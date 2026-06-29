@@ -1,0 +1,26 @@
+[package]
+name = "albert-mission-control"
+version = "0.1.0"
+description = "Albert Command Deck desktop bridge"
+edition = "2021"
+
+[[bin]]
+name = "albert-mission-control"
+path = "src/main.rs"
+required-features = ["desktop"]
+
+[features]
+default = ["desktop"]
+desktop = ["dep:tauri", "tauri/wry"]
+
+[lib]
+name = "albert_mission_control"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", default-features = false, optional = true , features = [] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

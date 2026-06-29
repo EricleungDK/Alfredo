@@ -1,0 +1,46 @@
+{
+  "agents": [
+    {
+      "id": "qwen3.6-27b",
+      "role": "frontier",
+      "provider": "ollama",
+      "runner": "ollama",
+      "model": "qwen3.6:27b",
+      "routing": "router"
+    },
+    {
+      "id": "gemma4-12b",
+      "role": "local-agent",
+      "provider": "ollama",
+      "runner": "ollama",
+      "model": "gemma4:12b",
+      "routing": "worker"
+    },
+    {
+      "id": "gemma4-26b",
+      "role": "local-agent",
+      "provider": "ollama",
+      "runner": "ollama",
+      "model": "gemma4:26b",
+      "routing": "worker"
+    },
+    {
+      "id": "qwen2.5-coder-14b",
+      "role": "delegate-agent",
+      "provider": "ollama",
+      "runner": "ollama",
+      "model": "qwen2.5-coder:14b",
+      "routing": "delegate",
+      "delegate_only": true
+    },
+    {
+      "id": "deepseek-r1-14b",
+      "role": "delegate-agent",
+      "provider": "ollama",
+      "runner": "ollama",
+      "model": "deepseek-r1:14b",
+      "routing": "delegate",
+      "delegate_only": true
+    }
+  ]
+}

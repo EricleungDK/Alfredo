@@ -1,0 +1,177 @@
+# Central Context
+
+**Last Updated**: 2026-06-26
+
+## Project Status
+
+Albert's tested local coding TUI MVP is implemented and verified.
+
+- Product PRD and Issue Slices are published at `.scratch/local-coding-agent-mvp/`.
+- Development roadmap and implementation backlog are published at `.scratch/local-coding-agent-mvp-development/`.
+- Both issue backlogs are marked complete in the local tracker.
+- Python stdlib package `albert_mvp` implements the local Orchestrator, textual TUI, agent registry, Qwen-controlled delegation, fake runner, command runner, Ollama runner, evidence collection, review loop, repair relaunch packets, and PR-prep fallback.
+- Tests pass with `python3 -m unittest discover -s tests`.
+- Live Qwen3.6-27B verification generated and ran a prototype app successfully.
+- Live Gemma4-12B verification launched through the local-agent role, generated `prototype_app.py`, printed `Albert Gemma prototype ready`, and reached PR-ready after review.
+- Live Gemma4-26B verification launched through the local-agent role, initially generated an incorrect output string, then used Albert's `Needs repair` -> `tui-action repair` loop to correct `prototype_app.py` and reach PR-ready after review.
+- Frontier repair outcomes can now relaunch a same-agent or specified fresh-agent repair session with prior review, evidence, and artifact context in the next task packet.
+- Command Deck Issue 01 is complete. The Python Orchestrator supplies a versioned canonical Workspace Session snapshot, Tauri validates and transports it, and React restores the acknowledged Command Deck state without owning accepted mission state.
+- Issue 01 integration evidence: 72 Python tests, 7 React tests, TypeScript typecheck, Vite production build, 6 Rust tests with the desktop feature enabled, and a real repository snapshot smoke command all pass.
+- Command Deck Issue 02 is complete. The Orchestrator owns correlated expected-revision actions and ordered events; Tauri transports typed batches and acknowledgements; React distinguishes pending, acknowledged, stale, rejected, offline, and reconnecting states and reloads a fresh canonical snapshot after disconnect.
+- Issue 02 integration evidence: 79 Python tests, 16 frontend tests, TypeScript typecheck, Vite production build, 8 default-feature Rust tests, and a real CLI action→updates→stale-action→fresh-snapshot smoke sequence pass.
+- Issue 03 first TDD cycle is green: the public `workspace-scope` command deliberately changes Mission scope through expected-revision synchronization, while tests prove the Operations view and Issue Slice contract remain unchanged. The focused workspace module passes 13 distinct tests.
+- Issue 03 backend/transport checkpoint is green: scoped append-only Agent Console history preserves stable sequence, source, outcome, and original scope; malformed scope/history is rejected; scope changes leave review/runtime/assignment/session state unchanged; CLI and Tauri commands restore scoped history across real Python process restarts.
+- Command Deck Issue 03 is complete. React keeps Agent Console history, draft, and scope stable across Operations navigation and Active Mission replacement; all three deliberate scope targets and all five sourced outcomes are explicit; exact displayed scope is enforced at submission.
+- Issue 03 integration evidence: 86 Python tests, 26 frontend tests, TypeScript typecheck, Vite production build, Rust formatting, 9 Rust tests, and a fresh-runtime CLI scope→message→restart smoke sequence pass.
+- Command Deck Issue 04 has started with TDD. The plan separates governed required sources from eligible curation, bounds recent scoped messages, retains pinned older messages as deliberate references, and keeps curation revisioning independent from workspace authority state.
+- Issue 04 backend/CLI checkpoint is green: five typed source categories, a six-message scoped window, fixed content budget, full-history separation, atomic pin/exclude persistence, malformed-state rejection, governance invariants, and JSON inspect/curate commands are implemented. The completed focused workspace module passes 27 tests.
+- Command Deck Issue 04 is complete. Tauri and React expose a governed Context Inspector; eligible pin/exclude changes reload only after acknowledgement, while required Shared Context has no controls. Core runtime persistence is now atomic after the integration smoke exposed a concurrent-reader truncation window.
+- Issue 04 integration evidence: 94 Python tests, 30 frontend tests, TypeScript typecheck, Vite production build, Rust formatting, 10 Rust tests, a fresh-runtime inspect→pin→exclude→restart smoke, and eight concurrent CLI readers pass.
+- Command Deck Issue 05 is complete. The Orchestrator owns a workspace-level mission registry, expected-revision Active Mission switching, background session summaries, stable Conversation Scope and Agent Console history, and delegation/clarification Workspace Queue attention links.
+- Issue 05 integration evidence: 3 focused Python mission-switch tests, 30 focused frontend App/client tests, TypeScript typecheck, and 2 focused Rust bridge mission-switch tests pass.
+- Command Deck Issue 06 is complete. Mission Board now renders authoritative Issue Graph lifecycle/progress, corrected Ready/Complete/Merged semantics, Issue Slice inspection, blocker detail, sessions, provenance, Evidence Package summary, and Working Context sources without changing Conversation Scope.
+- Issue 06 integration evidence: 99 Python tests, 34 frontend tests, TypeScript typecheck, and 12 Rust bridge tests pass.
+- Command Deck Issue 07 is complete. Model assignment is now provider-neutral across fake and Ollama runners, with authoritative availability, streaming/operation status, and provider failure provenance on Issue Slice and session surfaces.
+- Issue 07 integration evidence: 105 Python tests, 34 frontend tests, TypeScript typecheck, and 12 Rust bridge tests pass.
+- Command Deck Issue 08 is complete. Review Workspace is now the exclusive evidence-decision surface, showing complete and incomplete Evidence Packages, visibility limitations, acknowledged accept/repair/human-escalation decisions, and backend rejection/stale-action handling.
+- Issue 08 integration evidence: 112 Python tests, 43 frontend tests, TypeScript typecheck, Rust formatting, and 13 Rust bridge tests pass.
+- Command Deck Issue 09 is complete. Workspace Queue now owns Issue Change Proposals and Frontier Confirmations, keeping questionable governed changes pending with source/action/boundary/consequence details and acknowledged approve/reject/defer outcomes.
+- Issue 09 integration evidence: 119 Python tests, 46 frontend tests, TypeScript typecheck, Rust formatting, and 14 Rust bridge tests pass.
+- Command Deck Issue 10 is complete. Workspace Queue now records proposed Ad Hoc Delegations from Agent Console context, preserves pending/rejected proposals without launch, approves only auto-allowed command boundaries, creates bounded `ADHOC-*` Local Agent sessions without adding Issue Slices, exposes session status/model provenance, and carries valid Evidence Packages through Review Workspace completion. CLI, Tauri, and React expose the proposal path from latest Agent Console context into Workspace Queue.
+- Issue 10 integration evidence: 126 Python tests, 47 focused frontend/client/sync tests, TypeScript typecheck, Rust formatting, and 15 Rust bridge tests pass.
+- Command Deck Issue 11 has started with TDD. The first backend tracer bullet adds a persisted Mission Draft projection/service that selects relevant `ADHOC-*` delegations, explicitly records excluded ad hoc work and new work, carries dependencies/unresolved decisions, survives service restart, and keeps accepted Mission issues, sessions, Workspace revision, and mission-specific context unchanged until a later confirmation path.
+- Issue 11 first-slice evidence: `python3 -m unittest tests.test_workspace_snapshot.WorkspaceSnapshotTest.test_mission_draft_records_selected_excluded_and_new_work_without_accepting_state` passes, and the focused workspace suite `python3 -m unittest tests.test_workspace_snapshot` passes 54 tests.
+- Issue 11 draft revision slice is green. Mission Draft edits now require the current draft projection revision, rebuild included work only from explicitly selected Ad Hoc Delegation ids, preserve explicit exclusions, and leave later unselected `ADHOC-*` work outside the draft across restart.
+- Issue 11 revision evidence: `python3 -m unittest tests.test_workspace_snapshot.WorkspaceSnapshotTest.test_mission_draft_revision_keeps_unselected_ad_hoc_work_outside` passes, and the focused workspace suite `python3 -m unittest tests.test_workspace_snapshot` passes 55 tests.
+- Issue 11 confirmation/rejection backend slices are green. Explicit confirmation now uses the Orchestrator to create a durable accepted Issue Slice from a Mission Draft, marks the draft confirmed, and survives a fresh service load; abandonment marks the draft abandoned without changing existing missions; stale confirmation is rejected before accepted state changes.
+- Issue 11 backend evidence: confirmation, abandonment, and stale-confirmation focused tests pass; `python3 -m unittest tests.test_workspace_snapshot` passes 58 tests, and `python3 -m unittest tests.test_workspace_snapshot tests.test_albert_mvp` passes 131 tests.
+- Issue 11 CLI checkpoint is green. The command surface now exposes `mission-drafts`, `mission-draft-create`, `mission-draft-update`, `mission-draft-confirm`, and `mission-draft-abandon` over the same authoritative Mission Draft service, with restart coverage for create, inspect, confirm, and accepted Issue Slice persistence.
+- Issue 11 CLI evidence: `python3 -m unittest tests.test_workspace_snapshot.WorkspaceSnapshotTest.test_cli_creates_inspects_and_confirms_mission_draft_across_restart` passes, and `python3 -m unittest tests.test_workspace_snapshot tests.test_albert_mvp` passes 132 tests.
+- Issue 11 Tauri/client transport checkpoint is green. React's `TauriWorkspaceClient` can load the typed Mission Draft projection through `mission_drafts`, and the Rust bridge decodes Mission Draft JSON plus reads real Python-created draft state through `execute_mission_drafts`.
+- Issue 11 transport evidence: `npm test -- --run workspace-client.test.ts` passes 17 tests, `cargo test --manifest-path mission-control/src-tauri/Cargo.toml mission_draft` passes 2 focused Rust tests, and `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 17 Rust bridge tests.
+- Issue 11 React review-surface checkpoint is green. Workspace Queue now loads Mission Drafts through the client and presents proposed goal, included Ad Hoc Delegations, exclusions, new work, dependencies, and unresolved decisions before any confirmation controls.
+- Issue 11 React evidence: `npm test -- --run App.test.tsx -t "workspace queue presents Mission Draft scope before confirmation"` passes, and `npm test -- --run App.test.tsx` passes 30 tests.
+- Issue 11 React confirmation checkpoint is green. Mission Draft cards require an explicit Mission Commander reason before Confirm or Abandon, submit the current Mission Draft revision through `mission_draft_decision`, show pending/acknowledged/stale/rejected status, reload drafts after acknowledgement, and refresh the canonical snapshot so accepted Issue Slice state comes from the Orchestrator.
+- Issue 11 confirmation-surface evidence: `npm test -- --run App.test.tsx` passes 31 tests, `npm test -- --run workspace-client.test.ts` passes 18 tests, `npm run typecheck` passes, and `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 17 Rust bridge tests.
+- Command Deck Issue 11 is complete. Workspace Queue now lets the Mission Commander select pending Ad Hoc Delegations for inclusion, explicitly exclude unrelated delegations, describe new work/dependencies/unresolved decisions, create a Mission Draft through typed client/Tauri/backend transport, and continue to review/confirm/abandon only after the Orchestrator acknowledges the draft state.
+- Issue 11 final evidence: `python3 -m unittest tests.test_workspace_snapshot tests.test_albert_mvp` passes 132 tests; `npm test -- --run App.test.tsx workspace-client.test.ts workspace-sync.test.ts` passes 53 tests; `npm run typecheck` passes; `cargo fmt --manifest-path mission-control/src-tauri/Cargo.toml -- --check` passes; and `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 18 Rust bridge tests.
+- Command Deck Issue 12 has started with TDD. The first backend tracer bullet adds an append-only Activity Journal projection/service that records acknowledged Mission Commander Operations Workspace actions with timestamp, actor, action type, correlation id, affected Workspace Session/Mission entities, and separate evidence links while rejected stale actions remain outside the journal.
+- Issue 12 first-slice evidence: `python3 -m unittest tests.test_workspace_snapshot.WorkspaceSnapshotTest.test_activity_journal_records_acknowledged_workspace_actions_only` passes, and `python3 -m unittest tests.test_workspace_snapshot` passes 60 tests.
+- Issue 12 search/filter slice is green. `ActivityJournalService.inspect()` now preserves chronological journal order while filtering by free-text search, Mission id, actor, and action type without mutating the append-only journal.
+- Issue 12 search/filter evidence: `python3 -m unittest tests.test_workspace_snapshot.WorkspaceSnapshotTest.test_activity_journal_searches_and_filters_chronological_entries` passes, and `python3 -m unittest tests.test_workspace_snapshot` passes 61 tests.
+- Issue 12 time-filter slice is green. `ActivityJournalService.inspect()` now accepts inclusive `started_at` and `ended_at` ISO timestamp filters, preserves chronological order, validates persisted journal timestamps, and keeps time-window filtering separate from snapshot reconstruction.
+- Issue 12 time-filter evidence: `python3 -m unittest tests.test_workspace_snapshot.WorkspaceSnapshotTest.test_activity_journal_filters_by_recorded_time_window` passes; the three focused Activity Journal backend tests pass together; and `python3 -m unittest tests.test_workspace_snapshot` passes 62 tests.
+- Issue 12 review-decision link slice is green. Accepted Review Workspace decisions now append Activity Journal entries with Mission Commander attribution, `review-decision` action type, Mission, Issue Slice, Local Agent session, and Evidence Package affected entities, plus artifact evidence links; failed or stale review decisions still stop before journal recording.
+- Issue 12 review-decision evidence: `python3 -m unittest tests.test_workspace_snapshot.WorkspaceSnapshotTest.test_activity_journal_records_review_decision_with_links` passes; seven focused Activity Journal/Review Workspace backend tests pass together; and `python3 -m unittest tests.test_workspace_snapshot` passes 63 tests.
+- Issue 12 CLI transport slice is green. The Python command surface now exposes `activity-journal` with search, Mission id, actor, action-type, `started_at`, and `ended_at` filters over the same append-only Activity Journal projection, including affected entity and evidence links in JSON output.
+- Issue 12 CLI evidence: `python3 -m unittest tests.test_workspace_snapshot.WorkspaceSnapshotTest.test_cli_returns_filtered_activity_journal_as_json` passes; six focused Activity Journal/CLI backend tests pass together; and `python3 -m unittest tests.test_workspace_snapshot` passes 64 tests.
+- Issue 12 Tauri/client transport slice is green. TypeScript contracts now model Activity Journal entries, affected entities, filters, and load results; `TauriWorkspaceClient.loadActivityJournal()` invokes the `activity_journal` command with filters; and the Rust bridge decodes Activity Journal projections while forwarding filter flags to the Python CLI.
+- Issue 12 Tauri/client evidence: `npm test -- --run workspace-client.test.ts` passes 20 tests; `npm run typecheck` passes; `cargo fmt --manifest-path mission-control/src-tauri/Cargo.toml -- --check` passes; `cargo test --manifest-path mission-control/src-tauri/Cargo.toml parses_activity_journal_projection` passes; `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 19 Rust tests; and `python3 -m unittest tests.test_workspace_snapshot` passes 64 tests.
+- Issue 12 React Activity UI slice is green. The restored Activity view now loads the Activity Journal through `loadActivityJournal()`, displays chronological entries with timestamp, actor/action type, correlation id, affected entity links, and evidence links, and provides search, Mission, actor, action-type, `started_at`, and `ended_at` filters that reload through the client.
+- Issue 12 React evidence: `npm test -- --run App.test.tsx -t "activity view displays searchable journal entries with filters and links"` passes; `npm test -- --run App.test.tsx` passes 33 tests; `npm test -- --run workspace-client.test.ts` passes 20 tests; `npm run typecheck` passes; `python3 -m unittest tests.test_workspace_snapshot` passes 64 tests; and `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 19 Rust tests.
+- Issue 12 Workspace Queue decision slice is green. A successfully persisted approve/reject/defer decision now appends a Mission Commander `workspace-queue-decision` entry with timestamp, correlation, and navigable Mission, Issue Slice or Ad Hoc Delegation, queue-item, and queue-decision entities; proposal creation and stale validation remain before this recording boundary.
+- Issue 12 Workspace Queue decision evidence: the RED run of `python3 -m unittest tests.test_workspace_snapshot.WorkspaceSnapshotTest.test_activity_journal_records_acknowledged_workspace_queue_decision_with_links` failed with an empty journal, the GREEN rerun passes, and `python3 -m unittest tests.test_workspace_snapshot` passes 65 tests.
+- Issue 12 Mission Draft lifecycle slice is green. Successfully persisted create, update, confirm, and abandon actions append separate Mission Commander entries; all link the Mission and Mission Draft, while confirmation additionally links the accepted Issue Slice created from the draft.
+- Issue 12 Mission Draft evidence: each of `test_activity_journal_records_acknowledged_mission_draft_creation_with_links`, `test_activity_journal_records_acknowledged_mission_draft_revision`, `test_activity_journal_records_confirmed_mission_draft_and_accepted_issue_link`, and `test_activity_journal_records_acknowledged_mission_draft_abandonment` was observed RED with the lifecycle entry absent and GREEN after its recording boundary was added; `python3 -m unittest tests.test_workspace_snapshot` passes 69 tests.
+- Issue 12 non-human actor slice is green. Persisted Frontier Confirmation requests journal `frontier-model` attribution, acknowledged Ad Hoc approvals journal the resulting `orchestrator` session launch after the Mission Commander decision, and validated Evidence Package submission journals `local-agent` attribution with Mission, governed work, session, Evidence Package, queue, and artifact links where applicable. Raw execution output remains outside these boundaries.
+- Issue 12 actor evidence: `test_activity_journal_records_frontier_confirmation_request_with_links`, `test_activity_journal_records_orchestrator_ad_hoc_session_launch_with_links`, and `test_activity_journal_records_local_agent_validated_evidence_with_links` each failed RED with its actor entry absent and passed GREEN after implementation; `python3 -m unittest tests.test_workspace_snapshot` passes 72 tests.
+- Command Deck Issue 12 is complete. The append-only Activity Journal now spans meaningful actions from all four required actors, chronological search and five filter dimensions, Mission/Issue/session/Evidence/queue links, explicit transient/failed-action exclusions, recoverable journal-write errors without a false cross-file atomicity claim, and restart reconstruction that retains journal order separately from canonical snapshots.
+- Issue 12 final evidence: `python3 -m unittest tests.test_workspace_snapshot` passes 75 tests; `python3 -m unittest discover -s tests` passes 148 tests; `npm test -- --run` passes 55 tests; `npm run typecheck` passes; `cargo fmt --manifest-path mission-control/src-tauri/Cargo.toml -- --check` passes; and `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 19 Rust tests.
+- Command Deck Issue 13 has started with TDD. `ShellTerminalService` reuses Albert's three command-policy classes, executes auto-allowed commands without `shell=True`, persists pending frontier/human approvals and explicit denial, returns terminal bytes only in immediate responses, and keeps those bytes out of canonical snapshots and Activity. Additional Path Grants persist Mission Commander attribution, read/write level, fixed duration and expiry; expired grants stop authorization, and agent/skill grant mutation is rejected.
+- Issue 13 backend/CLI checkpoint evidence: the public Shell Terminal and Additional Path Grant tests were each observed RED before their behavior was implemented; `shell-terminal-submit` executes through the Python CLI and `shell-terminal` restores metadata without stdout/stderr; `python3 -m unittest tests.test_workspace_snapshot` passes 82 tests.
+- Issue 13 desktop submit transport checkpoint is green. TypeScript submits the typed Shell Terminal request through `shell_terminal_submit`; the Rust/Tauri bridge forwards every command boundary field to the Python CLI, decodes transient stdout/stderr only in the immediate result, and is registered with the desktop invoke handler.
+- Issue 13 desktop submit evidence: `desktop_bridge_submits_shell_terminal_command_through_python_backend` was observed RED before the Rust request/result transport existed and GREEN after implementation; `cargo fmt --manifest-path mission-control/src-tauri/Cargo.toml -- --check` passes after formatting, and `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 22 Rust tests.
+- Issue 13 desktop governance transport is green. TypeScript and Tauri now expose pending command approve/deny decisions plus Mission Commander-created Additional Path Grants; the Rust bridge forwards the exact decision actor/reason and bounded path/access/duration fields to the authoritative Python CLI.
+- Issue 13 governance transport evidence: the TypeScript decision and grant client tests and the real Rust/Python approval and grant-creation tests were each observed RED before implementation and GREEN afterward; `npm test -- --run workspace-client.test.ts` passes 24 tests, `npm run typecheck` passes, `python3 -m unittest tests.test_workspace_snapshot` passes 84 tests, and `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 24 Rust tests.
+
+## Current Model Registry
+
+`.albert/agents.json` currently configures:
+
+- Frontier/router: `qwen3.6-27b` using `ollama:qwen3.6:27b`.
+- Local worker: `gemma4-12b` using `ollama:gemma4:12b`.
+- Local worker: `gemma4-26b` using `ollama:gemma4:26b`.
+- Delegate-only coding worker: `qwen2.5-coder-14b` using `ollama:qwen2.5-coder:14b`.
+- Delegate-only reasoning architect/reviewer: `deepseek-r1-14b` using `ollama:deepseek-r1:14b`.
+
+Qwen decides when to delegate beyond Gemma. Delegates are hidden from normal manual assignment; approval gates are still supported for any configured gated or cloud delegate, but the default local delegates are not subscription-gated.
+
+## Completed Phases
+
+- Completed grill-session synthesis into Product Requirements Document.
+- Completed PRD-to-Issue-Slice breakdown using local markdown tracker.
+- Completed the original MVP workflow backlog.
+- Completed the development backlog for the production textual TUI and runner loop:
+  - lifecycle cleanup and reopen controls
+  - textual TUI mission board
+  - agent model configuration registry
+  - TUI assignment and launch controls
+  - fake Local Agent runner
+  - command-backed Local Agent runner
+  - Ollama file-plan runner
+  - automated evidence collection
+  - TUI review and repair loop
+  - repair relaunch from Frontier feedback
+  - Qwen-controlled delegation with delegate-only escalation support
+  - PR readiness from TUI
+
+## Pending
+
+- Command Deck Issue 13 is in progress: add the distinct constrained React Shell Terminal left-lane mode and complete the acceptance-criterion audit.
+- Optionally smoke-test Albert launch paths for `qwen2.5-coder-14b` and `deepseek-r1-14b` on a small approved Issue Slice.
+- Turn the textual TUI into an interactive full-screen terminal interface when the MVP command semantics stabilize.
+- Decide packaging and distribution strategy.
+
+## Active Delegations
+
+| Sub-Agent | Task ID | Status | Started | Expected Completion |
+|-----------|---------|--------|---------|---------------------|
+| Codex | local-coding-agent-mvp | Complete | 2026-06-15 | 2026-06-16 |
+
+## Activity Log
+
+| Date | Agent | Action |
+|------|-------|--------|
+| 2026-06-15 | Codex | Published PRD and Issue Slices, implemented tested Albert MVP scaffold, and updated documentation. |
+| 2026-06-16 | Codex | Completed TUI/runner backlog, switched the first local worker tier to installed Gemma4 models, verified the then-current suite, confirmed Qwen3.6-27B and Gemma4-12B can generate runnable prototypes, and live-verified Gemma4-26B repair relaunch from failed acceptance output to PR-ready. |
+| 2026-06-18 | Codex | Added Qwen-controlled delegation: Gemma remains normal worker, Kimi/DeepSeek are delegate-only cloud escalation targets with approval gates, and the suite passes 66 tests. |
+| 2026-06-18 | Codex | After `ollama signin`, live-smoked `kimi-k2.6:cloud` and `deepseek-v4-pro:cloud`; both reached Ollama Cloud but returned `403 Forbidden` requiring a subscription/upgrade. |
+| 2026-06-18 | Codex | Replaced subscription-gated cloud delegates with local `qwen2.5-coder:14b` and `deepseek-r1:14b` delegate-only models after successful pulls. |
+| 2026-06-19 | Codex | Started Command Deck Issue 01 with TDD: added the canonical Workspace Session snapshot/restoration contract and React projection; backend and frontend gates pass, while the Rust/Tauri bridge awaits toolchain availability. |
+| 2026-06-20 | Codex | Completed Command Deck Issue 01: added and integration-tested the Tauri-to-Python snapshot bridge, production React client, restart restoration, failure mapping, full desktop-feature Rust build, and updated authoritative progress evidence. |
+| 2026-06-20 | Codex | Started Command Deck Issue 02 from the approved tracker contract; wrote the live-sync implementation plan and began the stale-action immutability TDD tracer bullet. |
+| 2026-06-20 | Codex | Completed Issue 02's backend synchronization checkpoint: ordered revision events, correlated acknowledgements, stale-action immutability, event-gap resync signaling, and CLI action/update integration coverage. |
+| 2026-06-20 | Codex | Completed Command Deck Issue 02 with TDD and ticket integration: typed Tauri live-sync transport, ordered React projection, explicit action outcomes, offline/reconnect recovery from a fresh snapshot, 79 Python tests, 16 frontend tests, and 8 Rust tests. |
+| 2026-06-20 | Codex | Started Command Deck Issue 03: documented the scope/history architecture and began the explicit Working directory/Mission/Issue Slice scope-change tracer bullet. |
+| 2026-06-20 | Codex | Completed Issue 03's deliberate Mission-scope tracer bullet; the command advances only acknowledged workspace scope and has no Issue Slice authorization side effects. |
+| 2026-06-21 | Codex | Completed Issue 03's backend/transport checkpoint with TDD: durable scoped Agent Console history, five outcome types, authorization invariants, CLI transport, and real Tauri-to-Python restart restoration. |
+| 2026-06-21 | Codex | Completed Command Deck Issue 03 with TDD and integration: persistent React history/draft/scope, deliberate three-target scope controls, mission-switch stability, 86 Python tests, 26 frontend tests, and 9 Rust tests. |
+| 2026-06-21 | Codex | Started Command Deck Issue 04 with a TDD plan for bounded Working Context reconstruction and governed source curation. |
+| 2026-06-21 | Codex | Completed Issue 04's backend/CLI checkpoint: bounded source reconstruction, persistent eligible curation, governed-source rejection, and restart coverage. |
+| 2026-06-21 | Codex | Completed Command Deck Issue 04 with TDD and integration: governed Context Inspector, pin/exclude acknowledgement, bounded/full-history separation, atomic runtime persistence, 94 Python tests, 30 frontend tests, and 10 Rust tests. |
+| 2026-06-21 | Codex | Started Command Deck Issue 05 with a TDD plan for active/background Mission switching and continuity. |
+| 2026-06-25 | Codex | Completed Command Deck Issue 05 with TDD: compact React Active Mission selector, canonical Tauri/Python mission-switch bridge, background session continuity, stable Agent Console scope/history, and delegation/clarification Workspace Queue attention. |
+| 2026-06-25 | Codex | Completed Command Deck Issue 06 with TDD: authoritative Issue Graph projection, corrected Ready/Complete/Merged lifecycle semantics, React Issue Slice inspector, Tauri bridge payload support, and scoped Agent Console qualification fix. |
+| 2026-06-25 | Codex | Completed Command Deck Issue 07 with TDD: provider-neutral model assignments, availability/disconnected launch blocking, streaming and provider failure operation status, React inspector visibility, and Tauri bridge preservation. |
+| 2026-06-25 | Codex | Completed Command Deck Issue 08 with TDD: Review Workspace evidence projection, accept/repair/human-escalation decisions, missing evidence and visibility limitation handling, React decision UI, CLI/Tauri bridge contracts, and 112 Python / 43 frontend / 13 Rust tests. |
+| 2026-06-26 | Codex | Completed Command Deck Issue 09 with TDD: Workspace Queue proposals and Frontier Confirmations, approve/reject/defer governance outcomes, compact queue attention links, React Queue UI, CLI/Tauri bridge contracts, and 119 Python / 46 frontend / 14 Rust tests. |
+| 2026-06-26 | Codex | Advanced Command Deck Issue 10 with TDD: Ad Hoc Delegation queue proposal/rejection/approval, bounded `ADHOC-*` session launch, command-policy denial, session provenance projection, and Review Workspace evidence acceptance are green in focused Python coverage. |
+| 2026-06-26 | Codex | Advanced Issue 10 integration with TDD: added `ad-hoc-delegation-proposal` CLI command, Tauri bridge request/command, and React Workspace Queue proposal form that turns latest Agent Console context into a pending Ad Hoc Delegation proposal. |
+| 2026-06-26 | Codex | Completed Command Deck Issue 10 with TDD: Ad Hoc Delegation proposal, explicit approval, bounded launch, permission denial, provenance, Evidence Package review, CLI/Tauri/React proposal path, and full focused verification are complete. |
+| 2026-06-26 | Codex | Started Command Deck Issue 11 with TDD: added persisted Mission Draft backend projection/service for selected and excluded Ad Hoc Delegations plus new work, dependencies, unresolved decisions, restart persistence, and no accepted Mission state mutation; focused workspace suite passes 54 tests. |
+| 2026-06-26 | Codex | Advanced Command Deck Issue 11 with TDD: added explicit Mission Draft revision/editing that keeps unselected later Ad Hoc Delegations outside the draft across restart; focused workspace suite passes 55 tests. |
+| 2026-06-26 | Codex | Completed Command Deck Issue 11 with TDD: Mission Draft create/review/confirm/abandon now spans Python CLI, Tauri bridge, TypeScript client, and React Workspace Queue creation UI; final verification passes 132 Python, 53 frontend/client/sync, typecheck, formatting, and 18 Rust bridge tests. |
+| 2026-06-26 | Codex | Started Command Deck Issue 12 with TDD: added the first Activity Journal backend boundary for acknowledged Operations Workspace actions, timestamp/actor/action/entity attribution, restart inspection, and stale-action exclusion; focused workspace suite passes 60 tests. |
+| 2026-06-26 | Codex | Advanced Command Deck Issue 12 with TDD: added Activity Journal search plus Mission, actor, and action-type filters while preserving chronological order; focused workspace suite passes 61 tests. |
+| 2026-06-26 | Codex | Advanced Command Deck Issue 12 with TDD: added inclusive `started_at`/`ended_at` Activity Journal time filtering through the backend service, validated persisted timestamps, and kept the focused workspace suite green at 62 tests. |
+| 2026-06-26 | Codex | Advanced Command Deck Issue 12 with TDD: accepted Review Workspace decisions now journal Mission Commander attribution, Mission/Issue Slice/session/Evidence Package links, artifact evidence links, and focused workspace coverage passes 63 tests. |
+| 2026-06-26 | Codex | Advanced Command Deck Issue 12 with TDD: added the `activity-journal` Python CLI projection with search, Mission, actor, action-type, and time filters; focused workspace coverage passes 64 tests. |
+| 2026-06-26 | Codex | Advanced Command Deck Issue 12 with TDD: added Activity Journal TypeScript contracts, `TauriWorkspaceClient.loadActivityJournal()`, and Rust `activity_journal` bridge transport with filter forwarding; client/typecheck/Rust/Python gates pass. |
+| 2026-06-26 | Codex | Advanced Command Deck Issue 12 with TDD: React Activity now loads searchable chronological journal entries with actor/action/time filters, affected entity links, and evidence links; App/client/typecheck/Python/Rust gates pass. |
+| 2026-06-26 | Codex | Advanced Command Deck Issue 12 with TDD: acknowledged Workspace Queue decisions now journal Mission Commander attribution and navigable Mission, governed-work, queue-item, and decision links; the focused workspace suite passes 65 tests. |
+| 2026-06-26 | Codex | Advanced Command Deck Issue 12 with TDD: Mission Draft create, update, confirm, and abandon actions now journal linked Mission Commander entries; confirmation also links its accepted Issue Slice, and the focused workspace suite passes 69 tests. |
+| 2026-06-26 | Codex | Advanced Command Deck Issue 12 with TDD: meaningful Frontier Model confirmation requests, Orchestrator session launches, and Local Agent evidence submissions now journal actor-specific linked entries; the focused workspace suite passes 72 tests. |
+| 2026-06-26 | Codex | Completed Command Deck Issue 12 with TDD: all actors, filters, links, exclusions, failed-write semantics, and separate restart reconstruction are covered; final verification passes 148 Python, 55 frontend, typecheck, formatting, and 19 Rust tests. |
+| 2026-06-27 | Codex | Started Command Deck Issue 13 with TDD: governed Shell Terminal execution, pending approvals, denial, bounded expiring Additional Path Grants, self-expansion prevention, and CLI metadata restoration are green; the focused workspace suite passes 82 tests. |
+| 2026-06-29 | Codex | Advanced Command Deck Issue 13 with TDD: added and registered the typed Rust/Tauri `shell_terminal_submit` bridge through the real Python backend; the focused tracer bullet and all 22 Rust bridge tests pass. |
+| 2026-06-29 | Codex | Advanced Command Deck Issue 13 transport with TDD: added typed command decision and Additional Path Grant clients plus registered Rust/Tauri bridges; 24 client tests, typecheck, 84 focused Python tests, and 24 Rust tests pass. |
