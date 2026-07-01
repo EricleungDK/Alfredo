@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AdHocDelegationProposalRequest,
   AgentConsoleMessage,
@@ -20,6 +20,8 @@ import type {
 } from "./contracts";
 import type { WorkspaceClient } from "./workspace-client";
 import { applyWorkspaceUpdates } from "./workspace-sync";
+import { ShellTerminalPanel } from "./ShellTerminalPanel";
+import { useShellTerminal, type ShellTerminalController } from "./use-shell-terminal";
 import "./styles.css";
 
 interface AdHocDelegationDraft {
@@ -88,6 +90,16 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
     ended_at: "",
   });
   const [activityStatus, setActivityStatus] = useState<"pending" | "rejected" | null>(null);
+  const [leftLaneMode, setLeftLaneMode] = useState<"agent" | "terminal">("agent");
+  const workspacePath =
+    state !== "loading" && (state.kind === "ready" || state.kind === "empty")
+      ? state.snapshot.workspace_session.workspace_path
+      : "";
+  const shellTerminal = useShellTerminal(client, workspacePath);
+
+  useEffect(() => {
+    if (leftLaneMode === "terminal") void shellTerminal.load();
+  }, [leftLaneMode, shellTerminal.load]);
 
   const refreshWorkingContext = useCallback(async () => {
     if (!client.loadWorkingContext) return false;
@@ -668,6 +680,9 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         setMissionDraftReasons((current) => ({ ...current, [draftId]: reason }))
       }
       onMissionDraftDecision={submitMissionDraftDecision}
+      leftLaneMode={leftLaneMode}
+      onLeftLaneModeChange={setLeftLaneMode}
+      shellTerminal={shellTerminal}
     />
   );
 }
@@ -714,6 +729,9 @@ function CommandDeck({
   onMissionDraftCreate,
   onMissionDraftReasonChange,
   onMissionDraftDecision,
+  leftLaneMode,
+  onLeftLaneModeChange,
+  shellTerminal,
 }: {
   snapshot: WorkspaceSnapshot;
   empty: boolean;
@@ -772,6 +790,9 @@ function CommandDeck({
     decision: MissionDraftDecision,
     reason: string,
   ) => void;
+  leftLaneMode: "agent" | "terminal";
+  onLeftLaneModeChange: (mode: "agent" | "terminal") => void;
+  shellTerminal: ShellTerminalController;
 }) {
   const mission = snapshot.active_mission;
   const missions = snapshot.missions?.length
@@ -826,6 +847,9 @@ function CommandDeck({
   );
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  useEffect(() => {
+    if (selectedIssueId) document.getElementById("issue-slice-inspector")?.focus();
+  }, [selectedIssueId]);
   const selectedIssue =
     (selectedIssueId ? issueSlicesById.get(selectedIssueId) : null) ??
     snapshot.mission_board.issue_slices?.[0] ??
@@ -846,6 +870,37 @@ function CommandDeck({
       </header>
 
       <div className="deck-grid">
+        <aside className="left-lane">
+          <div className="left-lane-tabs" role="tablist" aria-label="Left lane mode">
+            {(["agent", "terminal"] as const).map((mode) => {
+              const label = mode === "agent" ? "Agent Console" : "Shell Terminal";
+              return (
+                <button
+                  key={mode}
+                  id={`${mode}-lane-tab`}
+                  role="tab"
+                  type="button"
+                  aria-selected={leftLaneMode === mode}
+                  aria-controls={`${mode}-lane-panel`}
+                  tabIndex={leftLaneMode === mode ? 0 : -1}
+                  onClick={() => onLeftLaneModeChange(mode)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                    event.preventDefault();
+                    const nextMode = leftLaneMode === "agent" ? "terminal" : "agent";
+                    onLeftLaneModeChange(nextMode);
+                    window.requestAnimationFrame(() =>
+                      document.getElementById(`${nextMode}-lane-tab`)?.focus(),
+                    );
+                  }}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+          {leftLaneMode === "agent" ? (
+        <div id="agent-lane-panel" role="tabpanel">
         <section className="agent-console" aria-label="Agent Console">
           <div className="panel-heading">
             <div>
@@ -985,6 +1040,13 @@ function CommandDeck({
             ) : null}
           </label>
         </section>
+        </div>
+          ) : (
+            <div id="terminal-lane-panel" role="tabpanel">
+              <ShellTerminalPanel terminal={shellTerminal} />
+            </div>
+          )}
+        </aside>
 
         <main className="operations" aria-label="Operations Workspace">
           <nav className="view-rail" aria-label="Operations views">
@@ -1384,6 +1446,10 @@ function WorkspaceQueue({
   const [newWorkItems, setNewWorkItems] = useState("");
   const [dependencies, setDependencies] = useState("");
   const [unresolvedDecisions, setUnresolvedDecisions] = useState("");
+  const decisionStatusRef = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (status) decisionStatusRef.current?.focus();
+  }, [status]);
   if (!projection) {
     return (
       <div className="empty-state">
@@ -1425,7 +1491,13 @@ function WorkspaceQueue({
         </div>
       </div>
       {status ? (
-        <span role="status" aria-label="Workspace Queue decision status" className="connection-pill">
+        <span
+          ref={decisionStatusRef}
+          role="status"
+          aria-label="Workspace Queue decision status"
+          className="connection-pill"
+          tabIndex={-1}
+        >
           {status.state[0].toUpperCase() + status.state.slice(1)}: {status.message}
         </span>
       ) : null}
@@ -1684,6 +1756,7 @@ function WorkspaceQueue({
                         <button
                           type="button"
                           aria-label={`Reject ${item.item_id}`}
+                          className="action--danger"
                           disabled={!isPendingItem || pending || !reason.trim()}
                           onClick={() => onDecision(item.item_id, "reject", reason)}
                         >
@@ -1726,6 +1799,10 @@ function MissionDrafts({
   onReasonChange: (draftId: string, reason: string) => void;
   onDecision: (draftId: string, decision: MissionDraftDecision, reason: string) => void;
 }) {
+  const decisionStatusRef = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (status) decisionStatusRef.current?.focus();
+  }, [status]);
   if (!projection) {
     return (
       <section className="queue-group" aria-label="Mission Drafts">
@@ -1749,7 +1826,13 @@ function MissionDrafts({
         </div>
       </div>
       {status ? (
-        <span role="status" aria-label="Mission Draft decision status" className="connection-pill">
+        <span
+          ref={decisionStatusRef}
+          role="status"
+          aria-label="Mission Draft decision status"
+          className="connection-pill"
+          tabIndex={-1}
+        >
           {status.state[0].toUpperCase() + status.state.slice(1)}: {status.message}
         </span>
       ) : null}
@@ -1829,6 +1912,7 @@ function MissionDrafts({
                     type="button"
                     disabled={status?.state === "pending" || !(reasons[draft.draft_id] ?? "").trim()}
                     aria-label={`Abandon ${draft.draft_id}`}
+                    className="action--danger"
                     onClick={() =>
                       onDecision(draft.draft_id, "abandon", (reasons[draft.draft_id] ?? "").trim())
                     }
@@ -1894,6 +1978,10 @@ function ReviewWorkspace({
   onReasonChange: (sessionId: string, reason: string) => void;
   onDecision: (sessionId: string, decision: ReviewDecision, reason: string) => void;
 }) {
+  const decisionStatusRef = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (status) decisionStatusRef.current?.focus();
+  }, [status]);
   if (!projection) {
     return (
       <div className="empty-state">
@@ -1917,7 +2005,13 @@ function ReviewWorkspace({
         </div>
       </div>
       {status ? (
-        <span role="status" aria-label="Review decision status" className="connection-pill">
+        <span
+          ref={decisionStatusRef}
+          role="status"
+          aria-label="Review decision status"
+          className="connection-pill"
+          tabIndex={-1}
+        >
           {status.state[0].toUpperCase() + status.state.slice(1)}: {status.message}
         </span>
       ) : null}
@@ -2022,6 +2116,7 @@ function ReviewWorkspace({
                   <button
                     type="button"
                     aria-label={`Request repair ${item.session_id}`}
+                    className="action--warning"
                     disabled={!reason.trim() || pending}
                     onClick={() => onDecision(item.session_id, "repair", reason)}
                   >
@@ -2030,6 +2125,7 @@ function ReviewWorkspace({
                   <button
                     type="button"
                     aria-label={`Escalate ${item.session_id}`}
+                    className="action--danger"
                     disabled={pending}
                     onClick={() => onDecision(item.session_id, "escalate-human", reason)}
                   >
@@ -2057,7 +2153,12 @@ function IssueSliceInspector({
   const selectedSession =
     issue.sessions.find((session) => session.session_id === selectedSessionId) ?? null;
   return (
-    <section className="issue-inspector" aria-label="Issue Slice Inspector">
+    <section
+      id="issue-slice-inspector"
+      className="issue-inspector"
+      aria-label="Issue Slice Inspector"
+      tabIndex={-1}
+    >
       <div className="issue-inspector__heading">
         <div>
           <span className="eyebrow">Issue Slice</span>

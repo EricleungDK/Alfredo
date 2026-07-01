@@ -83,6 +83,8 @@ Albert's tested local coding TUI MVP is implemented and verified.
 - Issue 13 desktop submit evidence: `desktop_bridge_submits_shell_terminal_command_through_python_backend` was observed RED before the Rust request/result transport existed and GREEN after implementation; `cargo fmt --manifest-path mission-control/src-tauri/Cargo.toml -- --check` passes after formatting, and `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 22 Rust tests.
 - Issue 13 desktop governance transport is green. TypeScript and Tauri now expose pending command approve/deny decisions plus Mission Commander-created Additional Path Grants; the Rust bridge forwards the exact decision actor/reason and bounded path/access/duration fields to the authoritative Python CLI.
 - Issue 13 governance transport evidence: the TypeScript decision and grant client tests and the real Rust/Python approval and grant-creation tests were each observed RED before implementation and GREEN afterward; `npm test -- --run workspace-client.test.ts` passes 24 tests, `npm run typecheck` passes, `python3 -m unittest tests.test_workspace_snapshot` passes 84 tests, and `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 24 Rust tests.
+- Command Deck Issue 13 is complete. The distinct Agent Console/Shell Terminal left lane preserves independent drafts and removes the inactive panel from the document tree; Terminal loads metadata without bytes, keeps immediate stdout/stderr in current-session React state, exposes the exact human/Frontier approval boundary, retains actionable failures without false success, and creates immutable bounded Additional Path Grants with explicit expiry state.
+- Issue 13 final evidence: `python3 -m unittest discover -s tests` passes 157 tests; `npm test -- --run` passes 69 tests; `npm run typecheck` passes; `npm run build` passes; `cargo fmt --manifest-path mission-control/src-tauri/Cargo.toml -- --check` passes; and `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 24 Rust tests.
 
 ## Current Model Registry
 
@@ -117,7 +119,7 @@ Qwen decides when to delegate beyond Gemma. Delegates are hidden from normal man
 
 ## Pending
 
-- Command Deck Issue 13 is in progress: add the distinct constrained React Shell Terminal left-lane mode and complete the acceptance-criterion audit.
+- Command Deck Issue 14 automated accessibility and responsive hardening is complete; the ticket remains `ready-for-human` pending the required human hierarchy, keyboard, screen-reader, zoom/reflow, low-vision, and reduced-motion confirmation.
 - Optionally smoke-test Albert launch paths for `qwen2.5-coder-14b` and `deepseek-r1-14b` on a small approved Issue Slice.
 - Turn the textual TUI into an interactive full-screen terminal interface when the MVP command semantics stabilize.
 - Decide packaging and distribution strategy.
@@ -175,3 +177,5 @@ Qwen decides when to delegate beyond Gemma. Delegates are hidden from normal man
 | 2026-06-27 | Codex | Started Command Deck Issue 13 with TDD: governed Shell Terminal execution, pending approvals, denial, bounded expiring Additional Path Grants, self-expansion prevention, and CLI metadata restoration are green; the focused workspace suite passes 82 tests. |
 | 2026-06-29 | Codex | Advanced Command Deck Issue 13 with TDD: added and registered the typed Rust/Tauri `shell_terminal_submit` bridge through the real Python backend; the focused tracer bullet and all 22 Rust bridge tests pass. |
 | 2026-06-29 | Codex | Advanced Command Deck Issue 13 transport with TDD: added typed command decision and Additional Path Grant clients plus registered Rust/Tauri bridges; 24 client tests, typecheck, 84 focused Python tests, and 24 Rust tests pass. |
+| 2026-07-01 | Codex | Completed Command Deck Issue 13 with public-behavior TDD: distinct left-lane modes, metadata-only restoration, governed execution and decisions, transient output, immutable expiring path grants, actionable failures, constrained keyboard interaction, and all full gates pass. |
+| 2026-07-01 | Codex | Completed Issue 14 automated hardening: named and labelled semantics, managed focus, danger/warning treatment, WCAG AA contrast audit, reduced motion, constrained reflow, and 70 frontend tests pass; human confirmation remains. |

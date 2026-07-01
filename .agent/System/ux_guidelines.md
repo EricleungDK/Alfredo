@@ -30,9 +30,12 @@ The production direction is the approved industrial Command Deck: a persistent A
 ## Accessibility
 
 - Agent Console is a named region and Operations Workspace is the named main landmark.
+- Agent Console and Shell Terminal are controlled by a two-tab left-lane switch; only the selected named panel is present in the document tree.
 - Connection progress uses a polite status; startup and persistence failures use alerts.
-- Keyboard focus uses a visible cyan outline.
-- Motion is removed under `prefers-reduced-motion`.
+- Keyboard focus uses a visible cyan outline across controls, links, inspectors, and decision outcomes. Issue Slice inspection and governed decisions move focus to the resulting content or status.
+- Dangerous rejection, abandonment, escalation, and denial actions use explicit danger treatment; repair uses warning treatment, and every meaning remains expressed in text.
+- Motion and transitions are removed under `prefers-reduced-motion`.
+- At constrained widths the left lane remains first, Operations Workspace reflows below it, the view rail becomes horizontal, forms stack, and Issue Graph/output content wraps without requiring horizontal-only access.
 
 ## Empty / Loading / Error States
 

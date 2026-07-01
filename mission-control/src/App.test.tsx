@@ -48,6 +48,383 @@ const client: WorkspaceClient = {
   loadSnapshot: async () => ({ kind: "ready", snapshot }),
 };
 
+test("switches distinct left-lane modes without mixing console and terminal drafts", async () => {
+  render(<App client={client} />);
+  await screen.findByRole("heading", { name: "Command Deck Mission" });
+
+  fireEvent.change(screen.getByRole("textbox", { name: "Message Albert" }), {
+    target: { value: "Keep this console draft" },
+  });
+  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+
+  expect(screen.queryByRole("region", { name: "Agent Console" })).not.toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "Shell Terminal" })).toBeVisible();
+  expect(screen.queryByText("Conversation Scope", { exact: false })).not.toBeInTheDocument();
+
+  fireEvent.change(screen.getByRole("textbox", { name: "Command" }), {
+    target: { value: "python3 -m unittest --help" },
+  });
+  fireEvent.click(screen.getByRole("tab", { name: "Agent Console" }));
+
+  expect(screen.getByRole("textbox", { name: "Message Albert" })).toHaveValue(
+    "Keep this console draft",
+  );
+  expect(screen.queryByRole("region", { name: "Shell Terminal" })).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  expect(screen.getByRole("textbox", { name: "Command" })).toHaveValue(
+    "python3 -m unittest --help",
+  );
+});
+
+test("loads authoritative terminal metadata without reconstructing terminal bytes", async () => {
+  const loadShellTerminal = vi.fn(async () => ({
+    kind: "shell-terminal" as const,
+    projection: {
+      schema_version: 1 as const,
+      revision: 2,
+      commands: [
+        {
+          command_id: "terminal-command-000001",
+          correlation_id: "terminal-ui-1",
+          command: "python3 -m unittest --help",
+          classification: "auto-allowed" as const,
+          status: "completed" as const,
+          exit_code: 0,
+          working_directory: "/workspace/albert",
+          requested_paths: [],
+          access_level: "read" as const,
+          requester: "mission-commander",
+          approver: "",
+          decider: "",
+          reason: "",
+        },
+      ],
+      grants: [],
+    },
+  }));
+  render(<App client={{ ...client, loadShellTerminal }} />);
+  await screen.findByRole("heading", { name: "Command Deck Mission" });
+  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+
+  const terminal = await screen.findByRole("region", { name: "Shell Terminal" });
+  expect(loadShellTerminal).toHaveBeenCalledTimes(1);
+  expect(within(terminal).getByText("python3 -m unittest --help")).toBeVisible();
+  expect(within(terminal).getByText("auto-allowed / completed")).toBeVisible();
+  expect(within(terminal).queryByLabelText("Command output")).not.toBeInTheDocument();
+});
+
+test("submits auto-allowed terminal command and keeps output local to the session", async () => {
+  const loadShellTerminal = vi.fn(async () => ({
+    kind: "shell-terminal" as const,
+    projection: { schema_version: 1 as const, revision: 1, commands: [], grants: [] },
+  }));
+  const submitShellTerminalCommand = vi.fn(async () => ({
+    kind: "command-result" as const,
+    result: {
+      command_id: "terminal-command-000002",
+      correlation_id: "terminal-ui-2",
+      classification: "auto-allowed" as const,
+      status: "completed" as const,
+      exit_code: 0,
+      stdout: "usage: python3 -m unittest\n",
+      stderr: "",
+    },
+  }));
+  render(
+    <App client={{ ...client, loadShellTerminal, submitShellTerminalCommand }} />,
+  );
+  await screen.findByRole("heading", { name: "Command Deck Mission" });
+  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  await waitFor(() => expect(loadShellTerminal).toHaveBeenCalledTimes(1));
+
+  fireEvent.change(screen.getByRole("textbox", { name: "Command" }), {
+    target: { value: "python3 -m unittest --help" },
+  });
+  fireEvent.change(screen.getByRole("textbox", { name: "Requested paths" }), {
+    target: { value: "/workspace/albert/tests\n/workspace/albert/docs" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Run command" }));
+
+  expect(submitShellTerminalCommand).toHaveBeenCalledWith({
+    correlation_id: expect.stringMatching(/^terminal-command-/),
+    command: "python3 -m unittest --help",
+    working_directory: "/workspace/albert",
+    requested_paths: ["/workspace/albert/tests", "/workspace/albert/docs"],
+    requester: "mission-commander",
+    access_level: "read",
+  });
+  expect(await screen.findByLabelText("Command output")).toHaveTextContent(
+    "usage: python3 -m unittest",
+  );
+  expect(screen.getByRole("textbox", { name: "Command" })).toHaveValue("");
+  expect(loadShellTerminal).toHaveBeenCalledTimes(2);
+
+  fireEvent.click(screen.getByRole("tab", { name: "Agent Console" }));
+  expect(screen.queryByText("usage: python3 -m unittest")).not.toBeInTheDocument();
+  await act(async () => {
+    fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  });
+  expect(screen.getByLabelText("Command output")).toHaveTextContent(
+    "usage: python3 -m unittest",
+  );
+});
+
+function pendingTerminalCommand(classification: "human-required" | "frontier-approvable") {
+  return {
+    command_id: `terminal-${classification}`,
+    correlation_id: `correlation-${classification}`,
+    command: "git push origin main",
+    classification,
+    status: "pending-approval" as const,
+    exit_code: null,
+    working_directory: "/workspace/albert",
+    requested_paths: [],
+    access_level: "write" as const,
+    requester: "mission-commander",
+    approver: classification === "human-required" ? "mission-commander" : "frontier-model",
+    decider: "",
+    reason: "",
+  };
+}
+
+test("approves a human-required terminal command as Mission Commander", async () => {
+  const command = pendingTerminalCommand("human-required");
+  const loadShellTerminal = vi.fn(async () => ({
+    kind: "shell-terminal" as const,
+    projection: { schema_version: 1 as const, revision: 1, commands: [command], grants: [] },
+  }));
+  const decideShellTerminalCommand = vi.fn(async () => ({
+    kind: "command-result" as const,
+    result: {
+      command_id: command.command_id,
+      correlation_id: command.correlation_id,
+      classification: command.classification,
+      status: "completed" as const,
+      exit_code: 0,
+      stdout: "pushed\n",
+      stderr: "",
+    },
+  }));
+  render(<App client={{ ...client, loadShellTerminal, decideShellTerminalCommand }} />);
+  await screen.findByRole("heading", { name: "Command Deck Mission" });
+  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  fireEvent.click(await screen.findByRole("button", { name: `Approve ${command.command_id}` }));
+
+  expect(decideShellTerminalCommand).toHaveBeenCalledWith({
+    command_id: command.command_id,
+    decision: "approve",
+    actor: "mission-commander",
+    reason: "",
+  });
+  expect(await screen.findByLabelText("Command output")).toHaveTextContent("pushed");
+  expect(loadShellTerminal).toHaveBeenCalledTimes(2);
+});
+
+test("requires a reason before denying a pending terminal command", async () => {
+  const command = pendingTerminalCommand("human-required");
+  const loadShellTerminal = vi.fn(async () => ({
+    kind: "shell-terminal" as const,
+    projection: { schema_version: 1 as const, revision: 1, commands: [command], grants: [] },
+  }));
+  const decideShellTerminalCommand = vi.fn(async () => ({
+    kind: "command-result" as const,
+    result: {
+      command_id: command.command_id,
+      correlation_id: command.correlation_id,
+      classification: command.classification,
+      status: "denied" as const,
+      exit_code: null,
+      stdout: "",
+      stderr: "",
+    },
+  }));
+  render(<App client={{ ...client, loadShellTerminal, decideShellTerminalCommand }} />);
+  await screen.findByRole("heading", { name: "Command Deck Mission" });
+  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  const deny = await screen.findByRole("button", { name: `Deny ${command.command_id}` });
+  expect(deny).toBeDisabled();
+  fireEvent.change(screen.getByRole("textbox", { name: `Denial reason ${command.command_id}` }), {
+    target: { value: "Unsafe destination" },
+  });
+  fireEvent.click(deny);
+
+  expect(decideShellTerminalCommand).toHaveBeenCalledWith({
+    command_id: command.command_id,
+    decision: "deny",
+    actor: "mission-commander",
+    reason: "Unsafe destination",
+  });
+  expect(await screen.findByRole("status")).toHaveTextContent("Command denied");
+  expect(screen.queryByLabelText("Command output")).not.toBeInTheDocument();
+});
+
+test("shows the Frontier approval boundary without false Mission Commander approval", async () => {
+  const command = pendingTerminalCommand("frontier-approvable");
+  const loadShellTerminal = vi.fn(async () => ({
+    kind: "shell-terminal" as const,
+    projection: { schema_version: 1 as const, revision: 1, commands: [command], grants: [] },
+  }));
+  render(<App client={{ ...client, loadShellTerminal }} />);
+  await screen.findByRole("heading", { name: "Command Deck Mission" });
+  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+
+  expect(await screen.findByText("Awaiting Frontier Model approval")).toBeVisible();
+  expect(screen.queryByRole("button", { name: `Approve ${command.command_id}` })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: `Deny ${command.command_id}` })).toBeDisabled();
+});
+
+test("creates a bounded Additional Path Grant through Mission Commander authority", async () => {
+  const grant = {
+    grant_id: "path-grant-000001",
+    correlation_id: "path-grant-ui-1",
+    path: "/external/docs",
+    access_level: "write" as const,
+    duration_seconds: 900,
+    granted_by: "mission-commander" as const,
+    granted_at: "2026-07-01T12:00:00Z",
+    expires_at: "2099-07-01T12:15:00Z",
+  };
+  let created = false;
+  const loadShellTerminal = vi.fn(async () => ({
+    kind: "shell-terminal" as const,
+    projection: {
+      schema_version: 1 as const,
+      revision: created ? 2 : 1,
+      commands: [],
+      grants: created ? [grant] : [],
+    },
+  }));
+  const createAdditionalPathGrant = vi.fn(async () => {
+    created = true;
+    return { kind: "path-grant" as const, grant };
+  });
+  render(<App client={{ ...client, loadShellTerminal, createAdditionalPathGrant }} />);
+  await screen.findByRole("heading", { name: "Command Deck Mission" });
+  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  await waitFor(() => expect(loadShellTerminal).toHaveBeenCalledTimes(1));
+
+  fireEvent.change(screen.getByRole("textbox", { name: "Grant path" }), {
+    target: { value: "/external/docs" },
+  });
+  fireEvent.change(screen.getByRole("combobox", { name: "Grant access level" }), {
+    target: { value: "write" },
+  });
+  fireEvent.change(screen.getByRole("spinbutton", { name: "Grant duration seconds" }), {
+    target: { value: "900" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Create Additional Path Grant" }));
+
+  expect(createAdditionalPathGrant).toHaveBeenCalledWith({
+    correlation_id: expect.stringMatching(/^path-grant-/),
+    path: "/external/docs",
+    access_level: "write",
+    duration_seconds: 900,
+    requester: "mission-commander",
+  });
+  expect(await screen.findByText("/external/docs")).toBeVisible();
+  expect(screen.getByText("write / 900 seconds")).toBeVisible();
+});
+
+test("shows expired grants as immutable history without self-expansion controls", async () => {
+  const loadShellTerminal = vi.fn(async () => ({
+    kind: "shell-terminal" as const,
+    projection: {
+      schema_version: 1 as const,
+      revision: 2,
+      commands: [],
+      grants: [{
+        grant_id: "path-grant-expired",
+        correlation_id: "path-grant-ui-expired",
+        path: "/external/archive",
+        access_level: "read" as const,
+        duration_seconds: 60,
+        granted_by: "mission-commander" as const,
+        granted_at: "2020-01-01T00:00:00Z",
+        expires_at: "2020-01-01T00:01:00Z",
+      }],
+    },
+  }));
+  render(<App client={{ ...client, loadShellTerminal }} />);
+  await screen.findByRole("heading", { name: "Command Deck Mission" });
+  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+
+  expect(await screen.findByText("Expired")).toBeVisible();
+  expect(screen.queryByRole("button", { name: /Edit|Renew|Broaden/i })).not.toBeInTheDocument();
+  expect(screen.queryByText(/agent requester|skill requester/i)).not.toBeInTheDocument();
+});
+
+test("keeps terminal inputs and shows actionable path rejection without false success", async () => {
+  const loadShellTerminal = vi.fn(async () => ({
+    kind: "shell-terminal" as const,
+    projection: { schema_version: 1 as const, revision: 1, commands: [], grants: [] },
+  }));
+  const submitShellTerminalCommand = vi.fn(async () => ({
+    kind: "command-rejected" as const,
+    code: "invalid-action",
+    message:
+      "Shell Terminal working directory is outside the workspace and has no active write Additional Path Grant.",
+  }));
+  render(<App client={{ ...client, loadShellTerminal, submitShellTerminalCommand }} />);
+  await screen.findByRole("heading", { name: "Command Deck Mission" });
+  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  fireEvent.change(screen.getByRole("textbox", { name: "Command" }), {
+    target: { value: "touch report.txt" },
+  });
+  fireEvent.change(screen.getByRole("textbox", { name: "Working directory" }), {
+    target: { value: "/external/docs" },
+  });
+  fireEvent.change(screen.getByRole("textbox", { name: "Requested paths" }), {
+    target: { value: "/external/docs/report.txt" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Run command" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "Shell Terminal working directory is outside the workspace and has no active write Additional Path Grant.",
+  );
+  expect(screen.getByRole("textbox", { name: "Command" })).toHaveValue("touch report.txt");
+  expect(screen.getByRole("textbox", { name: "Working directory" })).toHaveValue("/external/docs");
+  expect(screen.getByRole("textbox", { name: "Requested paths" })).toHaveValue(
+    "/external/docs/report.txt",
+  );
+  expect(screen.queryByText(/Command completed/i)).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("Command output")).not.toBeInTheDocument();
+});
+
+test("switches left-lane tabs with arrow keys at constrained width", async () => {
+  const originalWidth = window.innerWidth;
+  try {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 700 });
+    fireEvent(window, new Event("resize"));
+    render(<App client={client} />);
+    await screen.findByRole("heading", { name: "Command Deck Mission" });
+    fireEvent.change(screen.getByRole("textbox", { name: "Message Albert" }), {
+      target: { value: "Preserve constrained draft" },
+    });
+    const agentTab = screen.getByRole("tab", { name: "Agent Console" });
+    agentTab.focus();
+    fireEvent.keyDown(agentTab, { key: "ArrowRight" });
+    expect(screen.getByRole("tab", { name: "Shell Terminal" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("region", { name: "Shell Terminal" })).toBeVisible();
+
+    const terminalTab = screen.getByRole("tab", { name: "Shell Terminal" });
+    fireEvent.keyDown(terminalTab, { key: "ArrowLeft" });
+    expect(screen.getByRole("tab", { name: "Agent Console" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(screen.getByRole("textbox", { name: "Message Albert" })).toHaveValue(
+      "Preserve constrained draft",
+    );
+  } finally {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: originalWidth });
+    fireEvent(window, new Event("resize"));
+  }
+});
+
 test("launches from loading into the canonical Command Deck snapshot", async () => {
   render(<App client={client} />);
 
@@ -58,6 +435,24 @@ test("launches from loading into the canonical Command Deck snapshot", async () 
   expect(screen.getByText("Restore workspace session", { selector: ".scope-card strong" })).toBeVisible();
   expect(screen.getByText("Workspace Session workspace-command-deck")).toBeVisible();
   expect(screen.getAllByText("ISS-01")).not.toHaveLength(0);
+});
+
+test("exposes named landmarks and labelled controls in both left-lane modes", async () => {
+  render(<App client={client} />);
+  await screen.findByRole("heading", { name: "Command Deck Mission" });
+
+  expect(screen.getByRole("region", { name: "Agent Console" })).toBeVisible();
+  expect(screen.getByRole("main", { name: "Operations Workspace" })).toBeVisible();
+  for (const control of document.querySelectorAll("button, input, select, textarea, a[href]")) {
+    expect(control).toHaveAccessibleName();
+  }
+
+  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  expect(screen.getByRole("region", { name: "Shell Terminal" })).toBeVisible();
+  expect(screen.getByRole("alert")).toHaveTextContent("Shell Terminal transport is unavailable");
+  for (const control of document.querySelectorAll("button, input, select, textarea, a[href]")) {
+    expect(control).toHaveAccessibleName();
+  }
 });
 
 test("restores the acknowledged Operations Workspace view", async () => {
@@ -331,6 +726,7 @@ test("workspace queue lists grouped governance items and acknowledges decisions"
   fireEvent.click(within(queue).getByRole("button", { name: "Approve issue-change-command-deck-ISS-01-000001" }));
 
   expect(await screen.findByRole("status", { name: "Workspace Queue decision status" })).toHaveTextContent("Acknowledged");
+  expect(screen.getByRole("status", { name: "Workspace Queue decision status" })).toHaveFocus();
   expect(decisions).toEqual([
     {
       correlation_id: "queue-approve-issue-change-command-deck-ISS-01-000001-2",
@@ -839,6 +1235,7 @@ test("review workspace applies accepted evidence only after acknowledgement", as
   expect(screen.getByRole("status", { name: "Review decision status" })).toHaveTextContent(
     "Issue Slice becomes Complete and PR-ready; it is not marked merged.",
   );
+  expect(screen.getByRole("status", { name: "Review decision status" })).toHaveFocus();
 });
 
 test("review workspace requires a repair reason and exposes the next action", async () => {
@@ -1571,6 +1968,7 @@ test("inspects an Issue Slice from the graph without changing Conversation Scope
   fireEvent.click(screen.getByRole("button", { name: "Inspect ISS-02" }));
 
   const inspector = screen.getByRole("region", { name: "Issue Slice Inspector" });
+  expect(inspector).toHaveFocus();
   expect(within(inspector).getByRole("heading", { name: "ISS-02" })).toBeVisible();
   expect(within(inspector).getByText("Synchronize ordered workspace events after startup.")).toBeVisible();
   expect(within(inspector).getByText("Blocked by ISS-01")).toBeVisible();

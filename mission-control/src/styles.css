@@ -18,7 +18,7 @@
 * { box-sizing: border-box; }
 body { margin: 0; min-width: 320px; min-height: 100vh; }
 button, textarea, select { font: inherit; }
-button:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
+button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible, a:focus-visible, [tabindex="-1"]:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
 
 .boot-screen {
   min-height: 100vh;
@@ -45,7 +45,26 @@ button:focus-visible, textarea:focus-visible, select:focus-visible { outline: 2p
 .revision { color: var(--cyan); }
 
 .deck-grid { min-height: calc(100vh - 72px); display: grid; grid-template-columns: minmax(320px, 36%) 1fr; }
-.agent-console { display: grid; grid-template-rows: auto minmax(90px, 1fr) auto minmax(120px, 0.8fr) auto; gap: 1rem; min-height: 0; padding: 1.2rem; border-right: 1px solid var(--line); background: #0d1210; }
+.left-lane { display: grid; grid-template-rows: auto minmax(0, 1fr); min-height: 0; border-right: 1px solid var(--line); background: #0d1210; }
+.left-lane-tabs { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid var(--line); }
+.left-lane-tabs button { padding: 0.75rem; border: 0; border-bottom: 2px solid transparent; background: #0a0f0d; color: var(--muted); }
+.left-lane-tabs button[aria-selected="true"] { border-bottom-color: var(--lime); color: var(--ink); background: #131a16; }
+.agent-console { display: grid; grid-template-rows: auto minmax(90px, 1fr) auto minmax(120px, 0.8fr) auto; gap: 1rem; min-height: 0; padding: 1.2rem; background: #0d1210; }
+.shell-terminal { display: grid; align-content: start; gap: 1rem; min-height: 0; padding: 1.2rem; overflow: auto; }
+.terminal-boundary, .terminal-field { display: grid; gap: 0.4rem; padding: 0.8rem; border-left: 2px solid var(--cyan); background: #101715; }
+.terminal-boundary code { color: var(--cyan); overflow-wrap: anywhere; }
+.terminal-actions, .terminal-records, .terminal-transcript { display: grid; gap: 0.7rem; }
+.terminal-field textarea { min-height: 6rem; resize: vertical; }
+.terminal-field textarea, .terminal-field input, .terminal-field select { padding: 0.7rem; border: 1px solid var(--line); background: #050807; color: var(--ink); }
+.terminal-record, .terminal-transcript article { display: grid; gap: 0.35rem; padding: 0.75rem; border: 1px solid var(--line); background: #080d0b; }
+.terminal-governance { display: grid; gap: 0.5rem; padding-top: 0.5rem; border-top: 1px solid var(--line); }
+.terminal-governance label { display: grid; gap: 0.3rem; }
+.terminal-governance input { padding: 0.55rem; border: 1px solid var(--line); background: #050807; color: var(--ink); }
+.terminal-transcript pre { margin: 0; padding: 0.7rem; background: #050807; color: var(--ink); overflow: auto; }
+.path-grants, .path-grant-form, .path-grant { display: grid; gap: 0.65rem; }
+.path-grant-form, .path-grant { padding: 0.75rem; border: 1px solid var(--line); background: #080d0b; }
+.path-grant-form label { display: grid; gap: 0.3rem; }
+.path-grant-form input, .path-grant-form select { padding: 0.55rem; border: 1px solid var(--line); background: #050807; color: var(--ink); }
 .panel-heading, .mission-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; }
 h1, h2 { font-family: "Rajdhani", sans-serif; margin: 0.12rem 0 0; line-height: 1; }
 h1 { font-size: clamp(2rem, 4vw, 4.4rem); max-width: 14ch; }
@@ -156,6 +175,8 @@ h2 { font-size: 1.5rem; }
 .review-item .context-inspector__actions { flex-wrap: wrap; }
 .review-item .context-inspector__actions button { min-width: 7rem; padding: 0.45rem 0.65rem; }
 button:disabled { opacity: 0.45; cursor: not-allowed; }
+.action--danger { border-color: var(--danger) !important; color: #ffb4ad !important; background: #29110f !important; }
+.action--warning { border-color: #9d7b2b !important; color: #ffd166 !important; background: #241d0d !important; }
 .empty-state { min-height: 50vh; display: grid; place-content: center; justify-items: center; text-align: center; color: var(--muted); }
 .empty-state__glyph { color: var(--lime); font-size: 2rem; }
 .empty-state h2 { color: var(--ink); }
@@ -163,12 +184,23 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 
 @keyframes scan { to { transform: translateX(18px); background: var(--cyan); } }
 @keyframes enter { from { opacity: 0; transform: translateY(7px); } }
-@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; scroll-behavior: auto !important; } }
 @media (max-width: 820px) {
   .topbar { grid-template-columns: 1fr auto; }
   .session-state { display: none; }
   .deck-grid { grid-template-columns: 1fr; }
-  .agent-console { min-height: 42vh; border-right: 0; border-bottom: 1px solid var(--line); }
-  .operations { grid-template-columns: 78px 1fr; }
+  .left-lane { min-height: 48vh; border-right: 0; border-bottom: 1px solid var(--line); }
+  .agent-console { min-height: 42vh; }
+  .shell-terminal { overflow: visible; }
+  .terminal-actions, .path-grant-form { grid-template-columns: 1fr; }
+  .terminal-transcript pre, .terminal-record code { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .operations { grid-template-columns: 1fr; }
+  .view-rail { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); padding: 0.5rem; border-right: 0; border-bottom: 1px solid var(--line); }
+  .view-rail button { margin: 0; border-left: 0; border-bottom: 2px solid transparent; text-align: center; overflow-wrap: anywhere; }
+  .view-rail button.is-active { border-bottom-color: var(--lime); }
   .mission-surface { padding: 1.2rem; }
+  .issue-node { grid-template-columns: 32px minmax(0, 1fr); gap: 0.65rem; }
+  .issue-node > .status, .issue-node__inspect { grid-column: 2; width: fit-content; }
+  .mission-heading, .activity-journal__heading { flex-direction: column; }
+  .mission-count { justify-items: start; }
 }
