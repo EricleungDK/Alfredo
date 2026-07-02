@@ -1,9 +1,16 @@
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Mutex, OnceLock,
+};
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct BridgeConfig {
     pub python: String,
     pub backend_root: PathBuf,
@@ -49,6 +56,135 @@ impl BridgeConfig {
         let mut config = Self::for_repository(backend_root);
         config.mission_catalog = std::env::var_os("ALBERT_MISSION_CATALOG").map(PathBuf::from);
         config
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct PersistentResponse {
+    id: String,
+    success: bool,
+    stdout: String,
+    stderr: String,
+}
+
+struct BackendProcess {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl BackendProcess {
+    fn start(config: &BridgeConfig) -> io::Result<Self> {
+        let mut child = Command::new(&config.python)
+            .current_dir(&config.backend_root)
+            .arg("-m")
+            .arg("albert_mvp.server")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("Albert backend stdin was unavailable"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("Albert backend stdout was unavailable"))?;
+        Ok(Self {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        })
+    }
+
+    fn request(&mut self, id: &str, argv: &[String]) -> io::Result<ProcessOutput> {
+        serde_json::to_writer(
+            &mut self.stdin,
+            &serde_json::json!({"id": id, "argv": argv}),
+        )
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        self.stdin.write_all(b"\n")?;
+        self.stdin.flush()?;
+        let mut line = String::new();
+        if self.stdout.read_line(&mut line)? == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "Albert backend closed its response stream",
+            ));
+        }
+        let response: PersistentResponse = serde_json::from_str(&line)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        if response.id != id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Albert backend returned a mismatched correlation identifier",
+            ));
+        }
+        Ok(ProcessOutput {
+            success: response.success,
+            stdout: response.stdout,
+            stderr: response.stderr,
+        })
+    }
+}
+
+struct BackendCommand<'a> {
+    config: &'a BridgeConfig,
+    argv: Vec<String>,
+}
+
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+static BACKENDS: OnceLock<Mutex<HashMap<BridgeConfig, BackendProcess>>> = OnceLock::new();
+
+impl BackendCommand<'_> {
+    fn arg(&mut self, value: impl AsRef<OsStr>) -> &mut Self {
+        self.argv
+            .push(value.as_ref().to_string_lossy().into_owned());
+        self
+    }
+
+    fn output(&mut self) -> io::Result<ProcessOutput> {
+        let request_id = format!("desktop-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
+        let key = self.config.clone();
+        let mut backends = BACKENDS
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .map_err(|_| io::Error::other("Albert backend supervisor lock was poisoned"))?;
+
+        for attempt in 0..2 {
+            if !backends.contains_key(&key) {
+                backends.insert(key.clone(), BackendProcess::start(self.config)?);
+            }
+            let result = backends
+                .get_mut(&key)
+                .expect("backend inserted")
+                .request(&request_id, &self.argv);
+            match result {
+                Ok(output) => return Ok(output),
+                Err(_) if attempt == 0 => {
+                    if let Some(mut backend) = backends.remove(&key) {
+                        let _ = backend.child.kill();
+                    }
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        unreachable!()
+    }
+}
+
+#[cfg(feature = "desktop")]
+fn shutdown_backends() {
+    let Some(backends) = BACKENDS.get() else {
+        return;
+    };
+    let Ok(mut backends) = backends.lock() else {
+        return;
+    };
+    for (_, mut backend) in backends.drain() {
+        let _ = backend.child.kill();
+        let _ = backend.child.wait();
     }
 }
 
@@ -727,48 +863,22 @@ pub fn decode_updates_output(output: ProcessOutput) -> Result<WorkspaceUpdateBat
 }
 
 pub fn execute_snapshot(config: &BridgeConfig) -> Result<WorkspaceSnapshot, BridgeFailure> {
-    let mut command = Command::new(&config.python);
-    command
-        .current_dir(&config.backend_root)
-        .arg("-m")
-        .arg("albert_mvp")
-        .arg("workspace-snapshot")
-        .arg("--target-repo")
-        .arg(&config.target_repo)
-        .arg("--tracker-dir")
-        .arg(&config.tracker_dir)
-        .arg("--runtime-root")
-        .arg(&config.runtime_root)
-        .arg("--mission-id")
-        .arg(&config.mission_id);
-    if let Some(issues_dir) = &config.issues_dir {
-        command.arg("--issues-dir").arg(issues_dir);
-    }
-    if let Some(agent_config) = &config.agent_config {
-        command.arg("--agent-config").arg(agent_config);
-    }
-    if let Some(mission_catalog) = &config.mission_catalog {
-        command.arg("--mission-catalog").arg(mission_catalog);
-    }
-    let output = command.output().map_err(|error| BridgeFailure {
-        code: "backend-startup-failure".to_owned(),
-        message: format!("Unable to start the Albert backend: {error}"),
-        recoverable: true,
-    })?;
-    decode_snapshot_output(ProcessOutput {
-        success: output.status.success(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    })
+    let output = configured_python_command(config, "workspace-snapshot")
+        .output()
+        .map_err(|error| BridgeFailure {
+            code: "backend-startup-failure".to_owned(),
+            message: format!("Unable to start the Albert backend: {error}"),
+            recoverable: true,
+        })?;
+    decode_snapshot_output(output)
 }
 
-fn configured_python_command(config: &BridgeConfig, subcommand: &str) -> Command {
-    let mut command = Command::new(&config.python);
+fn configured_python_command<'a>(config: &'a BridgeConfig, subcommand: &str) -> BackendCommand<'a> {
+    let mut command = BackendCommand {
+        config,
+        argv: vec![subcommand.to_owned()],
+    };
     command
-        .current_dir(&config.backend_root)
-        .arg("-m")
-        .arg("albert_mvp")
-        .arg(subcommand)
         .arg("--target-repo")
         .arg(&config.target_repo)
         .arg("--tracker-dir")
@@ -789,12 +899,8 @@ fn configured_python_command(config: &BridgeConfig, subcommand: &str) -> Command
     command
 }
 
-fn process_output(output: std::process::Output) -> ProcessOutput {
-    ProcessOutput {
-        success: output.status.success(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-    }
+fn process_output(output: ProcessOutput) -> ProcessOutput {
+    output
 }
 
 fn decode_backend_json<T: DeserializeOwned>(
@@ -1538,8 +1644,13 @@ pub fn run() {
             mission_draft_create,
             mission_draft_decision
         ])
-        .run(tauri::generate_context!())
-        .expect("Albert Mission Control should start");
+        .build(tauri::generate_context!())
+        .expect("Albert Mission Control should build")
+        .run(|_app_handle, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                shutdown_backends();
+            }
+        });
 }
 
 #[cfg(test)]
@@ -1759,7 +1870,21 @@ None - can start immediately
         };
 
         let first = execute_snapshot(&config).expect("first desktop snapshot");
-        let restored = execute_snapshot(&config).expect("restored desktop snapshot");
+        let warm = execute_snapshot(&config).expect("warm desktop snapshot");
+        assert_eq!(first.workspace_session.id, warm.workspace_session.id);
+
+        let key = config.clone();
+        {
+            let mut backends = BACKENDS
+                .get()
+                .expect("backend supervisor")
+                .lock()
+                .expect("backend supervisor lock");
+            let backend = backends.get_mut(&key).expect("running backend");
+            backend.child.kill().expect("backend should stop");
+            backend.child.wait().expect("backend should exit");
+        }
+        let restored = execute_snapshot(&config).expect("restarted desktop snapshot");
 
         assert_eq!(first.workspace_session.id, restored.workspace_session.id);
         assert_eq!(first.active_mission.unwrap().id, "desktop-restore");

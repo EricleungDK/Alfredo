@@ -31,6 +31,11 @@ class EvidenceValidationError(AlbertError):
     """Raised when an Evidence Package is incomplete."""
 
 
+def _command_invocation(command: str) -> str | list[str]:
+    """Preserve native Windows command-line parsing and POSIX argv parsing."""
+    return command if os.name == "nt" else shlex.split(command)
+
+
 @dataclass
 class IssueSlice:
     id: str
@@ -765,7 +770,7 @@ class AlbertMission:
         prompt = self._delegation_prompt(issue, router)
         try:
             completed = subprocess.run(
-                shlex.split(command),
+                _command_invocation(command),
                 input=prompt,
                 cwd=self.target_repo,
                 capture_output=True,
@@ -1394,7 +1399,7 @@ class AlbertMission:
         env["ALBERT_SESSION_ID"] = session.session_id
         try:
             completed = subprocess.run(
-                shlex.split(command),
+                _command_invocation(command),
                 cwd=session.worktree_path,
                 capture_output=True,
                 text=True,
@@ -1407,7 +1412,7 @@ class AlbertMission:
         except FileNotFoundError as exc:
             exit_status = 127
             stdout = ""
-            stderr = str(exc)
+            stderr = f"Unable to start {command!r}: {exc}"
         session.runner_ended_at = _utc_now()
         self._write(stdout_path, stdout)
         self._write(stderr_path, stderr)
@@ -1453,7 +1458,7 @@ class AlbertMission:
         session.runner_started_at = _utc_now()
         try:
             completed = subprocess.run(
-                shlex.split(command),
+                _command_invocation(command),
                 input=prompt,
                 cwd=session.worktree_path,
                 capture_output=True,
@@ -1466,7 +1471,7 @@ class AlbertMission:
         except FileNotFoundError as exc:
             exit_status = 127
             stdout = ""
-            stderr = str(exc)
+            stderr = f"Unable to start {command!r}: {exc}"
         session.runner_ended_at = _utc_now()
         self._write(output_path, stdout)
         self._write(stderr_path, stderr)
@@ -1578,7 +1583,7 @@ class AlbertMission:
         env["ALBERT_SESSION_ID"] = session.session_id
         try:
             completed = subprocess.run(
-                shlex.split(agent_config.test_command),
+                _command_invocation(agent_config.test_command),
                 cwd=session.worktree_path,
                 capture_output=True,
                 text=True,
@@ -1591,7 +1596,7 @@ class AlbertMission:
         except FileNotFoundError as exc:
             exit_status = 127
             stdout = ""
-            stderr = str(exc)
+            stderr = f"Unable to start {agent_config.test_command!r}: {exc}"
         self._write(stdout_path, stdout)
         self._write(stderr_path, stderr)
         self._write(

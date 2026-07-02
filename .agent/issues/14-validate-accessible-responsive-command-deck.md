@@ -35,6 +35,9 @@ Harden and validate the completed Mission Control App workflows against the appr
 - `11-create-and-confirm-mission-draft.md`
 - `12-search-and-reconstruct-activity-journal.md`
 - `13-governed-shell-terminal-and-path-grants.md`
+- `15-launch-command-deck-reliably-across-supported-platforms.md`
+- `16-serve-mission-control-through-persistent-orchestrator.md`
+- `17-keep-operations-navigation-fast-continuously-synchronized.md`
 
 ## Comments
 
