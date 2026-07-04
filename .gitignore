@@ -8,4 +8,4 @@ mission-control/tsconfig.tsbuildinfo
 .codex/
 .prototypes/
 docs/superpowers/
-mission-control/src-tauri/target/debug/
+mission-control/src-tauri/target/
