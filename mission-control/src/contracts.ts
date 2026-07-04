@@ -7,6 +7,23 @@ export interface ConversationScope {
   readonly mission_id?: string | null;
 }
 
+export interface AlfredoLaunchContext {
+  readonly selected_agent: string;
+  readonly selected_model: string;
+  readonly selected_workspace: string;
+  readonly runtime_root: string;
+  readonly recent_workspaces: readonly string[];
+}
+
+export type AlfredoLaunchContextResult =
+  | { readonly kind: "launch-context"; readonly context: AlfredoLaunchContext }
+  | {
+      readonly kind: "launch-context-failure";
+      readonly code: string;
+      readonly message: string;
+      readonly recoverable: boolean;
+    };
+
 export type AgentConsoleRole = "user" | "assistant" | "system";
 export type AgentConsoleOutcome =
   | "proposed"

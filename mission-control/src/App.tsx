@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type {
   AdHocDelegationProposalRequest,
+  AlfredoLaunchContext,
   AgentConsoleMessage,
   ActivityJournalFilters,
   ActivityJournalProjection,
@@ -91,6 +92,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   });
   const [activityStatus, setActivityStatus] = useState<"pending" | "rejected" | null>(null);
   const [leftLaneMode, setLeftLaneMode] = useState<"agent" | "terminal">("agent");
+  const [launchContext, setLaunchContext] = useState<AlfredoLaunchContext | null>(null);
   const workspacePath =
     state !== "loading" && (state.kind === "ready" || state.kind === "empty")
       ? state.snapshot.workspace_session.workspace_path
@@ -158,6 +160,13 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   }, [client]);
 
   useEffect(connect, [connect]);
+
+  useEffect(() => {
+    if (!client.loadLaunchContext) return;
+    void client.loadLaunchContext().then((result) => {
+      if (result.kind === "launch-context") setLaunchContext(result.context);
+    });
+  }, [client]);
 
   useEffect(() => {
     if (!client.loadConsoleHistory) return;
@@ -683,6 +692,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       leftLaneMode={leftLaneMode}
       onLeftLaneModeChange={setLeftLaneMode}
       shellTerminal={shellTerminal}
+      launchContext={launchContext}
     />
   );
 }
@@ -732,6 +742,7 @@ function CommandDeck({
   leftLaneMode,
   onLeftLaneModeChange,
   shellTerminal,
+  launchContext,
 }: {
   snapshot: WorkspaceSnapshot;
   empty: boolean;
@@ -793,6 +804,7 @@ function CommandDeck({
   leftLaneMode: "agent" | "terminal";
   onLeftLaneModeChange: (mode: "agent" | "terminal") => void;
   shellTerminal: ShellTerminalController;
+  launchContext: AlfredoLaunchContext | null;
 }) {
   const mission = snapshot.active_mission;
   const missions = snapshot.missions?.length
@@ -1021,6 +1033,24 @@ function CommandDeck({
 
           <label className="composer">
             <span className="sr-only">Message Albert</span>
+            {launchContext ? (
+              <div
+                aria-label="Launch context"
+                style={{
+                  gridColumn: "1 / -1",
+                  display: "flex",
+                  flexWrap: "wrap",
+                  gap: "0.35rem 0.65rem",
+                }}
+              >
+                <span>Controller {launchContext.selected_agent || "default"}</span>
+                <span>Model {launchContext.selected_model || "default"}</span>
+                <span>Runtime {launchContext.runtime_root}</span>
+                {launchContext.recent_workspaces.length > 0 ? (
+                  <span>{launchContext.recent_workspaces.length} recent workspaces</span>
+                ) : null}
+              </div>
+            ) : null}
             <textarea
               aria-label="Message Albert"
               placeholder="Steer the active scope…"

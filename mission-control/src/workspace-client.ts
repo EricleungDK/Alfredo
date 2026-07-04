@@ -1,5 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
+  AlfredoLaunchContext,
+  AlfredoLaunchContextResult,
   AgentConsoleHistory,
   AgentConsoleHistoryResult,
   AgentConsoleMessage,
@@ -54,6 +56,7 @@ import type {
 } from "./contracts";
 
 export interface WorkspaceClient {
+  loadLaunchContext?(): Promise<AlfredoLaunchContextResult>;
   loadSnapshot(): Promise<WorkspaceLoadResult>;
   loadConsoleHistory?(): Promise<AgentConsoleHistoryResult>;
   loadUpdates?(afterRevision: number): Promise<WorkspaceUpdatesResult>;
@@ -93,6 +96,28 @@ export interface WorkspaceClient {
 }
 
 export class TauriWorkspaceClient implements WorkspaceClient {
+  async loadLaunchContext(): Promise<AlfredoLaunchContextResult> {
+    try {
+      const context = await invoke<AlfredoLaunchContext>("alfredo_launch_context");
+      return { kind: "launch-context", context };
+    } catch (error) {
+      if (isBridgeFailure(error)) {
+        return {
+          kind: "launch-context-failure",
+          code: error.code,
+          message: error.message,
+          recoverable: error.recoverable,
+        };
+      }
+      return {
+        kind: "launch-context-failure",
+        code: "backend-startup-failure",
+        message: error instanceof Error ? error.message : String(error),
+        recoverable: true,
+      };
+    }
+  }
+
   async loadSnapshot(): Promise<WorkspaceLoadResult> {
     try {
       const snapshot = await invoke<WorkspaceSnapshot>("workspace_snapshot");

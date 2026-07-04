@@ -2,6 +2,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::ffi::OsStr;
+use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
@@ -21,6 +22,15 @@ pub struct BridgeConfig {
     pub mission_id: String,
     pub agent_config: Option<PathBuf>,
     pub mission_catalog: Option<PathBuf>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AlfredoLaunchContext {
+    pub selected_agent: String,
+    pub selected_model: String,
+    pub selected_workspace: String,
+    pub runtime_root: String,
+    pub recent_workspaces: Vec<String>,
 }
 
 impl BridgeConfig {
@@ -62,6 +72,24 @@ impl BridgeConfig {
         }
         config.mission_catalog = std::env::var_os("ALBERT_MISSION_CATALOG").map(PathBuf::from);
         config
+    }
+}
+
+fn recent_workspaces(runtime_root: &PathBuf) -> Vec<String> {
+    let path = runtime_root.join("recent-workspaces.json");
+    let Ok(contents) = fs::read_to_string(path) else {
+        return vec![];
+    };
+    serde_json::from_str::<Vec<String>>(&contents).unwrap_or_default()
+}
+
+pub fn build_launch_context(config: &BridgeConfig) -> AlfredoLaunchContext {
+    AlfredoLaunchContext {
+        selected_agent: std::env::var("ALFREDO_SELECTED_AGENT").unwrap_or_default(),
+        selected_model: std::env::var("ALFREDO_SELECTED_MODEL").unwrap_or_default(),
+        selected_workspace: config.target_repo.to_string_lossy().into_owned(),
+        runtime_root: config.runtime_root.to_string_lossy().into_owned(),
+        recent_workspaces: recent_workspaces(&config.runtime_root),
     }
 }
 
@@ -1441,6 +1469,12 @@ fn workspace_snapshot(
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
+fn alfredo_launch_context(config: tauri::State<'_, BridgeConfig>) -> AlfredoLaunchContext {
+    build_launch_context(config.inner())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
 fn workspace_updates(
     config: tauri::State<'_, BridgeConfig>,
     after_revision: u64,
@@ -1627,6 +1661,7 @@ pub fn run() {
     tauri::Builder::default()
         .manage(BridgeConfig::from_environment())
         .invoke_handler(tauri::generate_handler![
+            alfredo_launch_context,
             workspace_snapshot,
             workspace_updates,
             workspace_action,
@@ -1936,6 +1971,63 @@ None - can start immediately
         assert_eq!(config.backend_root, install_root);
         assert_eq!(config.target_repo, selected_workspace);
         fs::remove_dir_all(root).expect("temporary bridge config fixture should be removed");
+    }
+
+    #[test]
+    fn launch_context_surfaces_agent_runtime_and_recent_workspaces() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("alfredo-launch-context-{unique}"));
+        let install_root = root.join("install");
+        let selected_workspace = root.join("workspace");
+        let runtime_root = root.join("runtime");
+        fs::create_dir_all(&install_root).expect("install root");
+        fs::create_dir_all(&selected_workspace).expect("selected workspace");
+        fs::create_dir_all(&runtime_root).expect("runtime root");
+        fs::write(
+            runtime_root.join("recent-workspaces.json"),
+            format!(
+                "[{}]",
+                serde_json::to_string(&selected_workspace.to_string_lossy().to_string())
+                    .expect("recent workspace json")
+            ),
+        )
+        .expect("recent workspaces should be written");
+        std::env::set_var("ALFREDO_SELECTED_AGENT", "qwen3.6-27b");
+        std::env::set_var("ALFREDO_SELECTED_MODEL", "qwen3.6:27b");
+        let config = BridgeConfig {
+            python: "python3".to_owned(),
+            backend_root: install_root,
+            target_repo: selected_workspace.clone(),
+            tracker_dir: root.join("tracker"),
+            issues_dir: None,
+            runtime_root: runtime_root.clone(),
+            mission_id: "launch-context".to_owned(),
+            agent_config: None,
+            mission_catalog: None,
+        };
+
+        let context = build_launch_context(&config);
+
+        std::env::remove_var("ALFREDO_SELECTED_AGENT");
+        std::env::remove_var("ALFREDO_SELECTED_MODEL");
+        assert_eq!(context.selected_agent, "qwen3.6-27b");
+        assert_eq!(context.selected_model, "qwen3.6:27b");
+        assert_eq!(
+            context.selected_workspace,
+            selected_workspace.to_string_lossy().to_string()
+        );
+        assert_eq!(
+            context.runtime_root,
+            runtime_root.to_string_lossy().to_string()
+        );
+        assert_eq!(
+            context.recent_workspaces,
+            vec![selected_workspace.to_string_lossy().to_string()]
+        );
+        fs::remove_dir_all(root).expect("temporary launch context fixture should be removed");
     }
 
     #[test]

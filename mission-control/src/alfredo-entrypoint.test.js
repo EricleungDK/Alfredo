@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -6,6 +6,24 @@ import { fileURLToPath } from "node:url";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(projectRoot, "..");
+
+function alfredoBinPath() {
+  const packageJson = JSON.parse(
+    readFileSync(resolve(projectRoot, "package.json"), "utf8"),
+  );
+  return resolve(projectRoot, packageJson.bin.alfredo);
+}
+
+function runAlfredo(args, options = {}) {
+  return spawnSync(process.execPath, [alfredoBinPath(), ...args], {
+    cwd: options.cwd ?? projectRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ...(options.env ?? {}),
+    },
+  });
+}
 
 test("published package exposes Alfredo and deprecated Albert npm bins", () => {
   const packageJson = JSON.parse(
@@ -28,16 +46,8 @@ test("published package exposes Alfredo and deprecated Albert npm bins", () => {
 });
 
 test("alfredo defaults to workstation launch with the selected agent", () => {
-  const packageJson = JSON.parse(
-    readFileSync(resolve(projectRoot, "package.json"), "utf8"),
-  );
-  const binPath = resolve(projectRoot, packageJson.bin.alfredo);
-
-  const result = spawnSync(process.execPath, [binPath, "--agent", "qwen3.6-27b"], {
-    cwd: projectRoot,
-    encoding: "utf8",
+  const result = runAlfredo(["--agent", "qwen3.6-27b"], {
     env: {
-      ...process.env,
       ALFREDO_DESKTOP_DRY_RUN: "1",
     },
   });
@@ -48,18 +58,14 @@ test("alfredo defaults to workstation launch with the selected agent", () => {
     product: "Alfredo",
     launch: "workstation",
     selected_agent: "qwen3.6-27b",
+    selected_model: "qwen3.6:27b",
   });
 });
 
 test("alfredo workstation carries the selected agent into launch", () => {
-  const packageJson = JSON.parse(
-    readFileSync(resolve(projectRoot, "package.json"), "utf8"),
-  );
-  const binPath = resolve(projectRoot, packageJson.bin.alfredo);
-
   const result = spawnSync(
     process.execPath,
-    [binPath, "workstation", "--agent", "gemma4-12b"],
+    [alfredoBinPath(), "workstation", "--agent", "gemma4-12b"],
     {
       cwd: projectRoot,
       encoding: "utf8",
@@ -76,18 +82,32 @@ test("alfredo workstation carries the selected agent into launch", () => {
     product: "Alfredo",
     launch: "workstation",
     selected_agent: "gemma4-12b",
+    selected_model: "gemma4:12b",
+  });
+});
+
+test("alfredo accepts a configured model name as the selected controller", () => {
+  const result = runAlfredo(["--agent", "qwen3.6:27b"], {
+    env: {
+      ALFREDO_DESKTOP_DRY_RUN: "1",
+    },
+  });
+
+  expect(result.stderr).toBe("");
+  expect(result.status).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    product: "Alfredo",
+    launch: "workstation",
+    selected_agent: "qwen3.6:27b",
+    selected_model: "qwen3.6:27b",
   });
 });
 
 test("alfredo uses the invocation directory as the selected coding workspace", () => {
-  const packageJson = JSON.parse(
-    readFileSync(resolve(projectRoot, "package.json"), "utf8"),
-  );
-  const binPath = resolve(projectRoot, packageJson.bin.alfredo);
   const workspace = mkdtempSync(resolve(tmpdir(), "alfredo-workspace-"));
 
   try {
-    const result = spawnSync(process.execPath, [binPath, "--agent", "qwen3.6-27b"], {
+    const result = spawnSync(process.execPath, [alfredoBinPath(), "--agent", "qwen3.6-27b"], {
       cwd: workspace,
       encoding: "utf8",
       env: {
@@ -108,16 +128,8 @@ test("alfredo uses the invocation directory as the selected coding workspace", (
 });
 
 test("alfredo rejects an unknown selected agent before launch", () => {
-  const packageJson = JSON.parse(
-    readFileSync(resolve(projectRoot, "package.json"), "utf8"),
-  );
-  const binPath = resolve(projectRoot, packageJson.bin.alfredo);
-
-  const result = spawnSync(process.execPath, [binPath, "--agent", "not-configured"], {
-    cwd: projectRoot,
-    encoding: "utf8",
+  const result = runAlfredo(["--agent", "not-configured"], {
     env: {
-      ...process.env,
       ALFREDO_DESKTOP_DRY_RUN: "1",
     },
   });
@@ -129,16 +141,8 @@ test("alfredo rejects an unknown selected agent before launch", () => {
 });
 
 test("alfredo reports separate startup preflight checks", () => {
-  const packageJson = JSON.parse(
-    readFileSync(resolve(projectRoot, "package.json"), "utf8"),
-  );
-  const binPath = resolve(projectRoot, packageJson.bin.alfredo);
-
-  const result = spawnSync(process.execPath, [binPath, "--agent", "qwen3.6-27b"], {
-    cwd: projectRoot,
-    encoding: "utf8",
+  const result = runAlfredo(["--agent", "qwen3.6-27b"], {
     env: {
-      ...process.env,
       ALFREDO_DESKTOP_DRY_RUN: "1",
     },
   });
@@ -149,6 +153,7 @@ test("alfredo reports separate startup preflight checks", () => {
   expect(plan.preflight.map((check) => check.name)).toEqual([
     "product_install",
     "node_runtime",
+    "npm_runtime",
     "desktop_shell",
     "backend_process",
     "workspace_access",
@@ -163,11 +168,111 @@ test("alfredo reports separate startup preflight checks", () => {
   ).toBe(true);
 });
 
+test("alfredo launch passes selected agent, model, workspace, and runtime to desktop", () => {
+  const runtimeRoot = mkdtempSync(resolve(tmpdir(), "alfredo-runtime-"));
+  const workspace = mkdtempSync(resolve(tmpdir(), "alfredo-workspace-"));
+
+  try {
+    const result = runAlfredo(["--agent", "qwen3.6-27b"], {
+      cwd: workspace,
+      env: {
+        ALFREDO_DESKTOP_DRY_RUN: "launch",
+        ALFREDO_RUNTIME_ROOT: runtimeRoot,
+      },
+    });
+
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    const launch = JSON.parse(result.stdout);
+    expect(launch.command).toEqual(["npm", "run", "desktop"]);
+    expect(launch.cwd).toBe(projectRoot);
+    expect(launch.env).toMatchObject({
+      ALBERT_BACKEND_ROOT: repositoryRoot,
+      ALFREDO_SELECTED_AGENT: "qwen3.6-27b",
+      ALFREDO_SELECTED_MODEL: "qwen3.6:27b",
+      ALFREDO_SELECTED_WORKSPACE: workspace,
+      ALFREDO_RUNTIME_ROOT: runtimeRoot,
+    });
+  } finally {
+    rmSync(runtimeRoot, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("alfredo reports an unwritable runtime root as a structured preflight failure", () => {
+  const workspace = mkdtempSync(resolve(tmpdir(), "alfredo-workspace-"));
+  const runtimeParent = mkdtempSync(resolve(tmpdir(), "alfredo-runtime-parent-"));
+  const runtimeRoot = resolve(runtimeParent, "runtime-file");
+  writeFileSync(runtimeRoot, "not a directory", "utf8");
+
+  try {
+    const result = runAlfredo(["--agent", "qwen3.6-27b"], {
+      cwd: workspace,
+      env: {
+        ALFREDO_DESKTOP_DRY_RUN: "launch",
+        ALFREDO_RUNTIME_ROOT: runtimeRoot,
+      },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Alfredo startup preflight failed:");
+    expect(result.stderr).toContain("writable_runtime");
+    expect(result.stderr).toContain(`mkdir -p "${runtimeRoot}" && test -w "${runtimeRoot}"`);
+  } finally {
+    rmSync(workspace, { recursive: true, force: true });
+    rmSync(runtimeParent, { recursive: true, force: true });
+  }
+});
+
+test("alfredo agents lists configured public agent ids and models", () => {
+  const result = runAlfredo(["agents"]);
+
+  expect(result.stderr).toBe("");
+  expect(result.status).toBe(0);
+  expect(result.stdout).toContain("qwen3.6-27b\tfrontier\tollama\tqwen3.6:27b");
+  expect(result.stdout).toContain("gemma4-12b\tlocal-agent\tollama\tgemma4:12b");
+});
+
+test("alfredo run grammar is recognized and deliberately deferred", () => {
+  const result = runAlfredo(["run", "--agent", "qwen3.6-27b", "Summarize this repo"], {
+    env: {
+      ALFREDO_DESKTOP_DRY_RUN: "1",
+    },
+  });
+
+  expect(result.stderr).toBe("");
+  expect(result.status).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    product: "Alfredo",
+    launch: "headless-run",
+    selected_agent: "qwen3.6-27b",
+    selected_model: "qwen3.6:27b",
+    prompt: "Summarize this repo",
+    implementation_status: "deferred",
+  });
+});
+
+test("alfredo review grammar accepts optional session id and agent", () => {
+  const result = runAlfredo(["review", "session-123", "--agent", "gemma4-12b"], {
+    env: {
+      ALFREDO_DESKTOP_DRY_RUN: "1",
+    },
+  });
+
+  expect(result.stderr).toBe("");
+  expect(result.status).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    product: "Alfredo",
+    launch: "headless-review",
+    selected_agent: "gemma4-12b",
+    selected_model: "gemma4:12b",
+    session_id: "session-123",
+    implementation_status: "deferred",
+  });
+});
+
 test("alfredo persists recent workspaces across launches", () => {
-  const packageJson = JSON.parse(
-    readFileSync(resolve(projectRoot, "package.json"), "utf8"),
-  );
-  const binPath = resolve(projectRoot, packageJson.bin.alfredo);
   const runtimeRoot = mkdtempSync(resolve(tmpdir(), "alfredo-runtime-"));
   const firstWorkspace = mkdtempSync(resolve(tmpdir(), "alfredo-workspace-one-"));
   const secondWorkspace = mkdtempSync(resolve(tmpdir(), "alfredo-workspace-two-"));
@@ -178,12 +283,12 @@ test("alfredo persists recent workspaces across launches", () => {
       ALFREDO_DESKTOP_DRY_RUN: "1",
       ALFREDO_RUNTIME_ROOT: runtimeRoot,
     };
-    const first = spawnSync(process.execPath, [binPath, "--agent", "qwen3.6-27b"], {
+    const first = spawnSync(process.execPath, [alfredoBinPath(), "--agent", "qwen3.6-27b"], {
       cwd: firstWorkspace,
       encoding: "utf8",
       env,
     });
-    const second = spawnSync(process.execPath, [binPath, "--agent", "qwen3.6-27b"], {
+    const second = spawnSync(process.execPath, [alfredoBinPath(), "--agent", "qwen3.6-27b"], {
       cwd: secondWorkspace,
       encoding: "utf8",
       env,

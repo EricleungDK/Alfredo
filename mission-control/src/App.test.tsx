@@ -77,6 +77,27 @@ test("switches distinct left-lane modes without mixing console and terminal draf
   );
 });
 
+test("shows selected controller and model near the prompt composer", async () => {
+  const loadLaunchContext = vi.fn(async () => ({
+    kind: "launch-context" as const,
+    context: {
+      selected_agent: "qwen3.6-27b",
+      selected_model: "qwen3.6:27b",
+      selected_workspace: "/workspace/albert",
+      runtime_root: "/home/mission/.alfredo/runtime",
+      recent_workspaces: ["/workspace/albert"],
+    },
+  }));
+
+  render(<App client={{ ...client, loadLaunchContext }} />);
+
+  await screen.findByRole("heading", { name: "Command Deck Mission" });
+  const launchContext = await screen.findByLabelText("Launch context");
+  expect(within(launchContext).getByText("Controller qwen3.6-27b")).toBeVisible();
+  expect(within(launchContext).getByText("Model qwen3.6:27b")).toBeVisible();
+  expect(within(launchContext).getByText("1 recent workspaces")).toBeVisible();
+});
+
 test("loads authoritative terminal metadata without reconstructing terminal bytes", async () => {
   const loadShellTerminal = vi.fn(async () => ({
     kind: "shell-terminal" as const,
