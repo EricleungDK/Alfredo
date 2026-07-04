@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -23,6 +23,75 @@ function runAlfredo(args, options = {}) {
       ...(options.env ?? {}),
     },
   });
+}
+
+function createHeadlessWorkspace() {
+  const root = mkdtempSync(resolve(tmpdir(), "alfredo-headless-root-"));
+  const workspace = resolve(root, "workspace");
+  mkdirSync(workspace, { recursive: true });
+  const issuesDir = resolve(workspace, ".agent", "issues");
+  mkdirSync(issuesDir, { recursive: true });
+  writeFileSync(
+    resolve(issuesDir, "PRD.md"),
+    "# Headless Alfredo Test Product Requirements Document\n",
+    "utf8",
+  );
+  writeFileSync(
+    resolve(issuesDir, "01-smoke.md"),
+    [
+      "# Smoke",
+      "",
+      "Status: ready-for-agent",
+      "Type: AFK",
+      "",
+      "## What to build",
+      "",
+      "Exercise the headless command path.",
+      "",
+      "## Acceptance criteria",
+      "",
+      "- [ ] Headless lifecycle output is available.",
+      "",
+      "## Blocked by",
+      "",
+      "None - can start immediately.",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  const agentConfig = resolve(workspace, "agents.json");
+  writeFileSync(
+    agentConfig,
+    `${JSON.stringify(
+      {
+        agents: [
+          {
+            id: "fake-local",
+            role: "local-agent",
+            provider: "test",
+            runner: "fake",
+            model: "deterministic-fake",
+          },
+          {
+            id: "fake-reviewer",
+            role: "frontier",
+            provider: "test",
+            runner: "fake",
+            model: "deterministic-reviewer",
+          },
+        ],
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+  return {
+    root,
+    workspace,
+    runtimeRoot: resolve(root, "runtime"),
+    agentConfig,
+  };
 }
 
 test("published package exposes Alfredo and deprecated Albert npm bins", () => {
@@ -230,46 +299,99 @@ test("alfredo agents lists configured public agent ids and models", () => {
 
   expect(result.stderr).toBe("");
   expect(result.status).toBe(0);
-  expect(result.stdout).toContain("qwen3.6-27b\tfrontier\tollama\tqwen3.6:27b");
-  expect(result.stdout).toContain("gemma4-12b\tlocal-agent\tollama\tgemma4:12b");
+  expect(result.stdout).toContain("qwen3.6-27b\tfrontier\tollama\tollama:qwen3.6:27b");
+  expect(result.stdout).toContain("gemma4-12b\tlocal-agent\tollama\tollama:gemma4:12b");
 });
 
-test("alfredo run grammar is recognized and deliberately deferred", () => {
-  const result = runAlfredo(["run", "--agent", "qwen3.6-27b", "Summarize this repo"], {
+test("alfredo run executes terminal-only work through the Orchestrator", () => {
+  const { root, workspace, runtimeRoot, agentConfig } = createHeadlessWorkspace();
+
+  try {
+    const result = runAlfredo(["run", "--agent", "fake-local", "Summarize this repo"], {
+      cwd: workspace,
+      env: {
+        ALFREDO_AGENT_CONFIG: agentConfig,
+        ALFREDO_RUNTIME_ROOT: runtimeRoot,
+      },
+    });
+
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      product: "Alfredo",
+      launch: "headless-run",
+      selected_agent: "fake-local",
+      selected_model: "deterministic-fake",
+      prompt: "Summarize this repo",
+      status: "evidence-ready",
+      governance: {
+        orchestrator: "AlbertMission",
+        evidence_package: "valid",
+        path_boundary: "allowed_paths",
+      },
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("alfredo review accepts optional session id and executes through the Orchestrator", () => {
+  const { root, workspace, runtimeRoot, agentConfig } = createHeadlessWorkspace();
+
+  try {
+    const runResult = runAlfredo(["run", "--agent", "fake-local", "Summarize this repo"], {
+      cwd: workspace,
+      env: {
+        ALFREDO_AGENT_CONFIG: agentConfig,
+        ALFREDO_RUNTIME_ROOT: runtimeRoot,
+      },
+    });
+    expect(runResult.stderr).toBe("");
+    expect(runResult.status).toBe(0);
+    const priorSessionId = JSON.parse(runResult.stdout).session_id;
+
+    const result = runAlfredo(["review", priorSessionId, "--agent", "fake-reviewer"], {
+      cwd: workspace,
+      env: {
+        ALFREDO_AGENT_CONFIG: agentConfig,
+        ALFREDO_RUNTIME_ROOT: runtimeRoot,
+      },
+    });
+
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      product: "Alfredo",
+      launch: "headless-review",
+      selected_agent: "fake-reviewer",
+      selected_model: "deterministic-reviewer",
+      review_session_id: priorSessionId,
+      review_context: {
+        session_id: priorSessionId,
+        evidence_valid: true,
+      },
+      status: "evidence-ready",
+      governance: {
+        orchestrator: "AlbertMission",
+        evidence_package: "valid",
+      },
+    });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("alfredo run rejects model aliases because per-command agent id is canonical", () => {
+  const result = runAlfredo(["run", "--agent", "qwen3.6:27b", "Summarize this repo"], {
     env: {
       ALFREDO_DESKTOP_DRY_RUN: "1",
     },
   });
 
-  expect(result.stderr).toBe("");
-  expect(result.status).toBe(0);
-  expect(JSON.parse(result.stdout)).toMatchObject({
-    product: "Alfredo",
-    launch: "headless-run",
-    selected_agent: "qwen3.6-27b",
-    selected_model: "qwen3.6:27b",
-    prompt: "Summarize this repo",
-    implementation_status: "deferred",
-  });
-});
-
-test("alfredo review grammar accepts optional session id and agent", () => {
-  const result = runAlfredo(["review", "session-123", "--agent", "gemma4-12b"], {
-    env: {
-      ALFREDO_DESKTOP_DRY_RUN: "1",
-    },
-  });
-
-  expect(result.stderr).toBe("");
-  expect(result.status).toBe(0);
-  expect(JSON.parse(result.stdout)).toMatchObject({
-    product: "Alfredo",
-    launch: "headless-review",
-    selected_agent: "gemma4-12b",
-    selected_model: "gemma4:12b",
-    session_id: "session-123",
-    implementation_status: "deferred",
-  });
+  expect(result.status).toBe(1);
+  expect(result.stderr).toContain("Unknown Alfredo agent id: qwen3.6:27b");
+  expect(result.stderr).toContain("alfredo agents");
+  expect(result.stdout).toBe("");
 });
 
 test("alfredo persists recent workspaces across launches", () => {

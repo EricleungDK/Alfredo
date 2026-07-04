@@ -149,6 +149,13 @@ class AlbertMvpTest(unittest.TestCase):
         self.assertEqual(mission.issues["ISS-03"].blocked_by, ["ISS-02"])
         self.assertEqual(mission.board_summary()["ready_issue_ids"], [])
 
+    def test_issue_directory_can_also_contain_prd_record(self):
+        (self.issues / "PRD.md").write_text("# Inline Product Requirements Document\n", encoding="utf-8")
+
+        mission = self.load_mission()
+
+        self.assertEqual(mission.board_summary()["ordered_issue_ids"], ["ISS-01", "ISS-02"])
+
     def test_loads_backtick_wrapped_bare_filename_blockers(self):
         (self.issues / "03-backtick-blocked.md").write_text(
             ISSUE_BODY.format(
@@ -1867,6 +1874,137 @@ class AlbertMvpTest(unittest.TestCase):
         self.assertEqual(session.task_packet["acceptance_criteria"], ["Mission summary is visible."])
         self.assertEqual(session.task_packet["allowed_paths"], ["src"])
         self.assertEqual(session.cleanup_eligible, False)
+
+    def test_headless_run_creates_governed_session_and_evidence_package(self):
+        config_path = self.write_agent_config(
+            [
+                {
+                    "id": "fake-local",
+                    "role": "local-agent",
+                    "provider": "test",
+                    "runner": "fake",
+                    "model": "deterministic-fake",
+                }
+            ]
+        )
+        mission = self.load_mission_with_agent_config(config_path)
+
+        session = mission.launch_headless_work(
+            work_kind="run",
+            agent_id="fake-local",
+            prompt="Summarize the workspace",
+            allowed_paths=[str(self.target_repo)],
+        )
+
+        self.assertEqual(session.issue_id, "headless-run-000001")
+        self.assertEqual(session.assigned_agent, "fake-local")
+        self.assertEqual(session.task_packet["work_kind"], "headless-run")
+        self.assertEqual(session.task_packet["prompt"], "Summarize the workspace")
+        self.assertEqual(session.task_packet["allowed_paths"], [str(self.target_repo)])
+        self.assertEqual(session.task_packet["agent_config"]["model"], "deterministic-fake")
+        self.assertEqual(session.evidence_valid, True)
+        self.assertEqual(session.status, "evidence-ready")
+
+        reloaded = self.load_mission_with_agent_config(config_path)
+        self.assertIn(session.session_id, reloaded.sessions)
+        self.assertEqual(reloaded.sessions[session.session_id].evidence_valid, True)
+
+    def test_headless_run_cli_allows_untracked_workspace(self):
+        config_path = self.write_agent_config(
+            [
+                {
+                    "id": "fake-local",
+                    "role": "local-agent",
+                    "provider": "test",
+                    "runner": "fake",
+                    "model": "deterministic-fake",
+                }
+            ]
+        )
+        missing_tracker = self.root / "missing-tracker"
+
+        exit_code, output = self.run_cli(
+            [
+                "headless-run",
+                "--target-repo",
+                str(self.target_repo),
+                "--tracker-dir",
+                str(missing_tracker),
+                "--issues-dir",
+                str(missing_tracker / "issues"),
+                "--runtime-root",
+                str(self.runtime),
+                "--agent-config",
+                str(config_path),
+                "--agent",
+                "fake-local",
+                "Summarize this untracked workspace",
+            ]
+        )
+
+        payload = json.loads(output)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["launch"], "headless-run")
+        self.assertEqual(payload["status"], "evidence-ready")
+
+    def test_headless_review_cli_returns_machine_readable_lifecycle_output(self):
+        config_path = self.write_agent_config(
+            [
+                {
+                    "id": "fake-local",
+                    "role": "local-agent",
+                    "provider": "test",
+                    "runner": "fake",
+                    "model": "deterministic-fake",
+                },
+                {
+                    "id": "fake-reviewer",
+                    "role": "frontier",
+                    "provider": "test",
+                    "runner": "fake",
+                    "model": "deterministic-reviewer",
+                }
+            ]
+        )
+        mission = self.load_mission_with_agent_config(config_path)
+        prior_session = mission.launch_headless_work(
+            work_kind="run",
+            agent_id="fake-local",
+            prompt="Summarize the workspace",
+            allowed_paths=[str(self.target_repo)],
+        )
+
+        exit_code, output = self.run_cli(
+            [
+                "headless-review",
+                "--target-repo",
+                str(self.target_repo),
+                "--tracker-dir",
+                str(self.tracker),
+                "--runtime-root",
+                str(self.runtime),
+                "--agent-config",
+                str(config_path),
+                "--agent",
+                "fake-reviewer",
+                "--allowed-path",
+                str(self.target_repo),
+                prior_session.session_id,
+            ]
+        )
+
+        payload = json.loads(output)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["product"], "Alfredo")
+        self.assertEqual(payload["launch"], "headless-review")
+        self.assertEqual(payload["review_session_id"], prior_session.session_id)
+        self.assertEqual(payload["review_context"]["session_id"], prior_session.session_id)
+        self.assertEqual(payload["review_context"]["evidence_valid"], True)
+        self.assertEqual(payload["selected_agent"], "fake-reviewer")
+        self.assertEqual(payload["selected_model"], "deterministic-reviewer")
+        self.assertEqual(payload["governance"]["orchestrator"], "AlbertMission")
+        self.assertEqual(payload["governance"]["evidence_package"], "valid")
+        self.assertIn("session-created", payload["lifecycle"])
 
     def test_command_and_visibility_policy_are_enforced(self):
         mission = self.load_mission()

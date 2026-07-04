@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, resolve } from "node:path";
+import { delimiter, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -46,8 +46,9 @@ function requireKnownAgent(agentIdOrModel, options = {}) {
   );
   if (!agent) {
     const configured = agents.map((candidate) => candidate.id).join(", ") || "none";
+    const expected = options.allowModelAlias === true ? "agent or model" : "agent id";
     throw new Error(
-      `Unknown Alfredo agent or model: ${agentIdOrModel}. Run "alfredo agents" and use one of: ${configured}. Registry: ${agentConfigPath}`,
+      `Unknown Alfredo ${expected}: ${agentIdOrModel}. Run "alfredo agents" and use one of: ${configured}. Registry: ${agentConfigPath}`,
     );
   }
   return agent;
@@ -325,7 +326,7 @@ function parseHeadlessRun(argv) {
   if (remaining.length !== 1 || !remaining[0]?.trim()) {
     throw new Error('alfredo run requires exactly one prompt argument, for example: alfredo run --agent qwen3.6-27b "Fix the tests"');
   }
-  const selectedAgentConfig = requireKnownAgent(selectedAgent, { allowModelAlias: true });
+  const selectedAgentConfig = requireKnownAgent(selectedAgent);
   return {
     product: "Alfredo",
     launch: "headless-run",
@@ -334,8 +335,6 @@ function parseHeadlessRun(argv) {
     prompt: remaining[0],
     selected_workspace: process.cwd(),
     runtime_root: runtimeRoot(),
-    implementation_status: "deferred",
-    follow_up_issue: ".agent/issues/21-add-headless-alfredo-cli-grammar.md",
   };
 }
 
@@ -345,7 +344,7 @@ function parseHeadlessReview(argv) {
   if (remaining.length > 1) {
     throw new Error("alfredo review accepts at most one optional session id");
   }
-  const selectedAgentConfig = requireKnownAgent(selectedAgent, { allowModelAlias: true });
+  const selectedAgentConfig = requireKnownAgent(selectedAgent);
   return {
     product: "Alfredo",
     launch: "headless-review",
@@ -354,15 +353,83 @@ function parseHeadlessReview(argv) {
     session_id: remaining[0] ?? "",
     selected_workspace: process.cwd(),
     runtime_root: runtimeRoot(),
-    implementation_status: "deferred",
-    follow_up_issue: ".agent/issues/21-add-headless-alfredo-cli-grammar.md",
   };
 }
 
-function listAgents() {
-  return loadAgentRegistry()
-    .map((agent) => `${agent.id}\t${agent.role ?? ""}\t${agent.runner ?? ""}\t${agent.model ?? ""}`)
-    .join("\n");
+function pythonCommand() {
+  return process.env.ALBERT_PYTHON ?? (process.platform === "win32" ? "python" : "python3");
+}
+
+function trackerArgs(selectedWorkspace) {
+  const agentIssuesTracker = resolve(selectedWorkspace, ".agent", "issues");
+  if (existsSync(resolve(agentIssuesTracker, "PRD.md"))) {
+    return {
+      trackerDir: agentIssuesTracker,
+      issuesDir: agentIssuesTracker,
+    };
+  }
+  const trackerDir = resolve(selectedWorkspace, ".agent");
+  return {
+    trackerDir,
+    issuesDir: resolve(trackerDir, "issues"),
+  };
+}
+
+function headlessContextArgs(selectedWorkspace) {
+  const { trackerDir, issuesDir } = trackerArgs(selectedWorkspace);
+  return [
+    "--target-repo",
+    selectedWorkspace,
+    "--tracker-dir",
+    trackerDir,
+    "--issues-dir",
+    issuesDir,
+    "--runtime-root",
+    runtimeRoot(),
+    "--mission-id",
+    "alfredo-headless",
+    "--agent-config",
+    agentConfigPath,
+  ];
+}
+
+function runHeadlessBackend(plan) {
+  const backendArgs = [
+    plan.launch === "headless-run" ? "headless-run" : "headless-review",
+    ...headlessContextArgs(plan.selected_workspace),
+    "--agent",
+    plan.selected_agent,
+    "--allowed-path",
+    plan.selected_workspace,
+  ];
+  if (plan.launch === "headless-run") {
+    backendArgs.push(plan.prompt);
+  } else if (plan.session_id) {
+    backendArgs.push(plan.session_id);
+  }
+  return spawnSync(pythonCommand(), ["-m", "albert_mvp", ...backendArgs], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PYTHONPATH: process.env.PYTHONPATH
+        ? `${repositoryRoot}${delimiter}${process.env.PYTHONPATH}`
+        : repositoryRoot,
+    },
+  });
+}
+
+function runAgentsBackend() {
+  return spawnSync(pythonCommand(), ["-m", "albert_mvp", "agents", ...headlessContextArgs(process.cwd())], {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PYTHONPATH: process.env.PYTHONPATH
+        ? `${repositoryRoot}${delimiter}${process.env.PYTHONPATH}`
+        : repositoryRoot,
+    },
+  });
 }
 
 function launchDryRunPlan(plan, npmCommand) {
@@ -428,18 +495,22 @@ try {
   const command = argv[0] ?? "";
   if (command === "agents") {
     if (argv.length !== 1) throw new Error("alfredo agents does not accept additional arguments");
-    process.stdout.write(`${listAgents()}\n`);
-    process.exit(0);
+    const result = runAgentsBackend();
+    if (result.error) throw result.error;
+    process.stdout.write(result.stdout);
+    process.stderr.write(result.stderr);
+    process.exit(result.status ?? 1);
   }
   if (command === "run") {
     const plan = parseHeadlessRun(argv.slice(1));
     if (dryRunMode()) {
       process.stdout.write(`${JSON.stringify(plan)}\n`);
     } else {
-      process.stderr.write(
-        `Alfredo headless run is recognized but deferred to ${plan.follow_up_issue}. Use "alfredo workstation --agent ${plan.selected_agent}" for this slice.\n`,
-      );
-      process.exit(2);
+      const result = runHeadlessBackend(plan);
+      if (result.error) throw result.error;
+      process.stdout.write(result.stdout);
+      process.stderr.write(result.stderr);
+      process.exit(result.status ?? 1);
     }
     process.exit(0);
   }
@@ -448,10 +519,11 @@ try {
     if (dryRunMode()) {
       process.stdout.write(`${JSON.stringify(plan)}\n`);
     } else {
-      process.stderr.write(
-        `Alfredo headless review is recognized but deferred to ${plan.follow_up_issue}. Use "alfredo workstation --agent ${plan.selected_agent}" for this slice.\n`,
-      );
-      process.exit(2);
+      const result = runHeadlessBackend(plan);
+      if (result.error) throw result.error;
+      process.stdout.write(result.stdout);
+      process.stderr.write(result.stderr);
+      process.exit(result.status ?? 1);
     }
     process.exit(0);
   }

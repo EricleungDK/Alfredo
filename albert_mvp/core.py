@@ -334,7 +334,11 @@ class AlbertMission:
 
     def load(self) -> "AlbertMission":
         self.agent_registry = load_agent_registry(self.agent_config_path)
-        self.prd_title = self._load_prd_title()
+        prd_path = self.tracker_dir / "PRD.md"
+        if self.allow_empty_tracker and not prd_path.exists():
+            self.prd_title = "Untracked Workspace"
+        else:
+            self.prd_title = self._load_prd_title()
         self.issues = self._load_issues()
         self._load_runtime()
         self._persist()
@@ -894,6 +898,91 @@ class AlbertMission:
         self._persist()
         return session
 
+    def launch_headless_work(
+        self,
+        *,
+        work_kind: str,
+        agent_id: str,
+        prompt: str = "",
+        review_session_id: str = "",
+        allowed_paths: list[str] | None = None,
+        command_policy: dict[str, str] | None = None,
+    ) -> LocalAgentSession:
+        if work_kind not in {"run", "review"}:
+            raise AlbertError(f"Unknown headless work kind: {work_kind}")
+        agent_config = self.agent_registry.require(agent_id)
+        if agent_config.availability != "available":
+            reason = agent_config.availability_reason or agent_config.availability
+            raise LaunchBlockedError(f"{agent_id} assigned model is unavailable: {reason}.")
+        if command_policy:
+            self.command_policy.update(command_policy)
+        if agent_config.runner in {"command", "ollama"}:
+            runner_command = self._runner_command(agent_config)
+            policy = self.classify_command(runner_command)
+            if policy != "auto-allowed":
+                raise LaunchBlockedError(
+                    f"{agent_id} command runner policy is {policy}; auto-allowed is required."
+                )
+        work_id = f"headless-{work_kind}-{len(self.sessions) + 1:06d}"
+        session_id = f"session-{work_id}"
+        worktree_path = self.target_repo.parent / ".albert-worktrees" / self.target_repo.name / work_id
+        worktree_path.mkdir(parents=True, exist_ok=True)
+        goal = prompt.strip()
+        review_context: dict[str, Any] | None = None
+        if work_kind == "review":
+            if review_session_id:
+                prior_session = self._session(review_session_id)
+                review_context = {
+                    "session_id": prior_session.session_id,
+                    "issue_id": prior_session.issue_id,
+                    "assigned_agent": prior_session.assigned_agent,
+                    "status": prior_session.status,
+                    "evidence_valid": prior_session.evidence_valid,
+                    "evidence": prior_session.evidence.to_dict() if prior_session.evidence else None,
+                    "artifacts": prior_session.artifacts,
+                    "runner_exit_status": prior_session.runner_exit_status,
+                }
+            goal = (
+                f"Review session {review_session_id}."
+                if review_session_id
+                else "Review the current Alfredo workspace state."
+            )
+        task_packet = {
+            "issue_id": work_id,
+            "work_kind": f"headless-{work_kind}",
+            "goal": goal,
+            "prompt": prompt,
+            "review_session_id": review_session_id,
+            "acceptance_criteria": [
+                "Return terminal-suitable lifecycle output.",
+                "Respect Orchestrator governance and Evidence Package boundaries.",
+            ],
+            "allowed_paths": allowed_paths or [],
+            "command_policy": command_policy or {},
+            "evidence_requirements": self.default_evidence_requirements(),
+            "assigned_agent": agent_id,
+            "agent_config": self._agent_config_for(agent_id),
+        }
+        if review_context is not None:
+            task_packet["review_context"] = review_context
+        session = LocalAgentSession(
+            session_id=session_id,
+            issue_id=work_id,
+            assigned_agent=agent_id,
+            worktree_path=worktree_path,
+            task_packet=task_packet,
+        )
+        self.sessions[session_id] = session
+        if agent_config.runner == "fake":
+            self._run_fake_agent(session)
+        elif agent_config.runner == "command":
+            self._run_command_agent(session, agent_config)
+        elif agent_config.runner == "ollama":
+            self._run_ollama_agent(session, agent_config)
+        self._record(f"{work_id} launched as {session_id}.")
+        self._persist()
+        return session
+
     def classify_command(self, command: str) -> str:
         if command in self.command_policy:
             return self.command_policy[command]
@@ -1150,10 +1239,12 @@ class AlbertMission:
     def _load_issues(self) -> dict[str, IssueSlice]:
         issues_dir = self.issues_dir
         if not issues_dir.exists():
+            if self.allow_empty_tracker:
+                return {}
             raise AlbertError(f"Missing issues directory: {issues_dir}")
         issues: dict[str, IssueSlice] = {}
         for path in sorted(issues_dir.glob("*.md")):
-            if path.name.upper() == "README.MD":
+            if path.name.upper() in {"README.MD", "PRD.MD"}:
                 continue
             issue = self._parse_issue(path)
             issues[issue.id] = issue

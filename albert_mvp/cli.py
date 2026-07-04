@@ -5,6 +5,7 @@ from dataclasses import asdict
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 from .agents import AgentConfigError
 from .core import AlbertError, AlbertMission, EvidencePackage, EvidenceValidationError
@@ -38,6 +39,24 @@ def build_parser() -> argparse.ArgumentParser:
 
     agents = subparsers.add_parser("agents", help="List configured Frontier and Local Agent models.")
     _add_common_args(agents)
+
+    headless_run = subparsers.add_parser(
+        "headless-run",
+        help="Launch terminal-only model work through the Orchestrator and print JSON lifecycle output.",
+    )
+    _add_common_args(headless_run)
+    headless_run.add_argument("--agent", required=True)
+    headless_run.add_argument("--allowed-path", action="append", default=[])
+    headless_run.add_argument("prompt")
+
+    headless_review = subparsers.add_parser(
+        "headless-review",
+        help="Launch terminal-only review work through the Orchestrator and print JSON lifecycle output.",
+    )
+    _add_common_args(headless_review)
+    headless_review.add_argument("--agent", required=True)
+    headless_review.add_argument("--allowed-path", action="append", default=[])
+    headless_review.add_argument("session_id", nargs="?", default="")
 
     tui = subparsers.add_parser("tui", help="Render the mission-control TUI surface.")
     _add_common_args(tui)
@@ -530,6 +549,9 @@ def _run(args: argparse.Namespace) -> int:
         agent_config_path=Path(args.agent_config) if args.agent_config else None,
         allow_empty_tracker=args.command
         in {
+            "agents",
+            "headless-run",
+            "headless-review",
             "workspace-snapshot",
             "workspace-action",
             "workspace-updates",
@@ -604,6 +626,24 @@ def _run(args: argparse.Namespace) -> int:
             return 0
         for agent in agents:
             print(f"{agent.id}\t{agent.role}\t{agent.runner}\t{agent.summary()}")
+        return 0
+    if args.command == "headless-run":
+        session = mission.launch_headless_work(
+            work_kind="run",
+            agent_id=args.agent,
+            prompt=args.prompt,
+            allowed_paths=args.allowed_path,
+        )
+        print(json.dumps(_headless_session_payload(mission, session, launch="headless-run"), sort_keys=True))
+        return 0
+    if args.command == "headless-review":
+        session = mission.launch_headless_work(
+            work_kind="review",
+            agent_id=args.agent,
+            review_session_id=args.session_id,
+            allowed_paths=args.allowed_path,
+        )
+        print(json.dumps(_headless_session_payload(mission, session, launch="headless-review"), sort_keys=True))
         return 0
     if args.command == "tui":
         print(render_tui_state(build_tui_state(mission, selected_issue_id=args.select)), end="")
@@ -960,6 +1000,48 @@ def _parse_command_policy(entries: list[str]) -> dict[str, str]:
             raise AlbertError("Command policy entries must use command=policy format.")
         policy[command.strip()] = level.strip()
     return policy
+
+
+def _headless_session_payload(
+    mission: AlbertMission,
+    session: Any,
+    *,
+    launch: str,
+) -> dict[str, Any]:
+    agent = mission.agent_registry.require(session.assigned_agent)
+    runner_command = mission._runner_command(agent)
+    command_policy = mission.classify_command(runner_command) if runner_command else "not_applicable"
+    evidence = session.evidence.to_dict() if session.evidence else None
+    return {
+        "product": "Alfredo",
+        "launch": launch,
+        "session_id": session.session_id,
+        "work_id": session.issue_id,
+        "status": session.status,
+        "selected_agent": agent.id,
+        "selected_model": agent.model,
+        "agent": agent.to_dict(),
+        "prompt": session.task_packet.get("prompt", ""),
+        "review_session_id": session.task_packet.get("review_session_id", ""),
+        "worktree_path": str(session.worktree_path),
+        "allowed_paths": list(session.task_packet.get("allowed_paths", [])),
+        "review_context": session.task_packet.get("review_context"),
+        "governance": {
+            "orchestrator": "AlbertMission",
+            "command_policy": command_policy,
+            "path_boundary": "allowed_paths",
+            "model_assignment": agent.id,
+            "evidence_package": "valid" if session.evidence_valid else "pending",
+        },
+        "lifecycle": [
+            "agent-resolved",
+            f"command-policy:{command_policy}",
+            "session-created",
+            f"runner-status:{session.status}",
+            "evidence-package:valid" if session.evidence_valid else "evidence-package:pending",
+        ],
+        "evidence": evidence,
+    }
 
 
 def _load_workspace_service(
