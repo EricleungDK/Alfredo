@@ -1,8 +1,11 @@
 {
-  "name": "albert-mission-control",
-  "private": true,
+  "name": "alfredo",
   "version": "0.1.0",
   "type": "module",
+  "bin": {
+    "alfredo": "./bin/alfredo.js",
+    "albert": "./bin/alfredo.js"
+  },
   "scripts": {
     "dev": "vite",
     "desktop": "tauri dev",

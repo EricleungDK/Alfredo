@@ -54,6 +54,12 @@ impl BridgeConfig {
                     .expect("Albert backend root must be available")
             });
         let mut config = Self::for_repository(backend_root);
+        if let Some(selected_workspace) = std::env::var_os("ALFREDO_SELECTED_WORKSPACE") {
+            config.target_repo = PathBuf::from(selected_workspace);
+        }
+        if let Some(runtime_root) = std::env::var_os("ALFREDO_RUNTIME_ROOT") {
+            config.runtime_root = PathBuf::from(runtime_root);
+        }
         config.mission_catalog = std::env::var_os("ALBERT_MISSION_CATALOG").map(PathBuf::from);
         config
     }
@@ -1907,6 +1913,29 @@ None - can start immediately
             .ends_with(".scratch/albert-mission-control-app"));
         assert!(config.issues_dir.unwrap().ends_with(".agent/issues"));
         assert_eq!(config.mission_id, "albert-mission-control-app");
+    }
+
+    #[test]
+    fn environment_config_keeps_install_root_and_selected_workspace_separate() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("alfredo-bridge-config-{unique}"));
+        let install_root = root.join("install");
+        let selected_workspace = root.join("workspace");
+        fs::create_dir_all(&install_root).expect("install root");
+        fs::create_dir_all(&selected_workspace).expect("selected workspace");
+        std::env::set_var("ALBERT_BACKEND_ROOT", &install_root);
+        std::env::set_var("ALFREDO_SELECTED_WORKSPACE", &selected_workspace);
+
+        let config = BridgeConfig::from_environment();
+
+        std::env::remove_var("ALBERT_BACKEND_ROOT");
+        std::env::remove_var("ALFREDO_SELECTED_WORKSPACE");
+        assert_eq!(config.backend_root, install_root);
+        assert_eq!(config.target_repo, selected_workspace);
+        fs::remove_dir_all(root).expect("temporary bridge config fixture should be removed");
     }
 
     #[test]
