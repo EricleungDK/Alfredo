@@ -21,6 +21,7 @@ import type {
 } from "./contracts";
 import type { WorkspaceClient } from "./workspace-client";
 import { applyWorkspaceUpdates } from "./workspace-sync";
+import { projectWorkstationCards } from "./workstation-projection";
 import { ShellTerminalPanel } from "./ShellTerminalPanel";
 import { useShellTerminal, type ShellTerminalController } from "./use-shell-terminal";
 import "./styles.css";
@@ -697,85 +698,11 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   );
 }
 
-interface WorkstationCardProjection {
-  readonly id: string;
-  readonly title: string;
-  readonly status: string;
-  readonly task: string;
-  readonly agent: string;
-  readonly role: string;
-  readonly model: string;
-  readonly filesTouched: number;
-  readonly latestCommand: string;
-  readonly nextAction: string;
-  readonly attention: boolean;
-}
-
 interface WorkstationTranscriptTurn {
   readonly id: string;
   readonly content: string;
   readonly source: string;
   readonly outcome: string;
-}
-
-function buildWorkstationCards(snapshot: WorkspaceSnapshot): readonly WorkstationCardProjection[] {
-  const issueSlices = new Map(
-    snapshot.mission_board.issue_slices?.map((issue) => [issue.issue_id, issue]),
-  );
-  const sessionCards =
-    snapshot.missions?.flatMap((mission) =>
-      mission.sessions.map((session) => {
-        const issue = issueSlices.get(session.issue_id);
-        return {
-          id: session.session_id,
-          title: session.session_id,
-          status: session.status,
-          task: issue?.title ?? session.issue_id,
-          agent: session.assigned_agent,
-          role: session.role ?? issue?.model_assignment.role ?? "agent",
-          model: session.model ?? issue?.model_assignment.model ?? session.assigned_agent,
-          filesTouched: issue?.evidence.changed_files.length ?? 0,
-          latestCommand: issue?.evidence.commands_run.at(-1) ?? "No command summary",
-          nextAction: issue?.progress ?? "Monitor active work",
-          attention: isAttentionStatus(session.status),
-        };
-      }),
-    ) ?? [];
-  const attentionCards =
-    snapshot.missions?.flatMap((mission) =>
-      mission.attention.map((attention) => ({
-        id: attention.attention_id,
-        title: attention.label,
-        status: "waiting-approval",
-        task: attention.kind,
-        agent: "orchestrator",
-        role: "governance",
-        model: "typed-action",
-        filesTouched: 0,
-        latestCommand: "No command summary",
-        nextAction: "Open Queue decision",
-        attention: true,
-      })),
-    ) ?? [];
-  const issueCards = snapshot.mission_board.ordered_issue_ids.map((issueId) => {
-    const issue = issueSlices.get(issueId);
-    const blockedBy = issue?.blockers.map((blocker) => blocker.issue_id).join(", ");
-    return {
-      id: `issue-${issueId}`,
-      title: issueId,
-      status: issue?.lifecycle ?? (snapshot.mission_board.ready_issue_ids.includes(issueId) ? "ready" : "blocked"),
-      task: issue?.title ?? (snapshot.mission_board.ready_issue_ids.includes(issueId) ? "Launch eligible" : "Waiting on blocker"),
-      agent: issue?.model_assignment.agent_id ?? "controller",
-      role: issue?.model_assignment.role ?? "controller",
-      model: issue?.model_assignment.model ?? "unassigned",
-      filesTouched: issue?.evidence.changed_files.length ?? 0,
-      latestCommand: issue?.evidence.commands_run.at(-1) ?? "No command summary",
-      nextAction: blockedBy ? `Blocked by ${blockedBy}` : issue?.progress ?? "Ready for governed launch",
-      attention: !issue?.launch_eligible && Boolean(issue?.blockers.length),
-    };
-  });
-  const cards = sessionCards.length || attentionCards.length ? [...attentionCards, ...sessionCards] : issueCards;
-  return [...cards].sort((left, right) => Number(right.attention) - Number(left.attention));
 }
 
 function buildWorkstationTranscriptTurns(
@@ -808,16 +735,6 @@ function snapshotExecutionState(snapshot: WorkspaceSnapshot): string {
   const sessions = snapshot.missions?.flatMap((mission) => mission.sessions) ?? [];
   const active = sessions.find((session) => !isDoneStatus(session.status));
   return active ? `Session ${active.status}` : "Idle";
-}
-
-function isAttentionStatus(status: string): boolean {
-  const normalized = status.toLowerCase();
-  return (
-    normalized.includes("waiting") ||
-    normalized.includes("approval") ||
-    normalized.includes("blocked") ||
-    normalized.includes("failed")
-  );
 }
 
 function isDoneStatus(status: string): boolean {
@@ -999,7 +916,17 @@ function CommandDeck({
     (selectedIssueId ? issueSlicesById.get(selectedIssueId) : null) ??
     snapshot.mission_board.issue_slices?.[0] ??
     null;
-  const workstationCards = buildWorkstationCards(snapshot);
+  const workstationProjection = projectWorkstationCards(snapshot, {
+    pendingIntent:
+      actionStatus === "pending"
+        ? {
+            id: `workspace-action-${snapshot.revision}`,
+            label: "Awaiting Orchestrator acknowledgement",
+            expectedRevision: snapshot.revision,
+          }
+        : null,
+  });
+  const workstationCards = workstationProjection.groups.flatMap((group) => group.cards);
   const workstationTranscriptTurns = buildWorkstationTranscriptTurns(snapshot);
   const activeExecutionState =
     actionStatus === "pending"
@@ -1228,35 +1155,79 @@ function CommandDeck({
             })}
           </div>
           <section className="workstation-cards" aria-label="Workstation Cards">
-            {workstationCards.map((card) => (
-              <article className="workstation-card" data-attention={card.attention} key={card.id}>
-                <header>
-                  <div>
-                    <span className="eyebrow">{card.agent}</span>
-                    <h3>{card.title}</h3>
-                  </div>
-                  <span className={card.attention ? "status status--ready" : "status"}>
-                    {card.status}
-                  </span>
-                </header>
-                <p>{card.task}</p>
-                <dl>
-                  <div>
-                    <dt>Model</dt>
-                    <dd>{card.model}</dd>
-                  </div>
-                  <div>
-                    <dt>Role</dt>
-                    <dd>{card.role}</dd>
-                  </div>
-                  <div>
-                    <dt>Files</dt>
-                    <dd>{card.filesTouched}</dd>
-                  </div>
-                </dl>
-                <small>{card.latestCommand}</small>
-                <strong>{card.nextAction}</strong>
-              </article>
+            {workstationProjection.pendingIntent ? (
+              <div className="workstation-pending" role="status" aria-label="Pending workstation intent">
+                <span>{workstationProjection.pendingIntent.label}</span>
+                <small>
+                  Expected revision {workstationProjection.pendingIntent.expectedRevision}
+                </small>
+              </div>
+            ) : null}
+            {workstationProjection.groups.map((group) => (
+              <div className="workstation-card-group" key={group.id}>
+                <div className="workstation-card-group__heading">
+                  <span>{group.label}</span>
+                  <small>{group.cards.length}</small>
+                </div>
+                {group.cards.map((card) => {
+                  return (
+                    <article
+                      className="workstation-card"
+                      data-attention={card.attention}
+                      data-tone={card.tone}
+                      key={card.id}
+                    >
+                      <header>
+                        <div>
+                          <span className="eyebrow">{card.missionTitle}</span>
+                          <h3>{card.name}</h3>
+                          <small>{card.sessionId ?? card.issueId ?? card.missionId}</small>
+                        </div>
+                        <span className={card.attention ? "status status--ready" : "status"}>
+                          {card.status}
+                        </span>
+                      </header>
+                      <p>{card.currentTask}</p>
+                      <dl>
+                        <div>
+                          <dt>Model</dt>
+                          <dd>{card.model}</dd>
+                        </div>
+                        <div>
+                          <dt>Role</dt>
+                          <dd>{card.role}</dd>
+                        </div>
+                        <div>
+                          <dt>Phase</dt>
+                          <dd>{card.phase}</dd>
+                        </div>
+                        <div>
+                          <dt>Last activity</dt>
+                          <dd>{card.lastActivity}</dd>
+                        </div>
+                        <div>
+                          <dt>Files</dt>
+                          <dd>{card.filesTouched}</dd>
+                        </div>
+                        <div>
+                          <dt>Accepted</dt>
+                          <dd>r{card.acceptedRevision}</dd>
+                        </div>
+                      </dl>
+                      <small>{card.progress}</small>
+                      <small>{card.latestCommandOrTest}</small>
+                      {card.approvalBlockers.length ? (
+                        <ul className="workstation-card__blockers" aria-label={`${card.name} approval blockers`}>
+                          {card.approvalBlockers.map((blocker) => (
+                            <li key={blocker}>Approval blocker: {blocker}</li>
+                          ))}
+                        </ul>
+                      ) : null}
+                      <strong>{card.nextAction}</strong>
+                    </article>
+                  );
+                })}
+              </div>
             ))}
           </section>
           {leftLaneMode === "terminal" ? (

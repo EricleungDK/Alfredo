@@ -53,9 +53,15 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .workstation-tabs button { padding: 0.75rem; border: 0; border-bottom: 2px solid transparent; background: #0a0f0d; color: var(--muted); }
 .workstation-tabs button[aria-selected="true"] { border-bottom-color: var(--lime); color: var(--ink); background: #131a16; }
 .workstation-panel { min-height: 0; overflow: auto; }
-.workstation-cards { display: grid; gap: 0.75rem; max-height: min(42vh, 24rem); overflow: auto; padding: 1rem; border-bottom: 1px solid var(--line); }
+.workstation-cards { display: grid; gap: 0.9rem; max-height: min(42vh, 24rem); overflow: auto; padding: 1rem; border-bottom: 1px solid var(--line); }
+.workstation-card-group { display: grid; gap: 0.65rem; }
+.workstation-card-group__heading, .workstation-pending { display: flex; justify-content: space-between; gap: 0.7rem; align-items: center; color: var(--muted); font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.08em; }
+.workstation-pending { padding: 0.55rem 0.65rem; border: 1px dashed #9d7b2b; color: #ffd166; background: #171406; text-transform: none; letter-spacing: 0; }
 .workstation-card { display: grid; gap: 0.65rem; padding: 0.85rem; border: 1px solid var(--line); border-left: 2px solid var(--line); background: #101513e8; }
 .workstation-card[data-attention="true"] { border-left-color: #ffd166; }
+.workstation-card[data-tone="failed"] { border-left-color: var(--danger); }
+.workstation-card[data-tone="active"] { border-left-color: var(--cyan); }
+.workstation-card[data-tone="muted"] { opacity: 0.78; }
 .workstation-card header { display: flex; justify-content: space-between; gap: 0.75rem; align-items: flex-start; }
 .workstation-card h3 { margin: 0.1rem 0 0; font-family: "Rajdhani", sans-serif; font-size: 1.15rem; line-height: 1.05; }
 .workstation-card p { margin: 0; color: #bdc5bd; font-size: 0.75rem; line-height: 1.45; }
@@ -64,6 +70,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .workstation-card dd { margin: 0.2rem 0 0; overflow-wrap: anywhere; font-size: 0.68rem; }
 .workstation-card small { color: var(--muted); overflow-wrap: anywhere; }
 .workstation-card > strong { color: var(--cyan); font-size: 0.72rem; }
+.workstation-card__blockers { margin: 0; padding-left: 1rem; color: #ffd166; font-size: 0.68rem; line-height: 1.4; }
 .shell-terminal { display: grid; align-content: start; gap: 1rem; min-height: 0; padding: 1.2rem; overflow: auto; }
 .terminal-boundary, .terminal-field { display: grid; gap: 0.4rem; padding: 0.8rem; border-left: 2px solid var(--cyan); background: #101715; }
 .terminal-boundary code { color: var(--cyan); overflow-wrap: anywhere; }
