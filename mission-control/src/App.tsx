@@ -624,7 +624,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
     return (
       <div className="boot-screen" role="status" aria-live="polite">
         <span className="boot-marker" aria-hidden="true" />
-        <p>Connecting to Albert</p>
+        <p>Connecting to Alfredo</p>
         <small>Waiting for an authoritative workspace snapshot</small>
       </div>
     );
@@ -633,7 +633,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   if (state.kind !== "ready" && state.kind !== "empty") {
     return (
       <div className="boot-screen boot-screen--error" role="alert">
-        <p>Command Deck unavailable</p>
+        <p>Alfredo workstation unavailable</p>
         <small>{state.message}</small>
         {state.recoverable ? <button onClick={connect}>Retry connection</button> : null}
       </div>
@@ -694,6 +694,139 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       shellTerminal={shellTerminal}
       launchContext={launchContext}
     />
+  );
+}
+
+interface WorkstationCardProjection {
+  readonly id: string;
+  readonly title: string;
+  readonly status: string;
+  readonly task: string;
+  readonly agent: string;
+  readonly role: string;
+  readonly model: string;
+  readonly filesTouched: number;
+  readonly latestCommand: string;
+  readonly nextAction: string;
+  readonly attention: boolean;
+}
+
+interface WorkstationTranscriptTurn {
+  readonly id: string;
+  readonly content: string;
+  readonly source: string;
+  readonly outcome: string;
+}
+
+function buildWorkstationCards(snapshot: WorkspaceSnapshot): readonly WorkstationCardProjection[] {
+  const issueSlices = new Map(
+    snapshot.mission_board.issue_slices?.map((issue) => [issue.issue_id, issue]),
+  );
+  const sessionCards =
+    snapshot.missions?.flatMap((mission) =>
+      mission.sessions.map((session) => {
+        const issue = issueSlices.get(session.issue_id);
+        return {
+          id: session.session_id,
+          title: session.session_id,
+          status: session.status,
+          task: issue?.title ?? session.issue_id,
+          agent: session.assigned_agent,
+          role: session.role ?? issue?.model_assignment.role ?? "agent",
+          model: session.model ?? issue?.model_assignment.model ?? session.assigned_agent,
+          filesTouched: issue?.evidence.changed_files.length ?? 0,
+          latestCommand: issue?.evidence.commands_run.at(-1) ?? "No command summary",
+          nextAction: issue?.progress ?? "Monitor active work",
+          attention: isAttentionStatus(session.status),
+        };
+      }),
+    ) ?? [];
+  const attentionCards =
+    snapshot.missions?.flatMap((mission) =>
+      mission.attention.map((attention) => ({
+        id: attention.attention_id,
+        title: attention.label,
+        status: "waiting-approval",
+        task: attention.kind,
+        agent: "orchestrator",
+        role: "governance",
+        model: "typed-action",
+        filesTouched: 0,
+        latestCommand: "No command summary",
+        nextAction: "Open Queue decision",
+        attention: true,
+      })),
+    ) ?? [];
+  const issueCards = snapshot.mission_board.ordered_issue_ids.map((issueId) => {
+    const issue = issueSlices.get(issueId);
+    const blockedBy = issue?.blockers.map((blocker) => blocker.issue_id).join(", ");
+    return {
+      id: `issue-${issueId}`,
+      title: issueId,
+      status: issue?.lifecycle ?? (snapshot.mission_board.ready_issue_ids.includes(issueId) ? "ready" : "blocked"),
+      task: issue?.title ?? (snapshot.mission_board.ready_issue_ids.includes(issueId) ? "Launch eligible" : "Waiting on blocker"),
+      agent: issue?.model_assignment.agent_id ?? "controller",
+      role: issue?.model_assignment.role ?? "controller",
+      model: issue?.model_assignment.model ?? "unassigned",
+      filesTouched: issue?.evidence.changed_files.length ?? 0,
+      latestCommand: issue?.evidence.commands_run.at(-1) ?? "No command summary",
+      nextAction: blockedBy ? `Blocked by ${blockedBy}` : issue?.progress ?? "Ready for governed launch",
+      attention: !issue?.launch_eligible && Boolean(issue?.blockers.length),
+    };
+  });
+  const cards = sessionCards.length || attentionCards.length ? [...attentionCards, ...sessionCards] : issueCards;
+  return [...cards].sort((left, right) => Number(right.attention) - Number(left.attention));
+}
+
+function buildWorkstationTranscriptTurns(
+  snapshot: WorkspaceSnapshot,
+): readonly WorkstationTranscriptTurn[] {
+  const attentionTurns =
+    snapshot.missions?.flatMap((mission) =>
+      mission.attention.map((attention) => ({
+        id: `attention:${attention.attention_id}`,
+        content: `Workstation action pending: ${attention.label}.`,
+        source: "orchestrator",
+        outcome: "waiting-approval",
+      })),
+    ) ?? [];
+  const sessionTurns =
+    snapshot.missions?.flatMap((mission) =>
+      mission.sessions.map((session) => ({
+        id: `session:${session.session_id}`,
+        content: `Workstation outcome: ${session.issue_id} is ${session.status} on ${session.assigned_agent}.`,
+        source: session.assigned_agent,
+        outcome: session.status,
+      })),
+    ) ?? [];
+  return [...attentionTurns, ...sessionTurns];
+}
+
+function snapshotExecutionState(snapshot: WorkspaceSnapshot): string {
+  const attention = snapshot.missions?.flatMap((mission) => mission.attention) ?? [];
+  if (attention.length > 0) return "Waiting approval";
+  const sessions = snapshot.missions?.flatMap((mission) => mission.sessions) ?? [];
+  const active = sessions.find((session) => !isDoneStatus(session.status));
+  return active ? `Session ${active.status}` : "Idle";
+}
+
+function isAttentionStatus(status: string): boolean {
+  const normalized = status.toLowerCase();
+  return (
+    normalized.includes("waiting") ||
+    normalized.includes("approval") ||
+    normalized.includes("blocked") ||
+    normalized.includes("failed")
+  );
+}
+
+function isDoneStatus(status: string): boolean {
+  const normalized = status.toLowerCase();
+  return (
+    normalized.includes("complete") ||
+    normalized.includes("done") ||
+    normalized.includes("failed") ||
+    normalized.includes("merged")
   );
 }
 
@@ -866,13 +999,27 @@ function CommandDeck({
     (selectedIssueId ? issueSlicesById.get(selectedIssueId) : null) ??
     snapshot.mission_board.issue_slices?.[0] ??
     null;
+  const workstationCards = buildWorkstationCards(snapshot);
+  const workstationTranscriptTurns = buildWorkstationTranscriptTurns(snapshot);
+  const activeExecutionState =
+    actionStatus === "pending"
+      ? "Action pending"
+      : reviewStatus?.state === "pending"
+        ? "Review pending"
+        : queueStatus?.state === "pending"
+          ? "Queue pending"
+          : missionDraftStatus?.state === "pending"
+            ? "Mission Draft pending"
+            : shellTerminal.actionStatus?.state === "pending"
+              ? "Command pending"
+              : snapshotExecutionState(snapshot);
   return (
     <div className="command-deck">
       <header className="topbar">
         <div className="wordmark">
           <span className="wordmark__signal" aria-hidden="true" />
-          <span>ALBERT</span>
-          <small>MISSION CONTROL</small>
+          <span>ALFREDO</span>
+          <small>WORKSTATION</small>
         </div>
         <div className="session-state">
           <span className="eyebrow">Workspace Session {snapshot.workspace_session.id}</span>
@@ -882,10 +1029,179 @@ function CommandDeck({
       </header>
 
       <div className="deck-grid">
-        <aside className="left-lane">
-          <div className="left-lane-tabs" role="tablist" aria-label="Left lane mode">
+        <main className="prompt-workspace" aria-label="Prompt Workstation">
+          <section className="prompt-pane" aria-label="Prompt Transcript">
+            <div className="panel-heading">
+              <div>
+                <span className="eyebrow">Active Mission / {mission?.id ?? "none"}</span>
+                <h1>{mission?.title ?? "No active mission"}</h1>
+              </div>
+              {connectionStatus === "offline" ? (
+                <button type="button" onClick={onReconnect}>Reconnect</button>
+              ) : null}
+            </div>
+
+            <div className="console-history">
+              {consoleHistory.length === 0 && workstationTranscriptTurns.length === 0 ? (
+                <p className="system-line">Canonical workspace state restored.</p>
+              ) : null}
+              {consoleHistory.map((message) => (
+                <article key={message.message_id} data-outcome={message.outcome}>
+                  <p>{message.content}</p>
+                  <small>{message.source} / {message.outcome}</small>
+                </article>
+              ))}
+              {workstationTranscriptTurns.map((turn) => (
+                <article key={turn.id} data-outcome={turn.outcome}>
+                  <p>{turn.content}</p>
+                  <small>{turn.source} / {turn.outcome}</small>
+                </article>
+              ))}
+            </div>
+
+            <div className="scope-card">
+              <span className="eyebrow">Conversation Scope / {snapshot.conversation_scope.kind}</span>
+              <strong>{snapshot.conversation_scope.label}</strong>
+              <code>{snapshot.conversation_scope.target_id}</code>
+              <select
+                aria-label="Conversation Scope"
+                value={scopeValue}
+                onChange={(event) => {
+                  const next = scopeOptions.find(
+                    (scope) => `${scope.kind}:${scope.target_id}` === event.target.value,
+                  );
+                  if (next) onScopeDraftChange(next);
+                }}
+              >
+                {scopeOptions.map((scope) => (
+                  <option key={`${scope.kind}:${scope.target_id}`} value={`${scope.kind}:${scope.target_id}`}>
+                    {scope.kind === "working-directory" ? "Working directory" : scope.label}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={onApplyScope}
+                disabled={
+                  !scopeDraft ||
+                  (scopeDraft.kind === snapshot.conversation_scope.kind &&
+                    scopeDraft.target_id === snapshot.conversation_scope.target_id)
+                }
+              >
+                Apply scope
+              </button>
+            </div>
+
+            {workingContext ? (
+              <section className="context-inspector" aria-label="Context Inspector">
+                <div className="context-inspector__heading">
+                  <div>
+                    <span className="eyebrow">Bounded model input</span>
+                    <h3>Context Inspector</h3>
+                  </div>
+                  <code>{workingContext.content_character_count} / 4000 chars</code>
+                </div>
+                <div className="context-inspector__counts">
+                  {Object.entries(contextCounts ?? {}).map(([kind, count]) => (
+                    <small key={kind}>{count} {kind} {count === 1 ? "source" : "sources"}</small>
+                  ))}
+                </div>
+                <div className="context-inspector__sources">
+                  {workingContext.sources.map((source) => (
+                    <article key={source.source_id} data-disposition={source.disposition}>
+                      <small>{source.kind}</small>
+                      <strong>{source.label}</strong>
+                      <p>{source.content}</p>
+                      <code>{source.disposition}</code>
+                      {source.governed ? (
+                        <span>Governed / required</span>
+                      ) : (
+                        <div className="context-inspector__actions">
+                          <button
+                            type="button"
+                            aria-label={`Pin ${source.label}`}
+                            disabled={contextStatus === "pending" || source.disposition === "pinned"}
+                            onClick={() => onCurateContext(source.source_id, "pinned")}
+                          >Pin</button>
+                          <button
+                            type="button"
+                            aria-label={`Exclude ${source.label}`}
+                            disabled={contextStatus === "pending" || source.disposition === "excluded"}
+                            onClick={() => onCurateContext(source.source_id, "excluded")}
+                          >Exclude</button>
+                          {source.disposition !== "included" ? (
+                            <button
+                              type="button"
+                              aria-label={`Include ${source.label}`}
+                              disabled={contextStatus === "pending"}
+                              onClick={() => onCurateContext(source.source_id, "included")}
+                            >Include</button>
+                          ) : null}
+                        </div>
+                      )}
+                    </article>
+                  ))}
+                </div>
+                {contextStatus ? (
+                  <span role="status" aria-label="Context curation status">
+                    {contextStatus[0].toUpperCase() + contextStatus.slice(1)}
+                  </span>
+                ) : null}
+              </section>
+            ) : null}
+
+            <div className="prompt-composer-dock" aria-label="Prompt Composer">
+              <div className="prompt-status-line" aria-label="Prompt status line">
+                <span role="status" aria-label="Connection status">
+                  Connection {connectionStatus[0].toUpperCase() + connectionStatus.slice(1)}
+                </span>
+                <span>Controller {launchContext?.selected_agent || "default"}</span>
+                <span>Model {launchContext?.selected_model || "default"}</span>
+                <span>Scope {snapshot.conversation_scope.label}</span>
+                <span>Workspace {snapshot.workspace_session.workspace_path}</span>
+                <span>Execution {activeExecutionState}</span>
+                {launchContext?.recent_workspaces.length ? (
+                  <span>{launchContext.recent_workspaces.length} recent workspaces</span>
+                ) : null}
+              </div>
+              <label className="composer prompt-composer">
+                <span className="sr-only">Message Alfredo</span>
+                <textarea
+                  aria-label="Message Alfredo"
+                  placeholder="Steer the active scope..."
+                  rows={3}
+                  value={draft}
+                  onChange={(event) => onDraftChange(event.target.value)}
+                />
+                <button
+                  type="button"
+                  aria-label="Send prompt"
+                  disabled={!draft.trim() || messageStatus === "pending"}
+                  onClick={onSend}
+                >
+                  Send
+                </button>
+                {messageStatus ? (
+                  <span role="status" aria-label="Message status">{messageStatus}</span>
+                ) : null}
+              </label>
+            </div>
+          </section>
+        </main>
+
+        <aside className="agent-workstations" aria-label="Agent Workstations">
+          <div className="agent-workstations__heading">
+            <div>
+              <span className="eyebrow">Persistent supervision</span>
+              <h2>Agent Workstations</h2>
+            </div>
+            <span className="connection-pill">
+              {workstationCards.length} streams
+            </span>
+          </div>
+          <div className="workstation-tabs" role="tablist" aria-label="Agent Workstation views">
             {(["agent", "terminal"] as const).map((mode) => {
-              const label = mode === "agent" ? "Agent Console" : "Shell Terminal";
+              const label = mode === "agent" ? "Workstations" : "Shell Terminal";
               return (
                 <button
                   key={mode}
@@ -911,371 +1227,256 @@ function CommandDeck({
               );
             })}
           </div>
-          {leftLaneMode === "agent" ? (
-        <div id="agent-lane-panel" role="tabpanel">
-        <section className="agent-console" aria-label="Agent Console">
-          <div className="panel-heading">
-            <div>
-              <span className="eyebrow">Persistent lane</span>
-              <h2>Agent Console</h2>
-            </div>
-            <span className="connection-pill" role="status" aria-label="Connection status">
-              {connectionStatus[0].toUpperCase() + connectionStatus.slice(1)}
-            </span>
-            {connectionStatus === "offline" ? (
-              <button type="button" onClick={onReconnect}>Reconnect</button>
-            ) : null}
-          </div>
-
-          <div className="console-history">
-            {consoleHistory.length === 0 ? (
-              <p className="system-line">Canonical workspace state restored.</p>
-            ) : (
-              consoleHistory.map((message) => (
-                <article key={message.message_id} data-outcome={message.outcome}>
-                  <p>{message.content}</p>
-                  <small>{message.source} / {message.outcome}</small>
-                </article>
-              ))
-            )}
-          </div>
-
-          <div className="scope-card">
-            <span className="eyebrow">Conversation Scope / {snapshot.conversation_scope.kind}</span>
-            <strong>{snapshot.conversation_scope.label}</strong>
-            <code>{snapshot.conversation_scope.target_id}</code>
-            <select
-              aria-label="Conversation Scope"
-              value={scopeValue}
-              onChange={(event) => {
-                const next = scopeOptions.find(
-                  (scope) => `${scope.kind}:${scope.target_id}` === event.target.value,
-                );
-                if (next) onScopeDraftChange(next);
-              }}
-            >
-              {scopeOptions.map((scope) => (
-                <option key={`${scope.kind}:${scope.target_id}`} value={`${scope.kind}:${scope.target_id}`}>
-                  {scope.kind === "working-directory" ? "Working directory" : scope.label}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              onClick={onApplyScope}
-              disabled={
-                !scopeDraft ||
-                (scopeDraft.kind === snapshot.conversation_scope.kind &&
-                  scopeDraft.target_id === snapshot.conversation_scope.target_id)
-              }
-            >
-              Apply scope
-            </button>
-          </div>
-
-          {workingContext ? (
-            <section className="context-inspector" aria-label="Context Inspector">
-              <div className="context-inspector__heading">
-                <div>
-                  <span className="eyebrow">Bounded model input</span>
-                  <h3>Context Inspector</h3>
-                </div>
-                <code>{workingContext.content_character_count} / 4000 chars</code>
-              </div>
-              <div className="context-inspector__counts">
-                {Object.entries(contextCounts ?? {}).map(([kind, count]) => (
-                  <small key={kind}>{count} {kind} {count === 1 ? "source" : "sources"}</small>
-                ))}
-              </div>
-              <div className="context-inspector__sources">
-                {workingContext.sources.map((source) => (
-                  <article key={source.source_id} data-disposition={source.disposition}>
-                    <small>{source.kind}</small>
-                    <strong>{source.label}</strong>
-                    <p>{source.content}</p>
-                    <code>{source.disposition}</code>
-                    {source.governed ? (
-                      <span>Governed / required</span>
-                    ) : (
-                      <div className="context-inspector__actions">
-                        <button
-                          type="button"
-                          aria-label={`Pin ${source.label}`}
-                          disabled={contextStatus === "pending" || source.disposition === "pinned"}
-                          onClick={() => onCurateContext(source.source_id, "pinned")}
-                        >Pin</button>
-                        <button
-                          type="button"
-                          aria-label={`Exclude ${source.label}`}
-                          disabled={contextStatus === "pending" || source.disposition === "excluded"}
-                          onClick={() => onCurateContext(source.source_id, "excluded")}
-                        >Exclude</button>
-                        {source.disposition !== "included" ? (
-                          <button
-                            type="button"
-                            aria-label={`Include ${source.label}`}
-                            disabled={contextStatus === "pending"}
-                            onClick={() => onCurateContext(source.source_id, "included")}
-                          >Include</button>
-                        ) : null}
-                      </div>
-                    )}
-                  </article>
-                ))}
-              </div>
-              {contextStatus ? (
-                <span role="status" aria-label="Context curation status">
-                  {contextStatus[0].toUpperCase() + contextStatus.slice(1)}
-                </span>
-              ) : null}
-            </section>
-          ) : null}
-
-          <label className="composer">
-            <span className="sr-only">Message Albert</span>
-            {launchContext ? (
-              <div
-                aria-label="Launch context"
-                style={{
-                  gridColumn: "1 / -1",
-                  display: "flex",
-                  flexWrap: "wrap",
-                  gap: "0.35rem 0.65rem",
-                }}
-              >
-                <span>Controller {launchContext.selected_agent || "default"}</span>
-                <span>Model {launchContext.selected_model || "default"}</span>
-                <span>Runtime {launchContext.runtime_root}</span>
-                {launchContext.recent_workspaces.length > 0 ? (
-                  <span>{launchContext.recent_workspaces.length} recent workspaces</span>
-                ) : null}
-              </div>
-            ) : null}
-            <textarea
-              aria-label="Message Albert"
-              placeholder="Steer the active scope…"
-              rows={3}
-              value={draft}
-              onChange={(event) => onDraftChange(event.target.value)}
-            />
-            <button
-              type="button"
-              disabled={!draft.trim() || messageStatus === "pending"}
-              onClick={onSend}
-            >
-              Send
-            </button>
-            {messageStatus ? (
-              <span role="status" aria-label="Message status">{messageStatus}</span>
-            ) : null}
-          </label>
-        </section>
-        </div>
-          ) : (
+          <section className="workstation-cards" aria-label="Workstation Cards">
+            {workstationCards.map((card) => (
+              <article className="workstation-card" data-attention={card.attention} key={card.id}>
+                <header>
+                  <div>
+                    <span className="eyebrow">{card.agent}</span>
+                    <h3>{card.title}</h3>
+                  </div>
+                  <span className={card.attention ? "status status--ready" : "status"}>
+                    {card.status}
+                  </span>
+                </header>
+                <p>{card.task}</p>
+                <dl>
+                  <div>
+                    <dt>Model</dt>
+                    <dd>{card.model}</dd>
+                  </div>
+                  <div>
+                    <dt>Role</dt>
+                    <dd>{card.role}</dd>
+                  </div>
+                  <div>
+                    <dt>Files</dt>
+                    <dd>{card.filesTouched}</dd>
+                  </div>
+                </dl>
+                <small>{card.latestCommand}</small>
+                <strong>{card.nextAction}</strong>
+              </article>
+            ))}
+          </section>
+          {leftLaneMode === "terminal" ? (
             <div id="terminal-lane-panel" role="tabpanel">
               <ShellTerminalPanel terminal={shellTerminal} />
             </div>
+          ) : (
+            <div id="agent-lane-panel" role="tabpanel" className="workstation-panel">
+              <section className="operations" aria-label="Workstation Detail Views">
+                <nav className="view-rail" aria-label="Workstation detail views">
+                  <button
+                    aria-current={snapshot.operations_view === "mission-board" ? "page" : undefined}
+                    className={snapshot.operations_view === "mission-board" ? "is-active" : undefined}
+                    type="button"
+                    onClick={() => onSelectView("mission-board")}
+                    disabled={actionStatus === "pending"}
+                  >
+                    Mission Board
+                  </button>
+                  <button
+                    aria-current={snapshot.operations_view === "review-workspace" ? "page" : undefined}
+                    className={snapshot.operations_view === "review-workspace" ? "is-active" : undefined}
+                    type="button"
+                    onClick={() => onSelectView("review-workspace")}
+                    disabled={actionStatus === "pending"}
+                  >Review</button>
+                  <button
+                    aria-current={snapshot.operations_view === "workspace-queue" ? "page" : undefined}
+                    className={snapshot.operations_view === "workspace-queue" ? "is-active" : undefined}
+                    type="button"
+                    onClick={() => onSelectView("workspace-queue")}
+                    disabled={actionStatus === "pending"}
+                  >Queue</button>
+                  <button
+                    aria-current={snapshot.operations_view === "activity" ? "page" : undefined}
+                    className={snapshot.operations_view === "activity" ? "is-active" : undefined}
+                    type="button"
+                    onClick={() => onSelectView("activity")}
+                    disabled={actionStatus === "pending"}
+                  >Activity</button>
+                </nav>
+
+                {actionStatus ? (
+                  <span role="status" aria-label="Action status" className="connection-pill">
+                    {actionStatus[0].toUpperCase() + actionStatus.slice(1)}
+                  </span>
+                ) : null}
+
+                <section className="mission-surface">
+                  {snapshot.operations_view === "review-workspace" ? (
+                    <ReviewWorkspace
+                      projection={reviewWorkspace}
+                      status={reviewStatus}
+                      reasons={reviewReasons}
+                      onReasonChange={onReviewReasonChange}
+                      onDecision={onReviewDecision}
+                    />
+                  ) : snapshot.operations_view === "workspace-queue" ? (
+                    <WorkspaceQueue
+                      projection={workspaceQueue}
+                      missionDrafts={missionDrafts}
+                      missionDraftStatus={missionDraftStatus}
+                      missionDraftReasons={missionDraftReasons}
+                      status={queueStatus}
+                      latestConsoleMessage={latestConsoleMessage}
+                      reasons={queueReasons}
+                      onReasonChange={onQueueReasonChange}
+                      onDecision={onQueueDecision}
+                      onAdHocProposal={onAdHocProposal}
+                      onMissionDraftCreate={onMissionDraftCreate}
+                      onMissionDraftReasonChange={onMissionDraftReasonChange}
+                      onMissionDraftDecision={onMissionDraftDecision}
+                    />
+                  ) : snapshot.operations_view === "activity" ? (
+                    <ActivityJournal
+                      projection={activityJournal}
+                      filters={activityFilters}
+                      status={activityStatus}
+                      onFilterChange={onActivityFilterChange}
+                      onRefresh={onActivityRefresh}
+                    />
+                  ) : snapshot.operations_view !== "mission-board" ? (
+                    <div className="empty-state">
+                      <span className="eyebrow">Restored detail view</span>
+                      <h1>{activeViewTitle}</h1>
+                      <p>This workspace is restored from acknowledged Orchestrator preferences.</p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="mission-heading">
+                        <div>
+                          <span className="eyebrow">Active Mission / {mission?.id ?? "none"}</span>
+                          <h2>Mission Board</h2>
+                          <small>{mission?.title ?? "No active mission"}</small>
+                        </div>
+                        <div className="mission-count">
+                          <strong>{mission?.issue_count ?? 0}</strong>
+                          <span>Issue Slices</span>
+                        </div>
+                      </div>
+
+                      {missions.length > 0 ? (
+                        <div className="mission-switcher" aria-label="Mission Selector">
+                          <label>
+                            <span className="eyebrow">Active Mission</span>
+                            <select
+                              aria-label="Active Mission"
+                              value={mission?.id ?? ""}
+                              disabled={actionStatus === "pending" || !mission}
+                              onChange={(event) => onSwitchMission(event.target.value)}
+                            >
+                              {missions.map((item) => (
+                                <option key={item.id} value={item.id}>
+                                  {item.title}
+                                </option>
+                              ))}
+                            </select>
+                          </label>
+                          <div className="mission-catalog" aria-label="Mission Catalog">
+                            {missions.map((item) => {
+                              const activeSessions = item.sessions.filter(
+                                (session) => session.status !== "complete" && session.status !== "failed",
+                              ).length;
+                              return (
+                                <article key={item.id} data-active={item.is_active}>
+                                  <div>
+                                    <strong>{item.title}</strong>
+                                    <small>{item.is_active ? "Active" : "Background"}</small>
+                                  </div>
+                                  <span>
+                                    {activeSessions} active {activeSessions === 1 ? "session" : "sessions"}
+                                  </span>
+                                  {item.attention.map((attention) => (
+                                    <a
+                                      key={attention.attention_id}
+                                      href={`#${attention.queue_link.split("#").at(1) ?? ""}`}
+                                    >
+                                      {attention.label}
+                                    </a>
+                                  ))}
+                                </article>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ) : null}
+
+                      {empty ? (
+                        <div className="empty-state">
+                          <span className="empty-state__glyph" aria-hidden="true">＋</span>
+                          <h2>Workspace is ready</h2>
+                          <p>No Issue Slices exist yet. Add a tracker issue to begin mission operations.</p>
+                        </div>
+                      ) : (
+                        <div className="mission-board-layout">
+                          <div className="mission-progress" aria-label="Mission Progress">
+                            <strong>
+                              {snapshot.mission_board.ready_issue_ids.length} / {snapshot.mission_board.issue_count}
+                            </strong>
+                            <span>launch eligible</span>
+                          </div>
+                          <div className="issue-graph" role="region" aria-label="Issue Graph">
+                            {snapshot.mission_board.ordered_issue_ids.map((issueId, index) => {
+                              const issue = issueSlicesById.get(issueId);
+                              const ready =
+                                issue?.launch_eligible ?? snapshot.mission_board.ready_issue_ids.includes(issueId);
+                              const blockers = issue?.blockers ?? [];
+                              const lifecycle = issue?.lifecycle ?? (ready ? "Ready" : "Blocked");
+                              return (
+                                <article
+                                  className="issue-node"
+                                  key={issueId}
+                                  data-selected={selectedIssue?.issue_id === issueId}
+                                >
+                                  <span className="issue-node__index">{String(index + 1).padStart(2, "0")}</span>
+                                  <div>
+                                    <strong>{issueId}</strong>
+                                    <small>{issue?.title ?? (ready ? "Launch eligible" : "Waiting on blocker")}</small>
+                                    {blockers.length > 0 ? (
+                                      <small>
+                                        Blocked by {blockers.map((blocker) => blocker.issue_id).join(", ")}
+                                      </small>
+                                    ) : null}
+                                  </div>
+                                  <span className={ready ? "status status--ready" : "status"}>
+                                    {lifecycle}
+                                  </span>
+                                  {issue ? (
+                                    <button
+                                      type="button"
+                                      className="issue-node__inspect"
+                                      aria-label={`Inspect ${issue.issue_id}`}
+                                      onClick={() => {
+                                        setSelectedIssueId(issue.issue_id);
+                                        setSelectedSessionId(null);
+                                      }}
+                                    >
+                                      Inspect
+                                    </button>
+                                  ) : null}
+                                </article>
+                              );
+                            })}
+                          </div>
+                          {selectedIssue ? (
+                            <IssueSliceInspector
+                              issue={selectedIssue}
+                              selectedSessionId={selectedSessionId}
+                              onSelectSession={setSelectedSessionId}
+                            />
+                          ) : null}
+                        </div>
+                      )}
+                    </>
+                  )}
+                </section>
+              </section>
+            </div>
           )}
         </aside>
-
-        <main className="operations" aria-label="Operations Workspace">
-          <nav className="view-rail" aria-label="Operations views">
-            <button
-              aria-current={snapshot.operations_view === "mission-board" ? "page" : undefined}
-              className={snapshot.operations_view === "mission-board" ? "is-active" : undefined}
-              type="button"
-              onClick={() => onSelectView("mission-board")}
-              disabled={actionStatus === "pending"}
-            >
-              Mission Board
-            </button>
-            <button
-              aria-current={snapshot.operations_view === "review-workspace" ? "page" : undefined}
-              className={snapshot.operations_view === "review-workspace" ? "is-active" : undefined}
-              type="button"
-              onClick={() => onSelectView("review-workspace")}
-              disabled={actionStatus === "pending"}
-            >Review</button>
-            <button
-              aria-current={snapshot.operations_view === "workspace-queue" ? "page" : undefined}
-              className={snapshot.operations_view === "workspace-queue" ? "is-active" : undefined}
-              type="button"
-              onClick={() => onSelectView("workspace-queue")}
-              disabled={actionStatus === "pending"}
-            >Queue</button>
-            <button
-              aria-current={snapshot.operations_view === "activity" ? "page" : undefined}
-              className={snapshot.operations_view === "activity" ? "is-active" : undefined}
-              type="button"
-              onClick={() => onSelectView("activity")}
-              disabled={actionStatus === "pending"}
-            >Activity</button>
-          </nav>
-
-          {actionStatus ? (
-            <span role="status" aria-label="Action status" className="connection-pill">
-              {actionStatus[0].toUpperCase() + actionStatus.slice(1)}
-            </span>
-          ) : null}
-
-          <section className="mission-surface">
-            {snapshot.operations_view === "review-workspace" ? (
-              <ReviewWorkspace
-                projection={reviewWorkspace}
-                status={reviewStatus}
-                reasons={reviewReasons}
-                onReasonChange={onReviewReasonChange}
-                onDecision={onReviewDecision}
-              />
-            ) : snapshot.operations_view === "workspace-queue" ? (
-              <WorkspaceQueue
-                projection={workspaceQueue}
-                missionDrafts={missionDrafts}
-                missionDraftStatus={missionDraftStatus}
-                missionDraftReasons={missionDraftReasons}
-                status={queueStatus}
-                latestConsoleMessage={latestConsoleMessage}
-                reasons={queueReasons}
-                onReasonChange={onQueueReasonChange}
-                onDecision={onQueueDecision}
-                onAdHocProposal={onAdHocProposal}
-                onMissionDraftCreate={onMissionDraftCreate}
-                onMissionDraftReasonChange={onMissionDraftReasonChange}
-                onMissionDraftDecision={onMissionDraftDecision}
-              />
-            ) : snapshot.operations_view === "activity" ? (
-              <ActivityJournal
-                projection={activityJournal}
-                filters={activityFilters}
-                status={activityStatus}
-                onFilterChange={onActivityFilterChange}
-                onRefresh={onActivityRefresh}
-              />
-            ) : snapshot.operations_view !== "mission-board" ? (
-              <div className="empty-state">
-                <span className="eyebrow">Restored operational view</span>
-                <h1>{activeViewTitle}</h1>
-                <p>This workspace is restored from acknowledged Orchestrator preferences.</p>
-              </div>
-            ) : <>
-            <div className="mission-heading">
-              <div>
-                <span className="eyebrow">Active Mission / {mission?.id ?? "none"}</span>
-                <h1>{mission?.title ?? "No active mission"}</h1>
-              </div>
-              <div className="mission-count">
-                <strong>{mission?.issue_count ?? 0}</strong>
-                <span>Issue Slices</span>
-              </div>
-            </div>
-
-            {missions.length > 0 ? (
-              <div className="mission-switcher" aria-label="Mission Selector">
-                <label>
-                  <span className="eyebrow">Active Mission</span>
-                  <select
-                    aria-label="Active Mission"
-                    value={mission?.id ?? ""}
-                    disabled={actionStatus === "pending" || !mission}
-                    onChange={(event) => onSwitchMission(event.target.value)}
-                  >
-                    {missions.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.title}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <div className="mission-catalog" aria-label="Mission Catalog">
-                  {missions.map((item) => {
-                    const activeSessions = item.sessions.filter(
-                      (session) => session.status !== "complete" && session.status !== "failed",
-                    ).length;
-                    return (
-                      <article key={item.id} data-active={item.is_active}>
-                        <div>
-                          <strong>{item.title}</strong>
-                          <small>{item.is_active ? "Active" : "Background"}</small>
-                        </div>
-                        <span>
-                          {activeSessions} active {activeSessions === 1 ? "session" : "sessions"}
-                        </span>
-                        {item.attention.map((attention) => (
-                          <a key={attention.attention_id} href={`#${attention.queue_link.split("#").at(1) ?? ""}`}>
-                            {attention.label}
-                          </a>
-                        ))}
-                      </article>
-                    );
-                  })}
-                </div>
-              </div>
-            ) : null}
-
-            {empty ? (
-              <div className="empty-state">
-                <span className="empty-state__glyph" aria-hidden="true">＋</span>
-                <h2>Workspace is ready</h2>
-                <p>No Issue Slices exist yet. Add a tracker issue to begin mission operations.</p>
-              </div>
-            ) : (
-              <div className="mission-board-layout">
-                <div className="mission-progress" aria-label="Mission Progress">
-                  <strong>
-                    {snapshot.mission_board.ready_issue_ids.length} / {snapshot.mission_board.issue_count}
-                  </strong>
-                  <span>launch eligible</span>
-                </div>
-                <div className="issue-graph" role="region" aria-label="Issue Graph">
-                  {snapshot.mission_board.ordered_issue_ids.map((issueId, index) => {
-                    const issue = issueSlicesById.get(issueId);
-                    const ready = issue?.launch_eligible ?? snapshot.mission_board.ready_issue_ids.includes(issueId);
-                    const blockers = issue?.blockers ?? [];
-                    const lifecycle = issue?.lifecycle ?? (ready ? "Ready" : "Blocked");
-                  return (
-                    <article className="issue-node" key={issueId} data-selected={selectedIssue?.issue_id === issueId}>
-                      <span className="issue-node__index">{String(index + 1).padStart(2, "0")}</span>
-                      <div>
-                        <strong>{issueId}</strong>
-                        <small>{issue?.title ?? (ready ? "Launch eligible" : "Waiting on blocker")}</small>
-                        {blockers.length > 0 ? (
-                          <small>
-                            Blocked by {blockers.map((blocker) => blocker.issue_id).join(", ")}
-                          </small>
-                        ) : null}
-                      </div>
-                      <span className={ready ? "status status--ready" : "status"}>
-                        {lifecycle}
-                      </span>
-                      {issue ? (
-                        <button
-                          type="button"
-                          className="issue-node__inspect"
-                          aria-label={`Inspect ${issue.issue_id}`}
-                          onClick={() => {
-                            setSelectedIssueId(issue.issue_id);
-                            setSelectedSessionId(null);
-                          }}
-                        >
-                          Inspect
-                        </button>
-                      ) : null}
-                    </article>
-                  );
-                })}
-                </div>
-                {selectedIssue ? (
-                  <IssueSliceInspector
-                    issue={selectedIssue}
-                    selectedSessionId={selectedSessionId}
-                    onSelectSession={setSelectedSessionId}
-                  />
-                ) : null}
-              </div>
-            )}
-            </>}
-          </section>
-        </main>
       </div>
     </div>
   );
@@ -1653,9 +1854,9 @@ function WorkspaceQueue({
       <section className="queue-proposal" aria-label="Ad Hoc Delegation proposal">
         <div className="issue-inspector__heading">
           <div>
-            <span className="eyebrow">Agent Console origin</span>
+            <span className="eyebrow">Prompt origin</span>
             <h2>Ad Hoc Delegation</h2>
-            <strong>{latestConsoleMessage?.message_id ?? "No Agent Console message"}</strong>
+            <strong>{latestConsoleMessage?.message_id ?? "No prompt message"}</strong>
           </div>
         </div>
         <label className="composer">

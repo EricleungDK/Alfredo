@@ -48,25 +48,140 @@ const client: WorkspaceClient = {
   loadSnapshot: async () => ({ kind: "ready", snapshot }),
 };
 
-test("switches distinct left-lane modes without mixing console and terminal drafts", async () => {
+test("opens to a prompt-dominant workstation with Agent Workstations beside it", async () => {
+  const workstationSnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 3,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ISS-01-1",
+            issue_id: "ISS-01",
+            assigned_agent: "qwen-coder-local",
+            status: "running",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+        ],
+        attention: [
+          {
+            attention_id: "queue-ISS-02",
+            mission_id: "command-deck",
+            kind: "delegation-approval",
+            label: "ISS-02 delegation approval required",
+            queue_link: "workspace-queue#queue-ISS-02",
+          },
+        ],
+      },
+    ],
+  };
+  const history: AgentConsoleMessageRequest[] = [];
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => ({ kind: "ready", snapshot: workstationSnapshot }),
+        loadConsoleHistory: async () => ({
+          kind: "history",
+          history: {
+            schema_version: 1,
+            messages: [
+              {
+                message_id: "console-000001",
+                sequence: 1,
+                role: "user",
+                content: "Implement the next Alfredo workstation slice.",
+                scope: snapshot.conversation_scope,
+                outcome: "proposed",
+                source: "mission-commander",
+              },
+              {
+                message_id: "console-000002",
+                sequence: 2,
+                role: "assistant",
+                content: "I will keep the prompt transcript durable and route execution through the Orchestrator.",
+                scope: snapshot.conversation_scope,
+                outcome: "model-commentary",
+                source: "frontier-model",
+              },
+            ],
+          },
+        }),
+        appendConsoleMessage: async (message) => {
+          history.push(message);
+          return {
+            kind: "message",
+            message: {
+              message_id: "console-000003",
+              sequence: 3,
+              role: message.role,
+              content: message.content,
+              scope: snapshot.conversation_scope,
+              outcome: message.outcome,
+              source: message.source,
+            },
+          };
+        },
+      }}
+    />,
+  );
+
+  expect(await screen.findByRole("main", { name: "Prompt Workstation" })).toBeVisible();
+  const transcript = screen.getByRole("region", { name: "Prompt Transcript" });
+  expect(within(transcript).getByText("Implement the next Alfredo workstation slice.")).toBeVisible();
+  expect(within(transcript).getByText(/durable and route execution/)).toBeVisible();
+  expect(within(transcript).getByText("Workstation action pending: ISS-02 delegation approval required.")).toBeVisible();
+  expect(within(transcript).getByText("Workstation outcome: ISS-01 is running on qwen-coder-local.")).toBeVisible();
+  expect(screen.getByRole("complementary", { name: "Agent Workstations" })).toBeVisible();
+  const cards = screen.getByRole("region", { name: "Workstation Cards" });
+  expect(cards).toBeVisible();
+  expect(screen.getByText("session-ISS-01-1")).toBeVisible();
+  expect(screen.getByText("qwen3.6:27b")).toBeVisible();
+  expect(within(cards).getByText("ISS-02 delegation approval required")).toBeVisible();
+
+  const statusLine = screen.getByLabelText("Prompt status line");
+  expect(within(statusLine).getByText("Connection Connected")).toBeVisible();
+  expect(within(statusLine).getByText("Scope Restore workspace session")).toBeVisible();
+  expect(within(statusLine).getByText("Workspace /workspace/albert")).toBeVisible();
+  expect(within(statusLine).getByText("Execution Waiting approval")).toBeVisible();
+  expect(screen.getByRole("textbox", { name: "Message Alfredo" })).toBeVisible();
+
+  fireEvent.change(screen.getByRole("textbox", { name: "Message Alfredo" }), {
+    target: { value: "Continue from the current issue." },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Send prompt" }));
+
+  await waitFor(() => expect(history).toHaveLength(1));
+  expect(history[0]).toMatchObject({
+    role: "user",
+    content: "Continue from the current issue.",
+    source: "mission-commander",
+    scope_kind: "issue-slice",
+  });
+});
+
+test("switches distinct side-pane modes without mixing prompt and terminal drafts", async () => {
   render(<App client={client} />);
   await screen.findByRole("heading", { name: "Command Deck Mission" });
 
-  fireEvent.change(screen.getByRole("textbox", { name: "Message Albert" }), {
+  fireEvent.change(screen.getByRole("textbox", { name: "Message Alfredo" }), {
     target: { value: "Keep this console draft" },
   });
   fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
 
-  expect(screen.queryByRole("region", { name: "Agent Console" })).not.toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "Workstation Cards" })).toBeVisible();
   expect(screen.getByRole("region", { name: "Shell Terminal" })).toBeVisible();
-  expect(screen.queryByText("Conversation Scope", { exact: false })).not.toBeInTheDocument();
 
   fireEvent.change(screen.getByRole("textbox", { name: "Command" }), {
     target: { value: "python3 -m unittest --help" },
   });
-  fireEvent.click(screen.getByRole("tab", { name: "Agent Console" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Workstations" }));
 
-  expect(screen.getByRole("textbox", { name: "Message Albert" })).toHaveValue(
+  expect(screen.getByRole("textbox", { name: "Message Alfredo" })).toHaveValue(
     "Keep this console draft",
   );
   expect(screen.queryByRole("region", { name: "Shell Terminal" })).not.toBeInTheDocument();
@@ -75,6 +190,43 @@ test("switches distinct left-lane modes without mixing console and terminal draf
   expect(screen.getByRole("textbox", { name: "Command" })).toHaveValue(
     "python3 -m unittest --help",
   );
+});
+
+test("shows running snapshot work as active execution near the prompt", async () => {
+  const runningSnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 3,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ISS-01-running",
+            issue_id: "ISS-01",
+            assigned_agent: "qwen-coder-local",
+            status: "running",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+        ],
+        attention: [],
+      },
+    ],
+  };
+
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => ({ kind: "ready", snapshot: runningSnapshot }),
+      }}
+    />,
+  );
+
+  const statusLine = await screen.findByLabelText("Prompt status line");
+  expect(within(statusLine).getByText("Execution Session running")).toBeVisible();
 });
 
 test("shows selected controller and model near the prompt composer", async () => {
@@ -92,7 +244,7 @@ test("shows selected controller and model near the prompt composer", async () =>
   render(<App client={{ ...client, loadLaunchContext }} />);
 
   await screen.findByRole("heading", { name: "Command Deck Mission" });
-  const launchContext = await screen.findByLabelText("Launch context");
+  const launchContext = await screen.findByLabelText("Prompt status line");
   expect(within(launchContext).getByText("Controller qwen3.6-27b")).toBeVisible();
   expect(within(launchContext).getByText("Model qwen3.6:27b")).toBeVisible();
   expect(within(launchContext).getByText("1 recent workspaces")).toBeVisible();
@@ -181,7 +333,7 @@ test("submits auto-allowed terminal command and keeps output local to the sessio
   expect(screen.getByRole("textbox", { name: "Command" })).toHaveValue("");
   expect(loadShellTerminal).toHaveBeenCalledTimes(2);
 
-  fireEvent.click(screen.getByRole("tab", { name: "Agent Console" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Workstations" }));
   expect(screen.queryByText("usage: python3 -m unittest")).not.toBeInTheDocument();
   await act(async () => {
     fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
@@ -276,7 +428,8 @@ test("requires a reason before denying a pending terminal command", async () => 
     actor: "mission-commander",
     reason: "Unsafe destination",
   });
-  expect(await screen.findByRole("status")).toHaveTextContent("Command denied");
+  const terminal = screen.getByRole("region", { name: "Shell Terminal" });
+  expect(await within(terminal).findByText("Command denied.")).toBeVisible();
   expect(screen.queryByLabelText("Command output")).not.toBeInTheDocument();
 });
 
@@ -412,17 +565,17 @@ test("keeps terminal inputs and shows actionable path rejection without false su
   expect(screen.queryByLabelText("Command output")).not.toBeInTheDocument();
 });
 
-test("switches left-lane tabs with arrow keys at constrained width", async () => {
+test("switches side-pane tabs with arrow keys at constrained width", async () => {
   const originalWidth = window.innerWidth;
   try {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 700 });
     fireEvent(window, new Event("resize"));
     render(<App client={client} />);
     await screen.findByRole("heading", { name: "Command Deck Mission" });
-    fireEvent.change(screen.getByRole("textbox", { name: "Message Albert" }), {
+    fireEvent.change(screen.getByRole("textbox", { name: "Message Alfredo" }), {
       target: { value: "Preserve constrained draft" },
     });
-    const agentTab = screen.getByRole("tab", { name: "Agent Console" });
+    const agentTab = screen.getByRole("tab", { name: "Workstations" });
     agentTab.focus();
     fireEvent.keyDown(agentTab, { key: "ArrowRight" });
     expect(screen.getByRole("tab", { name: "Shell Terminal" })).toHaveAttribute(
@@ -433,11 +586,11 @@ test("switches left-lane tabs with arrow keys at constrained width", async () =>
 
     const terminalTab = screen.getByRole("tab", { name: "Shell Terminal" });
     fireEvent.keyDown(terminalTab, { key: "ArrowLeft" });
-    expect(screen.getByRole("tab", { name: "Agent Console" })).toHaveAttribute(
+    expect(screen.getByRole("tab", { name: "Workstations" })).toHaveAttribute(
       "aria-selected",
       "true",
     );
-    expect(screen.getByRole("textbox", { name: "Message Albert" })).toHaveValue(
+    expect(screen.getByRole("textbox", { name: "Message Alfredo" })).toHaveValue(
       "Preserve constrained draft",
     );
   } finally {
@@ -449,21 +602,21 @@ test("switches left-lane tabs with arrow keys at constrained width", async () =>
 test("launches from loading into the canonical Command Deck snapshot", async () => {
   render(<App client={client} />);
 
-  expect(screen.getByRole("status")).toHaveTextContent("Connecting to Albert");
+  expect(screen.getByRole("status")).toHaveTextContent("Connecting to Alfredo");
   expect(await screen.findByRole("heading", { name: "Command Deck Mission" })).toBeVisible();
-  expect(screen.getByRole("region", { name: "Agent Console" })).toBeVisible();
-  expect(screen.getByRole("main", { name: "Operations Workspace" })).toBeVisible();
+  expect(screen.getByRole("region", { name: "Prompt Transcript" })).toBeVisible();
+  expect(screen.getByRole("complementary", { name: "Agent Workstations" })).toBeVisible();
   expect(screen.getByText("Restore workspace session", { selector: ".scope-card strong" })).toBeVisible();
   expect(screen.getByText("Workspace Session workspace-command-deck")).toBeVisible();
   expect(screen.getAllByText("ISS-01")).not.toHaveLength(0);
 });
 
-test("exposes named landmarks and labelled controls in both left-lane modes", async () => {
+test("exposes named landmarks and labelled controls in both side-pane modes", async () => {
   render(<App client={client} />);
   await screen.findByRole("heading", { name: "Command Deck Mission" });
 
-  expect(screen.getByRole("region", { name: "Agent Console" })).toBeVisible();
-  expect(screen.getByRole("main", { name: "Operations Workspace" })).toBeVisible();
+  expect(screen.getByRole("main", { name: "Prompt Workstation" })).toBeVisible();
+  expect(screen.getByRole("complementary", { name: "Agent Workstations" })).toBeVisible();
   for (const control of document.querySelectorAll("button, input, select, textarea, a[href]")) {
     expect(control).toHaveAccessibleName();
   }
@@ -1529,9 +1682,9 @@ test("shows backend startup failure and retries without fabricated accepted stat
   render(<App client={retryClient} />);
 
   expect(await screen.findByRole("alert")).toHaveTextContent("Python backend did not start");
-  expect(screen.queryByRole("region", { name: "Agent Console" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("main", { name: "Prompt Workstation" })).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "Retry connection" }));
-  expect(await screen.findByRole("region", { name: "Agent Console" })).toBeVisible();
+  expect(await screen.findByRole("main", { name: "Prompt Workstation" })).toBeVisible();
 });
 
 test("shows persistence read failure without rendering accepted mission state", async () => {
@@ -1717,7 +1870,7 @@ test("does not retarget Agent Console state when the Active Mission changes", as
 
   render(<App client={missionSwitchClient} syncIntervalMs={1} />);
   expect(await screen.findByText("Keep this conversation anchored")).toBeVisible();
-  const composer = screen.getByRole("textbox", { name: "Message Albert" });
+  const composer = screen.getByRole("textbox", { name: "Message Alfredo" });
   fireEvent.change(composer, { target: { value: "Continue on ISS-01" } });
 
   await waitFor(() =>
@@ -1730,7 +1883,7 @@ test("does not retarget Agent Console state when the Active Mission changes", as
   expect(composer).toHaveValue("Continue on ISS-01");
   expect(screen.getByText("Restore workspace session", { selector: ".scope-card strong" })).toBeVisible();
 
-  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  fireEvent.click(screen.getByRole("button", { name: "Send prompt" }));
   await screen.findByText("Continue on ISS-01");
   expect(messageRequests[0]).toMatchObject({
     expected_revision: 9,
@@ -1840,7 +1993,7 @@ test("switches Active Mission from the compact selector while preserving console
   expect(await screen.findByRole("heading", { name: "Background Mission" })).toBeVisible();
   expect(screen.getByText("Keep this workspace conversation continuous")).toBeVisible();
   expect(screen.getByText("Restore workspace session", { selector: ".scope-card strong" })).toBeVisible();
-  expect(screen.getByText("ISS-01 delegation approval required")).toBeVisible();
+  expect(within(screen.getByLabelText("Mission Catalog")).getByText("ISS-01 delegation approval required")).toBeVisible();
   expect(screen.getByText("1 active session")).toBeVisible();
   expect(within(screen.getByRole("region", { name: "Issue Graph" })).getByText("BG-01")).toBeVisible();
   expect(switchRequests).toEqual([
@@ -2095,12 +2248,14 @@ test("keeps Complete distinct from merged lifecycle terminology on graph inspect
   await screen.findByRole("heading", { name: "Command Deck Mission" });
 
   fireEvent.click(screen.getByRole("button", { name: "Inspect ISS-03" }));
-  expect(screen.getByRole("region", { name: "Issue Slice Inspector" })).toHaveTextContent("Complete");
-  expect(screen.getByText("Evidence accepted and PR-ready")).toBeVisible();
+  const inspector = screen.getByRole("region", { name: "Issue Slice Inspector" });
+  expect(inspector).toHaveTextContent("Complete");
+  expect(within(inspector).getByText("Evidence accepted and PR-ready")).toBeVisible();
 
   fireEvent.click(screen.getByRole("button", { name: "Inspect ISS-04" }));
-  expect(screen.getByRole("region", { name: "Issue Slice Inspector" })).toHaveTextContent("Merged");
-  expect(screen.getByText("Show merged work separately from PR-ready work.")).toBeVisible();
+  const updatedInspector = screen.getByRole("region", { name: "Issue Slice Inspector" });
+  expect(updatedInspector).toHaveTextContent("Merged");
+  expect(within(updatedInspector).getByText("Show merged work separately from PR-ready work.")).toBeVisible();
 });
 
 test.each([
@@ -2180,7 +2335,7 @@ test("preserves Agent Console history, draft, and scope while navigating operati
   render(<App client={consoleClient} />);
 
   expect(await screen.findByText("Persisted guidance")).toBeVisible();
-  const composer = screen.getByRole("textbox", { name: "Message Albert" });
+  const composer = screen.getByRole("textbox", { name: "Message Alfredo" });
   fireEvent.change(composer, { target: { value: "Unfinished mission question" } });
   fireEvent.click(screen.getByRole("button", { name: "Review" }));
 
@@ -2423,10 +2578,10 @@ test("submits a message with the displayed acknowledged scope", async () => {
   };
   render(<App client={messageClient} />);
   await screen.findByRole("heading", { name: "Command Deck Mission" });
-  const composer = screen.getByRole("textbox", { name: "Message Albert" });
+  const composer = screen.getByRole("textbox", { name: "Message Alfredo" });
 
   fireEvent.change(composer, { target: { value: "Explain the restore boundary" } });
-  fireEvent.click(screen.getByRole("button", { name: "Send" }));
+  fireEvent.click(screen.getByRole("button", { name: "Send prompt" }));
 
   expect(await screen.findByText("Explain the restore boundary")).toBeVisible();
   expect(composer).toHaveValue("");
