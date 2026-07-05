@@ -292,6 +292,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--decision", required=True, choices=["approve", "reject", "defer"]
     )
     workspace_queue_decision.add_argument("--reason", default="")
+    workspace_queue_decision.add_argument("--action-type", default="")
+    workspace_queue_decision.add_argument(
+        "--actor", choices=["mission-commander"], default=""
+    )
+    workspace_queue_decision.add_argument("--target-kind", default="")
+    workspace_queue_decision.add_argument("--target-id", default="")
 
     mission_drafts = subparsers.add_parser(
         "mission-drafts",
@@ -832,6 +838,10 @@ def _run(args: argparse.Namespace) -> int:
             item_id=args.item_id,
             decision=args.decision,
             reason=args.reason,
+            action_type=args.action_type,
+            actor=args.actor,
+            target_kind=args.target_kind,
+            target_id=args.target_id,
         )
         print(json.dumps(asdict(acknowledgement), sort_keys=True))
         return 0

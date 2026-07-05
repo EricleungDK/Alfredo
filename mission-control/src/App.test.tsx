@@ -164,6 +164,142 @@ test("opens to a prompt-dominant workstation with Agent Workstations beside it",
   });
 });
 
+test("routes a waiting workstation card decision through typed queue acknowledgement", async () => {
+  const queueItem = {
+    item_id: "delegation-command-deck-ISS-02",
+    mission_id: "command-deck",
+    item_type: "ad-hoc-delegation" as const,
+    status: "pending" as const,
+    source: "agent-console",
+    requested_action: "Approve ISS-02 delegation",
+    affected_boundary: "launch-boundary",
+    consequence: "Approval launches a local agent session.",
+    issue_id: "ADHOC-000001",
+    proposed_changes: {},
+  };
+  const before: WorkspaceSnapshot = {
+    ...snapshot,
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 3,
+        is_active: true,
+        sessions: [],
+        attention: [
+          {
+            attention_id: "delegation-command-deck-ISS-02",
+            mission_id: "command-deck",
+            kind: "delegation-approval",
+            label: "ISS-02 delegation approval required",
+            queue_link: "workspace-queue#delegation-command-deck-ISS-02",
+          },
+        ],
+      },
+    ],
+  };
+  const after: WorkspaceSnapshot = {
+    ...before,
+    revision: 5,
+    missions: before.missions?.map((mission) => ({
+      ...mission,
+      attention: [],
+      sessions: [
+        {
+          session_id: "session-ADHOC-000001-1",
+          issue_id: "ADHOC-000001",
+          assigned_agent: "qwen-coder-local",
+          status: "launched",
+        },
+      ],
+    })),
+  };
+  const queueProjection: WorkspaceQueueProjection = {
+    schema_version: 1,
+    revision: 2,
+    items: [queueItem],
+    groups: [
+      {
+        group_id: "ad-hoc-delegation:command-deck",
+        item_type: "ad-hoc-delegation",
+        mission_id: "command-deck",
+        item_count: 1,
+        items: [queueItem],
+      },
+    ],
+  };
+  const decisions: unknown[] = [];
+  let snapshotLoads = 0;
+  const actionClient: WorkspaceClient = {
+    loadSnapshot: async () => {
+      snapshotLoads += 1;
+      return { kind: "ready", snapshot: snapshotLoads === 1 ? before : after };
+    },
+    loadWorkspaceQueue: async () => ({
+      kind: "workspace-queue",
+      projection:
+        decisions.length === 0
+          ? queueProjection
+          : { ...queueProjection, revision: 3, items: [], groups: [] },
+    }),
+    submitWorkspaceQueueDecision: async (request) => {
+      decisions.push(request);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      return {
+        kind: "acknowledged",
+        acknowledgement: {
+          correlation_id: request.correlation_id,
+          outcome: "acknowledged",
+          revision: 3,
+          item_id: request.item_id,
+          item_status: "approved",
+          effect_summary: "Approved delegation-command-deck-ISS-02; launched ADHOC-000001.",
+        },
+      };
+    },
+  };
+
+  render(<App client={actionClient} />);
+
+  const cards = await screen.findByRole("region", { name: "Workstation Cards" });
+  expect(
+    await within(cards).findByRole("button", {
+      name: "Approve delegation-command-deck-ISS-02",
+    }),
+  ).toBeEnabled();
+  expect(within(cards).getByRole("button", { name: "Reject delegation-command-deck-ISS-02" })).toBeDisabled();
+  expect(within(cards).getByRole("button", { name: "Defer delegation-command-deck-ISS-02" })).toBeDisabled();
+
+  fireEvent.click(within(cards).getByRole("button", { name: "Approve delegation-command-deck-ISS-02" }));
+
+  expect(
+    await within(cards).findByRole("status", {
+      name: "ISS-02 delegation approval required workstation action state",
+    }),
+  ).toHaveTextContent("pending");
+  expect(screen.getByText("Orchestrator validating workstation action.")).toBeVisible();
+
+  await waitFor(() =>
+    expect(decisions).toEqual([
+      {
+        correlation_id: "queue-approve-delegation-command-deck-ISS-02-2",
+        action_type: "workspace-queue-decision",
+        actor: "mission-commander",
+        expected_revision: 2,
+        target: {
+          kind: "workspace-queue-item",
+          id: "delegation-command-deck-ISS-02",
+        },
+        item_id: "delegation-command-deck-ISS-02",
+        decision: "approve",
+        reason: "",
+      },
+    ]),
+  );
+  expect(await screen.findByText(/Orchestrator accepted workstation action/)).toBeVisible();
+  expect(screen.getByText("session-ADHOC-000001-1")).toBeVisible();
+});
+
 test("keeps expanded workstation navigation local to the side pane", async () => {
   const appendConsoleMessage = vi.fn();
   const workstationSnapshot: WorkspaceSnapshot = {
@@ -1047,7 +1183,13 @@ test("workspace queue lists grouped governance items and acknowledges decisions"
   expect(decisions).toEqual([
     {
       correlation_id: "queue-approve-issue-change-command-deck-ISS-01-000001-2",
+      action_type: "workspace-queue-decision",
+      actor: "mission-commander",
       expected_revision: 2,
+      target: {
+        kind: "workspace-queue-item",
+        id: "issue-change-command-deck-ISS-01-000001",
+      },
       item_id: "issue-change-command-deck-ISS-01-000001",
       decision: "approve",
       reason: "",

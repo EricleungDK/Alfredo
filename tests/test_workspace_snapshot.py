@@ -621,6 +621,66 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(mission.issues["ISS-01"].review_state, "approved")
         self.assertEqual(mission.issues["ISS-01"].locked, True)
 
+    def test_workspace_queue_decision_accepts_typed_workstation_metadata(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        mission.approve_issue("ISS-01")
+        service = WorkspaceQueueService(snapshots)
+        proposal = service.propose_issue_contract_change(
+            correlation_id="proposal-workstation-typed-1",
+            expected_revision=1,
+            issue_id="ISS-01",
+            source="workstation-card",
+            acceptance_criteria=["Route decisions from the workstation card."],
+        )
+
+        acknowledgement = service.decide(
+            correlation_id="proposal-workstation-typed-decision-1",
+            action_type="workspace-queue-decision",
+            actor="mission-commander",
+            expected_revision=proposal.revision,
+            target_kind="workspace-queue-item",
+            target_id=proposal.item_id,
+            item_id=proposal.item_id,
+            decision="approve",
+            reason="Approved from the workstation card.",
+        )
+
+        self.assertEqual(acknowledgement.item_status, "approved")
+        entry = ActivityJournalService(self.load_service()).inspect().entries[0]
+        self.assertEqual(entry.actor, "mission-commander")
+        self.assertEqual(entry.action_type, "workspace-queue-decision")
+        self.assertEqual(entry.correlation_id, "proposal-workstation-typed-decision-1")
+
+    def test_workspace_queue_decision_rejects_mismatched_workstation_target(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        mission.approve_issue("ISS-01")
+        service = WorkspaceQueueService(snapshots)
+        proposal = service.propose_issue_contract_change(
+            correlation_id="proposal-workstation-invalid-1",
+            expected_revision=1,
+            issue_id="ISS-01",
+            source="workstation-card",
+            acceptance_criteria=["Reject mismatched workstation targets."],
+        )
+
+        with self.assertRaisesRegex(AlbertError, "target id must match item id"):
+            service.decide(
+                correlation_id="proposal-workstation-invalid-decision-1",
+                action_type="workspace-queue-decision",
+                actor="mission-commander",
+                expected_revision=proposal.revision,
+                target_kind="workspace-queue-item",
+                target_id="another-item",
+                item_id=proposal.item_id,
+                decision="approve",
+                reason="This must not apply.",
+            )
+
+        reloaded = WorkspaceQueueService(self.load_service()).inspect()
+        self.assertEqual(reloaded.items[0].status, "pending")
+
     def test_workspace_queue_groups_and_filters_items_by_type_and_mission(self) -> None:
         primary = self.load_service()._primary_mission
         primary.approve_issue("ISS-01")

@@ -237,6 +237,97 @@ test("keeps frontend-only pending intent separate from accepted workstation stat
   );
 });
 
+test("exposes waiting approval card decisions only from pending queue projection", () => {
+  const pendingItem = {
+    item_id: "delegation-command-deck-ISS-03",
+    mission_id: "command-deck",
+    item_type: "ad-hoc-delegation" as const,
+    status: "pending" as const,
+    source: "agent-console",
+    requested_action: "Approve delegated work",
+    affected_boundary: "launch-boundary",
+    consequence: "Approval will launch the local agent session.",
+    issue_id: "ADHOC-000001",
+    proposed_changes: {},
+  };
+  const projection = projectWorkstationCards(baseSnapshot, {
+    workspaceQueue: {
+      schema_version: 1,
+      revision: 4,
+      items: [pendingItem],
+      groups: [
+        {
+          group_id: "ad-hoc-delegation:command-deck",
+          item_type: "ad-hoc-delegation",
+          mission_id: "command-deck",
+          item_count: 1,
+          items: [pendingItem],
+        },
+      ],
+    },
+  });
+
+  const waiting = projection.groups[0].cards[0];
+  expect(waiting.detail.governedActions).toEqual([
+    {
+      label: "Approve",
+      target: "workspace-queue",
+      requiresReason: false,
+      actionType: "workspace-queue-decision",
+      actor: "mission-commander",
+      itemId: "delegation-command-deck-ISS-03",
+      decision: "approve",
+      targetIdentity: {
+        kind: "workspace-queue-item",
+        id: "delegation-command-deck-ISS-03",
+      },
+    },
+    {
+      label: "Reject",
+      target: "workspace-queue",
+      requiresReason: true,
+      actionType: "workspace-queue-decision",
+      actor: "mission-commander",
+      itemId: "delegation-command-deck-ISS-03",
+      decision: "reject",
+      targetIdentity: {
+        kind: "workspace-queue-item",
+        id: "delegation-command-deck-ISS-03",
+      },
+    },
+    {
+      label: "Defer",
+      target: "workspace-queue",
+      requiresReason: true,
+      actionType: "workspace-queue-decision",
+      actor: "mission-commander",
+      itemId: "delegation-command-deck-ISS-03",
+      decision: "defer",
+      targetIdentity: {
+        kind: "workspace-queue-item",
+        id: "delegation-command-deck-ISS-03",
+      },
+    },
+  ]);
+
+  const approvedProjection = projectWorkstationCards(baseSnapshot, {
+    workspaceQueue: {
+      schema_version: 1,
+      revision: 5,
+      items: [{ ...pendingItem, status: "approved" }],
+      groups: [],
+    },
+  });
+
+  expect(approvedProjection.groups[0].cards[0].detail.governedActions).toEqual([
+    {
+      label: "Open Workspace Queue",
+      target: "workspace-queue",
+      requiresReason: false,
+    },
+  ]);
+});
+
 test("projects expanded operational detail from canonical issue and session evidence", () => {
   const projection = projectWorkstationCards({
     ...baseSnapshot,

@@ -720,10 +720,22 @@ pub struct WorkspaceQueueProjection {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct WorkspaceQueueDecisionRequest {
     pub correlation_id: String,
+    #[serde(default)]
+    pub action_type: String,
+    #[serde(default)]
+    pub actor: String,
     pub expected_revision: u64,
+    #[serde(default)]
+    pub target: Option<WorkspaceQueueDecisionTarget>,
     pub item_id: String,
     pub decision: String,
     pub reason: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WorkspaceQueueDecisionTarget {
+    pub kind: String,
+    pub id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1353,7 +1365,8 @@ pub fn execute_workspace_queue_decision(
     config: &BridgeConfig,
     request: &WorkspaceQueueDecisionRequest,
 ) -> Result<WorkspaceQueueAcknowledgement, BridgeFailure> {
-    let output = configured_python_command(config, "workspace-queue-decision")
+    let mut command = configured_python_command(config, "workspace-queue-decision");
+    command
         .arg("--correlation-id")
         .arg(&request.correlation_id)
         .arg("--expected-queue-revision")
@@ -1363,13 +1376,22 @@ pub fn execute_workspace_queue_decision(
         .arg("--decision")
         .arg(&request.decision)
         .arg("--reason")
-        .arg(&request.reason)
-        .output()
-        .map_err(|error| BridgeFailure {
-            code: "backend-startup-failure".to_owned(),
-            message: format!("Unable to start the Albert backend: {error}"),
-            recoverable: true,
-        })?;
+        .arg(&request.reason);
+    if !request.action_type.is_empty() {
+        command.arg("--action-type").arg(&request.action_type);
+    }
+    if !request.actor.is_empty() {
+        command.arg("--actor").arg(&request.actor);
+    }
+    if let Some(target) = &request.target {
+        command.arg("--target-kind").arg(&target.kind);
+        command.arg("--target-id").arg(&target.id);
+    }
+    let output = command.output().map_err(|error| BridgeFailure {
+        code: "backend-startup-failure".to_owned(),
+        message: format!("Unable to start the Albert backend: {error}"),
+        recoverable: true,
+    })?;
     decode_backend_json(process_output(output), "Workspace Queue acknowledgement")
 }
 

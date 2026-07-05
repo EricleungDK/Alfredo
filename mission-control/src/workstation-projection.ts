@@ -2,6 +2,9 @@ import type {
   WorkspaceIssueSessionDetail,
   WorkspaceIssueSliceSummary,
   WorkspaceMissionSummary,
+  WorkspaceQueueDecision,
+  WorkspaceQueueItem,
+  WorkspaceQueueProjection,
   WorkspaceQueueAttention,
   WorkspaceSnapshot,
 } from "./contracts";
@@ -63,6 +66,14 @@ export interface WorkstationGovernedAction {
   readonly label: string;
   readonly target: "workspace-queue" | "review-workspace" | "activity" | "none";
   readonly requiresReason: boolean;
+  readonly actionType?: "workspace-queue-decision";
+  readonly actor?: "mission-commander";
+  readonly itemId?: string;
+  readonly decision?: WorkspaceQueueDecision;
+  readonly targetIdentity?: {
+    readonly kind: "workspace-queue-item";
+    readonly id: string;
+  };
 }
 
 export interface WorkstationCardDetail {
@@ -117,6 +128,7 @@ export interface WorkstationProjection {
 
 interface ProjectWorkstationOptions {
   readonly pendingIntent?: WorkstationPendingIntent | null;
+  readonly workspaceQueue?: WorkspaceQueueProjection | null;
 }
 
 export function projectWorkstationCards(
@@ -129,7 +141,7 @@ export function projectWorkstationCards(
   const cards =
     snapshot.missions?.flatMap((mission) => [
       ...mission.attention.map((attention) =>
-        projectAttentionCard(snapshot, mission, attention),
+        projectAttentionCard(snapshot, mission, attention, options.workspaceQueue ?? null),
       ),
       ...mission.sessions.map((session) => {
         const issue = issueSlices.get(session.issue_id);
@@ -150,7 +162,9 @@ function projectAttentionCard(
   snapshot: WorkspaceSnapshot,
   mission: WorkspaceMissionSummary,
   attention: WorkspaceQueueAttention,
+  workspaceQueue: WorkspaceQueueProjection | null,
 ): WorkstationCardProjection {
+  const queueItem = pendingQueueItemForAttention(workspaceQueue, attention);
   return {
     id: `attention:${attention.attention_id}`,
     missionId: mission.id,
@@ -192,15 +206,48 @@ function projectAttentionCard(
         risks: "No evidence package attached to this queue item.",
         reviewReady: false,
       },
-      governedActions: [
-        {
-          label: "Open Workspace Queue",
-          target: "workspace-queue",
-          requiresReason: false,
-        },
-      ],
+      governedActions: queueItem
+        ? workspaceQueueDecisionActions(queueItem)
+        : [
+            {
+              label: "Open Workspace Queue",
+              target: "workspace-queue",
+              requiresReason: false,
+            },
+          ],
     },
   };
+}
+
+function pendingQueueItemForAttention(
+  workspaceQueue: WorkspaceQueueProjection | null,
+  attention: WorkspaceQueueAttention,
+): WorkspaceQueueItem | null {
+  if (!workspaceQueue) return null;
+  const itemId = attention.queue_link.split("#").at(1);
+  if (!itemId) return null;
+  const item = workspaceQueue.items.find((candidate) => candidate.item_id === itemId);
+  return item?.status === "pending" ? item : null;
+}
+
+function workspaceQueueDecisionActions(
+  item: WorkspaceQueueItem,
+): readonly WorkstationGovernedAction[] {
+  return [
+    { decision: "approve" as const, label: "Approve", requiresReason: false },
+    { decision: "reject" as const, label: "Reject", requiresReason: true },
+    { decision: "defer" as const, label: "Defer", requiresReason: true },
+  ].map((action) => ({
+    ...action,
+    target: "workspace-queue" as const,
+    actionType: "workspace-queue-decision" as const,
+    actor: "mission-commander" as const,
+    itemId: item.item_id,
+    targetIdentity: {
+      kind: "workspace-queue-item" as const,
+      id: item.item_id,
+    },
+  }));
 }
 
 function projectSessionCard(

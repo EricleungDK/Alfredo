@@ -1262,11 +1262,23 @@ class WorkspaceQueueService:
         item_id: str,
         decision: Literal["approve", "reject", "defer"],
         reason: str = "",
+        action_type: str = "",
+        actor: str = "",
+        target_kind: str = "",
+        target_id: str = "",
     ) -> WorkspaceQueueAcknowledgement:
         if decision not in {"approve", "reject", "defer"}:
             raise AlbertError(f"Unknown Workspace Queue decision: {decision}")
         if not correlation_id.strip():
             raise AlbertError("Workspace Queue correlation id must not be empty")
+        if action_type and action_type != "workspace-queue-decision":
+            raise AlbertError(f"Unknown Workspace Queue action type: {action_type}")
+        if actor and actor != "mission-commander":
+            raise AlbertError("Workspace Queue decisions require mission-commander actor.")
+        if target_kind and target_kind != "workspace-queue-item":
+            raise AlbertError(f"Unknown Workspace Queue target kind: {target_kind}")
+        if target_id and target_id != item_id:
+            raise AlbertError("Workspace Queue target id must match item id.")
         if decision in {"reject", "defer"} and not reason.strip():
             raise AlbertError("Reject and defer Workspace Queue decisions require a reason.")
         queue = self._load_queue()

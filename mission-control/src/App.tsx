@@ -48,6 +48,19 @@ interface MissionDraftCreateDraft {
   readonly unresolvedDecisions: readonly string[];
 }
 
+interface WorkstationActionTurn {
+  readonly id: string;
+  readonly content: string;
+  readonly source: string;
+  readonly outcome: string;
+}
+
+interface WorkstationActionState {
+  readonly itemId: string;
+  readonly state: "pending" | "accepted" | "rejected" | "failed" | "stale" | "disabled";
+  readonly message: string;
+}
+
 interface AppProps {
   readonly client: WorkspaceClient;
   readonly syncIntervalMs?: number;
@@ -86,6 +99,11 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
     state: "pending" | "acknowledged" | "stale" | "rejected";
     message: string;
   } | null>(null);
+  const [workstationActionTurns, setWorkstationActionTurns] = useState<
+    readonly WorkstationActionTurn[]
+  >([]);
+  const [workstationActionState, setWorkstationActionState] =
+    useState<WorkstationActionState | null>(null);
   const [queueReasons, setQueueReasons] = useState<Record<string, string>>({});
   const [activityJournal, setActivityJournal] = useState<ActivityJournalProjection | null>(null);
   const [activityFilters, setActivityFilters] = useState<ActivityJournalFilters>({
@@ -205,6 +223,16 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       void refreshMissionDrafts();
     }
   }, [refreshMissionDrafts, refreshWorkspaceQueue, state]);
+
+  useEffect(() => {
+    if (
+      state !== "loading" &&
+      (state.kind === "ready" || state.kind === "empty") &&
+      state.snapshot.missions?.some((mission) => mission.attention.length > 0)
+    ) {
+      void refreshWorkspaceQueue();
+    }
+  }, [refreshWorkspaceQueue, state]);
 
   useEffect(() => {
     if (
@@ -479,21 +507,78 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       ) {
         return;
       }
+      const item = workspaceQueue.items.find((candidate) => candidate.item_id === itemId);
+      const actionLabel = `${decision[0].toUpperCase() + decision.slice(1)} ${item?.requested_action ?? itemId}`;
+      const correlationId = `queue-${decision}-${itemId}-${workspaceQueue.revision}`;
       setQueueStatus({ state: "pending", message: "Workspace Queue decision pending" });
+      setWorkstationActionState({
+        itemId,
+        state: "pending",
+        message: `Waiting for Orchestrator acknowledgement: ${actionLabel}.`,
+      });
+      setWorkstationActionTurns((turns) => [
+        ...turns,
+        {
+          id: `${correlationId}:intent`,
+          content: `Workstation action: Mission Commander requested ${actionLabel}.`,
+          source: "mission-commander",
+          outcome: "pending",
+        },
+        {
+          id: `${correlationId}:reaction:pending`,
+          content: "Orchestrator validating workstation action.",
+          source: "orchestrator",
+          outcome: "pending",
+        },
+      ]);
       const result = await client.submitWorkspaceQueueDecision({
-        correlation_id: `queue-${decision}-${itemId}-${workspaceQueue.revision}`,
+        correlation_id: correlationId,
+        action_type: "workspace-queue-decision",
+        actor: "mission-commander",
         expected_revision: workspaceQueue.revision,
+        target: {
+          kind: "workspace-queue-item",
+          id: itemId,
+        },
         item_id: itemId,
         decision,
         reason,
       });
       if (result.kind !== "acknowledged") {
         setQueueStatus({ state: result.kind, message: result.message });
+        setWorkstationActionState({
+          itemId,
+          state: result.kind === "stale" ? "stale" : "rejected",
+          message: result.message,
+        });
+        setWorkstationActionTurns((turns) => [
+          ...turns,
+          {
+            id: `${correlationId}:reaction:${result.kind}`,
+            content: `Orchestrator ${result.kind === "stale" ? "reported stale state" : "rejected workstation action"}: ${result.message}`,
+            source: "orchestrator",
+            outcome: result.kind,
+          },
+        ]);
         return;
       }
       const reloaded = await client.loadSnapshot();
       if (reloaded.kind !== "ready" && reloaded.kind !== "empty") {
         setQueueStatus({ state: "rejected", message: "Queue acknowledged but reload failed" });
+        setWorkstationActionState({
+          itemId,
+          state: "failed",
+          message: "Queue acknowledged but canonical snapshot reload failed.",
+        });
+        setWorkstationActionTurns((turns) => [
+          ...turns,
+          {
+            id: `${correlationId}:reaction:failed`,
+            content: "Orchestrator acknowledged the action, but Alfredo could not reload canonical state.",
+            source: "orchestrator",
+            outcome: "failed",
+          },
+        ]);
         setConnectionStatus("offline");
         return;
       }
@@ -503,6 +588,20 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         state: "acknowledged",
         message: result.acknowledgement.effect_summary,
       });
+      setWorkstationActionState({
+        itemId,
+        state: "accepted",
+        message: result.acknowledgement.effect_summary,
+      });
+      setWorkstationActionTurns((turns) => [
+        ...turns,
+        {
+          id: `${correlationId}:reaction:acknowledged`,
+          content: `Orchestrator accepted workstation action: ${result.acknowledgement.effect_summary}`,
+          source: "orchestrator",
+          outcome: "acknowledged",
+        },
+      ]);
       await refreshWorkspaceQueue();
     },
     [client, refreshWorkspaceQueue, state, workspaceQueue],
@@ -689,6 +788,8 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         setQueueReasons((current) => ({ ...current, [itemId]: reason }))
       }
       onQueueDecision={submitWorkspaceQueueDecision}
+      workstationActionTurns={workstationActionTurns}
+      workstationActionState={workstationActionState}
       onAdHocProposal={submitAdHocDelegationProposal}
       onMissionDraftCreate={submitMissionDraftCreate}
       onMissionDraftReasonChange={(draftId, reason) =>
@@ -790,6 +891,8 @@ function CommandDeck({
   queueReasons,
   onQueueReasonChange,
   onQueueDecision,
+  workstationActionTurns,
+  workstationActionState,
   onAdHocProposal,
   onMissionDraftCreate,
   onMissionDraftReasonChange,
@@ -848,6 +951,8 @@ function CommandDeck({
   queueReasons: Record<string, string>;
   onQueueReasonChange: (itemId: string, reason: string) => void;
   onQueueDecision: (itemId: string, decision: WorkspaceQueueDecision, reason: string) => void;
+  workstationActionTurns: readonly WorkstationActionTurn[];
+  workstationActionState: WorkstationActionState | null;
   onAdHocProposal: (proposal: AdHocDelegationDraft) => void;
   onMissionDraftCreate: (draft: MissionDraftCreateDraft) => void;
   onMissionDraftReasonChange: (draftId: string, reason: string) => void;
@@ -928,6 +1033,7 @@ function CommandDeck({
     snapshot.mission_board.issue_slices?.[0] ??
     null;
   const workstationProjection = projectWorkstationCards(snapshot, {
+    workspaceQueue,
     pendingIntent:
       actionStatus === "pending"
         ? {
@@ -944,7 +1050,10 @@ function CommandDeck({
     workstationSort,
     pinnedWorkstationCardIds,
   );
-  const workstationTranscriptTurns = buildWorkstationTranscriptTurns(snapshot);
+  const workstationTranscriptTurns = [
+    ...buildWorkstationTranscriptTurns(snapshot),
+    ...workstationActionTurns,
+  ];
   const activeExecutionState =
     actionStatus === "pending"
       ? "Action pending"
@@ -1246,6 +1355,10 @@ function CommandDeck({
                     onTogglePinned={() => togglePinnedWorkstationCard(card.id)}
                     onSelectSession={setSelectedWorkstationSessionId}
                     onOpenDiff={setSelectedWorkstationDiff}
+                    queueReasons={queueReasons}
+                    onQueueReasonChange={onQueueReasonChange}
+                    onQueueDecision={onQueueDecision}
+                    actionState={workstationActionState}
                   />
                 ))}
               </div>
@@ -1536,6 +1649,10 @@ function WorkstationCard({
   onTogglePinned,
   onSelectSession,
   onOpenDiff,
+  queueReasons,
+  onQueueReasonChange,
+  onQueueDecision,
+  actionState,
 }: {
   card: WorkstationCardProjection;
   expanded: boolean;
@@ -1545,7 +1662,28 @@ function WorkstationCard({
   onTogglePinned: () => void;
   onSelectSession: (sessionId: string) => void;
   onOpenDiff: (diff: WorkstationDiffLink) => void;
+  queueReasons: Record<string, string>;
+  onQueueReasonChange: (itemId: string, reason: string) => void;
+  onQueueDecision: (itemId: string, decision: WorkspaceQueueDecision, reason: string) => void;
+  actionState: WorkstationActionState | null;
 }) {
+  const queueActions = card.detail.governedActions.filter(
+    (action) =>
+      action.actionType === "workspace-queue-decision" && action.itemId && action.decision,
+  );
+  const queueItemId = queueActions[0]?.itemId ?? null;
+  const queueReason = queueItemId ? queueReasons[queueItemId] ?? "" : "";
+  const matchingActionState =
+    actionState && queueItemId && actionState.itemId === queueItemId
+      ? actionState
+      : queueActions.length === 0 && card.status === "waiting-approval"
+        ? {
+            itemId: card.id,
+            state: "disabled" as const,
+            message: "Approval actions are unavailable until the Orchestrator exposes a pending queue item.",
+          }
+        : null;
+  const queueActionPending = matchingActionState?.state === "pending";
   return (
     <article
       className="workstation-card"
@@ -1616,6 +1754,56 @@ function WorkstationCard({
           {pinned ? "Unpin" : "Pin"}
         </button>
       </div>
+      {matchingActionState ? (
+        <span
+          role={
+            matchingActionState.state === "rejected" || matchingActionState.state === "failed"
+              ? "alert"
+              : "status"
+          }
+          aria-label={`${card.name} workstation action state`}
+          className="connection-pill"
+        >
+          {matchingActionState.state}: {matchingActionState.message}
+        </span>
+      ) : null}
+      {queueActions.length > 0 && queueItemId ? (
+        <div className="workstation-card__decision-actions">
+          <label className="composer">
+            <span>Decision reason</span>
+            <textarea
+              aria-label={`Workstation action reason ${queueItemId}`}
+              rows={2}
+              value={queueReason}
+              onChange={(event) => onQueueReasonChange(queueItemId, event.target.value)}
+            />
+          </label>
+          <div className="context-inspector__actions">
+            {queueActions.map((action) => {
+              const disabled =
+                queueActionPending ||
+                Boolean(action.requiresReason && !queueReason.trim()) ||
+                !action.itemId ||
+                !action.decision;
+              return (
+                <button
+                  key={`${action.itemId}:${action.decision}`}
+                  type="button"
+                  aria-label={`${action.label} ${action.itemId}`}
+                  disabled={disabled}
+                  className={action.decision === "reject" ? "action--danger" : undefined}
+                  onClick={() => {
+                    if (!action.itemId || !action.decision) return;
+                    onQueueDecision(action.itemId, action.decision, queueReason);
+                  }}
+                >
+                  {action.label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
 
       {expanded ? (
         <section className="workstation-card-detail" aria-label={`${card.name} operational detail`}>

@@ -411,7 +411,13 @@ export type WorkspaceQueueDecision = "approve" | "reject" | "defer";
 
 export interface WorkspaceQueueDecisionRequest {
   readonly correlation_id: string;
+  readonly action_type?: "workspace-queue-decision";
+  readonly actor?: "mission-commander";
   readonly expected_revision: number;
+  readonly target?: {
+    readonly kind: "workspace-queue-item";
+    readonly id: string;
+  };
   readonly item_id: string;
   readonly decision: WorkspaceQueueDecision;
   readonly reason: string;
