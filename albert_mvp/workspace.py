@@ -375,6 +375,7 @@ class ShellTerminalService:
         self,
         *,
         correlation_id: str,
+        expected_revision: int,
         path: str,
         access_level: Literal["read", "write"],
         duration_seconds: int,
@@ -390,13 +391,18 @@ class ShellTerminalService:
             raise AlbertError(f"Unknown Additional Path Grant access level: {access_level}")
         if duration_seconds <= 0:
             raise AlbertError("Additional Path Grant duration must be positive")
+        terminal = self._load_terminal()
+        if expected_revision != terminal["revision"]:
+            raise WorkspaceStaleActionError(
+                expected_revision=expected_revision,
+                current_revision=terminal["revision"],
+            )
         resolved_path = Path(path).resolve()
         now = datetime.now(timezone.utc)
         granted_at = now.isoformat(timespec="seconds").replace("+00:00", "Z")
         expires_at = (now + timedelta(seconds=duration_seconds)).isoformat(
             timespec="seconds"
         ).replace("+00:00", "Z")
-        terminal = self._load_terminal()
         grant = AdditionalPathGrant(
             grant_id=f"path-grant-{len(terminal['grants']) + 1:06d}",
             correlation_id=correlation_id,

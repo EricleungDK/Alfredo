@@ -680,6 +680,7 @@ pub struct ShellTerminalDecisionRequest {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AdditionalPathGrantRequest {
     pub correlation_id: String,
+    pub expected_revision: u64,
     pub path: String,
     pub access_level: String,
     pub duration_seconds: u64,
@@ -1285,6 +1286,8 @@ pub fn execute_additional_path_grant_create(
     let output = configured_python_command(config, "additional-path-grant-create")
         .arg("--correlation-id")
         .arg(&request.correlation_id)
+        .arg("--expected-terminal-revision")
+        .arg(request.expected_revision.to_string())
         .arg("--path")
         .arg(&request.path)
         .arg("--access-level")
@@ -2478,6 +2481,7 @@ None - can start immediately
         };
         let request = AdditionalPathGrantRequest {
             correlation_id: "path-grant-bridge-1".to_owned(),
+            expected_revision: 0,
             path: external_path.display().to_string(),
             access_level: "write".to_owned(),
             duration_seconds: 900,

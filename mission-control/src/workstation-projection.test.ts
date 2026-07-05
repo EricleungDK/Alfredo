@@ -328,6 +328,138 @@ test("exposes waiting approval card decisions only from pending queue projection
   ]);
 });
 
+test("describes the broader governed workstation action family with typed metadata", () => {
+  const projection = projectWorkstationCards({
+    ...baseSnapshot,
+    revision: 20,
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      ordered_issue_ids: ["ISS-01", "ISS-02", "ISS-04"],
+      ready_issue_ids: ["ISS-04"],
+      issue_slices: [
+        ...(baseSnapshot.mission_board.issue_slices ?? []),
+        {
+          issue_id: "ISS-04",
+          title: "Launch guarded worker",
+          lifecycle: "Ready",
+          progress: "Ready for Mission Commander launch",
+          launch_eligible: true,
+          blockers: [],
+          accepted_boundary: {
+            what_to_build: "Launch guarded worker.",
+            acceptance_criteria: ["Launch uses Orchestrator validation."],
+            evidence_requirements: ["Session evidence is recorded."],
+            source_path: ".scratch/command-deck/issues/04-launch-guarded-worker.md",
+          },
+          sessions: [],
+          provenance: {
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+          model_assignment: {
+            agent_id: "qwen-coder-local",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+            availability: "available",
+            availability_reason: "",
+            operation_status: "idle",
+            failure: "",
+          },
+          evidence: {
+            state: "not-started",
+            changed_files: [],
+            commands_run: [],
+            test_results: "No evidence package recorded.",
+            risks: "None recorded.",
+            artifact_links: [],
+          },
+          working_context_sources: [],
+        },
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 3,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ISS-01-1",
+            issue_id: "ISS-01",
+            assigned_agent: "qwen-coder-local",
+            status: "running",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+          {
+            session_id: "session-ISS-02-1",
+            issue_id: "ISS-02",
+            assigned_agent: "frontier-reviewer",
+            status: "evidence-ready",
+            role: "frontier-reviewer",
+            provider: "remote",
+            model: "frontier-reviewer",
+          },
+        ],
+        attention: [],
+      },
+    ],
+  });
+
+  const cards = projection.groups.flatMap((group) => group.cards);
+  const launchCard = cards.find((card) => card.issueId === "ISS-04");
+  expect(launchCard?.detail.governedActions).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        actionType: "issue-launch",
+        actor: "mission-commander",
+        issueId: "ISS-04",
+        expectedRevision: 20,
+        targetIdentity: { kind: "issue-slice", id: "ISS-04" },
+      }),
+      expect.objectContaining({
+        actionType: "model-assignment-change",
+        disabledReason: "Model assignment changes require the Mission Board governed control.",
+      }),
+    ]),
+  );
+
+  const runningCard = cards.find((card) => card.sessionId === "session-ISS-01-1");
+  expect(runningCard?.detail.governedActions).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        actionType: "session-cancel",
+        sessionId: "session-ISS-01-1",
+        targetIdentity: { kind: "agent-session", id: "session-ISS-01-1" },
+      }),
+    ]),
+  );
+
+  const reviewCard = cards.find((card) => card.sessionId === "session-ISS-02-1");
+  expect(reviewCard?.detail.governedActions).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        actionType: "review-decision",
+        reviewDecision: "accept",
+        sessionId: "session-ISS-02-1",
+      }),
+      expect.objectContaining({
+        actionType: "review-decision",
+        reviewDecision: "repair",
+        requiresReason: true,
+      }),
+      expect.objectContaining({
+        actionType: "review-decision",
+        reviewDecision: "escalate-human",
+      }),
+    ]),
+  );
+});
+
 test("projects expanded operational detail from canonical issue and session evidence", () => {
   const projection = projectWorkstationCards({
     ...baseSnapshot,
@@ -412,6 +544,7 @@ test("projects expanded operational detail from canonical issue and session evid
     },
   });
   expect(card?.detail.governedActions.map((action) => action.label)).toEqual([
+    "Cancel session",
     "Monitor active work",
   ]);
 });

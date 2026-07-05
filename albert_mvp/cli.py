@@ -209,6 +209,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common_args(path_grant_create)
     path_grant_create.add_argument("--correlation-id", required=True)
+    path_grant_create.add_argument("--expected-terminal-revision", required=True, type=int)
     path_grant_create.add_argument("--path", required=True)
     path_grant_create.add_argument(
         "--access-level", required=True, choices=["read", "write"]
@@ -774,6 +775,7 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "additional-path-grant-create":
         grant = ShellTerminalService(snapshots).create_path_grant(
             correlation_id=args.correlation_id,
+            expected_revision=args.expected_terminal_revision,
             path=args.path,
             access_level=args.access_level,
             duration_seconds=args.duration_seconds,

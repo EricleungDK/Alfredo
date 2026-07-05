@@ -770,11 +770,14 @@ test("creates a bounded Additional Path Grant through Mission Commander authorit
 
   expect(createAdditionalPathGrant).toHaveBeenCalledWith({
     correlation_id: expect.stringMatching(/^path-grant-/),
+    expected_revision: 1,
     path: "/external/docs",
     access_level: "write",
     duration_seconds: 900,
     requester: "mission-commander",
   });
+  expect(await screen.findByText(/Workstation action: Mission Commander requested Create Additional Path Grant for \/external\/docs/)).toBeVisible();
+  expect(await screen.findByText(/Orchestrator accepted workstation action: Created path-grant-000001/)).toBeVisible();
   expect(await screen.findByText("/external/docs")).toBeVisible();
   expect(screen.getByText("write / 900 seconds")).toBeVisible();
 });
@@ -1476,6 +1479,8 @@ test("workspace queue confirms a Mission Draft only through acknowledgement", as
   fireEvent.click(within(drafts).getByRole("button", { name: "Confirm mission-draft-command-deck-000001" }));
 
   expect(await screen.findByRole("status", { name: "Mission Draft decision status" })).toHaveTextContent("Acknowledged");
+  expect(await screen.findByText(/Workstation action: Mission Commander requested Confirm Mission Draft mission-draft-command-deck-000001/)).toBeVisible();
+  expect(await screen.findByText(/Orchestrator accepted workstation action: Mission Draft confirmed as accepted Issue Slice ISS-02/)).toBeVisible();
   expect(requests).toEqual([
     {
       correlation_id: "mission-draft-confirm-mission-draft-command-deck-000001-2",
@@ -1662,6 +1667,8 @@ test("review workspace applies accepted evidence only after acknowledgement", as
   fireEvent.click(within(workspace).getByRole("button", { name: "Accept session-ISS-01-1" }));
 
   expect(await screen.findByRole("status", { name: "Review decision status" })).toHaveTextContent("Pending");
+  expect(screen.getByText(/Workstation action: Mission Commander requested Accept evidence for session-ISS-01-1/)).toBeVisible();
+  expect(screen.getByText("Orchestrator validating workstation action.")).toBeVisible();
   expect(screen.getByText("session-ISS-01-1")).toBeVisible();
   expect(requests).toEqual([
     {
@@ -1691,6 +1698,7 @@ test("review workspace applies accepted evidence only after acknowledgement", as
   });
 
   expect(await screen.findByText("No evidence awaiting review")).toBeVisible();
+  expect(await screen.findByText(/Orchestrator accepted workstation action: Issue Slice becomes Complete and PR-ready/)).toBeVisible();
   expect(screen.getByRole("status", { name: "Review decision status" })).toHaveTextContent(
     "Issue Slice becomes Complete and PR-ready; it is not marked merged.",
   );
@@ -2678,6 +2686,8 @@ test("deliberately changes Conversation Scope to the active Mission", async () =
   fireEvent.click(screen.getByRole("button", { name: "Apply scope" }));
 
   expect(await screen.findByText("Command Deck Mission", { selector: ".scope-card strong" })).toBeVisible();
+  expect(await screen.findByText(/Workstation action: Mission Commander requested Change Conversation Scope to Command Deck Mission/)).toBeVisible();
+  expect(await screen.findByText(/Orchestrator accepted workstation action: Conversation Scope now targets Command Deck Mission/)).toBeVisible();
   expect(scopeRequests).toEqual([
     {
       correlation_id: "conversation-scope-mission-command-deck-4",

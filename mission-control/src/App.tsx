@@ -117,11 +117,80 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   const [activityStatus, setActivityStatus] = useState<"pending" | "rejected" | null>(null);
   const [leftLaneMode, setLeftLaneMode] = useState<"agent" | "terminal">("agent");
   const [launchContext, setLaunchContext] = useState<AlfredoLaunchContext | null>(null);
+  const appendWorkstationActionTurn = useCallback((turn: WorkstationActionTurn) => {
+    setWorkstationActionTurns((turns) => [...turns, turn]);
+  }, []);
+  const beginVisibleWorkstationAction = useCallback(
+    (correlationId: string, label: string, targetId: string) => {
+      setWorkstationActionState({
+        itemId: targetId,
+        state: "pending",
+        message: `Waiting for Orchestrator acknowledgement: ${label}.`,
+      });
+      setWorkstationActionTurns((turns) => [
+        ...turns,
+        {
+          id: `${correlationId}:intent`,
+          content: `Workstation action: Mission Commander requested ${label}.`,
+          source: "mission-commander",
+          outcome: "pending",
+        },
+        {
+          id: `${correlationId}:reaction:pending`,
+          content: "Orchestrator validating workstation action.",
+          source: "orchestrator",
+          outcome: "pending",
+        },
+      ]);
+    },
+    [],
+  );
+  const finishVisibleWorkstationAction = useCallback(
+    (
+      correlationId: string,
+      targetId: string,
+      result: "acknowledged" | "stale" | "rejected" | "failed",
+      message: string,
+    ) => {
+      const state =
+        result === "acknowledged"
+          ? "accepted"
+          : result === "failed"
+            ? "failed"
+            : result === "stale"
+              ? "stale"
+              : "rejected";
+      const recovery =
+        result === "stale"
+          ? `${message} Refresh the canonical workspace state and retry the action.`
+          : message;
+      setWorkstationActionState({
+        itemId: targetId,
+        state,
+        message: recovery,
+      });
+      setWorkstationActionTurns((turns) => [
+        ...turns,
+        {
+          id: `${correlationId}:reaction:${result}`,
+          content:
+            result === "acknowledged"
+              ? `Orchestrator accepted workstation action: ${message}`
+              : `Orchestrator ${result === "stale" ? "reported stale state" : "rejected workstation action"}: ${recovery}`,
+          source: "orchestrator",
+          outcome: result,
+        },
+      ]);
+    },
+    [],
+  );
   const workspacePath =
     state !== "loading" && (state.kind === "ready" || state.kind === "empty")
       ? state.snapshot.workspace_session.workspace_path
       : "";
-  const shellTerminal = useShellTerminal(client, workspacePath);
+  const shellTerminal = useShellTerminal(client, workspacePath, {
+    onWorkstationActionTurn: appendWorkstationActionTurn,
+  });
 
   useEffect(() => {
     if (leftLaneMode === "terminal") void shellTerminal.load();
@@ -380,9 +449,15 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       return;
     }
     const current = state;
+    const correlationId = `conversation-scope-${scopeDraft.kind}-${scopeDraft.target_id}-${current.snapshot.revision}`;
+    beginVisibleWorkstationAction(
+      correlationId,
+      `Change Conversation Scope to ${scopeDraft.label}`,
+      `scope:${scopeDraft.kind}:${scopeDraft.target_id}`,
+    );
     setActionStatus("pending");
     const result = await client.changeScope({
-      correlation_id: `conversation-scope-${scopeDraft.kind}-${scopeDraft.target_id}-${current.snapshot.revision}`,
+      correlation_id: correlationId,
       expected_revision: current.snapshot.revision,
       scope_kind: scopeDraft.kind,
       scope_target: scopeDraft.target_id,
@@ -390,23 +465,47 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
     });
     if (result.kind !== "acknowledged") {
       setActionStatus(result.kind);
+      finishVisibleWorkstationAction(
+        correlationId,
+        `scope:${scopeDraft.kind}:${scopeDraft.target_id}`,
+        result.kind,
+        result.message,
+      );
       return;
     }
     const updates = await client.loadUpdates(current.snapshot.revision);
     if (updates.kind !== "updates") {
       setActionStatus("rejected");
+      finishVisibleWorkstationAction(
+        correlationId,
+        `scope:${scopeDraft.kind}:${scopeDraft.target_id}`,
+        "failed",
+        "Conversation Scope was acknowledged but updates could not be loaded.",
+      );
       return;
     }
     const applied = applyWorkspaceUpdates(current.snapshot, updates.batch);
     if (applied.kind !== "applied") {
       setActionStatus("rejected");
+      finishVisibleWorkstationAction(
+        correlationId,
+        `scope:${scopeDraft.kind}:${scopeDraft.target_id}`,
+        "failed",
+        "Conversation Scope was acknowledged but canonical updates could not be applied.",
+      );
       return;
     }
     setState({ ...current, snapshot: applied.snapshot });
     setScopeDraft(null);
     setActionStatus("acknowledged");
+    finishVisibleWorkstationAction(
+      correlationId,
+      `scope:${scopeDraft.kind}:${scopeDraft.target_id}`,
+      "acknowledged",
+      `Conversation Scope now targets ${scopeDraft.label}.`,
+    );
     await refreshWorkingContext();
-  }, [client, refreshWorkingContext, scopeDraft, state]);
+  }, [beginVisibleWorkstationAction, client, finishVisibleWorkstationAction, refreshWorkingContext, scopeDraft, state]);
 
   const submitMessage = useCallback(async () => {
     if (
@@ -468,9 +567,15 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         return;
       }
       const current = state;
+      const correlationId = `review-${decision}-${sessionId}-${current.snapshot.revision}`;
+      beginVisibleWorkstationAction(
+        correlationId,
+        `${reviewDecisionLabel(decision)} for ${sessionId}`,
+        sessionId,
+      );
       setReviewStatus({ state: "pending", message: "Review decision pending" });
       const result = await client.submitReviewDecision({
-        correlation_id: `review-${decision}-${sessionId}-${current.snapshot.revision}`,
+        correlation_id: correlationId,
         expected_revision: current.snapshot.revision,
         session_id: sessionId,
         decision,
@@ -478,11 +583,18 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       });
       if (result.kind !== "acknowledged") {
         setReviewStatus({ state: result.kind, message: result.message });
+        finishVisibleWorkstationAction(correlationId, sessionId, result.kind, result.message);
         return;
       }
       const reloaded = await client.loadSnapshot();
       if (reloaded.kind !== "ready" && reloaded.kind !== "empty") {
         setReviewStatus({ state: "rejected", message: "Review acknowledged but reload failed" });
+        finishVisibleWorkstationAction(
+          correlationId,
+          sessionId,
+          "failed",
+          "Review acknowledged but canonical snapshot reload failed.",
+        );
         setConnectionStatus("offline");
         return;
       }
@@ -492,9 +604,15 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         state: "acknowledged",
         message: result.acknowledgement.effect_summary,
       });
+      finishVisibleWorkstationAction(
+        correlationId,
+        sessionId,
+        "acknowledged",
+        result.acknowledgement.effect_summary,
+      );
       await refreshReviewWorkspace();
     },
-    [client, refreshReviewWorkspace, state],
+    [beginVisibleWorkstationAction, client, finishVisibleWorkstationAction, refreshReviewWorkspace, state],
   );
 
   const submitWorkspaceQueueDecision = useCallback(
@@ -511,26 +629,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       const actionLabel = `${decision[0].toUpperCase() + decision.slice(1)} ${item?.requested_action ?? itemId}`;
       const correlationId = `queue-${decision}-${itemId}-${workspaceQueue.revision}`;
       setQueueStatus({ state: "pending", message: "Workspace Queue decision pending" });
-      setWorkstationActionState({
-        itemId,
-        state: "pending",
-        message: `Waiting for Orchestrator acknowledgement: ${actionLabel}.`,
-      });
-      setWorkstationActionTurns((turns) => [
-        ...turns,
-        {
-          id: `${correlationId}:intent`,
-          content: `Workstation action: Mission Commander requested ${actionLabel}.`,
-          source: "mission-commander",
-          outcome: "pending",
-        },
-        {
-          id: `${correlationId}:reaction:pending`,
-          content: "Orchestrator validating workstation action.",
-          source: "orchestrator",
-          outcome: "pending",
-        },
-      ]);
+      beginVisibleWorkstationAction(correlationId, actionLabel, itemId);
       const result = await client.submitWorkspaceQueueDecision({
         correlation_id: correlationId,
         action_type: "workspace-queue-decision",
@@ -546,39 +645,18 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       });
       if (result.kind !== "acknowledged") {
         setQueueStatus({ state: result.kind, message: result.message });
-        setWorkstationActionState({
-          itemId,
-          state: result.kind === "stale" ? "stale" : "rejected",
-          message: result.message,
-        });
-        setWorkstationActionTurns((turns) => [
-          ...turns,
-          {
-            id: `${correlationId}:reaction:${result.kind}`,
-            content: `Orchestrator ${result.kind === "stale" ? "reported stale state" : "rejected workstation action"}: ${result.message}`,
-            source: "orchestrator",
-            outcome: result.kind,
-          },
-        ]);
+        finishVisibleWorkstationAction(correlationId, itemId, result.kind, result.message);
         return;
       }
       const reloaded = await client.loadSnapshot();
       if (reloaded.kind !== "ready" && reloaded.kind !== "empty") {
         setQueueStatus({ state: "rejected", message: "Queue acknowledged but reload failed" });
-        setWorkstationActionState({
+        finishVisibleWorkstationAction(
+          correlationId,
           itemId,
-          state: "failed",
-          message: "Queue acknowledged but canonical snapshot reload failed.",
-        });
-        setWorkstationActionTurns((turns) => [
-          ...turns,
-          {
-            id: `${correlationId}:reaction:failed`,
-            content: "Orchestrator acknowledged the action, but Alfredo could not reload canonical state.",
-            source: "orchestrator",
-            outcome: "failed",
-          },
-        ]);
+          "failed",
+          "Orchestrator acknowledged the action, but Alfredo could not reload canonical state.",
+        );
         setConnectionStatus("offline");
         return;
       }
@@ -588,23 +666,15 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         state: "acknowledged",
         message: result.acknowledgement.effect_summary,
       });
-      setWorkstationActionState({
+      finishVisibleWorkstationAction(
+        correlationId,
         itemId,
-        state: "accepted",
-        message: result.acknowledgement.effect_summary,
-      });
-      setWorkstationActionTurns((turns) => [
-        ...turns,
-        {
-          id: `${correlationId}:reaction:acknowledged`,
-          content: `Orchestrator accepted workstation action: ${result.acknowledgement.effect_summary}`,
-          source: "orchestrator",
-          outcome: "acknowledged",
-        },
-      ]);
+        "acknowledged",
+        result.acknowledgement.effect_summary,
+      );
       await refreshWorkspaceQueue();
     },
-    [client, refreshWorkspaceQueue, state, workspaceQueue],
+    [beginVisibleWorkstationAction, client, finishVisibleWorkstationAction, refreshWorkspaceQueue, state, workspaceQueue],
   );
 
   const submitMissionDraftDecision = useCallback(
@@ -617,9 +687,15 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       ) {
         return;
       }
+      const correlationId = `mission-draft-${decision}-${draftId}-${missionDrafts.revision}`;
+      beginVisibleWorkstationAction(
+        correlationId,
+        `${missionDraftDecisionLabel(decision)} Mission Draft ${draftId}`,
+        draftId,
+      );
       setMissionDraftStatus({ state: "pending", message: "Submitting Mission Draft decision." });
       const result = await client.submitMissionDraftDecision({
-        correlation_id: `mission-draft-${decision}-${draftId}-${missionDrafts.revision}`,
+        correlation_id: correlationId,
         expected_revision: missionDrafts.revision,
         draft_id: draftId,
         decision,
@@ -630,14 +706,21 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
           state: "acknowledged",
           message: result.acknowledgement.effect_summary,
         });
+        finishVisibleWorkstationAction(
+          correlationId,
+          draftId,
+          "acknowledged",
+          result.acknowledgement.effect_summary,
+        );
         await refreshMissionDrafts();
         const snapshotResult = await client.loadSnapshot();
         setState(snapshotResult);
         return;
       }
       setMissionDraftStatus({ state: result.kind, message: result.message });
+      finishVisibleWorkstationAction(correlationId, draftId, result.kind, result.message);
     },
-    [client, missionDrafts, refreshMissionDrafts, state],
+    [beginVisibleWorkstationAction, client, finishVisibleWorkstationAction, missionDrafts, refreshMissionDrafts, state],
   );
 
   const submitMissionDraftCreate = useCallback(
@@ -650,9 +733,15 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         return;
       }
       const current = state;
+      const correlationId = `mission-draft-create-${current.snapshot.revision}`;
+      beginVisibleWorkstationAction(
+        correlationId,
+        `Create Mission Draft ${draft.proposedGoal}`,
+        "mission-draft:create",
+      );
       setMissionDraftStatus({ state: "pending", message: "Creating Mission Draft." });
       const request: MissionDraftCreateRequest = {
-        correlation_id: `mission-draft-create-${current.snapshot.revision}`,
+        correlation_id: correlationId,
         expected_revision: current.snapshot.revision,
         proposed_goal: draft.proposedGoal,
         selected_ad_hoc_ids: draft.selectedAdHocIds,
@@ -668,14 +757,21 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
           state: "acknowledged",
           message: result.acknowledgement.effect_summary,
         });
+        finishVisibleWorkstationAction(
+          correlationId,
+          "mission-draft:create",
+          "acknowledged",
+          result.acknowledgement.effect_summary,
+        );
         await refreshMissionDrafts();
         const snapshotResult = await client.loadSnapshot();
         setState(snapshotResult);
         return;
       }
       setMissionDraftStatus({ state: result.kind, message: result.message });
+      finishVisibleWorkstationAction(correlationId, "mission-draft:create", result.kind, result.message);
     },
-    [client, refreshMissionDrafts, state],
+    [beginVisibleWorkstationAction, client, finishVisibleWorkstationAction, refreshMissionDrafts, state],
   );
 
   const submitAdHocDelegationProposal = useCallback(
@@ -689,9 +785,15 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       }
       const current = state;
       const scope = current.snapshot.conversation_scope;
+      const correlationId = `ad-hoc-delegation-${proposal.originatingMessageId}-${current.snapshot.revision}`;
+      beginVisibleWorkstationAction(
+        correlationId,
+        `Propose Ad Hoc Delegation from ${proposal.originatingMessageId}`,
+        proposal.originatingMessageId,
+      );
       setQueueStatus({ state: "pending", message: "Ad Hoc Delegation proposal pending" });
       const request: AdHocDelegationProposalRequest = {
-        correlation_id: `ad-hoc-delegation-${proposal.originatingMessageId}-${current.snapshot.revision}`,
+        correlation_id: correlationId,
         expected_revision: current.snapshot.revision,
         source: "agent-console",
         scope_kind: scope.kind,
@@ -706,11 +808,18 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       const result = await client.submitAdHocDelegationProposal(request);
       if (result.kind !== "acknowledged") {
         setQueueStatus({ state: result.kind, message: result.message });
+        finishVisibleWorkstationAction(correlationId, proposal.originatingMessageId, result.kind, result.message);
         return;
       }
       const reloaded = await client.loadSnapshot();
       if (reloaded.kind !== "ready" && reloaded.kind !== "empty") {
         setQueueStatus({ state: "rejected", message: "Proposal acknowledged but reload failed" });
+        finishVisibleWorkstationAction(
+          correlationId,
+          proposal.originatingMessageId,
+          "failed",
+          "Ad Hoc Delegation proposal acknowledged but canonical snapshot reload failed.",
+        );
         setConnectionStatus("offline");
         return;
       }
@@ -720,9 +829,15 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         state: "acknowledged",
         message: result.acknowledgement.effect_summary,
       });
+      finishVisibleWorkstationAction(
+        correlationId,
+        proposal.originatingMessageId,
+        "acknowledged",
+        result.acknowledgement.effect_summary,
+      );
       await refreshWorkspaceQueue();
     },
-    [client, refreshWorkspaceQueue, state],
+    [beginVisibleWorkstationAction, client, finishVisibleWorkstationAction, refreshWorkspaceQueue, state],
   );
 
   if (state === "loading") {
@@ -833,6 +948,16 @@ function buildWorkstationTranscriptTurns(
       })),
     ) ?? [];
   return [...attentionTurns, ...sessionTurns];
+}
+
+function reviewDecisionLabel(decision: ReviewDecision): string {
+  if (decision === "accept") return "Accept evidence";
+  if (decision === "repair") return "Request repair";
+  return "Escalate human review";
+}
+
+function missionDraftDecisionLabel(decision: MissionDraftDecision): string {
+  return decision === "confirm" ? "Confirm" : "Abandon";
 }
 
 function snapshotExecutionState(snapshot: WorkspaceSnapshot): string {
@@ -1916,6 +2041,8 @@ function WorkstationCard({
                   <strong>{action.label}</strong>
                   <span>{governedActionSurface(action.target)}</span>
                   {action.requiresReason ? <small>Reason required</small> : null}
+                  {action.disabledReason ? <small>{action.disabledReason}</small> : null}
+                  {action.recoveryPath ? <small>{action.recoveryPath}</small> : null}
                 </li>
               ))}
             </ul>

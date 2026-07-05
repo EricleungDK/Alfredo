@@ -7,6 +7,7 @@ import type {
   WorkspaceQueueProjection,
   WorkspaceQueueAttention,
   WorkspaceSnapshot,
+  ReviewDecision,
 } from "./contracts";
 
 export type WorkstationCardStatus =
@@ -64,14 +65,42 @@ export interface WorkstationReviewState {
 
 export interface WorkstationGovernedAction {
   readonly label: string;
-  readonly target: "workspace-queue" | "review-workspace" | "activity" | "none";
+  readonly target:
+    | "workspace-queue"
+    | "review-workspace"
+    | "mission-board"
+    | "shell-terminal"
+    | "agent-console"
+    | "activity"
+    | "none";
   readonly requiresReason: boolean;
-  readonly actionType?: "workspace-queue-decision";
+  readonly actionType?:
+    | "workspace-queue-decision"
+    | "issue-launch"
+    | "issue-retry"
+    | "session-cancel"
+    | "path-grant-decision"
+    | "review-decision"
+    | "model-assignment-change"
+    | "mission-draft-decision"
+    | "conversation-scope-change";
   readonly actor?: "mission-commander";
   readonly itemId?: string;
+  readonly issueId?: string;
+  readonly sessionId?: string;
   readonly decision?: WorkspaceQueueDecision;
+  readonly reviewDecision?: ReviewDecision;
+  readonly expectedRevision?: number;
+  readonly disabledReason?: string;
+  readonly recoveryPath?: string;
   readonly targetIdentity?: {
-    readonly kind: "workspace-queue-item";
+    readonly kind:
+      | "workspace-queue-item"
+      | "issue-slice"
+      | "agent-session"
+      | "path-grant"
+      | "mission-draft"
+      | "conversation-scope";
     readonly id: string;
   };
 }
@@ -138,6 +167,15 @@ export function projectWorkstationCards(
   const issueSlices = new Map(
     snapshot.mission_board.issue_slices?.map((issue) => [issue.issue_id, issue]),
   );
+  const sessionIssueIds = new Set(
+    snapshot.missions?.flatMap((mission) =>
+      mission.sessions.map((session) => session.issue_id),
+    ) ?? [],
+  );
+  const launchableIssueCards =
+    snapshot.mission_board.issue_slices
+      ?.filter((issue) => issue.launch_eligible && !sessionIssueIds.has(issue.issue_id))
+      .map((issue) => projectLaunchableIssueCard(snapshot, issue)) ?? [];
   const cards =
     snapshot.missions?.flatMap((mission) => [
       ...mission.attention.map((attention) =>
@@ -150,11 +188,99 @@ export function projectWorkstationCards(
       }),
     ]) ?? [];
 
-  const groups = groupCards(cards);
+  const groups = groupCards([...launchableIssueCards, ...cards]);
   return {
     revision: snapshot.revision,
     groups,
     pendingIntent: options.pendingIntent ?? null,
+  };
+}
+
+function projectLaunchableIssueCard(
+  snapshot: WorkspaceSnapshot,
+  issue: WorkspaceIssueSliceSummary,
+): WorkstationCardProjection {
+  const mission = snapshot.active_mission;
+  const missionId = mission?.id ?? issue.issue_id;
+  const missionTitle = mission?.title ?? snapshot.mission_board.prd_title;
+  return {
+    id: `issue:${issue.issue_id}`,
+    missionId,
+    missionTitle,
+    name: issue.model_assignment.agent_id || issue.provenance.role,
+    sessionId: null,
+    issueId: issue.issue_id,
+    model: issue.model_assignment.model || issue.provenance.model,
+    role: issue.model_assignment.role || issue.provenance.role,
+    currentTask: issue.title,
+    status: "waiting-approval",
+    phase: issue.model_assignment.operation_status || issue.lifecycle,
+    progress: issue.progress,
+    lastActivity: `Revision ${snapshot.revision}`,
+    approvalBlockers: [],
+    filesTouched: issue.evidence.changed_files.length,
+    latestCommandOrTest: latestEvidenceLine(issue),
+    nextAction: "Launch through Mission Board governance",
+    acceptedRevision: snapshot.revision,
+    attention: true,
+    tone: "attention",
+    detail: {
+      originatingSessionId: null,
+      issueId: issue.issue_id,
+      toolActivity: [
+        {
+          kind: "operation-summary",
+          label: "Launch readiness",
+          summary: issue.progress || "Issue Slice is launch eligible.",
+        },
+      ],
+      filesTouched: issue.evidence.changed_files.map((path) => ({ path, status: "touched" })),
+      diffs: [],
+      evidenceLinks: [],
+      terminalExcerpts: [],
+      reviewState: {
+        evidenceState: issue.evidence.state,
+        lifecycle: issue.lifecycle,
+        risks: issue.evidence.risks || "No risks recorded.",
+        reviewReady: false,
+      },
+      governedActions: [
+        {
+          label: "Launch",
+          target: "mission-board",
+          requiresReason: false,
+          actionType: "issue-launch",
+          actor: "mission-commander",
+          issueId: issue.issue_id,
+          expectedRevision: snapshot.revision,
+          targetIdentity: { kind: "issue-slice", id: issue.issue_id },
+          recoveryPath: "Refresh the Mission Board and retry launch from the current Issue Slice state.",
+        },
+        {
+          label: "Change model assignment",
+          target: "mission-board",
+          requiresReason: true,
+          actionType: "model-assignment-change",
+          actor: "mission-commander",
+          issueId: issue.issue_id,
+          expectedRevision: snapshot.revision,
+          disabledReason: "Model assignment changes require the Mission Board governed control.",
+          recoveryPath: "Open the Issue Slice inspector and submit a model assignment change there.",
+          targetIdentity: { kind: "issue-slice", id: issue.issue_id },
+        },
+        {
+          label: "Change Conversation Scope",
+          target: "agent-console",
+          requiresReason: false,
+          actionType: "conversation-scope-change",
+          actor: "mission-commander",
+          issueId: issue.issue_id,
+          expectedRevision: snapshot.revision,
+          targetIdentity: { kind: "conversation-scope", id: issue.issue_id },
+          recoveryPath: "Use the Conversation Scope selector near the composer.",
+        },
+      ],
+    },
   };
 }
 
@@ -283,7 +409,7 @@ function projectSessionCard(
     acceptedRevision: snapshot.revision,
     attention,
     tone: toneForStatus(status),
-    detail: sessionDetail(status, session.session_id, session.issue_id, issue, detail),
+    detail: sessionDetail(status, session.session_id, session.issue_id, issue, detail, snapshot.revision),
   };
 }
 
@@ -293,6 +419,7 @@ function sessionDetail(
   issueId: string,
   issue: WorkspaceIssueSliceSummary | undefined,
   detail: WorkspaceIssueSessionDetail | undefined,
+  acceptedRevision = 0,
 ): WorkstationCardDetail {
   const commands = issue?.evidence.commands_run ?? [];
   const toolActivity: WorkstationToolActivity[] = [
@@ -361,7 +488,7 @@ function sessionDetail(
       risks: issue?.evidence.risks || "No risks recorded.",
       reviewReady: status === "review-ready",
     },
-    governedActions: governedActions(status),
+    governedActions: governedActions(status, sessionId, issueId, acceptedRevision),
   };
 }
 
@@ -496,26 +623,82 @@ function nextAction(
   return progress || "Monitor active work";
 }
 
-function governedActions(status: WorkstationCardStatus): readonly WorkstationGovernedAction[] {
+function governedActions(
+  status: WorkstationCardStatus,
+  sessionId: string,
+  issueId: string,
+  expectedRevision: number,
+): readonly WorkstationGovernedAction[] {
   if (status === "waiting-approval") {
     return [{ label: "Open Workspace Queue", target: "workspace-queue", requiresReason: false }];
   }
   if (status === "review-ready") {
     return [
       { label: "Open Review Workspace", target: "review-workspace", requiresReason: false },
-      { label: "Accept evidence", target: "review-workspace", requiresReason: false },
-      { label: "Request repair", target: "review-workspace", requiresReason: true },
-      { label: "Escalate human review", target: "review-workspace", requiresReason: false },
+      reviewAction("Accept evidence", "accept", sessionId, issueId, expectedRevision, false),
+      reviewAction("Request repair", "repair", sessionId, issueId, expectedRevision, true),
+      reviewAction("Escalate human review", "escalate-human", sessionId, issueId, expectedRevision, false),
     ];
   }
   if (status === "failed" || status === "blocked") {
     return [
-      { label: "Request repair", target: "review-workspace", requiresReason: true },
-      { label: "Escalate human review", target: "review-workspace", requiresReason: false },
+      {
+        label: "Retry",
+        target: "mission-board",
+        requiresReason: true,
+        actionType: "issue-retry",
+        actor: "mission-commander",
+        sessionId,
+        issueId,
+        expectedRevision,
+        disabledReason: "Retry requires Orchestrator validation from the Mission Board or Review Workspace.",
+        recoveryPath: "Open the Review Workspace, provide a repair reason, and submit the repair request.",
+        targetIdentity: { kind: "agent-session", id: sessionId },
+      },
+      reviewAction("Request repair", "repair", sessionId, issueId, expectedRevision, true),
+      reviewAction("Escalate human review", "escalate-human", sessionId, issueId, expectedRevision, false),
     ];
   }
   if (status === "done") {
     return [{ label: "Open Activity", target: "activity", requiresReason: false }];
   }
-  return [{ label: "Monitor active work", target: "none", requiresReason: false }];
+  return [
+    {
+      label: "Cancel session",
+      target: "mission-board",
+      requiresReason: true,
+      actionType: "session-cancel",
+      actor: "mission-commander",
+      sessionId,
+      issueId,
+      expectedRevision,
+      disabledReason: "Cancel requires the Orchestrator session-control endpoint before it can run from this card.",
+      recoveryPath: "Open the session detail and use an available Orchestrator-backed cancel control.",
+      targetIdentity: { kind: "agent-session", id: sessionId },
+    },
+    { label: "Monitor active work", target: "none", requiresReason: false },
+  ];
+}
+
+function reviewAction(
+  label: string,
+  reviewDecision: ReviewDecision,
+  sessionId: string,
+  issueId: string,
+  expectedRevision: number,
+  requiresReason: boolean,
+): WorkstationGovernedAction {
+  return {
+    label,
+    target: "review-workspace",
+    requiresReason,
+    actionType: "review-decision",
+    actor: "mission-commander",
+    sessionId,
+    issueId,
+    reviewDecision,
+    expectedRevision,
+    targetIdentity: { kind: "agent-session", id: sessionId },
+    recoveryPath: "Refresh the Review Workspace and retry against the current evidence state.",
+  };
 }

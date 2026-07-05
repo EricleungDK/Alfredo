@@ -428,6 +428,7 @@ test("approves a pending Shell Terminal command through Tauri", async () => {
 test("creates an Additional Path Grant through Tauri", async () => {
   const request = {
     correlation_id: "path-grant-client-2",
+    expected_revision: 3,
     path: "/external/docs",
     access_level: "write" as const,
     duration_seconds: 900,

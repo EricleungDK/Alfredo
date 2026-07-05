@@ -195,6 +195,7 @@ export type ShellTerminalDecisionResult =
 
 export interface AdditionalPathGrantRequest {
   readonly correlation_id: string;
+  readonly expected_revision: number;
   readonly path: string;
   readonly access_level: PathAccessLevel;
   readonly duration_seconds: number;

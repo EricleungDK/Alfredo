@@ -45,9 +45,21 @@ export interface ShellTerminalController {
   readonly createGrant: () => Promise<void>;
 }
 
+export interface ShellTerminalWorkstationActionTurn {
+  readonly id: string;
+  readonly content: string;
+  readonly source: string;
+  readonly outcome: string;
+}
+
+export interface ShellTerminalOptions {
+  readonly onWorkstationActionTurn?: (turn: ShellTerminalWorkstationActionTurn) => void;
+}
+
 export function useShellTerminal(
   client: WorkspaceClient,
   workspacePath: string,
+  options: ShellTerminalOptions = {},
 ): ShellTerminalController {
   const [commandDraft, setCommandDraft] = useState("");
   const [workingDirectory, setWorkingDirectory] = useState("");
@@ -69,6 +81,39 @@ export function useShellTerminal(
   useEffect(() => {
     if (workspacePath) setWorkingDirectory((current) => current || workspacePath);
   }, [workspacePath]);
+
+  const emitActionStart = useCallback(
+    (correlationId: string, label: string) => {
+      options.onWorkstationActionTurn?.({
+        id: `${correlationId}:intent`,
+        content: `Workstation action: Mission Commander requested ${label}.`,
+        source: "mission-commander",
+        outcome: "pending",
+      });
+      options.onWorkstationActionTurn?.({
+        id: `${correlationId}:reaction:pending`,
+        content: "Orchestrator validating workstation action.",
+        source: "orchestrator",
+        outcome: "pending",
+      });
+    },
+    [options],
+  );
+
+  const emitActionFinish = useCallback(
+    (correlationId: string, outcome: "acknowledged" | "rejected", message: string) => {
+      options.onWorkstationActionTurn?.({
+        id: `${correlationId}:reaction:${outcome}`,
+        content:
+          outcome === "acknowledged"
+            ? `Orchestrator accepted workstation action: ${message}`
+            : `Orchestrator rejected workstation action: ${message}`,
+        source: "orchestrator",
+        outcome,
+      });
+    },
+    [options],
+  );
 
   const load = useCallback(async () => {
     if (!client.loadShellTerminal) {
@@ -135,6 +180,8 @@ export function useShellTerminal(
       setActionStatus({ state: "rejected", message: "Shell Terminal decision transport is unavailable." });
       return;
     }
+    const correlationId = `terminal-decision-${decision}-${command.command_id}`;
+    emitActionStart(correlationId, `${decision === "approve" ? "Approve" : "Deny"} terminal command ${command.command_id}`);
     setActionStatus({ state: "pending", message: `Decision pending for ${command.command_id}.` });
     const result = await client.decideShellTerminalCommand({
       command_id: command.command_id,
@@ -144,14 +191,16 @@ export function useShellTerminal(
     });
     if (result.kind !== "command-result") {
       setActionStatus({ state: "rejected", message: result.message });
+      emitActionFinish(correlationId, "rejected", result.message);
       return;
     }
     if (result.result.stdout || result.result.stderr) {
       setTranscript((entries) => [...entries, { ...result.result, command: command.command }]);
     }
     setActionStatus({ state: "acknowledged", message: `Command ${result.result.status}.` });
+    emitActionFinish(correlationId, "acknowledged", `Command ${result.result.status}.`);
     await load();
-  }, [client, denialReasons, load]);
+  }, [client, denialReasons, emitActionFinish, emitActionStart, load]);
 
   const createGrant = useCallback(async () => {
     const durationSeconds = Number(grantDuration);
@@ -166,9 +215,12 @@ export function useShellTerminal(
       setActionStatus({ state: "rejected", message: "Additional Path Grant transport is unavailable." });
       return;
     }
+    const correlationId = `path-grant-${Date.now()}`;
+    emitActionStart(correlationId, `Create Additional Path Grant for ${grantPath.trim()}`);
     setActionStatus({ state: "pending", message: "Additional Path Grant creation pending." });
     const result = await client.createAdditionalPathGrant({
-      correlation_id: `path-grant-${Date.now()}`,
+      correlation_id: correlationId,
+      expected_revision: projection?.revision ?? 0,
       path: grantPath.trim(),
       access_level: grantAccessLevel,
       duration_seconds: durationSeconds,
@@ -176,12 +228,14 @@ export function useShellTerminal(
     });
     if (result.kind !== "path-grant") {
       setActionStatus({ state: "rejected", message: result.message });
+      emitActionFinish(correlationId, "rejected", result.message);
       return;
     }
     setGrantPath("");
     setActionStatus({ state: "acknowledged", message: `Created ${result.grant.grant_id}.` });
+    emitActionFinish(correlationId, "acknowledged", `Created ${result.grant.grant_id}.`);
     await load();
-  }, [client, grantAccessLevel, grantDuration, grantPath, load]);
+  }, [client, emitActionFinish, emitActionStart, grantAccessLevel, grantDuration, grantPath, load]);
 
   return {
     commandDraft,

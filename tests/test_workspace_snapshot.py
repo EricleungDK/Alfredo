@@ -197,6 +197,7 @@ class WorkspaceSnapshotTest(unittest.TestCase):
             clock.now.return_value = datetime(2026, 6, 27, 8, 0, tzinfo=timezone.utc)
             grant = terminal.create_path_grant(
                 correlation_id="path-grant-read-1",
+                expected_revision=0,
                 path=str(external),
                 access_level="read",
                 duration_seconds=300,
@@ -219,6 +220,25 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(result.status, "completed")
         self.assertEqual(result.exit_code, 0)
 
+    def test_additional_path_grant_rejects_stale_terminal_revision(self) -> None:
+        snapshots = self.load_service()
+        external = self.root / "external-stale"
+        external.mkdir()
+        terminal = ShellTerminalService(snapshots)
+
+        with self.assertRaises(WorkspaceStaleActionError) as raised:
+            terminal.create_path_grant(
+                correlation_id="path-grant-stale-1",
+                expected_revision=7,
+                path=str(external),
+                access_level="read",
+                duration_seconds=300,
+                requester="mission-commander",
+            )
+
+        self.assertEqual(raised.exception.expected_revision, 7)
+        self.assertEqual(raised.exception.current_revision, 0)
+
     def test_expired_additional_path_grant_stops_authorizing_external_access(self) -> None:
         snapshots = self.load_service()
         external = self.root / "expired-external"
@@ -228,6 +248,7 @@ class WorkspaceSnapshotTest(unittest.TestCase):
             clock.now.return_value = datetime(2026, 6, 27, 8, 0, tzinfo=timezone.utc)
             terminal.create_path_grant(
                 correlation_id="path-grant-expiry-1",
+                expected_revision=0,
                 path=str(external),
                 access_level="read",
                 duration_seconds=60,
@@ -251,6 +272,7 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         terminal = ShellTerminalService(snapshots)
         grant = terminal.create_path_grant(
             correlation_id="path-grant-agent-boundary-1",
+            expected_revision=0,
             path=str(external),
             access_level="read",
             duration_seconds=60,
@@ -348,6 +370,8 @@ class WorkspaceSnapshotTest(unittest.TestCase):
                     *common,
                     "--correlation-id",
                     "path-grant-cli-1",
+                    "--expected-terminal-revision",
+                    "0",
                     "--path",
                     str(external),
                     "--access-level",
