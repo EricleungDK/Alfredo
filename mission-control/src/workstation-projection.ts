@@ -22,6 +22,61 @@ export interface WorkstationPendingIntent {
   readonly expectedRevision: number;
 }
 
+export interface WorkstationToolActivity {
+  readonly kind: "command-summary" | "operation-summary" | "failure-summary" | "queue-summary";
+  readonly label: string;
+  readonly summary: string;
+}
+
+export interface WorkstationFileDetail {
+  readonly path: string;
+  readonly status: string;
+}
+
+export interface WorkstationDiffLink {
+  readonly label: string;
+  readonly path: string;
+  readonly href: string;
+  readonly sessionId: string;
+}
+
+export interface WorkstationEvidenceLink {
+  readonly label: string;
+  readonly href: string;
+  readonly sessionId: string;
+}
+
+export interface WorkstationTerminalExcerpt {
+  readonly label: string;
+  readonly excerpt: string;
+  readonly sessionId: string;
+}
+
+export interface WorkstationReviewState {
+  readonly evidenceState: string;
+  readonly lifecycle: string;
+  readonly risks: string;
+  readonly reviewReady: boolean;
+}
+
+export interface WorkstationGovernedAction {
+  readonly label: string;
+  readonly target: "workspace-queue" | "review-workspace" | "activity" | "none";
+  readonly requiresReason: boolean;
+}
+
+export interface WorkstationCardDetail {
+  readonly originatingSessionId: string | null;
+  readonly issueId: string | null;
+  readonly toolActivity: readonly WorkstationToolActivity[];
+  readonly filesTouched: readonly WorkstationFileDetail[];
+  readonly diffs: readonly WorkstationDiffLink[];
+  readonly evidenceLinks: readonly WorkstationEvidenceLink[];
+  readonly terminalExcerpts: readonly WorkstationTerminalExcerpt[];
+  readonly reviewState: WorkstationReviewState;
+  readonly governedActions: readonly WorkstationGovernedAction[];
+}
+
 export interface WorkstationCardProjection {
   readonly id: string;
   readonly missionId: string;
@@ -43,6 +98,7 @@ export interface WorkstationCardProjection {
   readonly acceptedRevision: number;
   readonly attention: boolean;
   readonly tone: "attention" | "active" | "failed" | "muted";
+  readonly detail: WorkstationCardDetail;
 }
 
 export interface WorkstationCardGroup {
@@ -116,6 +172,34 @@ function projectAttentionCard(
     acceptedRevision: snapshot.revision,
     attention: true,
     tone: "attention",
+    detail: {
+      originatingSessionId: null,
+      issueId: null,
+      toolActivity: [
+        {
+          kind: "queue-summary",
+          label: "Workspace Queue",
+          summary: `${attention.kind}: ${attention.label}`,
+        },
+      ],
+      filesTouched: [],
+      diffs: [],
+      evidenceLinks: [],
+      terminalExcerpts: [],
+      reviewState: {
+        evidenceState: "not-applicable",
+        lifecycle: "Waiting approval",
+        risks: "No evidence package attached to this queue item.",
+        reviewReady: false,
+      },
+      governedActions: [
+        {
+          label: "Open Workspace Queue",
+          target: "workspace-queue",
+          requiresReason: false,
+        },
+      ],
+    },
   };
 }
 
@@ -152,6 +236,85 @@ function projectSessionCard(
     acceptedRevision: snapshot.revision,
     attention,
     tone: toneForStatus(status),
+    detail: sessionDetail(status, session.session_id, session.issue_id, issue, detail),
+  };
+}
+
+function sessionDetail(
+  status: WorkstationCardStatus,
+  sessionId: string,
+  issueId: string,
+  issue: WorkspaceIssueSliceSummary | undefined,
+  detail: WorkspaceIssueSessionDetail | undefined,
+): WorkstationCardDetail {
+  const commands = issue?.evidence.commands_run ?? [];
+  const toolActivity: WorkstationToolActivity[] = [
+    ...commands.map((command) => ({
+      kind: "command-summary" as const,
+      label: "Command",
+      summary: command,
+    })),
+  ];
+  if (detail?.operation_status) {
+    toolActivity.push({
+      kind: "operation-summary",
+      label: "Provider operation",
+      summary: detail.operation_status,
+    });
+  }
+  if (detail?.failure) {
+    toolActivity.push({
+      kind: "failure-summary",
+      label: "Failure",
+      summary: detail.failure,
+    });
+  }
+
+  const changedFiles = issue?.evidence.changed_files ?? [];
+  const filesTouched = changedFiles.map((path) => ({ path, status: "touched" }));
+  const diffs = changedFiles.map((path) => ({
+    label: `Diff ${path}`,
+    path,
+    href: `app-local://diffs/${sessionId}?path=${encodeURIComponent(path)}`,
+    sessionId,
+  }));
+  const evidenceLinks = (issue?.evidence.artifact_links ?? []).map((href) => ({
+    label: `Evidence Package ${sessionId}`,
+    href,
+    sessionId,
+  }));
+  const terminalExcerpts = [
+    ...commands.map((command) => ({
+      label: "Command summary",
+      excerpt: command,
+      sessionId,
+    })),
+    ...(issue?.evidence.test_results
+      ? [
+          {
+            label: "Test summary",
+            excerpt: issue.evidence.test_results,
+            sessionId,
+          },
+        ]
+      : []),
+  ];
+
+  return {
+    originatingSessionId: sessionId,
+    issueId,
+    toolActivity,
+    filesTouched,
+    diffs,
+    evidenceLinks,
+    terminalExcerpts,
+    reviewState: {
+      evidenceState: issue?.evidence.state ?? "missing",
+      lifecycle: issue?.lifecycle ?? status,
+      risks: issue?.evidence.risks || "No risks recorded.",
+      reviewReady: status === "review-ready",
+    },
+    governedActions: governedActions(status),
   };
 }
 
@@ -284,4 +447,28 @@ function nextAction(
   if (status === "review-ready") return "Open Review Workspace";
   if (status === "done") return "Review accepted evidence";
   return progress || "Monitor active work";
+}
+
+function governedActions(status: WorkstationCardStatus): readonly WorkstationGovernedAction[] {
+  if (status === "waiting-approval") {
+    return [{ label: "Open Workspace Queue", target: "workspace-queue", requiresReason: false }];
+  }
+  if (status === "review-ready") {
+    return [
+      { label: "Open Review Workspace", target: "review-workspace", requiresReason: false },
+      { label: "Accept evidence", target: "review-workspace", requiresReason: false },
+      { label: "Request repair", target: "review-workspace", requiresReason: true },
+      { label: "Escalate human review", target: "review-workspace", requiresReason: false },
+    ];
+  }
+  if (status === "failed" || status === "blocked") {
+    return [
+      { label: "Request repair", target: "review-workspace", requiresReason: true },
+      { label: "Escalate human review", target: "review-workspace", requiresReason: false },
+    ];
+  }
+  if (status === "done") {
+    return [{ label: "Open Activity", target: "activity", requiresReason: false }];
+  }
+  return [{ label: "Monitor active work", target: "none", requiresReason: false }];
 }

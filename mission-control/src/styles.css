@@ -57,11 +57,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .workstation-card-group { display: grid; gap: 0.65rem; }
 .workstation-card-group__heading, .workstation-pending { display: flex; justify-content: space-between; gap: 0.7rem; align-items: center; color: var(--muted); font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0.08em; }
 .workstation-pending { padding: 0.55rem 0.65rem; border: 1px dashed #9d7b2b; color: #ffd166; background: #171406; text-transform: none; letter-spacing: 0; }
+.workstation-card-controls { display: grid; grid-template-columns: minmax(0, 1fr) 9rem; gap: 0.5rem; }
+.workstation-card-controls label { display: grid; gap: 0.25rem; color: var(--muted); font-size: 0.58rem; text-transform: uppercase; letter-spacing: 0.08em; }
+.workstation-card-controls input, .workstation-card-controls select { min-width: 0; width: 100%; padding: 0.45rem; border: 1px solid var(--line); background: #050807; color: var(--ink); }
+.workstation-local-selection { display: grid; gap: 0.2rem; padding: 0.5rem 0.6rem; border-left: 2px solid var(--cyan); background: #0c1716; color: var(--cyan); font-size: 0.68rem; }
 .workstation-card { display: grid; gap: 0.65rem; padding: 0.85rem; border: 1px solid var(--line); border-left: 2px solid var(--line); background: #101513e8; }
 .workstation-card[data-attention="true"] { border-left-color: #ffd166; }
 .workstation-card[data-tone="failed"] { border-left-color: var(--danger); }
 .workstation-card[data-tone="active"] { border-left-color: var(--cyan); }
 .workstation-card[data-tone="muted"] { opacity: 0.78; }
+.workstation-card[data-pinned="true"] { border-top-color: var(--lime); }
 .workstation-card header { display: flex; justify-content: space-between; gap: 0.75rem; align-items: flex-start; }
 .workstation-card h3 { margin: 0.1rem 0 0; font-family: "Rajdhani", sans-serif; font-size: 1.15rem; line-height: 1.05; }
 .workstation-card p { margin: 0; color: #bdc5bd; font-size: 0.75rem; line-height: 1.45; }
@@ -71,6 +76,17 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .workstation-card small { color: var(--muted); overflow-wrap: anywhere; }
 .workstation-card > strong { color: var(--cyan); font-size: 0.72rem; }
 .workstation-card__blockers { margin: 0; padding-left: 1rem; color: #ffd166; font-size: 0.68rem; line-height: 1.4; }
+.workstation-card__actions, .workstation-card-detail__actions { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.workstation-card__actions button, .workstation-card-detail button { border: 1px solid var(--line); background: var(--panel-raised); color: var(--ink); padding: 0.35rem 0.5rem; font-size: 0.62rem; }
+.workstation-card-detail { display: grid; gap: 0.7rem; padding: 0.75rem; border: 1px solid #29322d99; background: #080d0b; }
+.workstation-card-detail__section { display: grid; gap: 0.4rem; }
+.workstation-card-detail h4 { margin: 0; color: var(--cyan); font-size: 0.68rem; text-transform: uppercase; letter-spacing: 0.08em; }
+.workstation-card-detail ul { display: grid; gap: 0.3rem; margin: 0; padding-left: 1rem; }
+.workstation-card-detail li { color: #bdc5bd; font-size: 0.68rem; line-height: 1.4; overflow-wrap: anywhere; }
+.workstation-card-detail li strong, .workstation-card-detail li span, .workstation-card-detail li small { display: block; }
+.workstation-card-detail a { color: var(--cyan); text-decoration: none; overflow-wrap: anywhere; }
+.workstation-card-detail p { font-size: 0.68rem; }
+.workstation-card-detail dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .shell-terminal { display: grid; align-content: start; gap: 1rem; min-height: 0; padding: 1.2rem; overflow: auto; }
 .terminal-boundary, .terminal-field { display: grid; gap: 0.4rem; padding: 0.8rem; border-left: 2px solid var(--cyan); background: #101715; }
 .terminal-boundary code { color: var(--cyan); overflow-wrap: anywhere; }

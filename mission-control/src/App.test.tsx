@@ -164,6 +164,149 @@ test("opens to a prompt-dominant workstation with Agent Workstations beside it",
   });
 });
 
+test("keeps expanded workstation navigation local to the side pane", async () => {
+  const appendConsoleMessage = vi.fn();
+  const workstationSnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    revision: 8,
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_slices: [
+        {
+          issue_id: "ISS-01",
+          title: "Restore workspace session",
+          lifecycle: "Approved",
+          progress: "Runner summarized operational detail",
+          launch_eligible: false,
+          blockers: [],
+          accepted_boundary: {
+            what_to_build: "Restore the workspace session.",
+            acceptance_criteria: ["Session detail remains inspectable."],
+            evidence_requirements: ["Evidence package links are available."],
+            source_path: ".agent/issues/ISS-01.md",
+          },
+          sessions: [
+            {
+              session_id: "session-ISS-01-1",
+              assigned_agent: "qwen-coder-local",
+              role: "local-agent",
+              provider: "ollama",
+              model: "qwen3.6:27b",
+              status: "evidence-ready",
+              stale: false,
+              disconnected: false,
+              operation_status: "completed",
+              failure: "",
+            },
+          ],
+          provenance: {
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+          model_assignment: {
+            agent_id: "qwen-coder-local",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+            availability: "available",
+            availability_reason: "",
+            operation_status: "completed",
+            failure: "",
+          },
+          evidence: {
+            state: "ready",
+            changed_files: ["mission-control/src/App.tsx"],
+            commands_run: ["npm test -- App.test.tsx"],
+            test_results: "App tests passed.",
+            risks: "Diff should be reviewed before acceptance.",
+            artifact_links: ["app-local://evidence/session-ISS-01-1"],
+          },
+          working_context_sources: [],
+        },
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 3,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ISS-01-1",
+            issue_id: "ISS-01",
+            assigned_agent: "qwen-coder-local",
+            status: "evidence-ready",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+        ],
+        attention: [],
+      },
+    ],
+  };
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => ({ kind: "ready", snapshot: workstationSnapshot }),
+        loadConsoleHistory: async () => ({
+          kind: "history",
+          history: {
+            schema_version: 1,
+            messages: [
+              {
+                message_id: "console-000001",
+                sequence: 1,
+                role: "user",
+                content: "Keep this transcript clean.",
+                scope: snapshot.conversation_scope,
+                outcome: "proposed",
+                source: "mission-commander",
+              },
+            ],
+          },
+        }),
+        appendConsoleMessage,
+      }}
+    />,
+  );
+
+  const transcript = await screen.findByRole("region", { name: "Prompt Transcript" });
+  const cards = screen.getByRole("region", { name: "Workstation Cards" });
+  fireEvent.change(screen.getByRole("searchbox", { name: "Filter workstation cards" }), {
+    target: { value: "qwen" },
+  });
+  fireEvent.change(screen.getByRole("combobox", { name: "Sort workstation cards" }), {
+    target: { value: "name" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Pin qwen-coder-local" }));
+  fireEvent.click(screen.getByRole("button", { name: "Expand qwen-coder-local" }));
+
+  expect(within(cards).getByText("Tool Activity")).toBeVisible();
+  expect(within(cards).getAllByText("npm test -- App.test.tsx").length).toBeGreaterThan(0);
+  expect(within(cards).getByRole("link", { name: "Evidence Package session-ISS-01-1" })).toHaveAttribute(
+    "href",
+    "app-local://evidence/session-ISS-01-1",
+  );
+  expect(within(cards).getByText("Diff should be reviewed before acceptance.")).toBeVisible();
+
+  fireEvent.click(within(cards).getByRole("button", { name: "Select session session-ISS-01-1" }));
+  expect(within(cards).getByText("Selected session session-ISS-01-1")).toBeVisible();
+
+  fireEvent.click(within(cards).getByRole("button", { name: "Open diff mission-control/src/App.tsx" }));
+  expect(within(cards).getByRole("status", { name: "Selected workstation diff" })).toHaveTextContent(
+    "mission-control/src/App.tsx",
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Collapse qwen-coder-local" }));
+
+  expect(appendConsoleMessage).not.toHaveBeenCalled();
+  expect(within(transcript).getByText("Keep this transcript clean.")).toBeVisible();
+  expect(within(transcript).queryByText(/Selected session session-ISS-01-1/)).not.toBeInTheDocument();
+  expect(within(transcript).queryByText(/mission-control\/src\/App.tsx/)).not.toBeInTheDocument();
+});
+
 test("switches distinct side-pane modes without mixing prompt and terminal drafts", async () => {
   render(<App client={client} />);
   await screen.findByRole("heading", { name: "Command Deck Mission" });

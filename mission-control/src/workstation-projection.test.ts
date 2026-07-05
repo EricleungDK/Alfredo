@@ -237,6 +237,94 @@ test("keeps frontend-only pending intent separate from accepted workstation stat
   );
 });
 
+test("projects expanded operational detail from canonical issue and session evidence", () => {
+  const projection = projectWorkstationCards({
+    ...baseSnapshot,
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      issue_slices: baseSnapshot.mission_board.issue_slices?.map((issue) =>
+        issue.issue_id === "ISS-01"
+          ? {
+              ...issue,
+              evidence: {
+                ...issue.evidence,
+                artifact_links: ["app-local://evidence/session-ISS-01-1"],
+                risks: "Review generated CSS responsiveness.",
+              },
+            }
+          : issue,
+      ),
+    },
+  });
+
+  const card = projection.groups
+    .flatMap((group) => group.cards)
+    .find((item) => item.sessionId === "session-ISS-01-1");
+
+  expect(card?.detail).toMatchObject({
+    originatingSessionId: "session-ISS-01-1",
+    issueId: "ISS-01",
+    toolActivity: [
+      {
+        kind: "command-summary",
+        label: "Command",
+        summary: "npm test -- workstation-projection.test.ts",
+      },
+      {
+        kind: "operation-summary",
+        label: "Provider operation",
+        summary: "streaming",
+      },
+    ],
+    filesTouched: [
+      { path: "mission-control/src/App.tsx", status: "touched" },
+      { path: "mission-control/src/styles.css", status: "touched" },
+    ],
+    diffs: [
+      {
+        label: "Diff mission-control/src/App.tsx",
+        path: "mission-control/src/App.tsx",
+        href: "app-local://diffs/session-ISS-01-1?path=mission-control%2Fsrc%2FApp.tsx",
+        sessionId: "session-ISS-01-1",
+      },
+      {
+        label: "Diff mission-control/src/styles.css",
+        path: "mission-control/src/styles.css",
+        href: "app-local://diffs/session-ISS-01-1?path=mission-control%2Fsrc%2Fstyles.css",
+        sessionId: "session-ISS-01-1",
+      },
+    ],
+    evidenceLinks: [
+      {
+        label: "Evidence Package session-ISS-01-1",
+        href: "app-local://evidence/session-ISS-01-1",
+        sessionId: "session-ISS-01-1",
+      },
+    ],
+    terminalExcerpts: [
+      {
+        label: "Command summary",
+        excerpt: "npm test -- workstation-projection.test.ts",
+        sessionId: "session-ISS-01-1",
+      },
+      {
+        label: "Test summary",
+        excerpt: "No evidence package recorded.",
+        sessionId: "session-ISS-01-1",
+      },
+    ],
+    reviewState: {
+      evidenceState: "missing",
+      lifecycle: "Approved",
+      risks: "Review generated CSS responsiveness.",
+      reviewReady: false,
+    },
+  });
+  expect(card?.detail.governedActions.map((action) => action.label)).toEqual([
+    "Monitor active work",
+  ]);
+});
+
 test("updates accepted cards only when the canonical snapshot advances", () => {
   const pending = projectWorkstationCards(baseSnapshot, {
     pendingIntent: {

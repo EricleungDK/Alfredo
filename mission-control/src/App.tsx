@@ -21,7 +21,12 @@ import type {
 } from "./contracts";
 import type { WorkspaceClient } from "./workspace-client";
 import { applyWorkspaceUpdates } from "./workspace-sync";
-import { projectWorkstationCards } from "./workstation-projection";
+import {
+  projectWorkstationCards,
+  type WorkstationCardGroup,
+  type WorkstationCardProjection,
+  type WorkstationDiffLink,
+} from "./workstation-projection";
 import { ShellTerminalPanel } from "./ShellTerminalPanel";
 import { useShellTerminal, type ShellTerminalController } from "./use-shell-terminal";
 import "./styles.css";
@@ -909,6 +914,12 @@ function CommandDeck({
   );
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [expandedWorkstationCardIds, setExpandedWorkstationCardIds] = useState<readonly string[]>([]);
+  const [pinnedWorkstationCardIds, setPinnedWorkstationCardIds] = useState<readonly string[]>([]);
+  const [workstationFilter, setWorkstationFilter] = useState("");
+  const [workstationSort, setWorkstationSort] = useState<"priority" | "name" | "status">("priority");
+  const [selectedWorkstationSessionId, setSelectedWorkstationSessionId] = useState<string | null>(null);
+  const [selectedWorkstationDiff, setSelectedWorkstationDiff] = useState<WorkstationDiffLink | null>(null);
   useEffect(() => {
     if (selectedIssueId) document.getElementById("issue-slice-inspector")?.focus();
   }, [selectedIssueId]);
@@ -927,6 +938,12 @@ function CommandDeck({
         : null,
   });
   const workstationCards = workstationProjection.groups.flatMap((group) => group.cards);
+  const visibleWorkstationGroups = filterAndSortWorkstationGroups(
+    workstationProjection.groups,
+    workstationFilter,
+    workstationSort,
+    pinnedWorkstationCardIds,
+  );
   const workstationTranscriptTurns = buildWorkstationTranscriptTurns(snapshot);
   const activeExecutionState =
     actionStatus === "pending"
@@ -940,6 +957,20 @@ function CommandDeck({
             : shellTerminal.actionStatus?.state === "pending"
               ? "Command pending"
               : snapshotExecutionState(snapshot);
+  const toggleExpandedWorkstationCard = (cardId: string) => {
+    setExpandedWorkstationCardIds((current) =>
+      current.includes(cardId)
+        ? current.filter((id) => id !== cardId)
+        : [...current, cardId],
+    );
+  };
+  const togglePinnedWorkstationCard = (cardId: string) => {
+    setPinnedWorkstationCardIds((current) =>
+      current.includes(cardId)
+        ? current.filter((id) => id !== cardId)
+        : [...current, cardId],
+    );
+  };
   return (
     <div className="command-deck">
       <header className="topbar">
@@ -1155,6 +1186,41 @@ function CommandDeck({
             })}
           </div>
           <section className="workstation-cards" aria-label="Workstation Cards">
+            <div className="workstation-card-controls">
+              <label>
+                <span>Filter</span>
+                <input
+                  type="search"
+                  aria-label="Filter workstation cards"
+                  value={workstationFilter}
+                  onChange={(event) => setWorkstationFilter(event.target.value)}
+                />
+              </label>
+              <label>
+                <span>Sort</span>
+                <select
+                  aria-label="Sort workstation cards"
+                  value={workstationSort}
+                  onChange={(event) =>
+                    setWorkstationSort(event.target.value as "priority" | "name" | "status")
+                  }
+                >
+                  <option value="priority">Priority</option>
+                  <option value="name">Name</option>
+                  <option value="status">Status</option>
+                </select>
+              </label>
+            </div>
+            {selectedWorkstationDiff ? (
+              <div
+                className="workstation-local-selection"
+                role="status"
+                aria-label="Selected workstation diff"
+              >
+                Diff opened locally: {selectedWorkstationDiff.path}
+                <small>{selectedWorkstationDiff.sessionId}</small>
+              </div>
+            ) : null}
             {workstationProjection.pendingIntent ? (
               <div className="workstation-pending" role="status" aria-label="Pending workstation intent">
                 <span>{workstationProjection.pendingIntent.label}</span>
@@ -1163,72 +1229,32 @@ function CommandDeck({
                 </small>
               </div>
             ) : null}
-            {workstationProjection.groups.map((group) => (
+            {visibleWorkstationGroups.map((group) => (
               <div className="workstation-card-group" key={group.id}>
                 <div className="workstation-card-group__heading">
                   <span>{group.label}</span>
                   <small>{group.cards.length}</small>
                 </div>
-                {group.cards.map((card) => {
-                  return (
-                    <article
-                      className="workstation-card"
-                      data-attention={card.attention}
-                      data-tone={card.tone}
-                      key={card.id}
-                    >
-                      <header>
-                        <div>
-                          <span className="eyebrow">{card.missionTitle}</span>
-                          <h3>{card.name}</h3>
-                          <small>{card.sessionId ?? card.issueId ?? card.missionId}</small>
-                        </div>
-                        <span className={card.attention ? "status status--ready" : "status"}>
-                          {card.status}
-                        </span>
-                      </header>
-                      <p>{card.currentTask}</p>
-                      <dl>
-                        <div>
-                          <dt>Model</dt>
-                          <dd>{card.model}</dd>
-                        </div>
-                        <div>
-                          <dt>Role</dt>
-                          <dd>{card.role}</dd>
-                        </div>
-                        <div>
-                          <dt>Phase</dt>
-                          <dd>{card.phase}</dd>
-                        </div>
-                        <div>
-                          <dt>Last activity</dt>
-                          <dd>{card.lastActivity}</dd>
-                        </div>
-                        <div>
-                          <dt>Files</dt>
-                          <dd>{card.filesTouched}</dd>
-                        </div>
-                        <div>
-                          <dt>Accepted</dt>
-                          <dd>r{card.acceptedRevision}</dd>
-                        </div>
-                      </dl>
-                      <small>{card.progress}</small>
-                      <small>{card.latestCommandOrTest}</small>
-                      {card.approvalBlockers.length ? (
-                        <ul className="workstation-card__blockers" aria-label={`${card.name} approval blockers`}>
-                          {card.approvalBlockers.map((blocker) => (
-                            <li key={blocker}>Approval blocker: {blocker}</li>
-                          ))}
-                        </ul>
-                      ) : null}
-                      <strong>{card.nextAction}</strong>
-                    </article>
-                  );
-                })}
+                {group.cards.map((card) => (
+                  <WorkstationCard
+                    key={card.id}
+                    card={card}
+                    expanded={expandedWorkstationCardIds.includes(card.id)}
+                    pinned={pinnedWorkstationCardIds.includes(card.id)}
+                    selectedSessionId={selectedWorkstationSessionId}
+                    onToggleExpanded={() => toggleExpandedWorkstationCard(card.id)}
+                    onTogglePinned={() => togglePinnedWorkstationCard(card.id)}
+                    onSelectSession={setSelectedWorkstationSessionId}
+                    onOpenDiff={setSelectedWorkstationDiff}
+                  />
+                ))}
               </div>
             ))}
+            {visibleWorkstationGroups.length === 0 ? (
+              <div className="workstation-local-selection">
+                No workstation cards match the current filter.
+              </div>
+            ) : null}
           </section>
           {leftLaneMode === "terminal" ? (
             <div id="terminal-lane-panel" role="tabpanel">
@@ -1451,6 +1477,292 @@ function CommandDeck({
       </div>
     </div>
   );
+}
+
+function filterAndSortWorkstationGroups(
+  groups: readonly WorkstationCardGroup[],
+  filter: string,
+  sort: "priority" | "name" | "status",
+  pinnedIds: readonly string[],
+): readonly WorkstationCardGroup[] {
+  const normalizedFilter = filter.trim().toLowerCase();
+  return groups
+    .map((group) => {
+      const cards = group.cards.filter((card) => {
+        if (!normalizedFilter) return true;
+        return workstationCardSearchText(card).includes(normalizedFilter);
+      });
+      return {
+        ...group,
+        cards: [...cards].sort((left, right) => {
+          const pinPriority =
+            Number(pinnedIds.includes(right.id)) - Number(pinnedIds.includes(left.id));
+          if (pinPriority !== 0) return pinPriority;
+          if (sort === "name") return left.name.localeCompare(right.name);
+          if (sort === "status") return left.status.localeCompare(right.status);
+          return 0;
+        }),
+      };
+    })
+    .filter((group) => group.cards.length > 0);
+}
+
+function workstationCardSearchText(card: WorkstationCardProjection): string {
+  return [
+    card.name,
+    card.sessionId ?? "",
+    card.issueId ?? "",
+    card.model,
+    card.role,
+    card.currentTask,
+    card.status,
+    card.phase,
+    card.progress,
+    card.latestCommandOrTest,
+    ...card.detail.filesTouched.map((file) => file.path),
+    ...card.detail.evidenceLinks.map((link) => link.href),
+    ...card.detail.terminalExcerpts.map((excerpt) => excerpt.excerpt),
+  ]
+    .join(" ")
+    .toLowerCase();
+}
+
+function WorkstationCard({
+  card,
+  expanded,
+  pinned,
+  selectedSessionId,
+  onToggleExpanded,
+  onTogglePinned,
+  onSelectSession,
+  onOpenDiff,
+}: {
+  card: WorkstationCardProjection;
+  expanded: boolean;
+  pinned: boolean;
+  selectedSessionId: string | null;
+  onToggleExpanded: () => void;
+  onTogglePinned: () => void;
+  onSelectSession: (sessionId: string) => void;
+  onOpenDiff: (diff: WorkstationDiffLink) => void;
+}) {
+  return (
+    <article
+      className="workstation-card"
+      data-attention={card.attention}
+      data-tone={card.tone}
+      data-pinned={pinned}
+    >
+      <header>
+        <div>
+          <span className="eyebrow">{card.missionTitle}</span>
+          <h3>{card.name}</h3>
+          <small>{card.sessionId ?? card.issueId ?? card.missionId}</small>
+        </div>
+        <span className={card.attention ? "status status--ready" : "status"}>
+          {card.status}
+        </span>
+      </header>
+      <p>{card.currentTask}</p>
+      <dl>
+        <div>
+          <dt>Model</dt>
+          <dd>{card.model}</dd>
+        </div>
+        <div>
+          <dt>Role</dt>
+          <dd>{card.role}</dd>
+        </div>
+        <div>
+          <dt>Phase</dt>
+          <dd>{card.phase}</dd>
+        </div>
+        <div>
+          <dt>Last activity</dt>
+          <dd>{card.lastActivity}</dd>
+        </div>
+        <div>
+          <dt>Files</dt>
+          <dd>{card.filesTouched}</dd>
+        </div>
+        <div>
+          <dt>Accepted</dt>
+          <dd>r{card.acceptedRevision}</dd>
+        </div>
+      </dl>
+      <small>{card.progress}</small>
+      <small>{card.latestCommandOrTest}</small>
+      {card.approvalBlockers.length ? (
+        <ul className="workstation-card__blockers" aria-label={`${card.name} approval blockers`}>
+          {card.approvalBlockers.map((blocker) => (
+            <li key={blocker}>Approval blocker: {blocker}</li>
+          ))}
+        </ul>
+      ) : null}
+      <strong>{card.nextAction}</strong>
+      <div className="workstation-card__actions">
+        <button
+          type="button"
+          aria-label={`${expanded ? "Collapse" : "Expand"} ${card.name}`}
+          onClick={onToggleExpanded}
+        >
+          {expanded ? "Collapse" : "Expand"}
+        </button>
+        <button
+          type="button"
+          aria-label={`${pinned ? "Unpin" : "Pin"} ${card.name}`}
+          onClick={onTogglePinned}
+        >
+          {pinned ? "Unpin" : "Pin"}
+        </button>
+      </div>
+
+      {expanded ? (
+        <section className="workstation-card-detail" aria-label={`${card.name} operational detail`}>
+          <div className="workstation-card-detail__section">
+            <h4>Tool Activity</h4>
+            {card.detail.toolActivity.length === 0 ? (
+              <p>No summarized tool activity recorded.</p>
+            ) : (
+              <ul>
+                {card.detail.toolActivity.map((activity) => (
+                  <li key={`${activity.label}:${activity.summary}`}>
+                    <strong>{activity.label}</strong>
+                    <span>{activity.summary}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="workstation-card-detail__section">
+            <h4>Files and Diffs</h4>
+            {card.detail.filesTouched.length === 0 ? (
+              <p>No touched files recorded.</p>
+            ) : (
+              <ul>
+                {card.detail.filesTouched.map((file) => (
+                  <li key={file.path}>
+                    <span>{file.path}</span>
+                    <small>{file.status}</small>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {card.detail.diffs.length > 0 ? (
+              <div className="workstation-card-detail__actions">
+                {card.detail.diffs.map((diff) => (
+                  <button
+                    key={diff.href}
+                    type="button"
+                    aria-label={`Open diff ${diff.path}`}
+                    onClick={() => onOpenDiff(diff)}
+                  >
+                    {diff.label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+
+          <div className="workstation-card-detail__section">
+            <h4>Evidence Packages</h4>
+            {card.detail.evidenceLinks.length === 0 ? (
+              <p>No Evidence Package link recorded.</p>
+            ) : (
+              <ul>
+                {card.detail.evidenceLinks.map((link) => (
+                  <li key={link.href}>
+                    <a href={link.href}>{link.label}</a>
+                    <small>{link.sessionId}</small>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="workstation-card-detail__section">
+            <h4>Terminal Excerpts</h4>
+            {card.detail.terminalExcerpts.length === 0 ? (
+              <p>No terminal excerpts summarized.</p>
+            ) : (
+              <ul>
+                {card.detail.terminalExcerpts.map((excerpt) => (
+                  <li key={`${excerpt.label}:${excerpt.excerpt}`}>
+                    <strong>{excerpt.label}</strong>
+                    <span>{excerpt.excerpt}</span>
+                    <small>{excerpt.sessionId}</small>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="workstation-card-detail__section">
+            <h4>Review State</h4>
+            <dl>
+              <div>
+                <dt>Evidence</dt>
+                <dd>{card.detail.reviewState.evidenceState}</dd>
+              </div>
+              <div>
+                <dt>Lifecycle</dt>
+                <dd>{card.detail.reviewState.lifecycle}</dd>
+              </div>
+              <div>
+                <dt>Review ready</dt>
+                <dd>{card.detail.reviewState.reviewReady ? "yes" : "no"}</dd>
+              </div>
+              <div>
+                <dt>Risks</dt>
+                <dd>{card.detail.reviewState.risks}</dd>
+              </div>
+            </dl>
+          </div>
+
+          <div className="workstation-card-detail__section">
+            <h4>Governed Actions</h4>
+            <ul>
+              {card.detail.governedActions.map((action) => (
+                <li key={action.label}>
+                  <strong>{action.label}</strong>
+                  <span>{governedActionSurface(action.target)}</span>
+                  {action.requiresReason ? <small>Reason required</small> : null}
+                </li>
+              ))}
+            </ul>
+          </div>
+
+          {card.detail.originatingSessionId ? (
+            <div className="workstation-card-detail__section">
+              <h4>Originating Session</h4>
+              <button
+                type="button"
+                aria-label={`Select session ${card.detail.originatingSessionId}`}
+                onClick={() => onSelectSession(card.detail.originatingSessionId!)}
+              >
+                {card.detail.originatingSessionId}
+              </button>
+              {selectedSessionId === card.detail.originatingSessionId ? (
+                <span className="workstation-local-selection">
+                  Selected session {card.detail.originatingSessionId}
+                </span>
+              ) : null}
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+    </article>
+  );
+}
+
+function governedActionSurface(
+  actionTarget: WorkstationCardProjection["detail"]["governedActions"][number]["target"],
+): string {
+  if (actionTarget === "workspace-queue") return "Use Workspace Queue governed controls";
+  if (actionTarget === "review-workspace") return "Use Review Workspace governed controls";
+  if (actionTarget === "activity") return "Use Activity Journal review history";
+  return "Local monitoring only";
 }
 
 function ActivityJournal({
