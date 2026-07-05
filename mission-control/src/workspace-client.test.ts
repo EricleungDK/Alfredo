@@ -602,6 +602,58 @@ test("submits a Workspace Queue decision through Tauri", async () => {
   expect(result).toEqual({ kind: "acknowledged", acknowledgement });
 });
 
+test("submits a Workstation action through Tauri", async () => {
+  const request = {
+    correlation_id: "workstation-launch-1",
+    action_type: "issue-launch" as const,
+    actor: "mission-commander" as const,
+    expected_revision: 2,
+    target: { kind: "issue-slice" as const, id: "ISS-01" },
+    issue_id: "ISS-01",
+    allowed_paths: ["src"],
+  };
+  const acknowledgement = {
+    correlation_id: request.correlation_id,
+    outcome: "acknowledged" as const,
+    revision: 3,
+    action_type: "issue-launch" as const,
+    issue_id: "ISS-01",
+    session_id: "session-ISS-01-1",
+    effect_summary: "Orchestrator launched ISS-01 as session-ISS-01-1.",
+  };
+  vi.mocked(invoke).mockResolvedValueOnce(acknowledgement);
+
+  const result = await new TauriWorkspaceClient().submitWorkstationAction(request);
+
+  expect(invoke).toHaveBeenCalledWith("workstation_action", { request });
+  expect(result).toEqual({ kind: "acknowledged", acknowledgement });
+});
+
+test("maps stale Workstation actions separately from rejected actions", async () => {
+  vi.mocked(invoke).mockRejectedValueOnce({
+    code: "stale-action",
+    message: "Workspace action expected revision 2, but the current revision is 3.",
+    recoverable: true,
+    current_revision: 3,
+  });
+
+  const result = await new TauriWorkspaceClient().submitWorkstationAction({
+    correlation_id: "workstation-launch-stale-1",
+    action_type: "issue-launch",
+    actor: "mission-commander",
+    expected_revision: 2,
+    target: { kind: "issue-slice", id: "ISS-01" },
+    issue_id: "ISS-01",
+  });
+
+  expect(result).toEqual({
+    kind: "stale",
+    code: "stale-action",
+    message: "Workspace action expected revision 2, but the current revision is 3.",
+    current_revision: 3,
+  });
+});
+
 test("submits a Review Workspace decision through Tauri", async () => {
   const request = {
     correlation_id: "review-accept-4",

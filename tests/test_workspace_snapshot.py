@@ -10,6 +10,7 @@ import threading
 import unittest
 from unittest.mock import patch
 
+import albert_mvp.workspace as workspace_module
 from albert_mvp.cli import main
 from albert_mvp.core import (
     AlbertError,
@@ -704,6 +705,284 @@ class WorkspaceSnapshotTest(unittest.TestCase):
 
         reloaded = WorkspaceQueueService(self.load_service()).inspect()
         self.assertEqual(reloaded.items[0].status, "pending")
+
+    def test_workstation_action_launches_issue_through_expected_revision_guard(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        mission.approve_issue("ISS-01")
+
+        acknowledgement = workspace_module.WorkstationActionService(snapshots).submit(
+            correlation_id="workstation-launch-1",
+            action_type="issue-launch",
+            actor="mission-commander",
+            expected_revision=1,
+            target_kind="issue-slice",
+            target_id="ISS-01",
+            issue_id="ISS-01",
+            allowed_paths=["src"],
+        )
+
+        self.assertEqual(acknowledgement.action_type, "issue-launch")
+        self.assertEqual(acknowledgement.issue_id, "ISS-01")
+        self.assertEqual(acknowledgement.session_id, "session-ISS-01-1")
+        self.assertEqual(acknowledgement.revision, 2)
+        self.assertIn("launched", acknowledgement.effect_summary)
+        self.assertIn("session-ISS-01-1", mission.sessions)
+        self.assertEqual(mission.sessions["session-ISS-01-1"].task_packet["allowed_paths"], ["src"])
+        entry = ActivityJournalService(self.load_service()).inspect().entries[0]
+        self.assertEqual(entry.actor, "orchestrator")
+        self.assertEqual(entry.action_type, "issue-launch")
+        self.assertEqual(entry.correlation_id, "workstation-launch-1")
+
+    def test_workstation_action_rejects_stale_launch_without_mutating_sessions(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        mission.approve_issue("ISS-01")
+        WorkspaceSyncService(snapshots).submit_action(
+            WorkspaceAction(
+                correlation_id="revision-bump-before-launch",
+                expected_revision=1,
+                active_mission_id="command-deck",
+                conversation_scope=snapshots.snapshot().conversation_scope,
+                operations_view="mission-board",
+            )
+        )
+
+        with self.assertRaises(WorkspaceStaleActionError):
+            workspace_module.WorkstationActionService(snapshots).submit(
+                correlation_id="workstation-launch-stale-1",
+                action_type="issue-launch",
+                actor="mission-commander",
+                expected_revision=1,
+                target_kind="issue-slice",
+                target_id="ISS-01",
+                issue_id="ISS-01",
+            )
+
+        self.assertEqual(mission.sessions, {})
+
+    def test_workstation_action_changes_model_assignment_with_typed_target(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+
+        acknowledgement = workspace_module.WorkstationActionService(snapshots).submit(
+            correlation_id="workstation-model-assignment-1",
+            action_type="model-assignment-change",
+            actor="mission-commander",
+            expected_revision=1,
+            target_kind="issue-slice",
+            target_id="ISS-01",
+            issue_id="ISS-01",
+            agent_id="qwen3.6-27b",
+            reason="Use the stronger local model.",
+        )
+
+        self.assertEqual(acknowledgement.action_type, "model-assignment-change")
+        self.assertEqual(acknowledgement.issue_id, "ISS-01")
+        self.assertEqual(acknowledgement.revision, 2)
+        self.assertEqual(mission.issues["ISS-01"].assigned_agent, "qwen3.6-27b")
+        entry = ActivityJournalService(self.load_service()).inspect().entries[0]
+        self.assertEqual(entry.action_type, "model-assignment-change")
+        self.assertIn("qwen3.6-27b", entry.summary)
+
+    def test_workstation_action_rejects_mismatched_model_assignment_target(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+
+        with self.assertRaisesRegex(AlbertError, "target id must match issue id"):
+            workspace_module.WorkstationActionService(snapshots).submit(
+                correlation_id="workstation-model-assignment-invalid-1",
+                action_type="model-assignment-change",
+                actor="mission-commander",
+                expected_revision=1,
+                target_kind="issue-slice",
+                target_id="ISS-02",
+                issue_id="ISS-01",
+                agent_id="qwen3.6-27b",
+                reason="This target does not match.",
+            )
+
+        self.assertNotEqual(mission.issues["ISS-01"].assigned_agent, "qwen3.6-27b")
+
+    def test_workstation_action_retries_repairable_session_and_cancels_active_session(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        mission.approve_issue("ISS-01")
+        first_session = mission.launch_issue("ISS-01")
+        mission.record_frontier_review(
+            first_session.session_id,
+            "Needs repair",
+            reason="Acceptance criteria are not met.",
+        )
+
+        retry = workspace_module.WorkstationActionService(snapshots).submit(
+            correlation_id="workstation-retry-1",
+            action_type="issue-retry",
+            actor="mission-commander",
+            expected_revision=1,
+            target_kind="agent-session",
+            target_id=first_session.session_id,
+            issue_id="ISS-01",
+            session_id=first_session.session_id,
+            reason="Run the repair.",
+        )
+
+        self.assertEqual(retry.action_type, "issue-retry")
+        self.assertEqual(retry.session_id, "session-ISS-01-2")
+        self.assertIn("session-ISS-01-2", mission.sessions)
+
+        cancel = workspace_module.WorkstationActionService(snapshots).submit(
+            correlation_id="workstation-cancel-1",
+            action_type="session-cancel",
+            actor="mission-commander",
+            expected_revision=retry.revision,
+            target_kind="agent-session",
+            target_id="session-ISS-01-2",
+            issue_id="ISS-01",
+            session_id="session-ISS-01-2",
+            reason="Stop this repair run.",
+        )
+
+        self.assertEqual(cancel.action_type, "session-cancel")
+        self.assertEqual(cancel.session_id, "session-ISS-01-2")
+        self.assertEqual(mission.sessions["session-ISS-01-2"].status, "cancelled")
+        entries = ActivityJournalService(self.load_service()).inspect().entries
+        self.assertEqual([entry.action_type for entry in entries[-2:]], ["issue-retry", "session-cancel"])
+
+    def test_workstation_action_rejects_retry_and_cancel_without_required_reason(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        mission.approve_issue("ISS-01")
+        first_session = mission.launch_issue("ISS-01")
+        mission.record_frontier_review(
+            first_session.session_id,
+            "Needs repair",
+            reason="Acceptance criteria are not met.",
+        )
+
+        with self.assertRaisesRegex(AlbertError, "Retry requires a reason"):
+            workspace_module.WorkstationActionService(snapshots).submit(
+                correlation_id="workstation-retry-without-reason-1",
+                action_type="issue-retry",
+                actor="mission-commander",
+                expected_revision=1,
+                target_kind="agent-session",
+                target_id=first_session.session_id,
+                issue_id="ISS-01",
+                session_id=first_session.session_id,
+            )
+
+        self.assertNotIn("session-ISS-01-2", mission.sessions)
+        repair_session = mission.launch_repair(first_session.session_id)
+
+        with self.assertRaisesRegex(AlbertError, "Session cancellation requires a reason"):
+            workspace_module.WorkstationActionService(snapshots).submit(
+                correlation_id="workstation-cancel-without-reason-1",
+                action_type="session-cancel",
+                actor="mission-commander",
+                expected_revision=1,
+                target_kind="agent-session",
+                target_id=repair_session.session_id,
+                issue_id="ISS-01",
+                session_id=repair_session.session_id,
+            )
+
+        self.assertEqual(mission.sessions[repair_session.session_id].status, "launched")
+
+    def test_cli_submits_workstation_action_as_json(self) -> None:
+        mission = self.load_service()._primary_mission
+        mission.approve_issue("ISS-01")
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "workstation-action",
+                    "--target-repo",
+                    str(self.target_repo),
+                    "--tracker-dir",
+                    str(self.tracker),
+                    "--runtime-root",
+                    str(self.runtime),
+                    "--mission-id",
+                    "command-deck",
+                    "--correlation-id",
+                    "workstation-cli-launch-1",
+                    "--expected-revision",
+                    "1",
+                    "--action-type",
+                    "issue-launch",
+                    "--actor",
+                    "mission-commander",
+                    "--target-kind",
+                    "issue-slice",
+                    "--target-id",
+                    "ISS-01",
+                    "--issue-id",
+                    "ISS-01",
+                    "--allowed-path",
+                    "src",
+                ]
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["action_type"], "issue-launch")
+        self.assertEqual(payload["session_id"], "session-ISS-01-1")
+        self.assertEqual(payload["revision"], 2)
+
+    def test_cli_reports_stale_workstation_action_as_structured_json(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        mission.approve_issue("ISS-01")
+        WorkspaceSyncService(snapshots).submit_action(
+            WorkspaceAction(
+                correlation_id="workstation-cli-stale-bump-1",
+                expected_revision=1,
+                active_mission_id="command-deck",
+                conversation_scope=snapshots.snapshot().conversation_scope,
+                operations_view="mission-board",
+            )
+        )
+        output = io.StringIO()
+        error = io.StringIO()
+
+        with redirect_stdout(output), redirect_stderr(error):
+            exit_code = main(
+                [
+                    "workstation-action",
+                    "--target-repo",
+                    str(self.target_repo),
+                    "--tracker-dir",
+                    str(self.tracker),
+                    "--runtime-root",
+                    str(self.runtime),
+                    "--mission-id",
+                    "command-deck",
+                    "--correlation-id",
+                    "workstation-cli-launch-stale-1",
+                    "--expected-revision",
+                    "1",
+                    "--action-type",
+                    "issue-launch",
+                    "--actor",
+                    "mission-commander",
+                    "--target-kind",
+                    "issue-slice",
+                    "--target-id",
+                    "ISS-01",
+                    "--issue-id",
+                    "ISS-01",
+                ]
+            )
+
+        payload = json.loads(error.getvalue())
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(payload["error"]["code"], "stale-action")
+        self.assertEqual(payload["error"]["expected_revision"], 1)
+        self.assertEqual(payload["error"]["current_revision"], 2)
+        self.assertEqual(mission.sessions, {})
 
     def test_workspace_queue_groups_and_filters_items_by_type_and_mission(self) -> None:
         primary = self.load_service()._primary_mission

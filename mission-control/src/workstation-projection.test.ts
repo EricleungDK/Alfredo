@@ -423,7 +423,10 @@ test("describes the broader governed workstation action family with typed metada
       }),
       expect.objectContaining({
         actionType: "model-assignment-change",
-        disabledReason: "Model assignment changes require the Mission Board governed control.",
+        actor: "mission-commander",
+        issueId: "ISS-04",
+        expectedRevision: 20,
+        targetIdentity: { kind: "issue-slice", id: "ISS-04" },
       }),
     ]),
   );
@@ -458,6 +461,40 @@ test("describes the broader governed workstation action family with typed metada
       }),
     ]),
   );
+});
+
+test("projects cancelled sessions as done instead of active work", () => {
+  const projection = projectWorkstationCards({
+    ...baseSnapshot,
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 3,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ISS-01-1",
+            issue_id: "ISS-01",
+            assigned_agent: "qwen-coder-local",
+            status: "cancelled",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+        ],
+        attention: [],
+      },
+    ],
+  });
+
+  const card = projection.groups.flatMap((group) => group.cards).find((item) => item.sessionId === "session-ISS-01-1");
+
+  expect(card?.status).toBe("done");
+  expect(card?.nextAction).toBe("Review accepted evidence");
+  expect(card?.detail.governedActions).toEqual([
+    { label: "Open Activity", target: "activity", requiresReason: false },
+  ]);
 });
 
 test("projects expanded operational detail from canonical issue and session evidence", () => {

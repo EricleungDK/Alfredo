@@ -1047,6 +1047,27 @@ class AlbertMission:
         if self._evidence_activity_recorder is not None:
             self._evidence_activity_recorder(self.mission_id, session, evidence)
 
+    def cancel_session(self, session_id: str, *, reason: str) -> LocalAgentSession:
+        if not reason.strip():
+            raise AlbertError("Session cancellation requires a reason.")
+        session = self._session(session_id)
+        if session.status in {
+            "cancelled",
+            "evidence-ready",
+            "reviewed",
+            "complete",
+            "completed",
+            "failed",
+        }:
+            raise AlbertError(f"{session_id} cannot be cancelled from {session.status}.")
+        session.status = "cancelled"
+        session.runner_ended_at = session.runner_ended_at or datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
+        self._record(f"{session.issue_id} session {session_id} cancelled: {reason}")
+        self._persist()
+        return session
+
     def record_frontier_review(
         self,
         session_id: str,

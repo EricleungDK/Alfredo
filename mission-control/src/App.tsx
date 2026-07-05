@@ -18,6 +18,7 @@ import type {
   WorkspaceIssueSliceSummary,
   WorkspaceLoadResult,
   WorkspaceSnapshot,
+  WorkstationActionRequest,
 } from "./contracts";
 import type { WorkspaceClient } from "./workspace-client";
 import { applyWorkspaceUpdates } from "./workspace-sync";
@@ -26,6 +27,7 @@ import {
   type WorkstationCardGroup,
   type WorkstationCardProjection,
   type WorkstationDiffLink,
+  type WorkstationGovernedAction,
 } from "./workstation-projection";
 import { ShellTerminalPanel } from "./ShellTerminalPanel";
 import { useShellTerminal, type ShellTerminalController } from "./use-shell-terminal";
@@ -59,6 +61,11 @@ interface WorkstationActionState {
   readonly itemId: string;
   readonly state: "pending" | "accepted" | "rejected" | "failed" | "stale" | "disabled";
   readonly message: string;
+}
+
+interface WorkstationActionDraftState {
+  readonly reason: string;
+  readonly agentId: string;
 }
 
 interface AppProps {
@@ -104,6 +111,9 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   >([]);
   const [workstationActionState, setWorkstationActionState] =
     useState<WorkstationActionState | null>(null);
+  const [workstationActionDrafts, setWorkstationActionDrafts] = useState<
+    Record<string, WorkstationActionDraftState>
+  >({});
   const [queueReasons, setQueueReasons] = useState<Record<string, string>>({});
   const [activityJournal, setActivityJournal] = useState<ActivityJournalProjection | null>(null);
   const [activityFilters, setActivityFilters] = useState<ActivityJournalFilters>({
@@ -677,6 +687,66 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
     [beginVisibleWorkstationAction, client, finishVisibleWorkstationAction, refreshWorkspaceQueue, state, workspaceQueue],
   );
 
+  const submitWorkstationAction = useCallback(
+    async (action: WorkstationGovernedAction, draft: WorkstationActionDraftState) => {
+      if (
+        state === "loading" ||
+        (state.kind !== "ready" && state.kind !== "empty") ||
+        !client.submitWorkstationAction ||
+        !action.actionType ||
+        !isExecutableWorkstationAction(action) ||
+        typeof action.expectedRevision !== "number" ||
+        !action.targetIdentity
+      ) {
+        return;
+      }
+      const target = workstationActionRequestTarget(action);
+      const targetId = workstationActionTargetId(action);
+      if (!target || !targetId) return;
+      const correlationId = `workstation-${action.actionType}-${targetId}-${action.expectedRevision}`;
+      const label = `${action.label} ${targetId}`;
+      const request: WorkstationActionRequest = {
+        correlation_id: correlationId,
+        action_type: action.actionType,
+        actor: "mission-commander",
+        expected_revision: action.expectedRevision,
+        target,
+        issue_id: action.issueId,
+        session_id: action.sessionId,
+        agent_id: draft.agentId.trim() || undefined,
+        reason: draft.reason.trim() || undefined,
+        allowed_paths: [],
+        command_policy: {},
+      };
+      beginVisibleWorkstationAction(correlationId, label, targetId);
+      const result = await client.submitWorkstationAction(request);
+      if (result.kind !== "acknowledged") {
+        finishVisibleWorkstationAction(correlationId, targetId, result.kind, result.message);
+        return;
+      }
+      const reloaded = await client.loadSnapshot();
+      if (reloaded.kind !== "ready" && reloaded.kind !== "empty") {
+        finishVisibleWorkstationAction(
+          correlationId,
+          targetId,
+          "failed",
+          "Orchestrator acknowledged the action, but Alfredo could not reload canonical state.",
+        );
+        setConnectionStatus("offline");
+        return;
+      }
+      setState(reloaded);
+      setConnectionStatus("connected");
+      finishVisibleWorkstationAction(
+        correlationId,
+        targetId,
+        "acknowledged",
+        result.acknowledgement.effect_summary,
+      );
+    },
+    [beginVisibleWorkstationAction, client, finishVisibleWorkstationAction, state],
+  );
+
   const submitMissionDraftDecision = useCallback(
     async (draftId: string, decision: MissionDraftDecision, reason: string) => {
       if (
@@ -905,6 +975,11 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       onQueueDecision={submitWorkspaceQueueDecision}
       workstationActionTurns={workstationActionTurns}
       workstationActionState={workstationActionState}
+      workstationActionDrafts={workstationActionDrafts}
+      onWorkstationActionDraftChange={(key, draft) =>
+        setWorkstationActionDrafts((current) => ({ ...current, [key]: draft }))
+      }
+      onWorkstationAction={submitWorkstationAction}
       onAdHocProposal={submitAdHocDelegationProposal}
       onMissionDraftCreate={submitMissionDraftCreate}
       onMissionDraftReasonChange={(draftId, reason) =>
@@ -1018,6 +1093,9 @@ function CommandDeck({
   onQueueDecision,
   workstationActionTurns,
   workstationActionState,
+  workstationActionDrafts,
+  onWorkstationActionDraftChange,
+  onWorkstationAction,
   onAdHocProposal,
   onMissionDraftCreate,
   onMissionDraftReasonChange,
@@ -1078,6 +1156,12 @@ function CommandDeck({
   onQueueDecision: (itemId: string, decision: WorkspaceQueueDecision, reason: string) => void;
   workstationActionTurns: readonly WorkstationActionTurn[];
   workstationActionState: WorkstationActionState | null;
+  workstationActionDrafts: Record<string, WorkstationActionDraftState>;
+  onWorkstationActionDraftChange: (key: string, draft: WorkstationActionDraftState) => void;
+  onWorkstationAction: (
+    action: WorkstationGovernedAction,
+    draft: WorkstationActionDraftState,
+  ) => void;
   onAdHocProposal: (proposal: AdHocDelegationDraft) => void;
   onMissionDraftCreate: (draft: MissionDraftCreateDraft) => void;
   onMissionDraftReasonChange: (draftId: string, reason: string) => void;
@@ -1483,6 +1567,9 @@ function CommandDeck({
                     queueReasons={queueReasons}
                     onQueueReasonChange={onQueueReasonChange}
                     onQueueDecision={onQueueDecision}
+                    workstationActionDrafts={workstationActionDrafts}
+                    onWorkstationActionDraftChange={onWorkstationActionDraftChange}
+                    onWorkstationAction={onWorkstationAction}
                     actionState={workstationActionState}
                   />
                 ))}
@@ -1777,6 +1864,9 @@ function WorkstationCard({
   queueReasons,
   onQueueReasonChange,
   onQueueDecision,
+  workstationActionDrafts,
+  onWorkstationActionDraftChange,
+  onWorkstationAction,
   actionState,
 }: {
   card: WorkstationCardProjection;
@@ -1790,18 +1880,28 @@ function WorkstationCard({
   queueReasons: Record<string, string>;
   onQueueReasonChange: (itemId: string, reason: string) => void;
   onQueueDecision: (itemId: string, decision: WorkspaceQueueDecision, reason: string) => void;
+  workstationActionDrafts: Record<string, WorkstationActionDraftState>;
+  onWorkstationActionDraftChange: (key: string, draft: WorkstationActionDraftState) => void;
+  onWorkstationAction: (
+    action: WorkstationGovernedAction,
+    draft: WorkstationActionDraftState,
+  ) => void;
   actionState: WorkstationActionState | null;
 }) {
   const queueActions = card.detail.governedActions.filter(
     (action) =>
       action.actionType === "workspace-queue-decision" && action.itemId && action.decision,
   );
+  const workstationActions = card.detail.governedActions.filter(isExecutableWorkstationAction);
   const queueItemId = queueActions[0]?.itemId ?? null;
   const queueReason = queueItemId ? queueReasons[queueItemId] ?? "" : "";
+  const workstationActionTargetIds = workstationActions.map(workstationActionTargetId).filter(Boolean);
   const matchingActionState =
-    actionState && queueItemId && actionState.itemId === queueItemId
+    actionState &&
+    ((queueItemId && actionState.itemId === queueItemId) ||
+      workstationActionTargetIds.includes(actionState.itemId))
       ? actionState
-      : queueActions.length === 0 && card.status === "waiting-approval"
+      : queueActions.length === 0 && workstationActions.length === 0 && card.status === "waiting-approval"
         ? {
             itemId: card.id,
             state: "disabled" as const,
@@ -1927,6 +2027,67 @@ function WorkstationCard({
               );
             })}
           </div>
+        </div>
+      ) : null}
+      {workstationActions.length > 0 ? (
+        <div className="workstation-card__decision-actions">
+          {workstationActions.map((action) => {
+            const targetId = workstationActionTargetId(action);
+            const key = workstationActionKey(action);
+            const draft = workstationActionDrafts[key] ?? { reason: "", agentId: "" };
+            const pending = matchingActionState?.state === "pending";
+            const needsAgent = action.actionType === "model-assignment-change";
+            const disabled =
+              pending ||
+              Boolean(action.disabledReason) ||
+              !targetId ||
+              (action.requiresReason && !draft.reason.trim()) ||
+              (needsAgent && !draft.agentId.trim());
+            return (
+              <div className="workstation-card__direct-action" key={key}>
+                {needsAgent ? (
+                  <label>
+                    <span>Agent</span>
+                    <input
+                      aria-label={`Workstation action agent ${targetId}`}
+                      value={draft.agentId}
+                      onChange={(event) =>
+                        onWorkstationActionDraftChange(key, {
+                          ...draft,
+                          agentId: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+                ) : null}
+                {action.requiresReason ? (
+                  <label className="composer">
+                    <span>Reason</span>
+                    <textarea
+                      aria-label={`Workstation action reason ${targetId}`}
+                      rows={2}
+                      value={draft.reason}
+                      onChange={(event) =>
+                        onWorkstationActionDraftChange(key, {
+                          ...draft,
+                          reason: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+                ) : null}
+                <button
+                  type="button"
+                  aria-label={`${action.label} ${targetId}`}
+                  disabled={disabled}
+                  className={action.actionType === "session-cancel" ? "action--danger" : undefined}
+                  onClick={() => onWorkstationAction(action, draft)}
+                >
+                  {action.label}
+                </button>
+              </div>
+            );
+          })}
         </div>
       ) : null}
 
@@ -2069,6 +2230,43 @@ function WorkstationCard({
       ) : null}
     </article>
   );
+}
+
+function isExecutableWorkstationAction(
+  action: WorkstationGovernedAction,
+): action is WorkstationGovernedAction & {
+  actionType:
+    | "issue-launch"
+    | "issue-retry"
+    | "session-cancel"
+    | "model-assignment-change";
+} {
+  return (
+    action.actionType === "issue-launch" ||
+    action.actionType === "issue-retry" ||
+    action.actionType === "session-cancel" ||
+    action.actionType === "model-assignment-change"
+  );
+}
+
+function workstationActionTargetId(action: WorkstationGovernedAction): string {
+  return action.targetIdentity?.id ?? action.sessionId ?? action.issueId ?? action.label;
+}
+
+function workstationActionKey(action: WorkstationGovernedAction): string {
+  return `${action.actionType ?? "workstation-action"}:${workstationActionTargetId(action)}`;
+}
+
+function workstationActionRequestTarget(
+  action: WorkstationGovernedAction,
+): WorkstationActionRequest["target"] | null {
+  if (action.targetIdentity?.kind === "issue-slice") {
+    return { kind: "issue-slice", id: action.targetIdentity.id };
+  }
+  if (action.targetIdentity?.kind === "agent-session") {
+    return { kind: "agent-session", id: action.targetIdentity.id };
+  }
+  return null;
 }
 
 function governedActionSurface(

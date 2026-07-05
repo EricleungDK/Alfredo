@@ -25,6 +25,7 @@ from .workspace import (
     WorkspaceScopeMismatchError,
     WorkspaceStaleActionError,
     WorkspaceSyncService,
+    WorkstationActionService,
     WorkingContextCurationError,
     WorkingContextService,
 )
@@ -299,6 +300,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     workspace_queue_decision.add_argument("--target-kind", default="")
     workspace_queue_decision.add_argument("--target-id", default="")
+
+    workstation_action = subparsers.add_parser(
+        "workstation-action",
+        help="Submit a typed Agent Workstation action as JSON.",
+    )
+    _add_common_args(workstation_action)
+    workstation_action.add_argument("--correlation-id", required=True)
+    workstation_action.add_argument("--expected-revision", required=True, type=int)
+    workstation_action.add_argument(
+        "--action-type",
+        required=True,
+        choices=[
+            "issue-launch",
+            "issue-retry",
+            "session-cancel",
+            "model-assignment-change",
+        ],
+    )
+    workstation_action.add_argument(
+        "--actor", required=True, choices=["mission-commander"]
+    )
+    workstation_action.add_argument(
+        "--target-kind", required=True, choices=["issue-slice", "agent-session"]
+    )
+    workstation_action.add_argument("--target-id", required=True)
+    workstation_action.add_argument("--issue-id", default="")
+    workstation_action.add_argument("--session-id", default="")
+    workstation_action.add_argument("--agent", default="")
+    workstation_action.add_argument("--reason", default="")
+    workstation_action.add_argument("--allowed-path", action="append", default=[])
+    workstation_action.add_argument("--command-policy", action="append", default=[])
 
     mission_drafts = subparsers.add_parser(
         "mission-drafts",
@@ -578,6 +610,7 @@ def _run(args: argparse.Namespace) -> int:
             "workspace-queue",
             "ad-hoc-delegation-proposal",
             "workspace-queue-decision",
+            "workstation-action",
             "mission-drafts",
             "mission-draft-create",
             "mission-draft-update",
@@ -606,6 +639,7 @@ def _run(args: argparse.Namespace) -> int:
         "workspace-queue",
         "ad-hoc-delegation-proposal",
         "workspace-queue-decision",
+        "workstation-action",
         "mission-drafts",
         "mission-draft-create",
         "mission-draft-update",
@@ -844,6 +878,23 @@ def _run(args: argparse.Namespace) -> int:
             actor=args.actor,
             target_kind=args.target_kind,
             target_id=args.target_id,
+        )
+        print(json.dumps(asdict(acknowledgement), sort_keys=True))
+        return 0
+    if args.command == "workstation-action":
+        acknowledgement = WorkstationActionService(snapshots).submit(
+            correlation_id=args.correlation_id,
+            action_type=args.action_type,
+            actor=args.actor,
+            expected_revision=args.expected_revision,
+            target_kind=args.target_kind,
+            target_id=args.target_id,
+            issue_id=args.issue_id,
+            session_id=args.session_id,
+            agent_id=args.agent,
+            reason=args.reason,
+            allowed_paths=args.allowed_path,
+            command_policy=_parse_command_policy(args.command_policy),
         )
         print(json.dumps(asdict(acknowledgement), sort_keys=True))
         return 0

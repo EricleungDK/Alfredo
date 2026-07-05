@@ -264,7 +264,6 @@ function projectLaunchableIssueCard(
           actor: "mission-commander",
           issueId: issue.issue_id,
           expectedRevision: snapshot.revision,
-          disabledReason: "Model assignment changes require the Mission Board governed control.",
           recoveryPath: "Open the Issue Slice inspector and submit a model assignment change there.",
           targetIdentity: { kind: "issue-slice", id: issue.issue_id },
         },
@@ -565,6 +564,7 @@ function canonicalStatus(
 ): WorkstationCardStatus {
   const status = `${rawStatus} ${rawOperationStatus}`.toLowerCase();
   if (failure || status.includes("failed") || status.includes("rejected")) return "failed";
+  if (status.includes("cancelled") || status.includes("canceled")) return "done";
   if (status.includes("waiting") || status.includes("approval") || status.includes("pending")) {
     return "waiting-approval";
   }
@@ -651,7 +651,6 @@ function governedActions(
         sessionId,
         issueId,
         expectedRevision,
-        disabledReason: "Retry requires Orchestrator validation from the Mission Board or Review Workspace.",
         recoveryPath: "Open the Review Workspace, provide a repair reason, and submit the repair request.",
         targetIdentity: { kind: "agent-session", id: sessionId },
       },
@@ -672,7 +671,6 @@ function governedActions(
       sessionId,
       issueId,
       expectedRevision,
-      disabledReason: "Cancel requires the Orchestrator session-control endpoint before it can run from this card.",
       recoveryPath: "Open the session detail and use an available Orchestrator-backed cancel control.",
       targetIdentity: { kind: "agent-session", id: sessionId },
     },

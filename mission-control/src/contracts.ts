@@ -462,6 +462,50 @@ export type WorkspaceQueueDecisionResult =
 
 export type AdHocDelegationProposalResult = WorkspaceQueueDecisionResult;
 
+export type WorkstationActionType =
+  | "issue-launch"
+  | "issue-retry"
+  | "session-cancel"
+  | "model-assignment-change";
+
+export interface WorkstationActionRequest {
+  readonly correlation_id: string;
+  readonly action_type: WorkstationActionType;
+  readonly actor: "mission-commander";
+  readonly expected_revision: number;
+  readonly target:
+    | { readonly kind: "issue-slice"; readonly id: string }
+    | { readonly kind: "agent-session"; readonly id: string };
+  readonly issue_id?: string;
+  readonly session_id?: string;
+  readonly agent_id?: string;
+  readonly reason?: string;
+  readonly allowed_paths?: readonly string[];
+  readonly command_policy?: Readonly<Record<string, string>>;
+}
+
+export interface WorkstationActionAcknowledgement {
+  readonly correlation_id: string;
+  readonly outcome: "acknowledged";
+  readonly revision: number;
+  readonly action_type: WorkstationActionType;
+  readonly issue_id: string;
+  readonly session_id: string;
+  readonly effect_summary: string;
+}
+
+export type WorkstationActionResult =
+  | {
+      readonly kind: "acknowledged";
+      readonly acknowledgement: WorkstationActionAcknowledgement;
+    }
+  | {
+      readonly kind: "stale" | "rejected";
+      readonly code: string;
+      readonly message: string;
+      readonly current_revision?: number;
+    };
+
 export interface MissionDraftIncludedWork {
   readonly work_id: string;
   readonly source: string;

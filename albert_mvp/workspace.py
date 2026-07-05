@@ -917,6 +917,25 @@ class WorkspaceQueueAcknowledgement:
     effect_summary: str
 
 
+WorkstationActionType = Literal[
+    "issue-launch",
+    "issue-retry",
+    "session-cancel",
+    "model-assignment-change",
+]
+
+
+@dataclass(frozen=True)
+class WorkstationActionAcknowledgement:
+    correlation_id: str
+    outcome: Literal["acknowledged"]
+    revision: int
+    action_type: WorkstationActionType
+    issue_id: str
+    session_id: str
+    effect_summary: str
+
+
 @dataclass(frozen=True)
 class MissionDraftIncludedWork:
     work_id: str
@@ -2283,6 +2302,178 @@ class ReviewWorkspaceService:
         return f"Review recorded; next action is {next_action}."
 
 
+class WorkstationActionService:
+    """Applies typed Agent Workstation actions against acknowledged Orchestrator state."""
+
+    _actions = {
+        "issue-launch",
+        "issue-retry",
+        "session-cancel",
+        "model-assignment-change",
+    }
+    _actors = {"mission-commander"}
+
+    def __init__(self, snapshots: "WorkspaceSnapshotService"):
+        self._snapshots = snapshots
+
+    def submit(
+        self,
+        *,
+        correlation_id: str,
+        action_type: WorkstationActionType | str,
+        actor: str,
+        expected_revision: int,
+        target_kind: str,
+        target_id: str,
+        issue_id: str = "",
+        session_id: str = "",
+        agent_id: str = "",
+        reason: str = "",
+        allowed_paths: list[str] | None = None,
+        command_policy: dict[str, str] | None = None,
+    ) -> WorkstationActionAcknowledgement:
+        snapshot = self._snapshots.snapshot()
+        if expected_revision != snapshot.revision:
+            raise WorkspaceStaleActionError(
+                expected_revision=expected_revision,
+                current_revision=snapshot.revision,
+            )
+        if not correlation_id.strip():
+            raise AlbertError("Workstation action correlation id must not be empty")
+        if actor not in self._actors:
+            raise AlbertError(f"Unknown Workstation action actor: {actor}")
+        if action_type not in self._actions:
+            raise AlbertError(f"Unknown Workstation action type: {action_type}")
+        if snapshot.active_mission is None:
+            raise AlbertError("Workstation actions require an active Mission")
+        mission = self._snapshots._missions[snapshot.active_mission.id]
+
+        acknowledged_issue_id = issue_id
+        acknowledged_session_id = session_id
+        journal_actor: ActivityActor = "mission-commander"
+        if action_type == "issue-launch":
+            self._validate_issue_target(
+                target_kind=target_kind,
+                target_id=target_id,
+                issue_id=issue_id,
+            )
+            session = mission.launch_issue(
+                issue_id,
+                allowed_paths=allowed_paths or [],
+                command_policy=command_policy or {},
+            )
+            acknowledged_session_id = session.session_id
+            effect_summary = (
+                f"Orchestrator launched {issue_id} as {session.session_id}."
+            )
+            journal_actor = "orchestrator"
+        elif action_type == "issue-retry":
+            self._validate_session_target(
+                target_kind=target_kind,
+                target_id=target_id,
+                session_id=session_id,
+            )
+            if not reason.strip():
+                raise AlbertError("Retry requires a reason.")
+            prior_session = mission.sessions.get(session_id)
+            if prior_session is None:
+                raise AlbertError(f"Unknown Workstation session: {session_id}")
+            acknowledged_issue_id = issue_id or prior_session.issue_id
+            if acknowledged_issue_id != prior_session.issue_id:
+                raise AlbertError("issue id must match session issue id")
+            session = mission.launch_repair(
+                session_id,
+                agent_id=agent_id,
+                allowed_paths=allowed_paths or [],
+                command_policy=command_policy or {},
+            )
+            acknowledged_session_id = session.session_id
+            effect_summary = (
+                f"Orchestrator retried {acknowledged_issue_id} as "
+                f"{session.session_id} from {prior_session.session_id}."
+            )
+            journal_actor = "orchestrator"
+        elif action_type == "session-cancel":
+            self._validate_session_target(
+                target_kind=target_kind,
+                target_id=target_id,
+                session_id=session_id,
+            )
+            if not reason.strip():
+                raise AlbertError("Session cancellation requires a reason.")
+            session = mission.sessions.get(session_id)
+            if session is None:
+                raise AlbertError(f"Unknown Workstation session: {session_id}")
+            acknowledged_issue_id = issue_id or session.issue_id
+            if acknowledged_issue_id != session.issue_id:
+                raise AlbertError("issue id must match session issue id")
+            cancelled = mission.cancel_session(session_id, reason=reason)
+            acknowledged_session_id = cancelled.session_id
+            effect_summary = (
+                f"Orchestrator cancelled {cancelled.session_id} for "
+                f"{acknowledged_issue_id}. Persisted session state is cancelled; "
+                "runner process termination is not available in this MVP."
+            )
+            journal_actor = "orchestrator"
+        else:
+            self._validate_issue_target(
+                target_kind=target_kind,
+                target_id=target_id,
+                issue_id=issue_id,
+            )
+            if not agent_id.strip():
+                raise AlbertError("Model assignment changes require an agent id.")
+            if not reason.strip():
+                raise AlbertError("Model assignment changes require a reason.")
+            mission.assign_issue(issue_id, agent_id, notes=reason)
+            effect_summary = (
+                f"Mission Commander assigned {issue_id} to {agent_id}: {reason}"
+            )
+
+        updated = self._snapshots.update_preferences(
+            active_mission_id=mission.mission_id,
+            conversation_scope=snapshot.conversation_scope,
+            operations_view=snapshot.operations_view,
+            event_metadata={"correlation_id": correlation_id},
+        )
+        ActivityJournalService(self._snapshots).record_workstation_action(
+            correlation_id=correlation_id,
+            actor=journal_actor,
+            action_type=action_type,
+            mission=mission,
+            issue_id=acknowledged_issue_id,
+            session_id=acknowledged_session_id,
+            effect_summary=effect_summary,
+        )
+        return WorkstationActionAcknowledgement(
+            correlation_id=correlation_id,
+            outcome="acknowledged",
+            revision=updated.revision,
+            action_type=action_type,  # type: ignore[arg-type]
+            issue_id=acknowledged_issue_id,
+            session_id=acknowledged_session_id,
+            effect_summary=effect_summary,
+        )
+
+    @staticmethod
+    def _validate_issue_target(*, target_kind: str, target_id: str, issue_id: str) -> None:
+        if target_kind != "issue-slice":
+            raise AlbertError("Workstation action target kind must be issue-slice")
+        if not issue_id.strip():
+            raise AlbertError("Workstation action issue id must not be empty")
+        if target_id != issue_id:
+            raise AlbertError("Workstation action target id must match issue id")
+
+    @staticmethod
+    def _validate_session_target(*, target_kind: str, target_id: str, session_id: str) -> None:
+        if target_kind != "agent-session":
+            raise AlbertError("Workstation action target kind must be agent-session")
+        if not session_id.strip():
+            raise AlbertError("Workstation action session id must not be empty")
+        if target_id != session_id:
+            raise AlbertError("Workstation action target id must match session id")
+
+
 class WorkingContextService:
     """Reconstructs bounded model input without changing governed mission state."""
 
@@ -2905,6 +3096,60 @@ class ActivityJournalService:
                     href=f"workspace-queue#{draft.draft_id}",
                 ),
             ),
+            evidence_links=(),
+            correlation_id=correlation_id,
+        )
+
+    def record_workstation_action(
+        self,
+        *,
+        correlation_id: str,
+        actor: ActivityActor,
+        action_type: str,
+        mission: AlbertMission,
+        issue_id: str,
+        session_id: str,
+        effect_summary: str,
+    ) -> ActivityJournalEntry:
+        if not correlation_id.strip():
+            raise AlbertError("Activity Journal correlation id must not be empty")
+        issue_entity_type = "issue-slice" if issue_id.startswith("ISS-") else "ad-hoc-delegation"
+        issue_label = (
+            mission.issues[issue_id].title
+            if issue_id in mission.issues
+            else issue_id or "No issue"
+        )
+        affected_entities = [
+            ActivityAffectedEntity(
+                entity_type="mission",
+                entity_id=mission.mission_id,
+                label=mission.prd_title,
+                href=f"app-local://missions/{mission.mission_id}",
+            )
+        ]
+        if issue_id:
+            affected_entities.append(
+                ActivityAffectedEntity(
+                    entity_type=issue_entity_type,
+                    entity_id=issue_id,
+                    label=issue_label,
+                    href=f"app-local://missions/{mission.mission_id}/issues/{issue_id}",
+                )
+            )
+        if session_id:
+            affected_entities.append(
+                ActivityAffectedEntity(
+                    entity_type="local-agent-session",
+                    entity_id=session_id,
+                    label=session_id,
+                    href=f"app-local://missions/{mission.mission_id}/sessions/{session_id}",
+                )
+            )
+        return self._append(
+            actor=actor,
+            action_type=action_type,
+            summary=effect_summary,
+            affected_entities=tuple(affected_entities),
             evidence_links=(),
             correlation_id=correlation_id,
         )

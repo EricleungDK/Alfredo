@@ -768,6 +768,44 @@ pub struct WorkspaceQueueAcknowledgement {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct WorkstationActionTarget {
+    pub kind: String,
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WorkstationActionRequest {
+    pub correlation_id: String,
+    pub action_type: String,
+    pub actor: String,
+    pub expected_revision: u64,
+    pub target: WorkstationActionTarget,
+    #[serde(default)]
+    pub issue_id: String,
+    #[serde(default)]
+    pub session_id: String,
+    #[serde(default)]
+    pub agent_id: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub allowed_paths: Vec<String>,
+    #[serde(default)]
+    pub command_policy: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WorkstationActionAcknowledgement {
+    pub correlation_id: String,
+    pub outcome: String,
+    pub revision: u64,
+    pub action_type: String,
+    pub issue_id: String,
+    pub session_id: String,
+    pub effect_summary: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct MissionDraftIncludedWork {
     pub work_id: String,
     pub source: String,
@@ -1398,6 +1436,52 @@ pub fn execute_workspace_queue_decision(
     decode_backend_json(process_output(output), "Workspace Queue acknowledgement")
 }
 
+pub fn execute_workstation_action(
+    config: &BridgeConfig,
+    request: &WorkstationActionRequest,
+) -> Result<WorkstationActionAcknowledgement, BridgeFailure> {
+    let mut command = configured_python_command(config, "workstation-action");
+    command
+        .arg("--correlation-id")
+        .arg(&request.correlation_id)
+        .arg("--expected-revision")
+        .arg(request.expected_revision.to_string())
+        .arg("--action-type")
+        .arg(&request.action_type)
+        .arg("--actor")
+        .arg(&request.actor)
+        .arg("--target-kind")
+        .arg(&request.target.kind)
+        .arg("--target-id")
+        .arg(&request.target.id);
+    if !request.issue_id.is_empty() {
+        command.arg("--issue-id").arg(&request.issue_id);
+    }
+    if !request.session_id.is_empty() {
+        command.arg("--session-id").arg(&request.session_id);
+    }
+    if !request.agent_id.is_empty() {
+        command.arg("--agent").arg(&request.agent_id);
+    }
+    if !request.reason.is_empty() {
+        command.arg("--reason").arg(&request.reason);
+    }
+    for path in &request.allowed_paths {
+        command.arg("--allowed-path").arg(path);
+    }
+    for (backend_command, policy) in &request.command_policy {
+        command
+            .arg("--command-policy")
+            .arg(format!("{backend_command}={policy}"));
+    }
+    let output = command.output().map_err(|error| BridgeFailure {
+        code: "backend-startup-failure".to_owned(),
+        message: format!("Unable to start the Albert backend: {error}"),
+        recoverable: true,
+    })?;
+    decode_backend_json(process_output(output), "Workstation action acknowledgement")
+}
+
 pub fn execute_mission_drafts(
     config: &BridgeConfig,
 ) -> Result<MissionDraftProjection, BridgeFailure> {
@@ -1657,6 +1741,15 @@ fn workspace_queue_decision(
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
+fn workstation_action(
+    config: tauri::State<'_, BridgeConfig>,
+    request: WorkstationActionRequest,
+) -> Result<WorkstationActionAcknowledgement, BridgeFailure> {
+    execute_workstation_action(config.inner(), &request)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
 fn mission_drafts(
     config: tauri::State<'_, BridgeConfig>,
 ) -> Result<MissionDraftProjection, BridgeFailure> {
@@ -1706,6 +1799,7 @@ pub fn run() {
             workspace_queue,
             ad_hoc_delegation_proposal,
             workspace_queue_decision,
+            workstation_action,
             mission_drafts,
             mission_draft_create,
             mission_draft_decision
@@ -2901,6 +2995,70 @@ None - can start immediately
             queue.items[0].proposed_changes["allowed_paths"][0],
             "docs/smoke-tests.md"
         );
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn desktop_bridge_submits_workstation_launch_action() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("albert-tauri-workstation-action-{unique}"));
+        let target_repo = root.join("target");
+        let tracker_dir = root.join("tracker");
+        let issues_dir = tracker_dir.join("issues");
+        let runtime_root = root.join("runtime");
+        fs::create_dir_all(&target_repo).expect("target repo");
+        fs::create_dir_all(&issues_dir).expect("issues dir");
+        fs::write(tracker_dir.join("PRD.md"), "# Workstation Action Bridge\n").expect("PRD");
+        fs::write(
+            issues_dir.join("01-launch.md"),
+            "Status: approved\nType: AFK\n\n## Parent\n\nPRD.md\n\n## What to build\n\nLaunch through the workstation bridge.\n\n## Acceptance criteria\n\n- [ ] Launch acknowledgement is decoded.\n\n## Blocked by\n\nNone - can start immediately\n",
+        )
+        .expect("issue");
+        let config = BridgeConfig {
+            python: "python3".to_owned(),
+            backend_root: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .canonicalize()
+                .expect("backend root"),
+            target_repo: target_repo.clone(),
+            tracker_dir,
+            issues_dir: None,
+            runtime_root,
+            mission_id: "workstation-action-bridge".to_owned(),
+            agent_config: None,
+            mission_catalog: None,
+        };
+
+        let acknowledgement = execute_workstation_action(
+            &config,
+            &WorkstationActionRequest {
+                correlation_id: "tauri-workstation-launch-1".to_owned(),
+                action_type: "issue-launch".to_owned(),
+                actor: "mission-commander".to_owned(),
+                expected_revision: 1,
+                target: WorkstationActionTarget {
+                    kind: "issue-slice".to_owned(),
+                    id: "ISS-01".to_owned(),
+                },
+                issue_id: "ISS-01".to_owned(),
+                session_id: String::new(),
+                agent_id: String::new(),
+                reason: String::new(),
+                allowed_paths: vec!["src".to_owned()],
+                command_policy: std::collections::BTreeMap::new(),
+            },
+        )
+        .expect("workstation action should be acknowledged");
+        let snapshot = execute_snapshot(&config).expect("snapshot should inspect");
+
+        assert_eq!(acknowledgement.action_type, "issue-launch");
+        assert_eq!(acknowledgement.issue_id, "ISS-01");
+        assert_eq!(acknowledgement.session_id, "session-ISS-01-1");
+        assert_eq!(acknowledgement.revision, 2);
+        assert_eq!(snapshot.missions[0].sessions[0].session_id, "session-ISS-01-1");
         fs::remove_dir_all(root).expect("fixture cleanup");
     }
 

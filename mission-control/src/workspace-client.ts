@@ -53,6 +53,9 @@ import type {
   WorkspaceQueueDecisionResult,
   WorkspaceQueueLoadResult,
   WorkspaceQueueProjection,
+  WorkstationActionAcknowledgement,
+  WorkstationActionRequest,
+  WorkstationActionResult,
 } from "./contracts";
 
 export interface WorkspaceClient {
@@ -88,6 +91,7 @@ export interface WorkspaceClient {
   submitWorkspaceQueueDecision?(
     request: WorkspaceQueueDecisionRequest,
   ): Promise<WorkspaceQueueDecisionResult>;
+  submitWorkstationAction?(request: WorkstationActionRequest): Promise<WorkstationActionResult>;
   loadMissionDrafts?(): Promise<MissionDraftLoadResult>;
   submitMissionDraftCreate?(request: MissionDraftCreateRequest): Promise<MissionDraftCreateResult>;
   submitMissionDraftDecision?(
@@ -511,6 +515,35 @@ export class TauriWorkspaceClient implements WorkspaceClient {
     try {
       const acknowledgement = await invoke<WorkspaceQueueAcknowledgement>(
         "workspace_queue_decision",
+        { request },
+      );
+      return { kind: "acknowledged", acknowledgement };
+    } catch (error) {
+      if (isBridgeFailure(error)) {
+        return {
+          kind: error.code === "stale-action" ? "stale" : "rejected",
+          code: error.code,
+          message: error.message,
+          current_revision:
+            typeof (error as Record<string, unknown>).current_revision === "number"
+              ? ((error as Record<string, unknown>).current_revision as number)
+              : undefined,
+        };
+      }
+      return {
+        kind: "rejected",
+        code: "backend-startup-failure",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  async submitWorkstationAction(
+    request: WorkstationActionRequest,
+  ): Promise<WorkstationActionResult> {
+    try {
+      const acknowledgement = await invoke<WorkstationActionAcknowledgement>(
+        "workstation_action",
         { request },
       );
       return { kind: "acknowledged", acknowledgement };

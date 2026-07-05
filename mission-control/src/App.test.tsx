@@ -300,6 +300,249 @@ test("routes a waiting workstation card decision through typed queue acknowledge
   expect(screen.getByText("session-ADHOC-000001-1")).toBeVisible();
 });
 
+test("launches an issue from a workstation card through typed Orchestrator action", async () => {
+  const before: WorkspaceSnapshot = {
+    ...snapshot,
+    revision: 4,
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_slices: [
+        {
+          issue_id: "ISS-01",
+          title: "Restore workspace session",
+          lifecycle: "Ready",
+          progress: "Launch eligible",
+          launch_eligible: true,
+          blockers: [],
+          accepted_boundary: {
+            what_to_build: "Restore the workspace session.",
+            acceptance_criteria: ["Canonical snapshot is visible."],
+            evidence_requirements: [],
+            source_path: ".agent/issues/01-restore.md",
+          },
+          sessions: [],
+          provenance: {
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+          model_assignment: {
+            agent_id: "qwen-coder-local",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+            availability: "available",
+            availability_reason: "",
+            operation_status: "idle",
+            failure: "",
+          },
+          evidence: {
+            state: "not-started",
+            changed_files: [],
+            commands_run: [],
+            test_results: "No evidence package recorded.",
+            risks: "",
+            artifact_links: [],
+          },
+          working_context_sources: [],
+        },
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 3,
+        is_active: true,
+        sessions: [],
+        attention: [],
+      },
+    ],
+  };
+  const after: WorkspaceSnapshot = {
+    ...before,
+    revision: 5,
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 3,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ISS-01-1",
+            issue_id: "ISS-01",
+            assigned_agent: "qwen-coder-local",
+            status: "launched",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+        ],
+        attention: [],
+      },
+    ],
+  };
+  const actions: unknown[] = [];
+  let snapshotLoads = 0;
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => {
+          snapshotLoads += 1;
+          return { kind: "ready", snapshot: snapshotLoads === 1 ? before : after };
+        },
+        submitWorkstationAction: async (request) => {
+          actions.push(request);
+          return {
+            kind: "acknowledged",
+            acknowledgement: {
+              correlation_id: request.correlation_id,
+              outcome: "acknowledged",
+              revision: 5,
+              action_type: "issue-launch",
+              issue_id: "ISS-01",
+              session_id: "session-ISS-01-1",
+              effect_summary: "Orchestrator launched ISS-01 as session-ISS-01-1.",
+            },
+          };
+        },
+      }}
+    />,
+  );
+
+  const cards = await screen.findByRole("region", { name: "Workstation Cards" });
+  fireEvent.click(await within(cards).findByRole("button", { name: "Launch ISS-01" }));
+
+  await waitFor(() =>
+    expect(actions).toEqual([
+      {
+        correlation_id: "workstation-issue-launch-ISS-01-4",
+        action_type: "issue-launch",
+        actor: "mission-commander",
+        expected_revision: 4,
+        target: { kind: "issue-slice", id: "ISS-01" },
+        issue_id: "ISS-01",
+        session_id: undefined,
+        agent_id: undefined,
+        reason: undefined,
+        allowed_paths: [],
+        command_policy: {},
+      },
+    ]),
+  );
+  expect(screen.getByText("Orchestrator validating workstation action.")).toBeVisible();
+  expect(await screen.findByText(/Orchestrator accepted workstation action/)).toBeVisible();
+  expect(screen.getByText("session-ISS-01-1")).toBeVisible();
+});
+
+test("changes model assignment from a workstation card with required agent and reason", async () => {
+  const assignmentSnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    revision: 6,
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_slices: [
+        {
+          issue_id: "ISS-01",
+          title: "Restore workspace session",
+          lifecycle: "Ready",
+          progress: "Launch eligible",
+          launch_eligible: true,
+          blockers: [],
+          accepted_boundary: {
+            what_to_build: "Restore the workspace session.",
+            acceptance_criteria: ["Canonical snapshot is visible."],
+            evidence_requirements: [],
+            source_path: ".agent/issues/01-restore.md",
+          },
+          sessions: [],
+          provenance: {
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+          model_assignment: {
+            agent_id: "qwen-coder-local",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+            availability: "available",
+            availability_reason: "",
+            operation_status: "idle",
+            failure: "",
+          },
+          evidence: {
+            state: "not-started",
+            changed_files: [],
+            commands_run: [],
+            test_results: "No evidence package recorded.",
+            risks: "",
+            artifact_links: [],
+          },
+          working_context_sources: [],
+        },
+      ],
+    },
+  };
+  const actions: unknown[] = [];
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => ({ kind: "ready", snapshot: assignmentSnapshot }),
+        submitWorkstationAction: async (request) => {
+          actions.push(request);
+          return {
+            kind: "acknowledged",
+            acknowledgement: {
+              correlation_id: request.correlation_id,
+              outcome: "acknowledged",
+              revision: 7,
+              action_type: "model-assignment-change",
+              issue_id: "ISS-01",
+              session_id: "",
+              effect_summary: "Mission Commander assigned ISS-01 to qwen3.6-27b.",
+            },
+          };
+        },
+      }}
+    />,
+  );
+
+  const cards = await screen.findByRole("region", { name: "Workstation Cards" });
+  const button = await within(cards).findByRole("button", {
+    name: "Change model assignment ISS-01",
+  });
+  expect(button).toBeDisabled();
+  fireEvent.change(within(cards).getByRole("textbox", { name: "Workstation action agent ISS-01" }), {
+    target: { value: "qwen3.6-27b" },
+  });
+  fireEvent.change(within(cards).getByRole("textbox", { name: "Workstation action reason ISS-01" }), {
+    target: { value: "Use the stronger local model." },
+  });
+  expect(button).toBeEnabled();
+  fireEvent.click(button);
+
+  await waitFor(() =>
+    expect(actions).toEqual([
+      {
+        correlation_id: "workstation-model-assignment-change-ISS-01-6",
+        action_type: "model-assignment-change",
+        actor: "mission-commander",
+        expected_revision: 6,
+        target: { kind: "issue-slice", id: "ISS-01" },
+        issue_id: "ISS-01",
+        session_id: undefined,
+        agent_id: "qwen3.6-27b",
+        reason: "Use the stronger local model.",
+        allowed_paths: [],
+        command_policy: {},
+      },
+    ]),
+  );
+  expect(await screen.findByText(/Orchestrator accepted workstation action/)).toBeVisible();
+});
+
 test("keeps expanded workstation navigation local to the side pane", async () => {
   const appendConsoleMessage = vi.fn();
   const workstationSnapshot: WorkspaceSnapshot = {
