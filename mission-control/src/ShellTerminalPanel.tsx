@@ -158,45 +158,7 @@ export function ShellTerminalPanel({
       </section>
       <section className="path-grants" aria-label="Additional Path Grants">
         <h3>Additional Path Grants</h3>
-        <div className="path-grant-form">
-          <label>
-            <span>Absolute path</span>
-            <input
-              aria-label="Grant path"
-              value={terminal.grantPath}
-              onChange={(event) => terminal.setGrantPath(event.target.value)}
-            />
-          </label>
-          <label>
-            <span>Access level</span>
-            <select
-              aria-label="Grant access level"
-              value={terminal.grantAccessLevel}
-              onChange={(event) => terminal.setGrantAccessLevel(event.target.value as "read" | "write")}
-            >
-              <option value="read">Read</option>
-              <option value="write">Write</option>
-            </select>
-          </label>
-          <label>
-            <span>Duration in seconds</span>
-            <input
-              type="number"
-              min="1"
-              step="1"
-              aria-label="Grant duration seconds"
-              value={terminal.grantDuration}
-              onChange={(event) => terminal.setGrantDuration(event.target.value)}
-            />
-          </label>
-          <button
-            type="button"
-            disabled={terminal.actionStatus?.state === "pending"}
-            onClick={() => void terminal.createGrant()}
-          >
-            Create Additional Path Grant
-          </button>
-        </div>
+        <p>Additional authority is requested inline from the Agent Console when a blocked action needs it.</p>
         {terminal.projection?.grants.length ? (
           terminal.projection.grants.map((grant) => {
             const expired = Date.parse(grant.expires_at) <= Date.now();

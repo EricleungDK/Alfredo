@@ -4,13 +4,13 @@
 
 ## Active Orchestration Context
 
-- **Captured For Run**: `UNKNOWN - must be set by current operator before planning`
-- **Current Mission Focus**: `TBD`
-- **Active Agent Focus**: `TBD`
-- **Model Assignments (active run)**: `TBD`
-- **Coordination State**: `TBD`
-- **Pending Blockers**: `TBD`
-- **Next Decisions / Actions**: `TBD`
+- **Captured For Run**: `2026-07-06 - implement .scratch/alfredo-console-first-workstation-redesign/issues/03-inline-approvals-and-contextual-path-grants.md`
+- **Current Mission Focus**: `Alfredo console-first workstation redesign, Issue 03: inline risky command approvals and contextual Additional Path Grant requests in the Agent Console.`
+- **Active Agent Focus**: `Codex implementing the Issue 03 vertical slice across React projection/tests first, then backend/transport only if the slice exposes missing contract support.`
+- **Model Assignments (active run)**: `Primary coding agent: Codex. No local model delegation planned for this cycle.`
+- **Coordination State**: `Issue 03 implementation is complete at the React projection seam. Current worktree is on main ahead of origin with a pre-existing modification in tests/test_albert_mvp.py; avoid mixing unrelated edits.`
+- **Pending Blockers**: `No active blocker for Issue 03 implementation after dependency Issue 02 is complete. Release-seam task 29 is assumed satisfied by the existing completed workstation/restart groundwork.`
+- **Next Decisions / Actions**: `Complete local code review, then commit the Issue 03 frontend slice without staging unrelated tests/test_albert_mvp.py changes.`
 
 If any field above is `TBD` or stale, do not infer scope from this file. Update this section immediately before planning or implementation.
 
@@ -99,6 +99,8 @@ Albert's tested local coding TUI MVP is implemented and verified.
 - Issue 13 governance transport evidence: the TypeScript decision and grant client tests and the real Rust/Python approval and grant-creation tests were each observed RED before implementation and GREEN afterward; `npm test -- --run workspace-client.test.ts` passes 24 tests, `npm run typecheck` passes, `python3 -m unittest tests.test_workspace_snapshot` passes 84 tests, and `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 24 Rust tests.
 - Command Deck Issue 13 is complete. The distinct Agent Console/Shell Terminal left lane preserves independent drafts and removes the inactive panel from the document tree; Terminal loads metadata without bytes, keeps immediate stdout/stderr in current-session React state, exposes the exact human/Frontier approval boundary, retains actionable failures without false success, and creates immutable bounded Additional Path Grants with explicit expiry state.
 - Issue 13 final evidence: `python3 -m unittest discover -s tests` passes 157 tests; `npm test -- --run` passes 69 tests; `npm run typecheck` passes; `npm run build` passes; `cargo fmt --manifest-path mission-control/src-tauri/Cargo.toml -- --check` passes; and `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 24 Rust tests.
+- Alfredo console-first workstation Issue 03 is complete. Human-required command approvals now appear as inline Agent Console prompts; blocked out-of-workspace command submissions raise contextual Additional Path Grant prompts with path, access, duration, reason, and affected action; grant approvals/denials append visible workstation/orchestrator turns; the Command Audit grant area is history-only rather than a standing default grant form.
+- Issue 03 final evidence: `python3 -m unittest discover -s tests` passes 180 tests with 1 skip; `npm test -- --run App.test.tsx` passes 57 tests; `npm test -- --run` passes 116 frontend tests; `npm run typecheck` passes; `npm run build` passes; `cargo fmt --manifest-path mission-control/src-tauri/Cargo.toml -- --check` passes; and `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 27 Rust tests.
 
 ## Current Model Registry
 

@@ -36,6 +36,7 @@ import {
 import { ShellTerminalPanel } from "./ShellTerminalPanel";
 import {
   useShellTerminal,
+  type ContextualPathGrantRequest,
   type ShellTerminalController,
   type ShellTerminalTranscriptEntry,
 } from "./use-shell-terminal";
@@ -1031,6 +1032,7 @@ interface WorkstationTranscriptTurn {
 interface CommandConsoleTurn {
   readonly id: string;
   readonly commandId: string;
+  readonly record: ShellTerminalCommandRecord | null;
   readonly command: string;
   readonly purpose: string;
   readonly workingDirectory: string;
@@ -1105,6 +1107,7 @@ function commandConsoleTurn(
   return {
     id: `command:${commandId}`,
     commandId,
+    record: record ?? null,
     command: record?.command ?? result?.command ?? "Unknown command",
     purpose: commandPurpose(record),
     workingDirectory: (record?.working_directory ?? fallbackWorkingDirectory) || "Current workspace",
@@ -1483,6 +1486,7 @@ function CommandDeck({
     ...workstationActionTurns,
   ];
   const commandConsoleTurns = buildCommandConsoleTurns(shellTerminal);
+  const contextualGrantRequest = shellTerminal.contextualGrantRequest;
   const activeExecutionState =
     actionStatus === "pending"
       ? "Action pending"
@@ -1556,8 +1560,31 @@ function CommandDeck({
                 </article>
               ))}
               {commandConsoleTurns.map((turn) => (
-                <CommandConsoleCard key={turn.id} turn={turn} />
+                <CommandConsoleCard
+                  key={turn.id}
+                  turn={turn}
+                  actionPending={shellTerminal.actionStatus?.state === "pending"}
+                  denialReason={shellTerminal.denialReasons[turn.commandId] ?? ""}
+                  onDenialReasonChange={(reason) =>
+                    shellTerminal.setDenialReason(turn.commandId, reason)
+                  }
+                  onDecide={(decision) => {
+                    if (turn.record) void shellTerminal.decide(turn.record, decision);
+                  }}
+                />
               ))}
+              {contextualGrantRequest ? (
+                <PathGrantConsolePrompt
+                  request={contextualGrantRequest}
+                  actionPending={shellTerminal.actionStatus?.state === "pending"}
+                  onGrant={() =>
+                    void shellTerminal.createGrantForRequest(contextualGrantRequest.requestId)
+                  }
+                  onDeny={() =>
+                    shellTerminal.denyGrantRequest(contextualGrantRequest.requestId)
+                  }
+                />
+              ) : null}
             </div>
 
             <div className="scope-card">
@@ -2022,9 +2049,24 @@ function CommandDeck({
   );
 }
 
-function CommandConsoleCard({ turn }: { readonly turn: CommandConsoleTurn }) {
+function CommandConsoleCard({
+  turn,
+  actionPending,
+  denialReason,
+  onDenialReasonChange,
+  onDecide,
+}: {
+  readonly turn: CommandConsoleTurn;
+  readonly actionPending: boolean;
+  readonly denialReason: string;
+  readonly onDenialReasonChange: (reason: string) => void;
+  readonly onDecide: (decision: "approve" | "deny") => void;
+}) {
   const [expanded, setExpanded] = useState(false);
   const fullOutput = [turn.stdout, turn.stderr].filter(Boolean).join("\n");
+  const showApprovalPrompt =
+    turn.status === "pending-approval" &&
+    (turn.classification === "human-required" || turn.classification === "frontier-approvable");
   return (
     <article className="command-console-card" data-outcome={turn.status}>
       <header>
@@ -2060,6 +2102,50 @@ function CommandConsoleCard({ turn }: { readonly turn: CommandConsoleTurn }) {
         </div>
       </dl>
       <p>{turn.summary}</p>
+      {showApprovalPrompt ? (
+        <div
+          className="command-approval-prompt"
+          role="group"
+          aria-label={`Approval prompt for ${turn.commandId}`}
+        >
+          <div>
+            <strong>Command approval required</strong>
+            <span>Access / {turn.accessLevel}</span>
+          </div>
+          <code>{turn.command}</code>
+          {turn.classification === "human-required" ? (
+            <div className="command-approval-prompt__actions">
+              <button
+                type="button"
+                aria-label={`Approve ${turn.commandId} inline`}
+                disabled={actionPending}
+                onClick={() => onDecide("approve")}
+              >
+                Approve
+              </button>
+              <label>
+                <span>Denial reason</span>
+                <input
+                  aria-label={`Inline denial reason ${turn.commandId}`}
+                  value={denialReason}
+                  onChange={(event) => onDenialReasonChange(event.target.value)}
+                />
+              </label>
+              <button
+                type="button"
+                aria-label={`Deny ${turn.commandId} inline`}
+                className="action--danger"
+                disabled={!denialReason.trim() || actionPending}
+                onClick={() => onDecide("deny")}
+              >
+                Deny
+              </button>
+            </div>
+          ) : (
+            <span>Frontier Model approval required before execution.</span>
+          )}
+        </div>
+      ) : null}
       <button
         type="button"
         aria-expanded={expanded}
@@ -2073,6 +2159,69 @@ function CommandConsoleCard({ turn }: { readonly turn: CommandConsoleTurn }) {
         <pre aria-label={`Full command output for ${turn.commandId}`}>{fullOutput}</pre>
       ) : null}
       <small>{turn.requester} / {turn.commandId}</small>
+    </article>
+  );
+}
+
+function PathGrantConsolePrompt({
+  request,
+  actionPending,
+  onGrant,
+  onDeny,
+}: {
+  readonly request: ContextualPathGrantRequest;
+  readonly actionPending: boolean;
+  readonly onGrant: () => void;
+  readonly onDeny: () => void;
+}) {
+  const resolved = request.status !== "pending";
+  return (
+    <article
+      className="path-grant-prompt"
+      data-outcome={request.status}
+      role="group"
+      aria-label={`Additional Path Grant request for ${request.path}`}
+    >
+      <header>
+        <div>
+          <span className="eyebrow">Additional Path Grant request</span>
+          <strong>{request.status === "pending" ? "Authority required" : request.status}</strong>
+        </div>
+      </header>
+      <p>{request.reason}</p>
+      <div className="path-grant-prompt__details">
+        <span>Path / {request.path}</span>
+        <span>Access / {request.accessLevel}</span>
+        <span>Duration / {request.durationSeconds} seconds</span>
+        <span>Affected action / {request.affectedAction}</span>
+      </div>
+      {!resolved ? (
+        <div className="path-grant-prompt__actions">
+          <button
+            type="button"
+            aria-label={`Grant ${request.accessLevel} access for ${request.path}`}
+            disabled={actionPending}
+            onClick={onGrant}
+          >
+            Grant access
+          </button>
+          <button
+            type="button"
+            className="action--danger"
+            aria-label={`Deny grant request for ${request.path}`}
+            disabled={actionPending}
+            onClick={onDeny}
+          >
+            Deny
+          </button>
+        </div>
+      ) : (
+        <small>
+          {request.status === "granted"
+            ? "Mission Commander granted this bounded authority."
+            : "Mission Commander denied this grant request."}
+        </small>
+      )}
     </article>
   );
 }

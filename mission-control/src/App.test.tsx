@@ -1233,7 +1233,152 @@ test("shows the Frontier approval boundary without false Mission Commander appro
   expect(screen.getByRole("button", { name: `Deny ${command.command_id}` })).toBeDisabled();
 });
 
-test("creates a bounded Additional Path Grant through Mission Commander authority", async () => {
+test("handles command approval and contextual path grant requests inline in the Agent Console", async () => {
+  const command = pendingTerminalCommand("human-required");
+  const grant = {
+    grant_id: "path-grant-000001",
+    correlation_id: "path-grant-inline-1",
+    path: "/external/docs",
+    access_level: "write" as const,
+    duration_seconds: 900,
+    granted_by: "mission-commander" as const,
+    granted_at: "2026-07-01T12:00:00Z",
+    expires_at: "2099-07-01T12:15:00Z",
+  };
+  let grantCreated = false;
+  const loadShellTerminal = vi.fn(async () => ({
+    kind: "shell-terminal" as const,
+    projection: {
+      schema_version: 1 as const,
+      revision: grantCreated ? 2 : 1,
+      commands: [command],
+      grants: grantCreated ? [grant] : [],
+    },
+  }));
+  const decideShellTerminalCommand = vi.fn(async () => ({
+    kind: "command-result" as const,
+    result: {
+      command_id: command.command_id,
+      correlation_id: command.correlation_id,
+      classification: command.classification,
+      status: "completed" as const,
+      exit_code: 0,
+      stdout: "pushed\n",
+      stderr: "",
+    },
+  }));
+  const submitShellTerminalCommand = vi.fn(async () => ({
+    kind: "command-rejected" as const,
+    code: "invalid-action",
+    message:
+      "Shell Terminal working directory is outside the workspace and has no active write Additional Path Grant.",
+  }));
+  const createAdditionalPathGrant = vi.fn(async () => {
+    grantCreated = true;
+    return { kind: "path-grant" as const, grant };
+  });
+  render(
+    <App
+      client={{
+        ...client,
+        loadShellTerminal,
+        decideShellTerminalCommand,
+        submitShellTerminalCommand,
+        createAdditionalPathGrant,
+      }}
+    />,
+  );
+  await screen.findByRole("heading", { name: "Command Deck Mission" });
+  await waitFor(() => expect(loadShellTerminal).toHaveBeenCalledTimes(1));
+
+  const transcript = screen.getByRole("region", { name: "Prompt Transcript" });
+  const approvalPrompt = await within(transcript).findByRole("group", {
+    name: `Approval prompt for ${command.command_id}`,
+  });
+  expect(within(approvalPrompt).getByText("git push origin main")).toBeVisible();
+  expect(within(approvalPrompt).getByText("Access / write")).toBeVisible();
+  fireEvent.click(within(approvalPrompt).getByRole("button", { name: `Approve ${command.command_id} inline` }));
+  expect(decideShellTerminalCommand).toHaveBeenCalledWith({
+    command_id: command.command_id,
+    decision: "approve",
+    actor: "mission-commander",
+    reason: "",
+  });
+  expect(await within(transcript).findByText(/Orchestrator accepted workstation action: Command completed/)).toBeVisible();
+
+  await openCommandAudit();
+  fireEvent.change(screen.getByRole("textbox", { name: "Command" }), {
+    target: { value: "touch report.md" },
+  });
+  fireEvent.change(screen.getByRole("textbox", { name: "Working directory" }), {
+    target: { value: "/external/docs" },
+  });
+  fireEvent.change(screen.getByRole("textbox", { name: "Requested paths" }), {
+    target: { value: "/external/docs/report.md" },
+  });
+  fireEvent.change(screen.getByRole("combobox", { name: "Access level" }), {
+    target: { value: "write" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Run command" }));
+  closeCommandAudit();
+
+  const grantPrompt = await within(transcript).findByRole("group", {
+    name: "Additional Path Grant request for /external/docs",
+  });
+  expect(within(grantPrompt).getByText("Path / /external/docs")).toBeVisible();
+  expect(within(grantPrompt).getByText("Access / write")).toBeVisible();
+  expect(within(grantPrompt).getByText("Duration / 900 seconds")).toBeVisible();
+  expect(within(grantPrompt).getByText("Affected action / touch report.md")).toBeVisible();
+  expect(within(grantPrompt).getByText(/no active write Additional Path Grant/)).toBeVisible();
+  expect(screen.queryByRole("textbox", { name: "Grant path" })).not.toBeInTheDocument();
+
+  fireEvent.click(within(grantPrompt).getByRole("button", { name: "Grant write access for /external/docs" }));
+  expect(createAdditionalPathGrant).toHaveBeenCalledWith({
+    correlation_id: expect.stringMatching(/^path-grant-/),
+    expected_revision: 1,
+    path: "/external/docs",
+    access_level: "write",
+    duration_seconds: 900,
+    requester: "mission-commander",
+  });
+  expect(await within(transcript).findByText(/Orchestrator accepted workstation action: Created path-grant-000001/)).toBeVisible();
+});
+
+test("shows denied contextual path grants as Agent Console outcomes", async () => {
+  const loadShellTerminal = vi.fn(async () => ({
+    kind: "shell-terminal" as const,
+    projection: { schema_version: 1 as const, revision: 1, commands: [], grants: [] },
+  }));
+  const submitShellTerminalCommand = vi.fn(async () => ({
+    kind: "command-rejected" as const,
+    code: "invalid-action",
+    message:
+      "Shell Terminal requested path is outside the workspace and has no active read Additional Path Grant: /external/notes.md",
+  }));
+  render(<App client={{ ...client, loadShellTerminal, submitShellTerminalCommand }} />);
+  await screen.findByRole("heading", { name: "Command Deck Mission" });
+  await openCommandAudit();
+  fireEvent.change(screen.getByRole("textbox", { name: "Command" }), {
+    target: { value: "cat /external/notes.md" },
+  });
+  fireEvent.change(screen.getByRole("textbox", { name: "Requested paths" }), {
+    target: { value: "/external/notes.md" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Run command" }));
+  closeCommandAudit();
+
+  const transcript = screen.getByRole("region", { name: "Prompt Transcript" });
+  const grantPrompt = await within(transcript).findByRole("group", {
+    name: "Additional Path Grant request for /external/notes.md",
+  });
+  fireEvent.click(within(grantPrompt).getByRole("button", { name: "Deny grant request for /external/notes.md" }));
+
+  expect(await within(transcript).findByText(/Mission Commander denied Additional Path Grant for \/external\/notes.md/)).toBeVisible();
+  expect(await within(transcript).findByText(/Orchestrator left command blocked/)).toBeVisible();
+  expect(within(grantPrompt).getByText("Mission Commander denied this grant request.")).toBeVisible();
+});
+
+test("keeps Additional Path Grants as contextual history instead of a standing form", async () => {
   const grant = {
     grant_id: "path-grant-000001",
     correlation_id: "path-grant-ui-1",
@@ -1244,47 +1389,24 @@ test("creates a bounded Additional Path Grant through Mission Commander authorit
     granted_at: "2026-07-01T12:00:00Z",
     expires_at: "2099-07-01T12:15:00Z",
   };
-  let created = false;
   const loadShellTerminal = vi.fn(async () => ({
     kind: "shell-terminal" as const,
     projection: {
       schema_version: 1 as const,
-      revision: created ? 2 : 1,
+      revision: 2,
       commands: [],
-      grants: created ? [grant] : [],
+      grants: [grant],
     },
   }));
-  const createAdditionalPathGrant = vi.fn(async () => {
-    created = true;
-    return { kind: "path-grant" as const, grant };
-  });
-  render(<App client={{ ...client, loadShellTerminal, createAdditionalPathGrant }} />);
+  render(<App client={{ ...client, loadShellTerminal }} />);
   await screen.findByRole("heading", { name: "Command Deck Mission" });
   await waitFor(() => expect(loadShellTerminal).toHaveBeenCalledTimes(1));
   await openCommandAudit();
   await waitFor(() => expect(loadShellTerminal).toHaveBeenCalledTimes(2));
 
-  fireEvent.change(screen.getByRole("textbox", { name: "Grant path" }), {
-    target: { value: "/external/docs" },
-  });
-  fireEvent.change(screen.getByRole("combobox", { name: "Grant access level" }), {
-    target: { value: "write" },
-  });
-  fireEvent.change(screen.getByRole("spinbutton", { name: "Grant duration seconds" }), {
-    target: { value: "900" },
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Create Additional Path Grant" }));
-
-  expect(createAdditionalPathGrant).toHaveBeenCalledWith({
-    correlation_id: expect.stringMatching(/^path-grant-/),
-    expected_revision: 1,
-    path: "/external/docs",
-    access_level: "write",
-    duration_seconds: 900,
-    requester: "mission-commander",
-  });
-  expect(await screen.findByText(/Workstation action: Mission Commander requested Create Additional Path Grant for \/external\/docs/)).toBeVisible();
-  expect(await screen.findByText(/Orchestrator accepted workstation action: Created path-grant-000001/)).toBeVisible();
+  expect(screen.queryByRole("textbox", { name: "Grant path" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Create Additional Path Grant" })).not.toBeInTheDocument();
+  expect(screen.getByText(/Additional authority is requested inline/)).toBeVisible();
   expect(await screen.findByText("/external/docs")).toBeVisible();
   expect(screen.getByText("write / 900 seconds")).toBeVisible();
 });

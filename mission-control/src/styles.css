@@ -130,6 +130,17 @@ h2 { font-size: 1.5rem; }
 .command-console-card dd { margin: 0.2rem 0 0; overflow-wrap: anywhere; font-size: 0.68rem; }
 .command-console-card p { color: #bdc5bd; font-size: 0.74rem; line-height: 1.45; }
 .command-console-card button { justify-self: start; border: 1px solid var(--line); background: var(--panel-raised); color: var(--ink); padding: 0.35rem 0.5rem; font-size: 0.62rem; }
+.command-approval-prompt, .path-grant-prompt { display: grid; gap: 0.65rem; padding: 0.75rem; border: 1px solid #9d7b2b; border-left: 2px solid #ffd166; background: #141207; }
+.command-approval-prompt > div:first-child, .path-grant-prompt header { display: flex; justify-content: space-between; gap: 0.7rem; align-items: flex-start; }
+.command-approval-prompt strong, .path-grant-prompt strong { color: #ffd166; }
+.command-approval-prompt__actions, .path-grant-prompt__actions { display: flex; flex-wrap: wrap; gap: 0.45rem; align-items: end; }
+.command-approval-prompt__actions label { display: grid; gap: 0.25rem; min-width: min(18rem, 100%); color: var(--muted); font-size: 0.58rem; text-transform: uppercase; }
+.command-approval-prompt__actions input { width: 100%; padding: 0.5rem; border: 1px solid var(--line); background: #050807; color: var(--ink); }
+.path-grant-prompt { margin: 0.8rem 0; }
+.path-grant-prompt[data-outcome="granted"] { border-color: #668719; border-left-color: var(--lime); background: #0d1408; }
+.path-grant-prompt[data-outcome="denied"] { border-color: var(--danger); border-left-color: var(--danger); background: #180a0a; }
+.path-grant-prompt p { margin: 0; }
+.path-grant-prompt__details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.4rem; color: #bdc5bd; font-size: 0.68rem; }
 .command-console-card pre { max-height: 18rem; margin: 0; padding: 0.7rem; background: #050807; color: var(--ink); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .command-console-card small { color: var(--muted); font-size: 0.62rem; overflow-wrap: anywhere; }
 .system-line { color: var(--cyan); }

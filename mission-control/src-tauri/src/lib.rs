@@ -3058,7 +3058,10 @@ None - can start immediately
         assert_eq!(acknowledgement.issue_id, "ISS-01");
         assert_eq!(acknowledgement.session_id, "session-ISS-01-1");
         assert_eq!(acknowledgement.revision, 2);
-        assert_eq!(snapshot.missions[0].sessions[0].session_id, "session-ISS-01-1");
+        assert_eq!(
+            snapshot.missions[0].sessions[0].session_id,
+            "session-ISS-01-1"
+        );
         fs::remove_dir_all(root).expect("fixture cleanup");
     }
 
