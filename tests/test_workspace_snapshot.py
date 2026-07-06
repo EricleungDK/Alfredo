@@ -125,7 +125,15 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(result.exit_code, 0)
         self.assertIn("usage:", result.stdout.lower())
         self.assertEqual(snapshots.snapshot().to_dict(), canonical_before)
-        self.assertEqual(ActivityJournalService(self.load_service()).inspect().entries, ())
+        restored_history = AgentConsoleHistoryService(self.load_service()).history()
+        restored_journal = ActivityJournalService(self.load_service()).inspect()
+        self.assertEqual(
+            [message.content for message in restored_history],
+            ["Shell Terminal command completed with exit code 0: terminal-command-000001."],
+        )
+        self.assertEqual(len(restored_journal.entries), 1)
+        self.assertEqual(restored_journal.entries[0].action_type, "shell-command-completed")
+        self.assertNotIn("usage:", restored_journal.entries[0].summary.lower())
 
     def test_shell_terminal_waits_for_frontier_approval_before_execution(self) -> None:
         snapshots = self.load_service()
@@ -3704,6 +3712,104 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(entry.action_type, "model-assignment-change")
         self.assertEqual(entry.actor, "mission-commander")
         self.assertIn("Use the release verification model.", entry.summary)
+
+    def test_release_transcript_and_journal_record_shell_decisions_without_raw_bytes(
+        self,
+    ) -> None:
+        snapshots = self.load_service()
+        terminal = ShellTerminalService(snapshots)
+        command = "python3 -c \"print('raw terminal byte should stay transient')\""
+
+        pending = terminal.submit(
+            correlation_id="release-terminal-command-1",
+            command=command,
+            working_directory=str(self.target_repo),
+            requested_paths=[],
+            requester="mission-commander",
+        )
+        denied = terminal.deny(
+            command_id=pending.command_id,
+            decider="mission-commander",
+            reason="Do not run this command during release verification.",
+        )
+        external = self.root / "release-grant"
+        external.mkdir()
+        grant = terminal.create_path_grant(
+            correlation_id="release-path-grant-1",
+            expected_revision=2,
+            path=str(external),
+            access_level="read",
+            duration_seconds=300,
+            requester="mission-commander",
+        )
+        approved_command = terminal.submit(
+            correlation_id="release-terminal-approved-1",
+            command=command,
+            working_directory=str(self.target_repo),
+            requested_paths=[],
+            requester="mission-commander",
+        )
+        approved = terminal.approve(
+            command_id=approved_command.command_id,
+            approver="mission-commander",
+        )
+
+        self.assertEqual(denied.status, "denied")
+        self.assertEqual(grant.grant_id, "path-grant-000001")
+        self.assertEqual(approved.status, "completed")
+        self.assertIn("raw terminal byte", approved.stdout)
+
+        restored_history = AgentConsoleHistoryService(self.load_service()).history()
+        restored_journal = ActivityJournalService(self.load_service()).inspect()
+
+        self.assertEqual(
+            [message.outcome for message in restored_history],
+            [
+                "pending",
+                "rejected",
+                "acknowledged",
+                "pending",
+                "acknowledged",
+            ],
+        )
+        history_text = "\n".join(message.content for message in restored_history)
+        self.assertIn("Shell Terminal command requires mission-commander approval", history_text)
+        self.assertIn("Mission Commander denied Shell Terminal command", history_text)
+        self.assertIn("Mission Commander granted read Additional Path Grant", history_text)
+        self.assertIn("Shell Terminal command completed with exit code 0", history_text)
+        self.assertNotIn("raw terminal byte should stay transient", history_text)
+
+        self.assertEqual(
+            [entry.action_type for entry in restored_journal.entries],
+            [
+                "shell-command-approval-requested",
+                "shell-command-denied",
+                "additional-path-grant-created",
+                "shell-command-approval-requested",
+                "shell-command-completed",
+            ],
+        )
+        self.assertEqual(
+            [entry.actor for entry in restored_journal.entries],
+            [
+                "orchestrator",
+                "mission-commander",
+                "mission-commander",
+                "orchestrator",
+                "orchestrator",
+            ],
+        )
+        journal_text = "\n".join(entry.summary for entry in restored_journal.entries)
+        self.assertIn("release-path-grant-1", journal_text)
+        self.assertNotIn("raw terminal byte should stay transient", journal_text)
+        self.assertIn(
+            "terminal-command-000002",
+            {
+                entity.entity_id
+                for entry in restored_journal.entries
+                for entity in entry.affected_entities
+            },
+        )
 
     def test_agent_console_history_preserves_all_distinct_outcomes_in_order(self) -> None:
         history = AgentConsoleHistoryService(self.load_service())

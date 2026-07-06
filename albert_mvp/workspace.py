@@ -356,6 +356,24 @@ class ShellTerminalService:
                 commands=[*terminal["commands"], record],
                 grants=terminal["grants"],
             )
+            required_approver = (
+                "frontier-model"
+                if classification == "frontier-approvable"
+                else "mission-commander"
+            )
+            ActivityJournalService(self._snapshots).record_shell_command_approval_requested(
+                correlation_id=correlation_id,
+                snapshot=snapshot,
+                command_record=record,
+                required_approver=required_approver,
+            )
+            AgentConsoleHistoryService(
+                self._snapshots
+            ).record_shell_command_approval_requested(
+                command_id=command_id,
+                classification=classification,
+                required_approver=required_approver,
+            )
             return ShellTerminalCommandResult(
                 command_id=command_id,
                 correlation_id=correlation_id,
@@ -417,6 +435,14 @@ class ShellTerminalService:
             revision=terminal["revision"] + 1,
             commands=terminal["commands"],
             grants=[*terminal["grants"], asdict(grant)],
+        )
+        ActivityJournalService(self._snapshots).record_additional_path_grant_created(
+            correlation_id=correlation_id,
+            snapshot=self._snapshots.snapshot(),
+            grant=grant,
+        )
+        AgentConsoleHistoryService(self._snapshots).record_additional_path_grant_created(
+            grant=grant,
         )
         return grant
 
@@ -505,6 +531,16 @@ class ShellTerminalService:
             commands=commands,
             grants=terminal["grants"],
         )
+        ActivityJournalService(self._snapshots).record_shell_command_denied(
+            correlation_id=record["correlation_id"],
+            snapshot=self._snapshots.snapshot(),
+            command_record=denied,
+            reason=reason.strip(),
+        )
+        AgentConsoleHistoryService(self._snapshots).record_shell_command_denied(
+            command_id=record["command_id"],
+            reason=reason.strip(),
+        )
         return ShellTerminalCommandResult(
             command_id=record["command_id"],
             correlation_id=record["correlation_id"],
@@ -546,6 +582,16 @@ class ShellTerminalService:
             revision=terminal["revision"] + 1,
             commands=commands,
             grants=terminal["grants"],
+        )
+        ActivityJournalService(self._snapshots).record_shell_command_finished(
+            correlation_id=record["correlation_id"],
+            snapshot=self._snapshots.snapshot(),
+            command_record=completed_record,
+        )
+        AgentConsoleHistoryService(self._snapshots).record_shell_command_finished(
+            command_id=record["command_id"],
+            status=status,
+            exit_code=completed.returncode,
         )
         return ShellTerminalCommandResult(
             command_id=record["command_id"],
@@ -749,6 +795,66 @@ class AgentConsoleHistoryService:
             content=f"Orchestrator accepted workstation action: {effect_summary}",
             outcome="acknowledged",
             source="orchestrator",
+        )
+
+    def record_shell_command_approval_requested(
+        self,
+        *,
+        command_id: str,
+        classification: str,
+        required_approver: str,
+    ) -> None:
+        self.append(
+            role="system",
+            content=(
+                f"Shell Terminal command requires {required_approver} approval: "
+                f"{command_id} ({classification})."
+            ),
+            outcome="pending",
+            source="orchestrator",
+        )
+
+    def record_shell_command_denied(
+        self,
+        *,
+        command_id: str,
+        reason: str,
+    ) -> None:
+        self.append(
+            role="user",
+            content=f"Mission Commander denied Shell Terminal command {command_id}: {reason}",
+            outcome="rejected",
+            source="mission-commander",
+        )
+
+    def record_shell_command_finished(
+        self,
+        *,
+        command_id: str,
+        status: str,
+        exit_code: int,
+    ) -> None:
+        self.append(
+            role="system",
+            content=f"Shell Terminal command {status} with exit code {exit_code}: {command_id}.",
+            outcome="acknowledged",
+            source="orchestrator",
+        )
+
+    def record_additional_path_grant_created(
+        self,
+        *,
+        grant: AdditionalPathGrant,
+    ) -> None:
+        self.append(
+            role="user",
+            content=(
+                f"Mission Commander granted {grant.access_level} Additional Path Grant "
+                f"{grant.grant_id} for {grant.path} for {grant.duration_seconds} seconds "
+                f"until {grant.expires_at}."
+            ),
+            outcome="acknowledged",
+            source="mission-commander",
         )
 
     def history(self) -> tuple[AgentConsoleMessage, ...]:
@@ -3314,6 +3420,122 @@ class ActivityJournalService:
             correlation_id=correlation_id,
         )
 
+    def record_shell_command_approval_requested(
+        self,
+        *,
+        correlation_id: str,
+        snapshot: WorkspaceSnapshot,
+        command_record: dict[str, Any],
+        required_approver: str,
+    ) -> ActivityJournalEntry:
+        return self._append(
+            actor="orchestrator",
+            action_type="shell-command-approval-requested",
+            summary=(
+                f"Orchestrator requested {required_approver} approval for "
+                f"Shell Terminal command {command_record['command_id']}."
+            ),
+            affected_entities=self._shell_command_entities(
+                snapshot=snapshot,
+                command_record=command_record,
+            ),
+            evidence_links=(),
+            correlation_id=correlation_id,
+        )
+
+    def record_shell_command_denied(
+        self,
+        *,
+        correlation_id: str,
+        snapshot: WorkspaceSnapshot,
+        command_record: dict[str, Any],
+        reason: str,
+    ) -> ActivityJournalEntry:
+        return self._append(
+            actor="mission-commander",
+            action_type="shell-command-denied",
+            summary=(
+                f"Mission Commander denied Shell Terminal command "
+                f"{command_record['command_id']}: {reason}"
+            ),
+            affected_entities=self._shell_command_entities(
+                snapshot=snapshot,
+                command_record=command_record,
+            ),
+            evidence_links=(),
+            correlation_id=correlation_id,
+        )
+
+    def record_shell_command_finished(
+        self,
+        *,
+        correlation_id: str,
+        snapshot: WorkspaceSnapshot,
+        command_record: dict[str, Any],
+    ) -> ActivityJournalEntry:
+        status = command_record["status"]
+        action_type = "shell-command-completed" if status == "completed" else "shell-command-failed"
+        return self._append(
+            actor="orchestrator",
+            action_type=action_type,
+            summary=(
+                f"Orchestrator recorded Shell Terminal command "
+                f"{command_record['command_id']} {status} with exit code "
+                f"{command_record['exit_code']}."
+            ),
+            affected_entities=self._shell_command_entities(
+                snapshot=snapshot,
+                command_record=command_record,
+            ),
+            evidence_links=(),
+            correlation_id=correlation_id,
+        )
+
+    def record_additional_path_grant_created(
+        self,
+        *,
+        correlation_id: str,
+        snapshot: WorkspaceSnapshot,
+        grant: AdditionalPathGrant,
+    ) -> ActivityJournalEntry:
+        active = snapshot.active_mission
+        entities = [
+            ActivityAffectedEntity(
+                entity_type="workspace-session",
+                entity_id=snapshot.workspace_session.id,
+                label=snapshot.workspace_session.id,
+            )
+        ]
+        if active is not None:
+            entities.append(
+                ActivityAffectedEntity(
+                    entity_type="mission",
+                    entity_id=active.id,
+                    label=active.title,
+                    href=f"app-local://missions/{active.id}",
+                )
+            )
+        entities.append(
+            ActivityAffectedEntity(
+                entity_type="additional-path-grant",
+                entity_id=grant.grant_id,
+                label=grant.path,
+                href=f"app-local://workspace/shell-terminal#grant-{grant.grant_id}",
+            )
+        )
+        return self._append(
+            actor="mission-commander",
+            action_type="additional-path-grant-created",
+            summary=(
+                f"Mission Commander created {grant.access_level} Additional Path Grant "
+                f"{grant.grant_id} for {grant.path} for {grant.duration_seconds} seconds "
+                f"via {correlation_id}."
+            ),
+            affected_entities=tuple(entities),
+            evidence_links=(),
+            correlation_id=correlation_id,
+        )
+
     def record_local_agent_evidence(
         self,
         mission_id: str,
@@ -3374,6 +3596,42 @@ class ActivityJournalService:
             evidence_links=evidence_links,
             correlation_id=f"evidence:{session.session_id}",
         )
+
+    @staticmethod
+    def _shell_command_entities(
+        *,
+        snapshot: WorkspaceSnapshot,
+        command_record: dict[str, Any],
+    ) -> tuple[ActivityAffectedEntity, ...]:
+        active = snapshot.active_mission
+        entities = [
+            ActivityAffectedEntity(
+                entity_type="workspace-session",
+                entity_id=snapshot.workspace_session.id,
+                label=snapshot.workspace_session.id,
+            )
+        ]
+        if active is not None:
+            entities.append(
+                ActivityAffectedEntity(
+                    entity_type="mission",
+                    entity_id=active.id,
+                    label=active.title,
+                    href=f"app-local://missions/{active.id}",
+                )
+            )
+        entities.append(
+            ActivityAffectedEntity(
+                entity_type="shell-command",
+                entity_id=command_record["command_id"],
+                label=command_record["classification"],
+                href=(
+                    "app-local://workspace/shell-terminal#"
+                    f"{command_record['command_id']}"
+                ),
+            )
+        )
+        return tuple(entities)
 
     def _append(
         self,
