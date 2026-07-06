@@ -1518,7 +1518,7 @@ function CommandDeck({
               </section>
             ) : null}
 
-            <div className="prompt-composer-dock" aria-label="Prompt Composer">
+            <div className="prompt-composer-dock" role="region" aria-label="Prompt Composer">
               <div className="prompt-status-line" aria-label="Prompt status line">
                 <span role="status" aria-label="Connection status">
                   Connection {connectionStatus[0].toUpperCase() + connectionStatus.slice(1)}
@@ -1528,7 +1528,9 @@ function CommandDeck({
                 <span>Scope {snapshot.conversation_scope.label}</span>
                 <span>Workspace {snapshot.workspace_session.workspace_path}</span>
                 <span>Runtime {launchContext?.runtime_root || "backend default"}</span>
-                <span>Execution {activeExecutionState}</span>
+                <span role="status" aria-label="Execution status" aria-live="polite">
+                  Execution {activeExecutionState}
+                </span>
                 {launchContext?.recent_workspaces.length ? (
                   <span>{launchContext.recent_workspaces.length} recent workspaces</span>
                 ) : null}
@@ -2073,21 +2075,38 @@ function WorkstationCard({
           }
         : null;
   const queueActionPending = matchingActionState?.state === "pending";
+  const cardDomId = workstationDomId(card.id);
+  const cardTitleId = `${cardDomId}-title`;
+  const cardSummaryId = `${cardDomId}-summary`;
+  const cardStatusDescriptionId = `${cardDomId}-status-description`;
+  const cardDetailId = `${cardDomId}-detail`;
   return (
     <article
       className="workstation-card"
       data-attention={card.attention}
       data-tone={card.tone}
       data-pinned={pinned}
+      tabIndex={0}
+      aria-labelledby={cardTitleId}
+      aria-describedby={cardSummaryId}
     >
+      <p id={cardSummaryId} className="sr-only">
+        {workstationCardSummary(card)}
+      </p>
       <header>
         <div>
           <span className="eyebrow">{card.missionTitle}</span>
-          <h3>{card.name}</h3>
+          <h3 id={cardTitleId}>{card.name}<span className="sr-only"> workstation card</span></h3>
           <small>{card.sessionId ?? card.issueId ?? card.missionId}</small>
         </div>
-        <span className={card.attention ? "status status--ready" : "status"}>
+        <span
+          className={card.attention ? "status status--ready" : "status"}
+          aria-describedby={cardStatusDescriptionId}
+        >
           {card.status}
+        </span>
+        <span id={cardStatusDescriptionId} className="sr-only">
+          {workstationStatusDescription(card.status)}
         </span>
       </header>
       <p>{card.currentTask}</p>
@@ -2131,6 +2150,8 @@ function WorkstationCard({
         <button
           type="button"
           aria-label={`${expanded ? "Collapse" : "Expand"} ${card.name}`}
+          aria-expanded={expanded}
+          aria-controls={cardDetailId}
           onClick={onToggleExpanded}
         >
           {expanded ? "Collapse" : "Expand"}
@@ -2138,6 +2159,7 @@ function WorkstationCard({
         <button
           type="button"
           aria-label={`${pinned ? "Unpin" : "Pin"} ${card.name}`}
+          aria-pressed={pinned}
           onClick={onTogglePinned}
         >
           {pinned ? "Unpin" : "Pin"}
@@ -2174,20 +2196,34 @@ function WorkstationCard({
                 Boolean(action.requiresReason && !queueReason.trim()) ||
                 !action.itemId ||
                 !action.decision;
+              const disabledDescription =
+                disabled && action.itemId
+                  ? workstationQueueActionDisabledDescription(action, queueReason, queueActionPending)
+                  : null;
+              const helpId = disabledDescription
+                ? `${workstationDomId(`${action.itemId}:${action.decision ?? action.label}`)}-help`
+                : undefined;
               return (
-                <button
-                  key={`${action.itemId}:${action.decision}`}
-                  type="button"
-                  aria-label={`${action.label} ${action.itemId}`}
-                  disabled={disabled}
-                  className={action.decision === "reject" ? "action--danger" : undefined}
-                  onClick={() => {
-                    if (!action.itemId || !action.decision) return;
-                    onQueueDecision(action.itemId, action.decision, queueReason);
-                  }}
-                >
-                  {action.label}
-                </button>
+                <span className="workstation-card__action-wrap" key={`${action.itemId}:${action.decision}`}>
+                  {disabledDescription ? (
+                    <small id={helpId} className="workstation-card__action-help">
+                      {disabledDescription}
+                    </small>
+                  ) : null}
+                  <button
+                    type="button"
+                    aria-label={`${action.label} ${action.itemId}`}
+                    aria-describedby={helpId}
+                    disabled={disabled}
+                    className={action.decision === "reject" ? "action--danger" : undefined}
+                    onClick={() => {
+                      if (!action.itemId || !action.decision) return;
+                      onQueueDecision(action.itemId, action.decision, queueReason);
+                    }}
+                  >
+                    {action.label}
+                  </button>
+                </span>
               );
             })}
           </div>
@@ -2201,6 +2237,13 @@ function WorkstationCard({
             const draft = workstationActionDrafts[key] ?? { reason: "", agentId: "" };
             const pending = matchingActionState?.state === "pending";
             const needsAgent = action.actionType === "model-assignment-change";
+            const disabledDescription = workstationActionDisabledDescription(
+              action,
+              targetId,
+              draft,
+              pending,
+            );
+            const helpId = disabledDescription ? `${workstationDomId(key)}-help` : undefined;
             const disabled =
               pending ||
               Boolean(action.disabledReason) ||
@@ -2243,12 +2286,18 @@ function WorkstationCard({
                 <button
                   type="button"
                   aria-label={`${action.label} ${targetId}`}
+                  aria-describedby={helpId}
                   disabled={disabled}
                   className={action.actionType === "session-cancel" ? "action--danger" : undefined}
                   onClick={() => onWorkstationAction(action, draft)}
                 >
                   {action.label}
                 </button>
+                {disabledDescription ? (
+                  <small id={helpId} className="workstation-card__action-help">
+                    {disabledDescription}
+                  </small>
+                ) : null}
               </div>
             );
           })}
@@ -2256,7 +2305,11 @@ function WorkstationCard({
       ) : null}
 
       {expanded ? (
-        <section className="workstation-card-detail" aria-label={`${card.name} operational detail`}>
+        <section
+          id={cardDetailId}
+          className="workstation-card-detail"
+          aria-label={`${card.name} operational detail`}
+        >
           <div className="workstation-card-detail__section">
             <h4>Tool Activity</h4>
             {card.detail.toolActivity.length === 0 ? (
@@ -2394,6 +2447,83 @@ function WorkstationCard({
       ) : null}
     </article>
   );
+}
+
+function workstationDomId(value: string): string {
+  return `workstation-${value.replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
+}
+
+function workstationCardSummary(card: WorkstationCardProjection): string {
+  const blockers = card.approvalBlockers.length
+    ? ` Approval blockers: ${card.approvalBlockers.map(workstationSentence).join(" ")}`
+    : "";
+  return `${workstationSentence(card.status)} ${workstationSentence(card.currentTask)} Next action: ${workstationSentence(card.nextAction)}${blockers} Last activity: ${workstationSentence(card.lastActivity)}`;
+}
+
+const WORKSTATION_STATUS_DESCRIPTIONS: Record<WorkstationCardProjection["status"], string> = {
+  "waiting-approval": "Waiting for approval. Resolve the visible approval blocker before work can continue.",
+  blocked: "Blocked work needs a recovery decision before progress can continue.",
+  failed: "Failed work needs review, repair, retry, or human escalation.",
+  reviewing: "Review is in progress. Monitor the review workspace for the next decision.",
+  "review-ready": "Evidence is ready for review. Open Review Workspace for acceptance or repair.",
+  done: "Work is complete. Review accepted evidence or activity history if needed.",
+  running: "Running work is active. Monitor progress and preserve the prompt workflow.",
+  thinking: "The agent is preparing or thinking. Monitor progress without taking action yet.",
+};
+
+function workstationStatusDescription(status: WorkstationCardProjection["status"]): string {
+  return WORKSTATION_STATUS_DESCRIPTIONS[status];
+}
+
+function workstationQueueActionDisabledDescription(
+  action: WorkstationGovernedAction,
+  reason: string,
+  pending: boolean,
+): string | null {
+  const pendingDescription = workstationPendingActionDescription(action.label, pending);
+  if (pendingDescription) return pendingDescription;
+  if (action.requiresReason && !reason.trim() && action.itemId) {
+    return workstationRequiredInputDescription(action.label, action.itemId, "a decision reason");
+  }
+  if (!action.itemId || !action.decision) return `${action.label} is unavailable from the current queue state.`;
+  return null;
+}
+
+function workstationActionDisabledDescription(
+  action: WorkstationGovernedAction,
+  targetId: string,
+  draft: WorkstationActionDraftState,
+  pending: boolean,
+): string | null {
+  const pendingDescription = workstationPendingActionDescription(action.label, pending);
+  if (pendingDescription) return pendingDescription;
+  if (action.disabledReason) {
+    return action.recoveryPath
+      ? `${action.disabledReason} ${action.recoveryPath}`
+      : action.disabledReason;
+  }
+  if (!targetId) return `${action.label} is unavailable from the current workstation state.`;
+  if (action.requiresReason && !draft.reason.trim()) {
+    return workstationRequiredInputDescription(action.label, targetId, "a reason");
+  }
+  if (action.actionType === "model-assignment-change" && !draft.agentId.trim()) {
+    return workstationRequiredInputDescription(action.label, targetId, "an agent id");
+  }
+  return null;
+}
+
+function workstationPendingActionDescription(label: string, pending: boolean): string | null {
+  return pending ? `${label} is disabled while the Orchestrator validates the current action.` : null;
+}
+
+function workstationRequiredInputDescription(label: string, targetId: string, inputPhrase: string): string {
+  return `Enter ${inputPhrase} to enable ${label} for ${targetId}.`;
+}
+
+function workstationSentence(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
 function isExecutableWorkstationAction(

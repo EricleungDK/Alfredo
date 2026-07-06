@@ -1,4 +1,6 @@
+/// <reference types="node" />
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { readFileSync } from "node:fs";
 import { App } from "./App";
 import type {
   AgentConsoleMessageRequest,
@@ -48,9 +50,53 @@ const client: WorkspaceClient = {
   loadSnapshot: async () => ({ kind: "ready", snapshot }),
 };
 
+const stylesSource = readFileSync(`${process.cwd()}/src/styles.css`, "utf8");
+
 beforeEach(() => {
   window.localStorage.clear();
 });
+
+function cssVariable(name: string): string {
+  const match = stylesSource.match(new RegExp(`--${name}:\\s*(#[0-9a-fA-F]{6})`));
+  if (!match) throw new Error(`Missing CSS variable --${name}`);
+  return match[1];
+}
+
+function cssRootColor(property: string): string {
+  return cssRuleColor(":root", property);
+}
+
+function cssRuleColor(selector: string, property: string): string {
+  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const blocks = stylesSource.matchAll(new RegExp(`${escapedSelector}\\s*\\{([^}]*)\\}`, "g"));
+  for (const block of blocks) {
+    const propertyMatch = block[1].match(new RegExp(`${property}:\\s*(#[0-9a-fA-F]{6})`));
+    if (propertyMatch) return propertyMatch[1];
+  }
+  throw new Error(`Missing CSS color ${property} in ${selector}`);
+}
+
+function contrastRatio(foreground: string, background: string): number {
+  const [lighter, darker] = [relativeLuminance(foreground), relativeLuminance(background)].sort(
+    (left, right) => right - left,
+  );
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function relativeLuminance(hex: string): number {
+  const value = Number.parseInt(hex.slice(1), 16);
+  const [red, green, blue] = [
+    (value >> 16) & 255,
+    (value >> 8) & 255,
+    value & 255,
+  ].map((channel) => {
+    const normalized = channel / 255;
+    return normalized <= 0.03928
+      ? normalized / 12.92
+      : ((normalized + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
 
 test("opens to a prompt-dominant workstation with Agent Workstations beside it", async () => {
   const workstationSnapshot: WorkspaceSnapshot = {
@@ -1339,6 +1385,396 @@ test("exposes named landmarks and labelled controls in both side-pane modes", as
   for (const control of document.querySelectorAll("button, input, select, textarea, a[href]")) {
     expect(control).toHaveAccessibleName();
   }
+});
+
+test("exposes workstation cards as keyboard-reachable accessible summaries", async () => {
+  const workstationSnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    revision: 12,
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_slices: [
+        {
+          issue_id: "ISS-01",
+          title: "Validate Alfredo accessibility",
+          lifecycle: "Approved",
+          progress: "Agent is streaming responsive fixes.",
+          launch_eligible: false,
+          blockers: [],
+          accepted_boundary: {
+            what_to_build: "Validate workstation accessibility.",
+            acceptance_criteria: ["Card summaries are understandable."],
+            evidence_requirements: ["Accessibility contract test."],
+            source_path: ".agent/issues/28-validate-alfredo-accessibility-and-responsive-use.md",
+          },
+          sessions: [
+            {
+              session_id: "session-ISS-01-1",
+              assigned_agent: "qwen-coder-local",
+              role: "local-agent",
+              provider: "ollama",
+              model: "qwen3.6:27b",
+              status: "running",
+              stale: false,
+              disconnected: false,
+              operation_status: "streaming",
+              failure: "",
+            },
+          ],
+          provenance: {
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+          model_assignment: {
+            agent_id: "qwen-coder-local",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+            availability: "available",
+            availability_reason: "",
+            operation_status: "running",
+            failure: "",
+          },
+          evidence: {
+            state: "missing",
+            changed_files: ["mission-control/src/App.tsx"],
+            commands_run: ["npm test -- App.test.tsx"],
+            test_results: "Accessibility test is red.",
+            risks: "Low-vision readability requires human validation.",
+            artifact_links: ["app-local://evidence/session-ISS-01-1"],
+          },
+          working_context_sources: [],
+        },
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 3,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ISS-01-1",
+            issue_id: "ISS-01",
+            assigned_agent: "qwen-coder-local",
+            status: "running",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+        ],
+        attention: [],
+      },
+    ],
+  };
+  const originalWidth = window.innerWidth;
+  try {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 390 });
+    fireEvent(window, new Event("resize"));
+    render(<App client={{ loadSnapshot: async () => ({ kind: "ready", snapshot: workstationSnapshot }) }} />);
+
+    expect(await screen.findByRole("region", { name: "Prompt Composer" })).toBeVisible();
+    expect(screen.getByRole("textbox", { name: "Message Alfredo" })).toBeVisible();
+    expect(screen.getByRole("status", { name: "Execution status" })).toHaveTextContent(
+      "Execution Session running",
+    );
+
+    const cards = screen.getByRole("region", { name: "Workstation Cards" });
+    const card = within(cards).getByRole("article", { name: "qwen-coder-local workstation card" });
+    card.focus();
+    expect(card).toHaveFocus();
+    expect(card).toHaveAccessibleDescription(
+      /running\. Validate Alfredo accessibility\. Next action: Agent is streaming responsive fixes\./,
+    );
+    expect(within(card).getByText("running")).toHaveAccessibleDescription(
+      "Running work is active. Monitor progress and preserve the prompt workflow.",
+    );
+
+    const expand = within(card).getByRole("button", { name: "Expand qwen-coder-local" });
+    expect(expand).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(expand);
+    expect(expand).toHaveAttribute("aria-expanded", "true");
+    expect(
+      within(card).getByRole("button", { name: "Open diff mission-control/src/App.tsx" }),
+    ).toBeVisible();
+
+    const cancel = within(card).getByRole("button", { name: "Cancel session session-ISS-01-1" });
+    expect(cancel).toBeDisabled();
+    expect(cancel).toHaveAccessibleDescription(
+      "Enter a reason to enable Cancel session for session-ISS-01-1.",
+    );
+  } finally {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: originalWidth });
+    fireEvent(window, new Event("resize"));
+  }
+});
+
+test("keeps critical workstation decisions reachable at 520px", async () => {
+  const queueItem = {
+    item_id: "delegation-command-deck-ISS-02",
+    mission_id: "command-deck",
+    item_type: "ad-hoc-delegation" as const,
+    status: "pending" as const,
+    source: "agent-console",
+    requested_action: "Approve ISS-02 delegation",
+    affected_boundary: "launch-boundary",
+    consequence: "Approval launches a local agent session.",
+    issue_id: "ADHOC-000001",
+    proposed_changes: {},
+  };
+  const constrainedSnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    revision: 12,
+    operations_view: "review-workspace",
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_slices: [
+        {
+          issue_id: "ISS-01",
+          title: "Review responsive workstation evidence",
+          lifecycle: "Ready",
+          progress: "Evidence package ready for review.",
+          launch_eligible: false,
+          blockers: [],
+          accepted_boundary: {
+            what_to_build: "Review workstation accessibility evidence.",
+            acceptance_criteria: ["Review actions remain reachable."],
+            evidence_requirements: ["Review Workspace decision controls."],
+            source_path: ".agent/issues/28-validate-alfredo-accessibility-and-responsive-use.md",
+          },
+          sessions: [
+            {
+              session_id: "session-ISS-01-1",
+              assigned_agent: "review-agent",
+              role: "local-agent",
+              provider: "ollama",
+              model: "qwen3.6:27b",
+              status: "evidence-ready",
+              stale: false,
+              disconnected: false,
+              operation_status: "completed",
+              failure: "",
+            },
+          ],
+          provenance: {
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+          model_assignment: {
+            agent_id: "review-agent",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+            availability: "available",
+            availability_reason: "",
+            operation_status: "completed",
+            failure: "",
+          },
+          evidence: {
+            state: "ready",
+            changed_files: ["mission-control/src/App.tsx"],
+            commands_run: ["npm test -- App.test.tsx"],
+            test_results: "Accessibility contract passed.",
+            risks: "Human reviewer still needs to inspect zoom and low-vision readability.",
+            artifact_links: ["app-local://evidence/session-ISS-01-1"],
+          },
+          working_context_sources: [],
+        },
+        {
+          issue_id: "ISS-03",
+          title: "Recover stale workstation state",
+          lifecycle: "Approved",
+          progress: "Retry requires a fresh reason.",
+          launch_eligible: false,
+          blockers: [],
+          accepted_boundary: {
+            what_to_build: "Recover stale state.",
+            acceptance_criteria: ["Stale failures are understandable."],
+            evidence_requirements: [],
+            source_path: ".agent/issues/28-validate-alfredo-accessibility-and-responsive-use.md",
+          },
+          sessions: [
+            {
+              session_id: "session-ISS-03-1",
+              assigned_agent: "repair-agent",
+              role: "local-agent",
+              provider: "ollama",
+              model: "qwen3.6:27b",
+              status: "failed",
+              stale: true,
+              disconnected: false,
+              operation_status: "failed",
+              failure: "Stale state: workspace revision changed; refresh before retry.",
+            },
+          ],
+          provenance: {
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+          model_assignment: {
+            agent_id: "repair-agent",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+            availability: "available",
+            availability_reason: "",
+            operation_status: "failed",
+            failure: "Stale state: workspace revision changed; refresh before retry.",
+          },
+          evidence: {
+            state: "missing",
+            changed_files: [],
+            commands_run: [],
+            test_results: "",
+            risks: "Stale snapshot needs recovery.",
+            artifact_links: [],
+          },
+          working_context_sources: [],
+        },
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 3,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ISS-01-1",
+            issue_id: "ISS-01",
+            assigned_agent: "review-agent",
+            status: "evidence-ready",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+          {
+            session_id: "session-ISS-03-1",
+            issue_id: "ISS-03",
+            assigned_agent: "repair-agent",
+            status: "failed",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+        ],
+        attention: [
+          {
+            attention_id: "delegation-command-deck-ISS-02",
+            mission_id: "command-deck",
+            kind: "delegation-approval",
+            label: "ISS-02 delegation approval required",
+            queue_link: "workspace-queue#delegation-command-deck-ISS-02",
+          },
+        ],
+      },
+    ],
+  };
+  const reviewProjection: ReviewWorkspaceProjection = {
+    schema_version: 1,
+    revision: 12,
+    mission_id: "command-deck",
+    items: [
+      {
+        mission_id: "command-deck",
+        issue_id: "ISS-01",
+        issue_title: "Review responsive workstation evidence",
+        session_id: "session-ISS-01-1",
+        assigned_agent: "review-agent",
+        status: "evidence-ready",
+        lifecycle: "Ready",
+        evidence_complete: true,
+        missing_evidence: [],
+        can_accept: true,
+        evidence: {
+          changed_files: ["mission-control/src/App.tsx"],
+          diff_summary: "Added workstation accessibility hardening.",
+          commands_run: ["npm test -- App.test.tsx"],
+          test_results: "Accessibility contract passed.",
+          risks: "Human reviewer still needs to inspect zoom and low-vision readability.",
+          proposed_context_updates: "",
+          artifact_links: ["app-local://evidence/session-ISS-01-1"],
+        },
+        visibility_limitations: [],
+      },
+    ],
+  };
+  const originalWidth = window.innerWidth;
+  try {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: 520 });
+    fireEvent(window, new Event("resize"));
+    render(
+      <App
+        client={{
+          loadSnapshot: async () => ({ kind: "ready", snapshot: constrainedSnapshot }),
+          loadWorkspaceQueue: async () => ({
+            kind: "workspace-queue",
+            projection: {
+              schema_version: 1,
+              revision: 12,
+              items: [queueItem],
+              groups: [
+                {
+                  group_id: "ad-hoc-delegation:command-deck",
+                  item_type: "ad-hoc-delegation",
+                  mission_id: "command-deck",
+                  item_count: 1,
+                  items: [queueItem],
+                },
+              ],
+            },
+          }),
+          loadReviewWorkspace: async () => ({ kind: "review-workspace", projection: reviewProjection }),
+        }}
+      />,
+    );
+
+    const prompt = await screen.findByRole("main", { name: "Prompt Workstation" });
+    const cards = await screen.findByRole("region", { name: "Workstation Cards" });
+    expect(prompt.compareDocumentPosition(cards) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    expect(screen.getByRole("region", { name: "Prompt Composer" })).toBeVisible();
+    expect(within(cards).getByRole("button", { name: "Approve delegation-command-deck-ISS-02" })).toBeEnabled();
+
+    const failedCard = within(cards).getByRole("article", { name: "repair-agent workstation card" });
+    expect(failedCard).toHaveAccessibleDescription(/Stale state: workspace revision changed; refresh before retry\./);
+    expect(within(failedCard).getByText("failed", { selector: ".status" })).toHaveAccessibleDescription(
+      "Failed work needs review, repair, retry, or human escalation.",
+    );
+
+    const reviewWorkspace = await screen.findByRole("region", { name: "Review Workspace" });
+    expect(within(reviewWorkspace).getByRole("button", { name: "Accept session-ISS-01-1" })).toBeEnabled();
+    expect(within(reviewWorkspace).getByRole("button", { name: "Request repair session-ISS-01-1" })).toBeDisabled();
+    expect(within(reviewWorkspace).getByRole("button", { name: "Escalate session-ISS-01-1" })).toBeEnabled();
+  } finally {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: originalWidth });
+    fireEvent(window, new Event("resize"));
+  }
+});
+
+test("audits workstation contrast tokens and reduced-motion CSS", () => {
+  const pairs = [
+    ["ink/base", cssVariable("ink"), cssRootColor("background")],
+    ["muted/card", cssVariable("muted"), cssRuleColor(".workstation-card", "background")],
+    ["body/card", cssRuleColor(".workstation-card p", "color"), cssRuleColor(".workstation-card", "background")],
+    ["cyan/control", cssVariable("cyan"), "#0a0f0d"],
+    ["lime/control", cssVariable("lime"), "#0a0f0d"],
+    ["warning/pending", cssRuleColor(".workstation-card__action-help", "color"), cssRuleColor(".workstation-pending", "background")],
+    ["danger/action", "#ffb4ad", cssRuleColor(".action--danger", "background")],
+    ["focus/base", cssVariable("focus"), "#050807"],
+  ] as const;
+
+  for (const [label, foreground, background] of pairs) {
+    expect(contrastRatio(foreground, background), label).toBeGreaterThanOrEqual(4.5);
+  }
+  expect(stylesSource).toMatch(/@media \(prefers-reduced-motion: reduce\)/);
+  expect(stylesSource).toMatch(/animation:\s*none\s*!important/);
+  expect(stylesSource).toMatch(/transition:\s*none\s*!important/);
+  expect(stylesSource).toMatch(/@media \(max-width: 520px\)/);
 });
 
 test("restores the acknowledged Operations Workspace view", async () => {
