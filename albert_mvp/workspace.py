@@ -666,6 +666,7 @@ class AgentConsoleHistoryService:
 
     _roles = {"user", "assistant", "system"}
     _outcomes = {"proposed", "pending", "acknowledged", "rejected", "model-commentary"}
+    _transient_sources = {"frontier-model-stream", "shell-terminal-stream", "raw-telemetry"}
 
     def __init__(self, snapshots: WorkspaceSnapshotService):
         self._snapshots = snapshots
@@ -693,6 +694,7 @@ class AgentConsoleHistoryService:
             raise AlbertError("Agent Console message content must not be empty")
         if not source.strip():
             raise AlbertError("Agent Console message source must not be empty")
+        self._reject_transient_source(source)
         snapshot = self._snapshots.snapshot()
         if expected_revision is not None and expected_revision != snapshot.revision:
             raise WorkspaceStaleActionError(
@@ -728,6 +730,27 @@ class AgentConsoleHistoryService:
         )
         return message
 
+    def record_workstation_action(
+        self,
+        *,
+        action_type: str,
+        target_id: str,
+        effect_summary: str,
+    ) -> None:
+        label = action_type.replace("-", " ")
+        self.append(
+            role="user",
+            content=f"Workstation action: Mission Commander requested {label} for {target_id}.",
+            outcome="pending",
+            source="mission-commander",
+        )
+        self.append(
+            role="assistant",
+            content=f"Orchestrator accepted workstation action: {effect_summary}",
+            outcome="acknowledged",
+            source="orchestrator",
+        )
+
     def history(self) -> tuple[AgentConsoleMessage, ...]:
         if not self._history_path.exists():
             return ()
@@ -735,7 +758,25 @@ class AgentConsoleHistoryService:
             payload = json.loads(self._history_path.read_text(encoding="utf-8"))
             if payload["schema_version"] != 1 or not isinstance(payload["messages"], list):
                 raise ValueError("unsupported Agent Console history schema")
-            messages = tuple(self._parse_message(item) for item in payload["messages"])
+            raw_messages = payload["messages"]
+            skipped_transient = any(
+                isinstance(item, dict) and self._is_transient_source(item.get("source"))
+                for item in raw_messages
+            )
+            messages = tuple(
+                self._parse_message(item)
+                for item in raw_messages
+                if not (isinstance(item, dict) and self._is_transient_source(item.get("source")))
+            )
+            if skipped_transient:
+                return tuple(
+                    replace(
+                        message,
+                        message_id=f"console-{sequence:06d}",
+                        sequence=sequence,
+                    )
+                    for sequence, message in enumerate(messages, start=1)
+                )
             if [item.sequence for item in messages] != list(range(1, len(messages) + 1)):
                 raise ValueError("Agent Console message sequence must be contiguous")
             if [item.message_id for item in messages] != [
@@ -775,6 +816,23 @@ class AgentConsoleHistoryService:
             outcome=outcome,
             source=item["source"],
         )
+
+    @classmethod
+    def _reject_transient_source(
+        cls,
+        source: str,
+        *,
+        error_type: type[Exception] = AlbertError,
+    ) -> None:
+        if not cls._is_transient_source(source):
+            return
+        raise error_type(
+            "Transient stream telemetry must not be persisted in Agent Console history"
+        )
+
+    @classmethod
+    def _is_transient_source(cls, source: object) -> bool:
+        return isinstance(source, str) and source in cls._transient_sources
 
 
 WorkingContextSourceKind = Literal[
@@ -2443,6 +2501,11 @@ class WorkstationActionService:
             mission=mission,
             issue_id=acknowledged_issue_id,
             session_id=acknowledged_session_id,
+            effect_summary=effect_summary,
+        )
+        AgentConsoleHistoryService(self._snapshots).record_workstation_action(
+            action_type=action_type,
+            target_id=target_id,
             effect_summary=effect_summary,
         )
         return WorkstationActionAcknowledgement(

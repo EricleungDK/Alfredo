@@ -35,6 +35,7 @@ from albert_mvp.workspace import (
     WorkspaceScopeMismatchError,
     WorkspaceStaleActionError,
     WorkspaceSyncService,
+    WorkstationActionService,
     WorkingContextCurationError,
     WorkingContextService,
 )
@@ -3041,18 +3042,20 @@ class WorkspaceSnapshotTest(unittest.TestCase):
     def test_activity_journal_excludes_transient_output_and_failed_actions(self) -> None:
         snapshots = self.load_service()
         history = AgentConsoleHistoryService(snapshots)
-        history.append(
-            role="assistant",
-            content="partial model token fragment",
-            outcome="pending",
-            source="frontier-model-stream",
-        )
-        history.append(
-            role="system",
-            content="raw terminal byte chunk",
-            outcome="pending",
-            source="shell-terminal-stream",
-        )
+        with self.assertRaisesRegex(AlbertError, "Transient stream telemetry"):
+            history.append(
+                role="assistant",
+                content="partial model token fragment",
+                outcome="pending",
+                source="frontier-model-stream",
+            )
+        with self.assertRaisesRegex(AlbertError, "Transient stream telemetry"):
+            history.append(
+                role="system",
+                content="raw terminal byte chunk",
+                outcome="pending",
+                source="shell-terminal-stream",
+            )
         mission = snapshots._primary_mission
         mission.approve_issue("ISS-01")
         session = mission.launch_issue("ISS-01")
@@ -3565,6 +3568,142 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(len(history["messages"]), 1)
         self.assertEqual(history["messages"][0]["outcome"], "model-commentary")
         self.assertEqual(history["messages"][0]["source"], "frontier-model")
+
+    def test_agent_console_history_skips_legacy_transient_telemetry_on_restore(
+        self,
+    ) -> None:
+        history = AgentConsoleHistoryService(self.load_service())
+        durable = history.append(
+            role="user",
+            content="Keep this durable prompt.",
+            outcome="proposed",
+            source="mission-commander",
+        )
+        persisted = json.loads(history.history_path.read_text(encoding="utf-8"))
+        persisted["messages"].append(
+            {
+                "message_id": "console-000002",
+                "sequence": 2,
+                "role": "system",
+                "content": "raw telemetry chunk",
+                "scope": persisted["messages"][0]["scope"],
+                "outcome": "pending",
+                "source": "raw-telemetry",
+            }
+        )
+        history.history_path.write_text(json.dumps(persisted), encoding="utf-8")
+
+        restored = AgentConsoleHistoryService(self.load_service()).history()
+
+        self.assertEqual([message.content for message in restored], [durable.content])
+        self.assertEqual(restored[0].message_id, "console-000001")
+        self.assertEqual(restored[0].sequence, 1)
+
+    def test_release_transcript_persists_prompts_actions_outcomes_and_excludes_navigation(
+        self,
+    ) -> None:
+        snapshots = self.load_service()
+        history = AgentConsoleHistoryService(snapshots)
+        history.append(
+            role="user",
+            content="Launch the ready Alfredo workstation slice.",
+            outcome="proposed",
+            source="mission-commander",
+        )
+        history.append(
+            role="assistant",
+            content="I will route the launch through the Orchestrator.",
+            outcome="model-commentary",
+            source="frontier-model",
+        )
+        mission = snapshots._primary_mission
+        mission.approve_issue("ISS-01")
+
+        acknowledgement = WorkstationActionService(snapshots).submit(
+            correlation_id="release-seam-launch-1",
+            action_type="issue-launch",
+            actor="mission-commander",
+            expected_revision=1,
+            target_kind="issue-slice",
+            target_id="ISS-01",
+            issue_id="ISS-01",
+            allowed_paths=["src"],
+            command_policy={"python3 -m unittest": "auto-allowed"},
+        )
+        WorkspaceSyncService(snapshots).submit_action(
+            WorkspaceAction(
+                correlation_id="release-seam-routine-navigation-1",
+                expected_revision=acknowledgement.revision,
+                active_mission_id="command-deck",
+                conversation_scope=snapshots.snapshot().conversation_scope,
+                operations_view="activity",
+            )
+        )
+
+        restored = AgentConsoleHistoryService(self.load_service()).history()
+        self.assertEqual(
+            [(message.source, message.outcome) for message in restored],
+            [
+                ("mission-commander", "proposed"),
+                ("frontier-model", "model-commentary"),
+                ("mission-commander", "pending"),
+                ("orchestrator", "acknowledged"),
+            ],
+        )
+        self.assertEqual(
+            [message.content for message in restored],
+            [
+                "Launch the ready Alfredo workstation slice.",
+                "I will route the launch through the Orchestrator.",
+                "Workstation action: Mission Commander requested issue launch for ISS-01.",
+                "Orchestrator accepted workstation action: Orchestrator launched ISS-01 as session-ISS-01-1.",
+            ],
+        )
+        self.assertNotIn(
+            "release-seam-routine-navigation-1",
+            "\n".join(message.content for message in restored),
+        )
+        with self.assertRaisesRegex(AlbertError, "Transient stream telemetry"):
+            history.append(
+                role="system",
+                content="raw telemetry chunk",
+                outcome="pending",
+                source="raw-telemetry",
+            )
+
+    def test_release_transcript_preserves_reason_required_workstation_action_detail(
+        self,
+    ) -> None:
+        snapshots = self.load_service()
+
+        acknowledgement = WorkstationActionService(snapshots).submit(
+            correlation_id="release-seam-model-assignment-1",
+            action_type="model-assignment-change",
+            actor="mission-commander",
+            expected_revision=1,
+            target_kind="issue-slice",
+            target_id="ISS-01",
+            issue_id="ISS-01",
+            agent_id="qwen3.6-27b",
+            reason="Use the release verification model.",
+        )
+
+        restored = AgentConsoleHistoryService(self.load_service()).history()
+        self.assertEqual(acknowledgement.revision, 2)
+        self.assertEqual(
+            [message.content for message in restored],
+            [
+                "Workstation action: Mission Commander requested model assignment change for ISS-01.",
+                (
+                    "Orchestrator accepted workstation action: Mission Commander assigned "
+                    "ISS-01 to qwen3.6-27b: Use the release verification model."
+                ),
+            ],
+        )
+        entry = ActivityJournalService(self.load_service()).inspect().entries[0]
+        self.assertEqual(entry.action_type, "model-assignment-change")
+        self.assertEqual(entry.actor, "mission-commander")
+        self.assertIn("Use the release verification model.", entry.summary)
 
     def test_agent_console_history_preserves_all_distinct_outcomes_in_order(self) -> None:
         history = AgentConsoleHistoryService(self.load_service())

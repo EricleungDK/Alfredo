@@ -7,11 +7,19 @@ import { fileURLToPath } from "node:url";
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(projectRoot, "..");
 
-function alfredoBinPath() {
+function binPath(name) {
   const packageJson = JSON.parse(
     readFileSync(resolve(projectRoot, "package.json"), "utf8"),
   );
-  return resolve(projectRoot, packageJson.bin.alfredo);
+  return resolve(projectRoot, packageJson.bin[name]);
+}
+
+function alfredoBinPath() {
+  return binPath("alfredo");
+}
+
+function albertBinPath() {
+  return binPath("albert");
 }
 
 function runAlfredo(args, options = {}) {
@@ -23,6 +31,15 @@ function runAlfredo(args, options = {}) {
       ...(options.env ?? {}),
     },
   });
+}
+
+function normalizeBinPaths(bin) {
+  return Object.fromEntries(
+    Object.entries(bin).map(([name, path]) => [
+      name,
+      path.startsWith("./") ? path : `./${path}`,
+    ]),
+  );
 }
 
 function createHeadlessWorkspace() {
@@ -110,7 +127,7 @@ test("published package exposes Alfredo and deprecated Albert npm bins", () => {
   });
   expect(packageLock.name).toBe("alfredo");
   expect(packageLock.packages[""].name).toBe("alfredo");
-  expect(packageLock.packages[""].bin).toEqual(packageJson.bin);
+  expect(normalizeBinPaths(packageLock.packages[""].bin)).toEqual(packageJson.bin);
   expect(statSync(resolve(projectRoot, packageJson.bin.alfredo)).mode & 0o111).not.toBe(0);
 });
 
@@ -128,6 +145,23 @@ test("alfredo defaults to workstation launch with the selected agent", () => {
     launch: "workstation",
     selected_agent: "qwen3.6-27b",
     selected_model: "qwen3.6:27b",
+  });
+});
+
+test("alfredo with no subcommand opens the workstation as the default launch intent", () => {
+  const result = runAlfredo([], {
+    env: {
+      ALFREDO_DESKTOP_DRY_RUN: "1",
+    },
+  });
+
+  expect(result.stderr).toBe("");
+  expect(result.status).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    product: "Alfredo",
+    launch: "workstation",
+    selected_agent: "",
+    selected_model: "",
   });
 });
 
@@ -381,6 +415,24 @@ test("alfredo review accepts optional session id and executes through the Orches
   }
 });
 
+test("alfredo review without a session id keeps review-oriented headless intent", () => {
+  const result = runAlfredo(["review", "--agent", "qwen3.6-27b"], {
+    env: {
+      ALFREDO_DESKTOP_DRY_RUN: "1",
+    },
+  });
+
+  expect(result.stderr).toBe("");
+  expect(result.status).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    product: "Alfredo",
+    launch: "headless-review",
+    selected_agent: "qwen3.6-27b",
+    selected_model: "qwen3.6:27b",
+    session_id: "",
+  });
+});
+
 test("alfredo run rejects model aliases because per-command agent id is canonical", () => {
   const result = runAlfredo(["run", "--agent", "qwen3.6:27b", "Summarize this repo"], {
     env: {
@@ -473,6 +525,25 @@ test("alfredo restores the selected workstation controller from runtime launch c
     rmSync(firstWorkspace, { recursive: true, force: true });
     rmSync(secondWorkspace, { recursive: true, force: true });
   }
+});
+
+test("deprecated Albert npm alias preserves the default Alfredo workstation intent", () => {
+  const result = spawnSync(process.execPath, [albertBinPath(), "--agent", "qwen3.6-27b"], {
+    cwd: projectRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      ALFREDO_DESKTOP_DRY_RUN: "1",
+    },
+  });
+
+  expect(result.stderr).toBe("");
+  expect(result.status).toBe(0);
+  expect(JSON.parse(result.stdout)).toMatchObject({
+    product: "Alfredo",
+    launch: "workstation",
+    selected_agent: "qwen3.6-27b",
+  });
 });
 
 test("alfredo explicit agent ignores malformed persisted launch context", () => {

@@ -2,6 +2,7 @@ from pathlib import Path
 from contextlib import redirect_stderr, redirect_stdout
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -566,6 +567,22 @@ class AlbertMvpTest(unittest.TestCase):
             },
         )
         self.assertEqual(issue["sessions"][0]["operation_status"], "evidence-ready")
+
+    @unittest.skipUnless(
+        os.environ.get("ALBERT_OLLAMA_SMOKE") == "1",
+        "set ALBERT_OLLAMA_SMOKE=1 to run local Ollama smoke verification",
+    )
+    def test_local_ollama_smoke_is_separate_from_provider_neutral_ci(self):
+        result = subprocess.run(
+            ["ollama", "list"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("NAME", result.stdout)
 
     def test_disconnected_model_assignment_is_visible_before_launch(self):
         config_path = self.write_agent_config(
