@@ -1589,7 +1589,7 @@ function CommandDeck({
 
       <div className="deck-grid">
         <main className="prompt-workspace" aria-label="Prompt Workstation">
-          <section className="prompt-pane" aria-label="Prompt Transcript">
+          <section className="prompt-pane" aria-label="Agent Console">
             <div className="panel-heading">
               <div>
                 <span className="eyebrow">Agent Console / {mission?.id ?? "none"}</span>
@@ -1600,7 +1600,7 @@ function CommandDeck({
               ) : null}
             </div>
 
-            <div className="console-history">
+            <div className="console-history" role="region" aria-label="Prompt Transcript">
               {consoleHistory.length === 0 &&
               workstationTranscriptTurns.length === 0 &&
               commandConsoleTurns.length === 0 ? (
@@ -1789,7 +1789,7 @@ function CommandDeck({
               {workstationCards.length} streams
             </span>
           </div>
-          <section className="workstation-cards" aria-label="Workstation Cards">
+          <section className="workstation-cards" aria-label="Active Workstations">
             <div className="mission-work-section-heading">
               <div>
                 <span className="eyebrow">Live supervision</span>
@@ -1803,86 +1803,88 @@ function CommandDeck({
                 {commandAuditOpen ? "Close command audit" : "Open command audit"}
               </button>
             </div>
-            <div className="workstation-card-controls">
-              <label>
-                <span>Filter</span>
-                <input
-                  type="search"
-                  aria-label="Filter workstation cards"
-                  value={workstationFilter}
-                  onChange={(event) => setWorkstationFilter(event.target.value)}
-                />
-              </label>
-              <label>
-                <span>Sort</span>
-                <select
-                  aria-label="Sort workstation cards"
-                  value={workstationSort}
-                  onChange={(event) =>
-                    setWorkstationSort(event.target.value as "priority" | "name" | "status")
-                  }
-                >
-                  <option value="priority">Priority</option>
-                  <option value="name">Name</option>
-                  <option value="status">Status</option>
-                </select>
-              </label>
-            </div>
-            {selectedWorkstationDiff ? (
-              <div
-                className="workstation-local-selection"
-                role="status"
-                aria-label="Selected workstation diff"
-              >
-                Diff opened locally: {selectedWorkstationDiff.path}
-                <small>{selectedWorkstationDiff.sessionId}</small>
-              </div>
-            ) : null}
-            {workstationProjection.pendingIntent ? (
-              <div className="workstation-pending" role="status" aria-label="Pending workstation intent">
-                <span>{workstationProjection.pendingIntent.label}</span>
-                <small>
-                  Expected revision {workstationProjection.pendingIntent.expectedRevision}
-                </small>
-              </div>
-            ) : null}
-            {visibleWorkstationGroups.map((group) => (
-              <div className="workstation-card-group" key={group.id}>
-                <div className="workstation-card-group__heading">
-                  <span>{group.label}</span>
-                  <small>{group.cards.length}</small>
-                </div>
-                {group.cards.map((card) => (
-                  <WorkstationCard
-                    key={card.id}
-                    card={card}
-                    expanded={expandedWorkstationCardIds.includes(card.id)}
-                    pinned={pinnedWorkstationCardIds.includes(card.id)}
-                    selectedSessionId={selectedWorkstationSessionId}
-                    onToggleExpanded={() => toggleExpandedWorkstationCard(card.id)}
-                    onTogglePinned={() => togglePinnedWorkstationCard(card.id)}
-                    onSelectSession={setSelectedWorkstationSessionId}
-                    onOpenDiff={setSelectedWorkstationDiff}
-                    queueReasons={queueReasons}
-                    onQueueReasonChange={onQueueReasonChange}
-                    onQueueDecision={onQueueDecision}
-                    reviewReasons={reviewReasons}
-                    onReviewReasonChange={onReviewReasonChange}
-                    onReviewDecision={onReviewDecision}
-                    workstationActionDrafts={workstationActionDrafts}
-                    onWorkstationActionDraftChange={onWorkstationActionDraftChange}
-                    onWorkstationAction={onWorkstationAction}
-                    actionState={workstationActionState}
-                    actionStatusRef={workstationActionStatusRef}
+            <div className="workstation-cards__content" role="region" aria-label="Workstation Cards">
+              <div className="workstation-card-controls">
+                <label>
+                  <span>Filter</span>
+                  <input
+                    type="search"
+                    aria-label="Filter workstation cards"
+                    value={workstationFilter}
+                    onChange={(event) => setWorkstationFilter(event.target.value)}
                   />
-                ))}
+                </label>
+                <label>
+                  <span>Sort</span>
+                  <select
+                    aria-label="Sort workstation cards"
+                    value={workstationSort}
+                    onChange={(event) =>
+                      setWorkstationSort(event.target.value as "priority" | "name" | "status")
+                    }
+                  >
+                    <option value="priority">Priority</option>
+                    <option value="name">Name</option>
+                    <option value="status">Status</option>
+                  </select>
+                </label>
               </div>
-            ))}
-            {visibleWorkstationGroups.length === 0 ? (
-              <div className="workstation-local-selection">
-                No workstation cards match the current filter.
-              </div>
-            ) : null}
+              {selectedWorkstationDiff ? (
+                <div
+                  className="workstation-local-selection"
+                  role="status"
+                  aria-label="Selected workstation diff"
+                >
+                  Diff opened locally: {selectedWorkstationDiff.path}
+                  <small>{selectedWorkstationDiff.sessionId}</small>
+                </div>
+              ) : null}
+              {workstationProjection.pendingIntent ? (
+                <div className="workstation-pending" role="status" aria-label="Pending workstation intent">
+                  <span>{workstationProjection.pendingIntent.label}</span>
+                  <small>
+                    Expected revision {workstationProjection.pendingIntent.expectedRevision}
+                  </small>
+                </div>
+              ) : null}
+              {visibleWorkstationGroups.map((group) => (
+                <div className="workstation-card-group" key={group.id}>
+                  <div className="workstation-card-group__heading">
+                    <span>{group.label}</span>
+                    <small>{group.cards.length}</small>
+                  </div>
+                  {group.cards.map((card) => (
+                    <WorkstationCard
+                      key={card.id}
+                      card={card}
+                      expanded={expandedWorkstationCardIds.includes(card.id)}
+                      pinned={pinnedWorkstationCardIds.includes(card.id)}
+                      selectedSessionId={selectedWorkstationSessionId}
+                      onToggleExpanded={() => toggleExpandedWorkstationCard(card.id)}
+                      onTogglePinned={() => togglePinnedWorkstationCard(card.id)}
+                      onSelectSession={setSelectedWorkstationSessionId}
+                      onOpenDiff={setSelectedWorkstationDiff}
+                      queueReasons={queueReasons}
+                      onQueueReasonChange={onQueueReasonChange}
+                      onQueueDecision={onQueueDecision}
+                      reviewReasons={reviewReasons}
+                      onReviewReasonChange={onReviewReasonChange}
+                      onReviewDecision={onReviewDecision}
+                      workstationActionDrafts={workstationActionDrafts}
+                      onWorkstationActionDraftChange={onWorkstationActionDraftChange}
+                      onWorkstationAction={onWorkstationAction}
+                      actionState={workstationActionState}
+                      actionStatusRef={workstationActionStatusRef}
+                    />
+                  ))}
+                </div>
+              ))}
+              {visibleWorkstationGroups.length === 0 ? (
+                <div className="workstation-local-selection">
+                  No workstation cards match the current filter.
+                </div>
+              ) : null}
+            </div>
           </section>
           <IssueAssignmentBoard
             projection={issueAssignmentBoard}
@@ -2161,7 +2163,7 @@ function IssueAssignmentBoard({
   const selectedRow =
     projection.rows.find((row) => row.issueId === selectedIssueId) ?? null;
   return (
-    <section className="issue-assignment-board" aria-label="Issue Assignment Board region">
+    <section className="issue-assignment-board" aria-label="Issue Assignment Board">
       <div className="mission-work-section-heading">
         <div>
           <span className="eyebrow">Ownership matrix</span>
@@ -2197,11 +2199,13 @@ function IssueAssignmentBoard({
               return (
                 <tr
                   key={row.issueId}
-                  aria-label={`${row.issueId} ${row.title} ${row.owner} ${row.readinessState}`}
+                  aria-label={`${row.issueId} ${row.title} ${row.owner} ${row.readinessState} ${
+                    row.blockerSummaries.length ? row.blockerSummaries.join(", ") : "Clear"
+                  } ${row.workstationSessionId ? `Session ${row.workstationSessionId}` : "No workstation"}`}
                   data-selected={selectedIssueId === row.issueId}
                   data-state={row.state}
                 >
-                  <td>
+                  <td data-label="Issue">
                     <button
                       type="button"
                       aria-label={`Inspect assignment ${row.issueId}`}
@@ -2211,15 +2215,15 @@ function IssueAssignmentBoard({
                     </button>
                     <small>{row.title}</small>
                   </td>
-                  <td>
+                  <td data-label="Owner">
                     <strong>{row.owner}</strong>
                     <small>{row.assignmentState}</small>
                   </td>
-                  <td>
+                  <td data-label="State">
                     <span className="status">{row.readinessState}</span>
                     <small>{row.lifecycleState}</small>
                   </td>
-                  <td>
+                  <td data-label="Blockers">
                     {row.blockerSummaries.length === 0 ? (
                       <span>Clear</span>
                     ) : (
@@ -2228,7 +2232,7 @@ function IssueAssignmentBoard({
                       ))
                     )}
                   </td>
-                  <td>
+                  <td data-label="Workstation">
                     {row.workstationSessionId ? (
                       <>
                         <strong>Session {row.workstationSessionId}</strong>
@@ -2239,7 +2243,7 @@ function IssueAssignmentBoard({
                       <span>No workstation</span>
                     )}
                   </td>
-                  <td>
+                  <td data-label="Actions">
                     {rowActionState ? (
                       <small
                         ref={workstationActionStatusRef}

@@ -4,13 +4,13 @@
 
 ## Active Orchestration Context
 
-- **Captured For Run**: `2026-07-06 - implement .scratch/alfredo-console-first-workstation-redesign/issues/08-restart-continuity-through-the-release-seam.md`
-- **Current Mission Focus**: `Alfredo console-first workstation redesign, Issue 08: restart continuity through the task 29 release seam.`
-- **Active Agent Focus**: `Codex completed Issue 08 and post-review hardening: restart continuity now restores meaningful Agent Console, Mission Work, Active Workstations, Issue Assignment Board focus/detail state, approvals, evidence links, Activity Journal availability, and canonical accepted workstation state; review-decision consequential actions now carry and validate action_type, actor, and target identity through React, Tauri, and Python before mutation.`
+- **Captured For Run**: `2026-07-06 - implement .scratch/alfredo-console-first-workstation-redesign/issues/09-responsive-and-accessible-workstation-hardening.md`
+- **Current Mission Focus**: `Alfredo console-first workstation redesign, Issue 09: responsive and accessible workstation hardening.`
+- **Active Agent Focus**: `Codex completed Issue 09: the workstation now exposes named Agent Console, Active Workstations, and Issue Assignment Board regions; compact assignment rows carry accessible blocker/workstation summaries and visible mobile labels; existing keyboard, review, contrast, focus, reduced-motion, constrained-width, and release-seam coverage remains green.`
 - **Model Assignments (active run)**: `Primary coding agent: Codex. No local model delegation is planned for this implementation pass.`
-- **Coordination State**: `Issue 08 is complete in the local tracker. Subagent spec review passed, code quality review passed after the review-decision metadata fix and cleanup, and all final verification gates are green.`
-- **Pending Blockers**: `None known for Issue 08.`
-- **Next Decisions / Actions**: `Commit the Issue 08 implementation to the current branch and report verification evidence.`
+- **Coordination State**: `Issue 09 is complete in the local tracker. Two-axis code review found no remaining blocking findings after removing test-only production attributes.`
+- **Pending Blockers**: `None known for Issue 09.`
+- **Next Decisions / Actions**: `Commit the Issue 09 responsive/accessibility hardening to the current branch and report verification evidence.`
 
 If any field above is `TBD` or stale, do not infer scope from this file. Update this section immediately before planning or implementation.
 
@@ -109,6 +109,8 @@ Albert's tested local coding TUI MVP is implemented and verified.
 - Issue 07 evidence: `python3 -m unittest tests.test_workspace_snapshot` passes 101 tests; `python3 -m unittest discover -s tests` passes 182 tests with 1 skip; `npm test -- --run` passes 125 frontend tests; `npm run typecheck` passes; `npm run build` passes; `cargo fmt --manifest-path mission-control/src-tauri/Cargo.toml -- --check` passes; and `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 27 Rust bridge tests.
 - Alfredo console-first workstation Issue 08 is complete. Restart continuity now restores meaningful Agent Console, Mission Work, Active Workstations, Issue Assignment Board detail focus, approvals, evidence links, Activity Journal availability, and canonical accepted workstation state through the task 29 release seam while excluding transient hover/animation/raw terminal bytes.
 - Issue 08 evidence: `npm test -- --run App.test.tsx alfredo-release-seam.test.tsx` passes 63 tests; `python3 -m unittest tests.test_workspace_snapshot` passes 101 tests; `npm run typecheck` passes; `npm test -- --run` passes 125 frontend tests; `python3 -m unittest discover -s tests` passes 183 tests with 1 skip; `npm run build` passes; `cargo fmt --manifest-path mission-control/src-tauri/Cargo.toml -- --check` passes; and `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 28 Rust bridge tests.
+- Alfredo console-first workstation Issue 09 is complete. Agent Console, Active Workstations, and Issue Assignment Board now expose explicit semantic regions; Issue Assignment Board row summaries include blocker and workstation state; constrained-width assignment cells carry visible compact labels while existing keyboard, contrast/focus, reduced-motion, and critical-decision reachability coverage remains green.
+- Issue 09 evidence: `npm test -- --run App.test.tsx` passes 63 tests; `npm test -- --run alfredo-release-seam.test.tsx workstation-projection.test.ts` passes 15 tests; `npm run typecheck` passes; `npm test -- --run` passes 126 frontend tests; `npm run build` passes; `python3 -m unittest discover -s tests` passes 183 tests with 1 skip; `cargo fmt --manifest-path mission-control/src-tauri/Cargo.toml -- --check` passes; and `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 28 Rust bridge tests.
 
 ## Current Model Registry
 

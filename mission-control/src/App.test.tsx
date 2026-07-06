@@ -2245,6 +2245,43 @@ test("exposes named landmarks and labelled controls with command audit open", as
   }
 });
 
+test("exposes named workstation hierarchy regions and compact assignment row labels", async () => {
+  const accessibleSnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_slices: [
+        appIssueSlice({
+          issue_id: "ISS-A11Y",
+          title: "Harden workstation hierarchy",
+          launch_eligible: true,
+          lifecycle: "Approved",
+        }),
+      ],
+      ordered_issue_ids: ["ISS-A11Y"],
+      ready_issue_ids: ["ISS-A11Y"],
+    },
+  };
+
+  render(<App client={{ loadSnapshot: async () => ({ kind: "ready", snapshot: accessibleSnapshot }) }} />);
+
+  expect(await screen.findByRole("region", { name: "Agent Console" })).toBeVisible();
+  expect(screen.getByRole("region", { name: "Active Workstations" })).toBeVisible();
+  expect(screen.getByRole("region", { name: "Issue Assignment Board" })).toBeVisible();
+
+  const board = screen.getByRole("table", { name: "Issue Assignment Board" });
+  const row = within(board).getByRole("row", {
+    name: /ISS-A11Y Harden workstation hierarchy Unassigned Ready Clear No workstation/,
+  });
+  const cells = within(row).getAllByRole("cell");
+  for (const [index, label] of ["Issue", "Owner", "State", "Blockers", "Workstation", "Actions"].entries()) {
+    expect(cells[index]).toHaveAttribute("data-label", label);
+  }
+  expect(stylesSource).toMatch(
+    /@media \(max-width: 520px\)[\s\S]*\.issue-assignment-board td::before \{[\s\S]*content: attr\(data-label\)/,
+  );
+});
+
 test("exposes workstation cards as keyboard-reachable accessible summaries", async () => {
   const workstationSnapshot: WorkspaceSnapshot = {
     ...snapshot,

@@ -52,6 +52,7 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .agent-workstations__heading { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; padding: 1rem; border-bottom: 1px solid var(--line); }
 .workstation-panel { min-height: 0; overflow: auto; }
 .workstation-cards { display: grid; gap: 0.9rem; max-height: min(42vh, 24rem); overflow: auto; padding: 1rem; border-bottom: 1px solid var(--line); }
+.workstation-cards__content { display: grid; gap: 0.9rem; min-width: 0; }
 .mission-work-section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.8rem; }
 .mission-work-section-heading h3, .command-audit__heading h3 { margin: 0.12rem 0 0; font-family: "Rajdhani", sans-serif; font-size: 1.15rem; line-height: 1; }
 .mission-work-section-heading button { border: 1px solid var(--line); background: var(--panel-raised); color: var(--ink); padding: 0.42rem 0.55rem; font-size: 0.62rem; }
@@ -338,7 +339,8 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   .issue-assignment-board thead { display: none; }
   .issue-assignment-board tbody, .issue-assignment-board tr, .issue-assignment-board td { display: block; }
   .issue-assignment-board tr { margin-bottom: 0.6rem; border: 1px solid var(--line); }
-  .issue-assignment-board td { border-bottom: 0; }
+  .issue-assignment-board td { display: grid; grid-template-columns: minmax(5.5rem, 0.38fr) minmax(0, 1fr); gap: 0.35rem; border-bottom: 0; }
+  .issue-assignment-board td::before { content: attr(data-label); color: var(--muted); font-size: 0.55rem; text-transform: uppercase; letter-spacing: 0; }
   .issue-assignment-detail dl { grid-template-columns: 1fr; }
   .command-console-card header { flex-direction: column; }
   .command-console-card dl { grid-template-columns: 1fr; }
