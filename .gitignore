@@ -4,8 +4,7 @@ mission-control/node_modules/
 mission-control/dist/
 mission-control/tsconfig.tsbuildinfo
 @visualization/
-.scratch/
 .codex/
-.prototypes/
 docs/superpowers/
 mission-control/src-tauri/target/
+.superpowers/
