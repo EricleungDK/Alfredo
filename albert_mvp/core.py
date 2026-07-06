@@ -1286,7 +1286,7 @@ class AlbertMission:
         sections = _sections(text)
         what = sections.get("What to build", "").strip()
         acceptance = _checklist_items(sections.get("Acceptance criteria", ""))
-        blockers = _issue_refs(sections.get("Blocked by", ""))
+        blockers = _issue_refs(sections.get("Blocked by", ""), issues_dir=path.parent)
         if not what:
             raise AlbertError(f"{path.name} is missing a What to build section.")
         if not acceptance:
@@ -1889,18 +1889,20 @@ def _checklist_items(text: str) -> list[str]:
     return items
 
 
-def _issue_refs(text: str) -> list[str]:
+def _issue_refs(text: str, issues_dir: Path | None = None) -> list[str]:
     if "None - can start immediately" in text:
         return []
     refs: list[str] = []
     for match in re.finditer(r"ISS-(\d+)", text, flags=re.IGNORECASE):
         refs.append(f"ISS-{int(match.group(1)):02d}")
     for match in re.finditer(
-        r"(?:^|[/`\s])(\d+)-[^/`\s]+\.md(?=`|\s|$)",
+        r"(?:^|[/`\s])((\d+)-[^/`\s]+\.md)(?=`|\s|$)",
         text,
         flags=re.IGNORECASE | re.MULTILINE,
     ):
-        refs.append(f"ISS-{int(match.group(1)):02d}")
+        if issues_dir is not None and not (issues_dir / match.group(1)).exists():
+            continue
+        refs.append(f"ISS-{int(match.group(2)):02d}")
     deduped: list[str] = []
     for ref in refs:
         if ref not in deduped:

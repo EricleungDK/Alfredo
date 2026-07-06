@@ -150,6 +150,24 @@ class AlbertMvpTest(unittest.TestCase):
         self.assertEqual(mission.issues["ISS-03"].blocked_by, ["ISS-02"])
         self.assertEqual(mission.board_summary()["ready_issue_ids"], [])
 
+    def test_ignores_path_style_blocker_references_outside_current_tracker(self):
+        (self.issues / "03-external-blocked.md").write_text(
+            ISSUE_BODY.format(
+                type="AFK",
+                risk="Medium",
+                agent="qwen-coder-local-2",
+                what="Create an externally sequenced slice.",
+                acceptance="External tracker blocker does not become a local blocker.",
+                blocked_by="- .agent/issues/29-add-alfredo-release-seam-verification.md",
+            ),
+            encoding="utf-8",
+        )
+
+        mission = self.load_mission()
+
+        self.assertEqual(mission.issues["ISS-03"].blocked_by, [])
+        self.assertEqual(mission.board_summary()["ordered_issue_ids"], ["ISS-01", "ISS-02", "ISS-03"])
+
     def test_issue_directory_can_also_contain_prd_record(self):
         (self.issues / "PRD.md").write_text("# Inline Product Requirements Document\n", encoding="utf-8")
 

@@ -44,10 +44,10 @@ impl BridgeConfig {
                 }
             }),
             target_repo: backend_root.clone(),
-            tracker_dir: backend_root.join(".scratch/albert-mission-control-app"),
-            issues_dir: Some(backend_root.join(".agent/issues")),
+            tracker_dir: backend_root.join(".scratch/alfredo-console-first-workstation-redesign"),
+            issues_dir: None,
             runtime_root: std::env::temp_dir().join("albert-runtime"),
-            mission_id: "albert-mission-control-app".to_owned(),
+            mission_id: "alfredo-console-first-workstation-redesign".to_owned(),
             agent_config: Some(backend_root.join(".albert/agents.json")),
             mission_catalog: None,
             backend_root,
@@ -2087,7 +2087,7 @@ None - can start immediately
     }
 
     #[test]
-    fn repository_config_targets_the_current_command_deck_prd_and_issues() {
+    fn repository_config_targets_the_console_first_workstation_redesign() {
         let backend_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
@@ -2098,9 +2098,12 @@ None - can start immediately
         assert_eq!(config.target_repo, backend_root);
         assert!(config
             .tracker_dir
-            .ends_with(".scratch/albert-mission-control-app"));
-        assert!(config.issues_dir.unwrap().ends_with(".agent/issues"));
-        assert_eq!(config.mission_id, "albert-mission-control-app");
+            .ends_with(".scratch/alfredo-console-first-workstation-redesign"));
+        assert!(config.issues_dir.is_none());
+        assert_eq!(
+            config.mission_id,
+            "alfredo-console-first-workstation-redesign"
+        );
     }
 
     #[test]

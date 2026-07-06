@@ -4,13 +4,13 @@
 
 ## Active Orchestration Context
 
-- **Captured For Run**: `2026-07-06 - implement .scratch/alfredo-console-first-workstation-redesign/issues/09-responsive-and-accessible-workstation-hardening.md`
-- **Current Mission Focus**: `Alfredo console-first workstation redesign, Issue 09: responsive and accessible workstation hardening.`
-- **Active Agent Focus**: `Codex completed Issue 09: the workstation now exposes named Agent Console, Active Workstations, and Issue Assignment Board regions; compact assignment rows carry accessible blocker/workstation summaries and visible mobile labels; existing keyboard, review, contrast, focus, reduced-motion, constrained-width, and release-seam coverage remains green.`
-- **Model Assignments (active run)**: `Primary coding agent: Codex. No local model delegation is planned for this implementation pass.`
-- **Coordination State**: `Issue 09 is complete in the local tracker. Two-axis code review found no remaining blocking findings after removing test-only production attributes.`
-- **Pending Blockers**: `None known for Issue 09.`
-- **Next Decisions / Actions**: `Commit the Issue 09 responsive/accessibility hardening to the current branch and report verification evidence.`
+- **Captured For Run**: `2026-07-06 - continue Alfredo console-first workstation redesign unblock from /tmp/alfredo-redesign-unblock-handoff.md`
+- **Current Mission Focus**: `Unblock npm run desktop / workspace-snapshot behavior so the Alfredo console-first workstation redesign tracker can load cleanly and the desktop entrypoint can show the intended redesigned workstation surface.`
+- **Active Agent Focus**: `Codex reproduced the redesign workspace-snapshot failure, fixed path-style external blocker parsing, pointed the Tauri desktop default at the Alfredo redesign tracker, and completed Issue 01 evidence/status after focused UI/release-seam verification.`
+- **Model Assignments (active run)**: `Primary implementation agent: Codex. No local model delegation is planned for this run.`
+- **Coordination State**: `The original workspace-snapshot red loop now passes for .scratch/alfredo-console-first-workstation-redesign. BridgeConfig::for_repository now defaults npm run desktop to the Alfredo redesign tracker/mission. Issue 01 is marked complete with acceptance criteria checked and verification comments. Full Python, full frontend, typecheck, build, Rust formatting, and Rust bridge tests pass. Local commit d1315a7 records the unblock.`
+- **Pending Blockers**: `No known implementation blockers for the Alfredo console-first redesign unblock remain.`
+- **Next Decisions / Actions**: `Report the verification evidence and decide whether to push/open a PR.`
 
 If any field above is `TBD` or stale, do not infer scope from this file. Update this section immediately before planning or implementation.
 
