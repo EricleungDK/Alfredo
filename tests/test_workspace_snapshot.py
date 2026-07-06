@@ -467,6 +467,83 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(restored.conversation_scope.target_id, "ISS-01")
         self.assertEqual(restored.operations_view, "review-workspace")
 
+    def test_workstation_continuity_restores_meaningful_state_after_backend_restart(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        mission.approve_issue("ISS-01")
+        AgentConsoleHistoryService(snapshots).append(
+            role="user",
+            content="Keep Alfredo continuity across restart.",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=snapshots.snapshot().conversation_scope,
+        )
+        launch = workspace_module.WorkstationActionService(snapshots).submit(
+            correlation_id="continuity-launch-1",
+            action_type="issue-launch",
+            actor="mission-commander",
+            expected_revision=1,
+            target_kind="issue-slice",
+            target_id="ISS-01",
+            issue_id="ISS-01",
+            allowed_paths=["src"],
+        )
+        evidence_link = f"app-local://evidence/{launch.session_id}"
+        mission.record_evidence(
+            launch.session_id,
+            EvidencePackage(
+                changed_files=["src/app.py"],
+                diff_summary="Persisted workstation continuity.",
+                commands_run=["python3 -m unittest tests.test_workspace_snapshot"],
+                test_results="Focused persistence test passed.",
+                known_risks="None.",
+                proposed_context_updates="No domain model update.",
+                artifact_links=[evidence_link],
+            ),
+        )
+        proposal = WorkspaceQueueService(snapshots).propose_issue_contract_change(
+            correlation_id="continuity-approval-1",
+            expected_revision=launch.revision,
+            issue_id="ISS-01",
+            source="workstation-card",
+            acceptance_criteria=["Continuity restores pending approval records."],
+        )
+        snapshots.update_preferences(
+            active_mission_id="command-deck",
+            conversation_scope=ConversationScope(
+                kind="issue-slice",
+                target_id="ISS-01",
+                label="Restore workspace session",
+            ),
+            operations_view="workspace-queue",
+            event_metadata={"correlation_id": "continuity-side-pane-1"},
+        )
+
+        restored = self.load_service()
+        snapshot = restored.snapshot()
+        restored_issue = snapshot.mission_board["issue_slices"][0]
+        restored_queue = WorkspaceQueueService(restored).inspect()
+        restored_history = AgentConsoleHistoryService(restored).history()
+        restored_journal = ActivityJournalService(restored).inspect()
+
+        self.assertEqual(snapshot.workspace_session.workspace_path, str(self.target_repo))
+        self.assertEqual(snapshot.conversation_scope.kind, "issue-slice")
+        self.assertEqual(snapshot.conversation_scope.target_id, "ISS-01")
+        self.assertEqual(snapshot.operations_view, "workspace-queue")
+        self.assertEqual(restored_history[0].content, "Keep Alfredo continuity across restart.")
+        self.assertEqual(snapshot.missions[0].sessions[0].session_id, launch.session_id)
+        self.assertEqual(snapshot.missions[0].sessions[0].status, "evidence-ready")
+        self.assertEqual(restored_issue["evidence"]["artifact_links"], [evidence_link])
+        self.assertEqual(restored_queue.items[0].item_id, proposal.item_id)
+        self.assertEqual(restored_queue.items[0].status, "pending")
+        self.assertEqual(
+            [entry.action_type for entry in restored_journal.entries],
+            ["issue-launch", "evidence-package-submitted"],
+        )
+        self.assertEqual(restored_journal.entries[1].evidence_links, (evidence_link,))
+        self.assertNotIn("raw terminal byte", restored_journal.entries[0].summary)
+
     def test_review_workspace_lists_complete_and_incomplete_evidence_packages(self) -> None:
         mission = self.load_service()._primary_mission
         mission.approve_issue("ISS-01")

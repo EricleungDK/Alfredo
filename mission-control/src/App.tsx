@@ -73,6 +73,21 @@ interface AppProps {
   readonly syncIntervalMs?: number;
 }
 
+interface WorkstationContinuityState {
+  readonly schema_version: 1;
+  readonly leftLaneMode: "agent" | "terminal";
+  readonly selectedIssueId: string | null;
+  readonly selectedSessionId: string | null;
+  readonly expandedWorkstationCardIds: readonly string[];
+  readonly pinnedWorkstationCardIds: readonly string[];
+  readonly workstationFilter: string;
+  readonly workstationSort: "priority" | "name" | "status";
+  readonly selectedWorkstationSessionId: string | null;
+  readonly selectedWorkstationDiff: WorkstationDiffLink | null;
+}
+
+const WORKSTATION_CONTINUITY_SCHEMA_VERSION = 1;
+
 export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   const [state, setState] = useState<WorkspaceLoadResult | "loading">("loading");
   const [connectionStatus, setConnectionStatus] = useState<
@@ -1226,6 +1241,7 @@ function CommandDeck({
   const issueSlicesById = new Map(
     snapshot.mission_board.issue_slices?.map((issue) => [issue.issue_id, issue]),
   );
+  const workstationContinuityKey = workstationContinuityStorageKey(snapshot);
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [expandedWorkstationCardIds, setExpandedWorkstationCardIds] = useState<readonly string[]>([]);
@@ -1259,6 +1275,82 @@ function CommandDeck({
     workstationSort,
     pinnedWorkstationCardIds,
   );
+  const hydratedWorkstationContinuityKey = useRef<string | null>(null);
+  const skipWorkstationContinuityWrite = useRef(false);
+  useEffect(() => {
+    if (hydratedWorkstationContinuityKey.current === workstationContinuityKey) return;
+    const restored = readWorkstationContinuity(workstationContinuityKey);
+    const cardIds = new Set(workstationCards.map((card) => card.id));
+    const sessionIds = new Set(
+      workstationCards.flatMap((card) => (card.sessionId ? [card.sessionId] : [])),
+    );
+    const issueIds = new Set(snapshot.mission_board.ordered_issue_ids);
+    if (restored) {
+      skipWorkstationContinuityWrite.current = true;
+      onLeftLaneModeChange(restored.leftLaneMode);
+      setSelectedIssueId(
+        restored.selectedIssueId && issueIds.has(restored.selectedIssueId)
+          ? restored.selectedIssueId
+          : null,
+      );
+      setSelectedSessionId(
+        restored.selectedSessionId && sessionIds.has(restored.selectedSessionId)
+          ? restored.selectedSessionId
+          : null,
+      );
+      setExpandedWorkstationCardIds(
+        restored.expandedWorkstationCardIds.filter((cardId) => cardIds.has(cardId)),
+      );
+      setPinnedWorkstationCardIds(
+        restored.pinnedWorkstationCardIds.filter((cardId) => cardIds.has(cardId)),
+      );
+      setWorkstationFilter(restored.workstationFilter);
+      setWorkstationSort(restored.workstationSort);
+      setSelectedWorkstationSessionId(
+        restored.selectedWorkstationSessionId &&
+          sessionIds.has(restored.selectedWorkstationSessionId)
+          ? restored.selectedWorkstationSessionId
+          : null,
+      );
+      setSelectedWorkstationDiff(
+        restored.selectedWorkstationDiff &&
+          sessionIds.has(restored.selectedWorkstationDiff.sessionId)
+          ? restored.selectedWorkstationDiff
+          : null,
+      );
+    }
+    hydratedWorkstationContinuityKey.current = workstationContinuityKey;
+  }, [onLeftLaneModeChange, snapshot.mission_board.ordered_issue_ids, workstationCards, workstationContinuityKey]);
+  useEffect(() => {
+    if (hydratedWorkstationContinuityKey.current !== workstationContinuityKey) return;
+    if (skipWorkstationContinuityWrite.current) {
+      skipWorkstationContinuityWrite.current = false;
+      return;
+    }
+    writeWorkstationContinuity(workstationContinuityKey, {
+      schema_version: WORKSTATION_CONTINUITY_SCHEMA_VERSION,
+      leftLaneMode,
+      selectedIssueId,
+      selectedSessionId,
+      expandedWorkstationCardIds,
+      pinnedWorkstationCardIds,
+      workstationFilter,
+      workstationSort,
+      selectedWorkstationSessionId,
+      selectedWorkstationDiff,
+    });
+  }, [
+    expandedWorkstationCardIds,
+    leftLaneMode,
+    pinnedWorkstationCardIds,
+    selectedIssueId,
+    selectedSessionId,
+    selectedWorkstationDiff,
+    selectedWorkstationSessionId,
+    workstationContinuityKey,
+    workstationFilter,
+    workstationSort,
+  ]);
   const workstationTranscriptTurns = [
     ...buildWorkstationTranscriptTurns(snapshot),
     ...workstationActionTurns,
@@ -1435,6 +1527,7 @@ function CommandDeck({
                 <span>Model {launchContext?.selected_model || "default"}</span>
                 <span>Scope {snapshot.conversation_scope.label}</span>
                 <span>Workspace {snapshot.workspace_session.workspace_path}</span>
+                <span>Runtime {launchContext?.runtime_root || "backend default"}</span>
                 <span>Execution {activeExecutionState}</span>
                 {launchContext?.recent_workspaces.length ? (
                   <span>{launchContext.recent_workspaces.length} recent workspaces</span>
@@ -1802,6 +1895,77 @@ function CommandDeck({
       </div>
     </div>
   );
+}
+
+function workstationContinuityStorageKey(snapshot: WorkspaceSnapshot): string {
+  const workspaceIdentity = encodeURIComponent(
+    `${snapshot.workspace_session.id}:${snapshot.workspace_session.workspace_path}`,
+  );
+  return `alfredo:workstation-continuity:v1:${workspaceIdentity}`;
+}
+
+function readWorkstationContinuity(key: string): WorkstationContinuityState | null {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    const value = JSON.parse(raw) as Partial<WorkstationContinuityState>;
+    if (value.schema_version !== WORKSTATION_CONTINUITY_SCHEMA_VERSION) return null;
+    return {
+      schema_version: WORKSTATION_CONTINUITY_SCHEMA_VERSION,
+      leftLaneMode: value.leftLaneMode === "terminal" ? "terminal" : "agent",
+      selectedIssueId: stringOrNull(value.selectedIssueId),
+      selectedSessionId: stringOrNull(value.selectedSessionId),
+      expandedWorkstationCardIds: stringArray(value.expandedWorkstationCardIds),
+      pinnedWorkstationCardIds: stringArray(value.pinnedWorkstationCardIds),
+      workstationFilter: typeof value.workstationFilter === "string" ? value.workstationFilter : "",
+      workstationSort: workstationSortValue(value.workstationSort),
+      selectedWorkstationSessionId: stringOrNull(value.selectedWorkstationSessionId),
+      selectedWorkstationDiff: workstationDiffOrNull(value.selectedWorkstationDiff),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeWorkstationContinuity(
+  key: string,
+  value: WorkstationContinuityState,
+): void {
+  try {
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Best-effort local UI continuity must not block authoritative workspace rendering.
+  }
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function stringArray(value: unknown): readonly string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.length > 0)
+    : [];
+}
+
+function workstationSortValue(value: unknown): "priority" | "name" | "status" {
+  return value === "name" || value === "status" ? value : "priority";
+}
+
+function workstationDiffOrNull(value: unknown): WorkstationDiffLink | null {
+  if (!value || typeof value !== "object") return null;
+  const diff = value as Partial<WorkstationDiffLink>;
+  return typeof diff.label === "string" &&
+    typeof diff.path === "string" &&
+    typeof diff.href === "string" &&
+    typeof diff.sessionId === "string"
+    ? {
+        label: diff.label,
+        path: diff.path,
+        href: diff.href,
+        sessionId: diff.sessionId,
+      }
+    : null;
 }
 
 function filterAndSortWorkstationGroups(

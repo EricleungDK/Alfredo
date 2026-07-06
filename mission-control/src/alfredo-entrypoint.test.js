@@ -430,6 +430,80 @@ test("alfredo persists recent workspaces across launches", () => {
   }
 });
 
+test("alfredo restores the selected workstation controller from runtime launch context", () => {
+  const runtimeRoot = mkdtempSync(resolve(tmpdir(), "alfredo-runtime-"));
+  const firstWorkspace = mkdtempSync(resolve(tmpdir(), "alfredo-workspace-one-"));
+  const secondWorkspace = mkdtempSync(resolve(tmpdir(), "alfredo-workspace-two-"));
+
+  try {
+    const env = {
+      ...process.env,
+      ALFREDO_DESKTOP_DRY_RUN: "1",
+      ALFREDO_RUNTIME_ROOT: runtimeRoot,
+    };
+    const first = spawnSync(process.execPath, [alfredoBinPath(), "--agent", "gemma4-12b"], {
+      cwd: firstWorkspace,
+      encoding: "utf8",
+      env,
+    });
+    const second = spawnSync(process.execPath, [alfredoBinPath()], {
+      cwd: secondWorkspace,
+      encoding: "utf8",
+      env,
+    });
+
+    expect(first.status).toBe(0);
+    expect(second.status).toBe(0);
+    expect(JSON.parse(second.stdout)).toMatchObject({
+      selected_agent: "gemma4-12b",
+      selected_model: "gemma4:12b",
+      selected_workspace: secondWorkspace,
+      runtime_root: runtimeRoot,
+      recent_workspaces: [secondWorkspace, firstWorkspace],
+    });
+    expect(JSON.parse(readFileSync(resolve(runtimeRoot, "launch-context.json"), "utf8"))).toMatchObject({
+      schema_version: 1,
+      selected_agent: "gemma4-12b",
+      selected_model: "gemma4:12b",
+      selected_workspace: secondWorkspace,
+      runtime_root: runtimeRoot,
+    });
+  } finally {
+    rmSync(runtimeRoot, { recursive: true, force: true });
+    rmSync(firstWorkspace, { recursive: true, force: true });
+    rmSync(secondWorkspace, { recursive: true, force: true });
+  }
+});
+
+test("alfredo explicit agent ignores malformed persisted launch context", () => {
+  const runtimeRoot = mkdtempSync(resolve(tmpdir(), "alfredo-runtime-"));
+  const workspace = mkdtempSync(resolve(tmpdir(), "alfredo-workspace-"));
+
+  try {
+    writeFileSync(resolve(runtimeRoot, "launch-context.json"), "{not-json", "utf8");
+    const result = spawnSync(process.execPath, [alfredoBinPath(), "--agent", "qwen3.6-27b"], {
+      cwd: workspace,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        ALFREDO_DESKTOP_DRY_RUN: "1",
+        ALFREDO_RUNTIME_ROOT: runtimeRoot,
+      },
+    });
+
+    expect(result.stderr).toBe("");
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      selected_agent: "qwen3.6-27b",
+      selected_model: "qwen3.6:27b",
+      selected_workspace: workspace,
+    });
+  } finally {
+    rmSync(runtimeRoot, { recursive: true, force: true });
+    rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
 test("desktop shell presents Alfredo as the app title", () => {
   const tauriConfig = JSON.parse(
     readFileSync(resolve(projectRoot, "src-tauri", "tauri.conf.json"), "utf8"),

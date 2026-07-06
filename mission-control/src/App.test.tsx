@@ -48,6 +48,10 @@ const client: WorkspaceClient = {
   loadSnapshot: async () => ({ kind: "ready", snapshot }),
 };
 
+beforeEach(() => {
+  window.localStorage.clear();
+});
+
 test("opens to a prompt-dominant workstation with Agent Workstations beside it", async () => {
   const workstationSnapshot: WorkspaceSnapshot = {
     ...snapshot,
@@ -162,6 +166,189 @@ test("opens to a prompt-dominant workstation with Agent Workstations beside it",
     source: "mission-commander",
     scope_kind: "issue-slice",
   });
+});
+
+test("restores workstation card state and side-pane selection after desktop refresh", async () => {
+  const continuitySnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_slices: [
+        {
+          issue_id: "ISS-01",
+          title: "Restore workspace session",
+          lifecycle: "Approved",
+          progress: "Evidence package ready for review",
+          launch_eligible: false,
+          blockers: [],
+          accepted_boundary: {
+            what_to_build: "Restore the workspace session.",
+            acceptance_criteria: ["Continuity restores card state."],
+            evidence_requirements: ["Frontend refresh test."],
+            source_path: ".agent/issues/27-persist-alfredo-workstation-continuity.md",
+          },
+          sessions: [
+            {
+              session_id: "session-ISS-01-1",
+              assigned_agent: "qwen-coder-local",
+              role: "local-agent",
+              provider: "ollama",
+              model: "qwen3.6:27b",
+              status: "evidence-ready",
+              stale: false,
+              disconnected: false,
+              operation_status: "completed",
+              failure: "",
+            },
+          ],
+          provenance: {
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+          model_assignment: {
+            agent_id: "qwen-coder-local",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+            availability: "available",
+            availability_reason: "",
+            operation_status: "completed",
+            failure: "",
+          },
+          evidence: {
+            state: "accepted",
+            changed_files: ["mission-control/src/App.tsx"],
+            commands_run: ["npm test -- App.test.tsx"],
+            test_results: "App continuity tests passed.",
+            risks: "None recorded.",
+            artifact_links: ["app-local://evidence/session-ISS-01-1"],
+          },
+          working_context_sources: [],
+        },
+        {
+          issue_id: "ISS-02",
+          title: "Keep selected issue visible",
+          lifecycle: "Approved",
+          progress: "Issue selection restored from local continuity.",
+          launch_eligible: false,
+          blockers: [],
+          accepted_boundary: {
+            what_to_build: "Restore the selected Issue Slice.",
+            acceptance_criteria: ["Desktop refresh returns to the selected issue."],
+            evidence_requirements: ["Frontend refresh test."],
+            source_path: ".agent/issues/27-persist-alfredo-workstation-continuity.md",
+          },
+          sessions: [],
+          provenance: {
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+          model_assignment: {
+            agent_id: "qwen-coder-local",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+            availability: "available",
+            availability_reason: "",
+            operation_status: "not-started",
+            failure: "",
+          },
+          evidence: {
+            state: "missing",
+            changed_files: [],
+            commands_run: [],
+            test_results: "",
+            risks: "",
+            artifact_links: [],
+          },
+          working_context_sources: [],
+        },
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 3,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ISS-01-1",
+            issue_id: "ISS-01",
+            assigned_agent: "qwen-coder-local",
+            status: "evidence-ready",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+        ],
+        attention: [],
+      },
+    ],
+  };
+  const continuityClient: WorkspaceClient = {
+    loadSnapshot: async () => ({ kind: "ready", snapshot: continuitySnapshot }),
+    loadLaunchContext: async () => ({
+      kind: "launch-context",
+      context: {
+        selected_agent: "qwen3.6-27b",
+        selected_model: "qwen3.6:27b",
+        selected_workspace: "/workspace/albert",
+        runtime_root: "/runtime/alfredo",
+        recent_workspaces: ["/workspace/albert"],
+      },
+    }),
+  };
+
+  const first = render(<App client={continuityClient} />);
+  const cards = await screen.findByRole("region", { name: "Workstation Cards" });
+  fireEvent.change(within(cards).getByRole("searchbox", { name: "Filter workstation cards" }), {
+    target: { value: "qwen" },
+  });
+  fireEvent.change(within(cards).getByRole("combobox", { name: "Sort workstation cards" }), {
+    target: { value: "name" },
+  });
+  fireEvent.click(within(cards).getByRole("button", { name: "Expand qwen-coder-local" }));
+  fireEvent.click(within(cards).getByRole("button", { name: "Pin qwen-coder-local" }));
+  fireEvent.click(screen.getByRole("button", { name: "Inspect ISS-02" }));
+  fireEvent.click(within(cards).getByRole("button", { name: "Select session session-ISS-01-1" }));
+  fireEvent.click(within(cards).getByRole("button", { name: "Open diff mission-control/src/App.tsx" }));
+  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+
+  await waitFor(() =>
+    expect(screen.getByRole("tab", { name: "Shell Terminal" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    ),
+  );
+  first.unmount();
+
+  render(<App client={continuityClient} />);
+  const restoredCards = await screen.findByRole("region", { name: "Workstation Cards" });
+
+  await waitFor(() =>
+    expect(within(restoredCards).getByRole("searchbox", { name: "Filter workstation cards" })).toHaveValue(
+      "qwen",
+    ),
+  );
+  expect(within(restoredCards).getByRole("combobox", { name: "Sort workstation cards" })).toHaveValue(
+    "name",
+  );
+  expect(within(restoredCards).getByRole("button", { name: "Unpin qwen-coder-local" })).toBeVisible();
+  expect(within(restoredCards).getByRole("region", { name: "qwen-coder-local operational detail" })).toBeVisible();
+  expect(within(restoredCards).getByText("Selected session session-ISS-01-1")).toBeVisible();
+  expect(within(restoredCards).getByText("Diff opened locally: mission-control/src/App.tsx")).toBeVisible();
+  expect(screen.getByRole("tab", { name: "Shell Terminal" })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  fireEvent.click(screen.getByRole("tab", { name: "Workstations" }));
+  expect(screen.getByRole("region", { name: "Issue Slice Inspector" })).toHaveTextContent(
+    "Keep selected issue visible",
+  );
+  expect(screen.getByText("Runtime /runtime/alfredo")).toBeVisible();
 });
 
 test("routes a waiting workstation card decision through typed queue acknowledgement", async () => {

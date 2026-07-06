@@ -21,6 +21,7 @@ const PREFLIGHT_PASS = "pass";
 const PREFLIGHT_FAIL = "fail";
 const PREFLIGHT_NOT_RUN = "not_run";
 const PREFLIGHT_NOT_APPLICABLE = "not_applicable";
+const LAUNCH_CONTEXT_SCHEMA_VERSION = 1;
 
 function runtimeRoot() {
   return process.env.ALFREDO_RUNTIME_ROOT
@@ -267,22 +268,76 @@ function recordRecentWorkspace(selectedWorkspace) {
   return recent;
 }
 
+function shouldPersistRuntimeState() {
+  return !(process.env.ALFREDO_DESKTOP_DRY_RUN === "1" && !process.env.ALFREDO_RUNTIME_ROOT);
+}
+
+function loadPersistedLaunchContext() {
+  if (!shouldPersistRuntimeState()) return null;
+  const launchContextPath = resolve(runtimeRoot(), "launch-context.json");
+  if (!existsSync(launchContextPath)) return null;
+  try {
+    const persisted = JSON.parse(readFileSync(launchContextPath, "utf8"));
+    if (persisted.schema_version !== LAUNCH_CONTEXT_SCHEMA_VERSION) return null;
+    return persisted;
+  } catch {
+    return null;
+  }
+}
+
+function recordLaunchContext(plan) {
+  if (!shouldPersistRuntimeState()) return;
+  const runtimePath = runtimeRoot();
+  mkdirSync(runtimePath, { recursive: true });
+  const launchContextPath = resolve(runtimePath, "launch-context.json");
+  writeFileSync(
+    launchContextPath,
+    `${JSON.stringify(
+      {
+        schema_version: LAUNCH_CONTEXT_SCHEMA_VERSION,
+        selected_agent: plan.selected_agent,
+        selected_model: plan.selected_model,
+        selected_workspace: plan.selected_workspace,
+        runtime_root: plan.runtime_root,
+      },
+      null,
+      2,
+    )}\n`,
+    "utf8",
+  );
+}
+
+function resolveWorkstationAgent(explicitSelectedAgent) {
+  const persisted = explicitSelectedAgent ? null : loadPersistedLaunchContext();
+  const selectedAgent = explicitSelectedAgent || persisted?.selected_agent || "";
+  if (!selectedAgent) return { selectedAgent: "", selectedAgentConfig: null };
+  try {
+    return {
+      selectedAgent,
+      selectedAgentConfig: requireKnownAgent(selectedAgent, { allowModelAlias: true }),
+    };
+  } catch (error) {
+    if (explicitSelectedAgent) throw error;
+    return { selectedAgent: "", selectedAgentConfig: null };
+  }
+}
+
 function parseWorkstationLaunch(argv) {
   const args = [...argv];
   if (args[0] === "workstation") {
     args.shift();
   }
-  let selectedAgent = "";
+  let explicitSelectedAgent = "";
   while (args.length > 0) {
     const arg = args.shift();
     if (arg === "--agent") {
-      selectedAgent = args.shift() ?? "";
-      if (!selectedAgent) throw new Error("--agent requires an agent id");
+      explicitSelectedAgent = args.shift() ?? "";
+      if (!explicitSelectedAgent) throw new Error("--agent requires an agent id");
       continue;
     }
     throw new Error(`Unsupported workstation option: ${arg}`);
   }
-  const selectedAgentConfig = requireKnownAgent(selectedAgent, { allowModelAlias: true });
+  const { selectedAgent, selectedAgentConfig } = resolveWorkstationAgent(explicitSelectedAgent);
   const plan = {
     product: "Alfredo",
     launch: "workstation",
@@ -298,11 +353,13 @@ function parseWorkstationLaunch(argv) {
     (check) => check.name === "writable_runtime" && check.status === PREFLIGHT_FAIL,
   );
   const recentWorkspaces = runtimeReady ? recordRecentWorkspace(plan.selected_workspace) : [];
-  return {
+  const launchPlan = {
     ...plan,
     recent_workspaces: recentWorkspaces,
     preflight,
   };
+  if (runtimeReady) recordLaunchContext(launchPlan);
+  return launchPlan;
 }
 
 function parseAgentOption(args) {
