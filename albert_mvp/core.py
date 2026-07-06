@@ -1267,6 +1267,8 @@ class AlbertMission:
         for path in sorted(issues_dir.glob("*.md")):
             if path.name.upper() in {"README.MD", "PRD.MD"}:
                 continue
+            if _record_type(path.read_text(encoding="utf-8")) == "prd":
+                continue
             issue = self._parse_issue(path)
             issues[issue.id] = issue
         if not issues and not self.allow_empty_tracker:
@@ -1849,6 +1851,18 @@ def _metadata(text: str) -> dict[str, str]:
             key, value = line.split(":", 1)
             metadata[key.strip().lower()] = value.strip()
     return metadata
+
+
+def _record_type(text: str) -> str:
+    for line in text.splitlines():
+        if line.startswith("## "):
+            break
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        if key.strip().lower() == "type":
+            return value.strip().lower()
+    return ""
 
 
 def _sections(text: str) -> dict[str, str]:
