@@ -45,16 +45,16 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .session-state strong { font-size: 0.78rem; font-weight: 500; }
 .revision { color: var(--cyan); }
 
-.deck-grid { height: calc(100vh - 72px); min-height: 560px; display: grid; grid-template-columns: minmax(420px, 1fr) minmax(340px, 38%); min-width: 0; }
+.deck-grid { height: calc(100vh - 72px); min-height: 560px; display: grid; grid-template-columns: minmax(520px, 1.7fr) minmax(320px, 0.75fr); min-width: 0; }
 .prompt-workspace { min-height: 0; min-width: 0; border-right: 1px solid var(--line); background: #0d1210; }
 .prompt-pane { height: 100%; display: grid; grid-template-rows: auto minmax(120px, 1fr) auto auto auto; gap: 1rem; min-height: 0; padding: clamp(1rem, 2vw, 1.5rem); background: #0d1210; }
-.agent-workstations { display: grid; grid-template-rows: auto auto auto minmax(0, 1fr); min-height: 0; min-width: 0; background: #0a0e0c; }
+.agent-workstations { display: grid; grid-template-rows: auto auto minmax(0, 1fr); min-height: 0; min-width: 0; background: #0a0e0c; }
 .agent-workstations__heading { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; padding: 1rem; border-bottom: 1px solid var(--line); }
-.workstation-tabs { display: grid; grid-template-columns: 1fr 1fr; border-bottom: 1px solid var(--line); }
-.workstation-tabs button { padding: 0.75rem; border: 0; border-bottom: 2px solid transparent; background: #0a0f0d; color: var(--muted); }
-.workstation-tabs button[aria-selected="true"] { border-bottom-color: var(--lime); color: var(--ink); background: #131a16; }
 .workstation-panel { min-height: 0; overflow: auto; }
 .workstation-cards { display: grid; gap: 0.9rem; max-height: min(42vh, 24rem); overflow: auto; padding: 1rem; border-bottom: 1px solid var(--line); }
+.mission-work-section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.8rem; }
+.mission-work-section-heading h3, .command-audit__heading h3 { margin: 0.12rem 0 0; font-family: "Rajdhani", sans-serif; font-size: 1.15rem; line-height: 1; }
+.mission-work-section-heading button { border: 1px solid var(--line); background: var(--panel-raised); color: var(--ink); padding: 0.42rem 0.55rem; font-size: 0.62rem; }
 .workstation-card-group { display: grid; gap: 0.65rem; }
 .workstation-card-group__heading, .workstation-pending { display: flex; justify-content: space-between; gap: 0.7rem; align-items: center; color: var(--muted); font-size: 0.62rem; text-transform: uppercase; letter-spacing: 0; }
 .workstation-pending { padding: 0.55rem 0.65rem; border: 1px dashed #9d7b2b; color: #ffd166; background: #171406; text-transform: none; letter-spacing: 0; }
@@ -107,6 +107,9 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .path-grant-form, .path-grant { padding: 0.75rem; border: 1px solid var(--line); background: #080d0b; }
 .path-grant-form label { display: grid; gap: 0.3rem; }
 .path-grant-form input, .path-grant-form select { padding: 0.55rem; border: 1px solid var(--line); background: #050807; color: var(--ink); }
+.command-audit { display: grid; gap: 0.75rem; margin: 0 1rem 1rem; border-top: 1px solid var(--line); background: #080d0b; }
+.command-audit__heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.8rem; padding: 1rem 0 0; }
+.command-audit .shell-terminal { padding: 0 0 1rem; }
 .panel-heading, .mission-heading { display: flex; justify-content: space-between; gap: 1rem; align-items: flex-start; }
 h1, h2 { font-family: "Rajdhani", sans-serif; margin: 0.12rem 0 0; line-height: 1; }
 h1 { font-size: 4rem; max-width: 14ch; }
@@ -247,7 +250,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   .deck-grid { height: auto; min-height: calc(100vh - 72px); grid-template-columns: 1fr; }
   .prompt-workspace { min-height: 58vh; border-right: 0; border-bottom: 1px solid var(--line); }
   .prompt-pane { min-height: 58vh; }
-  .agent-workstations { min-height: 46vh; }
+  .agent-workstations { min-height: 34vh; }
   .shell-terminal { overflow: visible; }
   .terminal-actions, .path-grant-form { grid-template-columns: 1fr; }
   .terminal-transcript pre, .terminal-record code { white-space: pre-wrap; overflow-wrap: anywhere; }

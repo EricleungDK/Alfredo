@@ -75,7 +75,7 @@ interface AppProps {
 
 interface WorkstationContinuityState {
   readonly schema_version: 1;
-  readonly leftLaneMode: "agent" | "terminal";
+  readonly commandAuditOpen: boolean;
   readonly selectedIssueId: string | null;
   readonly selectedSessionId: string | null;
   readonly expandedWorkstationCardIds: readonly string[];
@@ -140,7 +140,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
     ended_at: "",
   });
   const [activityStatus, setActivityStatus] = useState<"pending" | "rejected" | null>(null);
-  const [leftLaneMode, setLeftLaneMode] = useState<"agent" | "terminal">("agent");
+  const [commandAuditOpen, setCommandAuditOpen] = useState(false);
   const [launchContext, setLaunchContext] = useState<AlfredoLaunchContext | null>(null);
   const appendWorkstationActionTurn = useCallback((turn: WorkstationActionTurn) => {
     setWorkstationActionTurns((turns) => [...turns, turn]);
@@ -218,8 +218,8 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   });
 
   useEffect(() => {
-    if (leftLaneMode === "terminal") void shellTerminal.load();
-  }, [leftLaneMode, shellTerminal.load]);
+    if (commandAuditOpen) void shellTerminal.load();
+  }, [commandAuditOpen, shellTerminal.load]);
 
   const refreshWorkingContext = useCallback(async () => {
     if (!client.loadWorkingContext) return false;
@@ -1001,8 +1001,8 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         setMissionDraftReasons((current) => ({ ...current, [draftId]: reason }))
       }
       onMissionDraftDecision={submitMissionDraftDecision}
-      leftLaneMode={leftLaneMode}
-      onLeftLaneModeChange={setLeftLaneMode}
+      commandAuditOpen={commandAuditOpen}
+      onCommandAuditOpenChange={setCommandAuditOpen}
       shellTerminal={shellTerminal}
       launchContext={launchContext}
     />
@@ -1115,8 +1115,8 @@ function CommandDeck({
   onMissionDraftCreate,
   onMissionDraftReasonChange,
   onMissionDraftDecision,
-  leftLaneMode,
-  onLeftLaneModeChange,
+  commandAuditOpen,
+  onCommandAuditOpenChange,
   shellTerminal,
   launchContext,
 }: {
@@ -1185,8 +1185,8 @@ function CommandDeck({
     decision: MissionDraftDecision,
     reason: string,
   ) => void;
-  leftLaneMode: "agent" | "terminal";
-  onLeftLaneModeChange: (mode: "agent" | "terminal") => void;
+  commandAuditOpen: boolean;
+  onCommandAuditOpenChange: (open: boolean) => void;
   shellTerminal: ShellTerminalController;
   launchContext: AlfredoLaunchContext | null;
 }) {
@@ -1287,7 +1287,7 @@ function CommandDeck({
     const issueIds = new Set(snapshot.mission_board.ordered_issue_ids);
     if (restored) {
       skipWorkstationContinuityWrite.current = true;
-      onLeftLaneModeChange(restored.leftLaneMode);
+      onCommandAuditOpenChange(restored.commandAuditOpen);
       setSelectedIssueId(
         restored.selectedIssueId && issueIds.has(restored.selectedIssueId)
           ? restored.selectedIssueId
@@ -1320,7 +1320,7 @@ function CommandDeck({
       );
     }
     hydratedWorkstationContinuityKey.current = workstationContinuityKey;
-  }, [onLeftLaneModeChange, snapshot.mission_board.ordered_issue_ids, workstationCards, workstationContinuityKey]);
+  }, [onCommandAuditOpenChange, snapshot.mission_board.ordered_issue_ids, workstationCards, workstationContinuityKey]);
   useEffect(() => {
     if (hydratedWorkstationContinuityKey.current !== workstationContinuityKey) return;
     if (skipWorkstationContinuityWrite.current) {
@@ -1329,7 +1329,7 @@ function CommandDeck({
     }
     writeWorkstationContinuity(workstationContinuityKey, {
       schema_version: WORKSTATION_CONTINUITY_SCHEMA_VERSION,
-      leftLaneMode,
+      commandAuditOpen,
       selectedIssueId,
       selectedSessionId,
       expandedWorkstationCardIds,
@@ -1341,7 +1341,7 @@ function CommandDeck({
     });
   }, [
     expandedWorkstationCardIds,
-    leftLaneMode,
+    commandAuditOpen,
     pinnedWorkstationCardIds,
     selectedIssueId,
     selectedSessionId,
@@ -1401,7 +1401,7 @@ function CommandDeck({
           <section className="prompt-pane" aria-label="Prompt Transcript">
             <div className="panel-heading">
               <div>
-                <span className="eyebrow">Active Mission / {mission?.id ?? "none"}</span>
+                <span className="eyebrow">Agent Console / {mission?.id ?? "none"}</span>
                 <h1>{mission?.title ?? "No active mission"}</h1>
               </div>
               {connectionStatus === "offline" ? (
@@ -1525,7 +1525,7 @@ function CommandDeck({
                 </span>
                 <span>Controller {launchContext?.selected_agent || "default"}</span>
                 <span>Model {launchContext?.selected_model || "default"}</span>
-                <span>Scope {snapshot.conversation_scope.label}</span>
+                <span>Conversation Scope {snapshot.conversation_scope.label}</span>
                 <span>Workspace {snapshot.workspace_session.workspace_path}</span>
                 <span>Runtime {launchContext?.runtime_root || "backend default"}</span>
                 <span role="status" aria-label="Execution status" aria-live="polite">
@@ -1560,45 +1560,30 @@ function CommandDeck({
           </section>
         </main>
 
-        <aside className="agent-workstations" aria-label="Agent Workstations">
+        <aside className="agent-workstations" aria-label="Mission Work">
           <div className="agent-workstations__heading">
             <div>
               <span className="eyebrow">Persistent supervision</span>
-              <h2>Agent Workstations</h2>
+              <h2>Mission Work</h2>
             </div>
             <span className="connection-pill">
               {workstationCards.length} streams
             </span>
           </div>
-          <div className="workstation-tabs" role="tablist" aria-label="Agent Workstation views">
-            {(["agent", "terminal"] as const).map((mode) => {
-              const label = mode === "agent" ? "Workstations" : "Shell Terminal";
-              return (
-                <button
-                  key={mode}
-                  id={`${mode}-lane-tab`}
-                  role="tab"
-                  type="button"
-                  aria-selected={leftLaneMode === mode}
-                  aria-controls={`${mode}-lane-panel`}
-                  tabIndex={leftLaneMode === mode ? 0 : -1}
-                  onClick={() => onLeftLaneModeChange(mode)}
-                  onKeyDown={(event) => {
-                    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-                    event.preventDefault();
-                    const nextMode = leftLaneMode === "agent" ? "terminal" : "agent";
-                    onLeftLaneModeChange(nextMode);
-                    window.requestAnimationFrame(() =>
-                      document.getElementById(`${nextMode}-lane-tab`)?.focus(),
-                    );
-                  }}
-                >
-                  {label}
-                </button>
-              );
-            })}
-          </div>
           <section className="workstation-cards" aria-label="Workstation Cards">
+            <div className="mission-work-section-heading">
+              <div>
+                <span className="eyebrow">Live supervision</span>
+                <h3>Active Workstations</h3>
+              </div>
+              <button
+                type="button"
+                aria-expanded={commandAuditOpen}
+                onClick={() => onCommandAuditOpenChange(!commandAuditOpen)}
+              >
+                {commandAuditOpen ? "Close command audit" : "Open command audit"}
+              </button>
+            </div>
             <div className="workstation-card-controls">
               <label>
                 <span>Filter</span>
@@ -1676,13 +1661,8 @@ function CommandDeck({
               </div>
             ) : null}
           </section>
-          {leftLaneMode === "terminal" ? (
-            <div id="terminal-lane-panel" role="tabpanel">
-              <ShellTerminalPanel terminal={shellTerminal} />
-            </div>
-          ) : (
-            <div id="agent-lane-panel" role="tabpanel" className="workstation-panel">
-              <section className="operations" aria-label="Workstation Detail Views">
+          <div className="workstation-panel">
+            <section className="operations" aria-label="Workstation Detail Views">
                 <nav className="view-rail" aria-label="Workstation detail views">
                   <button
                     aria-current={snapshot.operations_view === "mission-board" ? "page" : undefined}
@@ -1890,9 +1870,19 @@ function CommandDeck({
                     </>
                   )}
                 </section>
+            </section>
+            {commandAuditOpen ? (
+              <section className="command-audit" aria-label="Command Audit">
+                <div className="command-audit__heading">
+                  <div>
+                    <span className="eyebrow">Audit drill-down</span>
+                    <h3>Command Audit</h3>
+                  </div>
+                </div>
+                <ShellTerminalPanel terminal={shellTerminal} />
               </section>
-            </div>
-          )}
+            ) : null}
+          </div>
         </aside>
       </div>
     </div>
@@ -1912,9 +1902,15 @@ function readWorkstationContinuity(key: string): WorkstationContinuityState | nu
     if (!raw) return null;
     const value = JSON.parse(raw) as Partial<WorkstationContinuityState>;
     if (value.schema_version !== WORKSTATION_CONTINUITY_SCHEMA_VERSION) return null;
+    const legacyContinuity = value as Partial<WorkstationContinuityState> & {
+      readonly leftLaneMode?: "agent" | "terminal";
+    };
     return {
       schema_version: WORKSTATION_CONTINUITY_SCHEMA_VERSION,
-      leftLaneMode: value.leftLaneMode === "terminal" ? "terminal" : "agent",
+      commandAuditOpen:
+        typeof value.commandAuditOpen === "boolean"
+          ? value.commandAuditOpen
+          : legacyContinuity.leftLaneMode === "terminal",
       selectedIssueId: stringOrNull(value.selectedIssueId),
       selectedSessionId: stringOrNull(value.selectedSessionId),
       expandedWorkstationCardIds: stringArray(value.expandedWorkstationCardIds),

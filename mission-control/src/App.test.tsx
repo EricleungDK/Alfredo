@@ -98,7 +98,16 @@ function relativeLuminance(hex: string): number {
   return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
 }
 
-test("opens to a prompt-dominant workstation with Agent Workstations beside it", async () => {
+async function openCommandAudit() {
+  fireEvent.click(screen.getByRole("button", { name: "Open command audit" }));
+  return await screen.findByRole("region", { name: "Shell Terminal" });
+}
+
+function closeCommandAudit() {
+  fireEvent.click(screen.getByRole("button", { name: "Close command audit", expanded: true }));
+}
+
+test("opens to a console-first workstation with persistent Mission Work beside it", async () => {
   const workstationSnapshot: WorkspaceSnapshot = {
     ...snapshot,
     missions: [
@@ -181,12 +190,22 @@ test("opens to a prompt-dominant workstation with Agent Workstations beside it",
   );
 
   expect(await screen.findByRole("main", { name: "Prompt Workstation" })).toBeVisible();
+  expect(screen.getByText(/Agent Console/)).toBeVisible();
+  expect(stylesSource).toMatch(
+    /\.deck-grid\s*\{[^}]*grid-template-columns:\s*minmax\(520px,\s*1\.7fr\)\s+minmax\(320px,\s*0\.75fr\)/s,
+  );
   const transcript = screen.getByRole("region", { name: "Prompt Transcript" });
   expect(within(transcript).getByText("Implement the next Alfredo workstation slice.")).toBeVisible();
   expect(within(transcript).getByText(/durable and route execution/)).toBeVisible();
   expect(within(transcript).getByText("Workstation action pending: ISS-02 delegation approval required.")).toBeVisible();
   expect(within(transcript).getByText("Workstation outcome: ISS-01 is running on qwen-coder-local.")).toBeVisible();
-  expect(screen.getByRole("complementary", { name: "Agent Workstations" })).toBeVisible();
+  expect(screen.getByRole("complementary", { name: "Mission Work" })).toBeVisible();
+  expect(screen.getByRole("heading", { name: "Mission Work" })).toBeVisible();
+  expect(screen.getByRole("heading", { name: "Active Workstations" })).toBeVisible();
+  expect(screen.queryByRole("tablist", { name: "Agent Workstation views" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("tab", { name: "Workstations" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("tab", { name: "Shell Terminal" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Shell Terminal" })).not.toBeInTheDocument();
   const cards = screen.getByRole("region", { name: "Workstation Cards" });
   expect(cards).toBeVisible();
   expect(screen.getByText("session-ISS-01-1")).toBeVisible();
@@ -195,7 +214,7 @@ test("opens to a prompt-dominant workstation with Agent Workstations beside it",
 
   const statusLine = screen.getByLabelText("Prompt status line");
   expect(within(statusLine).getByText("Connection Connected")).toBeVisible();
-  expect(within(statusLine).getByText("Scope Restore workspace session")).toBeVisible();
+  expect(within(statusLine).getByText("Conversation Scope Restore workspace session")).toBeVisible();
   expect(within(statusLine).getByText("Workspace /workspace/albert")).toBeVisible();
   expect(within(statusLine).getByText("Execution Waiting approval")).toBeVisible();
   expect(screen.getByRole("textbox", { name: "Message Alfredo" })).toBeVisible();
@@ -361,13 +380,10 @@ test("restores workstation card state and side-pane selection after desktop refr
   fireEvent.click(screen.getByRole("button", { name: "Inspect ISS-02" }));
   fireEvent.click(within(cards).getByRole("button", { name: "Select session session-ISS-01-1" }));
   fireEvent.click(within(cards).getByRole("button", { name: "Open diff mission-control/src/App.tsx" }));
-  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  await openCommandAudit();
 
   await waitFor(() =>
-    expect(screen.getByRole("tab", { name: "Shell Terminal" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    ),
+    expect(screen.getByRole("button", { name: "Close command audit", expanded: true })).toBeVisible(),
   );
   first.unmount();
 
@@ -386,11 +402,8 @@ test("restores workstation card state and side-pane selection after desktop refr
   expect(within(restoredCards).getByRole("region", { name: "qwen-coder-local operational detail" })).toBeVisible();
   expect(within(restoredCards).getByText("Selected session session-ISS-01-1")).toBeVisible();
   expect(within(restoredCards).getByText("Diff opened locally: mission-control/src/App.tsx")).toBeVisible();
-  expect(screen.getByRole("tab", { name: "Shell Terminal" })).toHaveAttribute(
-    "aria-selected",
-    "true",
-  );
-  fireEvent.click(screen.getByRole("tab", { name: "Workstations" }));
+  expect(screen.getByRole("button", { name: "Close command audit", expanded: true })).toBeVisible();
+  closeCommandAudit();
   expect(screen.getByRole("region", { name: "Issue Slice Inspector" })).toHaveTextContent(
     "Keep selected issue visible",
   );
@@ -919,14 +932,14 @@ test("keeps expanded workstation navigation local to the side pane", async () =>
   expect(within(transcript).queryByText(/mission-control\/src\/App.tsx/)).not.toBeInTheDocument();
 });
 
-test("switches distinct side-pane modes without mixing prompt and terminal drafts", async () => {
+test("opens command audit without mixing prompt and terminal drafts", async () => {
   render(<App client={client} />);
   await screen.findByRole("heading", { name: "Command Deck Mission" });
 
   fireEvent.change(screen.getByRole("textbox", { name: "Message Alfredo" }), {
     target: { value: "Keep this console draft" },
   });
-  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  await openCommandAudit();
 
   expect(screen.getByRole("region", { name: "Workstation Cards" })).toBeVisible();
   expect(screen.getByRole("region", { name: "Shell Terminal" })).toBeVisible();
@@ -934,14 +947,14 @@ test("switches distinct side-pane modes without mixing prompt and terminal draft
   fireEvent.change(screen.getByRole("textbox", { name: "Command" }), {
     target: { value: "python3 -m unittest --help" },
   });
-  fireEvent.click(screen.getByRole("tab", { name: "Workstations" }));
+  closeCommandAudit();
 
   expect(screen.getByRole("textbox", { name: "Message Alfredo" })).toHaveValue(
     "Keep this console draft",
   );
   expect(screen.queryByRole("region", { name: "Shell Terminal" })).not.toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  await openCommandAudit();
   expect(screen.getByRole("textbox", { name: "Command" })).toHaveValue(
     "python3 -m unittest --help",
   );
@@ -1033,7 +1046,7 @@ test("loads authoritative terminal metadata without reconstructing terminal byte
   }));
   render(<App client={{ ...client, loadShellTerminal }} />);
   await screen.findByRole("heading", { name: "Command Deck Mission" });
-  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  await openCommandAudit();
 
   const terminal = await screen.findByRole("region", { name: "Shell Terminal" });
   expect(loadShellTerminal).toHaveBeenCalledTimes(1);
@@ -1063,7 +1076,7 @@ test("submits auto-allowed terminal command and keeps output local to the sessio
     <App client={{ ...client, loadShellTerminal, submitShellTerminalCommand }} />,
   );
   await screen.findByRole("heading", { name: "Command Deck Mission" });
-  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  await openCommandAudit();
   await waitFor(() => expect(loadShellTerminal).toHaveBeenCalledTimes(1));
 
   fireEvent.change(screen.getByRole("textbox", { name: "Command" }), {
@@ -1088,10 +1101,10 @@ test("submits auto-allowed terminal command and keeps output local to the sessio
   expect(screen.getByRole("textbox", { name: "Command" })).toHaveValue("");
   expect(loadShellTerminal).toHaveBeenCalledTimes(2);
 
-  fireEvent.click(screen.getByRole("tab", { name: "Workstations" }));
+  closeCommandAudit();
   expect(screen.queryByText("usage: python3 -m unittest")).not.toBeInTheDocument();
   await act(async () => {
-    fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+    fireEvent.click(screen.getByRole("button", { name: "Open command audit" }));
   });
   expect(screen.getByLabelText("Command output")).toHaveTextContent(
     "usage: python3 -m unittest",
@@ -1136,7 +1149,7 @@ test("approves a human-required terminal command as Mission Commander", async ()
   }));
   render(<App client={{ ...client, loadShellTerminal, decideShellTerminalCommand }} />);
   await screen.findByRole("heading", { name: "Command Deck Mission" });
-  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  await openCommandAudit();
   fireEvent.click(await screen.findByRole("button", { name: `Approve ${command.command_id}` }));
 
   expect(decideShellTerminalCommand).toHaveBeenCalledWith({
@@ -1169,7 +1182,7 @@ test("requires a reason before denying a pending terminal command", async () => 
   }));
   render(<App client={{ ...client, loadShellTerminal, decideShellTerminalCommand }} />);
   await screen.findByRole("heading", { name: "Command Deck Mission" });
-  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  await openCommandAudit();
   const deny = await screen.findByRole("button", { name: `Deny ${command.command_id}` });
   expect(deny).toBeDisabled();
   fireEvent.change(screen.getByRole("textbox", { name: `Denial reason ${command.command_id}` }), {
@@ -1196,7 +1209,7 @@ test("shows the Frontier approval boundary without false Mission Commander appro
   }));
   render(<App client={{ ...client, loadShellTerminal }} />);
   await screen.findByRole("heading", { name: "Command Deck Mission" });
-  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  await openCommandAudit();
 
   expect(await screen.findByText("Awaiting Frontier Model approval")).toBeVisible();
   expect(screen.queryByRole("button", { name: `Approve ${command.command_id}` })).not.toBeInTheDocument();
@@ -1230,7 +1243,7 @@ test("creates a bounded Additional Path Grant through Mission Commander authorit
   });
   render(<App client={{ ...client, loadShellTerminal, createAdditionalPathGrant }} />);
   await screen.findByRole("heading", { name: "Command Deck Mission" });
-  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  await openCommandAudit();
   await waitFor(() => expect(loadShellTerminal).toHaveBeenCalledTimes(1));
 
   fireEvent.change(screen.getByRole("textbox", { name: "Grant path" }), {
@@ -1279,7 +1292,7 @@ test("shows expired grants as immutable history without self-expansion controls"
   }));
   render(<App client={{ ...client, loadShellTerminal }} />);
   await screen.findByRole("heading", { name: "Command Deck Mission" });
-  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  await openCommandAudit();
 
   expect(await screen.findByText("Expired")).toBeVisible();
   expect(screen.queryByRole("button", { name: /Edit|Renew|Broaden/i })).not.toBeInTheDocument();
@@ -1299,7 +1312,7 @@ test("keeps terminal inputs and shows actionable path rejection without false su
   }));
   render(<App client={{ ...client, loadShellTerminal, submitShellTerminalCommand }} />);
   await screen.findByRole("heading", { name: "Command Deck Mission" });
-  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  await openCommandAudit();
   fireEvent.change(screen.getByRole("textbox", { name: "Command" }), {
     target: { value: "touch report.txt" },
   });
@@ -1323,7 +1336,7 @@ test("keeps terminal inputs and shows actionable path rejection without false su
   expect(screen.queryByLabelText("Command output")).not.toBeInTheDocument();
 });
 
-test("switches side-pane tabs with arrow keys at constrained width", async () => {
+test("keeps command audit reachable at constrained width", async () => {
   const originalWidth = window.innerWidth;
   try {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 700 });
@@ -1333,24 +1346,19 @@ test("switches side-pane tabs with arrow keys at constrained width", async () =>
     fireEvent.change(screen.getByRole("textbox", { name: "Message Alfredo" }), {
       target: { value: "Preserve constrained draft" },
     });
-    const agentTab = screen.getByRole("tab", { name: "Workstations" });
-    agentTab.focus();
-    fireEvent.keyDown(agentTab, { key: "ArrowRight" });
-    expect(screen.getByRole("tab", { name: "Shell Terminal" })).toHaveAttribute(
-      "aria-selected",
-      "true",
+    expect(screen.queryByRole("tablist", { name: "Agent Workstation views" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Open command audit" })).toBeVisible();
+    expect(stylesSource).toMatch(
+      /@media \(max-width: 820px\)[\s\S]*\.prompt-workspace \{ min-height: 58vh;[\s\S]*\.agent-workstations \{ min-height: 34vh;/,
     );
+    await openCommandAudit();
     expect(screen.getByRole("region", { name: "Shell Terminal" })).toBeVisible();
 
-    const terminalTab = screen.getByRole("tab", { name: "Shell Terminal" });
-    fireEvent.keyDown(terminalTab, { key: "ArrowLeft" });
-    expect(screen.getByRole("tab", { name: "Workstations" })).toHaveAttribute(
-      "aria-selected",
-      "true",
-    );
+    closeCommandAudit();
     expect(screen.getByRole("textbox", { name: "Message Alfredo" })).toHaveValue(
       "Preserve constrained draft",
     );
+    expect(screen.queryByRole("region", { name: "Shell Terminal" })).not.toBeInTheDocument();
   } finally {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: originalWidth });
     fireEvent(window, new Event("resize"));
@@ -1363,23 +1371,23 @@ test("launches from loading into the canonical Command Deck snapshot", async () 
   expect(screen.getByRole("status")).toHaveTextContent("Connecting to Alfredo");
   expect(await screen.findByRole("heading", { name: "Command Deck Mission" })).toBeVisible();
   expect(screen.getByRole("region", { name: "Prompt Transcript" })).toBeVisible();
-  expect(screen.getByRole("complementary", { name: "Agent Workstations" })).toBeVisible();
+  expect(screen.getByRole("complementary", { name: "Mission Work" })).toBeVisible();
   expect(screen.getByText("Restore workspace session", { selector: ".scope-card strong" })).toBeVisible();
   expect(screen.getByText("Workspace Session workspace-command-deck")).toBeVisible();
   expect(screen.getAllByText("ISS-01")).not.toHaveLength(0);
 });
 
-test("exposes named landmarks and labelled controls in both side-pane modes", async () => {
+test("exposes named landmarks and labelled controls with command audit open", async () => {
   render(<App client={client} />);
   await screen.findByRole("heading", { name: "Command Deck Mission" });
 
   expect(screen.getByRole("main", { name: "Prompt Workstation" })).toBeVisible();
-  expect(screen.getByRole("complementary", { name: "Agent Workstations" })).toBeVisible();
+  expect(screen.getByRole("complementary", { name: "Mission Work" })).toBeVisible();
   for (const control of document.querySelectorAll("button, input, select, textarea, a[href]")) {
     expect(control).toHaveAccessibleName();
   }
 
-  fireEvent.click(screen.getByRole("tab", { name: "Shell Terminal" }));
+  await openCommandAudit();
   expect(screen.getByRole("region", { name: "Shell Terminal" })).toBeVisible();
   expect(screen.getByRole("alert")).toHaveTextContent("Shell Terminal transport is unavailable");
   for (const control of document.querySelectorAll("button, input, select, textarea, a[href]")) {
