@@ -153,7 +153,10 @@ test("submits explicit Conversation Scope through Tauri", async () => {
   };
   const scope = {
     correlation_id: "scope-mission-4",
+    action_type: "conversation-scope-change" as const,
+    actor: "mission-commander" as const,
     expected_revision: 4,
+    target: { kind: "conversation-scope" as const, id: "command-deck" },
     scope_kind: "mission" as const,
     scope_target: "command-deck",
     scope_label: "Command Deck Mission",
@@ -657,7 +660,10 @@ test("maps stale Workstation actions separately from rejected actions", async ()
 test("submits a Review Workspace decision through Tauri", async () => {
   const request = {
     correlation_id: "review-accept-4",
+    action_type: "review-decision" as const,
+    actor: "mission-commander" as const,
     expected_revision: 4,
+    target: { kind: "agent-session" as const, id: "session-ISS-01-1" },
     session_id: "session-ISS-01-1",
     decision: "accept" as const,
     reason: "Evidence satisfies the Issue Slice.",
@@ -690,7 +696,10 @@ test("maps incomplete Review Workspace decisions as backend rejections", async (
 
   const result = await new TauriWorkspaceClient().submitReviewDecision({
     correlation_id: "review-accept-incomplete-4",
+    action_type: "review-decision",
+    actor: "mission-commander",
     expected_revision: 4,
+    target: { kind: "agent-session", id: "session-ISS-01-1" },
     session_id: "session-ISS-01-1",
     decision: "accept",
     reason: "Looks fine.",

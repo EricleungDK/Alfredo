@@ -424,9 +424,18 @@ pub struct WorkspaceActionAcknowledgement {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct WorkspaceScopeTarget {
+    pub kind: String,
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct WorkspaceScopeRequest {
     pub correlation_id: String,
+    pub action_type: String,
+    pub actor: String,
     pub expected_revision: u64,
+    pub target: WorkspaceScopeTarget,
     pub scope_kind: String,
     pub scope_target: String,
     pub scope_label: String,
@@ -544,9 +553,18 @@ pub struct ReviewWorkspaceProjection {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+pub struct ReviewDecisionTarget {
+    pub kind: String,
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ReviewDecisionRequest {
     pub correlation_id: String,
+    pub action_type: String,
+    pub actor: String,
     pub expected_revision: u64,
+    pub target: ReviewDecisionTarget,
     pub session_id: String,
     pub decision: String,
     pub reason: String,
@@ -1067,8 +1085,16 @@ pub fn execute_scope(
     let output = configured_python_command(config, "workspace-scope")
         .arg("--correlation-id")
         .arg(&scope.correlation_id)
+        .arg("--action-type")
+        .arg(&scope.action_type)
+        .arg("--actor")
+        .arg(&scope.actor)
         .arg("--expected-revision")
         .arg(scope.expected_revision.to_string())
+        .arg("--target-kind")
+        .arg(&scope.target.kind)
+        .arg("--target-id")
+        .arg(&scope.target.id)
         .arg("--scope-kind")
         .arg(&scope.scope_kind)
         .arg("--scope-target")
@@ -1203,6 +1229,14 @@ pub fn execute_review_decision(
         .arg(&request.correlation_id)
         .arg("--expected-revision")
         .arg(request.expected_revision.to_string())
+        .arg("--action-type")
+        .arg(&request.action_type)
+        .arg("--actor")
+        .arg(&request.actor)
+        .arg("--target-kind")
+        .arg(&request.target.kind)
+        .arg("--target-id")
+        .arg(&request.target.id)
         .arg("--session-id")
         .arg(&request.session_id)
         .arg("--decision")
@@ -2884,7 +2918,13 @@ None - can start immediately
             &config,
             &WorkspaceScopeRequest {
                 correlation_id: "scope-issue-1".to_owned(),
+                action_type: "conversation-scope-change".to_owned(),
+                actor: "mission-commander".to_owned(),
                 expected_revision: 1,
+                target: WorkspaceScopeTarget {
+                    kind: "conversation-scope".to_owned(),
+                    id: "ISS-01".to_owned(),
+                },
                 scope_kind: "issue-slice".to_owned(),
                 scope_target: "ISS-01".to_owned(),
                 scope_label: "Console".to_owned(),
@@ -3062,6 +3102,109 @@ None - can start immediately
             snapshot.missions[0].sessions[0].session_id,
             "session-ISS-01-1"
         );
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn desktop_bridge_submits_review_decision_metadata_and_rejects_mismatch() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("albert-tauri-review-decision-{unique}"));
+        let target_repo = root.join("target");
+        let tracker_dir = root.join("tracker");
+        let issues_dir = tracker_dir.join("issues");
+        let runtime_root = root.join("runtime");
+        fs::create_dir_all(&target_repo).expect("target repo");
+        fs::create_dir_all(&issues_dir).expect("issues dir");
+        fs::write(tracker_dir.join("PRD.md"), "# Review Decision Bridge\n").expect("PRD");
+        fs::write(
+            issues_dir.join("01-review.md"),
+            "Status: approved\nType: AFK\n\n## Parent\n\nPRD.md\n\n## What to build\n\nReview through the desktop bridge.\n\n## Acceptance criteria\n\n- [ ] Review metadata reaches the backend.\n\n## Blocked by\n\nNone - can start immediately\n",
+        )
+        .expect("issue");
+        let config = BridgeConfig {
+            python: "python3".to_owned(),
+            backend_root: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .canonicalize()
+                .expect("backend root"),
+            target_repo: target_repo.clone(),
+            tracker_dir,
+            issues_dir: None,
+            runtime_root,
+            mission_id: "review-decision-bridge".to_owned(),
+            agent_config: None,
+            mission_catalog: None,
+        };
+
+        let launch = execute_workstation_action(
+            &config,
+            &WorkstationActionRequest {
+                correlation_id: "tauri-review-launch-1".to_owned(),
+                action_type: "issue-launch".to_owned(),
+                actor: "mission-commander".to_owned(),
+                expected_revision: 1,
+                target: WorkstationActionTarget {
+                    kind: "issue-slice".to_owned(),
+                    id: "ISS-01".to_owned(),
+                },
+                issue_id: "ISS-01".to_owned(),
+                session_id: String::new(),
+                agent_id: String::new(),
+                reason: String::new(),
+                allowed_paths: vec!["src".to_owned()],
+                command_policy: std::collections::BTreeMap::new(),
+            },
+        )
+        .expect("launch should create a reviewable session");
+        let review = execute_review_decision(
+            &config,
+            &ReviewDecisionRequest {
+                correlation_id: "tauri-review-repair-1".to_owned(),
+                action_type: "review-decision".to_owned(),
+                actor: "mission-commander".to_owned(),
+                expected_revision: launch.revision,
+                target: ReviewDecisionTarget {
+                    kind: "agent-session".to_owned(),
+                    id: launch.session_id.clone(),
+                },
+                session_id: launch.session_id.clone(),
+                decision: "repair".to_owned(),
+                reason: "Needs focused repair.".to_owned(),
+                failure_type: None,
+            },
+        )
+        .expect("review decision should be acknowledged");
+
+        let failure = execute_review_decision(
+            &config,
+            &ReviewDecisionRequest {
+                correlation_id: "tauri-review-target-mismatch-1".to_owned(),
+                action_type: "review-decision".to_owned(),
+                actor: "mission-commander".to_owned(),
+                expected_revision: review.revision,
+                target: ReviewDecisionTarget {
+                    kind: "agent-session".to_owned(),
+                    id: "session-other".to_owned(),
+                },
+                session_id: launch.session_id,
+                decision: "repair".to_owned(),
+                reason: "Needs focused repair.".to_owned(),
+                failure_type: None,
+            },
+        )
+        .expect_err("mismatched target metadata should be rejected");
+        let snapshot = execute_snapshot(&config).expect("snapshot should inspect");
+
+        assert_eq!(review.review_outcome, "Needs repair");
+        assert_eq!(review.session_id, "session-ISS-01-1");
+        assert_eq!(failure.code, "backend-startup-failure");
+        assert!(failure
+            .message
+            .contains("Review decision action target id must match session id"));
+        assert_eq!(snapshot.revision, review.revision);
         fs::remove_dir_all(root).expect("fixture cleanup");
     }
 

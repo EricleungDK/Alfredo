@@ -370,6 +370,10 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
     expect(await screen.findByText(/Workstation action: Mission Commander requested Launch ISS-01/)).toBeVisible();
     expect(await screen.findByText(/Orchestrator accepted workstation action: Orchestrator launched ISS-01/)).toBeVisible();
     expect(screen.getAllByText("session-ISS-01-1").length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole("button", { name: "Inspect assignment ISS-01" }));
+    expect(screen.getByRole("region", { name: "Issue Assignment Detail" })).toHaveTextContent(
+      "Release Seam",
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Activity" }));
     const journal = await screen.findByRole("region", { name: "Activity Journal" });
@@ -389,6 +393,11 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
     const restoredTranscript = await screen.findByRole("region", { name: "Prompt Transcript" });
     expect(within(restoredTranscript).getByText("Workstation action: Mission Commander requested issue launch for ISS-01.")).toBeVisible();
     expect(within(restoredTranscript).getByText("Orchestrator accepted workstation action: Orchestrator launched ISS-01 as session-ISS-01-1.")).toBeVisible();
+    const restoredJournal = await screen.findByRole("region", { name: "Activity Journal" });
+    expect(within(restoredJournal).getByText("Orchestrator launched ISS-01 as session-ISS-01-1.")).toBeVisible();
+    const restoredAssignmentDetail = screen.getByRole("region", { name: "Issue Assignment Detail" });
+    expect(restoredAssignmentDetail).toHaveTextContent("ISS-01");
+    expect(restoredAssignmentDetail).toHaveTextContent("Release Seam");
     expect(screen.getAllByText("session-ISS-01-1").length).toBeGreaterThan(0);
     expect(screen.getByLabelText("Prompt status line")).toHaveTextContent(`Workspace ${workspace}`);
   } finally {

@@ -4,13 +4,13 @@
 
 ## Active Orchestration Context
 
-- **Captured For Run**: `2026-07-06 - implement .scratch/alfredo-console-first-workstation-redesign/issues/07-activity-journal-and-durable-transcript-boundaries.md`
-- **Current Mission Focus**: `Alfredo console-first workstation redesign, Issue 07: Activity Journal and durable Agent Console transcript boundaries.`
-- **Active Agent Focus**: `Codex implemented the remaining Shell Terminal transcript and Activity Journal boundaries for command approval requests, command denials, approved command outcomes, and Additional Path Grant creation while keeping raw stdout/stderr out of durable summaries.`
+- **Captured For Run**: `2026-07-06 - implement .scratch/alfredo-console-first-workstation-redesign/issues/08-restart-continuity-through-the-release-seam.md`
+- **Current Mission Focus**: `Alfredo console-first workstation redesign, Issue 08: restart continuity through the task 29 release seam.`
+- **Active Agent Focus**: `Codex completed Issue 08 and post-review hardening: restart continuity now restores meaningful Agent Console, Mission Work, Active Workstations, Issue Assignment Board focus/detail state, approvals, evidence links, Activity Journal availability, and canonical accepted workstation state; review-decision consequential actions now carry and validate action_type, actor, and target identity through React, Tauri, and Python before mutation.`
 - **Model Assignments (active run)**: `Primary coding agent: Codex. No local model delegation is planned for this implementation pass.`
-- **Coordination State**: `Issue 07 is complete in the local tracker. Shell Terminal command approval requests, denials, completed/failed outcomes, and Additional Path Grant creation now write durable Agent Console summaries and Activity Journal entries without raw stdout/stderr. Focused and full verification gates are green.`
-- **Pending Blockers**: `None known for Issue 07.`
-- **Next Decisions / Actions**: `Commit the Issue 07 implementation to the current branch and report the completed verification evidence.`
+- **Coordination State**: `Issue 08 is complete in the local tracker. Subagent spec review passed, code quality review passed after the review-decision metadata fix and cleanup, and all final verification gates are green.`
+- **Pending Blockers**: `None known for Issue 08.`
+- **Next Decisions / Actions**: `Commit the Issue 08 implementation to the current branch and report verification evidence.`
 
 If any field above is `TBD` or stale, do not infer scope from this file. Update this section immediately before planning or implementation.
 
@@ -107,6 +107,8 @@ Albert's tested local coding TUI MVP is implemented and verified.
 - Issue 06 evidence: `npm test -- --run workstation-projection.test.ts App.test.tsx` passes 76 tests; `npm run typecheck` passes; `python3 -m unittest tests.test_workspace_snapshot` passes 100 tests; `npm test -- --run` passes 125 frontend tests; `npm run build` passes; `python3 -m unittest discover -s tests` passes 181 tests with 1 skip; `cargo fmt --manifest-path mission-control/src-tauri/Cargo.toml -- --check` passes; and `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 27 Rust bridge tests.
 - Alfredo console-first workstation Issue 07 is complete. Agent Console history and Activity Journal now retain meaningful command/grant approval decisions and outcomes, including Shell Terminal approval requests, denials, completed/failed command outcomes, and Additional Path Grant creation, while routine navigation and raw terminal bytes stay out of durable records.
 - Issue 07 evidence: `python3 -m unittest tests.test_workspace_snapshot` passes 101 tests; `python3 -m unittest discover -s tests` passes 182 tests with 1 skip; `npm test -- --run` passes 125 frontend tests; `npm run typecheck` passes; `npm run build` passes; `cargo fmt --manifest-path mission-control/src-tauri/Cargo.toml -- --check` passes; and `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 27 Rust bridge tests.
+- Alfredo console-first workstation Issue 08 is complete. Restart continuity now restores meaningful Agent Console, Mission Work, Active Workstations, Issue Assignment Board detail focus, approvals, evidence links, Activity Journal availability, and canonical accepted workstation state through the task 29 release seam while excluding transient hover/animation/raw terminal bytes.
+- Issue 08 evidence: `npm test -- --run App.test.tsx alfredo-release-seam.test.tsx` passes 63 tests; `python3 -m unittest tests.test_workspace_snapshot` passes 101 tests; `npm run typecheck` passes; `npm test -- --run` passes 125 frontend tests; `python3 -m unittest discover -s tests` passes 183 tests with 1 skip; `npm run build` passes; `cargo fmt --manifest-path mission-control/src-tauri/Cargo.toml -- --check` passes; and `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 28 Rust bridge tests.
 
 ## Current Model Registry
 

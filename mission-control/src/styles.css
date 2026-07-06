@@ -110,6 +110,11 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .issue-assignment-board td > button { width: fit-content; max-width: 100%; border: 1px solid var(--line); background: var(--panel-raised); color: var(--ink); padding: 0.3rem 0.42rem; font-size: 0.58rem; }
 .issue-assignment-board td > strong { color: var(--ink); font-size: 0.62rem; }
 .issue-assignment-board td > small { margin-top: 0.22rem; color: var(--muted); line-height: 1.35; }
+.issue-assignment-board__actions { display: grid; gap: 0.35rem; margin-bottom: 0.4rem; }
+.issue-assignment-board__action { display: grid; gap: 0.28rem; }
+.issue-assignment-board__action label { display: grid; gap: 0.18rem; color: var(--muted); font-size: 0.55rem; text-transform: uppercase; letter-spacing: 0; }
+.issue-assignment-board__action input, .issue-assignment-board__action textarea { min-width: 0; width: 100%; padding: 0.32rem; border: 1px solid var(--line); background: #050807; color: var(--ink); font-size: 0.6rem; }
+.issue-assignment-board__action button { width: fit-content; max-width: 100%; border: 1px solid var(--line); background: var(--panel-raised); color: var(--ink); padding: 0.3rem 0.42rem; font-size: 0.58rem; }
 .issue-assignment-detail { display: grid; gap: 0.65rem; padding: 0.75rem; border: 1px solid #29322d99; background: #080d0b; }
 .issue-assignment-detail h4, .issue-assignment-detail h5 { margin: 0.1rem 0 0; font-family: "Rajdhani", sans-serif; color: var(--cyan); }
 .issue-assignment-detail h4 { font-size: 1.05rem; }

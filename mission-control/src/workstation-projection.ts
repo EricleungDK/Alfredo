@@ -190,6 +190,7 @@ export interface IssueAssignmentBoardRow {
     readonly mission_id?: string | null;
   };
   readonly scopeDisabledReason: string | null;
+  readonly governedActions: readonly WorkstationGovernedAction[];
 }
 
 export interface IssueAssignmentBoardProjection {
@@ -277,6 +278,7 @@ function projectIssueAssignmentRow(
     "Unassigned";
   const assignmentState = assignmentStateForIssue(owner, missionSession, issueSession);
   const state = issueAssignmentRowState(issue, workstationStatus, assignmentState);
+  const workstationSessionId = missionSession?.session_id ?? issueSession?.session_id ?? null;
   return {
     issueId: issue.issue_id,
     title: issue.title,
@@ -287,7 +289,7 @@ function projectIssueAssignmentRow(
     readinessState: readinessLabel(state),
     blockerState: blockerState(issue.blockers),
     blockerSummaries: issue.blockers.map(blockerSummary),
-    workstationSessionId: missionSession?.session_id ?? issueSession?.session_id ?? null,
+    workstationSessionId,
     workstationAgent: missionSession?.assigned_agent ?? issueSession?.assigned_agent ?? null,
     workstationStatus:
       (missionSession?.status ?? issueSession?.status ?? issue.model_assignment.operation_status) || null,
@@ -298,6 +300,13 @@ function projectIssueAssignmentRow(
       mission_id: ownerMissionId,
     },
     scopeDisabledReason: scopeDisabledReason(snapshot, issue.issue_id, ownerMissionId),
+    governedActions: issueAssignmentGovernedActions(
+      issue,
+      state,
+      assignmentState,
+      workstationSessionId,
+      snapshot.revision,
+    ),
   };
 }
 
@@ -327,7 +336,49 @@ function projectFallbackIssueAssignmentRow(
       mission_id: snapshot.active_mission?.id ?? null,
     },
     scopeDisabledReason: scopeDisabledReason(snapshot, issueId, snapshot.active_mission?.id ?? null),
+    governedActions: [],
   };
+}
+
+function issueAssignmentGovernedActions(
+  issue: WorkspaceIssueSliceSummary,
+  state: IssueAssignmentRowState,
+  assignmentState: IssueAssignmentState,
+  workstationSessionId: string | null,
+  expectedRevision: number,
+): readonly WorkstationGovernedAction[] {
+  if (
+    state !== "unassigned-ready" ||
+    assignmentState !== "unassigned" ||
+    workstationSessionId ||
+    !issue.launch_eligible
+  ) {
+    return [];
+  }
+  return [
+    {
+      label: "Launch",
+      target: "mission-board",
+      requiresReason: false,
+      actionType: "issue-launch",
+      actor: "mission-commander",
+      issueId: issue.issue_id,
+      expectedRevision,
+      targetIdentity: { kind: "issue-slice", id: issue.issue_id },
+      recoveryPath: "Refresh the Issue Assignment Board and retry from the current Issue Slice state.",
+    },
+    {
+      label: "Assign model",
+      target: "mission-board",
+      requiresReason: true,
+      actionType: "model-assignment-change",
+      actor: "mission-commander",
+      issueId: issue.issue_id,
+      expectedRevision,
+      targetIdentity: { kind: "issue-slice", id: issue.issue_id },
+      recoveryPath: "Provide the target agent id and reason, then retry from the acknowledged row state.",
+    },
+  ];
 }
 
 function missionSessionForIssue(
@@ -779,12 +830,12 @@ function canonicalStatus(
   const status = `${rawStatus} ${rawOperationStatus}`.toLowerCase();
   if (failure || status.includes("failed") || status.includes("rejected")) return "failed";
   if (status.includes("cancelled") || status.includes("canceled")) return "done";
+  if (status.includes("evidence-ready") || status.includes("awaiting-review")) return "review-ready";
   if (status.includes("waiting") || status.includes("approval") || status.includes("pending")) {
     return "waiting-approval";
   }
   if (status.includes("blocked") || status.includes("needs-repair")) return "blocked";
   if (status.includes("reviewing") || status.includes("needs-review")) return "reviewing";
-  if (status.includes("evidence-ready") || status.includes("awaiting-review")) return "review-ready";
   if (
     status.includes("reviewed") ||
     status.includes("complete") ||

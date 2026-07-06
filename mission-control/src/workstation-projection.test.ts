@@ -565,6 +565,100 @@ test("projects issue assignment rows from accepted mission and session state", (
   expect(board.rows[1].blockerSummaries).toEqual(["ISS-000 Ready open - Release seam"]);
 });
 
+test("projects Issue Assignment Board governed actions only for canonical unassigned ready work", () => {
+  const board = projectIssueAssignmentBoard({
+    ...baseSnapshot,
+    revision: 21,
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      ordered_issue_ids: ["ISS-READY", "ISS-BLOCKED", "ISS-ACTIVE"],
+      ready_issue_ids: ["ISS-READY"],
+      approved_issue_ids: ["ISS-READY", "ISS-BLOCKED", "ISS-ACTIVE"],
+      issue_slices: [
+        issueSlice({
+          issue_id: "ISS-READY",
+          title: "Launchable issue",
+          launch_eligible: true,
+        }),
+        issueSlice({
+          issue_id: "ISS-BLOCKED",
+          title: "Blocked issue",
+          launch_eligible: false,
+          blockers: [
+            {
+              issue_id: "ISS-000",
+              title: "Release seam",
+              lifecycle: "Ready",
+              satisfied: false,
+            },
+          ],
+        }),
+        issueSlice({
+          issue_id: "ISS-ACTIVE",
+          title: "Active issue",
+          launch_eligible: false,
+          sessions: [
+            {
+              session_id: "session-ISS-ACTIVE-1",
+              assigned_agent: "qwen-coder-local",
+              role: "local-agent",
+              provider: "ollama",
+              model: "qwen3.6:27b",
+              status: "launched",
+              stale: false,
+              disconnected: false,
+              operation_status: "streaming",
+              failure: "",
+            },
+          ],
+        }),
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 3,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ISS-ACTIVE-1",
+            issue_id: "ISS-ACTIVE",
+            assigned_agent: "qwen-coder-local",
+            status: "launched",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+        ],
+        attention: [],
+      },
+    ],
+  });
+
+  expect(board.rows.find((row) => row.issueId === "ISS-READY")?.governedActions).toEqual([
+    expect.objectContaining({
+      label: "Launch",
+      actionType: "issue-launch",
+      actor: "mission-commander",
+      issueId: "ISS-READY",
+      expectedRevision: 21,
+      targetIdentity: { kind: "issue-slice", id: "ISS-READY" },
+    }),
+    expect.objectContaining({
+      label: "Assign model",
+      actionType: "model-assignment-change",
+      actor: "mission-commander",
+      issueId: "ISS-READY",
+      requiresReason: true,
+      expectedRevision: 21,
+      targetIdentity: { kind: "issue-slice", id: "ISS-READY" },
+    }),
+  ]);
+  expect(board.rows.find((row) => row.issueId === "ISS-BLOCKED")?.governedActions).toEqual([]);
+  expect(board.rows.find((row) => row.issueId === "ISS-ACTIVE")?.governedActions).toEqual([]);
+});
+
 test("keeps issue assignment linkage qualified to the active mission", () => {
   const duplicateIssueSnapshot: WorkspaceSnapshot = {
     ...baseSnapshot,

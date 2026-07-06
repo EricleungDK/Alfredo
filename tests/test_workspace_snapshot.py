@@ -2135,6 +2135,14 @@ class WorkspaceSnapshotTest(unittest.TestCase):
                     "review-accept-cli-1",
                     "--expected-revision",
                     "1",
+                    "--action-type",
+                    "review-decision",
+                    "--actor",
+                    "mission-commander",
+                    "--target-kind",
+                    "agent-session",
+                    "--target-id",
+                    session.session_id,
                     "--session-id",
                     session.session_id,
                     "--decision",
@@ -2188,6 +2196,14 @@ class WorkspaceSnapshotTest(unittest.TestCase):
                     "review-activity-cli-1",
                     "--expected-revision",
                     "1",
+                    "--action-type",
+                    "review-decision",
+                    "--actor",
+                    "mission-commander",
+                    "--target-kind",
+                    "agent-session",
+                    "--target-id",
+                    session.session_id,
                     "--session-id",
                     session.session_id,
                     "--decision",
@@ -2254,6 +2270,14 @@ class WorkspaceSnapshotTest(unittest.TestCase):
                     "review-accept-incomplete-cli-1",
                     "--expected-revision",
                     "1",
+                    "--action-type",
+                    "review-decision",
+                    "--actor",
+                    "mission-commander",
+                    "--target-kind",
+                    "agent-session",
+                    "--target-id",
+                    session.session_id,
                     "--session-id",
                     session.session_id,
                     "--decision",
@@ -2270,6 +2294,57 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(payload["error"]["recoverable"], True)
         self.assertIn("changed_files", payload["error"]["message"])
         self.assertEqual(self.load_service()._primary_mission.issues["ISS-01"].review_state, "approved")
+
+    def test_cli_rejects_mismatched_review_decision_metadata_before_mutation(self) -> None:
+        mission = self.load_service()._primary_mission
+        mission.approve_issue("ISS-01")
+        session = mission.launch_issue("ISS-01")
+        output = io.StringIO()
+        error = io.StringIO()
+
+        with redirect_stdout(output), redirect_stderr(error):
+            exit_code = main(
+                [
+                    "review-decision",
+                    "--target-repo",
+                    str(self.target_repo),
+                    "--tracker-dir",
+                    str(self.tracker),
+                    "--runtime-root",
+                    str(self.runtime),
+                    "--mission-id",
+                    "command-deck",
+                    "--correlation-id",
+                    "review-target-mismatch-cli-1",
+                    "--expected-revision",
+                    "1",
+                    "--action-type",
+                    "review-decision",
+                    "--actor",
+                    "mission-commander",
+                    "--target-kind",
+                    "agent-session",
+                    "--target-id",
+                    "session-other",
+                    "--session-id",
+                    session.session_id,
+                    "--decision",
+                    "repair",
+                    "--reason",
+                    "Needs focused repair.",
+                ]
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn(
+            "Error: Review decision action target id must match session id",
+            error.getvalue(),
+        )
+        self.assertEqual(
+            self.load_service()._primary_mission.issues["ISS-01"].review_state,
+            "approved",
+        )
 
     def test_stale_semantic_action_is_rejected_without_changing_accepted_state(self) -> None:
         sync = WorkspaceSyncService(self.load_service())
@@ -3418,6 +3493,51 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(after_detail["runtime_status"], before_detail["runtime_status"])
         self.assertEqual(after_detail["assigned_agent"], before_detail["assigned_agent"])
         self.assertEqual(len(after.sessions), len(before.sessions))
+
+    def test_cli_rejects_mismatched_scope_action_target_identity(self) -> None:
+        output = io.StringIO()
+        error = io.StringIO()
+
+        with redirect_stdout(output), redirect_stderr(error):
+            exit_code = main(
+                [
+                    "workspace-scope",
+                    "--target-repo",
+                    str(self.target_repo),
+                    "--tracker-dir",
+                    str(self.tracker),
+                    "--runtime-root",
+                    str(self.runtime),
+                    "--mission-id",
+                    "command-deck",
+                    "--correlation-id",
+                    "scope-issue-mismatch",
+                    "--expected-revision",
+                    "1",
+                    "--action-type",
+                    "conversation-scope-change",
+                    "--actor",
+                    "mission-commander",
+                    "--target-kind",
+                    "conversation-scope",
+                    "--target-id",
+                    "ISS-02",
+                    "--scope-kind",
+                    "issue-slice",
+                    "--scope-target",
+                    "ISS-01",
+                    "--scope-label",
+                    "Restore workspace session",
+                ]
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(output.getvalue(), "")
+        self.assertIn(
+            "Error: Conversation Scope action target id must match scope target",
+            error.getvalue(),
+        )
+        self.assertEqual(self.load_service().snapshot().conversation_scope.kind, "working-directory")
 
     def test_agent_console_history_restores_proposed_message_with_original_scope(self) -> None:
         first = AgentConsoleHistoryService(self.load_service())

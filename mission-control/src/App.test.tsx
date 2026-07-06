@@ -5,6 +5,7 @@ import { App } from "./App";
 import type {
   AgentConsoleMessageRequest,
   MissionDraftProjection,
+  ReviewDecisionRequest,
   ReviewWorkspaceProjection,
   WorkspaceActionResult,
   ActivityJournalFilters,
@@ -16,6 +17,7 @@ import type {
   WorkspaceSnapshot,
   WorkingContextCurationRequest,
   WorkingContextProjection,
+  WorkstationActionRequest,
 } from "./contracts";
 import type { WorkspaceClient } from "./workspace-client";
 
@@ -386,10 +388,12 @@ test("keeps review-ready workstation evidence affordances visible beside the Age
     "href",
     "app-local://evidence/session-ISS-04-1",
   );
-  expect(within(card).getByText("Accept evidence")).toBeVisible();
-  expect(within(card).getByText("Request repair")).toBeVisible();
+  expect(within(card).getByRole("button", { name: "Accept evidence session-ISS-04-1" })).toBeVisible();
+  expect(within(card).getByRole("button", { name: "Request repair session-ISS-04-1" })).toBeVisible();
   expect(within(card).getByText("Reason required")).toBeVisible();
-  expect(within(card).getAllByText("Use Review Workspace governed controls").length).toBeGreaterThan(0);
+  expect(
+    within(card).getAllByText("Card controls submit through Review Workspace validation").length,
+  ).toBeGreaterThan(0);
 });
 
 test("renders Issue Assignment Board rows with local detail and explicit scope action", async () => {
@@ -575,12 +579,368 @@ test("renders Issue Assignment Board rows with local detail and explicit scope a
   await waitFor(() => expect(scopeRequests).toHaveLength(1));
   expect(scopeRequests[0]).toEqual({
     correlation_id: "conversation-scope-issue-slice-ISS-BLOCKED-4",
+    action_type: "conversation-scope-change",
+    actor: "mission-commander",
     expected_revision: 4,
+    target: { kind: "conversation-scope", id: "ISS-BLOCKED" },
     scope_kind: "issue-slice",
     scope_target: "ISS-BLOCKED",
     scope_label: "Blocked dependency work",
   });
   expect(await within(transcript).findByText(/Conversation Scope now targets Blocked dependency work/)).toBeVisible();
+});
+
+test("submits Issue Assignment Board launch through a typed workstation action", async () => {
+  const before: WorkspaceSnapshot = {
+    ...snapshot,
+    revision: 9,
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_count: 1,
+      ordered_issue_ids: ["ISS-READY"],
+      ready_issue_ids: ["ISS-READY"],
+      approved_issue_ids: ["ISS-READY"],
+      issue_slices: [
+        appIssueSlice({
+          issue_id: "ISS-READY",
+          title: "Unassigned launchable work",
+          launch_eligible: true,
+        }),
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [],
+        attention: [],
+      },
+    ],
+  };
+  const after: WorkspaceSnapshot = {
+    ...before,
+    revision: 10,
+    mission_board: {
+      ...before.mission_board,
+      issue_slices: before.mission_board.issue_slices?.map((issue) => ({
+        ...issue,
+        launch_eligible: false,
+        sessions: [
+          {
+            session_id: "session-ISS-READY-1",
+            assigned_agent: "qwen-coder-local",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+            status: "launched",
+            stale: false,
+            disconnected: false,
+            operation_status: "streaming",
+            failure: "",
+          },
+        ],
+      })),
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ISS-READY-1",
+            issue_id: "ISS-READY",
+            assigned_agent: "qwen-coder-local",
+            status: "launched",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+        ],
+        attention: [],
+      },
+    ],
+  };
+  const actions: WorkstationActionRequest[] = [];
+  let snapshotLoads = 0;
+
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => {
+          snapshotLoads += 1;
+          return { kind: "ready", snapshot: snapshotLoads === 1 ? before : after };
+        },
+        submitWorkstationAction: async (request) => {
+          actions.push(request);
+          return {
+            kind: "acknowledged",
+            acknowledgement: {
+              correlation_id: request.correlation_id,
+              outcome: "acknowledged",
+              revision: 10,
+              action_type: "issue-launch",
+              issue_id: "ISS-READY",
+              session_id: "session-ISS-READY-1",
+              effect_summary: "Orchestrator launched ISS-READY as session-ISS-READY-1.",
+            },
+          };
+        },
+      }}
+    />,
+  );
+
+  const board = await screen.findByRole("table", { name: "Issue Assignment Board" });
+  fireEvent.click(within(board).getByRole("button", { name: "Launch ISS-READY" }));
+
+  await waitFor(() =>
+    expect(actions).toEqual([
+      {
+        correlation_id: "workstation-issue-launch-ISS-READY-9",
+        action_type: "issue-launch",
+        actor: "mission-commander",
+        expected_revision: 9,
+        target: { kind: "issue-slice", id: "ISS-READY" },
+        issue_id: "ISS-READY",
+        session_id: undefined,
+        agent_id: undefined,
+        reason: undefined,
+        allowed_paths: [],
+        command_policy: {},
+      },
+    ]),
+  );
+  expect(screen.getByText("Orchestrator validating workstation action.")).toBeVisible();
+  expect(await screen.findByText(/Orchestrator accepted workstation action: Orchestrator launched ISS-READY/)).toBeVisible();
+  expect(screen.getAllByText("session-ISS-READY-1").length).toBeGreaterThan(0);
+});
+
+test("requires agent and reason before Issue Assignment Board model assignment", async () => {
+  const assignmentSnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    revision: 11,
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_count: 1,
+      ordered_issue_ids: ["ISS-READY"],
+      ready_issue_ids: ["ISS-READY"],
+      approved_issue_ids: ["ISS-READY"],
+      issue_slices: [
+        appIssueSlice({
+          issue_id: "ISS-READY",
+          title: "Unassigned launchable work",
+          launch_eligible: true,
+        }),
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [],
+        attention: [],
+      },
+    ],
+  };
+  const actions: WorkstationActionRequest[] = [];
+
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => ({ kind: "ready", snapshot: assignmentSnapshot }),
+        submitWorkstationAction: async (request) => {
+          actions.push(request);
+          return {
+            kind: "acknowledged",
+            acknowledgement: {
+              correlation_id: request.correlation_id,
+              outcome: "acknowledged",
+              revision: 12,
+              action_type: "model-assignment-change",
+              issue_id: "ISS-READY",
+              session_id: "",
+              effect_summary: "Mission Commander assigned ISS-READY to gemma4-12b.",
+            },
+          };
+        },
+      }}
+    />,
+  );
+
+  const board = await screen.findByRole("table", { name: "Issue Assignment Board" });
+  const assign = within(board).getByRole("button", { name: "Assign model ISS-READY" });
+  expect(assign).toBeDisabled();
+  fireEvent.change(within(board).getByRole("textbox", { name: "Issue assignment agent ISS-READY" }), {
+    target: { value: "gemma4-12b" },
+  });
+  fireEvent.change(within(board).getByRole("textbox", { name: "Issue assignment reason ISS-READY" }), {
+    target: { value: "Use the available local worker." },
+  });
+  expect(assign).toBeEnabled();
+  fireEvent.click(assign);
+
+  await waitFor(() =>
+    expect(actions).toEqual([
+      {
+        correlation_id: "workstation-model-assignment-change-ISS-READY-11",
+        action_type: "model-assignment-change",
+        actor: "mission-commander",
+        expected_revision: 11,
+        target: { kind: "issue-slice", id: "ISS-READY" },
+        issue_id: "ISS-READY",
+        session_id: undefined,
+        agent_id: "gemma4-12b",
+        reason: "Use the available local worker.",
+        allowed_paths: [],
+        command_policy: {},
+      },
+    ]),
+  );
+  expect(await screen.findByText(/Orchestrator accepted workstation action/)).toBeVisible();
+});
+
+test("submits review-ready workstation card decisions through typed review validation", async () => {
+  const before: WorkspaceSnapshot = {
+    ...snapshot,
+    revision: 13,
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_count: 1,
+      ordered_issue_ids: ["ISS-REVIEW"],
+      ready_issue_ids: [],
+      approved_issue_ids: ["ISS-REVIEW"],
+      issue_slices: [
+        appIssueSlice({
+          issue_id: "ISS-REVIEW",
+          title: "Review card evidence",
+          lifecycle: "Approved",
+          progress: "Evidence Package is ready for review",
+          sessions: [
+            {
+              session_id: "session-ISS-REVIEW-1",
+              assigned_agent: "review-agent",
+              role: "local-agent",
+              provider: "ollama",
+              model: "qwen3.6:27b",
+              status: "evidence-ready",
+              stale: false,
+              disconnected: false,
+              operation_status: "awaiting-review",
+              failure: "",
+            },
+          ],
+          evidence: {
+            state: "complete",
+            changed_files: ["mission-control/src/App.tsx"],
+            commands_run: ["npm test -- --run App.test.tsx"],
+            test_results: "Focused App tests passed.",
+            risks: "None recorded.",
+            artifact_links: ["app-local://evidence/session-ISS-REVIEW-1"],
+          },
+        }),
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ISS-REVIEW-1",
+            issue_id: "ISS-REVIEW",
+            assigned_agent: "review-agent",
+            status: "evidence-ready",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+        ],
+        attention: [],
+      },
+    ],
+  };
+  const after: WorkspaceSnapshot = {
+    ...before,
+    revision: 14,
+    mission_board: {
+      ...before.mission_board,
+      issue_slices: before.mission_board.issue_slices?.map((issue) => ({
+        ...issue,
+        lifecycle: "Complete",
+        progress: "Evidence accepted and PR-ready",
+        evidence: { ...issue.evidence, state: "accepted" },
+      })),
+    },
+  };
+  const requests: ReviewDecisionRequest[] = [];
+  let snapshotLoads = 0;
+
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => {
+          snapshotLoads += 1;
+          return { kind: "ready", snapshot: snapshotLoads === 1 ? before : after };
+        },
+        submitReviewDecision: async (request) => {
+          requests.push(request);
+          return {
+            kind: "acknowledged",
+            acknowledgement: {
+              correlation_id: request.correlation_id,
+              outcome: "acknowledged",
+              revision: 14,
+              issue_id: "ISS-REVIEW",
+              session_id: "session-ISS-REVIEW-1",
+              review_outcome: "Approved",
+              next_action: "prepare-pr",
+              issue_lifecycle: "Complete",
+              effect_summary: "Issue Slice becomes Complete and PR-ready; it is not marked merged.",
+            },
+          };
+        },
+      }}
+    />,
+  );
+
+  const cards = await screen.findByRole("region", { name: "Workstation Cards" });
+  const repair = await within(cards).findByRole("button", {
+    name: "Request repair session-ISS-REVIEW-1",
+  });
+  expect(repair).toBeDisabled();
+  expect(within(cards).getByRole("button", { name: "Escalate human review session-ISS-REVIEW-1" })).toBeEnabled();
+  fireEvent.change(within(cards).getByRole("textbox", { name: "Workstation review reason session-ISS-REVIEW-1" }), {
+    target: { value: "Repair acceptance copy." },
+  });
+  expect(repair).toBeEnabled();
+  fireEvent.click(within(cards).getByRole("button", { name: "Accept evidence session-ISS-REVIEW-1" }));
+
+  await waitFor(() =>
+    expect(requests).toEqual([
+      {
+        correlation_id: "review-accept-session-ISS-REVIEW-1-13",
+        action_type: "review-decision",
+        actor: "mission-commander",
+        expected_revision: 13,
+        target: {
+          kind: "agent-session",
+          id: "session-ISS-REVIEW-1",
+        },
+        session_id: "session-ISS-REVIEW-1",
+        decision: "accept",
+        reason: "",
+      },
+    ]),
+  );
+  expect(screen.getByText("Orchestrator validating workstation action.")).toBeVisible();
+  expect(await screen.findByText(/Orchestrator accepted workstation action: Issue Slice becomes Complete and PR-ready/)).toBeVisible();
 });
 
 test("restores workstation card state and side-pane selection after desktop refresh", async () => {
@@ -727,7 +1087,7 @@ test("restores workstation card state and side-pane selection after desktop refr
   });
   fireEvent.click(within(cards).getByRole("button", { name: "Expand qwen-coder-local" }));
   fireEvent.click(within(cards).getByRole("button", { name: "Pin qwen-coder-local" }));
-  fireEvent.click(screen.getByRole("button", { name: "Inspect ISS-02" }));
+  fireEvent.click(screen.getByRole("button", { name: "Inspect assignment ISS-02" }));
   fireEvent.click(within(cards).getByRole("button", { name: "Select session session-ISS-01-1" }));
   fireEvent.click(within(cards).getByRole("button", { name: "Open diff mission-control/src/App.tsx" }));
   await openCommandAudit();
@@ -754,7 +1114,11 @@ test("restores workstation card state and side-pane selection after desktop refr
   expect(within(restoredCards).getByText("Diff opened locally: mission-control/src/App.tsx")).toBeVisible();
   expect(screen.getByRole("button", { name: "Close command audit", expanded: true })).toBeVisible();
   closeCommandAudit();
-  expect(screen.getByRole("region", { name: "Issue Slice Inspector" })).toHaveTextContent(
+  const restoredAssignmentDetail = screen.getByRole("region", { name: "Issue Assignment Detail" });
+  expect(restoredAssignmentDetail).toHaveFocus();
+  expect(restoredAssignmentDetail).toHaveTextContent("ISS-02");
+  expect(restoredAssignmentDetail).toHaveTextContent("Keep selected issue visible");
+  expect(screen.getByRole("table", { name: "Issue Assignment Board" })).toHaveTextContent(
     "Keep selected issue visible",
   );
   expect(screen.getByText("Runtime /runtime/alfredo")).toBeVisible();
@@ -3033,7 +3397,13 @@ test("review workspace applies accepted evidence only after acknowledgement", as
   expect(requests).toEqual([
     {
       correlation_id: "review-accept-session-ISS-01-1-4",
+      action_type: "review-decision",
+      actor: "mission-commander",
       expected_revision: 4,
+      target: {
+        kind: "agent-session",
+        id: "session-ISS-01-1",
+      },
       session_id: "session-ISS-01-1",
       decision: "accept",
       reason: "",
@@ -3138,7 +3508,13 @@ test("review workspace requires a repair reason and exposes the next action", as
   expect(requests).toEqual([
     {
       correlation_id: "review-repair-session-ISS-01-1-4",
+      action_type: "review-decision",
+      actor: "mission-commander",
       expected_revision: 4,
+      target: {
+        kind: "agent-session",
+        id: "session-ISS-01-1",
+      },
       session_id: "session-ISS-01-1",
       decision: "repair",
       reason: "Acceptance copy is missing.",
@@ -3215,7 +3591,13 @@ test("review workspace records explicit human escalation outcomes", async () => 
   expect(requests).toEqual([
     {
       correlation_id: "review-escalate-human-session-ISS-01-1-4",
+      action_type: "review-decision",
+      actor: "mission-commander",
       expected_revision: 4,
+      target: {
+        kind: "agent-session",
+        id: "session-ISS-01-1",
+      },
       session_id: "session-ISS-01-1",
       decision: "escalate-human",
       reason: "Sensitive file needs human review.",
@@ -4051,7 +4433,10 @@ test("deliberately changes Conversation Scope to the active Mission", async () =
   expect(scopeRequests).toEqual([
     {
       correlation_id: "conversation-scope-mission-command-deck-4",
+      action_type: "conversation-scope-change",
+      actor: "mission-commander",
       expected_revision: 4,
+      target: { kind: "conversation-scope", id: "command-deck" },
       scope_kind: "mission",
       scope_target: "command-deck",
       scope_label: "Command Deck Mission",
@@ -4356,7 +4741,10 @@ test.each([
   expect(scopeRequests).toEqual([
     {
       correlation_id: `conversation-scope-${expectedScope.kind}-${expectedScope.target_id}-4`,
+      action_type: "conversation-scope-change",
+      actor: "mission-commander",
       expected_revision: 4,
+      target: { kind: "conversation-scope", id: expectedScope.target_id },
       scope_kind: expectedScope.kind,
       scope_target: expectedScope.target_id,
       scope_label: expectedScope.label,

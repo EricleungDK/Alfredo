@@ -97,6 +97,22 @@ def build_parser() -> argparse.ArgumentParser:
     workspace_scope.add_argument("--correlation-id", required=True)
     workspace_scope.add_argument("--expected-revision", required=True, type=int)
     workspace_scope.add_argument(
+        "--action-type",
+        default="conversation-scope-change",
+        choices=["conversation-scope-change"],
+    )
+    workspace_scope.add_argument(
+        "--actor",
+        default="mission-commander",
+        choices=["mission-commander"],
+    )
+    workspace_scope.add_argument(
+        "--target-kind",
+        default="conversation-scope",
+        choices=["conversation-scope"],
+    )
+    workspace_scope.add_argument("--target-id", default="")
+    workspace_scope.add_argument(
         "--scope-kind",
         required=True,
         choices=["working-directory", "mission", "issue-slice"],
@@ -239,6 +255,16 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_args(review_decision)
     review_decision.add_argument("--correlation-id", required=True)
     review_decision.add_argument("--expected-revision", required=True, type=int)
+    review_decision.add_argument(
+        "--action-type", required=True, choices=["review-decision"]
+    )
+    review_decision.add_argument(
+        "--actor", required=True, choices=["mission-commander"]
+    )
+    review_decision.add_argument(
+        "--target-kind", required=True, choices=["agent-session"]
+    )
+    review_decision.add_argument("--target-id", required=True)
     review_decision.add_argument("--session-id", required=True)
     review_decision.add_argument(
         "--decision", required=True, choices=["accept", "repair", "escalate-human"]
@@ -712,6 +738,15 @@ def _run(args: argparse.Namespace) -> int:
         return 0
     if args.command == "workspace-scope":
         current = snapshots.snapshot()
+        target_id = args.target_id or args.scope_target
+        if args.action_type != "conversation-scope-change":
+            raise AlbertError("Conversation Scope action type must be conversation-scope-change")
+        if args.actor != "mission-commander":
+            raise AlbertError("Conversation Scope action actor must be mission-commander")
+        if args.target_kind != "conversation-scope":
+            raise AlbertError("Conversation Scope action target kind must be conversation-scope")
+        if target_id != args.scope_target:
+            raise AlbertError("Conversation Scope action target id must match scope target")
         acknowledgement = WorkspaceSyncService(snapshots).submit_action(
             WorkspaceAction(
                 correlation_id=args.correlation_id,
@@ -831,6 +866,14 @@ def _run(args: argparse.Namespace) -> int:
         print(json.dumps(asdict(result), sort_keys=True))
         return 0
     if args.command == "review-decision":
+        if args.action_type != "review-decision":
+            raise AlbertError("Review decision action type must be review-decision")
+        if args.actor != "mission-commander":
+            raise AlbertError("Review decision action actor must be mission-commander")
+        if args.target_kind != "agent-session":
+            raise AlbertError("Review decision action target kind must be agent-session")
+        if args.target_id != args.session_id:
+            raise AlbertError("Review decision action target id must match session id")
         acknowledgement = ReviewWorkspaceService(snapshots).decide(
             correlation_id=args.correlation_id,
             expected_revision=args.expected_revision,

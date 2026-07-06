@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactElement, type RefObject } from "react";
 import type {
   AdHocDelegationProposalRequest,
   AlfredoLaunchContext,
@@ -89,6 +89,7 @@ interface WorkstationContinuityState {
   readonly schema_version: 1;
   readonly commandAuditOpen: boolean;
   readonly selectedIssueId: string | null;
+  readonly issueFocusTarget: "assignment-board" | "mission-board" | null;
   readonly selectedSessionId: string | null;
   readonly expandedWorkstationCardIds: readonly string[];
   readonly pinnedWorkstationCardIds: readonly string[];
@@ -97,6 +98,13 @@ interface WorkstationContinuityState {
   readonly selectedWorkstationSessionId: string | null;
   readonly selectedWorkstationDiff: WorkstationDiffLink | null;
 }
+
+type PersistedWorkstationContinuityState = Partial<
+  Omit<WorkstationContinuityState, "issueFocusTarget">
+> & {
+  readonly issueFocusTarget?: unknown;
+  readonly leftLaneMode?: "agent" | "terminal";
+};
 
 const WORKSTATION_CONTINUITY_SCHEMA_VERSION = 1;
 
@@ -141,6 +149,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   const [workstationActionDrafts, setWorkstationActionDrafts] = useState<
     Record<string, WorkstationActionDraftState>
   >({});
+  const workstationActionStatusRef = useRef<HTMLSpanElement>(null);
   const [queueReasons, setQueueReasons] = useState<Record<string, string>>({});
   const [activityJournal, setActivityJournal] = useState<ActivityJournalProjection | null>(null);
   const [activityFilters, setActivityFilters] = useState<ActivityJournalFilters>({
@@ -500,7 +509,13 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
     setActionStatus("pending");
     const result = await client.changeScope({
       correlation_id: correlationId,
+      action_type: "conversation-scope-change",
+      actor: "mission-commander",
       expected_revision: current.snapshot.revision,
+      target: {
+        kind: "conversation-scope",
+        id: targetScope.target_id,
+      },
       scope_kind: targetScope.kind,
       scope_target: targetScope.target_id,
       scope_label: targetScope.label,
@@ -618,7 +633,13 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       setReviewStatus({ state: "pending", message: "Review decision pending" });
       const result = await client.submitReviewDecision({
         correlation_id: correlationId,
+        action_type: "review-decision",
+        actor: "mission-commander",
         expected_revision: current.snapshot.revision,
+        target: {
+          kind: "agent-session",
+          id: sessionId,
+        },
         session_id: sessionId,
         decision,
         reason,
@@ -656,6 +677,10 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
     },
     [beginVisibleWorkstationAction, client, finishVisibleWorkstationAction, refreshReviewWorkspace, state],
   );
+
+  useEffect(() => {
+    if (workstationActionState) workstationActionStatusRef.current?.focus();
+  }, [workstationActionState]);
 
   const submitWorkspaceQueueDecision = useCallback(
     async (itemId: string, decision: WorkspaceQueueDecision, reason: string) => {
@@ -1008,6 +1033,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       onQueueDecision={submitWorkspaceQueueDecision}
       workstationActionTurns={workstationActionTurns}
       workstationActionState={workstationActionState}
+      workstationActionStatusRef={workstationActionStatusRef}
       workstationActionDrafts={workstationActionDrafts}
       onWorkstationActionDraftChange={(key, draft) =>
         setWorkstationActionDrafts((current) => ({ ...current, [key]: draft }))
@@ -1181,6 +1207,12 @@ function reviewDecisionLabel(decision: ReviewDecision): string {
   return "Escalate human review";
 }
 
+function reviewDecisionButtonClass(decision: ReviewDecision): string | undefined {
+  if (decision === "repair") return "action--warning";
+  if (decision === "escalate-human") return "action--danger";
+  return undefined;
+}
+
 function missionDraftDecisionLabel(decision: MissionDraftDecision): string {
   return decision === "confirm" ? "Confirm" : "Abandon";
 }
@@ -1244,6 +1276,7 @@ function CommandDeck({
   onQueueDecision,
   workstationActionTurns,
   workstationActionState,
+  workstationActionStatusRef,
   workstationActionDrafts,
   onWorkstationActionDraftChange,
   onWorkstationAction,
@@ -1308,6 +1341,7 @@ function CommandDeck({
   onQueueDecision: (itemId: string, decision: WorkspaceQueueDecision, reason: string) => void;
   workstationActionTurns: readonly WorkstationActionTurn[];
   workstationActionState: WorkstationActionState | null;
+  workstationActionStatusRef: RefObject<HTMLSpanElement | null>;
   workstationActionDrafts: Record<string, WorkstationActionDraftState>;
   onWorkstationActionDraftChange: (key: string, draft: WorkstationActionDraftState) => void;
   onWorkstationAction: (
@@ -1441,6 +1475,11 @@ function CommandDeck({
           ? restored.selectedIssueId
           : null,
       );
+      setIssueFocusTarget(
+        restored.selectedIssueId && issueIds.has(restored.selectedIssueId)
+          ? restored.issueFocusTarget
+          : null,
+      );
       setSelectedSessionId(
         restored.selectedSessionId && sessionIds.has(restored.selectedSessionId)
           ? restored.selectedSessionId
@@ -1479,6 +1518,7 @@ function CommandDeck({
       schema_version: WORKSTATION_CONTINUITY_SCHEMA_VERSION,
       commandAuditOpen,
       selectedIssueId,
+      issueFocusTarget,
       selectedSessionId,
       expandedWorkstationCardIds,
       pinnedWorkstationCardIds,
@@ -1491,6 +1531,7 @@ function CommandDeck({
     expandedWorkstationCardIds,
     commandAuditOpen,
     pinnedWorkstationCardIds,
+    issueFocusTarget,
     selectedIssueId,
     selectedSessionId,
     selectedWorkstationDiff,
@@ -1825,10 +1866,14 @@ function CommandDeck({
                     queueReasons={queueReasons}
                     onQueueReasonChange={onQueueReasonChange}
                     onQueueDecision={onQueueDecision}
+                    reviewReasons={reviewReasons}
+                    onReviewReasonChange={onReviewReasonChange}
+                    onReviewDecision={onReviewDecision}
                     workstationActionDrafts={workstationActionDrafts}
                     onWorkstationActionDraftChange={onWorkstationActionDraftChange}
                     onWorkstationAction={onWorkstationAction}
                     actionState={workstationActionState}
+                    actionStatusRef={workstationActionStatusRef}
                   />
                 ))}
               </div>
@@ -1844,12 +1889,17 @@ function CommandDeck({
             selectedIssueId={issueFocusTarget === "assignment-board" ? selectedIssueId : null}
             actionPending={actionStatus === "pending"}
             scopeActionAvailable={scopeActionAvailable}
+            workstationActionState={workstationActionState}
+            workstationActionDrafts={workstationActionDrafts}
+            workstationActionStatusRef={workstationActionStatusRef}
             onSelectIssue={(issueId) => {
               setSelectedIssueId(issueId);
               setIssueFocusTarget("assignment-board");
               setSelectedSessionId(null);
             }}
             onApplyScope={onApplyScope}
+            onWorkstationActionDraftChange={onWorkstationActionDraftChange}
+            onWorkstationAction={onWorkstationAction}
           />
           <div className="workstation-panel">
             <section className="operations" aria-label="Workstation Detail Views">
@@ -2085,15 +2135,28 @@ function IssueAssignmentBoard({
   selectedIssueId,
   actionPending,
   scopeActionAvailable,
+  workstationActionState,
+  workstationActionDrafts,
+  workstationActionStatusRef,
   onSelectIssue,
   onApplyScope,
+  onWorkstationActionDraftChange,
+  onWorkstationAction,
 }: {
   projection: IssueAssignmentBoardProjection;
   selectedIssueId: string | null;
   actionPending: boolean;
   scopeActionAvailable: boolean;
+  workstationActionState: WorkstationActionState | null;
+  workstationActionDrafts: Record<string, WorkstationActionDraftState>;
+  workstationActionStatusRef: RefObject<HTMLSpanElement | null>;
   onSelectIssue: (issueId: string) => void;
   onApplyScope: (scope: ConversationScope) => void;
+  onWorkstationActionDraftChange: (key: string, draft: WorkstationActionDraftState) => void;
+  onWorkstationAction: (
+    action: WorkstationGovernedAction,
+    draft: WorkstationActionDraftState,
+  ) => void;
 }): ReactElement {
   const selectedRow =
     projection.rows.find((row) => row.issueId === selectedIssueId) ?? null;
@@ -2115,7 +2178,7 @@ function IssueAssignmentBoard({
               <th scope="col">State</th>
               <th scope="col">Blockers</th>
               <th scope="col">Workstation</th>
-              <th scope="col">Scope</th>
+              <th scope="col">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -2125,6 +2188,11 @@ function IssueAssignmentBoard({
                 scopeActionAvailable,
                 actionPending,
               );
+              const rowActions = row.governedActions.filter(isExecutableWorkstationAction);
+              const rowActionState =
+                workstationActionState && workstationActionState.itemId === row.issueId
+                  ? workstationActionState
+                  : null;
               const helpId = disabledReason ? `issue-assignment-${row.issueId}-scope-help` : undefined;
               return (
                 <tr
@@ -2172,6 +2240,28 @@ function IssueAssignmentBoard({
                     )}
                   </td>
                   <td>
+                    {rowActionState ? (
+                      <small
+                        ref={workstationActionStatusRef}
+                        role={
+                          rowActionState.state === "rejected" || rowActionState.state === "failed"
+                            ? "alert"
+                            : "status"
+                        }
+                        aria-label={`${row.issueId} issue assignment action state`}
+                        className="connection-pill"
+                        tabIndex={-1}
+                      >
+                        {rowActionState.state}: {rowActionState.message}
+                      </small>
+                    ) : null}
+                    <IssueAssignmentActions
+                      actions={rowActions}
+                      actionState={rowActionState}
+                      drafts={workstationActionDrafts}
+                      onDraftChange={onWorkstationActionDraftChange}
+                      onAction={onWorkstationAction}
+                    />
                     <button
                       type="button"
                       aria-label={`Set scope to ${row.issueId}`}
@@ -2195,6 +2285,95 @@ function IssueAssignmentBoard({
       </div>
       {selectedRow ? <IssueAssignmentDetail row={selectedRow} /> : null}
     </section>
+  );
+}
+
+function IssueAssignmentActions({
+  actions,
+  actionState,
+  drafts,
+  onDraftChange,
+  onAction,
+}: {
+  actions: readonly WorkstationGovernedAction[];
+  actionState: WorkstationActionState | null;
+  drafts: Record<string, WorkstationActionDraftState>;
+  onDraftChange: (key: string, draft: WorkstationActionDraftState) => void;
+  onAction: (action: WorkstationGovernedAction, draft: WorkstationActionDraftState) => void;
+}): ReactElement | null {
+  if (actions.length === 0) return null;
+  const pending = actionState?.state === "pending";
+  return (
+    <div className="issue-assignment-board__actions">
+      {actions.map((action) => {
+        const targetId = workstationActionTargetId(action);
+        const key = workstationActionKey(action);
+        const draft = drafts[key] ?? { reason: "", agentId: "" };
+        const needsAgent = action.actionType === "model-assignment-change";
+        const disabledDescription = workstationActionDisabledDescription(
+          action,
+          targetId,
+          draft,
+          pending,
+        );
+        const helpId = disabledDescription ? `${workstationDomId(`issue-board:${key}`)}-help` : undefined;
+        const disabled =
+          pending ||
+          Boolean(action.disabledReason) ||
+          !targetId ||
+          (action.requiresReason && !draft.reason.trim()) ||
+          (needsAgent && !draft.agentId.trim());
+        return (
+          <div className="issue-assignment-board__action" key={key}>
+            {needsAgent ? (
+              <label>
+                <span>Agent</span>
+                <input
+                  aria-label={`Issue assignment agent ${targetId}`}
+                  value={draft.agentId}
+                  onChange={(event) =>
+                    onDraftChange(key, {
+                      ...draft,
+                      agentId: event.target.value,
+                    })
+                  }
+                />
+              </label>
+            ) : null}
+            {action.requiresReason ? (
+              <label>
+                <span>Reason</span>
+                <textarea
+                  aria-label={`Issue assignment reason ${targetId}`}
+                  rows={2}
+                  value={draft.reason}
+                  onChange={(event) =>
+                    onDraftChange(key, {
+                      ...draft,
+                      reason: event.target.value,
+                    })
+                  }
+                />
+              </label>
+            ) : null}
+            <button
+              type="button"
+              aria-label={`${action.label} ${targetId}`}
+              aria-describedby={helpId}
+              disabled={disabled}
+              onClick={() => onAction(action, draft)}
+            >
+              {action.label}
+            </button>
+            {disabledDescription ? (
+              <small id={helpId} className="workstation-card__action-help">
+                {disabledDescription}
+              </small>
+            ) : null}
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
@@ -2448,18 +2627,16 @@ function readWorkstationContinuity(key: string): WorkstationContinuityState | nu
   try {
     const raw = window.localStorage.getItem(key);
     if (!raw) return null;
-    const value = JSON.parse(raw) as Partial<WorkstationContinuityState>;
+    const value = JSON.parse(raw) as PersistedWorkstationContinuityState;
     if (value.schema_version !== WORKSTATION_CONTINUITY_SCHEMA_VERSION) return null;
-    const legacyContinuity = value as Partial<WorkstationContinuityState> & {
-      readonly leftLaneMode?: "agent" | "terminal";
-    };
     return {
       schema_version: WORKSTATION_CONTINUITY_SCHEMA_VERSION,
       commandAuditOpen:
         typeof value.commandAuditOpen === "boolean"
           ? value.commandAuditOpen
-          : legacyContinuity.leftLaneMode === "terminal",
+          : value.leftLaneMode === "terminal",
       selectedIssueId: stringOrNull(value.selectedIssueId),
+      issueFocusTarget: issueFocusTargetOrNull(value.issueFocusTarget),
       selectedSessionId: stringOrNull(value.selectedSessionId),
       expandedWorkstationCardIds: stringArray(value.expandedWorkstationCardIds),
       pinnedWorkstationCardIds: stringArray(value.pinnedWorkstationCardIds),
@@ -2496,6 +2673,10 @@ function stringArray(value: unknown): readonly string[] {
 
 function workstationSortValue(value: unknown): "priority" | "name" | "status" {
   return value === "name" || value === "status" ? value : "priority";
+}
+
+function issueFocusTargetOrNull(value: unknown): "assignment-board" | "mission-board" | null {
+  return value === "assignment-board" || value === "mission-board" ? value : null;
 }
 
 function workstationDiffOrNull(value: unknown): WorkstationDiffLink | null {
@@ -2574,10 +2755,14 @@ function WorkstationCard({
   queueReasons,
   onQueueReasonChange,
   onQueueDecision,
+  reviewReasons,
+  onReviewReasonChange,
+  onReviewDecision,
   workstationActionDrafts,
   onWorkstationActionDraftChange,
   onWorkstationAction,
   actionState,
+  actionStatusRef,
 }: {
   card: WorkstationCardProjection;
   expanded: boolean;
@@ -2590,6 +2775,9 @@ function WorkstationCard({
   queueReasons: Record<string, string>;
   onQueueReasonChange: (itemId: string, reason: string) => void;
   onQueueDecision: (itemId: string, decision: WorkspaceQueueDecision, reason: string) => void;
+  reviewReasons: Record<string, string>;
+  onReviewReasonChange: (sessionId: string, reason: string) => void;
+  onReviewDecision: (sessionId: string, decision: ReviewDecision, reason: string) => void;
   workstationActionDrafts: Record<string, WorkstationActionDraftState>;
   onWorkstationActionDraftChange: (key: string, draft: WorkstationActionDraftState) => void;
   onWorkstationAction: (
@@ -2597,21 +2785,28 @@ function WorkstationCard({
     draft: WorkstationActionDraftState,
   ) => void;
   actionState: WorkstationActionState | null;
+  actionStatusRef: RefObject<HTMLSpanElement | null>;
 }) {
   const queueActions = card.detail.governedActions.filter(
     (action) =>
       action.actionType === "workspace-queue-decision" && action.itemId && action.decision,
   );
+  const reviewActions = card.detail.governedActions.filter(isReviewWorkstationAction);
   const workstationActions = card.detail.governedActions.filter(isExecutableWorkstationAction);
   const queueItemId = queueActions[0]?.itemId ?? null;
   const queueReason = queueItemId ? queueReasons[queueItemId] ?? "" : "";
   const workstationActionTargetIds = workstationActions.map(workstationActionTargetId).filter(Boolean);
+  const reviewActionTargetIds = reviewActions.map(workstationActionTargetId).filter(Boolean);
   const matchingActionState =
     actionState &&
     ((queueItemId && actionState.itemId === queueItemId) ||
-      workstationActionTargetIds.includes(actionState.itemId))
+      workstationActionTargetIds.includes(actionState.itemId) ||
+      reviewActionTargetIds.includes(actionState.itemId))
       ? actionState
-      : queueActions.length === 0 && workstationActions.length === 0 && card.status === "waiting-approval"
+      : queueActions.length === 0 &&
+          reviewActions.length === 0 &&
+          workstationActions.length === 0 &&
+          card.status === "waiting-approval"
         ? {
             itemId: card.id,
             state: "disabled" as const,
@@ -2715,6 +2910,7 @@ function WorkstationCard({
       </div>
       {matchingActionState ? (
         <span
+          ref={actionStatusRef}
           role={
             matchingActionState.state === "rejected" || matchingActionState.state === "failed"
               ? "alert"
@@ -2722,6 +2918,7 @@ function WorkstationCard({
           }
           aria-label={`${card.name} workstation action state`}
           className="connection-pill"
+          tabIndex={-1}
         >
           {matchingActionState.state}: {matchingActionState.message}
         </span>
@@ -2775,6 +2972,60 @@ function WorkstationCard({
               );
             })}
           </div>
+        </div>
+      ) : null}
+      {reviewActions.length > 0 ? (
+        <div className="workstation-card__decision-actions">
+          {reviewActions.map((action) => {
+            const sessionId = action.sessionId;
+            const reason = reviewReasons[sessionId] ?? "";
+            const pending = matchingActionState?.state === "pending";
+            const disabledDescription = workstationReviewActionDisabledDescription(
+              action,
+              reason,
+              pending,
+            );
+            const helpId = disabledDescription
+              ? `${workstationDomId(`review:${sessionId}:${action.reviewDecision}`)}-help`
+              : undefined;
+            const disabled = pending || (action.requiresReason && !reason.trim());
+            return (
+              <div className="workstation-card__direct-action" key={`review:${sessionId}:${action.reviewDecision}`}>
+                {action.requiresReason ? (
+                  <label className="composer">
+                    <span>Reason</span>
+                    <textarea
+                      aria-label={`Workstation review reason ${sessionId}`}
+                      rows={2}
+                      value={reason}
+                      onChange={(event) => onReviewReasonChange(sessionId, event.target.value)}
+                    />
+                  </label>
+                ) : null}
+                <button
+                  type="button"
+                  aria-label={`${action.label} ${sessionId}`}
+                  aria-describedby={helpId}
+                  disabled={disabled}
+                  className={reviewDecisionButtonClass(action.reviewDecision)}
+                  onClick={() =>
+                    onReviewDecision(
+                      sessionId,
+                      action.reviewDecision,
+                      action.requiresReason ? reason : "",
+                    )
+                  }
+                >
+                  {action.label}
+                </button>
+                {disabledDescription ? (
+                  <small id={helpId} className="workstation-card__action-help">
+                    {disabledDescription}
+                  </small>
+                ) : null}
+              </div>
+            );
+          })}
         </div>
       ) : null}
       {workstationActions.length > 0 ? (
@@ -3013,7 +3264,7 @@ const WORKSTATION_STATUS_DESCRIPTIONS: Record<WorkstationCardProjection["status"
   blocked: "Blocked work needs a recovery decision before progress can continue.",
   failed: "Failed work needs review, repair, retry, or human escalation.",
   reviewing: "Review is in progress. Monitor the review workspace for the next decision.",
-  "review-ready": "Evidence is ready for review. Open Review Workspace for acceptance or repair.",
+  "review-ready": "Evidence is ready for review. Card controls submit through Review Workspace validation.",
   done: "Work is complete. Review accepted evidence or activity history if needed.",
   running: "Running work is active. Monitor progress and preserve the prompt workflow.",
   idle: "Idle work is assigned or queued but not actively executing.",
@@ -3061,6 +3312,23 @@ function workstationActionDisabledDescription(
   return null;
 }
 
+function workstationReviewActionDisabledDescription(
+  action: WorkstationGovernedAction & {
+    actionType: "review-decision";
+    reviewDecision: ReviewDecision;
+    sessionId: string;
+  },
+  reason: string,
+  pending: boolean,
+): string | null {
+  const pendingDescription = workstationPendingActionDescription(action.label, pending);
+  if (pendingDescription) return pendingDescription;
+  if (action.requiresReason && !reason.trim()) {
+    return workstationRequiredInputDescription(action.label, action.sessionId, "a review reason");
+  }
+  return null;
+}
+
 function workstationPendingActionDescription(label: string, pending: boolean): string | null {
   return pending ? `${label} is disabled while the Orchestrator validates the current action.` : null;
 }
@@ -3092,6 +3360,16 @@ function isExecutableWorkstationAction(
   );
 }
 
+function isReviewWorkstationAction(
+  action: WorkstationGovernedAction,
+): action is WorkstationGovernedAction & {
+  actionType: "review-decision";
+  reviewDecision: ReviewDecision;
+  sessionId: string;
+} {
+  return action.actionType === "review-decision" && Boolean(action.reviewDecision && action.sessionId);
+}
+
 function workstationActionTargetId(action: WorkstationGovernedAction): string {
   return action.targetIdentity?.id ?? action.sessionId ?? action.issueId ?? action.label;
 }
@@ -3116,7 +3394,7 @@ function governedActionSurface(
   actionTarget: WorkstationCardProjection["detail"]["governedActions"][number]["target"],
 ): string {
   if (actionTarget === "workspace-queue") return "Use Workspace Queue governed controls";
-  if (actionTarget === "review-workspace") return "Use Review Workspace governed controls";
+  if (actionTarget === "review-workspace") return "Card controls submit through Review Workspace validation";
   if (actionTarget === "activity") return "Use Activity Journal review history";
   return "Local monitoring only";
 }

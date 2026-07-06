@@ -1,4 +1,4 @@
-Status: ready-for-human
+Status: Completed
 Type: AFK
 
 ## Parent
@@ -30,5 +30,5 @@ Add the Issue Assignment Board below Active Workstations as a compact ownership 
 - Added board-local issue detail focus so row browsing stays inside the side pane and does not append Agent Console transcript turns or silently retarget Conversation Scope.
 - Added explicit per-row `Set scope` controls that submit through the existing Orchestrator-backed Conversation Scope acknowledgement path; disabled scope actions show visible reasons.
 - Projection coverage now distinguishes unassigned-ready, blocked, active, review-ready, complete, merged, and failed rows without inventing accepted ownership before canonical assignment/session data exists.
-- The implementation is ready for human acceptance, but this ticket remains `ready-for-human` rather than `complete` because `.agent/issues/29-add-alfredo-release-seam-verification.md` is still recorded as `ready-for-agent` while also listed as a blocker.
+- Mission Commander approval for `.agent/issues/29-add-alfredo-release-seam-verification.md` is registered, so this ticket is marked Completed with its blocker status resolved locally.
 - Verification: `npm test -- --run workstation-projection.test.ts App.test.tsx` passes 72 tests; `npm run typecheck` passes; `npm test -- --run` passes 121 frontend tests; `npm run build` passes; `python3 -m unittest discover -s tests` passes 180 tests with 1 skip; `cargo fmt --manifest-path mission-control/src-tauri/Cargo.toml -- --check` passes; `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` passes 27 Rust bridge tests.

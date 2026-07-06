@@ -332,9 +332,17 @@ export type ReviewWorkspaceLoadResult =
 
 export type ReviewDecision = "accept" | "repair" | "escalate-human";
 
+export interface ReviewDecisionTarget {
+  readonly kind: "agent-session";
+  readonly id: string;
+}
+
 export interface ReviewDecisionRequest {
   readonly correlation_id: string;
+  readonly action_type: "review-decision";
+  readonly actor: "mission-commander";
   readonly expected_revision: number;
+  readonly target: ReviewDecisionTarget;
   readonly session_id: string;
   readonly decision: ReviewDecision;
   readonly reason: string;
@@ -746,7 +754,13 @@ export interface WorkspaceActionRequest {
 
 export interface WorkspaceScopeRequest {
   readonly correlation_id: string;
+  readonly action_type: "conversation-scope-change";
+  readonly actor: "mission-commander";
   readonly expected_revision: number;
+  readonly target: {
+    readonly kind: "conversation-scope";
+    readonly id: string;
+  };
   readonly scope_kind: ConversationScopeKind;
   readonly scope_target: string;
   readonly scope_label: string;
