@@ -1,6 +1,20 @@
 # Central Context
 
-**Last Updated**: 2026-06-26
+**Last Updated**: 2026-07-06
+
+## Active Orchestration Context
+
+- **Captured For Run**: `UNKNOWN - must be set by current operator before planning`
+- **Current Mission Focus**: `TBD`
+- **Active Agent Focus**: `TBD`
+- **Model Assignments (active run)**: `TBD`
+- **Coordination State**: `TBD`
+- **Pending Blockers**: `TBD`
+- **Next Decisions / Actions**: `TBD`
+
+If any field above is `TBD` or stale, do not infer scope from this file. Update this section immediately before planning or implementation.
+
+## Project Status
 
 ## Project Status
 
