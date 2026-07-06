@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactElement } from "react";
 import type {
   AdHocDelegationProposalRequest,
   AlfredoLaunchContext,
@@ -27,7 +27,10 @@ import type {
 import type { WorkspaceClient } from "./workspace-client";
 import { applyWorkspaceUpdates } from "./workspace-sync";
 import {
+  projectIssueAssignmentBoard,
   projectWorkstationCards,
+  type IssueAssignmentBoardProjection,
+  type IssueAssignmentBoardRow,
   type WorkstationCardGroup,
   type WorkstationCardProjection,
   type WorkstationDiffLink,
@@ -476,9 +479,10 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
     [client, refreshWorkingContext, state],
   );
 
-  const submitScope = useCallback(async () => {
+  const submitScope = useCallback(async (requestedScope?: ConversationScope) => {
+    const targetScope = requestedScope ?? scopeDraft;
     if (
-      !scopeDraft ||
+      !targetScope ||
       state === "loading" ||
       (state.kind !== "ready" && state.kind !== "empty") ||
       !client.changeScope ||
@@ -487,25 +491,25 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       return;
     }
     const current = state;
-    const correlationId = `conversation-scope-${scopeDraft.kind}-${scopeDraft.target_id}-${current.snapshot.revision}`;
+    const correlationId = `conversation-scope-${targetScope.kind}-${targetScope.target_id}-${current.snapshot.revision}`;
     beginVisibleWorkstationAction(
       correlationId,
-      `Change Conversation Scope to ${scopeDraft.label}`,
-      `scope:${scopeDraft.kind}:${scopeDraft.target_id}`,
+      `Change Conversation Scope to ${targetScope.label}`,
+      `scope:${targetScope.kind}:${targetScope.target_id}`,
     );
     setActionStatus("pending");
     const result = await client.changeScope({
       correlation_id: correlationId,
       expected_revision: current.snapshot.revision,
-      scope_kind: scopeDraft.kind,
-      scope_target: scopeDraft.target_id,
-      scope_label: scopeDraft.label,
+      scope_kind: targetScope.kind,
+      scope_target: targetScope.target_id,
+      scope_label: targetScope.label,
     });
     if (result.kind !== "acknowledged") {
       setActionStatus(result.kind);
       finishVisibleWorkstationAction(
         correlationId,
-        `scope:${scopeDraft.kind}:${scopeDraft.target_id}`,
+        `scope:${targetScope.kind}:${targetScope.target_id}`,
         result.kind,
         result.message,
       );
@@ -516,7 +520,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       setActionStatus("rejected");
       finishVisibleWorkstationAction(
         correlationId,
-        `scope:${scopeDraft.kind}:${scopeDraft.target_id}`,
+        `scope:${targetScope.kind}:${targetScope.target_id}`,
         "failed",
         "Conversation Scope was acknowledged but updates could not be loaded.",
       );
@@ -527,7 +531,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       setActionStatus("rejected");
       finishVisibleWorkstationAction(
         correlationId,
-        `scope:${scopeDraft.kind}:${scopeDraft.target_id}`,
+        `scope:${targetScope.kind}:${targetScope.target_id}`,
         "failed",
         "Conversation Scope was acknowledged but canonical updates could not be applied.",
       );
@@ -538,9 +542,9 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
     setActionStatus("acknowledged");
     finishVisibleWorkstationAction(
       correlationId,
-      `scope:${scopeDraft.kind}:${scopeDraft.target_id}`,
+      `scope:${targetScope.kind}:${targetScope.target_id}`,
       "acknowledged",
-      `Conversation Scope now targets ${scopeDraft.label}.`,
+      `Conversation Scope now targets ${targetScope.label}.`,
     );
     await refreshWorkingContext();
   }, [beginVisibleWorkstationAction, client, finishVisibleWorkstationAction, refreshWorkingContext, scopeDraft, state]);
@@ -973,6 +977,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       scopeDraft={scopeDraft}
       onScopeDraftChange={setScopeDraft}
       onApplyScope={submitScope}
+      scopeActionAvailable={Boolean(client.changeScope && client.loadUpdates)}
       onSend={submitMessage}
       messageStatus={messageStatus}
       workingContext={workingContext}
@@ -1212,6 +1217,7 @@ function CommandDeck({
   scopeDraft,
   onScopeDraftChange,
   onApplyScope,
+  scopeActionAvailable,
   onSend,
   messageStatus,
   workingContext,
@@ -1262,7 +1268,8 @@ function CommandDeck({
   onDraftChange: (draft: string) => void;
   scopeDraft: ConversationScope | null;
   onScopeDraftChange: (scope: ConversationScope) => void;
-  onApplyScope: () => void;
+  onApplyScope: (scope?: ConversationScope) => void;
+  scopeActionAvailable: boolean;
   onSend: () => void;
   messageStatus: "pending" | "rejected" | null;
   workingContext: WorkingContextProjection | null;
@@ -1343,6 +1350,9 @@ function CommandDeck({
   };
   const activeViewTitle = viewTitle[snapshot.operations_view] ?? "Mission Board";
   const workingDirectoryLabel = snapshot.workspace_session.workspace_path.split(/[\\/]/).filter(Boolean).at(-1) ?? "Working directory";
+  const issueSlicesById = new Map(
+    snapshot.mission_board.issue_slices?.map((issue) => [issue.issue_id, issue]),
+  );
   const scopeOptions: ConversationScope[] = [
     {
       kind: "working-directory",
@@ -1359,7 +1369,7 @@ function CommandDeck({
         snapshot.conversation_scope.kind === "issue-slice" &&
         snapshot.conversation_scope.target_id === issueId
           ? snapshot.conversation_scope.label
-          : issueId,
+          : issueSlicesById.get(issueId)?.title ?? issueId,
     })),
   ];
   const selectedScope = scopeDraft ?? snapshot.conversation_scope;
@@ -1368,11 +1378,10 @@ function CommandDeck({
     (counts, source) => ({ ...counts, [source.kind]: (counts[source.kind] ?? 0) + 1 }),
     {},
   );
-  const issueSlicesById = new Map(
-    snapshot.mission_board.issue_slices?.map((issue) => [issue.issue_id, issue]),
-  );
+  const issueAssignmentBoard = projectIssueAssignmentBoard(snapshot);
   const workstationContinuityKey = workstationContinuityStorageKey(snapshot);
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
+  const [issueFocusTarget, setIssueFocusTarget] = useState<"assignment-board" | "mission-board" | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [expandedWorkstationCardIds, setExpandedWorkstationCardIds] = useState<readonly string[]>([]);
   const [pinnedWorkstationCardIds, setPinnedWorkstationCardIds] = useState<readonly string[]>([]);
@@ -1381,8 +1390,17 @@ function CommandDeck({
   const [selectedWorkstationSessionId, setSelectedWorkstationSessionId] = useState<string | null>(null);
   const [selectedWorkstationDiff, setSelectedWorkstationDiff] = useState<WorkstationDiffLink | null>(null);
   useEffect(() => {
-    if (selectedIssueId) document.getElementById("issue-slice-inspector")?.focus();
-  }, [selectedIssueId]);
+    if (!selectedIssueId) return;
+    const assignmentDetail =
+      issueFocusTarget === "assignment-board"
+        ? document.getElementById("issue-assignment-detail")
+        : null;
+    if (assignmentDetail) {
+      assignmentDetail.focus();
+      return;
+    }
+    document.getElementById("issue-slice-inspector")?.focus();
+  }, [issueFocusTarget, selectedIssueId]);
   const selectedIssue =
     (selectedIssueId ? issueSlicesById.get(selectedIssueId) : null) ??
     snapshot.mission_board.issue_slices?.[0] ??
@@ -1609,7 +1627,7 @@ function CommandDeck({
               </select>
               <button
                 type="button"
-                onClick={onApplyScope}
+                onClick={() => onApplyScope()}
                 disabled={
                   !scopeDraft ||
                   (scopeDraft.kind === snapshot.conversation_scope.kind &&
@@ -1821,6 +1839,18 @@ function CommandDeck({
               </div>
             ) : null}
           </section>
+          <IssueAssignmentBoard
+            projection={issueAssignmentBoard}
+            selectedIssueId={issueFocusTarget === "assignment-board" ? selectedIssueId : null}
+            actionPending={actionStatus === "pending"}
+            scopeActionAvailable={scopeActionAvailable}
+            onSelectIssue={(issueId) => {
+              setSelectedIssueId(issueId);
+              setIssueFocusTarget("assignment-board");
+              setSelectedSessionId(null);
+            }}
+            onApplyScope={onApplyScope}
+          />
           <div className="workstation-panel">
             <section className="operations" aria-label="Workstation Detail Views">
                 <nav className="view-rail" aria-label="Workstation detail views">
@@ -2008,6 +2038,7 @@ function CommandDeck({
                                       aria-label={`Inspect ${issue.issue_id}`}
                                       onClick={() => {
                                         setSelectedIssueId(issue.issue_id);
+                                        setIssueFocusTarget("mission-board");
                                         setSelectedSessionId(null);
                                       }}
                                     >
@@ -2047,6 +2078,186 @@ function CommandDeck({
       </div>
     </div>
   );
+}
+
+function IssueAssignmentBoard({
+  projection,
+  selectedIssueId,
+  actionPending,
+  scopeActionAvailable,
+  onSelectIssue,
+  onApplyScope,
+}: {
+  projection: IssueAssignmentBoardProjection;
+  selectedIssueId: string | null;
+  actionPending: boolean;
+  scopeActionAvailable: boolean;
+  onSelectIssue: (issueId: string) => void;
+  onApplyScope: (scope: ConversationScope) => void;
+}): ReactElement {
+  const selectedRow =
+    projection.rows.find((row) => row.issueId === selectedIssueId) ?? null;
+  return (
+    <section className="issue-assignment-board" aria-label="Issue Assignment Board region">
+      <div className="mission-work-section-heading">
+        <div>
+          <span className="eyebrow">Ownership matrix</span>
+          <h3>Issue Assignment Board</h3>
+        </div>
+        <span className="connection-pill">{projection.rows.length} issues</span>
+      </div>
+      <div className="issue-assignment-board__scroll">
+        <table aria-label="Issue Assignment Board">
+          <thead>
+            <tr>
+              <th scope="col">Issue</th>
+              <th scope="col">Owner</th>
+              <th scope="col">State</th>
+              <th scope="col">Blockers</th>
+              <th scope="col">Workstation</th>
+              <th scope="col">Scope</th>
+            </tr>
+          </thead>
+          <tbody>
+            {projection.rows.map((row) => {
+              const disabledReason = issueScopeDisabledReason(
+                row,
+                scopeActionAvailable,
+                actionPending,
+              );
+              const helpId = disabledReason ? `issue-assignment-${row.issueId}-scope-help` : undefined;
+              return (
+                <tr
+                  key={row.issueId}
+                  aria-label={`${row.issueId} ${row.title} ${row.owner} ${row.readinessState}`}
+                  data-selected={selectedIssueId === row.issueId}
+                  data-state={row.state}
+                >
+                  <td>
+                    <button
+                      type="button"
+                      aria-label={`Inspect assignment ${row.issueId}`}
+                      onClick={() => onSelectIssue(row.issueId)}
+                    >
+                      {row.issueId}
+                    </button>
+                    <small>{row.title}</small>
+                  </td>
+                  <td>
+                    <strong>{row.owner}</strong>
+                    <small>{row.assignmentState}</small>
+                  </td>
+                  <td>
+                    <span className="status">{row.readinessState}</span>
+                    <small>{row.lifecycleState}</small>
+                  </td>
+                  <td>
+                    {row.blockerSummaries.length === 0 ? (
+                      <span>Clear</span>
+                    ) : (
+                      row.blockerSummaries.map((summary) => (
+                        <small key={summary}>{summary}</small>
+                      ))
+                    )}
+                  </td>
+                  <td>
+                    {row.workstationSessionId ? (
+                      <>
+                        <strong>Session {row.workstationSessionId}</strong>
+                        <small>{row.workstationAgent ?? "Unassigned workstation"}</small>
+                        {row.workstationStatus ? <small>{row.workstationStatus}</small> : null}
+                      </>
+                    ) : (
+                      <span>No workstation</span>
+                    )}
+                  </td>
+                  <td>
+                    <button
+                      type="button"
+                      aria-label={`Set scope to ${row.issueId}`}
+                      aria-describedby={helpId}
+                      disabled={Boolean(disabledReason)}
+                      onClick={() => onApplyScope(row.scope)}
+                    >
+                      Set scope
+                    </button>
+                    {disabledReason ? (
+                      <small id={helpId} className="workstation-card__action-help">
+                        {disabledReason}
+                      </small>
+                    ) : null}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {selectedRow ? <IssueAssignmentDetail row={selectedRow} /> : null}
+    </section>
+  );
+}
+
+function IssueAssignmentDetail({ row }: { row: IssueAssignmentBoardRow }): ReactElement {
+  return (
+    <section
+      id="issue-assignment-detail"
+      className="issue-assignment-detail"
+      aria-label="Issue Assignment Detail"
+      tabIndex={-1}
+    >
+      <div className="issue-inspector__heading">
+        <div>
+          <span className="eyebrow">Local issue detail</span>
+          <h4>{row.issueId}</h4>
+        </div>
+        <span className="status">{row.readinessState}</span>
+      </div>
+      <p>{row.title}</p>
+      <dl>
+        <div>
+          <dt>Owner</dt>
+          <dd>{row.owner}</dd>
+        </div>
+        <div>
+          <dt>Assignment</dt>
+          <dd>{row.assignmentState}</dd>
+        </div>
+        <div>
+          <dt>Lifecycle</dt>
+          <dd>{row.lifecycleState}</dd>
+        </div>
+        <div>
+          <dt>Workstation</dt>
+          <dd>{row.workstationSessionId ?? "No workstation"}</dd>
+        </div>
+      </dl>
+      <section>
+        <h5>Blockers</h5>
+        {row.blockerSummaries.length === 0 ? (
+          <p>No blockers</p>
+        ) : (
+          <ul>
+            {row.blockerSummaries.map((summary) => (
+              <li key={summary}>{summary}</li>
+            ))}
+          </ul>
+        )}
+      </section>
+    </section>
+  );
+}
+
+function issueScopeDisabledReason(
+  row: IssueAssignmentBoardRow,
+  scopeActionAvailable: boolean,
+  actionPending: boolean,
+): string | null {
+  if (row.scopeDisabledReason) return row.scopeDisabledReason;
+  if (!scopeActionAvailable) return "Conversation Scope action is unavailable in this client.";
+  return actionPending
+    ? "Conversation Scope action is disabled while the Orchestrator validates another action."
+    : null;
 }
 
 function CommandConsoleCard({

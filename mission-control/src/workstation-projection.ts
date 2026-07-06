@@ -156,6 +156,47 @@ export interface WorkstationProjection {
   readonly pendingIntent: WorkstationPendingIntent | null;
 }
 
+export type IssueAssignmentRowState =
+  | "unassigned-ready"
+  | "assigned"
+  | "blocked"
+  | "active"
+  | "review-ready"
+  | "complete"
+  | "merged"
+  | "failed";
+
+export type IssueAssignmentState = "unassigned" | "assigned" | "active";
+
+export type IssueAssignmentBlockerState = "clear" | "blocked" | "satisfied";
+
+export interface IssueAssignmentBoardRow {
+  readonly issueId: string;
+  readonly title: string;
+  readonly owner: string;
+  readonly assignmentState: IssueAssignmentState;
+  readonly state: IssueAssignmentRowState;
+  readonly lifecycleState: string;
+  readonly readinessState: string;
+  readonly blockerState: IssueAssignmentBlockerState;
+  readonly blockerSummaries: readonly string[];
+  readonly workstationSessionId: string | null;
+  readonly workstationAgent: string | null;
+  readonly workstationStatus: string | null;
+  readonly scope: {
+    readonly kind: "issue-slice";
+    readonly target_id: string;
+    readonly label: string;
+    readonly mission_id?: string | null;
+  };
+  readonly scopeDisabledReason: string | null;
+}
+
+export interface IssueAssignmentBoardProjection {
+  readonly revision: number;
+  readonly rows: readonly IssueAssignmentBoardRow[];
+}
+
 interface ProjectWorkstationOptions {
   readonly pendingIntent?: WorkstationPendingIntent | null;
   readonly workspaceQueue?: WorkspaceQueueProjection | null;
@@ -195,6 +236,177 @@ export function projectWorkstationCards(
     groups,
     pendingIntent: options.pendingIntent ?? null,
   };
+}
+
+export function projectIssueAssignmentBoard(snapshot: WorkspaceSnapshot): IssueAssignmentBoardProjection {
+  const issueSlices = new Map(
+    snapshot.mission_board.issue_slices?.map((issue) => [issue.issue_id, issue]),
+  );
+  const rows = snapshot.mission_board.ordered_issue_ids.map((issueId) => {
+    const issue = issueSlices.get(issueId);
+    return issue
+      ? projectIssueAssignmentRow(snapshot, issue)
+      : projectFallbackIssueAssignmentRow(snapshot, issueId);
+  });
+
+  return {
+    revision: snapshot.revision,
+    rows,
+  };
+}
+
+function projectIssueAssignmentRow(
+  snapshot: WorkspaceSnapshot,
+  issue: WorkspaceIssueSliceSummary,
+): IssueAssignmentBoardRow {
+  const ownerMissionId = snapshot.active_mission?.id ?? null;
+  const missionSession = missionSessionForIssue(snapshot, issue.issue_id, ownerMissionId);
+  const issueSession =
+    (missionSession
+      ? issue.sessions.find((session) => session.session_id === missionSession.session_id)
+      : null) ?? issue.sessions[0] ?? null;
+  const workstationStatus = canonicalStatus(
+    issueSession?.status ?? missionSession?.status ?? "",
+    issueSession?.operation_status ?? issue.model_assignment.operation_status,
+    issueSession?.failure ?? issue.model_assignment.failure,
+  );
+  const owner =
+    missionSession?.assigned_agent ||
+    issueSession?.assigned_agent ||
+    issue.model_assignment.agent_id ||
+    "Unassigned";
+  const assignmentState = assignmentStateForIssue(owner, missionSession, issueSession);
+  const state = issueAssignmentRowState(issue, workstationStatus, assignmentState);
+  return {
+    issueId: issue.issue_id,
+    title: issue.title,
+    owner,
+    assignmentState,
+    state,
+    lifecycleState: issue.lifecycle,
+    readinessState: readinessLabel(state),
+    blockerState: blockerState(issue.blockers),
+    blockerSummaries: issue.blockers.map(blockerSummary),
+    workstationSessionId: missionSession?.session_id ?? issueSession?.session_id ?? null,
+    workstationAgent: missionSession?.assigned_agent ?? issueSession?.assigned_agent ?? null,
+    workstationStatus:
+      (missionSession?.status ?? issueSession?.status ?? issue.model_assignment.operation_status) || null,
+    scope: {
+      kind: "issue-slice",
+      target_id: issue.issue_id,
+      label: issue.title,
+      mission_id: ownerMissionId,
+    },
+    scopeDisabledReason: scopeDisabledReason(snapshot, issue.issue_id, ownerMissionId),
+  };
+}
+
+function projectFallbackIssueAssignmentRow(
+  snapshot: WorkspaceSnapshot,
+  issueId: string,
+): IssueAssignmentBoardRow {
+  const ready = snapshot.mission_board.ready_issue_ids.includes(issueId);
+  const state: IssueAssignmentRowState = ready ? "unassigned-ready" : "blocked";
+  return {
+    issueId,
+    title: ready ? "Launch eligible" : "Waiting on canonical Issue Slice details",
+    owner: "Unassigned",
+    assignmentState: "unassigned",
+    state,
+    lifecycleState: ready ? "Ready" : "Blocked",
+    readinessState: readinessLabel(state),
+    blockerState: ready ? "clear" : "blocked",
+    blockerSummaries: ready ? [] : ["Canonical Issue Slice detail unavailable"],
+    workstationSessionId: null,
+    workstationAgent: null,
+    workstationStatus: null,
+    scope: {
+      kind: "issue-slice",
+      target_id: issueId,
+      label: issueId,
+      mission_id: snapshot.active_mission?.id ?? null,
+    },
+    scopeDisabledReason: scopeDisabledReason(snapshot, issueId, snapshot.active_mission?.id ?? null),
+  };
+}
+
+function missionSessionForIssue(
+  snapshot: WorkspaceSnapshot,
+  issueId: string,
+  missionId: string | null,
+): WorkspaceMissionSummary["sessions"][number] | null {
+  const mission = (snapshot.missions ?? []).find((candidate) => candidate.id === missionId);
+  return mission?.sessions.find((candidate) => candidate.issue_id === issueId) ?? null;
+}
+
+function assignmentStateForIssue(
+  owner: string,
+  missionSession: WorkspaceMissionSummary["sessions"][number] | null,
+  issueSession: WorkspaceIssueSessionDetail | null,
+): IssueAssignmentState {
+  if (missionSession || issueSession) return "active";
+  return owner === "Unassigned" ? "unassigned" : "assigned";
+}
+
+function issueAssignmentRowState(
+  issue: WorkspaceIssueSliceSummary,
+  status: WorkstationCardStatus,
+  assignmentState: IssueAssignmentState,
+): IssueAssignmentRowState {
+  const lifecycle = issue.lifecycle.toLowerCase();
+  if (status === "failed" || lifecycle.includes("failed")) return "failed";
+  if (lifecycle.includes("merged")) return "merged";
+  if (
+    status === "done" ||
+    lifecycle.includes("complete") ||
+    issue.evidence.state === "accepted"
+  ) {
+    return "complete";
+  }
+  if (status === "review-ready") return "review-ready";
+  if (issue.blockers.some((blocker) => !blocker.satisfied)) return "blocked";
+  if (assignmentState === "active") return "active";
+  if (issue.launch_eligible && assignmentState === "unassigned") return "unassigned-ready";
+  if (assignmentState === "assigned") return "assigned";
+  return issue.launch_eligible ? "unassigned-ready" : "blocked";
+}
+
+function blockerState(
+  blockers: readonly WorkspaceIssueSliceSummary["blockers"][number][],
+): IssueAssignmentBlockerState {
+  if (blockers.some((blocker) => !blocker.satisfied)) return "blocked";
+  return blockers.length > 0 ? "satisfied" : "clear";
+}
+
+function blockerSummary(blocker: WorkspaceIssueSliceSummary["blockers"][number]): string {
+  return `${blocker.issue_id} ${blocker.lifecycle} ${blocker.satisfied ? "satisfied" : "open"} - ${blocker.title}`;
+}
+
+function readinessLabel(state: IssueAssignmentRowState): string {
+  const labels: Record<IssueAssignmentRowState, string> = {
+    "unassigned-ready": "Ready",
+    assigned: "Assigned",
+    blocked: "Blocked",
+    active: "Active",
+    "review-ready": "Review ready",
+    complete: "Complete",
+    merged: "Merged",
+    failed: "Failed",
+  };
+  return labels[state];
+}
+
+function scopeDisabledReason(
+  snapshot: WorkspaceSnapshot,
+  issueId: string,
+  missionId: string | null,
+): string | null {
+  const scopedMissionId = snapshot.conversation_scope.mission_id ?? snapshot.active_mission?.id ?? null;
+  return snapshot.conversation_scope.kind === "issue-slice" &&
+    snapshot.conversation_scope.target_id === issueId &&
+    scopedMissionId === missionId
+    ? `Conversation Scope already targets ${issueId}.`
+    : null;
 }
 
 function projectLaunchableIssueCard(

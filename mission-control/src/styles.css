@@ -92,6 +92,33 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-
 .workstation-card-detail a { color: var(--cyan); text-decoration: none; overflow-wrap: anywhere; }
 .workstation-card-detail p { font-size: 0.68rem; }
 .workstation-card-detail dl { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.issue-assignment-board { display: grid; gap: 0.75rem; padding: 1rem; border-bottom: 1px solid var(--line); background: #090d0b; }
+.issue-assignment-board__scroll { overflow: auto; }
+.issue-assignment-board table { width: 100%; min-width: 640px; border-collapse: collapse; table-layout: fixed; font-size: 0.64rem; }
+.issue-assignment-board th { color: var(--muted); font-size: 0.55rem; font-weight: 500; text-align: left; text-transform: uppercase; letter-spacing: 0; }
+.issue-assignment-board th, .issue-assignment-board td { padding: 0.45rem; border-bottom: 1px solid #29322d99; vertical-align: top; overflow-wrap: anywhere; }
+.issue-assignment-board tbody tr { background: #101513d8; box-shadow: inset 2px 0 0 var(--line); }
+.issue-assignment-board tbody tr[data-selected="true"] { outline: 2px solid var(--cyan); outline-offset: -2px; }
+.issue-assignment-board tbody tr[data-state="unassigned-ready"] { box-shadow: inset 2px 0 0 var(--lime); }
+.issue-assignment-board tbody tr[data-state="blocked"] { box-shadow: inset 2px 0 0 #ffd166; }
+.issue-assignment-board tbody tr[data-state="active"], .issue-assignment-board tbody tr[data-state="review-ready"] { box-shadow: inset 2px 0 0 var(--cyan); }
+.issue-assignment-board tbody tr[data-state="failed"] { box-shadow: inset 2px 0 0 var(--danger); }
+.issue-assignment-board tbody tr[data-state="complete"] { opacity: 0.78; }
+.issue-assignment-board tbody tr[data-state="merged"] { opacity: 0.68; box-shadow: inset 2px 0 0 #668719; }
+.issue-assignment-board td { color: #bdc5bd; }
+.issue-assignment-board td > button, .issue-assignment-board td > strong, .issue-assignment-board td > span, .issue-assignment-board td > small { display: block; }
+.issue-assignment-board td > button { width: fit-content; max-width: 100%; border: 1px solid var(--line); background: var(--panel-raised); color: var(--ink); padding: 0.3rem 0.42rem; font-size: 0.58rem; }
+.issue-assignment-board td > strong { color: var(--ink); font-size: 0.62rem; }
+.issue-assignment-board td > small { margin-top: 0.22rem; color: var(--muted); line-height: 1.35; }
+.issue-assignment-detail { display: grid; gap: 0.65rem; padding: 0.75rem; border: 1px solid #29322d99; background: #080d0b; }
+.issue-assignment-detail h4, .issue-assignment-detail h5 { margin: 0.1rem 0 0; font-family: "Rajdhani", sans-serif; color: var(--cyan); }
+.issue-assignment-detail h4 { font-size: 1.05rem; }
+.issue-assignment-detail h5 { font-size: 0.85rem; }
+.issue-assignment-detail p, .issue-assignment-detail li, .issue-assignment-detail dd { color: #bdc5bd; font-size: 0.68rem; line-height: 1.4; overflow-wrap: anywhere; }
+.issue-assignment-detail dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.45rem; margin: 0; }
+.issue-assignment-detail dt { color: var(--muted); font-size: 0.56rem; text-transform: uppercase; letter-spacing: 0; }
+.issue-assignment-detail dd { margin: 0.2rem 0 0; }
+.issue-assignment-detail ul { margin: 0.3rem 0 0; padding-left: 1rem; }
 .shell-terminal { display: grid; align-content: start; gap: 1rem; min-height: 0; padding: 1.2rem; overflow: auto; }
 .terminal-boundary, .terminal-field { display: grid; gap: 0.4rem; padding: 0.8rem; border-left: 2px solid var(--cyan); background: #101715; }
 .terminal-boundary code { color: var(--cyan); overflow-wrap: anywhere; }
@@ -302,6 +329,12 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   .workstation-card-controls { grid-template-columns: 1fr; }
   .agent-workstations__heading, .workstation-card header { flex-direction: column; align-items: stretch; }
   .workstation-card dl, .workstation-card-detail dl { grid-template-columns: 1fr; }
+  .issue-assignment-board table { min-width: 0; }
+  .issue-assignment-board thead { display: none; }
+  .issue-assignment-board tbody, .issue-assignment-board tr, .issue-assignment-board td { display: block; }
+  .issue-assignment-board tr { margin-bottom: 0.6rem; border: 1px solid var(--line); }
+  .issue-assignment-board td { border-bottom: 0; }
+  .issue-assignment-detail dl { grid-template-columns: 1fr; }
   .command-console-card header { flex-direction: column; }
   .command-console-card dl { grid-template-columns: 1fr; }
   .context-inspector__actions { flex-wrap: wrap; }

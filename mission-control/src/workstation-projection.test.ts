@@ -1,5 +1,5 @@
-import type { WorkspaceSnapshot } from "./contracts";
-import { projectWorkstationCards } from "./workstation-projection";
+import type { WorkspaceIssueSliceSummary, WorkspaceSnapshot } from "./contracts";
+import { projectIssueAssignmentBoard, projectWorkstationCards } from "./workstation-projection";
 
 const baseSnapshot: WorkspaceSnapshot = {
   schema_version: 1,
@@ -172,6 +172,50 @@ const baseSnapshot: WorkspaceSnapshot = {
   ],
 };
 
+function issueSlice(
+  overrides: Partial<WorkspaceIssueSliceSummary> & Pick<WorkspaceIssueSliceSummary, "issue_id" | "title">,
+): WorkspaceIssueSliceSummary {
+  return {
+    issue_id: overrides.issue_id,
+    title: overrides.title,
+    lifecycle: overrides.lifecycle ?? "Approved",
+    progress: overrides.progress ?? "Ready for assignment",
+    launch_eligible: overrides.launch_eligible ?? false,
+    blockers: overrides.blockers ?? [],
+    accepted_boundary: overrides.accepted_boundary ?? {
+      what_to_build: `Build ${overrides.title}.`,
+      acceptance_criteria: [`${overrides.title} is accepted.`],
+      evidence_requirements: ["Projection tests pass."],
+      source_path: `.agent/issues/${overrides.issue_id}.md`,
+    },
+    sessions: overrides.sessions ?? [],
+    provenance: overrides.provenance ?? {
+      role: "local-agent",
+      provider: "ollama",
+      model: "qwen3.6:27b",
+    },
+    model_assignment: overrides.model_assignment ?? {
+      agent_id: "",
+      role: "local-agent",
+      provider: "ollama",
+      model: "qwen3.6:27b",
+      availability: "available",
+      availability_reason: "",
+      operation_status: "",
+      failure: "",
+    },
+    evidence: overrides.evidence ?? {
+      state: "missing",
+      changed_files: [],
+      commands_run: [],
+      test_results: "No evidence package recorded.",
+      risks: "None recorded.",
+      artifact_links: [],
+    },
+    working_context_sources: overrides.working_context_sources ?? [],
+  };
+}
+
 test("projects compact live workstation cards from canonical snapshot state", () => {
   const projection = projectWorkstationCards(baseSnapshot);
 
@@ -235,6 +279,366 @@ test("keeps frontend-only pending intent separate from accepted workstation stat
   expect(projection.groups.flatMap((group) => group.cards).every((card) => card.acceptedRevision === 12)).toBe(
     true,
   );
+});
+
+test("projects issue assignment rows from accepted mission and session state", () => {
+  const boardSnapshot: WorkspaceSnapshot = {
+    ...baseSnapshot,
+    revision: 18,
+    conversation_scope: {
+      kind: "issue-slice",
+      target_id: "ISS-DONE",
+      label: "Accepted evidence",
+    },
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      issue_count: 7,
+      ordered_issue_ids: [
+        "ISS-READY",
+        "ISS-BLOCKED",
+        "ISS-ACTIVE",
+        "ISS-REVIEW",
+        "ISS-DONE",
+        "ISS-MERGED",
+        "ISS-FAILED",
+      ],
+      ready_issue_ids: ["ISS-READY"],
+      approved_issue_ids: [
+        "ISS-READY",
+        "ISS-BLOCKED",
+        "ISS-ACTIVE",
+        "ISS-REVIEW",
+        "ISS-DONE",
+        "ISS-FAILED",
+      ],
+      issue_slices: [
+        issueSlice({
+          issue_id: "ISS-READY",
+          title: "Unassigned ready work",
+          launch_eligible: true,
+        }),
+        issueSlice({
+          issue_id: "ISS-BLOCKED",
+          title: "Blocked dependency work",
+          progress: "Waiting on release seam",
+          blockers: [
+            {
+              issue_id: "ISS-000",
+              title: "Release seam",
+              lifecycle: "Ready",
+              satisfied: false,
+            },
+          ],
+        }),
+        issueSlice({
+          issue_id: "ISS-ACTIVE",
+          title: "Active implementation",
+          progress: "Runner streaming edits",
+          sessions: [
+            {
+              session_id: "session-ISS-ACTIVE-1",
+              assigned_agent: "qwen-coder-local",
+              role: "local-agent",
+              provider: "ollama",
+              model: "qwen3.6:27b",
+              status: "launched",
+              stale: false,
+              disconnected: false,
+              operation_status: "streaming",
+              failure: "",
+            },
+          ],
+          model_assignment: {
+            agent_id: "qwen-coder-local",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+            availability: "available",
+            availability_reason: "",
+            operation_status: "streaming",
+            failure: "",
+          },
+        }),
+        issueSlice({
+          issue_id: "ISS-REVIEW",
+          title: "Evidence ready",
+          progress: "Evidence package ready",
+          sessions: [
+            {
+              session_id: "session-ISS-REVIEW-1",
+              assigned_agent: "review-subagent",
+              role: "subagent",
+              provider: "ollama",
+              model: "qwen2.5-coder:14b",
+              status: "evidence-ready",
+              stale: false,
+              disconnected: false,
+              operation_status: "completed",
+              failure: "",
+            },
+          ],
+        }),
+        issueSlice({
+          issue_id: "ISS-DONE",
+          title: "Accepted evidence",
+          lifecycle: "Complete",
+          progress: "Evidence accepted and PR-ready",
+          evidence: {
+            state: "accepted",
+            changed_files: [],
+            commands_run: [],
+            test_results: "Review accepted.",
+            risks: "None recorded.",
+            artifact_links: [],
+          },
+        }),
+        issueSlice({
+          issue_id: "ISS-MERGED",
+          title: "Merged evidence",
+          lifecycle: "Merged",
+          progress: "PR merged upstream",
+          evidence: {
+            state: "accepted",
+            changed_files: [],
+            commands_run: [],
+            test_results: "Review accepted.",
+            risks: "None recorded.",
+            artifact_links: [],
+          },
+        }),
+        issueSlice({
+          issue_id: "ISS-FAILED",
+          title: "Provider failed",
+          progress: "Provider failure recorded",
+          sessions: [
+            {
+              session_id: "session-ISS-FAILED-1",
+              assigned_agent: "repair-agent",
+              role: "local-agent",
+              provider: "ollama",
+              model: "gemma4:12b",
+              status: "failed",
+              stale: false,
+              disconnected: false,
+              operation_status: "failed",
+              failure: "Provider exited before evidence.",
+            },
+          ],
+        }),
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 7,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ISS-ACTIVE-1",
+            issue_id: "ISS-ACTIVE",
+            assigned_agent: "qwen-coder-local",
+            status: "launched",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+          {
+            session_id: "session-ISS-REVIEW-1",
+            issue_id: "ISS-REVIEW",
+            assigned_agent: "review-subagent",
+            status: "evidence-ready",
+            role: "subagent",
+            provider: "ollama",
+            model: "qwen2.5-coder:14b",
+          },
+          {
+            session_id: "session-ISS-FAILED-1",
+            issue_id: "ISS-FAILED",
+            assigned_agent: "repair-agent",
+            status: "failed",
+            role: "local-agent",
+            provider: "ollama",
+            model: "gemma4:12b",
+          },
+        ],
+        attention: [],
+      },
+    ],
+  };
+
+  const board = projectIssueAssignmentBoard(boardSnapshot);
+
+  expect(board.revision).toBe(18);
+  expect(board.rows.map((row) => row.issueId)).toEqual([
+    "ISS-READY",
+    "ISS-BLOCKED",
+    "ISS-ACTIVE",
+      "ISS-REVIEW",
+      "ISS-DONE",
+      "ISS-MERGED",
+      "ISS-FAILED",
+    ]);
+  expect(
+    board.rows.map((row) => ({
+      issueId: row.issueId,
+      owner: row.owner,
+      assignmentState: row.assignmentState,
+      state: row.state,
+      blockerState: row.blockerState,
+      workstationSessionId: row.workstationSessionId,
+      workstationAgent: row.workstationAgent,
+      scopeDisabledReason: row.scopeDisabledReason,
+    })),
+  ).toEqual([
+    {
+      issueId: "ISS-READY",
+      owner: "Unassigned",
+      assignmentState: "unassigned",
+      state: "unassigned-ready",
+      blockerState: "clear",
+      workstationSessionId: null,
+      workstationAgent: null,
+      scopeDisabledReason: null,
+    },
+    {
+      issueId: "ISS-BLOCKED",
+      owner: "Unassigned",
+      assignmentState: "unassigned",
+      state: "blocked",
+      blockerState: "blocked",
+      workstationSessionId: null,
+      workstationAgent: null,
+      scopeDisabledReason: null,
+    },
+    {
+      issueId: "ISS-ACTIVE",
+      owner: "qwen-coder-local",
+      assignmentState: "active",
+      state: "active",
+      blockerState: "clear",
+      workstationSessionId: "session-ISS-ACTIVE-1",
+      workstationAgent: "qwen-coder-local",
+      scopeDisabledReason: null,
+    },
+    {
+      issueId: "ISS-REVIEW",
+      owner: "review-subagent",
+      assignmentState: "active",
+      state: "review-ready",
+      blockerState: "clear",
+      workstationSessionId: "session-ISS-REVIEW-1",
+      workstationAgent: "review-subagent",
+      scopeDisabledReason: null,
+    },
+      {
+        issueId: "ISS-DONE",
+        owner: "Unassigned",
+      assignmentState: "unassigned",
+      state: "complete",
+      blockerState: "clear",
+      workstationSessionId: null,
+        workstationAgent: null,
+        scopeDisabledReason: "Conversation Scope already targets ISS-DONE.",
+      },
+      {
+        issueId: "ISS-MERGED",
+        owner: "Unassigned",
+        assignmentState: "unassigned",
+        state: "merged",
+        blockerState: "clear",
+        workstationSessionId: null,
+        workstationAgent: null,
+        scopeDisabledReason: null,
+      },
+      {
+        issueId: "ISS-FAILED",
+      owner: "repair-agent",
+      assignmentState: "active",
+      state: "failed",
+      blockerState: "clear",
+      workstationSessionId: "session-ISS-FAILED-1",
+      workstationAgent: "repair-agent",
+      scopeDisabledReason: null,
+    },
+  ]);
+  expect(board.rows[1].blockerSummaries).toEqual(["ISS-000 Ready open - Release seam"]);
+});
+
+test("keeps issue assignment linkage qualified to the active mission", () => {
+  const duplicateIssueSnapshot: WorkspaceSnapshot = {
+    ...baseSnapshot,
+    active_mission: {
+      id: "active-mission",
+      title: "Active Mission",
+      issue_count: 1,
+    },
+    conversation_scope: {
+      kind: "issue-slice",
+      target_id: "ISS-01",
+      label: "Background issue",
+      mission_id: "background-mission",
+    },
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      prd_title: "Active Mission",
+      issue_count: 1,
+      ordered_issue_ids: ["ISS-01"],
+      ready_issue_ids: ["ISS-01"],
+      approved_issue_ids: ["ISS-01"],
+      issue_slices: [
+        issueSlice({
+          issue_id: "ISS-01",
+          title: "Active unassigned issue",
+          launch_eligible: true,
+        }),
+      ],
+    },
+    missions: [
+      {
+        id: "background-mission",
+        title: "Background Mission",
+        issue_count: 1,
+        is_active: false,
+        sessions: [
+          {
+            session_id: "session-background-ISS-01-1",
+            issue_id: "ISS-01",
+            assigned_agent: "background-agent",
+            status: "launched",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+        ],
+        attention: [],
+      },
+      {
+        id: "active-mission",
+        title: "Active Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [],
+        attention: [],
+      },
+    ],
+  };
+
+  const board = projectIssueAssignmentBoard(duplicateIssueSnapshot);
+
+  expect(board.rows[0]).toMatchObject({
+    issueId: "ISS-01",
+    title: "Active unassigned issue",
+    owner: "Unassigned",
+    assignmentState: "unassigned",
+    state: "unassigned-ready",
+    workstationSessionId: null,
+    workstationAgent: null,
+    scopeDisabledReason: null,
+    scope: {
+      mission_id: "active-mission",
+    },
+  });
 });
 
 test("exposes waiting approval card decisions only from pending queue projection", () => {

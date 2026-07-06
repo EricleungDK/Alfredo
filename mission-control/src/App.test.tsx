@@ -10,6 +10,7 @@ import type {
   ActivityJournalFilters,
   ActivityJournalProjection,
   WorkspaceMissionSwitchRequest,
+  WorkspaceIssueSliceSummary,
   WorkspaceQueueProjection,
   WorkspaceScopeRequest,
   WorkspaceSnapshot,
@@ -96,6 +97,50 @@ function relativeLuminance(hex: string): number {
       : ((normalized + 0.055) / 1.055) ** 2.4;
   });
   return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
+
+function appIssueSlice(
+  overrides: Partial<WorkspaceIssueSliceSummary> & Pick<WorkspaceIssueSliceSummary, "issue_id" | "title">,
+): WorkspaceIssueSliceSummary {
+  return {
+    issue_id: overrides.issue_id,
+    title: overrides.title,
+    lifecycle: overrides.lifecycle ?? "Approved",
+    progress: overrides.progress ?? "Ready for assignment",
+    launch_eligible: overrides.launch_eligible ?? false,
+    blockers: overrides.blockers ?? [],
+    accepted_boundary: overrides.accepted_boundary ?? {
+      what_to_build: `Build ${overrides.title}.`,
+      acceptance_criteria: [`${overrides.title} is accepted.`],
+      evidence_requirements: ["App projection tests pass."],
+      source_path: `.agent/issues/${overrides.issue_id}.md`,
+    },
+    sessions: overrides.sessions ?? [],
+    provenance: overrides.provenance ?? {
+      role: "local-agent",
+      provider: "ollama",
+      model: "qwen3.6:27b",
+    },
+    model_assignment: overrides.model_assignment ?? {
+      agent_id: "",
+      role: "local-agent",
+      provider: "ollama",
+      model: "qwen3.6:27b",
+      availability: "available",
+      availability_reason: "",
+      operation_status: "",
+      failure: "",
+    },
+    evidence: overrides.evidence ?? {
+      state: "missing",
+      changed_files: [],
+      commands_run: [],
+      test_results: "No evidence package recorded.",
+      risks: "None recorded.",
+      artifact_links: [],
+    },
+    working_context_sources: overrides.working_context_sources ?? [],
+  };
 }
 
 async function openCommandAudit() {
@@ -345,6 +390,197 @@ test("keeps review-ready workstation evidence affordances visible beside the Age
   expect(within(card).getByText("Request repair")).toBeVisible();
   expect(within(card).getByText("Reason required")).toBeVisible();
   expect(within(card).getAllByText("Use Review Workspace governed controls").length).toBeGreaterThan(0);
+});
+
+test("renders Issue Assignment Board rows with local detail and explicit scope action", async () => {
+  const appendConsoleMessage = vi.fn();
+  const scopeRequests: WorkspaceScopeRequest[] = [];
+  const assignmentSnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    revision: 4,
+    conversation_scope: {
+      kind: "issue-slice",
+      target_id: "ISS-READY",
+      label: "Unassigned ready work",
+    },
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_count: 3,
+      ordered_issue_ids: ["ISS-READY", "ISS-BLOCKED", "ISS-ACTIVE"],
+      ready_issue_ids: ["ISS-READY"],
+      approved_issue_ids: ["ISS-READY", "ISS-BLOCKED", "ISS-ACTIVE"],
+      issue_slices: [
+        appIssueSlice({
+          issue_id: "ISS-READY",
+          title: "Unassigned ready work",
+          launch_eligible: true,
+        }),
+        appIssueSlice({
+          issue_id: "ISS-BLOCKED",
+          title: "Blocked dependency work",
+          progress: "Waiting on release seam verification",
+          blockers: [
+            {
+              issue_id: "ISS-00",
+              title: "Release seam",
+              lifecycle: "Ready",
+              satisfied: false,
+            },
+          ],
+        }),
+        appIssueSlice({
+          issue_id: "ISS-ACTIVE",
+          title: "Active implementation",
+          progress: "Runner streaming edits",
+          sessions: [
+            {
+              session_id: "session-ISS-ACTIVE-1",
+              assigned_agent: "qwen-coder-local",
+              role: "local-agent",
+              provider: "ollama",
+              model: "qwen3.6:27b",
+              status: "launched",
+              stale: false,
+              disconnected: false,
+              operation_status: "streaming",
+              failure: "",
+            },
+          ],
+          model_assignment: {
+            agent_id: "qwen-coder-local",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+            availability: "available",
+            availability_reason: "",
+            operation_status: "streaming",
+            failure: "",
+          },
+        }),
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 3,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ISS-ACTIVE-1",
+            issue_id: "ISS-ACTIVE",
+            assigned_agent: "qwen-coder-local",
+            status: "launched",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+        ],
+        attention: [],
+      },
+    ],
+  };
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => ({ kind: "ready", snapshot: assignmentSnapshot }),
+        loadConsoleHistory: async () => ({
+          kind: "history",
+          history: {
+            schema_version: 1,
+            messages: [
+              {
+                message_id: "console-000001",
+                sequence: 1,
+                role: "user",
+                content: "Keep issue browsing local.",
+                scope: assignmentSnapshot.conversation_scope,
+                outcome: "proposed",
+                source: "mission-commander",
+              },
+            ],
+          },
+        }),
+        appendConsoleMessage,
+        changeScope: async (request) => {
+          scopeRequests.push(request);
+          return {
+            kind: "acknowledged",
+            acknowledgement: {
+              correlation_id: request.correlation_id,
+              outcome: "acknowledged",
+              revision: 5,
+            },
+          };
+        },
+        loadUpdates: async () => ({
+          kind: "updates",
+          batch: {
+            after_revision: 4,
+            current_revision: 5,
+            events: [
+              {
+                event_id: "workspace-5-issue-scope",
+                correlation_id: "conversation-scope-issue-slice-ISS-BLOCKED-4",
+                revision: 5,
+                kind: "workspace-preferences-updated",
+                active_mission_id: "command-deck",
+                conversation_scope: {
+                  kind: "issue-slice",
+                  target_id: "ISS-BLOCKED",
+                  label: "Blocked dependency work",
+                },
+                operations_view: "mission-board",
+              },
+            ],
+          },
+        }),
+      }}
+    />,
+  );
+
+  const transcript = await screen.findByRole("region", { name: "Prompt Transcript" });
+  const missionWork = screen.getByRole("complementary", { name: "Mission Work" });
+  const cards = within(missionWork).getByRole("region", { name: "Workstation Cards" });
+  const board = within(missionWork).getByRole("table", { name: "Issue Assignment Board" });
+
+  expect(cards.compareDocumentPosition(board) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(within(board).getByRole("row", { name: /ISS-READY Unassigned ready work/ })).toHaveTextContent(
+    "Unassigned",
+  );
+  expect(within(board).getByRole("row", { name: /ISS-READY Unassigned ready work/ })).toHaveTextContent(
+    "Ready",
+  );
+  expect(within(board).getByRole("row", { name: /ISS-BLOCKED Blocked dependency work/ })).toHaveTextContent(
+    "ISS-00 Ready open - Release seam",
+  );
+  expect(within(board).getByRole("row", { name: /ISS-ACTIVE Active implementation/ })).toHaveTextContent(
+    "session-ISS-ACTIVE-1",
+  );
+  expect(within(board).getByRole("button", { name: "Set scope to ISS-READY" })).toBeDisabled();
+  expect(within(board).getByText("Conversation Scope already targets ISS-READY.")).toBeVisible();
+
+  fireEvent.click(within(board).getByRole("button", { name: "Inspect assignment ISS-BLOCKED" }));
+
+  const detail = within(missionWork).getByRole("region", { name: "Issue Assignment Detail" });
+  expect(detail).toHaveFocus();
+  expect(within(detail).getByText("Blocked dependency work")).toBeVisible();
+  expect(within(detail).getByText("ISS-00 Ready open - Release seam")).toBeVisible();
+  expect(appendConsoleMessage).not.toHaveBeenCalled();
+  expect(within(transcript).getByText("Keep issue browsing local.")).toBeVisible();
+  expect(within(transcript).queryByText(/Release seam/)).not.toBeInTheDocument();
+
+  fireEvent.click(within(board).getByRole("button", { name: "Set scope to ISS-BLOCKED" }));
+
+  await waitFor(() => expect(scopeRequests).toHaveLength(1));
+  expect(scopeRequests[0]).toEqual({
+    correlation_id: "conversation-scope-issue-slice-ISS-BLOCKED-4",
+    expected_revision: 4,
+    scope_kind: "issue-slice",
+    scope_target: "ISS-BLOCKED",
+    scope_label: "Blocked dependency work",
+  });
+  expect(await within(transcript).findByText(/Conversation Scope now targets Blocked dependency work/)).toBeVisible();
 });
 
 test("restores workstation card state and side-pane selection after desktop refresh", async () => {
