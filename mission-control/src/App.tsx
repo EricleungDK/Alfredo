@@ -2453,6 +2453,10 @@ function WorkstationCard({
           <dd>{card.role}</dd>
         </div>
         <div>
+          <dt>Issue Slice</dt>
+          <dd>{card.issueId ?? "None"}</dd>
+        </div>
+        <div>
           <dt>Phase</dt>
           <dd>{card.phase}</dd>
         </div>
@@ -2801,6 +2805,7 @@ const WORKSTATION_STATUS_DESCRIPTIONS: Record<WorkstationCardProjection["status"
   "review-ready": "Evidence is ready for review. Open Review Workspace for acceptance or repair.",
   done: "Work is complete. Review accepted evidence or activity history if needed.",
   running: "Running work is active. Monitor progress and preserve the prompt workflow.",
+  idle: "Idle work is assigned or queued but not actively executing.",
   thinking: "The agent is preparing or thinking. Monitor progress without taking action yet.",
 };
 

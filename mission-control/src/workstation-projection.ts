@@ -13,6 +13,7 @@ import type {
 export type WorkstationCardStatus =
   | "thinking"
   | "running"
+  | "idle"
   | "waiting-approval"
   | "blocked"
   | "reviewing"
@@ -543,9 +544,10 @@ function statusPriority(status: WorkstationCardStatus): number {
     failed: 2,
     reviewing: 3,
     running: 4,
-    thinking: 5,
-    "review-ready": 6,
-    done: 7,
+    idle: 5,
+    thinking: 6,
+    "review-ready": 7,
+    done: 8,
   };
   return priority[status];
 }
@@ -578,6 +580,13 @@ function canonicalStatus(
     status.includes("done")
   ) {
     return "done";
+  }
+  if (
+    status.includes("queued") ||
+    status.includes("not-started") ||
+    (status.includes("idle") && !status.includes("launched"))
+  ) {
+    return "idle";
   }
   if (
     status.includes("running") ||
@@ -620,6 +629,7 @@ function nextAction(
   if (status === "blocked") return progress || "Resolve blocker";
   if (status === "review-ready") return "Open Review Workspace";
   if (status === "done") return "Review accepted evidence";
+  if (status === "idle") return progress || "Await launch or assignment";
   return progress || "Monitor active work";
 }
 

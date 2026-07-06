@@ -215,6 +215,9 @@ test("opens to a console-first workstation with persistent Mission Work beside i
   expect(screen.getByText("session-ISS-01-1")).toBeVisible();
   expect(screen.getByText("qwen3.6:27b")).toBeVisible();
   expect(within(cards).getByText("ISS-02 delegation approval required")).toBeVisible();
+  const runningCard = within(cards).getByRole("article", { name: "qwen-coder-local workstation card" });
+  expect(within(runningCard).getByText("Issue Slice")).toBeVisible();
+  expect(within(runningCard).getAllByText("ISS-01").length).toBeGreaterThan(0);
 
   const statusLine = screen.getByLabelText("Prompt status line");
   expect(within(statusLine).getByText("Connection Connected")).toBeVisible();
@@ -235,6 +238,113 @@ test("opens to a console-first workstation with persistent Mission Work beside i
     source: "mission-commander",
     scope_kind: "issue-slice",
   });
+});
+
+test("keeps review-ready workstation evidence affordances visible beside the Agent Console", async () => {
+  const reviewReadySnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_slices: [
+        {
+          issue_id: "ISS-04",
+          title: "Mission Work pane active cards",
+          lifecycle: "Approved",
+          progress: "Evidence package ready for review",
+          launch_eligible: false,
+          blockers: [],
+          accepted_boundary: {
+            what_to_build: "Create Mission Work active workstation cards.",
+            acceptance_criteria: ["Review-ready cards expose evidence and review controls."],
+            evidence_requirements: ["Frontend projection test passes."],
+            source_path:
+              ".scratch/alfredo-console-first-workstation-redesign/issues/04-mission-work-pane-active-workstation-cards.md",
+          },
+          sessions: [
+            {
+              session_id: "session-ISS-04-1",
+              assigned_agent: "layout-subagent",
+              role: "subagent",
+              provider: "ollama",
+              model: "qwen2.5-coder:14b",
+              status: "evidence-ready",
+              stale: false,
+              disconnected: false,
+              operation_status: "completed",
+              failure: "",
+            },
+          ],
+          provenance: {
+            role: "subagent",
+            provider: "ollama",
+            model: "qwen2.5-coder:14b",
+          },
+          model_assignment: {
+            agent_id: "layout-subagent",
+            role: "subagent",
+            provider: "ollama",
+            model: "qwen2.5-coder:14b",
+            availability: "available",
+            availability_reason: "",
+            operation_status: "completed",
+            failure: "",
+          },
+          evidence: {
+            state: "complete",
+            changed_files: ["mission-control/src/App.tsx"],
+            commands_run: ["npm test -- --run App.test.tsx"],
+            test_results: "App tests passed.",
+            risks: "None recorded.",
+            artifact_links: ["app-local://evidence/session-ISS-04-1"],
+          },
+          working_context_sources: [],
+        },
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ISS-04-1",
+            issue_id: "ISS-04",
+            assigned_agent: "layout-subagent",
+            status: "evidence-ready",
+            role: "subagent",
+            provider: "ollama",
+            model: "qwen2.5-coder:14b",
+          },
+        ],
+        attention: [],
+      },
+    ],
+  };
+
+  render(<App client={{ loadSnapshot: async () => ({ kind: "ready", snapshot: reviewReadySnapshot }) }} />);
+
+  expect(await screen.findByRole("main", { name: "Prompt Workstation" })).toBeVisible();
+  const cards = screen.getByRole("region", { name: "Workstation Cards" });
+  const card = within(cards).getByRole("article", { name: "layout-subagent workstation card" });
+  expect(within(card).getByText("Issue Slice")).toBeVisible();
+  expect(within(card).getAllByText("ISS-04").length).toBeGreaterThan(0);
+  expect(within(card).getByText("review-ready")).toBeVisible();
+  expect(within(card).getAllByText("npm test -- --run App.test.tsx").length).toBeGreaterThan(0);
+
+  fireEvent.click(within(card).getByRole("button", { name: "Expand layout-subagent" }));
+
+  expect(within(card).getByRole("region", { name: "layout-subagent operational detail" })).toBeVisible();
+  expect(within(card).getByText("Evidence Packages")).toBeVisible();
+  expect(within(card).getByRole("link", { name: "Evidence Package session-ISS-04-1" })).toHaveAttribute(
+    "href",
+    "app-local://evidence/session-ISS-04-1",
+  );
+  expect(within(card).getByText("Accept evidence")).toBeVisible();
+  expect(within(card).getByText("Request repair")).toBeVisible();
+  expect(within(card).getByText("Reason required")).toBeVisible();
+  expect(within(card).getAllByText("Use Review Workspace governed controls").length).toBeGreaterThan(0);
 });
 
 test("restores workstation card state and side-pane selection after desktop refresh", async () => {

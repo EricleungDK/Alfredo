@@ -4,13 +4,13 @@
 
 ## Active Orchestration Context
 
-- **Captured For Run**: `2026-07-06 - implement .scratch/alfredo-console-first-workstation-redesign/issues/03-inline-approvals-and-contextual-path-grants.md`
-- **Current Mission Focus**: `Alfredo console-first workstation redesign, Issue 03: inline risky command approvals and contextual Additional Path Grant requests in the Agent Console.`
-- **Active Agent Focus**: `Codex implementing the Issue 03 vertical slice across React projection/tests first, then backend/transport only if the slice exposes missing contract support.`
-- **Model Assignments (active run)**: `Primary coding agent: Codex. No local model delegation planned for this cycle.`
-- **Coordination State**: `Issue 03 implementation is complete at the React projection seam. Current worktree is on main ahead of origin with a pre-existing modification in tests/test_albert_mvp.py; avoid mixing unrelated edits.`
-- **Pending Blockers**: `No active blocker for Issue 03 implementation after dependency Issue 02 is complete. Release-seam task 29 is assumed satisfied by the existing completed workstation/restart groundwork.`
-- **Next Decisions / Actions**: `Complete local code review, then commit the Issue 03 frontend slice without staging unrelated tests/test_albert_mvp.py changes.`
+- **Captured For Run**: `2026-07-06 - implement .scratch/alfredo-console-first-workstation-redesign/issues/04-mission-work-pane-active-workstation-cards.md`
+- **Current Mission Focus**: `Alfredo console-first workstation redesign, Issue 04: Mission Work pane with Active Workstations as the top live-supervision surface.`
+- **Active Agent Focus**: `Codex implementing the Issue 04 vertical slice across React projection/tests first, then backend/transport only if the existing canonical session contract lacks required workstation-card fields.`
+- **Model Assignments (active run)**: `Primary coding agent: Codex. Subagent-driven development is allowed if the task separates cleanly; no local model delegation is currently planned.`
+- **Coordination State**: `Issue 04 frontend projection is implemented, verified, reviewed, and committed in the latest commit. Active Workstation cards expose explicit Issue Slice metadata and canonical idle state while preserving card-first Mission Work layout. Current worktree is on main ahead of origin with a pre-existing modification in tests/test_albert_mvp.py; avoid mixing unrelated edits.`
+- **Pending Blockers**: `No active blocker for Issue 04 implementation after dependencies Issue 01 and release-seam task 29 are assumed satisfied by existing completed workstation/restart groundwork.`
+- **Next Decisions / Actions**: `Issue 04 is complete. Next Alfredo redesign slice is .scratch/alfredo-console-first-workstation-redesign/issues/05-issue-assignment-board-projection-and-local-navigation.md unless the Mission Commander redirects.`
 
 If any field above is `TBD` or stale, do not infer scope from this file. Update this section immediately before planning or implementation.
 

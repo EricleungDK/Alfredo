@@ -700,7 +700,7 @@ test("splits many live cards by mission while retaining active and done buckets"
 
 test("maps canonical session states to every workstation status", () => {
   const cases = [
-    ["queued", "idle", "", "thinking"],
+    ["queued", "idle", "", "idle"],
     ["launched", "streaming", "", "running"],
     ["pending-approval", "idle", "", "waiting-approval"],
     ["needs-repair", "idle", "", "blocked"],
@@ -742,4 +742,120 @@ test("maps canonical session states to every workstation status", () => {
 
     expect(card.status).toBe(expected);
   }
+});
+
+test("sorts blocked and waiting approval cards above routine active work while preserving distinct states", () => {
+  const statuses = [
+    ["session-running", "ISS-RUN", "runner-agent", "launched", "streaming", "", "running"],
+    ["session-blocked", "ISS-BLOCK", "blocked-agent", "needs-repair", "idle", "", "blocked"],
+    ["session-idle", "ISS-IDLE", "idle-agent", "queued", "idle", "", "idle"],
+    ["session-reviewing", "ISS-REVIEW", "review-agent", "needs-review", "idle", "", "reviewing"],
+    ["session-ready", "ISS-READY", "evidence-agent", "evidence-ready", "completed", "", "review-ready"],
+    ["session-failed", "ISS-FAIL", "failed-agent", "launched", "idle", "Provider failed.", "failed"],
+  ] as const;
+  const snapshot: WorkspaceSnapshot = {
+    ...baseSnapshot,
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      issue_slices: statuses.map(([sessionId, issueId, agent, sessionStatus, operationStatus, failure]) => ({
+        issue_id: issueId,
+        title: `Work ${issueId}`,
+        lifecycle: "Approved",
+        progress: `${agent} progress`,
+        launch_eligible: false,
+        blockers: [],
+        accepted_boundary: {
+          what_to_build: `Work ${issueId}.`,
+          acceptance_criteria: ["Card projects state."],
+          evidence_requirements: ["Projection test."],
+          source_path: `.scratch/issues/${issueId}.md`,
+        },
+        sessions: [
+          {
+            session_id: sessionId,
+            assigned_agent: agent,
+            role: "subagent",
+            provider: "ollama",
+            model: "qwen2.5-coder:14b",
+            status: sessionStatus,
+            stale: false,
+            disconnected: false,
+            operation_status: operationStatus,
+            failure,
+          },
+        ],
+        provenance: {
+          role: "subagent",
+          provider: "ollama",
+          model: "qwen2.5-coder:14b",
+        },
+        model_assignment: {
+          agent_id: agent,
+          role: "subagent",
+          provider: "ollama",
+          model: "qwen2.5-coder:14b",
+          availability: "available",
+          availability_reason: "",
+          operation_status: operationStatus,
+          failure,
+        },
+        evidence: {
+          state: operationStatus === "completed" ? "complete" : "missing",
+          changed_files: [],
+          commands_run: [`npm test -- ${issueId}`],
+          test_results: "",
+          risks: "",
+          artifact_links: operationStatus === "completed" ? [`app-local://evidence/${sessionId}`] : [],
+        },
+        working_context_sources: [],
+      })),
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: statuses.length,
+        is_active: true,
+        attention: [
+          {
+            attention_id: "queue-ISS-APPROVAL",
+            mission_id: "command-deck",
+            kind: "delegation-approval",
+            label: "ISS-APPROVAL delegation approval required",
+            queue_link: "workspace-queue#queue-ISS-APPROVAL",
+          },
+        ],
+        sessions: statuses.map(([sessionId, issueId, agent, sessionStatus]) => ({
+          session_id: sessionId,
+          issue_id: issueId,
+          assigned_agent: agent,
+          status: sessionStatus,
+          role: "subagent",
+          provider: "ollama",
+          model: "qwen2.5-coder:14b",
+        })),
+      },
+    ],
+  };
+
+  const cards = projectWorkstationCards(snapshot).groups.flatMap((group) => group.cards);
+
+  expect(cards.map((card) => card.status)).toEqual([
+    "waiting-approval",
+    "blocked",
+    "failed",
+    "reviewing",
+    "running",
+    "idle",
+    "review-ready",
+  ]);
+  expect(cards.map((card) => [card.status, card.tone])).toEqual([
+    ["waiting-approval", "attention"],
+    ["blocked", "attention"],
+    ["failed", "failed"],
+    ["reviewing", "active"],
+    ["running", "active"],
+    ["idle", "muted"],
+    ["review-ready", "active"],
+  ]);
 });
