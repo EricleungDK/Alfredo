@@ -120,6 +120,18 @@ h2 { font-size: 1.5rem; }
 .console-history article { max-width: 76ch; padding: 0.85rem 0; border-bottom: 1px solid #29322d80; }
 .console-history article[data-outcome="proposed"] { color: var(--ink); }
 .console-history article p { margin: 0 0 0.35rem; }
+.command-console-card { display: grid; gap: 0.65rem; margin: 0.8rem 0; padding: 0.85rem; border: 1px solid var(--line); border-left: 2px solid var(--cyan); background: #0a0f0d; }
+.command-console-card header { display: flex; justify-content: space-between; gap: 0.8rem; align-items: flex-start; }
+.command-console-card header div { display: grid; gap: 0.35rem; min-width: 0; }
+.command-console-card code { color: var(--cyan); overflow-wrap: anywhere; white-space: pre-wrap; }
+.command-console-card strong { color: var(--lime); font-size: 0.68rem; text-transform: uppercase; }
+.command-console-card dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.45rem; margin: 0; }
+.command-console-card dt { color: var(--muted); font-size: 0.56rem; text-transform: uppercase; }
+.command-console-card dd { margin: 0.2rem 0 0; overflow-wrap: anywhere; font-size: 0.68rem; }
+.command-console-card p { color: #bdc5bd; font-size: 0.74rem; line-height: 1.45; }
+.command-console-card button { justify-self: start; border: 1px solid var(--line); background: var(--panel-raised); color: var(--ink); padding: 0.35rem 0.5rem; font-size: 0.62rem; }
+.command-console-card pre { max-height: 18rem; margin: 0; padding: 0.7rem; background: #050807; color: var(--ink); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.command-console-card small { color: var(--muted); font-size: 0.62rem; overflow-wrap: anywhere; }
 .system-line { color: var(--cyan); }
 .scope-card { display: grid; gap: 0.35rem; padding: 0.9rem; border-left: 2px solid var(--cyan); background: #121917; }
 .scope-card strong { font-family: "Rajdhani", sans-serif; font-size: 1.05rem; }
@@ -279,5 +291,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
   .workstation-card-controls { grid-template-columns: 1fr; }
   .agent-workstations__heading, .workstation-card header { flex-direction: column; align-items: stretch; }
   .workstation-card dl, .workstation-card-detail dl { grid-template-columns: 1fr; }
+  .command-console-card header { flex-direction: column; }
+  .command-console-card dl { grid-template-columns: 1fr; }
   .context-inspector__actions { flex-wrap: wrap; }
 }

@@ -14,8 +14,8 @@ export function ShellTerminalPanel({
     <section className="shell-terminal" aria-label="Shell Terminal">
       <div className="panel-heading">
         <div>
-          <span className="eyebrow">Governed execution lane</span>
-          <h2>Shell Terminal</h2>
+          <span className="eyebrow">Audit drill-down</span>
+          <h2>Shell Terminal Detail</h2>
         </div>
       </div>
       <div className="terminal-boundary" aria-label="Execution boundary">

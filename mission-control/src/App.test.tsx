@@ -206,6 +206,10 @@ test("opens to a console-first workstation with persistent Mission Work beside i
   expect(screen.queryByRole("tab", { name: "Workstations" })).not.toBeInTheDocument();
   expect(screen.queryByRole("tab", { name: "Shell Terminal" })).not.toBeInTheDocument();
   expect(screen.queryByRole("region", { name: "Shell Terminal" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Command history" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("textbox", { name: "Requested paths" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("combobox", { name: "Access level" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("textbox", { name: "Grant path" })).not.toBeInTheDocument();
   const cards = screen.getByRole("region", { name: "Workstation Cards" });
   expect(cards).toBeVisible();
   expect(screen.getByText("session-ISS-01-1")).toBeVisible();
@@ -1018,7 +1022,7 @@ test("shows selected controller and model near the prompt composer", async () =>
   expect(within(launchContext).getByText("1 recent workspaces")).toBeVisible();
 });
 
-test("loads authoritative terminal metadata without reconstructing terminal bytes", async () => {
+test("renders observed terminal commands inline without reconstructing terminal bytes by default", async () => {
   const loadShellTerminal = vi.fn(async () => ({
     kind: "shell-terminal" as const,
     projection: {
@@ -1046,10 +1050,21 @@ test("loads authoritative terminal metadata without reconstructing terminal byte
   }));
   render(<App client={{ ...client, loadShellTerminal }} />);
   await screen.findByRole("heading", { name: "Command Deck Mission" });
+  await waitFor(() => expect(loadShellTerminal).toHaveBeenCalledTimes(1));
+
+  const transcript = screen.getByRole("region", { name: "Prompt Transcript" });
+  expect(within(transcript).getByText("python3 -m unittest --help")).toBeVisible();
+  expect(within(transcript).getByText(/auto-allowed \/ Auto-allowed by command policy/)).toBeVisible();
+  expect(within(transcript).getByText("/workspace/albert")).toBeVisible();
+  expect(within(transcript).getByText("Completed with exit 0 and no output.")).toBeVisible();
+  expect(within(transcript).getByRole("button", { name: "Inspect full output for terminal-command-000001" })).toBeDisabled();
+  expect(screen.queryByRole("region", { name: "Command history" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("textbox", { name: "Requested paths" })).not.toBeInTheDocument();
+
   await openCommandAudit();
 
   const terminal = await screen.findByRole("region", { name: "Shell Terminal" });
-  expect(loadShellTerminal).toHaveBeenCalledTimes(1);
+  expect(loadShellTerminal).toHaveBeenCalledTimes(2);
   expect(within(terminal).getByText("python3 -m unittest --help")).toBeVisible();
   expect(within(terminal).getByText("auto-allowed / completed")).toBeVisible();
   expect(within(terminal).queryByLabelText("Command output")).not.toBeInTheDocument();
@@ -1076,8 +1091,9 @@ test("submits auto-allowed terminal command and keeps output local to the sessio
     <App client={{ ...client, loadShellTerminal, submitShellTerminalCommand }} />,
   );
   await screen.findByRole("heading", { name: "Command Deck Mission" });
-  await openCommandAudit();
   await waitFor(() => expect(loadShellTerminal).toHaveBeenCalledTimes(1));
+  await openCommandAudit();
+  await waitFor(() => expect(loadShellTerminal).toHaveBeenCalledTimes(2));
 
   fireEvent.change(screen.getByRole("textbox", { name: "Command" }), {
     target: { value: "python3 -m unittest --help" },
@@ -1099,14 +1115,15 @@ test("submits auto-allowed terminal command and keeps output local to the sessio
     "usage: python3 -m unittest",
   );
   expect(screen.getByRole("textbox", { name: "Command" })).toHaveValue("");
-  expect(loadShellTerminal).toHaveBeenCalledTimes(2);
+  expect(loadShellTerminal).toHaveBeenCalledTimes(3);
 
   closeCommandAudit();
+  const transcript = screen.getByRole("region", { name: "Prompt Transcript" });
+  expect(within(transcript).getByText("python3 -m unittest --help")).toBeVisible();
+  expect(within(transcript).getByText(/Captured 1 stdout line/)).toBeVisible();
   expect(screen.queryByText("usage: python3 -m unittest")).not.toBeInTheDocument();
-  await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: "Open command audit" }));
-  });
-  expect(screen.getByLabelText("Command output")).toHaveTextContent(
+  fireEvent.click(screen.getByRole("button", { name: "Inspect full output for terminal-command-000002" }));
+  expect(screen.getByLabelText("Full command output for terminal-command-000002")).toHaveTextContent(
     "usage: python3 -m unittest",
   );
 });
@@ -1159,7 +1176,7 @@ test("approves a human-required terminal command as Mission Commander", async ()
     reason: "",
   });
   expect(await screen.findByLabelText("Command output")).toHaveTextContent("pushed");
-  expect(loadShellTerminal).toHaveBeenCalledTimes(2);
+  expect(loadShellTerminal).toHaveBeenCalledTimes(3);
 });
 
 test("requires a reason before denying a pending terminal command", async () => {
@@ -1243,8 +1260,9 @@ test("creates a bounded Additional Path Grant through Mission Commander authorit
   });
   render(<App client={{ ...client, loadShellTerminal, createAdditionalPathGrant }} />);
   await screen.findByRole("heading", { name: "Command Deck Mission" });
-  await openCommandAudit();
   await waitFor(() => expect(loadShellTerminal).toHaveBeenCalledTimes(1));
+  await openCommandAudit();
+  await waitFor(() => expect(loadShellTerminal).toHaveBeenCalledTimes(2));
 
   fireEvent.change(screen.getByRole("textbox", { name: "Grant path" }), {
     target: { value: "/external/docs" },

@@ -6,6 +6,10 @@ import type {
   ActivityJournalFilters,
   ActivityJournalProjection,
   ConversationScope,
+  PathAccessLevel,
+  ShellTerminalClassification,
+  ShellTerminalCommandRecord,
+  ShellTerminalCommandStatus,
   MissionDraftCreateRequest,
   MissionDraftDecision,
   MissionDraftProjection,
@@ -30,7 +34,11 @@ import {
   type WorkstationGovernedAction,
 } from "./workstation-projection";
 import { ShellTerminalPanel } from "./ShellTerminalPanel";
-import { useShellTerminal, type ShellTerminalController } from "./use-shell-terminal";
+import {
+  useShellTerminal,
+  type ShellTerminalController,
+  type ShellTerminalTranscriptEntry,
+} from "./use-shell-terminal";
 import "./styles.css";
 
 interface AdHocDelegationDraft {
@@ -216,6 +224,10 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   const shellTerminal = useShellTerminal(client, workspacePath, {
     onWorkstationActionTurn: appendWorkstationActionTurn,
   });
+
+  useEffect(() => {
+    if (workspacePath && client.loadShellTerminal) void shellTerminal.load();
+  }, [client.loadShellTerminal, shellTerminal.load, workspacePath]);
 
   useEffect(() => {
     if (commandAuditOpen) void shellTerminal.load();
@@ -1016,6 +1028,24 @@ interface WorkstationTranscriptTurn {
   readonly outcome: string;
 }
 
+interface CommandConsoleTurn {
+  readonly id: string;
+  readonly commandId: string;
+  readonly command: string;
+  readonly purpose: string;
+  readonly workingDirectory: string;
+  readonly requestedPaths: readonly string[];
+  readonly accessLevel: PathAccessLevel;
+  readonly requester: string;
+  readonly classification: ShellTerminalClassification;
+  readonly status: ShellTerminalCommandStatus;
+  readonly approvalState: string;
+  readonly exitCode: number | null;
+  readonly summary: string;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
 function buildWorkstationTranscriptTurns(
   snapshot: WorkspaceSnapshot,
 ): readonly WorkstationTranscriptTurn[] {
@@ -1038,6 +1068,103 @@ function buildWorkstationTranscriptTurns(
       })),
     ) ?? [];
   return [...attentionTurns, ...sessionTurns];
+}
+
+function buildCommandConsoleTurns(
+  terminal: ShellTerminalController,
+): readonly CommandConsoleTurn[] {
+  const recordsByCommandId = new Map(
+    terminal.projection?.commands.map((command) => [command.command_id, command]) ?? [],
+  );
+  const resultsByCommandId = new Map(
+    terminal.transcript.map((entry) => [entry.command_id, entry]),
+  );
+  const commandIds = new Set([...recordsByCommandId.keys(), ...resultsByCommandId.keys()]);
+  return [...commandIds].map((commandId) =>
+    commandConsoleTurn(
+      commandId,
+      recordsByCommandId.get(commandId),
+      resultsByCommandId.get(commandId),
+      terminal.workingDirectory,
+      terminal.accessLevel,
+    ),
+  );
+}
+
+function commandConsoleTurn(
+  commandId: string,
+  record: ShellTerminalCommandRecord | undefined,
+  result: ShellTerminalTranscriptEntry | undefined,
+  fallbackWorkingDirectory: string,
+  fallbackAccessLevel: PathAccessLevel,
+): CommandConsoleTurn {
+  const classification = result?.classification ?? record?.classification ?? "auto-allowed";
+  const status = result?.status ?? record?.status ?? "pending-approval";
+  const stdout = result?.stdout ?? "";
+  const stderr = result?.stderr ?? "";
+  return {
+    id: `command:${commandId}`,
+    commandId,
+    command: record?.command ?? result?.command ?? "Unknown command",
+    purpose: commandPurpose(record),
+    workingDirectory: (record?.working_directory ?? fallbackWorkingDirectory) || "Current workspace",
+    requestedPaths: record?.requested_paths ?? [],
+    accessLevel: record?.access_level ?? fallbackAccessLevel,
+    requester: record?.requester ?? "mission-commander",
+    classification,
+    status,
+    approvalState: commandApprovalState(record, classification, status),
+    exitCode: result?.exit_code ?? record?.exit_code ?? null,
+    summary: commandOutputSummary(status, result?.exit_code ?? record?.exit_code ?? null, stdout, stderr),
+    stdout,
+    stderr,
+  };
+}
+
+function commandPurpose(record: ShellTerminalCommandRecord | undefined): string {
+  if (record?.reason.trim()) return record.reason;
+  if (record?.requester) return `Requested by ${record.requester}.`;
+  return "Purpose not provided.";
+}
+
+function commandApprovalState(
+  record: ShellTerminalCommandRecord | undefined,
+  classification: ShellTerminalClassification,
+  status: ShellTerminalCommandStatus,
+): string {
+  if (status === "pending-approval") {
+    if (classification === "human-required") return "Waiting for Mission Commander approval";
+    if (classification === "frontier-approvable") return "Waiting for Frontier Model approval";
+    return "Policy check pending";
+  }
+  if (status === "denied") return record?.decider ? `Denied by ${record.decider}` : "Denied";
+  if (classification === "auto-allowed") return "Auto-allowed by command policy";
+  return record?.approver ? `Approved by ${record.approver}` : "Approved by command policy";
+}
+
+function commandOutputSummary(
+  status: ShellTerminalCommandStatus,
+  exitCode: number | null,
+  stdout: string,
+  stderr: string,
+): string {
+  const stdoutLines = countOutputLines(stdout);
+  const stderrLines = countOutputLines(stderr);
+  if (stdoutLines || stderrLines) {
+    const parts = [
+      stdoutLines ? `${stdoutLines} stdout ${stdoutLines === 1 ? "line" : "lines"}` : "",
+      stderrLines ? `${stderrLines} stderr ${stderrLines === 1 ? "line" : "lines"}` : "",
+    ].filter(Boolean);
+    return `Captured ${parts.join(" and ")}; inspect full output for terminal bytes.`;
+  }
+  if (status === "pending-approval") return "Command is waiting for approval before execution.";
+  if (status === "completed") return `Completed${exitCode === null ? "" : ` with exit ${exitCode}`} and no output.`;
+  if (status === "failed") return `Failed${exitCode === null ? "" : ` with exit ${exitCode}`} and no captured output.`;
+  return "Command did not produce captured output.";
+}
+
+function countOutputLines(output: string): number {
+  return output.split(/\r?\n/).filter((line) => line.trim()).length;
 }
 
 function reviewDecisionLabel(decision: ReviewDecision): string {
@@ -1355,6 +1482,7 @@ function CommandDeck({
     ...buildWorkstationTranscriptTurns(snapshot),
     ...workstationActionTurns,
   ];
+  const commandConsoleTurns = buildCommandConsoleTurns(shellTerminal);
   const activeExecutionState =
     actionStatus === "pending"
       ? "Action pending"
@@ -1410,7 +1538,9 @@ function CommandDeck({
             </div>
 
             <div className="console-history">
-              {consoleHistory.length === 0 && workstationTranscriptTurns.length === 0 ? (
+              {consoleHistory.length === 0 &&
+              workstationTranscriptTurns.length === 0 &&
+              commandConsoleTurns.length === 0 ? (
                 <p className="system-line">Canonical workspace state restored.</p>
               ) : null}
               {consoleHistory.map((message) => (
@@ -1424,6 +1554,9 @@ function CommandDeck({
                   <p>{turn.content}</p>
                   <small>{turn.source} / {turn.outcome}</small>
                 </article>
+              ))}
+              {commandConsoleTurns.map((turn) => (
+                <CommandConsoleCard key={turn.id} turn={turn} />
               ))}
             </div>
 
@@ -1886,6 +2019,61 @@ function CommandDeck({
         </aside>
       </div>
     </div>
+  );
+}
+
+function CommandConsoleCard({ turn }: { readonly turn: CommandConsoleTurn }) {
+  const [expanded, setExpanded] = useState(false);
+  const fullOutput = [turn.stdout, turn.stderr].filter(Boolean).join("\n");
+  return (
+    <article className="command-console-card" data-outcome={turn.status}>
+      <header>
+        <div>
+          <span className="eyebrow">Shell Terminal command</span>
+          <code>{turn.command}</code>
+        </div>
+        <strong>{turn.status}</strong>
+      </header>
+      <dl>
+        <div>
+          <dt>Purpose</dt>
+          <dd>{turn.purpose}</dd>
+        </div>
+        <div>
+          <dt>Working directory</dt>
+          <dd>{turn.workingDirectory}</dd>
+        </div>
+        <div>
+          <dt>Policy</dt>
+          <dd>{turn.classification} / {turn.approvalState}</dd>
+        </div>
+        <div>
+          <dt>Access</dt>
+          <dd>
+            {turn.accessLevel}
+            {turn.requestedPaths.length ? ` / ${turn.requestedPaths.join(", ")}` : ""}
+          </dd>
+        </div>
+        <div>
+          <dt>Outcome</dt>
+          <dd>{turn.exitCode === null ? "Exit not available" : `Exit ${turn.exitCode}`}</dd>
+        </div>
+      </dl>
+      <p>{turn.summary}</p>
+      <button
+        type="button"
+        aria-expanded={expanded}
+        aria-label={`Inspect full output for ${turn.commandId}`}
+        disabled={!fullOutput}
+        onClick={() => setExpanded((current) => !current)}
+      >
+        {expanded ? "Hide full output" : "Inspect full output"}
+      </button>
+      {expanded ? (
+        <pre aria-label={`Full command output for ${turn.commandId}`}>{fullOutput}</pre>
+      ) : null}
+      <small>{turn.requester} / {turn.commandId}</small>
+    </article>
   );
 }
 
