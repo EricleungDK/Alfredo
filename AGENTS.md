@@ -32,3 +32,8 @@ The default five-label triage vocabulary is used unchanged. See `docs/agents/tri
 ### Domain docs
 
 This is a single-context repo with a root `CONTEXT.md`. See `docs/agents/domain.md`.
+
+### User instruction
+
+After each implementation, provide user the instruction reply with the commands that they can use for viewing the current coding results, i.e. application GUI skeleton.
+
