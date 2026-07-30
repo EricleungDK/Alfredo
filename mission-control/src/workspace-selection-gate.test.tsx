@@ -1,0 +1,281 @@
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import { App } from "./App";
+import type { WorkspaceClient } from "./workspace-client";
+
+type SelectionRequest = Parameters<NonNullable<WorkspaceClient["selectCodingWorkspace"]>>[0];
+
+const selectionRequiredContext = {
+  schema_version: 1 as const,
+  selected_agent: "qwen3-14b",
+  selected_model: "qwen3:14b",
+  starting_location: "/home/mission-commander/projects",
+  coding_workspace: null,
+  active_mission: null,
+  phase: "selection-required" as const,
+  runtime_root: "/home/mission-commander/.alfredo/runtime",
+  recent_workspaces: [],
+};
+
+function snapshotMustRemainBlocked() {
+  return vi.fn(async () => {
+    throw new Error("workspace snapshot must remain blocked before Mission selection");
+  });
+}
+
+test("keeps Coding Workspace selection pending until the Orchestrator acknowledges it", async () => {
+  let acknowledgeSelection!: (
+    value: Awaited<ReturnType<NonNullable<WorkspaceClient["selectCodingWorkspace"]>>>,
+  ) => void;
+  const pendingSelection = new Promise<
+    Awaited<ReturnType<NonNullable<WorkspaceClient["selectCodingWorkspace"]>>>
+  >((resolve) => {
+    acknowledgeSelection = resolve;
+  });
+  const loadSnapshot = snapshotMustRemainBlocked();
+  const selectCodingWorkspace = vi.fn(async (_request: SelectionRequest) => pendingSelection);
+
+  render(
+    <App
+      client={{
+        loadLaunchContext: async () => ({
+          kind: "launch-context",
+          context: selectionRequiredContext,
+        }),
+        loadSnapshot,
+        selectCodingWorkspace,
+      }}
+    />,
+  );
+
+  const agentConsole = await screen.findByRole("main", { name: "Agent Console" });
+  expect(within(agentConsole).getByText("Starting Location")).toBeVisible();
+  expect(within(agentConsole).getByText(selectionRequiredContext.starting_location)).toBeVisible();
+  expect(loadSnapshot).not.toHaveBeenCalled();
+
+  fireEvent.change(screen.getByRole("textbox", { name: "Coding Workspace path" }), {
+    target: { value: "/home/mission-commander/projects/acknowledged" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Choose existing repository" }));
+
+  expect(await screen.findByText("Waiting for Orchestrator acknowledgement.")).toBeVisible();
+  expect(screen.queryByText("Mission selection required")).not.toBeInTheDocument();
+  const request = selectCodingWorkspace.mock.calls[0][0];
+
+  acknowledgeSelection({
+    kind: "acknowledged",
+    acknowledgement: {
+      schema_version: 1,
+      correlation_id: request.correlation_id,
+      outcome: "acknowledged",
+      starting_location: selectionRequiredContext.starting_location,
+      coding_workspace: "/home/mission-commander/projects/acknowledged",
+      selection_mode: "existing",
+      active_mission: null,
+      replayed: false,
+      message: "Coding Workspace acknowledged by the Orchestrator; no Mission has been selected.",
+    },
+  });
+
+  expect(await screen.findByText("Mission selection required")).toBeVisible();
+  expect(loadSnapshot).not.toHaveBeenCalled();
+});
+
+test("keeps selection required after a structured failure and permits an acknowledged retry", async () => {
+  const codingWorkspace = "/home/mission-commander/projects/acknowledged";
+  const loadSnapshot = snapshotMustRemainBlocked();
+  const selectCodingWorkspace = vi
+    .fn()
+    .mockResolvedValueOnce({
+      kind: "selection-failure" as const,
+      code: "workspace-unsafe",
+      message: "The selected repository overlaps an Alfredo backend root.",
+      recoverable: true,
+    })
+    .mockImplementationOnce(async (request: SelectionRequest) => ({
+      kind: "acknowledged" as const,
+      acknowledgement: {
+        schema_version: 1 as const,
+        correlation_id: request.correlation_id,
+        outcome: "acknowledged" as const,
+        starting_location: selectionRequiredContext.starting_location,
+        coding_workspace: codingWorkspace,
+        selection_mode: "existing" as const,
+        active_mission: null,
+        replayed: false,
+        message: "Coding Workspace acknowledged by the Orchestrator; no Mission has been selected.",
+      },
+    }));
+
+  render(
+    <App
+      client={{
+        loadLaunchContext: async () => ({
+          kind: "launch-context",
+          context: selectionRequiredContext,
+        }),
+        loadSnapshot,
+        selectCodingWorkspace,
+      }}
+    />,
+  );
+
+  fireEvent.change(await screen.findByRole("textbox", { name: "Coding Workspace path" }), {
+    target: { value: codingWorkspace },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Choose existing repository" }));
+
+  const failure = await screen.findByRole("alert");
+  expect(failure).toHaveTextContent("workspace-unsafe");
+  expect(screen.getByText("Choose or create a repository")).toBeVisible();
+  expect(screen.queryByText("Mission selection required")).not.toBeInTheDocument();
+  expect(loadSnapshot).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole("button", { name: "Choose existing repository" }));
+
+  expect(await screen.findByText("Mission selection required")).toBeVisible();
+  expect(screen.getByText(codingWorkspace)).toBeVisible();
+  expect(loadSnapshot).not.toHaveBeenCalled();
+});
+
+test("rejects an acknowledgement for a different correlation without leaving the gate", async () => {
+  const codingWorkspace = "/home/mission-commander/projects/acknowledged";
+  const loadSnapshot = snapshotMustRemainBlocked();
+  const selectCodingWorkspace = vi.fn(async (_request: SelectionRequest) => ({
+    kind: "acknowledged" as const,
+    acknowledgement: {
+      schema_version: 1 as const,
+      correlation_id: "unrelated-correlation",
+      outcome: "acknowledged" as const,
+      starting_location: selectionRequiredContext.starting_location,
+      coding_workspace: codingWorkspace,
+      selection_mode: "existing" as const,
+      active_mission: null,
+      replayed: false,
+      message: "Unrelated acknowledgement.",
+    },
+  }));
+
+  render(
+    <App
+      client={{
+        loadLaunchContext: async () => ({
+          kind: "launch-context",
+          context: selectionRequiredContext,
+        }),
+        loadSnapshot,
+        selectCodingWorkspace,
+      }}
+    />,
+  );
+
+  fireEvent.change(await screen.findByRole("textbox", { name: "Coding Workspace path" }), {
+    target: { value: codingWorkspace },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Choose existing repository" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "invalid-workspace-acknowledgement",
+  );
+  expect(screen.getByText("Choose or create a repository")).toBeVisible();
+  expect(screen.queryByText("Mission selection required")).not.toBeInTheDocument();
+  expect(loadSnapshot).not.toHaveBeenCalled();
+});
+
+test("accepts a canonical workspace path after the native boundary validates it", async () => {
+  const enteredWorkspace = "/home/mission-commander/projects/acknowledged/.";
+  const canonicalWorkspace = "/home/mission-commander/projects/acknowledged";
+  const selectCodingWorkspace = vi.fn(async (request: SelectionRequest) => ({
+    kind: "acknowledged" as const,
+    acknowledgement: {
+      schema_version: 1 as const,
+      correlation_id: request.correlation_id,
+      outcome: "acknowledged" as const,
+      starting_location: selectionRequiredContext.starting_location,
+      coding_workspace: canonicalWorkspace,
+      selection_mode: request.selection_mode,
+      active_mission: null,
+      replayed: false,
+      message: "Canonical Coding Workspace acknowledged.",
+    },
+  }));
+
+  render(
+    <App
+      client={{
+        loadLaunchContext: async () => ({
+          kind: "launch-context",
+          context: selectionRequiredContext,
+        }),
+        loadSnapshot: snapshotMustRemainBlocked(),
+        selectCodingWorkspace,
+      }}
+    />,
+  );
+
+  fireEvent.change(await screen.findByRole("textbox", { name: "Coding Workspace path" }), {
+    target: { value: enteredWorkspace },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Choose existing repository" }));
+
+  expect(await screen.findByText("Mission selection required")).toBeVisible();
+  expect(screen.getByText(canonicalWorkspace)).toBeVisible();
+});
+
+test.each([
+  "backend-startup-failure",
+  "workspace-create-cleanup-failed",
+  "runtime-state-write-failed",
+])("reuses the correlation when retrying recoverable failure %s", async (failureCode) => {
+  const codingWorkspace = "/home/mission-commander/projects/retry";
+  const requests: SelectionRequest[] = [];
+  const selectCodingWorkspace = vi.fn(async (request: SelectionRequest) => {
+    requests.push(request);
+    if (requests.length === 1) {
+      return {
+        kind: "selection-failure" as const,
+        code: failureCode,
+        message: "The acknowledgement response was unavailable.",
+        recoverable: true,
+      };
+    }
+    return {
+      kind: "acknowledged" as const,
+      acknowledgement: {
+        schema_version: 1 as const,
+        correlation_id: request.correlation_id,
+        outcome: "acknowledged" as const,
+        starting_location: selectionRequiredContext.starting_location,
+        coding_workspace: codingWorkspace,
+        selection_mode: "existing" as const,
+        active_mission: null,
+        replayed: true,
+        message: "Coding Workspace acknowledgement replayed.",
+      },
+    };
+  });
+
+  render(
+    <App
+      client={{
+        loadLaunchContext: async () => ({
+          kind: "launch-context",
+          context: selectionRequiredContext,
+        }),
+        loadSnapshot: snapshotMustRemainBlocked(),
+        selectCodingWorkspace,
+      }}
+    />,
+  );
+
+  fireEvent.change(await screen.findByRole("textbox", { name: "Coding Workspace path" }), {
+    target: { value: codingWorkspace },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Choose existing repository" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(failureCode);
+
+  fireEvent.click(screen.getByRole("button", { name: "Choose existing repository" }));
+
+  expect(await screen.findByText("Mission selection required")).toBeVisible();
+  expect(requests).toHaveLength(2);
+  expect(requests[1]).toEqual(requests[0]);
+});

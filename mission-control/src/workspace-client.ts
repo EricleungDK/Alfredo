@@ -2,6 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   AlfredoLaunchContext,
   AlfredoLaunchContextResult,
+  CodingWorkspaceAcknowledgement,
+  CodingWorkspaceSelectionRequest,
+  CodingWorkspaceSelectionResult,
   AgentConsoleHistory,
   AgentConsoleHistoryResult,
   AgentConsoleMessage,
@@ -60,6 +63,9 @@ import type {
 
 export interface WorkspaceClient {
   loadLaunchContext?(): Promise<AlfredoLaunchContextResult>;
+  selectCodingWorkspace?(
+    request: CodingWorkspaceSelectionRequest,
+  ): Promise<CodingWorkspaceSelectionResult>;
   loadSnapshot(): Promise<WorkspaceLoadResult>;
   loadConsoleHistory?(): Promise<AgentConsoleHistoryResult>;
   loadUpdates?(afterRevision: number): Promise<WorkspaceUpdatesResult>;
@@ -115,6 +121,33 @@ export class TauriWorkspaceClient implements WorkspaceClient {
       }
       return {
         kind: "launch-context-failure",
+        code: "backend-startup-failure",
+        message: error instanceof Error ? error.message : String(error),
+        recoverable: true,
+      };
+    }
+  }
+
+  async selectCodingWorkspace(
+    request: CodingWorkspaceSelectionRequest,
+  ): Promise<CodingWorkspaceSelectionResult> {
+    try {
+      const acknowledgement = await invoke<CodingWorkspaceAcknowledgement>(
+        "coding_workspace_select",
+        { request },
+      );
+      return { kind: "acknowledged", acknowledgement };
+    } catch (error) {
+      if (isBridgeFailure(error)) {
+        return {
+          kind: "selection-failure",
+          code: error.code,
+          message: error.message,
+          recoverable: error.recoverable,
+        };
+      }
+      return {
+        kind: "selection-failure",
         code: "backend-startup-failure",
         message: error instanceof Error ? error.message : String(error),
         recoverable: true,

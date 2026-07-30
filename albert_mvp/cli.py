@@ -29,6 +29,10 @@ from .workspace import (
     WorkingContextCurationError,
     WorkingContextService,
 )
+from .workspace_selection import (
+    CodingWorkspaceSelectionError,
+    CodingWorkspaceSelectionService,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -69,6 +73,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common_args(workspace_snapshot)
 
+    coding_workspace_select = subparsers.add_parser(
+        "coding-workspace-select",
+        help="Validate and acknowledge an exact Coding Workspace repository.",
+    )
+    coding_workspace_select.add_argument("--starting-location", required=True)
+    coding_workspace_select.add_argument("--workspace-path", required=True)
+    coding_workspace_select.add_argument(
+        "--selection-mode", required=True, choices=["existing", "create"]
+    )
+    coding_workspace_select.add_argument("--runtime-root", required=True)
+    coding_workspace_select.add_argument("--correlation-id", required=True)
+    coding_workspace_select.add_argument("--forbidden-root", action="append", default=[])
     workspace_action = subparsers.add_parser(
         "workspace-action",
         help="Submit a correlated semantic Workspace Session action as JSON.",
@@ -585,6 +601,21 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    except CodingWorkspaceSelectionError as exc:
+        print(
+            json.dumps(
+                {
+                    "error": {
+                        "code": exc.code,
+                        "message": str(exc),
+                        "recoverable": exc.recoverable,
+                    }
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 1
     except EvidenceValidationError as exc:
         print(
             json.dumps(
@@ -606,6 +637,18 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run(args: argparse.Namespace) -> int:
+    if args.command == "coding-workspace-select":
+        acknowledgement = CodingWorkspaceSelectionService(
+            starting_location=Path(args.starting_location),
+            runtime_root=Path(args.runtime_root),
+            forbidden_roots=tuple(Path(root) for root in args.forbidden_root),
+        ).select(
+            correlation_id=args.correlation_id,
+            workspace_path=Path(args.workspace_path),
+            selection_mode=args.selection_mode,
+        )
+        print(json.dumps(acknowledgement.to_dict(), sort_keys=True))
+        return 0
     mission = AlbertMission(
         target_repo=Path(args.target_repo),
         tracker_dir=Path(args.tracker_dir),

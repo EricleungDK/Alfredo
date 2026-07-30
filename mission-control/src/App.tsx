@@ -5,6 +5,8 @@ import type {
   AgentConsoleMessage,
   ActivityJournalFilters,
   ActivityJournalProjection,
+  CodingWorkspaceAcknowledgement,
+  CodingWorkspaceSelectionRequest,
   ConversationScope,
   PathAccessLevel,
   ShellTerminalClassification,
@@ -108,6 +110,19 @@ type PersistedWorkstationContinuityState = Partial<
 
 const WORKSTATION_CONTINUITY_SCHEMA_VERSION = 1;
 
+function acknowledgementMatchesWorkspaceSelection(
+  acknowledgement: CodingWorkspaceAcknowledgement,
+  request: CodingWorkspaceSelectionRequest,
+  startingLocation: string,
+): boolean {
+  return acknowledgement.schema_version === 1 &&
+    acknowledgement.outcome === "acknowledged" &&
+    acknowledgement.correlation_id === request.correlation_id &&
+    acknowledgement.starting_location === startingLocation &&
+    acknowledgement.selection_mode === request.selection_mode &&
+    acknowledgement.active_mission === null;
+}
+
 export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   const [state, setState] = useState<WorkspaceLoadResult | "loading">("loading");
   const [connectionStatus, setConnectionStatus] = useState<
@@ -163,6 +178,13 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   const [activityStatus, setActivityStatus] = useState<"pending" | "rejected" | null>(null);
   const [commandAuditOpen, setCommandAuditOpen] = useState(false);
   const [launchContext, setLaunchContext] = useState<AlfredoLaunchContext | null>(null);
+  const [codingWorkspacePath, setCodingWorkspacePath] = useState("");
+  const [codingWorkspaceStatus, setCodingWorkspaceStatus] = useState<{
+    readonly state: "pending" | "acknowledged" | "rejected";
+    readonly message: string;
+  } | null>(null);
+  const pendingWorkspaceSelectionRef = useRef<CodingWorkspaceSelectionRequest | null>(null);
+  const nextWorkspaceSelectionIdRef = useRef(0);
   const appendWorkstationActionTurn = useCallback((turn: WorkstationActionTurn) => {
     setWorkstationActionTurns((turns) => [...turns, turn]);
   }, []);
@@ -296,31 +318,40 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
 
   const connect = useCallback(() => {
     setState("loading");
-    void client.loadSnapshot().then((result) => {
+    void (async () => {
+      if (client.loadLaunchContext) {
+        const contextResult = await client.loadLaunchContext();
+        if (contextResult.kind === "launch-context") {
+          setLaunchContext(contextResult.context);
+          if (
+            contextResult.context.phase === "selection-required" ||
+            contextResult.context.phase === "mission-choice-required"
+          ) {
+            setConnectionStatus("connected");
+            return;
+          }
+        }
+      }
+      const result = await client.loadSnapshot();
       setState(result);
       setConnectionStatus(result.kind === "ready" || result.kind === "empty" ? "connected" : "offline");
-    });
+    })();
   }, [client]);
 
   useEffect(connect, [connect]);
 
   useEffect(() => {
-    if (!client.loadLaunchContext) return;
-    void client.loadLaunchContext().then((result) => {
-      if (result.kind === "launch-context") setLaunchContext(result.context);
-    });
-  }, [client]);
-
-  useEffect(() => {
+    if (state === "loading") return;
     if (!client.loadConsoleHistory) return;
     void client.loadConsoleHistory().then((result) => {
       if (result.kind === "history") setConsoleHistory(result.history.messages);
     });
-  }, [client]);
+  }, [client, state]);
 
   useEffect(() => {
+    if (state === "loading") return;
     void refreshWorkingContext();
-  }, [refreshWorkingContext]);
+  }, [refreshWorkingContext, state]);
 
   useEffect(() => {
     if (
@@ -967,6 +998,97 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
     [beginVisibleWorkstationAction, client, finishVisibleWorkstationAction, refreshWorkspaceQueue, state],
   );
 
+  const selectCodingWorkspace = useCallback(
+    async (selectionMode: "existing" | "create") => {
+      if (!launchContext || !client.selectCodingWorkspace || !codingWorkspacePath.trim()) {
+        setCodingWorkspaceStatus({
+          state: "rejected",
+          message: "Enter an exact repository path before requesting selection.",
+        });
+        return;
+      }
+      setCodingWorkspaceStatus({
+        state: "pending",
+        message: "Waiting for Orchestrator acknowledgement.",
+      });
+      const workspacePath = codingWorkspacePath.trim();
+      const pendingRequest = pendingWorkspaceSelectionRef.current;
+      const request: CodingWorkspaceSelectionRequest =
+        pendingRequest?.workspace_path === workspacePath &&
+        pendingRequest.selection_mode === selectionMode
+          ? pendingRequest
+          : {
+              correlation_id:
+                `workspace-select-${Date.now()}-${nextWorkspaceSelectionIdRef.current++}`,
+              workspace_path: workspacePath,
+              selection_mode: selectionMode,
+            };
+      pendingWorkspaceSelectionRef.current = request;
+      const result = await client.selectCodingWorkspace(request);
+      if (result.kind !== "acknowledged") {
+        if (!result.recoverable) {
+          pendingWorkspaceSelectionRef.current = null;
+        }
+        setCodingWorkspaceStatus({
+          state: "rejected",
+          message: `${result.code}: ${result.message}`,
+        });
+        return;
+      }
+      if (
+        !acknowledgementMatchesWorkspaceSelection(
+          result.acknowledgement,
+          request,
+          launchContext.starting_location,
+        )
+      ) {
+        setCodingWorkspaceStatus({
+          state: "rejected",
+          message:
+            "invalid-workspace-acknowledgement: " +
+            "The Orchestrator acknowledgement did not match the requested boundary.",
+        });
+        return;
+      }
+      pendingWorkspaceSelectionRef.current = null;
+      setLaunchContext({
+        ...launchContext,
+        starting_location: result.acknowledgement.starting_location,
+        coding_workspace: result.acknowledgement.coding_workspace,
+        active_mission: null,
+        phase: "mission-choice-required",
+      });
+      setCodingWorkspaceStatus({
+        state: "acknowledged",
+        message: result.acknowledgement.message,
+      });
+    },
+    [client, codingWorkspacePath, launchContext],
+  );
+
+  if (launchContext?.phase === "selection-required") {
+    return (
+      <CodingWorkspaceGate
+        launchContext={launchContext}
+        workspacePath={codingWorkspacePath}
+        status={codingWorkspaceStatus}
+        onWorkspacePathChange={setCodingWorkspacePath}
+        onSelect={selectCodingWorkspace}
+      />
+    );
+  }
+
+  if (launchContext?.phase === "mission-choice-required") {
+    return (
+      <CodingWorkspaceGate
+        launchContext={launchContext}
+        workspacePath={codingWorkspacePath}
+        status={codingWorkspaceStatus}
+        onWorkspacePathChange={setCodingWorkspacePath}
+        onSelect={selectCodingWorkspace}
+      />
+    );
+  }
   if (state === "loading") {
     return (
       <div className="boot-screen" role="status" aria-live="polite">
@@ -1053,6 +1175,128 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   );
 }
 
+function CodingWorkspaceGate({
+  launchContext,
+  workspacePath,
+  status,
+  onWorkspacePathChange,
+  onSelect,
+}: {
+  launchContext: AlfredoLaunchContext;
+  workspacePath: string;
+  status: {
+    readonly state: "pending" | "acknowledged" | "rejected";
+    readonly message: string;
+  } | null;
+  onWorkspacePathChange: (path: string) => void;
+  onSelect: (selectionMode: "existing" | "create") => void;
+}) {
+  const selectionRequired = launchContext.phase === "selection-required";
+  return (
+    <div className="command-deck">
+      <header className="topbar">
+        <div className="wordmark">
+          <span className="wordmark__signal" aria-hidden="true" />
+          <span>ALFREDO</span>
+          <small>WORKSTATION</small>
+        </div>
+        <div className="session-state">
+          <span className="eyebrow">Starting Location</span>
+          <strong>{launchContext.starting_location}</strong>
+        </div>
+      </header>
+      <div className="deck-grid">
+        <main className="prompt-workspace" aria-label="Agent Console">
+          <section className="prompt-pane" aria-label="Coding Workspace selection">
+            <div className="panel-heading">
+              <div>
+                <span className="eyebrow">Agent Console / Coding Workspace</span>
+                <h1>
+                  {selectionRequired
+                    ? "Choose or create a repository"
+                    : "Mission selection required"}
+                </h1>
+              </div>
+            </div>
+            <div className="console-stage">
+              <div className="console-history" role="region" aria-label="Prompt Transcript">
+                <p className="system-line">
+                  Starting Location
+                  <br />
+                  <strong>{launchContext.starting_location}</strong>
+                </p>
+                {selectionRequired ? (
+                  <p>
+                    No Coding Workspace or Mission is bound. Choose an exact existing Git
+                    repository or create a new one below the Starting Location.
+                  </p>
+                ) : (
+                  <p>
+                    Coding Workspace
+                    <br />
+                    <strong>{launchContext.coding_workspace}</strong>
+                  </p>
+                )}
+                {status ? (
+                  <p
+                    role={status.state === "rejected" ? "alert" : "status"}
+                    aria-live="polite"
+                    className={`status status--${status.state}`}
+                  >
+                    {status.message}
+                  </p>
+                ) : null}
+              </div>
+            </div>
+            {selectionRequired ? (
+              <div className="prompt-composer-dock" role="region" aria-label="Coding Workspace controls">
+                <label className="composer prompt-composer">
+                  <span>Coding Workspace path</span>
+                  <input
+                    aria-label="Coding Workspace path"
+                    value={workspacePath}
+                    disabled={status?.state === "pending"}
+                    onChange={(event) => onWorkspacePathChange(event.target.value)}
+                  />
+                </label>
+                <div className="prompt-toolbar">
+                  <button
+                    type="button"
+                    disabled={!workspacePath.trim() || status?.state === "pending"}
+                    onClick={() => onSelect("existing")}
+                  >
+                    Choose existing repository
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!workspacePath.trim() || status?.state === "pending"}
+                    onClick={() => onSelect("create")}
+                  >
+                    Create new repository
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </section>
+        </main>
+        <aside className="agent-workstations" aria-label="Mission Work">
+          <div className="agent-workstations__heading">
+            <div>
+              <span className="eyebrow">No Mission selected</span>
+              <h2>Mission Work</h2>
+            </div>
+          </div>
+          <div className="mission-work-scroll">
+            <p>
+              Mission-qualified work remains unavailable until a later acknowledged Mission
+              choice.
+            </p>
+          </div>
+        </aside>
+      </div>
+    </div>
+  );
+}
 interface WorkstationTranscriptTurn {
   readonly id: string;
   readonly content: string;

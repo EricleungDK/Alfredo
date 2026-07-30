@@ -242,7 +242,7 @@ test("opens to a console-first workstation with persistent Mission Work beside i
     /\.deck-grid\s*\{[^}]*grid-template-columns:\s*minmax\(520px,\s*1\.7fr\)\s+minmax\(320px,\s*0\.75fr\)/s,
   );
   const transcript = screen.getByRole("region", { name: "Prompt Transcript" });
-  expect(within(transcript).getByText("Implement the next Alfredo workstation slice.")).toBeVisible();
+  expect(await within(transcript).findByText("Implement the next Alfredo workstation slice.")).toBeVisible();
   expect(within(transcript).getByText(/durable and route execution/)).toBeVisible();
   expect(within(transcript).getByText("Workstation action pending: ISS-02 delegation approval required.")).toBeVisible();
   expect(within(transcript).getByText("Workstation outcome: ISS-01 is running on qwen-coder-local.")).toBeVisible();
@@ -1068,9 +1068,13 @@ test("restores workstation card state and side-pane selection after desktop refr
     loadLaunchContext: async () => ({
       kind: "launch-context",
       context: {
+        schema_version: 1,
         selected_agent: "qwen3.6-27b",
         selected_model: "qwen3.6:27b",
-        selected_workspace: "/workspace/albert",
+        starting_location: "/workspace",
+        coding_workspace: "/workspace/albert",
+        active_mission: "command-deck",
+        phase: "workspace-ready",
         runtime_root: "/runtime/alfredo",
         recent_workspaces: ["/workspace/albert"],
       },
@@ -1716,8 +1720,12 @@ test("shows selected controller and model near the prompt composer", async () =>
     kind: "launch-context" as const,
     context: {
       selected_agent: "qwen3.6-27b",
+      schema_version: 1 as const,
       selected_model: "qwen3.6:27b",
-      selected_workspace: "/workspace/albert",
+      starting_location: "/workspace",
+      coding_workspace: "/workspace/albert",
+      active_mission: "command-deck",
+      phase: "workspace-ready" as const,
       runtime_root: "/home/mission/.alfredo/runtime",
       recent_workspaces: ["/workspace/albert"],
     },

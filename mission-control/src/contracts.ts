@@ -8,9 +8,13 @@ export interface ConversationScope {
 }
 
 export interface AlfredoLaunchContext {
+  readonly schema_version: 1;
   readonly selected_agent: string;
   readonly selected_model: string;
-  readonly selected_workspace: string;
+  readonly starting_location: string;
+  readonly coding_workspace: string | null;
+  readonly active_mission: string | null;
+  readonly phase: "selection-required" | "mission-choice-required" | "workspace-ready";
   readonly runtime_root: string;
   readonly recent_workspaces: readonly string[];
 }
@@ -19,6 +23,36 @@ export type AlfredoLaunchContextResult =
   | { readonly kind: "launch-context"; readonly context: AlfredoLaunchContext }
   | {
       readonly kind: "launch-context-failure";
+      readonly code: string;
+      readonly message: string;
+      readonly recoverable: boolean;
+    };
+
+export interface CodingWorkspaceSelectionRequest {
+  readonly correlation_id: string;
+  readonly workspace_path: string;
+  readonly selection_mode: "existing" | "create";
+}
+
+export interface CodingWorkspaceAcknowledgement {
+  readonly schema_version: 1;
+  readonly correlation_id: string;
+  readonly outcome: "acknowledged";
+  readonly starting_location: string;
+  readonly coding_workspace: string;
+  readonly selection_mode: "existing" | "create";
+  readonly active_mission: null;
+  readonly replayed: boolean;
+  readonly message: string;
+}
+
+export type CodingWorkspaceSelectionResult =
+  | {
+      readonly kind: "acknowledged";
+      readonly acknowledgement: CodingWorkspaceAcknowledgement;
+    }
+  | {
+      readonly kind: "selection-failure";
       readonly code: string;
       readonly message: string;
       readonly recoverable: boolean;

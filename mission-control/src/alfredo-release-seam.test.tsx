@@ -225,9 +225,16 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
       launch: "workstation",
       selected_agent: "fake-local",
       selected_model: "deterministic-fake",
-      selected_workspace: workspace,
+      starting_location: workspace,
+      workspace_selection: {
+        schema_version: 1,
+        phase: "selection-required",
+        starting_location: workspace,
+        coding_workspace: null,
+        active_mission: null,
+      },
       runtime_root: runtimeRoot,
-      recent_workspaces: [workspace],
+      recent_workspaces: [],
     });
     expect(launchPlan.preflight.map((check: { name: string }) => check.name)).toEqual([
       "product_install",
@@ -235,7 +242,7 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
       "npm_runtime",
       "desktop_shell",
       "backend_process",
-      "workspace_access",
+      "starting_location_access",
       "writable_runtime",
       "ollama",
       "required_model",
@@ -318,9 +325,13 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
     const activityLoads: ActivityJournalFilters[] = [];
     const client = createBackendClient({
       launchContext: {
+        schema_version: 1,
         selected_agent: launchPlan.selected_agent,
         selected_model: launchPlan.selected_model,
-        selected_workspace: launchPlan.selected_workspace,
+        starting_location: launchPlan.starting_location,
+        coding_workspace: workspace,
+        active_mission: "release-smoke",
+        phase: "workspace-ready",
         runtime_root: launchPlan.runtime_root,
         recent_workspaces: launchPlan.recent_workspaces,
       },
@@ -341,10 +352,10 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
     expect(within(statusLine).getByText("Model deterministic-fake")).toBeVisible();
     expect(within(statusLine).getByText(`Workspace ${workspace}`)).toBeVisible();
     expect(within(statusLine).getByText(`Runtime ${runtimeRoot}`)).toBeVisible();
-    expect(within(statusLine).getByText("1 recent workspaces")).toBeVisible();
+    expect(statusLine).not.toHaveTextContent(/recent workspaces/);
     expect(screen.getByRole("textbox", { name: "Message Alfredo" })).toBeVisible();
-    expect(screen.getByText("Launch the release seam verification.")).toBeVisible();
-    expect(screen.getByText(/keep the action governed/)).toBeVisible();
+    expect(await screen.findByText("Launch the release seam verification.")).toBeVisible();
+    expect(await screen.findByText(/keep the action governed/)).toBeVisible();
 
     const cards = screen.getByRole("region", { name: "Workstation Cards" });
     expect(within(cards).getByText("Release Seam")).toBeVisible();
@@ -391,8 +402,8 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
     first.unmount();
     render(<App client={client} />);
     const restoredTranscript = await screen.findByRole("region", { name: "Prompt Transcript" });
-    expect(within(restoredTranscript).getByText("Workstation action: Mission Commander requested issue launch for ISS-01.")).toBeVisible();
-    expect(within(restoredTranscript).getByText("Orchestrator accepted workstation action: Orchestrator launched ISS-01 as session-ISS-01-1.")).toBeVisible();
+    expect(await within(restoredTranscript).findByText("Workstation action: Mission Commander requested issue launch for ISS-01.")).toBeVisible();
+    expect(await within(restoredTranscript).findByText("Orchestrator accepted workstation action: Orchestrator launched ISS-01 as session-ISS-01-1.")).toBeVisible();
     const restoredJournal = await screen.findByRole("region", { name: "Activity Journal" });
     expect(within(restoredJournal).getByText("Orchestrator launched ISS-01 as session-ISS-01-1.")).toBeVisible();
     const restoredAssignmentDetail = screen.getByRole("region", { name: "Issue Assignment Detail" });

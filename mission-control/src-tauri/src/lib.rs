@@ -26,11 +26,286 @@ pub struct BridgeConfig {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AlfredoLaunchContext {
+    pub schema_version: u32,
     pub selected_agent: String,
     pub selected_model: String,
-    pub selected_workspace: String,
+    pub starting_location: String,
+    pub coding_workspace: Option<String>,
+    pub active_mission: Option<String>,
+    pub phase: String,
     pub runtime_root: String,
     pub recent_workspaces: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CodingWorkspaceSelectionRequest {
+    pub correlation_id: String,
+    pub workspace_path: String,
+    pub selection_mode: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CodingWorkspaceAcknowledgement {
+    pub schema_version: u32,
+    pub correlation_id: String,
+    pub outcome: String,
+    pub starting_location: String,
+    pub coding_workspace: String,
+    pub selection_mode: String,
+    pub active_mission: Option<String>,
+    pub replayed: bool,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Default)]
+struct WorkspaceBindingState {
+    coding_workspace: Option<PathBuf>,
+    active_mission: Option<String>,
+    pending_selection: Option<PendingWorkspaceSelection>,
+    accepted_selection: Option<AcceptedWorkspaceSelection>,
+}
+
+#[derive(Clone, Debug)]
+struct PendingWorkspaceSelection {
+    correlation_id: String,
+    workspace_path: String,
+    selection_mode: String,
+}
+
+#[derive(Clone, Debug)]
+struct AcceptedWorkspaceSelection {
+    correlation_id: String,
+    workspace_path: String,
+    selection_mode: String,
+    acknowledgement: CodingWorkspaceAcknowledgement,
+}
+
+#[derive(Debug, Default)]
+pub struct WorkspaceBinding {
+    inner: Mutex<WorkspaceBindingState>,
+}
+
+impl WorkspaceBinding {
+    fn from_environment() -> Self {
+        Self::default()
+    }
+
+    fn state(&self) -> WorkspaceBindingState {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    pub fn acknowledge(
+        &self,
+        request: &CodingWorkspaceSelectionRequest,
+        acknowledgement: &CodingWorkspaceAcknowledgement,
+    ) -> Result<(), BridgeFailure> {
+        if acknowledgement.schema_version != 1
+            || acknowledgement.outcome != "acknowledged"
+            || acknowledgement.active_mission.is_some()
+            || acknowledgement.correlation_id != request.correlation_id
+            || acknowledgement.selection_mode != request.selection_mode
+        {
+            return Err(BridgeFailure {
+                code: "invalid-workspace-acknowledgement".to_owned(),
+                message: "The Orchestrator returned an invalid Coding Workspace acknowledgement."
+                    .to_owned(),
+                recoverable: true,
+            });
+        }
+        let coding_workspace = PathBuf::from(&acknowledgement.coding_workspace)
+            .canonicalize()
+            .map_err(|error| BridgeFailure {
+                code: "invalid-workspace-path".to_owned(),
+                message: format!(
+                    "The acknowledged Coding Workspace is no longer available: {error}"
+                ),
+                recoverable: true,
+            })?;
+        let requested_workspace = PathBuf::from(&request.workspace_path)
+            .canonicalize()
+            .map_err(|error| BridgeFailure {
+                code: "invalid-workspace-path".to_owned(),
+                message: format!("The requested Coding Workspace is unavailable: {error}"),
+                recoverable: true,
+            })?;
+        if requested_workspace != coding_workspace {
+            return Err(BridgeFailure {
+                code: "invalid-workspace-acknowledgement".to_owned(),
+                message: "The Orchestrator acknowledged a different Coding Workspace boundary."
+                    .to_owned(),
+                recoverable: true,
+            });
+        }
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let pending_matches = state.pending_selection.as_ref().is_some_and(|pending| {
+            pending.correlation_id == request.correlation_id
+                && pending.workspace_path == request.workspace_path
+                && pending.selection_mode == request.selection_mode
+        });
+        if !pending_matches {
+            return Err(BridgeFailure {
+                code: "workspace-selection-not-pending".to_owned(),
+                message:
+                    "The Coding Workspace acknowledgement does not match the reserved request."
+                        .to_owned(),
+                recoverable: true,
+            });
+        }
+        state.coding_workspace = Some(coding_workspace);
+        state.active_mission = None;
+        state.pending_selection = None;
+        state.accepted_selection = Some(AcceptedWorkspaceSelection {
+            correlation_id: request.correlation_id.clone(),
+            workspace_path: request.workspace_path.clone(),
+            selection_mode: request.selection_mode.clone(),
+            acknowledgement: acknowledgement.clone(),
+        });
+        Ok(())
+    }
+
+    pub fn reserve_selection(
+        &self,
+        request: &CodingWorkspaceSelectionRequest,
+    ) -> Result<Option<CodingWorkspaceAcknowledgement>, BridgeFailure> {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(accepted) = state.accepted_selection.as_ref() {
+            if accepted.correlation_id != request.correlation_id {
+                return Err(BridgeFailure {
+                    code: "workspace-already-selected".to_owned(),
+                    message: "This Alfredo process already has an acknowledged Coding Workspace."
+                        .to_owned(),
+                    recoverable: false,
+                });
+            }
+            if accepted.workspace_path != request.workspace_path
+                || accepted.selection_mode != request.selection_mode
+            {
+                return Err(BridgeFailure {
+                    code: "correlation-conflict".to_owned(),
+                    message:
+                        "The Coding Workspace correlation id was already used for a different boundary."
+                            .to_owned(),
+                    recoverable: false,
+                });
+            }
+            let mut acknowledgement = accepted.acknowledgement.clone();
+            acknowledgement.replayed = true;
+            return Ok(Some(acknowledgement));
+        }
+        if let Some(pending) = state.pending_selection.as_ref() {
+            if pending.correlation_id == request.correlation_id
+                && (pending.workspace_path != request.workspace_path
+                    || pending.selection_mode != request.selection_mode)
+            {
+                return Err(BridgeFailure {
+                    code: "correlation-conflict".to_owned(),
+                    message:
+                        "The Coding Workspace correlation id is pending for a different boundary."
+                            .to_owned(),
+                    recoverable: false,
+                });
+            }
+            return Err(BridgeFailure {
+                code: "workspace-selection-pending".to_owned(),
+                message: "A Coding Workspace selection is already waiting for acknowledgement."
+                    .to_owned(),
+                recoverable: true,
+            });
+        }
+        state.pending_selection = Some(PendingWorkspaceSelection {
+            correlation_id: request.correlation_id.clone(),
+            workspace_path: request.workspace_path.clone(),
+            selection_mode: request.selection_mode.clone(),
+        });
+        Ok(None)
+    }
+
+    pub fn release_selection(&self, request: &CodingWorkspaceSelectionRequest) {
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.pending_selection.as_ref().is_some_and(|pending| {
+            pending.correlation_id == request.correlation_id
+                && pending.workspace_path == request.workspace_path
+                && pending.selection_mode == request.selection_mode
+        }) {
+            state.pending_selection = None;
+        }
+    }
+
+    pub fn require_active_mission(&self) -> Result<(), BridgeFailure> {
+        let state = self.state();
+        if state.coding_workspace.is_none() {
+            return Err(BridgeFailure {
+                code: "coding-workspace-selection-required".to_owned(),
+                message: "Choose or create a Coding Workspace before using Mission commands."
+                    .to_owned(),
+                recoverable: true,
+            });
+        }
+        if state.active_mission.is_none() {
+            return Err(BridgeFailure {
+                code: "mission-selection-required".to_owned(),
+                message:
+                    "Choose Resume Mission or Start New Mission before using Mission commands."
+                        .to_owned(),
+                recoverable: true,
+            });
+        }
+        Ok(())
+    }
+}
+
+pub fn execute_coding_workspace_select(
+    config: &BridgeConfig,
+    starting_location: &std::path::Path,
+    request: &CodingWorkspaceSelectionRequest,
+) -> Result<CodingWorkspaceAcknowledgement, BridgeFailure> {
+    let mut command = BackendCommand {
+        config,
+        argv: vec!["coding-workspace-select".to_owned()],
+    };
+    command
+        .arg("--starting-location")
+        .arg(starting_location)
+        .arg("--workspace-path")
+        .arg(&request.workspace_path)
+        .arg("--selection-mode")
+        .arg(&request.selection_mode)
+        .arg("--runtime-root")
+        .arg(&config.runtime_root)
+        .arg("--correlation-id")
+        .arg(&request.correlation_id)
+        .arg("--forbidden-root")
+        .arg(&config.backend_root)
+        .arg("--forbidden-root")
+        .arg(&config.runtime_root);
+    if let Some(install_root) = std::env::var_os("ALFREDO_INSTALL_ROOT") {
+        if !install_root.is_empty() {
+            command
+                .arg("--forbidden-root")
+                .arg(PathBuf::from(install_root));
+        }
+    }
+    let output = command.output().map_err(|error| BridgeFailure {
+        code: "backend-startup-failure".to_owned(),
+        message: format!("Unable to start the Alfredo backend: {error}"),
+        recoverable: true,
+    })?;
+    decode_backend_json(
+        process_output(output),
+        "Coding Workspace selection acknowledgement",
+    )
 }
 
 impl BridgeConfig {
@@ -83,16 +358,58 @@ fn recent_workspaces(runtime_root: &PathBuf) -> Vec<String> {
     serde_json::from_str::<Vec<String>>(&contents).unwrap_or_default()
 }
 
-pub fn build_launch_context(config: &BridgeConfig) -> AlfredoLaunchContext {
+pub fn build_launch_context_with_binding(
+    config: &BridgeConfig,
+    binding: &WorkspaceBinding,
+) -> AlfredoLaunchContext {
+    let binding = binding.state();
+    let coding_workspace = binding
+        .coding_workspace
+        .map(|workspace| workspace.to_string_lossy().into_owned());
+    let active_mission = binding.active_mission;
+    let phase = if coding_workspace.is_none() {
+        "selection-required"
+    } else if active_mission.is_none() {
+        "mission-choice-required"
+    } else {
+        "workspace-ready"
+    };
     AlfredoLaunchContext {
+        schema_version: 1,
         selected_agent: std::env::var("ALFREDO_SELECTED_AGENT").unwrap_or_default(),
         selected_model: std::env::var("ALFREDO_SELECTED_MODEL").unwrap_or_default(),
-        selected_workspace: config.target_repo.to_string_lossy().into_owned(),
+        starting_location: bridge_starting_location(config)
+            .to_string_lossy()
+            .into_owned(),
+        coding_workspace,
+        active_mission,
+        phase: phase.to_owned(),
         runtime_root: config.runtime_root.to_string_lossy().into_owned(),
         recent_workspaces: recent_workspaces(&config.runtime_root),
     }
 }
 
+pub fn build_launch_context(config: &BridgeConfig) -> AlfredoLaunchContext {
+    build_launch_context_with_binding(config, &WorkspaceBinding::from_environment())
+}
+
+fn bridge_starting_location(config: &BridgeConfig) -> PathBuf {
+    std::env::var_os("ALFREDO_STARTING_LOCATION")
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+        })
+        .unwrap_or_else(|| {
+            config
+                .backend_root
+                .parent()
+                .map(PathBuf::from)
+                .unwrap_or_else(std::env::temp_dir)
+        })
+}
 #[derive(Debug, Deserialize)]
 struct PersistentResponse {
     id: String,
@@ -1606,22 +1923,59 @@ pub fn execute_mission_draft_decision(
 #[tauri::command]
 fn workspace_snapshot(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
 ) -> Result<WorkspaceSnapshot, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_snapshot(config.inner())
 }
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-fn alfredo_launch_context(config: tauri::State<'_, BridgeConfig>) -> AlfredoLaunchContext {
-    build_launch_context(config.inner())
+fn alfredo_launch_context(
+    config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
+) -> AlfredoLaunchContext {
+    build_launch_context_with_binding(config.inner(), binding.inner())
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn coding_workspace_select(
+    config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
+    request: CodingWorkspaceSelectionRequest,
+) -> Result<CodingWorkspaceAcknowledgement, BridgeFailure> {
+    if let Some(acknowledgement) = binding.reserve_selection(&request)? {
+        return Ok(acknowledgement);
+    }
+    let acknowledgement = match execute_coding_workspace_select(
+        config.inner(),
+        &bridge_starting_location(config.inner()),
+        &request,
+    ) {
+        Ok(acknowledgement) => acknowledgement,
+        Err(error) => {
+            binding.release_selection(&request);
+            return Err(error);
+        }
+    };
+    match binding.acknowledge(&request, &acknowledgement) {
+        Ok(()) => Ok(acknowledgement),
+        Err(error) => {
+            binding.release_selection(&request);
+            Err(error)
+        }
+    }
 }
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
 fn workspace_updates(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
     after_revision: u64,
 ) -> Result<WorkspaceUpdateBatch, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_updates(config.inner(), after_revision)
 }
 
@@ -1629,8 +1983,10 @@ fn workspace_updates(
 #[tauri::command]
 fn workspace_action(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
     action: WorkspaceActionRequest,
 ) -> Result<WorkspaceActionAcknowledgement, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_action(config.inner(), &action)
 }
 
@@ -1638,8 +1994,10 @@ fn workspace_action(
 #[tauri::command]
 fn workspace_scope(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
     scope: WorkspaceScopeRequest,
 ) -> Result<WorkspaceActionAcknowledgement, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_scope(config.inner(), &scope)
 }
 
@@ -1647,8 +2005,10 @@ fn workspace_scope(
 #[tauri::command]
 fn workspace_mission_switch(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
     request: WorkspaceMissionSwitchRequest,
 ) -> Result<WorkspaceActionAcknowledgement, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_mission_switch(config.inner(), &request)
 }
 
@@ -1656,8 +2016,10 @@ fn workspace_mission_switch(
 #[tauri::command]
 fn agent_console_message(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
     message: AgentConsoleMessageRequest,
 ) -> Result<AgentConsoleMessage, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_console_message(config.inner(), &message)
 }
 
@@ -1665,7 +2027,9 @@ fn agent_console_message(
 #[tauri::command]
 fn agent_console_history(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
 ) -> Result<AgentConsoleHistory, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_console_history(config.inner())
 }
 
@@ -1673,7 +2037,9 @@ fn agent_console_history(
 #[tauri::command]
 fn working_context(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
 ) -> Result<WorkingContextProjection, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_working_context(config.inner())
 }
 
@@ -1681,8 +2047,10 @@ fn working_context(
 #[tauri::command]
 fn working_context_curate(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
     request: WorkingContextCurationRequest,
 ) -> Result<WorkingContextAcknowledgement, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_working_context_curate(config.inner(), &request)
 }
 
@@ -1690,7 +2058,9 @@ fn working_context_curate(
 #[tauri::command]
 fn review_workspace(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
 ) -> Result<ReviewWorkspaceProjection, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_review_workspace(config.inner())
 }
 
@@ -1698,8 +2068,10 @@ fn review_workspace(
 #[tauri::command]
 fn review_decision(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
     request: ReviewDecisionRequest,
 ) -> Result<ReviewDecisionAcknowledgement, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_review_decision(config.inner(), &request)
 }
 
@@ -1707,8 +2079,10 @@ fn review_decision(
 #[tauri::command]
 fn activity_journal(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
     filters: ActivityJournalFilters,
 ) -> Result<ActivityJournalProjection, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_activity_journal(config.inner(), &filters)
 }
 
@@ -1716,7 +2090,9 @@ fn activity_journal(
 #[tauri::command]
 fn shell_terminal(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
 ) -> Result<ShellTerminalProjection, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_shell_terminal(config.inner())
 }
 
@@ -1724,8 +2100,10 @@ fn shell_terminal(
 #[tauri::command]
 fn shell_terminal_submit(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
     request: ShellTerminalCommandRequest,
 ) -> Result<ShellTerminalCommandResult, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_shell_terminal_submit(config.inner(), &request)
 }
 
@@ -1733,8 +2111,10 @@ fn shell_terminal_submit(
 #[tauri::command]
 fn shell_terminal_decision(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
     request: ShellTerminalDecisionRequest,
 ) -> Result<ShellTerminalCommandResult, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_shell_terminal_decision(config.inner(), &request)
 }
 
@@ -1742,8 +2122,10 @@ fn shell_terminal_decision(
 #[tauri::command]
 fn additional_path_grant_create(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
     request: AdditionalPathGrantRequest,
 ) -> Result<AdditionalPathGrant, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_additional_path_grant_create(config.inner(), &request)
 }
 
@@ -1751,7 +2133,9 @@ fn additional_path_grant_create(
 #[tauri::command]
 fn workspace_queue(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
 ) -> Result<WorkspaceQueueProjection, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_workspace_queue(config.inner())
 }
 
@@ -1759,8 +2143,10 @@ fn workspace_queue(
 #[tauri::command]
 fn ad_hoc_delegation_proposal(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
     request: AdHocDelegationProposalRequest,
 ) -> Result<WorkspaceQueueAcknowledgement, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_ad_hoc_delegation_proposal(config.inner(), &request)
 }
 
@@ -1768,8 +2154,10 @@ fn ad_hoc_delegation_proposal(
 #[tauri::command]
 fn workspace_queue_decision(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
     request: WorkspaceQueueDecisionRequest,
 ) -> Result<WorkspaceQueueAcknowledgement, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_workspace_queue_decision(config.inner(), &request)
 }
 
@@ -1777,8 +2165,10 @@ fn workspace_queue_decision(
 #[tauri::command]
 fn workstation_action(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
     request: WorkstationActionRequest,
 ) -> Result<WorkstationActionAcknowledgement, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_workstation_action(config.inner(), &request)
 }
 
@@ -1786,7 +2176,9 @@ fn workstation_action(
 #[tauri::command]
 fn mission_drafts(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
 ) -> Result<MissionDraftProjection, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_mission_drafts(config.inner())
 }
 
@@ -1794,8 +2186,10 @@ fn mission_drafts(
 #[tauri::command]
 fn mission_draft_create(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
     request: MissionDraftCreateRequest,
 ) -> Result<MissionDraftAcknowledgement, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_mission_draft_create(config.inner(), &request)
 }
 
@@ -1803,8 +2197,10 @@ fn mission_draft_create(
 #[tauri::command]
 fn mission_draft_decision(
     config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
     request: MissionDraftDecisionRequest,
 ) -> Result<MissionDraftAcknowledgement, BridgeFailure> {
+    binding.require_active_mission()?;
     execute_mission_draft_decision(config.inner(), &request)
 }
 
@@ -1812,8 +2208,10 @@ fn mission_draft_decision(
 pub fn run() {
     tauri::Builder::default()
         .manage(BridgeConfig::from_environment())
+        .manage(WorkspaceBinding::from_environment())
         .invoke_handler(tauri::generate_handler![
             alfredo_launch_context,
+            coding_workspace_select,
             workspace_snapshot,
             workspace_updates,
             workspace_action,
@@ -2153,6 +2551,7 @@ None - can start immediately
         .expect("recent workspaces should be written");
         std::env::set_var("ALFREDO_SELECTED_AGENT", "qwen3.6-27b");
         std::env::set_var("ALFREDO_SELECTED_MODEL", "qwen3.6:27b");
+        std::env::set_var("ALFREDO_STARTING_LOCATION", &selected_workspace);
         let config = BridgeConfig {
             python: "python3".to_owned(),
             backend_root: install_root,
@@ -2169,12 +2568,17 @@ None - can start immediately
 
         std::env::remove_var("ALFREDO_SELECTED_AGENT");
         std::env::remove_var("ALFREDO_SELECTED_MODEL");
+        std::env::remove_var("ALFREDO_STARTING_LOCATION");
+        assert_eq!(context.schema_version, 1);
         assert_eq!(context.selected_agent, "qwen3.6-27b");
         assert_eq!(context.selected_model, "qwen3.6:27b");
         assert_eq!(
-            context.selected_workspace,
+            context.starting_location,
             selected_workspace.to_string_lossy().to_string()
         );
+        assert!(context.coding_workspace.is_none());
+        assert!(context.active_mission.is_none());
+        assert_eq!(context.phase, "selection-required");
         assert_eq!(
             context.runtime_root,
             runtime_root.to_string_lossy().to_string()
@@ -3579,6 +3983,125 @@ None - can start immediately
             history.messages[0].content,
             "Continuous mission conversation"
         );
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+    #[test]
+    fn desktop_bridge_acknowledges_an_exact_coding_workspace_without_a_mission() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("alfredo-workspace-select-{unique}"));
+        let starting_location = root.join("projects");
+        let coding_workspace = starting_location.join("existing");
+        let runtime_root = root.join("runtime");
+        fs::create_dir_all(&coding_workspace).expect("coding workspace");
+        let git = Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&coding_workspace)
+            .output()
+            .expect("git should start");
+        assert!(
+            git.status.success(),
+            "{}",
+            String::from_utf8_lossy(&git.stderr)
+        );
+        let backend_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("backend root");
+        let mut config = BridgeConfig::for_repository(backend_root);
+        config.runtime_root = runtime_root;
+
+        let request = CodingWorkspaceSelectionRequest {
+            correlation_id: "workspace-select-rust-1".to_owned(),
+            workspace_path: coding_workspace.to_string_lossy().into_owned(),
+            selection_mode: "existing".to_owned(),
+        };
+        let binding = WorkspaceBinding::default();
+        assert!(binding
+            .reserve_selection(&request)
+            .expect("the first selection should reserve the effect")
+            .is_none());
+        let pending = binding
+            .reserve_selection(&request)
+            .expect_err("a concurrent request must not repeat the effect");
+        assert_eq!(pending.code, "workspace-selection-pending");
+        let pending_conflict = binding
+            .reserve_selection(&CodingWorkspaceSelectionRequest {
+                correlation_id: request.correlation_id.clone(),
+                workspace_path: starting_location
+                    .join("different")
+                    .to_string_lossy()
+                    .into_owned(),
+                selection_mode: "create".to_owned(),
+            })
+            .expect_err("a pending correlation must retain its exact boundary");
+        assert_eq!(pending_conflict.code, "correlation-conflict");
+        let acknowledgement =
+            execute_coding_workspace_select(&config, &starting_location, &request)
+                .expect("selection should be acknowledged");
+
+        assert_eq!(acknowledgement.schema_version, 1);
+        assert_eq!(acknowledgement.outcome, "acknowledged");
+        assert_eq!(
+            acknowledgement.coding_workspace,
+            coding_workspace
+                .canonicalize()
+                .expect("canonical workspace")
+                .to_string_lossy()
+        );
+        assert!(acknowledgement.active_mission.is_none());
+
+        binding
+            .acknowledge(&request, &acknowledgement)
+            .expect("acknowledged workspace should become the native binding");
+        let replay = binding
+            .reserve_selection(&request)
+            .expect("exact correlation replay should remain valid")
+            .expect("accepted correlation should replay");
+        assert!(replay.replayed);
+        let changed_request = CodingWorkspaceSelectionRequest {
+            correlation_id: request.correlation_id.clone(),
+            workspace_path: starting_location
+                .join("different")
+                .to_string_lossy()
+                .into_owned(),
+            selection_mode: "create".to_owned(),
+        };
+        let conflict = binding
+            .reserve_selection(&changed_request)
+            .expect_err("changed selection boundary must not reuse a correlation");
+        assert_eq!(conflict.code, "correlation-conflict");
+        let second_selection = CodingWorkspaceSelectionRequest {
+            correlation_id: "workspace-select-rust-2".to_owned(),
+            workspace_path: starting_location
+                .join("different")
+                .to_string_lossy()
+                .into_owned(),
+            selection_mode: "create".to_owned(),
+        };
+        let already_selected = binding
+            .reserve_selection(&second_selection)
+            .expect_err("an acknowledged process binding must not be retargeted");
+        assert_eq!(already_selected.code, "workspace-already-selected");
+        let context = build_launch_context_with_binding(&config, &binding);
+        assert_eq!(context.phase, "mission-choice-required");
+        assert_eq!(
+            context.coding_workspace.as_deref(),
+            Some(
+                coding_workspace
+                    .canonicalize()
+                    .expect("canonical workspace")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        let failure = binding
+            .require_active_mission()
+            .expect_err("Mission-qualified commands must remain blocked");
+        assert_eq!(failure.code, "mission-selection-required");
+        assert!(failure.recoverable);
         fs::remove_dir_all(root).expect("fixture cleanup");
     }
 }

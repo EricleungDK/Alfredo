@@ -224,7 +224,19 @@ test("alfredo uses the invocation directory as the selected coding workspace", (
     const plan = JSON.parse(result.stdout);
     expect(plan.project_root).toBe(projectRoot);
     expect(plan.backend_root).toBe(repositoryRoot);
-    expect(plan.selected_workspace).toBe(workspace);
+    expect(plan.starting_location).toBe(workspace);
+    expect(plan.workspace_selection).toEqual({
+      schema_version: 1,
+      phase: "selection-required",
+      starting_location: workspace,
+      coding_workspace: null,
+      active_mission: null,
+    });
+    expect(plan).not.toHaveProperty("selected_workspace");
+    expect(plan).not.toHaveProperty("tracker_dir");
+    expect(plan).not.toHaveProperty("issues_dir");
+    expect(plan).not.toHaveProperty("mission_id");
+    expect(plan.recent_workspaces).toEqual([]);
   } finally {
     rmSync(workspace, { recursive: true, force: true });
   }
@@ -259,7 +271,7 @@ test("alfredo reports separate startup preflight checks", () => {
     "npm_runtime",
     "desktop_shell",
     "backend_process",
-    "workspace_access",
+    "starting_location_access",
     "writable_runtime",
     "ollama",
     "required_model",
@@ -291,9 +303,10 @@ test("alfredo launch passes selected agent, model, workspace, and runtime to des
     expect(launch.cwd).toBe(projectRoot);
     expect(launch.env).toMatchObject({
       ALBERT_BACKEND_ROOT: repositoryRoot,
+      ALFREDO_INSTALL_ROOT: projectRoot,
+      ALFREDO_STARTING_LOCATION: workspace,
       ALFREDO_SELECTED_AGENT: "qwen3.6-27b",
       ALFREDO_SELECTED_MODEL: "qwen3.6:27b",
-      ALFREDO_SELECTED_WORKSPACE: workspace,
       ALFREDO_RUNTIME_ROOT: runtimeRoot,
     });
   } finally {
@@ -470,11 +483,8 @@ test("alfredo persists recent workspaces across launches", () => {
 
     expect(first.status).toBe(0);
     expect(second.status).toBe(0);
-    expect(JSON.parse(first.stdout).recent_workspaces).toEqual([firstWorkspace]);
-    expect(JSON.parse(second.stdout).recent_workspaces).toEqual([
-      secondWorkspace,
-      firstWorkspace,
-    ]);
+    expect(JSON.parse(first.stdout).recent_workspaces).toEqual([]);
+    expect(JSON.parse(second.stdout).recent_workspaces).toEqual([]);
   } finally {
     rmSync(runtimeRoot, { recursive: true, force: true });
     rmSync(firstWorkspace, { recursive: true, force: true });
@@ -509,15 +519,15 @@ test("alfredo restores the selected workstation controller from runtime launch c
     expect(JSON.parse(second.stdout)).toMatchObject({
       selected_agent: "gemma4-12b",
       selected_model: "gemma4:12b",
-      selected_workspace: secondWorkspace,
+      starting_location: secondWorkspace,
       runtime_root: runtimeRoot,
-      recent_workspaces: [secondWorkspace, firstWorkspace],
+      recent_workspaces: [],
     });
     expect(JSON.parse(readFileSync(resolve(runtimeRoot, "launch-context.json"), "utf8"))).toMatchObject({
       schema_version: 1,
       selected_agent: "gemma4-12b",
       selected_model: "gemma4:12b",
-      selected_workspace: secondWorkspace,
+      starting_location: secondWorkspace,
       runtime_root: runtimeRoot,
     });
   } finally {
@@ -567,7 +577,7 @@ test("alfredo explicit agent ignores malformed persisted launch context", () => 
     expect(JSON.parse(result.stdout)).toMatchObject({
       selected_agent: "qwen3.6-27b",
       selected_model: "qwen3.6:27b",
-      selected_workspace: workspace,
+      starting_location: workspace,
     });
   } finally {
     rmSync(runtimeRoot, { recursive: true, force: true });

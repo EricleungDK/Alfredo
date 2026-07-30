@@ -172,13 +172,13 @@ function buildPreflight(plan, selectedAgentConfig) {
       `cd "${repositoryRoot}" && ${pythonCommand} -m albert_mvp --help`,
     ),
     preflightCheck(
-      "workspace_access",
-      existsSync(plan.selected_workspace) &&
-        accessStatus(plan.selected_workspace, constants.R_OK | constants.W_OK)
+      "starting_location_access",
+      existsSync(plan.starting_location) &&
+        accessStatus(plan.starting_location, constants.R_OK | constants.W_OK)
         ? PREFLIGHT_PASS
         : PREFLIGHT_FAIL,
-      `Selected workspace: ${plan.selected_workspace}`,
-      `cd "${plan.selected_workspace}"`,
+      `Starting location: ${plan.starting_location}`,
+      `cd "${plan.starting_location}"`,
     ),
     preflightCheck(
       "writable_runtime",
@@ -250,24 +250,6 @@ function buildPreflight(plan, selectedAgentConfig) {
   return checks;
 }
 
-function recordRecentWorkspace(selectedWorkspace) {
-  if (process.env.ALFREDO_DESKTOP_DRY_RUN === "1" && !process.env.ALFREDO_RUNTIME_ROOT) {
-    return [];
-  }
-  const runtimePath = runtimeRoot();
-  mkdirSync(runtimePath, { recursive: true });
-  const recentPath = resolve(runtimePath, "recent-workspaces.json");
-  const existing = existsSync(recentPath)
-    ? JSON.parse(readFileSync(recentPath, "utf8"))
-    : [];
-  const recent = [
-    selectedWorkspace,
-    ...existing.filter((workspace) => workspace !== selectedWorkspace),
-  ].slice(0, 10);
-  writeFileSync(recentPath, `${JSON.stringify(recent, null, 2)}\n`, "utf8");
-  return recent;
-}
-
 function shouldPersistRuntimeState() {
   return !(process.env.ALFREDO_DESKTOP_DRY_RUN === "1" && !process.env.ALFREDO_RUNTIME_ROOT);
 }
@@ -297,7 +279,7 @@ function recordLaunchContext(plan) {
         schema_version: LAUNCH_CONTEXT_SCHEMA_VERSION,
         selected_agent: plan.selected_agent,
         selected_model: plan.selected_model,
-        selected_workspace: plan.selected_workspace,
+        starting_location: plan.starting_location,
         runtime_root: plan.runtime_root,
       },
       null,
@@ -346,16 +328,22 @@ function parseWorkstationLaunch(argv) {
     runtime_root: runtimeRoot(),
     project_root: projectRoot,
     backend_root: repositoryRoot,
-    selected_workspace: process.cwd(),
+    starting_location: process.cwd(),
+    workspace_selection: {
+      schema_version: 1,
+      phase: "selection-required",
+      starting_location: process.cwd(),
+      coding_workspace: null,
+      active_mission: null,
+    },
   };
   const preflight = buildPreflight(plan, selectedAgentConfig);
   const runtimeReady = !preflight.some(
     (check) => check.name === "writable_runtime" && check.status === PREFLIGHT_FAIL,
   );
-  const recentWorkspaces = runtimeReady ? recordRecentWorkspace(plan.selected_workspace) : [];
   const launchPlan = {
     ...plan,
-    recent_workspaces: recentWorkspaces,
+    recent_workspaces: [],
     preflight,
   };
   if (runtimeReady) recordLaunchContext(launchPlan);
@@ -495,9 +483,10 @@ function launchDryRunPlan(plan, npmCommand) {
     cwd: projectRoot,
     env: {
       ALBERT_BACKEND_ROOT: plan.backend_root,
+      ALFREDO_INSTALL_ROOT: plan.project_root,
+      ALFREDO_STARTING_LOCATION: plan.starting_location,
       ALFREDO_SELECTED_AGENT: plan.selected_agent,
       ALFREDO_SELECTED_MODEL: plan.selected_model,
-      ALFREDO_SELECTED_WORKSPACE: plan.selected_workspace,
       ALFREDO_RUNTIME_ROOT: plan.runtime_root,
     },
   };
@@ -519,16 +508,20 @@ function launchDesktop(plan) {
     process.stdout.write(`${JSON.stringify(launchDryRunPlan(plan, npmCommand))}\n`);
     return;
   }
+  const desktopEnvironment = {
+    ...process.env,
+    ALBERT_BACKEND_ROOT: plan.backend_root,
+    ALFREDO_INSTALL_ROOT: plan.project_root,
+    ALFREDO_STARTING_LOCATION: plan.starting_location,
+    ALFREDO_SELECTED_AGENT: plan.selected_agent,
+    ALFREDO_SELECTED_MODEL: plan.selected_model,
+    ALFREDO_RUNTIME_ROOT: plan.runtime_root,
+  };
+  delete desktopEnvironment.ALFREDO_SELECTED_WORKSPACE;
+  delete desktopEnvironment.ALBERT_MISSION_ID;
   const child = spawn(npmCommand, ["run", "desktop"], {
     cwd: projectRoot,
-    env: {
-      ...process.env,
-      ALBERT_BACKEND_ROOT: plan.backend_root,
-      ALFREDO_SELECTED_AGENT: plan.selected_agent,
-      ALFREDO_SELECTED_MODEL: plan.selected_model,
-      ALFREDO_SELECTED_WORKSPACE: plan.selected_workspace,
-      ALFREDO_RUNTIME_ROOT: plan.runtime_root,
-    },
+    env: desktopEnvironment,
     stdio: "inherit",
   });
   child.on("error", (error) => {
