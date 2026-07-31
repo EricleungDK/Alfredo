@@ -23,6 +23,15 @@ def serve(source: TextIO = sys.stdin, destination: TextIO = sys.stdout) -> None:
             argv = request["argv"]
             if not isinstance(request_id, str) or not isinstance(argv, list):
                 raise ValueError("id must be a string and argv must be a list")
+            if argv and str(argv[0]) == "workspace-snapshot":
+                destination.write(
+                    json.dumps(
+                        {"id": request_id, "accepted": True},
+                        sort_keys=True,
+                    )
+                    + "\n"
+                )
+                destination.flush()
             with redirect_stdout(stdout), redirect_stderr(stderr):
                 exit_code = main([str(value) for value in argv])
             response = {

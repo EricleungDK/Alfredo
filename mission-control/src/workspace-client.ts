@@ -32,6 +32,8 @@ import type {
   MissionDraftDecisionResult,
   MissionDraftLoadResult,
   MissionDraftProjection,
+  PerformanceMarkAcknowledgement,
+  PerformanceMarkRequest,
   WorkspaceLoadResult,
   WorkspaceActionRequest,
   WorkspaceActionAcknowledgement,
@@ -62,6 +64,9 @@ import type {
 } from "./contracts";
 
 export interface WorkspaceClient {
+  recordPerformanceMark?(
+    request: PerformanceMarkRequest,
+  ): Promise<PerformanceMarkAcknowledgement>;
   loadLaunchContext?(): Promise<AlfredoLaunchContextResult>;
   selectCodingWorkspace?(
     request: CodingWorkspaceSelectionRequest,
@@ -106,6 +111,12 @@ export interface WorkspaceClient {
 }
 
 export class TauriWorkspaceClient implements WorkspaceClient {
+  async recordPerformanceMark(
+    request: PerformanceMarkRequest,
+  ): Promise<PerformanceMarkAcknowledgement> {
+    return invoke<PerformanceMarkAcknowledgement>("performance_mark", { request });
+  }
+
   async loadLaunchContext(): Promise<AlfredoLaunchContextResult> {
     try {
       const context = await invoke<AlfredoLaunchContext>("alfredo_launch_context");

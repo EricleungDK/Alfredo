@@ -9,6 +9,7 @@ import subprocess
 from typing import Any, Literal
 
 from .core import AlbertError, AlbertMission, EvidenceValidationError, IssueSlice, LocalAgentSession
+from .performance import measured_stage
 
 
 class WorkspacePersistenceError(AlbertError):
@@ -1443,6 +1444,7 @@ class WorkspaceQueueService:
             for (item_type, mission_id), group_items in sorted(grouped.items())
         )
 
+    @measured_stage("R2", workflows={"queue-defer", "queue-approve"})
     def decide(
         self,
         *,
@@ -3893,6 +3895,7 @@ class WorkspaceSnapshotService:
     def preferences_path(self) -> Path:
         return self._preferences_path
 
+    @measured_stage("S6", workflows={"startup"})
     def snapshot(self) -> WorkspaceSnapshot:
         preferences = self._load_preferences()
         active = self._missions.get(preferences["active_mission_id"])

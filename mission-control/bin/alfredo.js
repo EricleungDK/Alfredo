@@ -12,6 +12,29 @@ import { homedir } from "node:os";
 import { delimiter, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  createPerformanceRecorder,
+  performanceEnvironment,
+} from "../scripts/performance-recorder.js";
+
+const launcherMeasurementMetadata = performanceEnvironment();
+const launcherPerformance =
+  launcherMeasurementMetadata?.workflow === "startup"
+    ? createPerformanceRecorder({
+        ...launcherMeasurementMetadata,
+        source: "launcher",
+        clock_id: `launcher:${process.pid}`,
+      })
+    : null;
+launcherPerformance?.mark("S1", "start");
+let launcherMeasurementFinished = false;
+
+function finishLauncherMeasurement(desktopKind) {
+  if (!launcherPerformance || launcherMeasurementFinished) return;
+  launcherMeasurementFinished = true;
+  launcherPerformance.mark("S1", "end", { desktop_kind: desktopKind });
+}
+
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(projectRoot, "..");
 const agentConfigPath = process.env.ALFREDO_AGENT_CONFIG
@@ -505,9 +528,11 @@ function launchDesktop(plan) {
   }
   const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
   if (dryRunMode() === "launch") {
+    finishLauncherMeasurement("tauri-development");
     process.stdout.write(`${JSON.stringify(launchDryRunPlan(plan, npmCommand))}\n`);
     return;
   }
+  finishLauncherMeasurement("tauri-development");
   const desktopEnvironment = {
     ...process.env,
     ALBERT_BACKEND_ROOT: plan.backend_root,

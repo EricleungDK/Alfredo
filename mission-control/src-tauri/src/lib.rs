@@ -4,12 +4,13 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{
     atomic::{AtomicU64, Ordering},
     Mutex, OnceLock,
 };
+use std::time::Instant;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct BridgeConfig {
@@ -22,6 +23,380 @@ pub struct BridgeConfig {
     pub mission_id: String,
     pub agent_config: Option<PathBuf>,
     pub mission_catalog: Option<PathBuf>,
+}
+
+const MEASUREMENT_ENVIRONMENT: [(&str, &str); 12] = [
+    ("jsonl_path", "ALFREDO_MEASUREMENT_JSONL"),
+    ("run_id", "ALFREDO_MEASUREMENT_RUN_ID"),
+    ("sample_id", "ALFREDO_MEASUREMENT_SAMPLE_ID"),
+    ("cohort_id", "ALFREDO_MEASUREMENT_COHORT_ID"),
+    ("correlation_id", "ALFREDO_MEASUREMENT_CORRELATION_ID"),
+    ("fixture_id", "ALFREDO_MEASUREMENT_FIXTURE_ID"),
+    ("fixture_sha256", "ALFREDO_MEASUREMENT_FIXTURE_SHA256"),
+    ("source_sha256", "ALFREDO_MEASUREMENT_SOURCE_SHA256"),
+    ("artifact_sha256", "ALFREDO_MEASUREMENT_ARTIFACT_SHA256"),
+    ("variant", "ALFREDO_MEASUREMENT_VARIANT"),
+    ("workflow", "ALFREDO_MEASUREMENT_WORKFLOW"),
+    ("mode", "ALFREDO_MEASUREMENT_MODE"),
+];
+static PROCESS_MONOTONIC_ORIGIN: OnceLock<Instant> = OnceLock::new();
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PerformanceIdentity {
+    run_id: String,
+    sample_id: String,
+    cohort_id: String,
+    correlation_id: String,
+    fixture_id: String,
+    fixture_sha256: String,
+    source_sha256: String,
+    artifact_sha256: String,
+    variant: String,
+    workflow: String,
+    mode: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    desktop_pid: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    desktop_session_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PerformanceControl {
+    jsonl_path: PathBuf,
+    #[serde(flatten)]
+    identity: PerformanceIdentity,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PerformanceMarkRequest {
+    pub stage: String,
+    pub boundary: String,
+    pub clock: String,
+    #[serde(default)]
+    pub monotonic_ns: String,
+    #[serde(default)]
+    pub clock_id: String,
+    #[serde(default)]
+    pub detail: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PerformanceMarkAcknowledgement {
+    pub recorded: bool,
+}
+
+fn measurement_failure(message: impl Into<String>) -> BridgeFailure {
+    BridgeFailure {
+        code: "measurement-failure".to_owned(),
+        message: message.into(),
+        recoverable: false,
+    }
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn validate_performance_identity(
+    path: PathBuf,
+    identity: PerformanceIdentity,
+) -> Result<(PathBuf, PerformanceIdentity), BridgeFailure> {
+    if !path.is_absolute() {
+        return Err(measurement_failure(
+            "ALFREDO_MEASUREMENT_JSONL must be absolute",
+        ));
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| measurement_failure("measurement output has no parent directory"))?;
+    parent.canonicalize().map_err(|error| {
+        measurement_failure(format!("measurement output parent is unavailable: {error}"))
+    })?;
+    if let Ok(metadata) = fs::symlink_metadata(&path) {
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(measurement_failure(
+                "measurement output must be a regular non-symlink file",
+            ));
+        }
+    }
+    for (field, value) in [
+        ("fixture_sha256", &identity.fixture_sha256),
+        ("source_sha256", &identity.source_sha256),
+        ("artifact_sha256", &identity.artifact_sha256),
+    ] {
+        if !valid_sha256(value) {
+            return Err(measurement_failure(format!(
+                "{field} must be a lowercase SHA-256"
+            )));
+        }
+    }
+    if identity.mode != "process-cold" && identity.mode != "process-warm" {
+        return Err(measurement_failure(
+            "measurement mode must be process-cold or process-warm",
+        ));
+    }
+    match (identity.desktop_pid, identity.desktop_session_id.as_deref()) {
+        (None, None) => {}
+        (Some(pid), Some(session)) if pid > 0 && !session.trim().is_empty() => {}
+        _ => {
+            return Err(measurement_failure(
+                "desktop_pid and desktop_session_id must be provided together",
+            ))
+        }
+    }
+    Ok((path, identity))
+}
+
+fn performance_identity_from_control(
+    control_path: &Path,
+) -> Result<Option<(PathBuf, PerformanceIdentity)>, BridgeFailure> {
+    if !control_path.is_absolute() {
+        return Err(measurement_failure(
+            "ALFREDO_MEASUREMENT_CONTROL_PATH must be absolute",
+        ));
+    }
+    let parent = control_path
+        .parent()
+        .ok_or_else(|| measurement_failure("measurement control path has no parent"))?;
+    parent.canonicalize().map_err(|error| {
+        measurement_failure(format!(
+            "measurement control parent is unavailable: {error}"
+        ))
+    })?;
+    let metadata = match fs::symlink_metadata(control_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(measurement_failure(format!(
+                "measurement control metadata is unavailable: {error}"
+            )))
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(measurement_failure(
+            "ALFREDO_MEASUREMENT_CONTROL_PATH must be a regular non-symlink file",
+        ));
+    }
+    if metadata.len() > 16_384 {
+        return Err(measurement_failure(
+            "measurement control file exceeds 16 KiB",
+        ));
+    }
+    let bytes = fs::read(control_path).map_err(|error| {
+        measurement_failure(format!(
+            "measurement control file could not be read: {error}"
+        ))
+    })?;
+    let control: PerformanceControl = serde_json::from_slice(&bytes).map_err(|error| {
+        measurement_failure(format!("measurement control file is invalid: {error}"))
+    })?;
+    validate_performance_identity(control.jsonl_path, control.identity).map(Some)
+}
+
+fn performance_identity() -> Result<Option<(PathBuf, PerformanceIdentity)>, BridgeFailure> {
+    let control_path = std::env::var("ALFREDO_MEASUREMENT_CONTROL_PATH")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    let legacy_present = MEASUREMENT_ENVIRONMENT.iter().any(|(_, variable)| {
+        std::env::var(variable)
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
+    });
+    if let Some(control_path) = control_path {
+        if legacy_present {
+            return Err(measurement_failure(
+                "ALFREDO_MEASUREMENT_CONTROL_PATH must not be combined with legacy measurement identity",
+            ));
+        }
+        return performance_identity_from_control(Path::new(&control_path));
+    }
+    let mut values = HashMap::new();
+    let mut missing = Vec::new();
+    for (field, variable) in MEASUREMENT_ENVIRONMENT {
+        match std::env::var(variable) {
+            Ok(value) if !value.trim().is_empty() => {
+                values.insert(field, value);
+            }
+            _ => missing.push(variable),
+        }
+    }
+    if missing.len() == MEASUREMENT_ENVIRONMENT.len() {
+        return Ok(None);
+    }
+    if !missing.is_empty() {
+        return Err(measurement_failure(format!(
+            "measurement environment is incomplete: missing {}",
+            missing.join(", ")
+        )));
+    }
+    let path = PathBuf::from(
+        values
+            .remove("jsonl_path")
+            .expect("measurement path was inserted"),
+    );
+    let take = |field: &str, values: &mut HashMap<&str, String>| {
+        values
+            .remove(field)
+            .expect("measurement identity field was inserted")
+    };
+    let identity = PerformanceIdentity {
+        run_id: take("run_id", &mut values),
+        sample_id: take("sample_id", &mut values),
+        cohort_id: take("cohort_id", &mut values),
+        correlation_id: take("correlation_id", &mut values),
+        fixture_id: take("fixture_id", &mut values),
+        fixture_sha256: take("fixture_sha256", &mut values),
+        source_sha256: take("source_sha256", &mut values),
+        artifact_sha256: take("artifact_sha256", &mut values),
+        variant: take("variant", &mut values),
+        workflow: take("workflow", &mut values),
+        mode: take("mode", &mut values),
+        desktop_pid: None,
+        desktop_session_id: None,
+    };
+    validate_performance_identity(path, identity).map(Some)
+}
+
+fn measurement_stage_matches_workflow(stage: &str, workflow: &str) -> bool {
+    match workflow {
+        "startup" => matches!(
+            stage,
+            "S0" | "S1" | "S2" | "S3" | "S4" | "S5" | "S6" | "S7" | "S8" | "S9"
+        ),
+        "queue-defer" => matches!(stage, "R0" | "R1" | "R2" | "R3" | "R4" | "R5"),
+        "queue-approve" | "session-claim" => {
+            matches!(stage, "R0" | "R1" | "R2" | "R3" | "R4" | "R5" | "R6")
+        }
+        _ => false,
+    }
+}
+
+fn write_performance_mark(
+    path: &PathBuf,
+    identity: &PerformanceIdentity,
+    source: &str,
+    clock_id: &str,
+    stage: &str,
+    boundary: &str,
+    monotonic_ns: &str,
+    detail: serde_json::Value,
+) -> Result<(), BridgeFailure> {
+    if !measurement_stage_matches_workflow(stage, &identity.workflow) {
+        return Err(measurement_failure(format!(
+            "{stage} is not valid for workflow {}",
+            identity.workflow
+        )));
+    }
+    if boundary != "start" && boundary != "end" {
+        return Err(measurement_failure(format!(
+            "unknown measurement boundary: {boundary}"
+        )));
+    }
+    if source.trim().is_empty() || clock_id.trim().is_empty() {
+        return Err(measurement_failure(
+            "measurement source and clock id must not be empty",
+        ));
+    }
+    if monotonic_ns.is_empty() || !monotonic_ns.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(measurement_failure(
+            "measurement monotonic_ns must be an unsigned integer",
+        ));
+    }
+    if !detail.is_object() {
+        return Err(measurement_failure("measurement detail must be an object"));
+    }
+    let mut payload = serde_json::json!({
+        "schema_version": 1,
+        "record_type": "stage-mark",
+        "run_id": identity.run_id,
+        "sample_id": identity.sample_id,
+        "cohort_id": identity.cohort_id,
+        "correlation_id": identity.correlation_id,
+        "fixture_id": identity.fixture_id,
+        "fixture_sha256": identity.fixture_sha256,
+        "source_sha256": identity.source_sha256,
+        "artifact_sha256": identity.artifact_sha256,
+        "variant": identity.variant,
+        "workflow": identity.workflow,
+        "mode": identity.mode,
+        "source": source,
+        "clock_id": clock_id,
+        "stage": stage,
+        "boundary": boundary,
+        "monotonic_ns": monotonic_ns,
+        "detail": detail,
+    });
+    if let (Some(desktop_pid), Some(desktop_session_id)) =
+        (identity.desktop_pid, identity.desktop_session_id.as_deref())
+    {
+        let object = payload
+            .as_object_mut()
+            .expect("measurement payload is always an object");
+        object.insert("desktop_pid".to_owned(), serde_json::json!(desktop_pid));
+        object.insert(
+            "desktop_session_id".to_owned(),
+            serde_json::json!(desktop_session_id),
+        );
+    }
+    let mut encoded = serde_json::to_vec(&payload).map_err(|error| {
+        measurement_failure(format!("measurement mark did not serialize: {error}"))
+    })?;
+    encoded.push(b'\n');
+    if encoded.len() > 16_384 {
+        return Err(measurement_failure("measurement stage mark exceeds 16 KiB"));
+    }
+    let mut output = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|error| {
+            measurement_failure(format!("measurement output could not be opened: {error}"))
+        })?;
+    output.write_all(&encoded).map_err(|error| {
+        measurement_failure(format!("measurement stage mark write failed: {error}"))
+    })
+}
+
+fn native_monotonic_ns() -> String {
+    PROCESS_MONOTONIC_ORIGIN
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_nanos()
+        .to_string()
+}
+
+fn record_native_performance_mark(
+    stage: &str,
+    boundary: &str,
+    detail: serde_json::Value,
+) -> Result<bool, BridgeFailure> {
+    let Some((path, identity)) = performance_identity()? else {
+        return Ok(false);
+    };
+    if !measurement_stage_matches_workflow(stage, &identity.workflow) {
+        return Ok(false);
+    }
+    write_performance_mark(
+        &path,
+        &identity,
+        "native-shell",
+        &format!("native-shell:{}", std::process::id()),
+        stage,
+        boundary,
+        &native_monotonic_ns(),
+        detail,
+    )?;
+    Ok(true)
+}
+
+pub fn record_native_main_start() -> Result<(), BridgeFailure> {
+    record_native_performance_mark("S2", "start", serde_json::json!({"outcome": "pass"}))?;
+    Ok(())
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -418,16 +793,30 @@ struct PersistentResponse {
     stderr: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct PersistentAcceptance {
+    id: String,
+    accepted: bool,
+}
+
 struct BackendProcess {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
 }
 
+fn python_backend_process(config: &BridgeConfig) -> Command {
+    let mut command = Command::new(&config.python);
+    command
+        .current_dir(&config.backend_root)
+        .env_remove("PYTHONHOME")
+        .env_remove("PYTHONPATH");
+    command
+}
+
 impl BackendProcess {
     fn start(config: &BridgeConfig) -> io::Result<Self> {
-        let mut child = Command::new(&config.python)
-            .current_dir(&config.backend_root)
+        let mut child = python_backend_process(config)
             .arg("-m")
             .arg("albert_mvp.server")
             .stdin(Stdio::piped())
@@ -457,6 +846,32 @@ impl BackendProcess {
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         self.stdin.write_all(b"\n")?;
         self.stdin.flush()?;
+        if argv
+            .first()
+            .is_some_and(|value| value == "workspace-snapshot")
+        {
+            let mut acceptance_line = String::new();
+            if self.stdout.read_line(&mut acceptance_line)? == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "Albert backend closed before accepting the request",
+                ));
+            }
+            let acceptance: PersistentAcceptance = serde_json::from_str(&acceptance_line)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            if acceptance.id != id || !acceptance.accepted {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Albert backend returned an invalid request acceptance",
+                ));
+            }
+            record_native_performance_mark(
+                "S5",
+                "end",
+                serde_json::json!({"outcome": "pass", "boundary": "python-request-accepted"}),
+            )
+            .map_err(|error| io::Error::other(error.message))?;
+        }
         let mut line = String::new();
         if self.stdout.read_line(&mut line)? == 0 {
             return Err(io::Error::new(
@@ -1283,14 +1698,21 @@ pub fn decode_updates_output(output: ProcessOutput) -> Result<WorkspaceUpdateBat
 }
 
 pub fn execute_snapshot(config: &BridgeConfig) -> Result<WorkspaceSnapshot, BridgeFailure> {
-    let output = configured_python_command(config, "workspace-snapshot")
-        .output()
-        .map_err(|error| BridgeFailure {
-            code: "backend-startup-failure".to_owned(),
-            message: format!("Unable to start the Albert backend: {error}"),
-            recoverable: true,
-        })?;
-    decode_snapshot_output(output)
+    record_native_performance_mark("S5", "start", serde_json::json!({"outcome": "pass"}))?;
+    let output_result = configured_python_command(config, "workspace-snapshot").output();
+    let output = output_result.map_err(|error| BridgeFailure {
+        code: "backend-startup-failure".to_owned(),
+        message: format!("Unable to start the Albert backend: {error}"),
+        recoverable: true,
+    })?;
+    record_native_performance_mark("S7", "start", serde_json::json!({"outcome": "pass"}))?;
+    let decoded = decode_snapshot_output(output);
+    record_native_performance_mark(
+        "S7",
+        "end",
+        serde_json::json!({"outcome": if decoded.is_ok() { "pass" } else { "fail" }}),
+    )?;
+    decoded
 }
 
 fn configured_python_command<'a>(config: &'a BridgeConfig, subcommand: &str) -> BackendCommand<'a> {
@@ -1784,6 +2206,11 @@ pub fn execute_workspace_queue_decision(
         message: format!("Unable to start the Albert backend: {error}"),
         recoverable: true,
     })?;
+    record_native_performance_mark(
+        "R3",
+        "start",
+        serde_json::json!({"outcome": if output.success { "pass" } else { "fail" }}),
+    )?;
     decode_backend_json(process_output(output), "Workspace Queue acknowledgement")
 }
 
@@ -1921,11 +2348,57 @@ pub fn execute_mission_draft_decision(
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
+fn performance_mark(
+    request: PerformanceMarkRequest,
+) -> Result<PerformanceMarkAcknowledgement, BridgeFailure> {
+    let Some((path, identity)) = performance_identity()? else {
+        return Ok(PerformanceMarkAcknowledgement { recorded: false });
+    };
+    if !measurement_stage_matches_workflow(&request.stage, &identity.workflow) {
+        return Ok(PerformanceMarkAcknowledgement { recorded: false });
+    }
+    if request.clock == "native" {
+        let recorded = record_native_performance_mark(
+            &request.stage,
+            &request.boundary,
+            if request.detail.is_null() {
+                serde_json::json!({})
+            } else {
+                request.detail
+            },
+        )?;
+        return Ok(PerformanceMarkAcknowledgement { recorded });
+    }
+    if request.clock != "frontend" {
+        return Err(measurement_failure(
+            "measurement clock must be native or frontend",
+        ));
+    }
+    write_performance_mark(
+        &path,
+        &identity,
+        "react",
+        &request.clock_id,
+        &request.stage,
+        &request.boundary,
+        &request.monotonic_ns,
+        if request.detail.is_null() {
+            serde_json::json!({})
+        } else {
+            request.detail
+        },
+    )?;
+    Ok(PerformanceMarkAcknowledgement { recorded: true })
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
 fn workspace_snapshot(
     config: tauri::State<'_, BridgeConfig>,
     binding: tauri::State<'_, WorkspaceBinding>,
 ) -> Result<WorkspaceSnapshot, BridgeFailure> {
     binding.require_active_mission()?;
+    record_native_performance_mark("S4", "end", serde_json::json!({"outcome": "pass"}))?;
     execute_snapshot(config.inner())
 }
 
@@ -2158,6 +2631,7 @@ fn workspace_queue_decision(
     request: WorkspaceQueueDecisionRequest,
 ) -> Result<WorkspaceQueueAcknowledgement, BridgeFailure> {
     binding.require_active_mission()?;
+    record_native_performance_mark("R1", "end", serde_json::json!({"outcome": "pass"}))?;
     execute_workspace_queue_decision(config.inner(), &request)
 }
 
@@ -2210,6 +2684,7 @@ pub fn run() {
         .manage(BridgeConfig::from_environment())
         .manage(WorkspaceBinding::from_environment())
         .invoke_handler(tauri::generate_handler![
+            performance_mark,
             alfredo_launch_context,
             coding_workspace_select,
             workspace_snapshot,

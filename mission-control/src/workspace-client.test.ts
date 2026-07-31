@@ -41,6 +41,23 @@ test("loads a ready canonical snapshot through the Tauri command", async () => {
   expect(result).toEqual({ kind: "ready", snapshot });
 });
 
+test("records a process-local performance boundary through the native bridge", async () => {
+  const request = {
+    stage: "S4" as const,
+    boundary: "start" as const,
+    clock: "native" as const,
+    monotonic_ns: "123456",
+    clock_id: "native:123",
+    detail: { outcome: "pass" },
+  };
+  vi.mocked(invoke).mockResolvedValueOnce({ recorded: true });
+
+  const result = await new TauriWorkspaceClient().recordPerformanceMark(request);
+
+  expect(invoke).toHaveBeenCalledWith("performance_mark", { request });
+  expect(result).toEqual({ recorded: true });
+});
+
 test("preserves a structured persistence failure from the Tauri bridge", async () => {
   vi.mocked(invoke).mockRejectedValueOnce({
     code: "persistence-read-failure",

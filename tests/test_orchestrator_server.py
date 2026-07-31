@@ -39,10 +39,13 @@ class PersistentOrchestratorServerTests(unittest.TestCase):
             serve(requests, responses)
 
             payloads = [json.loads(line) for line in responses.getvalue().splitlines()]
-            self.assertEqual([item["id"] for item in payloads], ["snapshot", "updates"])
-            self.assertTrue(all(item["success"] for item in payloads))
-            self.assertEqual(json.loads(payloads[0]["stdout"])["schema_version"], 1)
-            self.assertEqual(json.loads(payloads[1]["stdout"])["after_revision"], 1)
+            self.assertEqual(
+                [(item["id"], item.get("accepted", False)) for item in payloads],
+                [("snapshot", True), ("snapshot", False), ("updates", False)],
+            )
+            self.assertTrue(all(item["success"] for item in payloads if "success" in item))
+            self.assertEqual(json.loads(payloads[1]["stdout"])["schema_version"], 1)
+            self.assertEqual(json.loads(payloads[2]["stdout"])["after_revision"], 1)
 
     def test_rejects_a_malformed_request_and_continues_serving(self) -> None:
         source = io.StringIO(
@@ -92,6 +95,11 @@ class PersistentOrchestratorServerTests(unittest.TestCase):
                         "argv": ["workspace-snapshot", *common],
                     }) + "\n")
                     process.stdin.flush()
+                    acceptance = json.loads(process.stdout.readline())
+                    self.assertEqual(
+                        acceptance,
+                        {"accepted": True, "id": f"warm-{index}"},
+                    )
                     response = json.loads(process.stdout.readline())
                     elapsed = time.perf_counter() - started
                     self.assertEqual(response["id"], f"warm-{index}")

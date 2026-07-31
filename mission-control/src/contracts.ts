@@ -1,5 +1,37 @@
 export type ConversationScopeKind = "working-directory" | "mission" | "issue-slice";
 
+export type PerformanceStage =
+  | "S0"
+  | "S1"
+  | "S2"
+  | "S3"
+  | "S4"
+  | "S5"
+  | "S6"
+  | "S7"
+  | "S8"
+  | "S9"
+  | "R0"
+  | "R1"
+  | "R2"
+  | "R3"
+  | "R4"
+  | "R5"
+  | "R6";
+
+export interface PerformanceMarkRequest {
+  readonly stage: PerformanceStage;
+  readonly boundary: "start" | "end";
+  readonly clock: "native" | "frontend";
+  readonly monotonic_ns: string;
+  readonly clock_id: string;
+  readonly detail: Readonly<Record<string, unknown>>;
+}
+
+export interface PerformanceMarkAcknowledgement {
+  readonly recorded: boolean;
+}
+
 export interface ConversationScope {
   readonly kind: ConversationScopeKind;
   readonly target_id: string;

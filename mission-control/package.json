@@ -12,6 +12,12 @@
     "desktop:build": "tauri build",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
+    "performance:fixtures": "node scripts/performance-cohorts.js fixture-check --manifest performance/fixtures/v1/manifest.json",
+    "performance:check": "node scripts/performance-driver.js check",
+    "performance:gate": "node scripts/performance-driver.js record-gate",
+    "performance:run": "node scripts/performance-driver.js run",
+    "performance:report": "node scripts/performance-cohorts.js report",
+    "test:performance": "node --test tests/performance-cohorts.test.js tests/performance-driver.test.js tests/performance-instrumentation.test.js tests/performance-lifecycle.test.js",
     "test": "vitest"
   },
   "dependencies": {

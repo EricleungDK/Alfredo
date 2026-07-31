@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "fixture_id": "representative-warm-v1",
+  "kind": "representative-warm",
+  "installation_root": "/tmp/alfredo-performance",
+  "canonical_tree_sha256": "69898c0833c2309a6068cced89f9483ab7f85dcd08f6bc6ed16d4c436e9f65ea",
+  "canonical_files": [
+    {"path":"workspace/.albert/agents.json","mode":420,"content":"{\"schema_version\":1,\"agents\":[{\"id\":\"fake-performance-worker-v1\",\"provider\":\"fake\",\"runner\":\"fake\",\"model\":\"fake-performance\",\"role\":\"local-agent\",\"routing\":\"worker\",\"approval_required\":false,\"delegate_only\":false,\"availability\":\"available\"}]}\n"},
+    {"path":"tracker/PRD.md","mode":420,"content":"# Performance Mission\n"},
+    {"path":"tracker/issues/01-performance.md","mode":420,"content":"Status: ready-for-agent\nType: AFK\n\n## Parent\n\nPRD.md\n\n## What to build\n\nMeasure one deterministic production workflow.\n\n## Acceptance criteria\n\n- [ ] The canonical projection remains exact.\n\n## Blocked by\n\nNone - can start immediately\n"},
+    {"path":"runtime/workspace-612c6240/runtime.json","mode":384,"content":"{\"command_policy\":{},\"delegations\":{},\"issues\":{\"ISS-01\":{\"assigned_agent\":\"qwen-coder-local-1\",\"contract_overridden\":false,\"launch_order\":null,\"locked\":false,\"notes\":\"\",\"review_state\":\"needs-review\",\"status\":\"needs-review\"}},\"mission_id\":\"performance-mission-v1\",\"prd_title\":\"Performance Mission\",\"project_key\":\"workspace-612c6240\",\"reviews\":[],\"sessions\":{},\"timeline\":[],\"workstation_actions\":{}}\n"},
+    {"path":"runtime/workspace-612c6240/agent-console-history.json","mode":384,"content":"{\"schema_version\":1,\"messages\":[{\"message_id\":\"console-000001\",\"sequence\":1,\"role\":\"user\",\"content\":\"Inspect the representative fixture.\",\"outcome\":\"acknowledged\",\"source\":\"mission-commander\",\"scope\":{\"kind\":\"working-directory\",\"target_id\":\"/tmp/alfredo-performance/workspace\",\"label\":\"workspace\",\"mission_id\":null},\"correlation_id\":\"\",\"action_phase\":\"\"},{\"message_id\":\"console-000002\",\"sequence\":2,\"role\":\"assistant\",\"content\":\"The canonical state is ready.\",\"outcome\":\"model-commentary\",\"source\":\"frontier-model\",\"scope\":{\"kind\":\"working-directory\",\"target_id\":\"/tmp/alfredo-performance/workspace\",\"label\":\"workspace\",\"mission_id\":null},\"correlation_id\":\"\",\"action_phase\":\"\"}]}\n"}
+  ],
+  "identities": {"workspace_session_id":"workspace-612c6240","workspace_path":"/tmp/alfredo-performance/workspace","mission_id":"performance-mission-v1","issue_ids":["ISS-01"],"agent_registry_id":"performance-agents-v1"},
+  "counts": {"missions":1,"issue_slices":1,"console_messages":2,"working_context_sources":2,"queue_history_items":0,"activity_entries":0}
+}

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "family_id": "alfredo-production-equivalent-v1",
+  "fixtures": [
+    {
+      "fixture_id": "minimal-ready-v1",
+      "kind": "minimal-ready",
+      "path": "minimal-ready.json",
+      "byte_count": 1903,
+      "sha256": "ef1aaced12f47ffcce312e7228ce76f48be04214c7c2ceba8cecc8fdc966b616"
+    },
+    {
+      "fixture_id": "representative-warm-v1",
+      "kind": "representative-warm",
+      "path": "representative-warm.json",
+      "byte_count": 2792,
+      "sha256": "8b39b89256eb61c769cd18d6c7d112bbcee8bddfbd760e527c8437e673dab179"
+    },
+    {
+      "fixture_id": "pending-ad-hoc-v1",
+      "kind": "pending-ad-hoc",
+      "path": "pending-ad-hoc.json",
+      "byte_count": 4911,
+      "sha256": "8ab2c8b20fb1542551d80c6d6a691ebfd99e87ab183ec6e7e18f10cdab152822"
+    }
+  ]
+}
