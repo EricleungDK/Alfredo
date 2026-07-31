@@ -15,6 +15,104 @@ from albert_mvp.server import serve
 
 
 class PersistentOrchestratorServerTests(unittest.TestCase):
+    def test_warm_transport_carries_workspace_selection_and_mission_choice(self) -> None:
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            starting = root / "projects"
+            workspace = starting / "project"
+            tracker = workspace / ".agent" / "issues"
+            tracker.mkdir(parents=True)
+            subprocess.run(
+                ["git", "init", "--quiet", str(workspace)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            (tracker / "PRD.md").write_text("# Existing Mission\n", encoding="utf-8")
+            runtime = root / "runtime"
+            requests = io.StringIO(
+                json.dumps(
+                    {
+                        "id": "select",
+                        "argv": [
+                            "coding-workspace-select",
+                            "--starting-location",
+                            str(starting),
+                            "--workspace-path",
+                            str(workspace),
+                            "--selection-mode",
+                            "existing",
+                            "--runtime-root",
+                            str(runtime),
+                            "--correlation-id",
+                            "server-selection",
+                        ],
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "id": "options",
+                        "argv": [
+                            "mission-options",
+                            "--starting-location",
+                            str(starting),
+                            "--coding-workspace",
+                            str(workspace),
+                            "--runtime-root",
+                            str(runtime),
+                        ],
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "id": "choice",
+                        "argv": [
+                            "mission-choice",
+                            "--starting-location",
+                            str(starting),
+                            "--coding-workspace",
+                            str(workspace),
+                            "--runtime-root",
+                            str(runtime),
+                            "--correlation-id",
+                            "server-choice",
+                            "--expected-revision",
+                            "1",
+                            "--choice",
+                            "resume",
+                            "--mission-id",
+                            "agent-issues",
+                        ],
+                    }
+                )
+                + "\n"
+                + json.dumps(
+                    {
+                        "id": "restored",
+                        "argv": [
+                            "workspace-context",
+                            "--starting-location",
+                            str(starting),
+                            "--runtime-root",
+                            str(runtime),
+                        ],
+                    }
+                )
+                + "\n"
+            )
+            responses = io.StringIO()
+
+            serve(requests, responses)
+
+            payloads = [json.loads(line) for line in responses.getvalue().splitlines()]
+            self.assertEqual([item["id"] for item in payloads], ["select", "options", "choice", "restored"])
+            self.assertTrue(all(item["success"] for item in payloads), payloads)
+            self.assertEqual(json.loads(payloads[1]["stdout"])["phase"], "mission-choice-required")
+            self.assertEqual(json.loads(payloads[2]["stdout"])["active_mission"], "agent-issues")
+            self.assertEqual(json.loads(payloads[3]["stdout"])["phase"], "workspace-ready")
+
     def test_serves_correlated_requests_until_input_closes(self) -> None:
         parent = r"C:\tmp" if os.name == "nt" else None
         with tempfile.TemporaryDirectory(dir=parent) as root_value:

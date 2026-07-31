@@ -1,6 +1,6 @@
 # Add Alfredo Release Seam Verification
 
-Status: Completed
+Status: complete
 Type: AFK
 
 ## Parent
@@ -21,11 +21,9 @@ Add high-value release-seam verification for the complete Alfredo desktop-to-bac
 
 ## Blocked by
 
-- `21-add-headless-alfredo-cli-grammar.md`
-- `26-cover-governed-workstation-action-family.md`
-- `27-persist-alfredo-workstation-continuity.md`
-- `28-validate-alfredo-accessibility-and-responsive-use.md`
+None — the deterministic release seam was accepted. Ticket 28 remains an independent product-level human accessibility validation gate.
 
 ## Comments
 
-- 2026-07-06: Mission Commander approved this release-seam verification issue after all acceptance criteria were checked; registered locally as Completed.
+- 2026-07-06: Mission Commander approved this release-seam verification issue after all acceptance criteria were checked; registered locally as complete.
+- 2026-07-12: Fresh merged evidence passes 416 Python tests (one optional skip), 215 frontend tests including the real Python-backed seam, TypeScript/build, Rust formatting, 36 Rust bridge tests, 32 focused launcher/package tests, packed-consumer backend launch, and managed launcher dry-run. Current Chromium startup remains separately environment-blocked and is not claimed by this accepted deterministic seam.

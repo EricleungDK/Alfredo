@@ -1,0 +1,634 @@
+.rust-prototype-host {
+  --rust-cyan: #61ead0;
+  --rust-cyan-soft: #153e39;
+  --python-lime: #c0ed78;
+  --rust-amber: #f2cf78;
+  --flight-bg: #090d0c;
+  --flight-panel: #111716;
+  --flight-panel-raised: #17201e;
+  --flight-line: #34443f;
+  position: relative;
+  width: 100%;
+  height: 100%;
+  isolation: isolate;
+}
+
+.rust-prototype-host__product {
+  width: 100%;
+  height: 100%;
+}
+
+.rust-flight {
+  position: fixed;
+  z-index: 70;
+  color: #eef5ef;
+  border: 1px solid #4d625b;
+  background:
+    linear-gradient(180deg, #101716f7, #080c0bf8),
+    repeating-linear-gradient(0deg, transparent 0 4px, #b6ffe203 4px 5px);
+  box-shadow: 0 30px 100px #000c, inset 0 1px #bdfbe61c;
+  font-family: "Ubuntu Sans", "Aptos", "Segoe UI", sans-serif;
+}
+
+.rust-flight::before {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(#75ffe90a 1px, transparent 1px),
+    linear-gradient(90deg, #75ffe90a 1px, transparent 1px);
+  background-size: 32px 32px;
+  content: "";
+  mask-image: linear-gradient(to bottom, #0008, transparent 70%);
+}
+
+.rust-flight > * {
+  position: relative;
+}
+
+.rust-flight button,
+.rust-flight input,
+.rust-flight select {
+  border-color: var(--flight-line);
+  background: #16201e;
+}
+
+.rust-flight button:hover:not(:disabled) {
+  border-color: var(--rust-cyan);
+  background: #1b2b27;
+}
+
+.rust-flight-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 0.85rem;
+  border-bottom: 1px solid var(--flight-line);
+}
+
+.rust-flight-header h2 {
+  margin: 0.1rem 0 0;
+  color: #fff;
+  font-size: 1.05rem;
+  letter-spacing: -0.015em;
+}
+
+.rust-flight-kicker {
+  color: var(--rust-cyan);
+  font-family: "Ubuntu Mono", "Cascadia Code", monospace;
+  font-size: 0.66rem;
+  font-weight: 800;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+}
+
+.rust-flight-safety {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.45rem 0.8rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid #3d514b;
+  background: #0f1715;
+  color: #bdc9c4;
+  font-family: "Ubuntu Mono", "Cascadia Code", monospace;
+  font-size: 0.68rem;
+}
+
+.rust-flight-safety strong {
+  color: var(--python-lime);
+}
+
+.rust-flight-safety__light {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: #ff8d85;
+  box-shadow: 0 0 0 4px #ff8d8514;
+}
+
+.rust-flight-safety__light[data-safe="true"] {
+  background: var(--python-lime);
+  box-shadow: 0 0 0 4px #c0ed7817, 0 0 16px #c0ed7855;
+}
+
+.rust-flight-safety__pulse {
+  color: var(--rust-cyan);
+  animation: rust-flight-pulse 1s ease-in-out infinite alternate;
+}
+
+@keyframes rust-flight-pulse {
+  to {
+    opacity: 0.42;
+  }
+}
+
+.rust-flight-track {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 0.35rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.rust-flight-track li {
+  min-width: 0;
+  padding: 0.5rem;
+  border-top: 2px solid #31413c;
+  background: #111816;
+}
+
+.rust-flight-track li[data-complete="true"] {
+  border-color: var(--python-lime);
+}
+
+.rust-flight-track li[data-current="true"] {
+  border-color: var(--rust-cyan);
+  background: #15312d;
+}
+
+.rust-flight-track span,
+.rust-flight-track strong {
+  display: block;
+}
+
+.rust-flight-track span {
+  color: #82918b;
+  font-family: "Ubuntu Mono", "Cascadia Code", monospace;
+  font-size: 0.58rem;
+}
+
+.rust-flight-track strong {
+  margin-top: 0.15rem;
+  color: #e6ece8;
+  font-size: 0.66rem;
+  line-height: 1.25;
+}
+
+.rust-flight-actions {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.8rem;
+  border: 1px solid var(--flight-line);
+  background: #101715;
+}
+
+.rust-flight-actions > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.rust-flight-actions > header strong {
+  color: #fff;
+  font-size: 0.8rem;
+  text-transform: capitalize;
+}
+
+.rust-flight-actions label {
+  display: grid;
+  gap: 0.25rem;
+  color: #9caaa5;
+  font-family: "Ubuntu Mono", "Cascadia Code", monospace;
+  font-size: 0.64rem;
+}
+
+.rust-flight-actions input,
+.rust-flight-actions select {
+  width: 100%;
+  min-width: 0;
+  padding: 0.5rem 0.6rem;
+  color: #f3f6f4;
+  font-family: "Ubuntu Sans", "Aptos", sans-serif;
+  font-size: 0.73rem;
+}
+
+.rust-flight-actions__row,
+.rust-flight-actions__route {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.rust-flight-actions__row button {
+  flex: 1 1 8rem;
+}
+
+.rust-flight-actions__route label {
+  flex: 1 1 11rem;
+}
+
+.rust-flight-actions button {
+  min-height: 2rem;
+  padding: 0.4rem 0.55rem;
+  font-size: 0.69rem;
+}
+
+.rust-flight-primary {
+  border-color: #4f947f !important;
+  background: #174238 !important;
+  color: #eafff8;
+}
+
+.rust-flight-rollback {
+  width: 100%;
+  border-color: #73633b !important;
+  color: var(--rust-amber);
+}
+
+.rust-flight-error {
+  margin: 0;
+  padding: 0.55rem;
+  border-left: 3px solid #ff8d85;
+  background: #3a1818;
+  color: #ffd5d2;
+  font-size: 0.72rem;
+}
+
+.rust-flight-comparison {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 4.2rem minmax(0, 1fr);
+  gap: 0.45rem;
+  align-items: stretch;
+}
+
+.rust-flight-authority {
+  min-width: 0;
+  border: 1px solid var(--flight-line);
+  background: #101614;
+}
+
+.rust-flight-authority[data-kind="python"] {
+  border-top: 2px solid var(--python-lime);
+}
+
+.rust-flight-authority[data-kind="rust"] {
+  border-top: 2px solid var(--rust-cyan);
+}
+
+.rust-flight-authority > header {
+  display: flex;
+  gap: 0.55rem;
+  padding: 0.55rem;
+  border-bottom: 1px solid #293732;
+}
+
+.rust-flight-authority > header > span {
+  display: grid;
+  place-items: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  border: 1px solid currentColor;
+  color: var(--python-lime);
+  font-family: "Ubuntu Mono", monospace;
+  font-size: 0.65rem;
+  font-weight: 800;
+}
+
+.rust-flight-authority[data-kind="rust"] > header > span {
+  color: var(--rust-cyan);
+}
+
+.rust-flight-authority header strong,
+.rust-flight-authority header small {
+  display: block;
+}
+
+.rust-flight-authority header strong {
+  color: #f5f8f6;
+  font-size: 0.73rem;
+}
+
+.rust-flight-authority header small {
+  color: #87968f;
+  font-size: 0.6rem;
+}
+
+.rust-flight-authority dl,
+.rust-flight-receipt dl {
+  margin: 0;
+}
+
+.rust-flight-authority dl div,
+.rust-flight-receipt dl div {
+  display: grid;
+  grid-template-columns: 5.2rem minmax(0, 1fr);
+  gap: 0.45rem;
+  padding: 0.35rem 0.55rem;
+  border-bottom: 1px solid #202c28;
+}
+
+.rust-flight-authority dt,
+.rust-flight-receipt dt {
+  color: #798982;
+  font-size: 0.58rem;
+}
+
+.rust-flight-authority dd,
+.rust-flight-receipt dd {
+  min-width: 0;
+  margin: 0;
+  color: #dce5e0;
+  font-family: "Ubuntu Mono", monospace;
+  font-size: 0.61rem;
+  overflow-wrap: anywhere;
+}
+
+.rust-flight-bridge {
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 0.25rem;
+  color: #72827c;
+  font-family: "Ubuntu Mono", monospace;
+  font-size: 0.52rem;
+  text-align: center;
+}
+
+.rust-flight-bridge i {
+  color: var(--rust-cyan);
+  font-size: 1rem;
+  font-style: normal;
+}
+
+.rust-flight-bridge strong {
+  color: var(--rust-amber);
+  font-size: 0.54rem;
+}
+
+.rust-flight-receipt,
+.rust-flight-trace {
+  border: 1px solid var(--flight-line);
+  background: #0f1513;
+}
+
+.rust-flight-receipt > header,
+.rust-flight-trace > header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 0.65rem;
+  border-bottom: 1px solid var(--flight-line);
+}
+
+.rust-flight-receipt header span,
+.rust-flight-trace header span {
+  color: #8d9b95;
+  font-family: "Ubuntu Mono", monospace;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+}
+
+.rust-flight-receipt header strong {
+  color: var(--rust-cyan);
+  font-size: 0.7rem;
+}
+
+.rust-flight-receipt > p {
+  margin: 0;
+  padding: 0.6rem;
+  color: #cbd6d1;
+  font-size: 0.7rem;
+}
+
+.rust-flight-trace ol {
+  display: grid;
+  gap: 0;
+  max-height: 12rem;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.rust-flight-trace li {
+  display: grid;
+  grid-template-columns: 1.5rem minmax(0, 1fr) auto;
+  gap: 0.45rem;
+  padding: 0.45rem 0.6rem;
+  border-bottom: 1px solid #202c28;
+}
+
+.rust-flight-trace li > span,
+.rust-flight-trace li > small {
+  color: #72817b;
+  font-family: "Ubuntu Mono", monospace;
+  font-size: 0.57rem;
+}
+
+.rust-flight-trace li[data-tone="rust"] > span {
+  color: var(--rust-cyan);
+}
+
+.rust-flight-trace li[data-tone="warning"] > span {
+  color: #ff8d85;
+}
+
+.rust-flight-trace strong {
+  display: block;
+  color: #e8eeeb;
+  font-size: 0.65rem;
+}
+
+.rust-flight-trace p {
+  margin: 0.1rem 0 0;
+  color: #9aa8a2;
+  font-size: 0.61rem;
+  line-height: 1.35;
+}
+
+.rust-flight--rail {
+  top: 0.7rem;
+  right: 0.7rem;
+  bottom: 0.7rem;
+  width: min(31rem, calc(100vw - 2rem));
+  display: grid;
+  align-content: start;
+  gap: 0.65rem;
+  padding: 0.8rem;
+  overflow-y: auto;
+}
+
+.rust-flight--rail .rust-flight-track {
+  grid-template-columns: repeat(5, minmax(4.1rem, 1fr));
+  overflow-x: auto;
+}
+
+.rust-flight--rail .rust-flight-comparison {
+  grid-template-columns: 1fr;
+}
+
+.rust-flight--rail .rust-flight-bridge {
+  grid-template-columns: repeat(5, auto);
+  padding: 0.2rem;
+}
+
+.rust-flight--rail .rust-flight-bridge i {
+  transform: rotate(90deg);
+}
+
+.rust-flight--bench {
+  right: 0.7rem;
+  bottom: 0.7rem;
+  left: 0.7rem;
+  height: min(31rem, calc(100vh - 2rem));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0.65rem;
+  padding: 0.8rem;
+}
+
+.rust-flight--bench__head {
+  display: grid;
+  grid-template-columns: minmax(18rem, 0.6fr) minmax(30rem, 1fr);
+  gap: 0.8rem;
+}
+
+.rust-flight--bench__body {
+  display: grid;
+  grid-template-columns: minmax(22rem, 0.8fr) minmax(30rem, 1.2fr) minmax(18rem, 0.7fr);
+  gap: 0.65rem;
+  min-height: 0;
+}
+
+.rust-flight--bench__body > div {
+  display: grid;
+  align-content: start;
+  gap: 0.65rem;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.rust-flight--bench .rust-flight-trace,
+.rust-flight--bench .rust-flight-trace ol {
+  height: 100%;
+  max-height: none;
+  min-height: 0;
+}
+
+.rust-flight--lens {
+  inset: 1rem;
+  display: grid;
+  align-content: start;
+  gap: 0.8rem;
+  padding: 1rem;
+  overflow-y: auto;
+}
+
+.rust-flight--lens__headline {
+  display: grid;
+  grid-template-columns: auto minmax(20rem, 0.8fr) minmax(20rem, 1fr);
+  gap: 1rem;
+  align-items: baseline;
+  padding: 0.8rem 0;
+  border-bottom: 1px solid var(--flight-line);
+}
+
+.rust-flight--lens__headline > span {
+  color: var(--rust-cyan);
+  font-family: "Ubuntu Mono", monospace;
+  font-size: 0.68rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.rust-flight--lens__headline strong {
+  color: #fff;
+  font-size: clamp(1.25rem, 2vw, 2.15rem);
+  letter-spacing: -0.04em;
+}
+
+.rust-flight--lens__headline p {
+  margin: 0;
+  color: #aebbb5;
+  font-size: 0.78rem;
+}
+
+.rust-flight--lens .rust-flight-comparison {
+  grid-template-columns: minmax(20rem, 1fr) 8rem minmax(20rem, 1fr);
+}
+
+.rust-flight--lens__work {
+  display: grid;
+  grid-template-columns: minmax(26rem, 0.9fr) minmax(28rem, 1.1fr);
+  gap: 0.8rem;
+}
+
+.rust-flight--lens__work > div {
+  display: grid;
+  align-content: start;
+  gap: 0.8rem;
+  min-width: 0;
+}
+
+.rust-flight-switcher {
+  position: fixed;
+  z-index: 90;
+  bottom: 0.9rem;
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0.35rem;
+  border: 1px solid #637a71;
+  border-radius: 999px;
+  background: #080c0bf5;
+  box-shadow: 0 12px 42px #000b;
+  transform: translateX(-50%);
+}
+
+.rust-flight-switcher span {
+  min-width: 11rem;
+  color: #edf4f0;
+  font-family: "Ubuntu Mono", monospace;
+  font-size: 0.68rem;
+  text-align: center;
+}
+
+.rust-flight-switcher button {
+  width: 2rem;
+  min-height: 2rem;
+  padding: 0;
+  border-radius: 50%;
+}
+
+.rust-flight-reopen {
+  position: fixed;
+  z-index: 80;
+  top: 0.75rem;
+  right: 0.75rem;
+  border-color: var(--rust-cyan);
+  background: #102a25;
+  color: #eafff8;
+  box-shadow: 0 10px 36px #0009;
+}
+
+@media (max-width: 1180px) {
+  .rust-flight--bench__body {
+    grid-template-columns: 1fr 1fr;
+    overflow-y: auto;
+  }
+
+  .rust-flight--bench__body > .rust-flight-trace {
+    grid-column: 1 / -1;
+    min-height: 12rem;
+  }
+
+  .rust-flight--lens__headline {
+    grid-template-columns: 1fr;
+  }
+
+  .rust-flight--lens__work {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rust-flight-safety__pulse {
+    animation: none;
+  }
+}

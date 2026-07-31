@@ -3,6 +3,7 @@ import { App } from "./App";
 import type { WorkspaceClient } from "./workspace-client";
 
 type SelectionRequest = Parameters<NonNullable<WorkspaceClient["selectCodingWorkspace"]>>[0];
+type MissionRequest = Parameters<NonNullable<WorkspaceClient["chooseMission"]>>[0];
 
 const selectionRequiredContext = {
   schema_version: 1 as const,
@@ -77,6 +78,66 @@ test("keeps Coding Workspace selection pending until the Orchestrator acknowledg
   });
 
   expect(await screen.findByText("Mission selection required")).toBeVisible();
+  expect(loadSnapshot).not.toHaveBeenCalled();
+});
+
+test("requires explicit Resume Mission or Start New Mission choices before loading work", async () => {
+  const missionChoiceContext = {
+    ...selectionRequiredContext,
+    coding_workspace: "/home/mission-commander/projects/acknowledged",
+    phase: "mission-choice-required" as const,
+    revision: 1,
+    known_missions: [{ id: "existing", title: "Existing Mission" }],
+  };
+  const loadSnapshot = snapshotMustRemainBlocked();
+  const requests: MissionRequest[] = [];
+  const chooseMission = vi.fn(async (request: MissionRequest) => {
+    requests.push(request);
+    return {
+      kind: "mission-choice-failure" as const,
+      code: "mission-not-found",
+      message: "The requested Mission is not known for this Coding Workspace.",
+      recoverable: true,
+    };
+  });
+
+  render(
+    <App
+      client={{
+        loadLaunchContext: async () => ({
+          kind: "launch-context",
+          context: missionChoiceContext,
+        }),
+        loadSnapshot,
+        chooseMission,
+      }}
+    />,
+  );
+
+  expect(await screen.findByText("Mission selection required")).toBeVisible();
+  expect(screen.getByRole("button", { name: /Resume Mission/ })).toBeVisible();
+  expect(screen.getByRole("button", { name: "Start New Mission" })).toBeVisible();
+  expect(loadSnapshot).not.toHaveBeenCalled();
+
+  fireEvent.click(screen.getByRole("button", { name: /Resume Mission/ }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("mission-not-found");
+  expect(requests[0]).toMatchObject({
+    expected_revision: 1,
+    choice: "resume",
+    mission_id: "existing",
+  });
+
+  fireEvent.change(screen.getByRole("textbox", { name: "New Mission title" }), {
+    target: { value: "Modernization" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Start New Mission" }));
+  expect(requests[1]).toMatchObject({
+    expected_revision: 1,
+    choice: "new",
+    mission_id: "modernization",
+    mission_title: "Modernization",
+  });
+  expect(await screen.findByRole("alert")).toHaveTextContent("mission-not-found");
   expect(loadSnapshot).not.toHaveBeenCalled();
 });
 

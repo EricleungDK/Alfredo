@@ -5,13 +5,16 @@ import {
   constants,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, dirname, resolve } from "node:path";
+import { basename, delimiter, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { DesktopAdapterError, resolveDesktopAdapter } from "./desktop-adapter.js";
 import {
   createPerformanceRecorder,
   performanceEnvironment,
@@ -37,11 +40,27 @@ function finishLauncherMeasurement(desktopKind) {
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(projectRoot, "..");
+const bundledBackendRoot = resolve(projectRoot, "bundled-backend");
+const repositoryLayoutAvailable =
+  projectRoot === resolve(repositoryRoot, "mission-control") &&
+  existsSync(resolve(repositoryRoot, "albert_mvp")) &&
+  existsSync(resolve(repositoryRoot, ".albert", "agents.json"));
+const bundledBackendAvailable =
+  existsSync(resolve(bundledBackendRoot, "albert_mvp")) &&
+  existsSync(resolve(bundledBackendRoot, ".albert", "agents.json"));
+const backendRoot = process.env.ALBERT_BACKEND_ROOT
+  ? resolve(process.env.ALBERT_BACKEND_ROOT)
+  : repositoryLayoutAvailable
+    ? repositoryRoot
+    : bundledBackendAvailable
+      ? bundledBackendRoot
+      : repositoryRoot;
 const agentConfigPath = process.env.ALFREDO_AGENT_CONFIG
   ? resolve(process.env.ALFREDO_AGENT_CONFIG)
-  : resolve(repositoryRoot, ".albert", "agents.json");
+  : resolve(backendRoot, ".albert", "agents.json");
 const PREFLIGHT_PASS = "pass";
 const PREFLIGHT_FAIL = "fail";
+const PREFLIGHT_WARNING = "warning";
 const PREFLIGHT_NOT_RUN = "not_run";
 const PREFLIGHT_NOT_APPLICABLE = "not_applicable";
 const LAUNCH_CONTEXT_SCHEMA_VERSION = 1;
@@ -86,6 +105,42 @@ function dryRunMode() {
   return process.env.ALFREDO_DESKTOP_DRY_RUN ?? "";
 }
 
+function desktopLaunchTarget(selectedWorkspace) {
+  if (repositoryLayoutAvailable) {
+    const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
+    return {
+      kind: "development",
+      command: [npmCommand, "run", "desktop"],
+      cwd: projectRoot,
+      detail: "Repository development shell: npm run desktop.",
+      copyable_action: `cd "${projectRoot}" && npm run desktop`,
+      environment: {},
+    };
+  }
+  try {
+    const adapter = resolveDesktopAdapter(projectRoot);
+    return {
+      kind: adapter.kind,
+      command: [adapter.executable],
+      cwd: selectedWorkspace,
+      detail: `Installed desktop package: ${adapter.packageName}@${adapter.version}.`,
+      copyable_action: `APPIMAGE_EXTRACT_AND_RUN=1 "${adapter.executable}" --version`,
+      environment: adapter.environment,
+      version: adapter.version,
+    };
+  } catch (error) {
+    if (!(error instanceof DesktopAdapterError)) throw error;
+    return {
+      kind: "unavailable",
+      command: [],
+      cwd: selectedWorkspace,
+      detail: error.message,
+      copyable_action: error.copyableAction,
+      environment: {},
+    };
+  }
+}
+
 function accessStatus(path, mode) {
   try {
     accessSync(path, mode);
@@ -104,24 +159,59 @@ function preflightCheck(name, status, detail, copyableAction) {
   };
 }
 
-function buildPreflight(plan, selectedAgentConfig) {
+function buildPreflight(plan, selectedAgentConfig, desktopTarget) {
   const packageJsonPath = resolve(projectRoot, "package.json");
   const packageJson = existsSync(packageJsonPath)
     ? JSON.parse(readFileSync(packageJsonPath, "utf8"))
     : {};
   const runtimePath = runtimeRoot();
   const shouldRunExternalChecks = dryRunMode() === "";
+  const requiresNpmRuntime = desktopTarget.kind === "development";
   const pythonCommand = process.env.ALBERT_PYTHON ?? (process.platform === "win32" ? "python" : "python3");
-  const npmVersion = shouldRunExternalChecks
+  const npmVersion = shouldRunExternalChecks && requiresNpmRuntime
     ? spawnSync("npm", ["--version"], { encoding: "utf8", timeout: 5000 })
     : null;
   const backendHelp = shouldRunExternalChecks
     ? spawnSync(pythonCommand, ["-m", "albert_mvp", "--help"], {
-        cwd: repositoryRoot,
+        cwd: backendRoot,
         encoding: "utf8",
         timeout: 5000,
       })
     : null;
+  const sandboxProbe = shouldRunExternalChecks && process.platform === "linux"
+    ? spawnSync("bwrap", ["--version"], { encoding: "utf8", timeout: 5000 })
+    : null;
+  const desktopProbe =
+    shouldRunExternalChecks && desktopTarget.kind === "native"
+      ? spawnSync(desktopTarget.command[0], ["--version"], {
+          cwd: desktopTarget.cwd,
+          encoding: "utf8",
+          timeout: 15_000,
+          env: {
+            ...process.env,
+            ...desktopTarget.environment,
+          },
+        })
+      : null;
+  const desktopProbeExpected = `Alfredo Desktop ${desktopTarget.version ?? ""}`;
+  const desktopReady =
+    desktopTarget.kind !== "unavailable" &&
+    (desktopTarget.kind !== "native" ||
+      !shouldRunExternalChecks ||
+      (desktopProbe?.status === 0 && desktopProbe.stdout.trim() === desktopProbeExpected));
+  const desktopDetail =
+    desktopTarget.kind === "native" && shouldRunExternalChecks
+      ? desktopReady
+        ? `${desktopTarget.detail} Native probe: ${desktopProbeExpected}.`
+        : `${desktopTarget.detail} Native probe failed: ${(
+            desktopProbe?.stderr ||
+            desktopProbe?.stdout ||
+            desktopProbe?.error?.message ||
+            "no version response"
+          )
+            .toString()
+            .trim()}.`
+      : desktopTarget.detail;
   const shouldCheckRuntime = dryRunMode() !== "1" || Boolean(process.env.ALFREDO_RUNTIME_ROOT);
   let runtimeStatus = PREFLIGHT_NOT_RUN;
   let runtimeDetail = "Dry-run skipped default runtime writability check.";
@@ -156,25 +246,27 @@ function buildPreflight(plan, selectedAgentConfig) {
     ),
     preflightCheck(
       "npm_runtime",
-      shouldRunExternalChecks
+      !requiresNpmRuntime
+        ? PREFLIGHT_NOT_APPLICABLE
+        : shouldRunExternalChecks
         ? npmVersion?.status === 0
           ? PREFLIGHT_PASS
           : PREFLIGHT_FAIL
         : PREFLIGHT_NOT_RUN,
-      shouldRunExternalChecks
+      !requiresNpmRuntime
+        ? "The installed native desktop does not invoke npm at launch."
+        : shouldRunExternalChecks
         ? npmVersion?.status === 0
           ? `npm runtime: ${npmVersion.stdout.trim()}.`
           : `npm runtime unavailable: ${(npmVersion?.stderr || npmVersion?.error?.message || "npm --version failed").toString().trim()}.`
         : "Dry-run skipped npm runtime availability check.",
-      "npm --version",
+      requiresNpmRuntime ? "npm --version" : "alfredo --version",
     ),
     preflightCheck(
       "desktop_shell",
-      packageJson.scripts?.desktop ? PREFLIGHT_PASS : PREFLIGHT_FAIL,
-      packageJson.scripts?.desktop
-        ? `Desktop shell command: npm run desktop.`
-        : "Missing package script: desktop.",
-      `cd "${projectRoot}" && npm run desktop`,
+      desktopReady ? PREFLIGHT_PASS : PREFLIGHT_FAIL,
+      desktopDetail,
+      desktopTarget.copyable_action,
     ),
     preflightCheck(
       "backend_process",
@@ -182,17 +274,35 @@ function buildPreflight(plan, selectedAgentConfig) {
         ? backendHelp?.status === 0
           ? PREFLIGHT_PASS
           : PREFLIGHT_FAIL
-        : existsSync(resolve(repositoryRoot, "albert_mvp"))
+        : existsSync(resolve(backendRoot, "albert_mvp"))
           ? PREFLIGHT_NOT_RUN
           : PREFLIGHT_FAIL,
       shouldRunExternalChecks
         ? backendHelp?.status === 0
           ? `Backend process responds to ${pythonCommand} -m albert_mvp --help.`
           : `Backend process did not start: ${(backendHelp?.stderr || backendHelp?.error?.message || `${pythonCommand} -m albert_mvp --help failed`).toString().trim()}.`
-        : existsSync(resolve(repositoryRoot, "albert_mvp"))
+        : existsSync(resolve(backendRoot, "albert_mvp"))
           ? "Dry-run skipped backend process startup check."
-          : `Backend module missing at ${resolve(repositoryRoot, "albert_mvp")}.`,
-      `cd "${repositoryRoot}" && ${pythonCommand} -m albert_mvp --help`,
+          : `Backend module missing at ${resolve(backendRoot, "albert_mvp")}.`,
+      `cd "${backendRoot}" && ${pythonCommand} -m albert_mvp --help`,
+    ),
+    preflightCheck(
+      "sandbox_runtime",
+      process.platform !== "linux"
+        ? PREFLIGHT_NOT_APPLICABLE
+        : shouldRunExternalChecks
+          ? sandboxProbe?.status === 0
+            ? PREFLIGHT_PASS
+            : PREFLIGHT_WARNING
+          : PREFLIGHT_NOT_RUN,
+      process.platform !== "linux"
+        ? "Bubblewrap sandboxing applies to the supported Ubuntu workstation package."
+        : shouldRunExternalChecks
+          ? sandboxProbe?.status === 0
+            ? `Bubblewrap sandbox runtime: ${sandboxProbe.stdout.trim()}.`
+            : "Bubblewrap is unavailable; Alfredo can open, but governed coding and shell work requires it."
+          : "Dry-run skipped Bubblewrap availability check.",
+      "bwrap --version",
     ),
     preflightCheck(
       "starting_location_access",
@@ -240,16 +350,18 @@ function buildPreflight(plan, selectedAgentConfig) {
     checks.push(
       preflightCheck(
         "ollama",
-        ollamaAvailable ? PREFLIGHT_PASS : PREFLIGHT_FAIL,
-        ollamaAvailable ? "Ollama responded to ollama list." : "Ollama did not respond.",
+        ollamaAvailable ? PREFLIGHT_PASS : PREFLIGHT_WARNING,
+        ollamaAvailable
+          ? "Ollama responded to ollama list."
+          : "Ollama is not available yet; Alfredo can open, but local model work stays unavailable until it is installed.",
         "ollama list",
       ),
       preflightCheck(
         "required_model",
-        modelAvailable ? PREFLIGHT_PASS : PREFLIGHT_FAIL,
+        modelAvailable ? PREFLIGHT_PASS : PREFLIGHT_WARNING,
         modelAvailable
           ? `Required model is available: ${selectedAgentConfig.model}.`
-          : `Required model is unavailable: ${selectedAgentConfig.model}.`,
+          : `Required model is unavailable: ${selectedAgentConfig.model}. Alfredo can open before the model is pulled.`,
         `ollama pull ${selectedAgentConfig.model}`,
       ),
     );
@@ -271,6 +383,27 @@ function buildPreflight(plan, selectedAgentConfig) {
   }
 
   return checks;
+}
+
+function recentWorkspaces() {
+  if (!shouldPersistRuntimeState()) return [];
+  const recentPath = resolve(runtimeRoot(), "recent-workspaces.json");
+  if (!existsSync(recentPath)) return [];
+  try {
+    const recent = JSON.parse(readFileSync(recentPath, "utf8"));
+    return Array.isArray(recent)
+      ? recent.filter((workspace) => typeof workspace === "string" && workspace.trim()).slice(0, 10)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function filesystemIdentity(path) {
+  const normalized = String(path).replaceAll("\\", "/");
+  return process.platform === "win32" || /^\/mnt\/[a-z]\//i.test(normalized)
+    ? normalized.toLowerCase()
+    : normalized;
 }
 
 function shouldPersistRuntimeState() {
@@ -312,19 +445,69 @@ function recordLaunchContext(plan) {
   );
 }
 
+const LOCAL_EXECUTION_PROVIDERS = new Set([
+  "command",
+  "fake",
+  "local",
+  "ollama",
+  "test",
+  "test-harness",
+]);
+const LOCAL_EXECUTION_RUNNERS = new Set(["command", "fake", "ollama"]);
+
+function hasLocalExecutionBoundary(agent) {
+  return LOCAL_EXECUTION_PROVIDERS.has(String(agent?.provider ?? "").trim().toLowerCase()) &&
+    LOCAL_EXECUTION_RUNNERS.has(String(agent?.runner ?? "").trim().toLowerCase());
+}
+
+function isEligibleWorkstationController(agent) {
+  if (
+    !agent ||
+    !hasLocalExecutionBoundary(agent) ||
+    agent.delegate_only === true ||
+    agent.requires_approval === true ||
+    String(agent.availability ?? "available").trim().toLowerCase() !== "available" ||
+    String(agent.model ?? "").toLowerCase().endsWith(":cloud")
+  ) return false;
+  const routing = String(agent.routing ?? "").toLowerCase();
+  const role = String(agent.role ?? "").toLowerCase();
+  return routing
+    ? ["controller", "router", "frontier"].includes(routing)
+    : role === "frontier";
+}
+
 function resolveWorkstationAgent(explicitSelectedAgent) {
-  const persisted = explicitSelectedAgent ? null : loadPersistedLaunchContext();
-  const selectedAgent = explicitSelectedAgent || persisted?.selected_agent || "";
-  if (!selectedAgent) return { selectedAgent: "", selectedAgentConfig: null };
-  try {
-    return {
-      selectedAgent,
-      selectedAgentConfig: requireKnownAgent(selectedAgent, { allowModelAlias: true }),
-    };
-  } catch (error) {
-    if (explicitSelectedAgent) throw error;
-    return { selectedAgent: "", selectedAgentConfig: null };
+  const agents = agentRegistry();
+  const eligibleControllers = agents.filter(isEligibleWorkstationController);
+  const defaultController = eligibleControllers.find(
+    (agent) => String(agent.routing).toLowerCase() === "controller",
+  ) ?? eligibleControllers.find(
+    (agent) => String(agent.routing).toLowerCase() === "router",
+  ) ?? eligibleControllers[0];
+  const resolveCandidate = (candidate) => {
+    const config = requireKnownAgent(candidate, { allowModelAlias: true });
+    if (!isEligibleWorkstationController(config)) {
+      const available = eligibleControllers.map((agent) => agent.id).join(", ") || "none";
+      throw new Error(
+        `Agent ${candidate} (${config.id}) is not an eligible Alfredo workstation controller. ` +
+        `Choose an ungated controller/router Frontier Model: ${available}.`,
+      );
+    }
+    return { selectedAgent: config.id, selectedAgentConfig: config };
+  };
+
+  if (explicitSelectedAgent) return resolveCandidate(explicitSelectedAgent);
+  const persisted = loadPersistedLaunchContext();
+  if (persisted?.selected_agent) {
+    try {
+      return resolveCandidate(persisted.selected_agent);
+    } catch {
+      // A stale, removed, aliased, or role-ineligible preference must not break startup.
+    }
   }
+  return defaultController
+    ? { selectedAgent: defaultController.id, selectedAgentConfig: defaultController }
+    : { selectedAgent: "", selectedAgentConfig: null };
 }
 
 function parseWorkstationLaunch(argv) {
@@ -350,7 +533,7 @@ function parseWorkstationLaunch(argv) {
     selected_model: selectedAgentConfig?.model ?? "",
     runtime_root: runtimeRoot(),
     project_root: projectRoot,
-    backend_root: repositoryRoot,
+    backend_root: backendRoot,
     starting_location: process.cwd(),
     workspace_selection: {
       schema_version: 1,
@@ -360,13 +543,15 @@ function parseWorkstationLaunch(argv) {
       active_mission: null,
     },
   };
-  const preflight = buildPreflight(plan, selectedAgentConfig);
+  const desktopAdapter = desktopLaunchTarget(plan.starting_location);
+  const preflight = buildPreflight(plan, selectedAgentConfig, desktopAdapter);
   const runtimeReady = !preflight.some(
     (check) => check.name === "writable_runtime" && check.status === PREFLIGHT_FAIL,
   );
   const launchPlan = {
     ...plan,
-    recent_workspaces: [],
+    desktop_adapter: desktopAdapter,
+    recent_workspaces: runtimeReady ? recentWorkspaces() : [],
     preflight,
   };
   if (runtimeReady) recordLaunchContext(launchPlan);
@@ -392,7 +577,7 @@ function parseHeadlessRun(argv) {
   const { selectedAgent, remaining } = parseAgentOption([...argv]);
   if (!selectedAgent) throw new Error("alfredo run requires --agent <agent-id>");
   if (remaining.length !== 1 || !remaining[0]?.trim()) {
-    throw new Error('alfredo run requires exactly one prompt argument, for example: alfredo run --agent qwen3.6-27b "Fix the tests"');
+    throw new Error('alfredo run requires exactly one prompt argument, for example: alfredo run --agent gemma4-12b "Fix the tests"');
   }
   const selectedAgentConfig = requireKnownAgent(selectedAgent);
   return {
@@ -428,23 +613,133 @@ function pythonCommand() {
   return process.env.ALBERT_PYTHON ?? (process.platform === "win32" ? "python" : "python3");
 }
 
+const AGENT_READY_TICKET_STATUSES = new Set(["approved", "ready", "ready-for-agent"]);
+const READY_TICKET_STATUSES = new Set([...AGENT_READY_TICKET_STATUSES, "ready-for-human"]);
+const TERMINAL_TICKET_STATUSES = new Set([
+  "canceled",
+  "cancelled",
+  "closed",
+  "complete",
+  "completed",
+  "done",
+  "merged",
+  "wont-fix",
+  "wontfix",
+]);
+
+function trackerTicketStatuses(issuesDir) {
+  if (!existsSync(issuesDir)) return [];
+  try {
+    return readdirSync(issuesDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && /^\d+[-_].+\.md$/i.test(entry.name))
+      .map((entry) => {
+        try {
+          const issue = readFileSync(resolve(issuesDir, entry.name), "utf8");
+          const ticketType = issue.match(/^\s*Type:\s*(.+?)\s*$/im)?.[1]?.trim().toLowerCase() ?? "";
+          if (ticketType === "prd") return "";
+          return issue.match(/^\s*Status:\s*(.+?)\s*$/im)?.[1]?.trim().toLowerCase() ?? "";
+        } catch {
+          return "";
+        }
+      })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function trackerCandidate(trackerDir, missionId) {
+  const issuesDir = existsSync(resolve(trackerDir, "issues"))
+    ? resolve(trackerDir, "issues")
+    : trackerDir;
+  const statuses = trackerTicketStatuses(issuesDir);
+  let modifiedAt = 0;
+  try {
+    modifiedAt = statSync(resolve(trackerDir, "PRD.md")).mtimeMs;
+  } catch {
+    // An unreadable timestamp should not make discovery fail. The normal
+    // preflight will still report workspace access problems before launch.
+  }
+  return {
+    trackerDir,
+    issuesDir,
+    missionId,
+    hasAgentReadyTicket: statuses.some((status) => AGENT_READY_TICKET_STATUSES.has(status)),
+    hasReadyTicket: statuses.some((status) => READY_TICKET_STATUSES.has(status)),
+    hasActionableTicket: statuses.some((status) => !TERMINAL_TICKET_STATUSES.has(status)),
+    modifiedAt,
+  };
+}
+
+function compareTrackerCandidates(left, right) {
+  const agentReady =
+    Number(right.hasAgentReadyTicket) - Number(left.hasAgentReadyTicket);
+  if (agentReady !== 0) return agentReady;
+  const ready = Number(right.hasReadyTicket) - Number(left.hasReadyTicket);
+  if (ready !== 0) return ready;
+  const actionable = Number(right.hasActionableTicket) - Number(left.hasActionableTicket);
+  if (actionable !== 0) return actionable;
+  const modified = right.modifiedAt - left.modifiedAt;
+  if (modified !== 0) return modified;
+  const leftIdentity = filesystemIdentity(left.trackerDir);
+  const rightIdentity = filesystemIdentity(right.trackerDir);
+  return leftIdentity < rightIdentity ? -1 : leftIdentity > rightIdentity ? 1 : 0;
+}
+
 function trackerArgs(selectedWorkspace) {
+  if (process.env.ALBERT_TRACKER_DIR) {
+    const trackerDir = resolve(process.env.ALBERT_TRACKER_DIR);
+    const issuesDir = process.env.ALBERT_ISSUES_DIR
+      ? resolve(process.env.ALBERT_ISSUES_DIR)
+      : existsSync(resolve(trackerDir, "issues"))
+        ? resolve(trackerDir, "issues")
+        : trackerDir;
+    return {
+      trackerDir,
+      issuesDir,
+      missionId: process.env.ALBERT_MISSION_ID || basename(trackerDir),
+    };
+  }
+
+  const candidates = [];
+  const scratchRoot = resolve(selectedWorkspace, ".scratch");
+  if (existsSync(scratchRoot)) {
+    try {
+      candidates.push(
+        ...readdirSync(scratchRoot, { withFileTypes: true })
+          .filter((entry) => entry.isDirectory())
+          .map((entry) => resolve(scratchRoot, entry.name))
+          .filter((trackerDir) => existsSync(resolve(trackerDir, "PRD.md")))
+          .map((trackerDir) => trackerCandidate(trackerDir, basename(trackerDir))),
+      );
+    } catch {
+      // Fall through to the conventional .agent tracker when .scratch cannot
+      // be inspected; workspace access preflight owns the user-facing error.
+    }
+  }
+
   const agentIssuesTracker = resolve(selectedWorkspace, ".agent", "issues");
   if (existsSync(resolve(agentIssuesTracker, "PRD.md"))) {
+    candidates.push(trackerCandidate(agentIssuesTracker, "agent-issues"));
+  }
+  if (candidates.length > 0) {
+    const selected = candidates.sort(compareTrackerCandidates)[0];
     return {
-      trackerDir: agentIssuesTracker,
-      issuesDir: agentIssuesTracker,
+      trackerDir: selected.trackerDir,
+      issuesDir: selected.issuesDir,
+      missionId: selected.missionId,
     };
   }
   const trackerDir = resolve(selectedWorkspace, ".agent");
   return {
     trackerDir,
     issuesDir: resolve(trackerDir, "issues"),
+    missionId: basename(selectedWorkspace),
   };
 }
 
 function headlessContextArgs(selectedWorkspace) {
-  const { trackerDir, issuesDir } = trackerArgs(selectedWorkspace);
+  const { trackerDir, issuesDir, missionId } = trackerArgs(selectedWorkspace);
   return [
     "--target-repo",
     selectedWorkspace,
@@ -455,7 +750,7 @@ function headlessContextArgs(selectedWorkspace) {
     "--runtime-root",
     runtimeRoot(),
     "--mission-id",
-    "alfredo-headless",
+    missionId,
     "--agent-config",
     agentConfigPath,
   ];
@@ -476,38 +771,40 @@ function runHeadlessBackend(plan) {
     backendArgs.push(plan.session_id);
   }
   return spawnSync(pythonCommand(), ["-m", "albert_mvp", ...backendArgs], {
-    cwd: repositoryRoot,
+    cwd: backendRoot,
     encoding: "utf8",
     env: {
       ...process.env,
       PYTHONPATH: process.env.PYTHONPATH
-        ? `${repositoryRoot}${delimiter}${process.env.PYTHONPATH}`
-        : repositoryRoot,
+        ? `${backendRoot}${delimiter}${process.env.PYTHONPATH}`
+        : backendRoot,
     },
   });
 }
 
 function runAgentsBackend() {
   return spawnSync(pythonCommand(), ["-m", "albert_mvp", "agents", ...headlessContextArgs(process.cwd())], {
-    cwd: repositoryRoot,
+    cwd: backendRoot,
     encoding: "utf8",
     env: {
       ...process.env,
       PYTHONPATH: process.env.PYTHONPATH
-        ? `${repositoryRoot}${delimiter}${process.env.PYTHONPATH}`
-        : repositoryRoot,
+        ? `${backendRoot}${delimiter}${process.env.PYTHONPATH}`
+        : backendRoot,
     },
   });
 }
 
-function launchDryRunPlan(plan, npmCommand) {
+function launchDryRunPlan(plan) {
   return {
-    command: [npmCommand, "run", "desktop"],
-    cwd: projectRoot,
+    command: plan.desktop_adapter.command,
+    cwd: plan.desktop_adapter.cwd,
     env: {
+      ...plan.desktop_adapter.environment,
       ALBERT_BACKEND_ROOT: plan.backend_root,
       ALFREDO_INSTALL_ROOT: plan.project_root,
       ALFREDO_STARTING_LOCATION: plan.starting_location,
+      ALFREDO_AGENT_CONFIG: agentConfigPath,
       ALFREDO_SELECTED_AGENT: plan.selected_agent,
       ALFREDO_SELECTED_MODEL: plan.selected_model,
       ALFREDO_RUNTIME_ROOT: plan.runtime_root,
@@ -526,37 +823,50 @@ function launchDesktop(plan) {
     }
     process.exit(1);
   }
-  const npmCommand = process.platform === "win32" ? "npm.cmd" : "npm";
   if (dryRunMode() === "launch") {
-    finishLauncherMeasurement("tauri-development");
-    process.stdout.write(`${JSON.stringify(launchDryRunPlan(plan, npmCommand))}\n`);
+    finishLauncherMeasurement(plan.desktop_adapter.kind);
+    process.stdout.write(`${JSON.stringify(launchDryRunPlan(plan))}\n`);
     return;
   }
-  finishLauncherMeasurement("tauri-development");
+  const [desktopCommand, ...desktopArgs] = plan.desktop_adapter.command;
+  finishLauncherMeasurement(plan.desktop_adapter.kind);
   const desktopEnvironment = {
     ...process.env,
+    ...plan.desktop_adapter.environment,
     ALBERT_BACKEND_ROOT: plan.backend_root,
     ALFREDO_INSTALL_ROOT: plan.project_root,
     ALFREDO_STARTING_LOCATION: plan.starting_location,
+    ALFREDO_AGENT_CONFIG: agentConfigPath,
     ALFREDO_SELECTED_AGENT: plan.selected_agent,
     ALFREDO_SELECTED_MODEL: plan.selected_model,
     ALFREDO_RUNTIME_ROOT: plan.runtime_root,
   };
   delete desktopEnvironment.ALFREDO_SELECTED_WORKSPACE;
   delete desktopEnvironment.ALBERT_MISSION_ID;
-  const child = spawn(npmCommand, ["run", "desktop"], {
-    cwd: projectRoot,
+  const child = spawn(desktopCommand, desktopArgs, {
+    cwd: plan.desktop_adapter.cwd,
     env: desktopEnvironment,
     stdio: "inherit",
   });
+  let forwardedSignal = "";
+  const forwardSignal = (signal) => {
+    forwardedSignal = signal;
+    if (!child.kill(signal)) process.exit(1);
+  };
+  process.once("SIGINT", () => forwardSignal("SIGINT"));
+  process.once("SIGTERM", () => forwardSignal("SIGTERM"));
   child.on("error", (error) => {
     process.stderr.write("Alfredo startup preflight failed:\n");
     process.stderr.write(
-      `- desktop_shell: Unable to launch npm desktop process: ${error.message}\n  cd "${projectRoot}" && npm run desktop\n`,
+      `- desktop_shell: Unable to launch Alfredo desktop process: ${error.message}\n  ${plan.desktop_adapter.copyable_action}\n`,
     );
     process.exit(1);
   });
   child.on("exit", (code, signal) => {
+    if (forwardedSignal) {
+      process.exit(code ?? 0);
+      return;
+    }
     if (signal) {
       process.kill(process.pid, signal);
       return;
@@ -568,6 +878,12 @@ function launchDesktop(plan) {
 try {
   const argv = process.argv.slice(2);
   const command = argv[0] ?? "";
+  if (command === "--version" || command === "-V") {
+    if (argv.length !== 1) throw new Error(`${command} does not accept additional arguments`);
+    const manifest = JSON.parse(readFileSync(resolve(projectRoot, "package.json"), "utf8"));
+    process.stdout.write(`Alfredo ${manifest.version}\n`);
+    process.exit(0);
+  }
   if (command === "agents") {
     if (argv.length !== 1) throw new Error("alfredo agents does not accept additional arguments");
     const result = runAgentsBackend();

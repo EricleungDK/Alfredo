@@ -1,6 +1,6 @@
 # Triage Labels
 
-The skills speak in terms of five canonical triage roles. This file maps those roles to the label strings used in this repo's local markdown issue tracker.
+The skills speak in terms of five canonical triage roles. This file maps those roles to the GitHub labels used by this repository.
 
 | Label in mattpocock/skills | Label in our tracker | Meaning |
 | --- | --- | --- |
@@ -10,4 +10,4 @@ The skills speak in terms of five canonical triage roles. This file maps those r
 | `ready-for-human` | `ready-for-human` | Requires human implementation |
 | `wontfix` | `wontfix` | Will not be actioned |
 
-When a skill mentions a role, use the corresponding label string from this table.
+When a skill mentions a role, use the corresponding GitHub label from this table. An open issue has exactly one of these triage labels; closed completed issues do not need a triage label. Structural labels such as `type:prd`, `type:afk`, and `type:hitl` are separate from this state vocabulary.

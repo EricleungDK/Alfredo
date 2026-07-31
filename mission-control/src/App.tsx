@@ -1,13 +1,24 @@
-import { useCallback, useEffect, useRef, useState, type ReactElement, type RefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactElement,
+  type RefObject,
+} from "react";
 import type {
   AdHocDelegationProposalRequest,
   AlfredoLaunchContext,
+  AgentCapability,
+  AgentCapabilityCatalog,
   AgentConsoleMessage,
   ActivityJournalFilters,
   ActivityJournalProjection,
   CodingWorkspaceAcknowledgement,
   CodingWorkspaceSelectionRequest,
   ConversationScope,
+  MissionChoiceOption,
   PathAccessLevel,
   ShellTerminalClassification,
   ShellTerminalCommandRecord,
@@ -17,6 +28,8 @@ import type {
   MissionDraftProjection,
   ReviewDecision,
   ReviewWorkspaceProjection,
+  SessionArtifactProjection,
+  SessionArtifactReadRequest,
   WorkingContextProjection,
   WorkspaceQueueDecision,
   WorkspaceQueueItem,
@@ -27,6 +40,11 @@ import type {
   WorkstationActionRequest,
 } from "./contracts";
 import type { WorkspaceClient } from "./workspace-client";
+import {
+  afterTwoAnimationFrames,
+  markFrontendPerformance,
+  markNativePerformance,
+} from "./performance-measurement";
 import { applyWorkspaceUpdates } from "./workspace-sync";
 import {
   projectIssueAssignmentBoard,
@@ -36,6 +54,7 @@ import {
   type WorkstationCardGroup,
   type WorkstationCardProjection,
   type WorkstationDiffLink,
+  type WorkstationEvidenceLink,
   type WorkstationGovernedAction,
 } from "./workstation-projection";
 import { ShellTerminalPanel } from "./ShellTerminalPanel";
@@ -46,6 +65,8 @@ import {
   type ShellTerminalTranscriptEntry,
 } from "./use-shell-terminal";
 import "./styles.css";
+
+const AGENT_CONSOLE_USER_CONTENT_CHARACTER_LIMIT = 16_000;
 
 interface AdHocDelegationDraft {
   readonly acceptanceCriteria: readonly string[];
@@ -71,6 +92,11 @@ interface WorkstationActionTurn {
   readonly outcome: string;
 }
 
+interface FailedWorkstationActionContinuityState {
+  readonly schema_version: 1;
+  readonly turns: readonly WorkstationActionTurn[];
+}
+
 interface WorkstationActionState {
   readonly itemId: string;
   readonly state: "pending" | "accepted" | "rejected" | "failed" | "stale" | "disabled";
@@ -82,6 +108,21 @@ interface WorkstationActionDraftState {
   readonly agentId: string;
 }
 
+interface SessionArtifactViewerTarget {
+  readonly request: SessionArtifactReadRequest;
+  readonly label: string;
+  readonly focusPath?: string;
+  readonly returnFocus?: HTMLElement | null;
+}
+
+interface SessionArtifactViewerState {
+  readonly target: SessionArtifactViewerTarget;
+  readonly status: "loading" | "ready" | "error";
+  readonly artifact: SessionArtifactProjection | null;
+  readonly message: string;
+  readonly recoverable: boolean;
+}
+
 interface AppProps {
   readonly client: WorkspaceClient;
   readonly syncIntervalMs?: number;
@@ -91,8 +132,10 @@ interface WorkstationContinuityState {
   readonly schema_version: 1;
   readonly commandAuditOpen: boolean;
   readonly selectedIssueId: string | null;
+  readonly selectedIssueMissionId: string | null;
   readonly issueFocusTarget: "assignment-board" | "mission-board" | null;
   readonly selectedSessionId: string | null;
+  readonly selectedSessionMissionId: string | null;
   readonly expandedWorkstationCardIds: readonly string[];
   readonly pinnedWorkstationCardIds: readonly string[];
   readonly workstationFilter: string;
@@ -109,6 +152,220 @@ type PersistedWorkstationContinuityState = Partial<
 };
 
 const WORKSTATION_CONTINUITY_SCHEMA_VERSION = 1;
+const FAILED_WORKSTATION_ACTION_CONTINUITY_SCHEMA_VERSION = 1;
+const FAILED_WORKSTATION_ACTION_TURN_LIMIT = 100;
+const FAILED_WORKSTATION_ACTION_CONTENT_LIMIT = 4_000;
+
+function parseSlashCommand(content: string): { name: string; argument: string } | null {
+  const match = content.trim().match(/^(\/[a-z-]+)(?:\s+([\s\S]*))?$/i);
+  if (!match) return null;
+  return { name: match[1].toLowerCase(), argument: (match[2] ?? "").trim() };
+}
+
+function missionSessionIdentity(missionId: string, sessionId: string): string {
+  return JSON.stringify([missionId, sessionId]);
+}
+
+interface CodingTaskIntent {
+  readonly request: string;
+  readonly skillName: string | null;
+  readonly acceptanceCriteria: readonly string[];
+}
+
+function parseCodingTaskIntent(content: string): CodingTaskIntent | null {
+  const slashCommand = parseSlashCommand(content);
+  if (slashCommand?.name === "/task" && slashCommand.argument) {
+    return {
+      request: slashCommand.argument,
+      skillName: null,
+      acceptanceCriteria: [slashCommand.argument],
+    };
+  }
+  if (slashCommand?.name === "/use" && slashCommand.argument) {
+    const skillRequest = slashCommand.argument.match(/^(\S+)\s+([\s\S]+)$/);
+    if (!skillRequest?.[2].trim()) return null;
+    const skillName = skillRequest[1];
+    const request = skillRequest[2].trim();
+    return {
+      request,
+      skillName,
+      acceptanceCriteria: [
+        `/use ${skillName} ${request}`,
+      ],
+    };
+  }
+
+  const request = content.trim();
+  const delegatedCodingVerb =
+    "(?:fix|implement|build|add|create|update|modify|change|refactor|repair|debug|write|develop|remove|migrate|optimize|upgrade|integrate|replace|make|handle|resolve|address|patch|troubleshoot|test|investigate|inspect|check|work\\s+on|take\\s+care\\s+of)";
+  const delegatedCodingRequest = new RegExp(
+      `^(?:(?:can|could|would|will)\\s+you\\s+)?(?:please\\s+)?` +
+      `(?:ask|have|get|tell|use|call|spin\\s+up|delegate(?:\\s+to)?|send)\\s+` +
+      `(?:an?\\s+|the\\s+)?(?:subagent|sub-agent|local\\s+agent|coding\\s+agent)` +
+      `(?:\\s+to)?\\s+${delegatedCodingVerb}\\b`,
+    "i",
+  );
+  const explicitRemediationRequest =
+    /^(?:(?:can|could|would|will)\s+you\s+)?(?:please\s+)?(?:fix|repair|implement|refactor|patch|update)\s+(?:(?:the|this|these|a|an)\s+)?(?:(?:failing|failed|broken|buggy|regressed)\s+)?(?:tests?|build|bug|error|issue|code|layout|polling|feature|function|component|module|api|ui|frontend|backend)\b/i;
+  const explicitDelegationSuffix = new RegExp(
+    `^(?:(?:can|could|would|will)\\s+you\\s+)?(?:please\\s+)?${delegatedCodingVerb}\\b` +
+      `[\\s\\S]*\\bwith\\s+a\\s+subagent\\s*[.!?]*\\s*$`,
+    "i",
+  );
+  if (
+    !delegatedCodingRequest.test(request) &&
+    !explicitRemediationRequest.test(request) &&
+    !explicitDelegationSuffix.test(request)
+  ) return null;
+  return { request, skillName: null, acceptanceCriteria: [request] };
+}
+
+function isUnknownRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function sameStringList(value: unknown, expected: readonly string[]): boolean {
+  return Array.isArray(value) &&
+    value.length === expected.length &&
+    value.every((item, index) => item === expected[index]);
+}
+
+function sameStringRecord(
+  value: unknown,
+  expected: Readonly<Record<string, string>>,
+): boolean {
+  if (!isUnknownRecord(value)) return false;
+  const entries = Object.entries(expected);
+  return Object.keys(value).length === entries.length &&
+    entries.every(([key, expectedValue]) => value[key] === expectedValue);
+}
+
+export function isExactAdHocDelegationBoundary(
+  item: WorkspaceQueueItem,
+  request: AdHocDelegationProposalRequest,
+  authorizedGoal: string,
+): boolean {
+  const changes = item.proposed_changes;
+  const scope = changes.scope;
+  if (!isUnknownRecord(scope)) return false;
+  const scopeMissionMatches = request.scope_kind === "working-directory"
+    ? scope.mission_id == null
+    : scope.mission_id === request.mission_id;
+  return item.item_type === "ad-hoc-delegation" &&
+    item.status === "pending" &&
+    item.source === request.source &&
+    typeof request.mission_id === "string" &&
+    request.mission_id.length > 0 &&
+    item.mission_id === request.mission_id &&
+    scope.kind === request.scope_kind &&
+    scope.target_id === request.scope_target &&
+    scope.label === request.scope_label &&
+    scopeMissionMatches &&
+    changes.goal === authorizedGoal &&
+    sameStringList(changes.acceptance_criteria, request.acceptance_criteria) &&
+    sameStringList(changes.allowed_paths, request.allowed_paths) &&
+    sameStringRecord(changes.command_policy, request.command_policy) &&
+    changes.proposed_agent === request.proposed_agent &&
+    changes.originating_message_id === request.originating_message_id;
+}
+
+function isEligibleControllerCapability(agent: AgentCapability): boolean {
+  const routing = agent.routing.toLowerCase();
+  const role = agent.role.toLowerCase();
+  const controllerRole = routing
+    ? ["controller", "router", "frontier"].includes(routing)
+    : role === "frontier";
+  return controllerRole &&
+    hasLocalExecutionBoundary(agent) &&
+    agent.delegate_only === false &&
+    agent.requires_approval === false &&
+    !agent.model.toLowerCase().endsWith(":cloud");
+}
+
+const LOCAL_EXECUTION_PROVIDERS = new Set([
+  "command",
+  "fake",
+  "local",
+  "ollama",
+  "test",
+  "test-harness",
+]);
+const LOCAL_EXECUTION_RUNNERS = new Set(["command", "fake", "ollama"]);
+
+function hasLocalExecutionBoundary(agent: AgentCapability): boolean {
+  return LOCAL_EXECUTION_PROVIDERS.has(agent.provider.trim().toLowerCase()) &&
+    LOCAL_EXECUTION_RUNNERS.has(agent.runner.trim().toLowerCase());
+}
+
+function isEligibleWorkerCapability(agent: AgentCapability): boolean {
+  const routing = agent.routing.toLowerCase();
+  const role = agent.role.toLowerCase();
+  return agent.availability === "available" &&
+    hasLocalExecutionBoundary(agent) &&
+    agent.assignable === true &&
+    agent.delegate_only === false &&
+    agent.requires_approval === false &&
+    !agent.model.toLowerCase().endsWith(":cloud") &&
+    role !== "frontier" &&
+    routing !== "controller" &&
+    routing !== "router" &&
+    routing !== "frontier" &&
+    (routing === "worker" || role === "local-agent");
+}
+
+function eligibleControllerId(
+  catalog: AgentCapabilityCatalog,
+  requestedIdOrModel: string,
+): string {
+  if (!requestedIdOrModel) return "";
+  return catalog.agents.find(
+    (agent) =>
+      (agent.id === requestedIdOrModel || agent.model === requestedIdOrModel) &&
+      agent.availability === "available" &&
+      isEligibleControllerCapability(agent),
+  )?.id ?? "";
+}
+
+function preferredEligibleControllerId(
+  catalog: AgentCapabilityCatalog,
+  preferredIdsOrModels: readonly string[],
+): string {
+  for (const requested of preferredIdsOrModels) {
+    const eligible = eligibleControllerId(catalog, requested);
+    if (eligible) return eligible;
+  }
+  const defaultController = eligibleControllerId(catalog, catalog.default_agent_id);
+  if (defaultController) return defaultController;
+  return catalog.agents.find(
+    (agent) => agent.availability === "available" && isEligibleControllerCapability(agent),
+  )?.id ?? "";
+}
+
+function sameCanonicalWorkspace(
+  current: Extract<WorkspaceLoadResult, { kind: "ready" | "empty" }>,
+  candidate: Extract<WorkspaceLoadResult, { kind: "ready" | "empty" }>,
+): boolean {
+  return current.kind === candidate.kind &&
+    JSON.stringify(current.snapshot) === JSON.stringify(candidate.snapshot);
+}
+
+function canonicalSessionIsQueued(
+  state: WorkspaceLoadResult | "loading",
+  missionId: string,
+  sessionId: string,
+): boolean {
+  if (state === "loading" || (state.kind !== "ready" && state.kind !== "empty")) return false;
+  const missions = state.snapshot.missions ?? [];
+  const mission = missionId
+    ? missions.find((candidate) => candidate.id === missionId)
+    : missions.find((candidate) =>
+        candidate.sessions.some((session) => session.session_id === sessionId),
+      );
+  return mission?.sessions.some(
+    (session) =>
+      session.session_id === sessionId && session.status.toLowerCase() === "queued",
+  ) ?? false;
+}
 
 function acknowledgementMatchesWorkspaceSelection(
   acknowledgement: CodingWorkspaceAcknowledgement,
@@ -123,6 +380,15 @@ function acknowledgementMatchesWorkspaceSelection(
     acknowledgement.active_mission === null;
 }
 
+function missionIdFromTitle(title: string): string {
+  return title
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 64);
+}
+
 export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   const [state, setState] = useState<WorkspaceLoadResult | "loading">("loading");
   const [connectionStatus, setConnectionStatus] = useState<
@@ -131,22 +397,42 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   const [actionStatus, setActionStatus] = useState<
     "pending" | "acknowledged" | "stale" | "rejected" | null
   >(null);
+  const [actionFailure, setActionFailure] = useState<string | null>(null);
   const [consoleHistory, setConsoleHistory] = useState<readonly AgentConsoleMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [scopeDraft, setScopeDraft] = useState<ConversationScope | null>(null);
-  const [messageStatus, setMessageStatus] = useState<"pending" | "rejected" | null>(null);
+  const [messageStatus, setMessageStatus] = useState<
+    "saving" | "responding" | "rejected" | null
+  >(null);
+  const messageSubmissionInFlightRef = useRef(false);
+  const [messageFailure, setMessageFailure] = useState<string | null>(null);
   const [workingContext, setWorkingContext] = useState<WorkingContextProjection | null>(null);
+  const [workingContextLoadFailure, setWorkingContextLoadFailure] = useState<string | null>(null);
+  const [consoleHistoryLoadFailure, setConsoleHistoryLoadFailure] = useState<string | null>(null);
+  const [capabilityLoadFailure, setCapabilityLoadFailure] = useState<string | null>(null);
+  const [startupHydration, setStartupHydration] = useState({
+    capabilities: false,
+    consoleHistory: false,
+    workingContext: false,
+    workspaceQueue: false,
+    shell: false,
+  });
+  const [usablePaintComplete, setUsablePaintComplete] = useState(false);
   const [contextStatus, setContextStatus] = useState<
     "pending" | "acknowledged" | "stale" | "rejected" | null
   >(null);
+  const [contextActionFailure, setContextActionFailure] = useState<string | null>(null);
   const [reviewWorkspace, setReviewWorkspace] = useState<ReviewWorkspaceProjection | null>(null);
+  const [reviewWorkspaceLoadFailure, setReviewWorkspaceLoadFailure] = useState<string | null>(null);
   const [reviewStatus, setReviewStatus] = useState<{
     state: "pending" | "acknowledged" | "stale" | "rejected";
     message: string;
   } | null>(null);
   const [reviewReasons, setReviewReasons] = useState<Record<string, string>>({});
   const [workspaceQueue, setWorkspaceQueue] = useState<WorkspaceQueueProjection | null>(null);
+  const [workspaceQueueLoadFailure, setWorkspaceQueueLoadFailure] = useState<string | null>(null);
   const [missionDrafts, setMissionDrafts] = useState<MissionDraftProjection | null>(null);
+  const [missionDraftLoadFailure, setMissionDraftLoadFailure] = useState<string | null>(null);
   const [missionDraftStatus, setMissionDraftStatus] = useState<{
     state: "pending" | "acknowledged" | "stale" | "rejected";
     message: string;
@@ -156,9 +442,18 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
     state: "pending" | "acknowledged" | "stale" | "rejected";
     message: string;
   } | null>(null);
+  const workspacePath =
+    state !== "loading" && (state.kind === "ready" || state.kind === "empty")
+      ? state.snapshot.workspace_session.workspace_path
+      : "";
+  const failedWorkstationActionContinuityKey =
+    state !== "loading" && (state.kind === "ready" || state.kind === "empty")
+      ? failedWorkstationActionStorageKey(state.snapshot)
+      : "";
   const [workstationActionTurns, setWorkstationActionTurns] = useState<
     readonly WorkstationActionTurn[]
   >([]);
+  const workstationActionTurnsWorkspaceKeyRef = useRef("");
   const [workstationActionState, setWorkstationActionState] =
     useState<WorkstationActionState | null>(null);
   const [workstationActionDrafts, setWorkstationActionDrafts] = useState<
@@ -176,18 +471,104 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
     ended_at: "",
   });
   const [activityStatus, setActivityStatus] = useState<"pending" | "rejected" | null>(null);
+  const [activityLoadFailure, setActivityLoadFailure] = useState<string | null>(null);
   const [commandAuditOpen, setCommandAuditOpen] = useState(false);
   const [launchContext, setLaunchContext] = useState<AlfredoLaunchContext | null>(null);
+  const launchContextLoadInFlightRef = useRef<Promise<AlfredoLaunchContext | null> | null>(null);
   const [codingWorkspacePath, setCodingWorkspacePath] = useState("");
   const [codingWorkspaceStatus, setCodingWorkspaceStatus] = useState<{
     readonly state: "pending" | "acknowledged" | "rejected";
     readonly message: string;
   } | null>(null);
+  const [missionChoiceStatus, setMissionChoiceStatus] = useState<{
+    readonly state: "pending" | "acknowledged" | "rejected";
+    readonly message: string;
+  } | null>(null);
+  const [missionTitle, setMissionTitle] = useState("");
   const pendingWorkspaceSelectionRef = useRef<CodingWorkspaceSelectionRequest | null>(null);
+  const pendingMissionChoiceRef = useRef<{
+    readonly correlation_id: string;
+    readonly expected_revision: number;
+    readonly choice: "resume" | "new";
+    readonly mission_id: string;
+    readonly mission_title?: string;
+  } | null>(null);
   const nextWorkspaceSelectionIdRef = useRef(0);
-  const appendWorkstationActionTurn = useCallback((turn: WorkstationActionTurn) => {
-    setWorkstationActionTurns((turns) => [...turns, turn]);
+  const nextMissionChoiceIdRef = useRef(0);
+  const [capabilityCatalog, setCapabilityCatalog] = useState<AgentCapabilityCatalog | null>(null);
+  const capabilityLoadInFlightRef = useRef<Promise<AgentCapabilityCatalog | null> | null>(null);
+  const [selectedControllerId, setSelectedControllerId] = useState("");
+  const workspaceStateRef = useRef<WorkspaceLoadResult | "loading">("loading");
+  const dispatchedSessionIdsRef = useRef(new Set<string>());
+  const queuedSessionRunAttemptsRef = useRef(new Map<string, number>());
+  const queuedSessionRetryTimersRef = useRef(new Map<string, number>());
+  const startQueuedSessionRef = useRef<(sessionId: string, missionId?: string) => void>(() => {});
+  const bootPaintMarkedRef = useRef(false);
+  const usablePaintStartedRef = useRef(false);
+  const usablePaintMarkedRef = useRef(false);
+  const hydratedPaintMarkedRef = useRef(false);
+  const runnerClaimMeasurementsRef = useRef(
+    new Map<string, { missionId: string; sessionId: string }>(),
+  );
+  const timelineOrderByKeyRef = useRef(new Map<string, number>());
+  const nextTimelineOrderRef = useRef(0);
+  const consoleTimelineKeyByMessageIdRef = useRef(new Map<string, string>());
+  const initialConsoleTimelineKeysRef = useRef(new Set<string>());
+  const registerTimelineTurn = useCallback((key: string): number => {
+    const existing = timelineOrderByKeyRef.current.get(key);
+    if (existing !== undefined) return existing;
+    const order = nextTimelineOrderRef.current;
+    nextTimelineOrderRef.current += 1;
+    timelineOrderByKeyRef.current.set(key, order);
+    return order;
   }, []);
+  const consoleTimelineKey = useCallback((message: AgentConsoleMessage): string => {
+    const existing = consoleTimelineKeyByMessageIdRef.current.get(message.message_id);
+    if (existing) return existing;
+    const key = `console:${message.sequence}:${message.message_id}`;
+    consoleTimelineKeyByMessageIdRef.current.set(message.message_id, key);
+    return key;
+  }, []);
+  const registerConsoleTimelineMessage = useCallback(
+    (message: AgentConsoleMessage, aliasKey?: string): string => {
+      const key = aliasKey ?? consoleTimelineKey(message);
+      consoleTimelineKeyByMessageIdRef.current.set(message.message_id, key);
+      registerTimelineTurn(key);
+      return key;
+    },
+    [consoleTimelineKey, registerTimelineTurn],
+  );
+  const isInitialConsoleTimelineKey = useCallback(
+    (key: string): boolean => initialConsoleTimelineKeysRef.current.has(key),
+    [],
+  );
+  const appendWorkstationActionTurns = useCallback(
+    (newTurns: readonly WorkstationActionTurn[]): void => {
+      for (const turn of newTurns) {
+        registerTimelineTurn(`workstation-action:${turn.id}`);
+      }
+      setWorkstationActionTurns((turns) => {
+        const workspaceTurns =
+          workstationActionTurnsWorkspaceKeyRef.current ===
+          failedWorkstationActionContinuityKey
+            ? turns
+            : [];
+        workstationActionTurnsWorkspaceKeyRef.current =
+          failedWorkstationActionContinuityKey;
+        return [...workspaceTurns, ...newTurns];
+      });
+    },
+    [failedWorkstationActionContinuityKey, registerTimelineTurn],
+  );
+  const appendWorkstationActionTurn = useCallback((turn: WorkstationActionTurn) => {
+    appendWorkstationActionTurns([turn]);
+  }, [appendWorkstationActionTurns]);
+  const registerCommandTimelineTurn = useCallback(
+    (commandId: string) => {
+      registerTimelineTurn(`command:${commandId}`);
+    },
+    [registerTimelineTurn],
+  );
   const beginVisibleWorkstationAction = useCallback(
     (correlationId: string, label: string, targetId: string) => {
       setWorkstationActionState({
@@ -195,8 +576,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         state: "pending",
         message: `Waiting for Orchestrator acknowledgement: ${label}.`,
       });
-      setWorkstationActionTurns((turns) => [
-        ...turns,
+      appendWorkstationActionTurns([
         {
           id: `${correlationId}:intent`,
           content: `Workstation action: Mission Commander requested ${label}.`,
@@ -211,7 +591,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         },
       ]);
     },
-    [],
+    [appendWorkstationActionTurns],
   );
   const finishVisibleWorkstationAction = useCallback(
     (
@@ -237,8 +617,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         state,
         message: recovery,
       });
-      setWorkstationActionTurns((turns) => [
-        ...turns,
+      appendWorkstationActionTurns([
         {
           id: `${correlationId}:reaction:${result}`,
           content:
@@ -250,108 +629,402 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         },
       ]);
     },
-    [],
+    [appendWorkstationActionTurns],
   );
-  const workspacePath =
-    state !== "loading" && (state.kind === "ready" || state.kind === "empty")
-      ? state.snapshot.workspace_session.workspace_path
-      : "";
+  const hydratedFailedWorkstationActionKeyRef = useRef("");
+  const skipFailedWorkstationActionWriteRef = useRef(false);
+  useEffect(() => {
+    if (
+      !failedWorkstationActionContinuityKey ||
+      hydratedFailedWorkstationActionKeyRef.current === failedWorkstationActionContinuityKey
+    ) {
+      return;
+    }
+    const restored = readFailedWorkstationActionContinuity(
+      failedWorkstationActionContinuityKey,
+    );
+    skipFailedWorkstationActionWriteRef.current = true;
+    for (const turn of restored) {
+      registerTimelineTurn(`workstation-action:${turn.id}`);
+    }
+    setWorkstationActionTurns((current) => {
+      const sameWorkspace =
+        workstationActionTurnsWorkspaceKeyRef.current ===
+        failedWorkstationActionContinuityKey;
+      workstationActionTurnsWorkspaceKeyRef.current =
+        failedWorkstationActionContinuityKey;
+      if (!sameWorkspace) return restored;
+      const merged = new Map(restored.map((turn) => [turn.id, turn]));
+      for (const turn of current) merged.set(turn.id, turn);
+      return [...merged.values()];
+    });
+    hydratedFailedWorkstationActionKeyRef.current = failedWorkstationActionContinuityKey;
+  }, [failedWorkstationActionContinuityKey, registerTimelineTurn]);
+  useEffect(() => {
+    if (
+      !failedWorkstationActionContinuityKey ||
+      hydratedFailedWorkstationActionKeyRef.current !== failedWorkstationActionContinuityKey
+    ) {
+      return;
+    }
+    if (skipFailedWorkstationActionWriteRef.current) {
+      skipFailedWorkstationActionWriteRef.current = false;
+      return;
+    }
+    writeFailedWorkstationActionContinuity(
+      failedWorkstationActionContinuityKey,
+      workstationActionTurns,
+    );
+  }, [failedWorkstationActionContinuityKey, workstationActionTurns]);
+  const controllerPreferenceKey = workspacePath
+    ? `alfredo:selected-controller:${/^\/mnt\/[a-z]\//i.test(workspacePath) ? workspacePath.toLowerCase() : workspacePath}`
+    : "";
   const shellTerminal = useShellTerminal(client, workspacePath, {
     onWorkstationActionTurn: appendWorkstationActionTurn,
+    onCommandTurnAvailable: registerCommandTimelineTurn,
   });
 
   useEffect(() => {
-    if (workspacePath && client.loadShellTerminal) void shellTerminal.load();
-  }, [client.loadShellTerminal, shellTerminal.load, workspacePath]);
+    if (!workspacePath) return;
+    void shellTerminal.load().finally(() => {
+      setStartupHydration((current) => ({ ...current, shell: true }));
+    });
+  }, [shellTerminal.load, workspacePath]);
 
   useEffect(() => {
     if (commandAuditOpen) void shellTerminal.load();
   }, [commandAuditOpen, shellTerminal.load]);
 
   const refreshWorkingContext = useCallback(async () => {
-    if (!client.loadWorkingContext) return false;
+    if (!client.loadWorkingContext) {
+      setWorkingContextLoadFailure("Working Context transport is unavailable.");
+      setStartupHydration((current) => ({ ...current, workingContext: true }));
+      return false;
+    }
     const result = await client.loadWorkingContext();
-    if (result.kind !== "working-context") return false;
+    if (result.kind !== "working-context") {
+      setWorkingContextLoadFailure(result.message);
+      setStartupHydration((current) => ({ ...current, workingContext: true }));
+      return false;
+    }
     setWorkingContext(result.projection);
+    setWorkingContextLoadFailure(null);
+    setStartupHydration((current) => ({ ...current, workingContext: true }));
     return true;
   }, [client]);
 
   const refreshReviewWorkspace = useCallback(async () => {
-    if (!client.loadReviewWorkspace) return false;
+    if (!client.loadReviewWorkspace) {
+      setReviewWorkspaceLoadFailure("Review Workspace transport is unavailable.");
+      return false;
+    }
     const result = await client.loadReviewWorkspace();
-    if (result.kind !== "review-workspace") return false;
+    if (result.kind !== "review-workspace") {
+      setReviewWorkspaceLoadFailure(result.message);
+      return false;
+    }
     setReviewWorkspace(result.projection);
+    setReviewWorkspaceLoadFailure(null);
     return true;
   }, [client]);
 
   const refreshWorkspaceQueue = useCallback(async () => {
-    if (!client.loadWorkspaceQueue) return false;
+    if (!client.loadWorkspaceQueue) {
+      setWorkspaceQueueLoadFailure("Workspace Queue transport is unavailable.");
+      setStartupHydration((current) => ({ ...current, workspaceQueue: true }));
+      return false;
+    }
     const result = await client.loadWorkspaceQueue();
-    if (result.kind !== "workspace-queue") return false;
+    if (result.kind !== "workspace-queue") {
+      setWorkspaceQueueLoadFailure(result.message);
+      setStartupHydration((current) => ({ ...current, workspaceQueue: true }));
+      return false;
+    }
     setWorkspaceQueue(result.projection);
+    setWorkspaceQueueLoadFailure(null);
+    setStartupHydration((current) => ({ ...current, workspaceQueue: true }));
     return true;
   }, [client]);
 
-  const refreshMissionDrafts = useCallback(async () => {
-    if (!client.loadMissionDrafts) return false;
+  const refreshMissionDrafts = useCallback(async (): Promise<boolean> => {
+    if (!client.loadMissionDrafts) {
+      setMissionDraftLoadFailure("Mission Draft transport is unavailable.");
+      return false;
+    }
     const result = await client.loadMissionDrafts();
-    if (result.kind !== "mission-drafts") return false;
+    if (result.kind !== "mission-drafts") {
+      setMissionDraftLoadFailure(result.message);
+      return false;
+    }
     setMissionDrafts(result.projection);
+    setMissionDraftLoadFailure(null);
     return true;
   }, [client]);
 
   const refreshActivityJournal = useCallback(
     async (filters: ActivityJournalFilters) => {
-      if (!client.loadActivityJournal) return false;
+      if (!client.loadActivityJournal) {
+        setActivityLoadFailure("Activity Journal transport is unavailable.");
+        setActivityStatus("rejected");
+        return false;
+      }
       setActivityStatus("pending");
       const result = await client.loadActivityJournal(filters);
       if (result.kind !== "activity-journal") {
+        setActivityLoadFailure(result.message);
         setActivityStatus("rejected");
         return false;
       }
       setActivityJournal(result.projection);
+      setActivityLoadFailure(null);
       setActivityStatus(null);
       return true;
     },
     [client],
   );
 
-  const connect = useCallback(() => {
-    setState("loading");
-    void (async () => {
-      if (client.loadLaunchContext) {
-        const contextResult = await client.loadLaunchContext();
-        if (contextResult.kind === "launch-context") {
-          setLaunchContext(contextResult.context);
-          if (
-            contextResult.context.phase === "selection-required" ||
-            contextResult.context.phase === "mission-choice-required"
-          ) {
-            setConnectionStatus("connected");
-            return;
-          }
-        }
-      }
-      const result = await client.loadSnapshot();
-      setState(result);
-      setConnectionStatus(result.kind === "ready" || result.kind === "empty" ? "connected" : "offline");
-    })();
-  }, [client]);
-
-  useEffect(connect, [connect]);
+  useEffect(() => {
+    workspaceStateRef.current = state;
+  }, [state]);
 
   useEffect(() => {
-    if (state === "loading") return;
-    if (!client.loadConsoleHistory) return;
-    void client.loadConsoleHistory().then((result) => {
-      if (result.kind === "history") setConsoleHistory(result.history.messages);
-    });
+    if (
+      state === "loading" ||
+      (state.kind !== "ready" && state.kind !== "empty") ||
+      runnerClaimMeasurementsRef.current.size === 0
+    ) {
+      return;
+    }
+    for (const [identity, pending] of runnerClaimMeasurementsRef.current) {
+      const mission = pending.missionId
+        ? state.snapshot.missions?.find((candidate) => candidate.id === pending.missionId)
+        : state.snapshot.missions?.find((candidate) =>
+            candidate.sessions.some(
+              (session) => session.session_id === pending.sessionId,
+            ),
+          );
+      const session = mission?.sessions.find(
+        (candidate) => candidate.session_id === pending.sessionId,
+      );
+      if (
+        !session ||
+        session.status.toLowerCase() === "queued" ||
+        !session.runner_started_at
+      ) {
+        continue;
+      }
+      runnerClaimMeasurementsRef.current.delete(identity);
+      void afterTwoAnimationFrames().then(() =>
+        markFrontendPerformance(client, "R6", "end", {
+          outcome: "pass",
+          mission_id: mission?.id ?? pending.missionId,
+          session_id: pending.sessionId,
+          rendered_status: session.status,
+          runner_started_at: session.runner_started_at,
+        }),
+      );
+    }
   }, [client, state]);
 
   useEffect(() => {
-    if (state === "loading") return;
+    if (bootPaintMarkedRef.current) return;
+    bootPaintMarkedRef.current = true;
+    void afterTwoAnimationFrames().then(() =>
+      markFrontendPerformance(client, "S3", "end", { outcome: "pass" }),
+    );
+  }, [client]);
+
+  useEffect(() => {
+    if (
+      usablePaintMarkedRef.current ||
+      state === "loading" ||
+      (state.kind !== "ready" && state.kind !== "empty")
+    ) {
+      return;
+    }
+    usablePaintMarkedRef.current = true;
+    const snapshot = state.snapshot;
+    void (async () => {
+      await afterTwoAnimationFrames();
+      const detail = {
+        outcome: "pass",
+        workspace_session_id: snapshot.workspace_session.id,
+        active_mission_id: snapshot.active_mission?.id ?? "",
+      };
+      await markFrontendPerformance(client, "S8", "end", detail);
+      await markFrontendPerformance(client, "S9", "start", detail);
+      setUsablePaintComplete(true);
+    })();
+  }, [client, state]);
+
+  useEffect(() => {
+    if (
+      hydratedPaintMarkedRef.current ||
+      !usablePaintComplete ||
+      !Object.values(startupHydration).every(Boolean) ||
+      state === "loading" ||
+      (state.kind !== "ready" && state.kind !== "empty")
+    ) {
+      return;
+    }
+    hydratedPaintMarkedRef.current = true;
+    const snapshot = state.snapshot;
+    void afterTwoAnimationFrames().then(() =>
+      markFrontendPerformance(client, "S9", "end", {
+        outcome: "pass",
+        workspace_session_id: snapshot.workspace_session.id,
+        active_mission_id: snapshot.active_mission?.id ?? "",
+        hydration: startupHydration,
+      }),
+    );
+  }, [client, startupHydration, state, usablePaintComplete]);
+
+  const refreshLaunchContext = useCallback((): Promise<AlfredoLaunchContext | null> => {
+    if (launchContextLoadInFlightRef.current) return launchContextLoadInFlightRef.current;
+    if (!client.loadLaunchContext) return Promise.resolve(null);
+    const request = (async (): Promise<AlfredoLaunchContext | null> => {
+      const result = await client.loadLaunchContext!();
+      if (result.kind !== "launch-context") return null;
+      setLaunchContext(result.context);
+      return result.context;
+    })();
+    launchContextLoadInFlightRef.current = request;
+    void request.finally(() => {
+      if (launchContextLoadInFlightRef.current === request) {
+        launchContextLoadInFlightRef.current = null;
+      }
+    });
+    return request;
+  }, [client]);
+
+  const connect = useCallback((contextOverride?: AlfredoLaunchContext) => {
+    setState("loading");
+    void (async () => {
+      const context = contextOverride ?? (client.loadLaunchContext ? await refreshLaunchContext() : null);
+      if (
+        context &&
+        (context.phase === "selection-required" ||
+          context.phase === "mission-choice-required")
+      ) {
+        setConnectionStatus("connected");
+        return;
+      }
+      await markNativePerformance(client, "S4", "start", { outcome: "pass" });
+      const result = await client.loadSnapshot();
+      if (
+        !usablePaintStartedRef.current &&
+        (result.kind === "ready" || result.kind === "empty")
+      ) {
+        usablePaintStartedRef.current = true;
+        void markFrontendPerformance(client, "S8", "start", {
+          outcome: "pass",
+          workspace_session_id: result.snapshot.workspace_session.id,
+          active_mission_id: result.snapshot.active_mission?.id ?? "",
+        });
+      }
+      setState(result);
+      setConnectionStatus(
+        result.kind === "ready" || result.kind === "empty" ? "connected" : "offline",
+      );
+    })();
+  }, [client, refreshLaunchContext]);
+
+  useEffect(connect, [connect]);
+
+  const refreshCapabilities = useCallback((): Promise<AgentCapabilityCatalog | null> => {
+    if (capabilityLoadInFlightRef.current) return capabilityLoadInFlightRef.current;
+    const request = (async (): Promise<AgentCapabilityCatalog | null> => {
+      if (!client.loadAgentCapabilities) {
+        setCapabilityLoadFailure("Capability catalog transport is unavailable.");
+        setStartupHydration((current) => ({ ...current, capabilities: true }));
+        return null;
+      }
+      const result = await client.loadAgentCapabilities();
+      if (result.kind !== "capabilities") {
+        setCapabilityLoadFailure(result.message);
+        setStartupHydration((current) => ({ ...current, capabilities: true }));
+        return null;
+      }
+      setCapabilityCatalog(result.catalog);
+      setCapabilityLoadFailure(null);
+      setStartupHydration((current) => ({ ...current, capabilities: true }));
+      return result.catalog;
+    })();
+    capabilityLoadInFlightRef.current = request;
+    void request.finally(() => {
+      if (capabilityLoadInFlightRef.current === request) {
+        capabilityLoadInFlightRef.current = null;
+      }
+    });
+    return request;
+  }, [client]);
+
+  useEffect(() => {
+    void refreshCapabilities();
+  }, [refreshCapabilities]);
+
+  useEffect(() => {
+    if (!capabilityCatalog) return;
+    setSelectedControllerId((current) => {
+      const persisted = controllerPreferenceKey
+        ? window.localStorage.getItem(controllerPreferenceKey) ?? ""
+        : "";
+      const persistedController = eligibleControllerId(capabilityCatalog, persisted);
+      if (persistedController) return persistedController;
+      const launched = launchContext?.selected_agent ?? "";
+      return preferredEligibleControllerId(capabilityCatalog, [launched, current]);
+    });
+  }, [capabilityCatalog, controllerPreferenceKey, launchContext?.selected_agent]);
+
+  const selectController = useCallback((agentId: string) => {
+    setSelectedControllerId(agentId);
+    if (controllerPreferenceKey) {
+      window.localStorage.setItem(controllerPreferenceKey, agentId);
+    }
+  }, [controllerPreferenceKey]);
+
+  const effectiveControllerId = selectedControllerId || (
+    capabilityCatalog
+      ? eligibleControllerId(capabilityCatalog, capabilityCatalog.default_agent_id)
+      : ""
+  );
+
+  const refreshConsoleHistory = useCallback(async () => {
+    if (!client.loadConsoleHistory) {
+      setConsoleHistoryLoadFailure("Console history transport is unavailable.");
+      setStartupHydration((current) => ({ ...current, consoleHistory: true }));
+      return false;
+    }
+    const result = await client.loadConsoleHistory();
+    if (result.kind !== "history") {
+      setConsoleHistoryLoadFailure(result.message);
+      setStartupHydration((current) => ({ ...current, consoleHistory: true }));
+      return false;
+    }
+    const messages = [...result.history.messages].sort(
+      (left, right) => left.sequence - right.sequence,
+    );
+    for (const message of messages) {
+      const key = registerConsoleTimelineMessage(message);
+      initialConsoleTimelineKeysRef.current.add(key);
+    }
+    setConsoleHistory(messages);
+    setConsoleHistoryLoadFailure(null);
+    setStartupHydration((current) => ({ ...current, consoleHistory: true }));
+    return true;
+  }, [client, registerConsoleTimelineMessage]);
+
+  useEffect(() => {
+    void refreshConsoleHistory();
+  }, [refreshConsoleHistory]);
+
+  useEffect(() => {
     void refreshWorkingContext();
-  }, [refreshWorkingContext, state]);
+  }, [refreshWorkingContext]);
+
+  useEffect(() => {
+    if (workspacePath) void refreshWorkspaceQueue();
+  }, [refreshWorkspaceQueue, workspacePath]);
 
   useEffect(() => {
     if (
@@ -369,7 +1042,6 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       (state.kind === "ready" || state.kind === "empty") &&
       state.snapshot.operations_view === "workspace-queue"
     ) {
-      void refreshWorkspaceQueue();
       void refreshMissionDrafts();
     }
   }, [refreshMissionDrafts, refreshWorkspaceQueue, state]);
@@ -395,33 +1067,76 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   }, [refreshActivityJournal, state]);
 
   useEffect(() => {
-    if (
-      connectionStatus !== "connected" ||
-      state === "loading" ||
-      (state.kind !== "ready" && state.kind !== "empty") ||
-      !client.loadUpdates
-    ) {
-      return;
-    }
-    const current = state;
-    const timer = window.setTimeout(() => {
-      void client.loadUpdates!(current.snapshot.revision).then((updates) => {
-        if (updates.kind !== "updates") {
-          setConnectionStatus("offline");
+    let cancelled = false;
+    let timer: number | undefined;
+
+    const schedule = () => {
+      if (!cancelled) timer = window.setTimeout(() => void poll(), syncIntervalMs);
+    };
+    const poll = async () => {
+      try {
+        const current = workspaceStateRef.current;
+        if (
+          current === "loading" ||
+          (current.kind !== "ready" && current.kind !== "empty")
+        ) {
+          schedule();
           return;
         }
-        const applied = applyWorkspaceUpdates(current.snapshot, updates.batch);
-        if (applied.kind !== "applied") {
+
+        if (client.loadUpdates) {
+          const updates = await client.loadUpdates(current.snapshot.revision);
+          if (cancelled) return;
+          if (updates.kind !== "updates") {
+            setConnectionStatus("offline");
+            if (updates.recoverable) schedule();
+            return;
+          }
+          const applied = applyWorkspaceUpdates(current.snapshot, updates.batch);
+          if (applied.kind !== "applied") {
+            setConnectionStatus("offline");
+            schedule();
+            return;
+          }
+          if (applied.snapshot !== current.snapshot) {
+            const next = { ...current, snapshot: applied.snapshot };
+            workspaceStateRef.current = next;
+            setState(next);
+            setConnectionStatus("connected");
+            schedule();
+            return;
+          }
+        }
+
+        // Agent lifecycle can change without a navigation revision. Keep the
+        // canonical probe, but retain the existing object when nothing changed
+        // so quiet ticks do not retrigger every secondary projection.
+        const canonical = await client.loadSnapshot();
+        if (cancelled) return;
+        if (canonical.kind !== "ready" && canonical.kind !== "empty") {
           setConnectionStatus("offline");
+          if (canonical.recoverable) schedule();
           return;
         }
-        if (applied.snapshot !== current.snapshot) {
-          setState({ ...current, snapshot: applied.snapshot });
+        if (!sameCanonicalWorkspace(current, canonical)) {
+          workspaceStateRef.current = canonical;
+          setState(canonical);
         }
-      });
-    }, syncIntervalMs);
-    return () => window.clearTimeout(timer);
-  }, [client, connectionStatus, state, syncIntervalMs]);
+        setConnectionStatus("connected");
+        schedule();
+      } catch {
+        if (cancelled) return;
+        setConnectionStatus("offline");
+        schedule();
+      }
+    };
+
+    schedule();
+    return () => {
+      cancelled = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+    };
+  }, [client, syncIntervalMs]);
 
   const reconnect = useCallback(() => {
     setConnectionStatus("reconnecting");
@@ -445,6 +1160,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         return;
       }
       const current = state;
+      setActionFailure(null);
       setActionStatus("pending");
       const result = await client.submitAction({
         correlation_id: `operations-view-${operationsView}-${current.snapshot.revision}`,
@@ -452,20 +1168,24 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         operations_view: operationsView,
       });
       if (result.kind !== "acknowledged") {
+        setActionFailure(result.message);
         setActionStatus(result.kind);
         return;
       }
       if (!client.loadUpdates) {
+        setActionFailure("Workspace update transport is unavailable after acknowledgement.");
         setActionStatus("rejected");
         return;
       }
       const updates = await client.loadUpdates(current.snapshot.revision);
       if (updates.kind !== "updates") {
+        setActionFailure(updates.message);
         setActionStatus("rejected");
         return;
       }
       const applied = applyWorkspaceUpdates(current.snapshot, updates.batch);
       if (applied.kind !== "applied") {
+        setActionFailure("Acknowledged workspace updates could not be applied in canonical order.");
         setActionStatus("rejected");
         return;
       }
@@ -495,6 +1215,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       }
       const current = state;
       if (current.snapshot.active_mission?.id === missionId) return;
+      setActionFailure(null);
       setActionStatus("pending");
       const result = await client.switchMission({
         correlation_id: `active-mission-${missionId}-${current.snapshot.revision}`,
@@ -502,11 +1223,13 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         active_mission_id: missionId,
       });
       if (result.kind !== "acknowledged") {
+        setActionFailure(result.message);
         setActionStatus(result.kind);
         return;
       }
       const reloaded = await client.loadSnapshot();
       if (reloaded.kind !== "ready" && reloaded.kind !== "empty") {
+        setActionFailure(reloaded.message);
         setActionStatus("rejected");
         setConnectionStatus("offline");
         return;
@@ -537,6 +1260,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       `Change Conversation Scope to ${targetScope.label}`,
       `scope:${targetScope.kind}:${targetScope.target_id}`,
     );
+    setActionFailure(null);
     setActionStatus("pending");
     const result = await client.changeScope({
       correlation_id: correlationId,
@@ -604,31 +1328,397 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
     ) {
       return;
     }
+    if (messageSubmissionInFlightRef.current) return;
+    messageSubmissionInFlightRef.current = true;
+    try {
     const scope = state.snapshot.conversation_scope;
-    setMessageStatus("pending");
+    const content = draft.trim();
+    setMessageFailure(null);
+    const optimisticMessageId = `console-pending-${Date.now()}`;
+    const optimisticSequence = consoleHistory.length + 1;
+    const optimisticTimelineKey = `console:${optimisticSequence}:${optimisticMessageId}`;
+    registerConsoleTimelineMessage(
+      {
+        message_id: optimisticMessageId,
+        sequence: optimisticSequence,
+        role: "user",
+        content,
+        scope,
+        outcome: "proposed",
+        source: "mission-commander",
+      },
+      optimisticTimelineKey,
+    );
+    setMessageStatus("saving");
+    setDraft("");
+    setConsoleHistory((messages) => [
+      ...messages,
+      {
+        message_id: optimisticMessageId,
+        sequence: optimisticSequence,
+        role: "user",
+        content,
+        scope,
+        outcome: "proposed",
+        source: "mission-commander",
+      },
+    ]);
     const result = await client.appendConsoleMessage({
       role: "user",
-      content: draft,
+      content,
       outcome: "proposed",
       source: "mission-commander",
       expected_revision: state.snapshot.revision,
       scope_kind: scope.kind,
       scope_target: scope.target_id,
       scope_label: scope.label,
+      scope_mission_id: scope.mission_id ?? undefined,
     });
     if (result.kind !== "message") {
+      setConsoleHistory((messages) =>
+        messages.filter((message) => message.message_id !== optimisticMessageId),
+      );
+      setDraft((current) => current || content);
+      setMessageFailure(result.message);
       setMessageStatus("rejected");
       return;
     }
-    setConsoleHistory((messages) => [...messages, result.message]);
-    setDraft("");
+    registerConsoleTimelineMessage(result.message, optimisticTimelineKey);
+    setConsoleHistory((messages) => [
+      ...messages.filter((message) => message.message_id !== optimisticMessageId),
+      result.message,
+    ]);
+    const slashCommand = parseSlashCommand(content);
+    if (slashCommand?.name === "/run" && slashCommand.argument) {
+      setMessageStatus(null);
+      await shellTerminal.submitCommand(slashCommand.argument);
+      await refreshWorkingContext();
+      return;
+    }
+    const delegateCodingTask = async (codingTask: CodingTaskIntent): Promise<void> => {
+      const taskCapabilityCatalog = capabilityCatalog ?? await refreshCapabilities();
+      if (!taskCapabilityCatalog) {
+        const message =
+          "Coding task delegation is waiting for the capability catalog. " +
+          "Retry the prompt after Alfredo reconnects to its agents.";
+        setMessageStatus(null);
+        setQueueStatus({ state: "rejected", message });
+        appendWorkstationActionTurns([
+          {
+            id: `capability-validation:${result.message.message_id}`,
+            content: message,
+            source: "orchestrator",
+            outcome: "rejected",
+          },
+        ]);
+        return;
+      }
+      const requestedSkill = codingTask.skillName?.replace(/^\$/, "") ?? null;
+      const installedSkill = requestedSkill
+        ? taskCapabilityCatalog.skills.find(
+            (skill) => skill.name.toLowerCase() === requestedSkill.toLowerCase(),
+          )
+        : null;
+      if (requestedSkill && !installedSkill) {
+        const validationMessage =
+          `Unknown skill ${requestedSkill}. Use /skills to choose an installed skill.`;
+        setMessageStatus(null);
+        setQueueStatus({ state: "rejected", message: validationMessage });
+        appendWorkstationActionTurns([
+          {
+            id: `skill-validation:${result.message.message_id}`,
+            content: validationMessage,
+            source: "orchestrator",
+            outcome: "rejected",
+          },
+        ]);
+        await refreshWorkingContext();
+        return;
+      }
+      const correlationId = `chat-task-${result.message.message_id}-${state.snapshot.revision}`;
+      const actionLabel = codingTask.skillName
+        ? `Propose coding task with skill ${codingTask.skillName}: ${codingTask.request}`
+        : `Propose coding task: ${codingTask.request}`;
+      beginVisibleWorkstationAction(correlationId, actionLabel, result.message.message_id);
+      setMessageStatus(null);
+      setQueueStatus({ state: "pending", message: "Coding task proposal pending approval" });
+      const worker = taskCapabilityCatalog.agents.find(
+        isEligibleWorkerCapability,
+      );
+      if (!client.submitAdHocDelegationProposal || !worker) {
+        const message = client.submitAdHocDelegationProposal
+          ? "No available ungated assignable local worker can accept this coding task."
+          : "The Orchestrator proposal boundary is unavailable for this coding task.";
+        setQueueStatus({ state: "rejected", message });
+        finishVisibleWorkstationAction(
+          correlationId,
+          result.message.message_id,
+          "rejected",
+          message,
+        );
+        await refreshWorkingContext();
+        return;
+      }
+      const proposalRequest: AdHocDelegationProposalRequest = {
+        correlation_id: correlationId,
+        expected_revision: state.snapshot.revision,
+        source: "agent-console",
+        scope_kind: scope.kind,
+        scope_target: scope.target_id,
+        scope_label: scope.label,
+        mission_id: scope.mission_id ?? state.snapshot.active_mission?.id,
+        acceptance_criteria: codingTask.acceptanceCriteria,
+        allowed_paths: [state.snapshot.workspace_session.workspace_path],
+        command_policy: {},
+        proposed_agent: worker.id,
+        originating_message_id: result.message.message_id,
+      };
+      const proposal = await client.submitAdHocDelegationProposal(proposalRequest);
+      if (proposal.kind !== "acknowledged") {
+        setQueueStatus({ state: proposal.kind, message: proposal.message });
+        finishVisibleWorkstationAction(
+          correlationId,
+          result.message.message_id,
+          proposal.kind,
+          proposal.message,
+        );
+        return;
+      }
+      setQueueStatus({
+        state: "acknowledged",
+        message: proposal.acknowledgement.effect_summary,
+      });
+      finishVisibleWorkstationAction(
+        correlationId,
+        result.message.message_id,
+        "acknowledged",
+        proposal.acknowledgement.effect_summary,
+      );
+      if (
+        !client.loadWorkspaceQueue ||
+        !client.submitWorkspaceQueueDecision ||
+        !client.runWorkstationSession
+      ) {
+        await refreshWorkspaceQueue();
+        await refreshWorkingContext();
+        return;
+      }
+      const queueResult = await client.loadWorkspaceQueue();
+      if (queueResult.kind !== "workspace-queue") {
+        const message =
+          `Automatic approval paused because the canonical Workspace Queue could not be loaded: ` +
+          `${queueResult.message} Review the pending proposal and retry.`;
+        setQueueStatus({ state: "rejected", message });
+        appendWorkstationActionTurns([
+          {
+            id: `${correlationId}:auto-approval:queue-load-failed`,
+            content: message,
+            source: "orchestrator",
+            outcome: "rejected",
+          },
+        ]);
+        await refreshWorkingContext();
+        return;
+      }
+      setWorkspaceQueue(queueResult.projection);
+      const queueItem = queueResult.projection.items.find(
+        (item) => item.item_id === proposal.acknowledgement.item_id,
+      );
+      if (
+        queueResult.projection.revision !== proposal.acknowledgement.revision ||
+        !queueItem ||
+        !isExactAdHocDelegationBoundary(queueItem, proposalRequest, content)
+      ) {
+        const message =
+          "Automatic approval paused because the canonical proposal no longer exactly matches " +
+          "the authorized path, command policy, scope, agent, and acceptance criteria. " +
+          "Review the pending Workspace Queue item manually.";
+        setQueueStatus({ state: "rejected", message });
+        appendWorkstationActionTurns([
+          {
+            id: `${correlationId}:auto-approval:boundary-mismatch`,
+            content: message,
+            source: "orchestrator",
+            outcome: "rejected",
+          },
+        ]);
+        await refreshWorkingContext();
+        return;
+      }
+      const approvalCorrelationId =
+        `chat-task-approve-${result.message.message_id}-${queueItem.item_id}-${proposal.acknowledgement.revision}`;
+      beginVisibleWorkstationAction(
+        approvalCorrelationId,
+        `Approve exactly bounded coding task ${queueItem.issue_id}`,
+        queueItem.item_id,
+      );
+      setQueueStatus({ state: "pending", message: "Exact coding task boundary approval pending" });
+      const decision = await client.submitWorkspaceQueueDecision({
+        correlation_id: approvalCorrelationId,
+        action_type: "workspace-queue-decision",
+        actor: "mission-commander",
+        expected_revision: proposal.acknowledgement.revision,
+        target: {
+          kind: "workspace-queue-item",
+          id: queueItem.item_id,
+        },
+        item_id: queueItem.item_id,
+        decision: "approve",
+        reason:
+          `Mission Commander explicitly authorized this bounded coding task in Agent Console message ` +
+          `${result.message.message_id}.`,
+      });
+      if (decision.kind !== "acknowledged") {
+        setQueueStatus({ state: decision.kind, message: decision.message });
+        finishVisibleWorkstationAction(
+          approvalCorrelationId,
+          queueItem.item_id,
+          decision.kind,
+          decision.message,
+        );
+        await refreshWorkingContext();
+        return;
+      }
+      setQueueStatus({
+        state: "acknowledged",
+        message: decision.acknowledgement.effect_summary,
+      });
+      finishVisibleWorkstationAction(
+        approvalCorrelationId,
+        queueItem.item_id,
+        "acknowledged",
+        decision.acknowledgement.effect_summary,
+      );
+      if (decision.acknowledgement.session_id) {
+        startQueuedSessionRef.current(
+          decision.acknowledgement.session_id,
+          queueItem.mission_id,
+        );
+      }
+      await refreshWorkspaceQueue();
+      await refreshWorkingContext();
+      return;
+    };
+    const codingTask = parseCodingTaskIntent(content);
+    if (codingTask) {
+      await delegateCodingTask(codingTask);
+      return;
+    }
+    if (client.generateConsoleResponse) {
+      setMessageStatus("responding");
+      let responseControllerId = "";
+      if (!slashCommand) {
+        const responseCapabilityCatalog = capabilityCatalog ?? (
+          client.loadAgentCapabilities ? await refreshCapabilities() : null
+        );
+        if (client.loadAgentCapabilities && !responseCapabilityCatalog) {
+          const message =
+            "Controller response paused because the capability catalog is unavailable. " +
+            "Retry after Alfredo reconnects to its local agent registry.";
+          setMessageStatus(null);
+          appendWorkstationActionTurns([
+            {
+              id: `controller-capability:${result.message.message_id}`,
+              content: message,
+              source: "orchestrator",
+              outcome: "rejected",
+            },
+          ]);
+          await refreshWorkingContext();
+          return;
+        }
+        const responseLaunchContext = launchContext ?? (
+          client.loadLaunchContext ? await refreshLaunchContext() : null
+        );
+        const persistedController = controllerPreferenceKey
+          ? window.localStorage.getItem(controllerPreferenceKey) ?? ""
+          : "";
+        responseControllerId = responseCapabilityCatalog
+          ? preferredEligibleControllerId(responseCapabilityCatalog, [
+              persistedController,
+              responseLaunchContext?.selected_agent ?? "",
+              selectedControllerId,
+            ])
+          : effectiveControllerId;
+        if (responseCapabilityCatalog && !responseControllerId) {
+          const message =
+            "Controller response paused because no validated available local controller is " +
+            "present in the capability catalog. Retry after the agent registry is available.";
+          setMessageStatus(null);
+          appendWorkstationActionTurns([
+            {
+              id: `controller-validation:${result.message.message_id}`,
+              content: message,
+              source: "orchestrator",
+              outcome: "rejected",
+            },
+          ]);
+          await refreshWorkingContext();
+          return;
+        }
+      }
+      const response = await client.generateConsoleResponse({
+        expected_revision: state.snapshot.revision,
+        message_id: result.message.message_id,
+        scope_kind: scope.kind,
+        scope_target: scope.target_id,
+        scope_label: scope.label,
+        scope_mission_id: scope.mission_id ?? undefined,
+        agent_id: responseControllerId || undefined,
+      });
+      if (response.kind === "message") {
+        registerConsoleTimelineMessage(response.message);
+        setConsoleHistory((messages) => [...messages, response.message]);
+        if (response.route.intent === "coding-task") {
+          await delegateCodingTask({
+            request: response.route.task_request,
+            skillName: null,
+            acceptanceCriteria: response.route.acceptance_criteria,
+          });
+          return;
+        }
+      } else {
+        appendWorkstationActionTurns([
+          {
+            id: `agent-console-response:${Date.now()}`,
+            content: `Controller response failed: ${response.message}`,
+            source: "frontier-model",
+            outcome: "rejected",
+          },
+        ]);
+      }
+    }
     setMessageStatus(null);
     await refreshWorkingContext();
-  }, [client, draft, refreshWorkingContext, state]);
+    } finally {
+      messageSubmissionInFlightRef.current = false;
+    }
+  }, [
+    appendWorkstationActionTurns,
+    beginVisibleWorkstationAction,
+    capabilityCatalog?.agents,
+    capabilityCatalog?.skills,
+    client,
+    consoleHistory.length,
+    draft,
+    effectiveControllerId,
+    finishVisibleWorkstationAction,
+    launchContext,
+    controllerPreferenceKey,
+    refreshCapabilities,
+    refreshLaunchContext,
+    refreshWorkingContext,
+    refreshWorkspaceQueue,
+    registerConsoleTimelineMessage,
+    selectedControllerId,
+    shellTerminal,
+    state,
+  ]);
 
   const curateWorkingContext = useCallback(
     async (sourceId: string, disposition: "included" | "pinned" | "excluded") => {
       if (!workingContext || !client.curateWorkingContext) return;
+      setContextActionFailure(null);
       setContextStatus("pending");
       const result = await client.curateWorkingContext({
         source_id: sourceId,
@@ -636,17 +1726,28 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         expected_context_revision: workingContext.revision,
       });
       if (result.kind !== "acknowledged") {
+        setContextActionFailure(result.message);
         setContextStatus(result.kind);
         return;
       }
       const reloaded = await refreshWorkingContext();
+      if (!reloaded) {
+        setContextActionFailure(
+          "Context curation was acknowledged, but the refreshed Working Context could not be loaded.",
+        );
+      }
       setContextStatus(reloaded ? "acknowledged" : "rejected");
     },
     [client, refreshWorkingContext, workingContext],
   );
 
   const submitReviewDecision = useCallback(
-    async (sessionId: string, decision: ReviewDecision, reason: string) => {
+    async (
+      sessionId: string,
+      decision: ReviewDecision,
+      reason: string,
+      missionId?: string,
+    ) => {
       if (
         state === "loading" ||
         (state.kind !== "ready" && state.kind !== "empty") ||
@@ -655,11 +1756,13 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         return;
       }
       const current = state;
-      const correlationId = `review-${decision}-${sessionId}-${current.snapshot.revision}`;
+      const targetMissionId = missionId ?? current.snapshot.active_mission?.id ?? "";
+      const actionStateId = missionSessionIdentity(targetMissionId, sessionId);
+      const correlationId = `review-${decision}-${targetMissionId}-${sessionId}-${current.snapshot.revision}`;
       beginVisibleWorkstationAction(
         correlationId,
         `${reviewDecisionLabel(decision)} for ${sessionId}`,
-        sessionId,
+        actionStateId,
       );
       setReviewStatus({ state: "pending", message: "Review decision pending" });
       const result = await client.submitReviewDecision({
@@ -671,13 +1774,14 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
           kind: "agent-session",
           id: sessionId,
         },
+        mission_id: targetMissionId || undefined,
         session_id: sessionId,
         decision,
         reason,
       });
       if (result.kind !== "acknowledged") {
         setReviewStatus({ state: result.kind, message: result.message });
-        finishVisibleWorkstationAction(correlationId, sessionId, result.kind, result.message);
+        finishVisibleWorkstationAction(correlationId, actionStateId, result.kind, result.message);
         return;
       }
       const reloaded = await client.loadSnapshot();
@@ -685,7 +1789,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         setReviewStatus({ state: "rejected", message: "Review acknowledged but reload failed" });
         finishVisibleWorkstationAction(
           correlationId,
-          sessionId,
+          actionStateId,
           "failed",
           "Review acknowledged but canonical snapshot reload failed.",
         );
@@ -700,7 +1804,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       });
       finishVisibleWorkstationAction(
         correlationId,
-        sessionId,
+        actionStateId,
         "acknowledged",
         result.acknowledgement.effect_summary,
       );
@@ -712,6 +1816,133 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   useEffect(() => {
     if (workstationActionState) workstationActionStatusRef.current?.focus();
   }, [workstationActionState]);
+
+  const startQueuedSession = useCallback(
+    (sessionId: string, missionId = "") => {
+      if (!sessionId || !client.runWorkstationSession) return;
+      const sessionIdentity = missionSessionIdentity(missionId, sessionId);
+      if (
+        dispatchedSessionIdsRef.current.has(sessionIdentity) ||
+        queuedSessionRetryTimersRef.current.has(sessionIdentity)
+      ) return;
+      const priorAttempts = queuedSessionRunAttemptsRef.current.get(sessionIdentity) ?? 0;
+      if (priorAttempts >= 3) return;
+      if (
+        priorAttempts > 0 &&
+        !canonicalSessionIsQueued(workspaceStateRef.current, missionId, sessionId)
+      ) return;
+      const attempt = priorAttempts + 1;
+      queuedSessionRunAttemptsRef.current.set(sessionIdentity, attempt);
+      dispatchedSessionIdsRef.current.add(sessionIdentity);
+      appendWorkstationActionTurns([
+        {
+          id: `session-run:${sessionIdentity}:${attempt === 1 ? "queued" : `retry-${attempt}`}`,
+          content:
+            attempt === 1
+              ? `Local Agent ${sessionId} is queued and starting in the background.`
+              : `Retrying Local Agent ${sessionId} runner dispatch (attempt ${attempt} of 3).`,
+          source: "orchestrator",
+          outcome: "queued",
+        },
+      ]);
+
+      const reloadCanonical = async (): Promise<WorkspaceLoadResult | "loading"> => {
+        try {
+          const reloaded = await client.loadSnapshot();
+          if (reloaded.kind === "ready" || reloaded.kind === "empty") {
+            workspaceStateRef.current = reloaded;
+            setState(reloaded);
+            setConnectionStatus("connected");
+            return reloaded;
+          }
+          return workspaceStateRef.current;
+        } catch {
+          return workspaceStateRef.current;
+        }
+      };
+      const finishFailedAttempt = async (message: string, transportFailure: boolean) => {
+        appendWorkstationActionTurns([
+          {
+            id: `session-run:${sessionIdentity}:${transportFailure ? "transport-failed" : "failed"}-${attempt}`,
+            content: transportFailure
+              ? `Local Agent ${sessionId} could not start: ${message}`
+              : `Local Agent ${sessionId} failed to run: ${message}`,
+            source: "orchestrator",
+            outcome: "failed",
+          },
+        ]);
+        const canonical = await reloadCanonical();
+        if (
+          attempt < 3 &&
+          canonicalSessionIsQueued(canonical, missionId, sessionId)
+        ) {
+          const delayMs = 50 * 2 ** (attempt - 1);
+          const timer = window.setTimeout(() => {
+            queuedSessionRetryTimersRef.current.delete(sessionIdentity);
+            startQueuedSessionRef.current(sessionId, missionId);
+          }, delayMs);
+          queuedSessionRetryTimersRef.current.set(sessionIdentity, timer);
+        } else if (!canonicalSessionIsQueued(canonical, missionId, sessionId)) {
+          queuedSessionRunAttemptsRef.current.delete(sessionIdentity);
+        }
+        dispatchedSessionIdsRef.current.delete(sessionIdentity);
+      };
+
+      void (async () => {
+        try {
+          const result = await client.runWorkstationSession!({
+            session_id: sessionId,
+            mission_id: missionId || undefined,
+          });
+          if (result.kind === "session-failed") {
+            await finishFailedAttempt(result.message, false);
+            return;
+          }
+          queuedSessionRunAttemptsRef.current.delete(sessionIdentity);
+          appendWorkstationActionTurns([
+            {
+              id: `session-run:${sessionIdentity}:finished`,
+              content: `Local Agent ${sessionId} finished with status ${result.session.status}.`,
+              source: "orchestrator",
+              outcome: result.session.status,
+            },
+          ]);
+          await reloadCanonical();
+        } catch (error: unknown) {
+          await finishFailedAttempt(
+            error instanceof Error ? error.message : String(error),
+            true,
+          );
+        }
+      })();
+    },
+    [appendWorkstationActionTurns, client],
+  );
+
+  useEffect(() => {
+    startQueuedSessionRef.current = startQueuedSession;
+  }, [startQueuedSession]);
+
+  useEffect(
+    () => () => {
+      for (const timer of queuedSessionRetryTimersRef.current.values()) {
+        window.clearTimeout(timer);
+      }
+      queuedSessionRetryTimersRef.current.clear();
+    },
+    [],
+  );
+
+  useEffect(() => {
+    if (state === "loading" || (state.kind !== "ready" && state.kind !== "empty")) return;
+    for (const mission of state.snapshot.missions ?? []) {
+      for (const session of mission.sessions) {
+        if (session.status.toLowerCase() === "queued") {
+          startQueuedSession(session.session_id, mission.id);
+        }
+      }
+    }
+  }, [startQueuedSession, state]);
 
   const submitWorkspaceQueueDecision = useCallback(
     async (itemId: string, decision: WorkspaceQueueDecision, reason: string) => {
@@ -726,8 +1957,25 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       const item = workspaceQueue.items.find((candidate) => candidate.item_id === itemId);
       const actionLabel = `${decision[0].toUpperCase() + decision.slice(1)} ${item?.requested_action ?? itemId}`;
       const correlationId = `queue-${decision}-${itemId}-${workspaceQueue.revision}`;
+      void markFrontendPerformance(client, "R0", "start", {
+        outcome: "pass",
+        correlation_id: correlationId,
+        decision,
+      });
       setQueueStatus({ state: "pending", message: "Workspace Queue decision pending" });
       beginVisibleWorkstationAction(correlationId, actionLabel, itemId);
+      void afterTwoAnimationFrames().then(() =>
+        markFrontendPerformance(client, "R0", "end", {
+          outcome: "pass",
+          correlation_id: correlationId,
+          decision,
+        }),
+      );
+      await markNativePerformance(client, "R1", "start", {
+        outcome: "pass",
+        correlation_id: correlationId,
+        decision,
+      });
       const result = await client.submitWorkspaceQueueDecision({
         correlation_id: correlationId,
         action_type: "workspace-queue-decision",
@@ -741,12 +1989,41 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         decision,
         reason,
       });
+      await markNativePerformance(client, "R3", "end", {
+        outcome: result.kind === "acknowledged" ? "pass" : "fail",
+        correlation_id: correlationId,
+        decision,
+      });
       if (result.kind !== "acknowledged") {
         setQueueStatus({ state: result.kind, message: result.message });
         finishVisibleWorkstationAction(correlationId, itemId, result.kind, result.message);
         return;
       }
+      if (result.acknowledgement.session_id) {
+        const sessionId = result.acknowledgement.session_id;
+        const missionId = item?.mission_id ?? "";
+        const identity = missionSessionIdentity(missionId, sessionId);
+        runnerClaimMeasurementsRef.current.set(identity, { missionId, sessionId });
+        void markFrontendPerformance(client, "R6", "start", {
+          outcome: "pass",
+          correlation_id: correlationId,
+          mission_id: missionId,
+          session_id: sessionId,
+        });
+        startQueuedSession(result.acknowledgement.session_id, item?.mission_id ?? "");
+      }
+      void markFrontendPerformance(client, "R4", "start", {
+        outcome: "pass",
+        correlation_id: correlationId,
+        decision,
+      });
       const reloaded = await client.loadSnapshot();
+      void markFrontendPerformance(client, "R4", "end", {
+        outcome:
+          reloaded.kind === "ready" || reloaded.kind === "empty" ? "pass" : "fail",
+        correlation_id: correlationId,
+        decision,
+      });
       if (reloaded.kind !== "ready" && reloaded.kind !== "empty") {
         setQueueStatus({ state: "rejected", message: "Queue acknowledged but reload failed" });
         finishVisibleWorkstationAction(
@@ -758,6 +2035,12 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         setConnectionStatus("offline");
         return;
       }
+      void markFrontendPerformance(client, "R5", "start", {
+        outcome: "pass",
+        correlation_id: correlationId,
+        decision,
+        revision: reloaded.snapshot.revision,
+      });
       setState(reloaded);
       setConnectionStatus("connected");
       setQueueStatus({
@@ -770,9 +2053,18 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         "acknowledged",
         result.acknowledgement.effect_summary,
       );
+      void afterTwoAnimationFrames().then(() =>
+        markFrontendPerformance(client, "R5", "end", {
+          outcome: "pass",
+          correlation_id: correlationId,
+          decision,
+          revision: reloaded.snapshot.revision,
+          session_id: result.acknowledgement.session_id ?? "",
+        }),
+      );
       await refreshWorkspaceQueue();
     },
-    [beginVisibleWorkstationAction, client, finishVisibleWorkstationAction, refreshWorkspaceQueue, state, workspaceQueue],
+    [beginVisibleWorkstationAction, client, finishVisibleWorkstationAction, refreshWorkspaceQueue, startQueuedSession, state, workspaceQueue],
   );
 
   const submitWorkstationAction = useCallback(
@@ -791,7 +2083,14 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       const target = workstationActionRequestTarget(action);
       const targetId = workstationActionTargetId(action);
       if (!target || !targetId) return;
-      const correlationId = `workstation-${action.actionType}-${targetId}-${action.expectedRevision}`;
+      if (
+        action.actionType === "model-assignment-change" &&
+        !capabilityCatalog?.agents.some(
+          (agent) => agent.id === draft.agentId && isEligibleWorkerCapability(agent),
+        )
+      ) return;
+      const actionStateId = workstationActionStateId(action);
+      const correlationId = `workstation-${action.actionType}-${action.missionId ?? "workspace"}-${targetId}-${action.expectedRevision}`;
       const label = `${action.label} ${targetId}`;
       const request: WorkstationActionRequest = {
         correlation_id: correlationId,
@@ -799,6 +2098,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         actor: "mission-commander",
         expected_revision: action.expectedRevision,
         target,
+        mission_id: action.missionId,
         issue_id: action.issueId,
         session_id: action.sessionId,
         agent_id: draft.agentId.trim() || undefined,
@@ -806,17 +2106,26 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         allowed_paths: [],
         command_policy: {},
       };
-      beginVisibleWorkstationAction(correlationId, label, targetId);
+      beginVisibleWorkstationAction(correlationId, label, actionStateId);
       const result = await client.submitWorkstationAction(request);
       if (result.kind !== "acknowledged") {
-        finishVisibleWorkstationAction(correlationId, targetId, result.kind, result.message);
+        finishVisibleWorkstationAction(correlationId, actionStateId, result.kind, result.message);
         return;
+      }
+      if (
+        ["issue-launch", "issue-retry"].includes(action.actionType) &&
+        result.acknowledgement.session_id
+      ) {
+        startQueuedSession(
+          result.acknowledgement.session_id,
+          action.missionId ?? state.snapshot.active_mission?.id ?? "",
+        );
       }
       const reloaded = await client.loadSnapshot();
       if (reloaded.kind !== "ready" && reloaded.kind !== "empty") {
         finishVisibleWorkstationAction(
           correlationId,
-          targetId,
+          actionStateId,
           "failed",
           "Orchestrator acknowledged the action, but Alfredo could not reload canonical state.",
         );
@@ -827,12 +2136,19 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       setConnectionStatus("connected");
       finishVisibleWorkstationAction(
         correlationId,
-        targetId,
+        actionStateId,
         "acknowledged",
         result.acknowledgement.effect_summary,
       );
     },
-    [beginVisibleWorkstationAction, client, finishVisibleWorkstationAction, state],
+    [
+      beginVisibleWorkstationAction,
+      capabilityCatalog,
+      client,
+      finishVisibleWorkstationAction,
+      startQueuedSession,
+      state,
+    ],
   );
 
   const submitMissionDraftDecision = useCallback(
@@ -860,6 +2176,19 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         reason,
       });
       if (result.kind === "acknowledged") {
+        await refreshMissionDrafts();
+        const snapshotResult = await client.loadSnapshot();
+        if (snapshotResult.kind !== "ready" && snapshotResult.kind !== "empty") {
+          const message =
+            `Mission Draft was acknowledged, but canonical snapshot reload failed: ` +
+            `${snapshotResult.message} Retry the canonical workspace load.`;
+          setMissionDraftStatus({ state: "rejected", message });
+          finishVisibleWorkstationAction(correlationId, draftId, "failed", message);
+          setConnectionStatus("offline");
+          return;
+        }
+        setState(snapshotResult);
+        setConnectionStatus("connected");
         setMissionDraftStatus({
           state: "acknowledged",
           message: result.acknowledgement.effect_summary,
@@ -870,9 +2199,6 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
           "acknowledged",
           result.acknowledgement.effect_summary,
         );
-        await refreshMissionDrafts();
-        const snapshotResult = await client.loadSnapshot();
-        setState(snapshotResult);
         return;
       }
       setMissionDraftStatus({ state: result.kind, message: result.message });
@@ -911,6 +2237,24 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       };
       const result = await client.submitMissionDraftCreate(request);
       if (result.kind === "acknowledged") {
+        await refreshMissionDrafts();
+        const snapshotResult = await client.loadSnapshot();
+        if (snapshotResult.kind !== "ready" && snapshotResult.kind !== "empty") {
+          const message =
+            `Mission Draft was acknowledged, but canonical snapshot reload failed: ` +
+            `${snapshotResult.message} Retry the canonical workspace load.`;
+          setMissionDraftStatus({ state: "rejected", message });
+          finishVisibleWorkstationAction(
+            correlationId,
+            "mission-draft:create",
+            "failed",
+            message,
+          );
+          setConnectionStatus("offline");
+          return;
+        }
+        setState(snapshotResult);
+        setConnectionStatus("connected");
         setMissionDraftStatus({
           state: "acknowledged",
           message: result.acknowledgement.effect_summary,
@@ -921,9 +2265,6 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
           "acknowledged",
           result.acknowledgement.effect_summary,
         );
-        await refreshMissionDrafts();
-        const snapshotResult = await client.loadSnapshot();
-        setState(snapshotResult);
         return;
       }
       setMissionDraftStatus({ state: result.kind, message: result.message });
@@ -957,6 +2298,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         scope_kind: scope.kind,
         scope_target: scope.target_id,
         scope_label: scope.label,
+        mission_id: scope.mission_id ?? current.snapshot.active_mission?.id,
         acceptance_criteria: proposal.acceptanceCriteria,
         allowed_paths: proposal.allowedPaths,
         command_policy: proposal.commandPolicy,
@@ -1056,6 +2398,8 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         starting_location: result.acknowledgement.starting_location,
         coding_workspace: result.acknowledgement.coding_workspace,
         active_mission: null,
+        revision: 1,
+        known_missions: result.acknowledgement.known_missions ?? [],
         phase: "mission-choice-required",
       });
       setCodingWorkspaceStatus({
@@ -1066,6 +2410,97 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
     [client, codingWorkspacePath, launchContext],
   );
 
+  const chooseMission = useCallback(
+    async (choice: "resume" | "new", option: MissionChoiceOption | null) => {
+      if (
+        !launchContext ||
+        launchContext.phase !== "mission-choice-required" ||
+        !client.chooseMission ||
+        !launchContext.coding_workspace
+      ) {
+        setMissionChoiceStatus({
+          state: "rejected",
+          message: "Mission choice transport is unavailable until a Coding Workspace is bound.",
+        });
+        return;
+      }
+      const title = choice === "new" ? missionTitle.trim() : "";
+      const missionId =
+        choice === "resume"
+          ? option?.id ?? ""
+          : missionIdFromTitle(title);
+      if (!missionId || (choice === "new" && !title)) {
+        setMissionChoiceStatus({
+          state: "rejected",
+          message: "Enter a Mission title before starting a new Mission.",
+        });
+        return;
+      }
+      const expectedRevision = launchContext.revision ?? 1;
+      const pending = pendingMissionChoiceRef.current;
+      const request =
+        pending &&
+        pending.expected_revision === expectedRevision &&
+        pending.choice === choice &&
+        pending.mission_id === missionId &&
+        (pending.mission_title ?? "") === title
+          ? pending
+          : {
+              correlation_id:
+                `mission-choice-${Date.now()}-${nextMissionChoiceIdRef.current++}`,
+              expected_revision: expectedRevision,
+              choice,
+              mission_id: missionId,
+              mission_title: title,
+            };
+      pendingMissionChoiceRef.current = request;
+      setMissionChoiceStatus({
+        state: "pending",
+        message: choice === "resume" ? "Resuming Mission…" : "Starting new Mission…",
+      });
+      const result = await client.chooseMission(request);
+      if (result.kind !== "acknowledged") {
+        if (!result.recoverable) pendingMissionChoiceRef.current = null;
+        setMissionChoiceStatus({
+          state: "rejected",
+          message: `${result.code}: ${result.message}`,
+        });
+        return;
+      }
+      const acknowledgement = result.acknowledgement;
+      if (
+        acknowledgement.schema_version !== 1 ||
+        acknowledgement.outcome !== "acknowledged" ||
+        acknowledgement.correlation_id !== request.correlation_id ||
+        acknowledgement.coding_workspace !== launchContext.coding_workspace ||
+        acknowledgement.choice !== choice ||
+        !acknowledgement.active_mission
+      ) {
+        setMissionChoiceStatus({
+          state: "rejected",
+          message:
+            "invalid-mission-acknowledgement: The Orchestrator acknowledgement did not match the requested Mission.",
+        });
+        return;
+      }
+      pendingMissionChoiceRef.current = null;
+      const nextContext: AlfredoLaunchContext = {
+        ...launchContext,
+        active_mission: acknowledgement.active_mission,
+        revision: acknowledgement.revision,
+        known_missions: acknowledgement.missions,
+        phase: "workspace-ready",
+      };
+      setLaunchContext(nextContext);
+      setMissionChoiceStatus({
+        state: "acknowledged",
+        message: acknowledgement.message,
+      });
+      connect(nextContext);
+    },
+    [client, connect, launchContext, missionTitle],
+  );
+
   if (launchContext?.phase === "selection-required") {
     return (
       <CodingWorkspaceGate
@@ -1074,6 +2509,10 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         status={codingWorkspaceStatus}
         onWorkspacePathChange={setCodingWorkspacePath}
         onSelect={selectCodingWorkspace}
+        missionStatus={null}
+        missionTitle={missionTitle}
+        onMissionTitleChange={setMissionTitle}
+        onChooseMission={chooseMission}
       />
     );
   }
@@ -1086,9 +2525,14 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         status={codingWorkspaceStatus}
         onWorkspacePathChange={setCodingWorkspacePath}
         onSelect={selectCodingWorkspace}
+        missionStatus={missionChoiceStatus}
+        missionTitle={missionTitle}
+        onMissionTitleChange={setMissionTitle}
+        onChooseMission={chooseMission}
       />
     );
   }
+
   if (state === "loading") {
     return (
       <div className="boot-screen" role="status" aria-live="polite">
@@ -1104,21 +2548,25 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       <div className="boot-screen boot-screen--error" role="alert">
         <p>Alfredo workstation unavailable</p>
         <small>{state.message}</small>
-        {state.recoverable ? <button onClick={connect}>Retry connection</button> : null}
+        {state.recoverable ? <button onClick={() => connect()}>Retry connection</button> : null}
       </div>
     );
   }
 
   return (
     <CommandDeck
+      client={client}
       snapshot={state.snapshot}
       empty={state.kind === "empty"}
       actionStatus={actionStatus}
+      actionFailure={actionFailure}
       onSelectView={submitView}
       onSwitchMission={submitMissionSwitch}
       connectionStatus={connectionStatus}
       onReconnect={reconnect}
       consoleHistory={consoleHistory}
+      consoleHistoryLoadFailure={consoleHistoryLoadFailure}
+      onConsoleHistoryRetry={() => void refreshConsoleHistory()}
       draft={draft}
       onDraftChange={setDraft}
       scopeDraft={scopeDraft}
@@ -1127,10 +2575,16 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       scopeActionAvailable={Boolean(client.changeScope && client.loadUpdates)}
       onSend={submitMessage}
       messageStatus={messageStatus}
+      messageFailure={messageFailure}
       workingContext={workingContext}
+      workingContextLoadFailure={workingContextLoadFailure}
+      onWorkingContextRetry={() => void refreshWorkingContext()}
       contextStatus={contextStatus}
+      contextActionFailure={contextActionFailure}
       onCurateContext={curateWorkingContext}
       reviewWorkspace={reviewWorkspace}
+      reviewWorkspaceLoadFailure={reviewWorkspaceLoadFailure}
+      onReviewWorkspaceRetry={() => void refreshReviewWorkspace()}
       reviewStatus={reviewStatus}
       reviewReasons={reviewReasons}
       onReviewReasonChange={(sessionId, reason) =>
@@ -1138,12 +2592,17 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       }
       onReviewDecision={submitReviewDecision}
       workspaceQueue={workspaceQueue}
+      workspaceQueueLoadFailure={workspaceQueueLoadFailure}
+      onWorkspaceQueueRetry={() => void refreshWorkspaceQueue()}
       missionDrafts={missionDrafts}
+      missionDraftLoadFailure={missionDraftLoadFailure}
+      onMissionDraftRetry={() => void refreshMissionDrafts()}
       missionDraftStatus={missionDraftStatus}
       missionDraftReasons={missionDraftReasons}
       activityJournal={activityJournal}
       activityFilters={activityFilters}
       activityStatus={activityStatus}
+      activityLoadFailure={activityLoadFailure}
       onActivityFilterChange={setActivityFilters}
       onActivityRefresh={() => void refreshActivityJournal(activityFilters)}
       queueStatus={queueStatus}
@@ -1171,6 +2630,14 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       onCommandAuditOpenChange={setCommandAuditOpen}
       shellTerminal={shellTerminal}
       launchContext={launchContext}
+      capabilityCatalog={capabilityCatalog}
+      capabilityLoadFailure={capabilityLoadFailure}
+      onCapabilityRetry={() => void refreshCapabilities()}
+      selectedControllerId={effectiveControllerId}
+      onControllerChange={selectController}
+      consoleTimelineKey={consoleTimelineKey}
+      isInitialConsoleTimelineKey={isInitialConsoleTimelineKey}
+      timelineOrderForKey={registerTimelineTurn}
     />
   );
 }
@@ -1181,6 +2648,10 @@ function CodingWorkspaceGate({
   status,
   onWorkspacePathChange,
   onSelect,
+  missionStatus,
+  missionTitle,
+  onMissionTitleChange,
+  onChooseMission,
 }: {
   launchContext: AlfredoLaunchContext;
   workspacePath: string;
@@ -1190,6 +2661,13 @@ function CodingWorkspaceGate({
   } | null;
   onWorkspacePathChange: (path: string) => void;
   onSelect: (selectionMode: "existing" | "create") => void;
+  missionStatus: {
+    readonly state: "pending" | "acknowledged" | "rejected";
+    readonly message: string;
+  } | null;
+  missionTitle: string;
+  onMissionTitleChange: (title: string) => void;
+  onChooseMission: (choice: "resume" | "new", option: MissionChoiceOption | null) => void;
 }) {
   const selectionRequired = launchContext.phase === "selection-required";
   return (
@@ -1246,6 +2724,15 @@ function CodingWorkspaceGate({
                     {status.message}
                   </p>
                 ) : null}
+                {!selectionRequired && missionStatus ? (
+                  <p
+                    role={missionStatus.state === "rejected" ? "alert" : "status"}
+                    aria-live="polite"
+                    className={`status status--${missionStatus.state}`}
+                  >
+                    {missionStatus.message}
+                  </p>
+                ) : null}
               </div>
             </div>
             {selectionRequired ? (
@@ -1276,20 +2763,59 @@ function CodingWorkspaceGate({
                   </button>
                 </div>
               </div>
-            ) : null}
+            ) : (
+              <div className="prompt-composer-dock" role="region" aria-label="Mission controls">
+                <div className="mission-choice-list">
+                  <p>
+                    Choose exactly one existing Mission to continue, or start a distinct new
+                    Mission. Mission-qualified work remains blocked until the acknowledgement.
+                  </p>
+                  {(launchContext.known_missions ?? []).map((mission) => (
+                    <button
+                      key={mission.id}
+                      type="button"
+                      disabled={missionStatus?.state === "pending"}
+                      onClick={() => onChooseMission("resume", mission)}
+                    >
+                      Resume Mission: {mission.title}
+                    </button>
+                  ))}
+                </div>
+                <label className="composer prompt-composer">
+                  <span>New Mission title</span>
+                  <input
+                    aria-label="New Mission title"
+                    value={missionTitle}
+                    disabled={missionStatus?.state === "pending"}
+                    onChange={(event) => onMissionTitleChange(event.target.value)}
+                  />
+                </label>
+                <div className="prompt-toolbar">
+                  <button
+                    type="button"
+                    disabled={!missionTitle.trim() || missionStatus?.state === "pending"}
+                    onClick={() => onChooseMission("new", null)}
+                  >
+                    Start New Mission
+                  </button>
+                </div>
+              </div>
+            )}
           </section>
         </main>
         <aside className="agent-workstations" aria-label="Mission Work">
           <div className="agent-workstations__heading">
             <div>
-              <span className="eyebrow">No Mission selected</span>
+              <span className="eyebrow">
+                {selectionRequired ? "No Mission selected" : "Mission choice required"}
+              </span>
               <h2>Mission Work</h2>
             </div>
           </div>
           <div className="mission-work-scroll">
             <p>
-              Mission-qualified work remains unavailable until a later acknowledged Mission
-              choice.
+              Mission-qualified work remains unavailable until an explicit Mission choice is
+              acknowledged.
             </p>
           </div>
         </aside>
@@ -1297,11 +2823,13 @@ function CodingWorkspaceGate({
     </div>
   );
 }
+
 interface WorkstationTranscriptTurn {
   readonly id: string;
   readonly content: string;
   readonly source: string;
   readonly outcome: string;
+  readonly causalOriginMessageId?: string;
 }
 
 interface CommandConsoleTurn {
@@ -1323,13 +2851,67 @@ interface CommandConsoleTurn {
   readonly stderr: string;
 }
 
+type PromptTimelineEntry =
+  | {
+      readonly kind: "console";
+      readonly key: string;
+      readonly order: number;
+      readonly canonicalSequence: number | null;
+      readonly message: AgentConsoleMessage;
+    }
+  | {
+      readonly kind: "response-pending";
+      readonly key: string;
+      readonly order: number;
+      readonly canonicalSequence: null;
+    }
+  | {
+      readonly kind: "workstation";
+      readonly key: string;
+      readonly order: number;
+      readonly canonicalSequence: number | null;
+      readonly turn: WorkstationTranscriptTurn;
+    }
+  | {
+      readonly kind: "command";
+      readonly key: string;
+      readonly order: number;
+      readonly canonicalSequence: null;
+      readonly turn: CommandConsoleTurn;
+    };
+
+function comparePromptTimelineEntries(
+  left: PromptTimelineEntry,
+  right: PromptTimelineEntry,
+): number {
+  if (left.canonicalSequence !== null && right.canonicalSequence !== null) {
+    return left.canonicalSequence - right.canonicalSequence;
+  }
+  if (left.canonicalSequence !== null) return -1;
+  if (right.canonicalSequence !== null) return 1;
+  return left.order - right.order || left.key.localeCompare(right.key);
+}
+
+function promptTimelineVersion(entry: PromptTimelineEntry): string {
+  if (entry.kind === "console") {
+    return `${entry.key}:${entry.message.outcome}:${entry.message.content}`;
+  }
+  if (entry.kind === "workstation") {
+    return `${entry.key}:${entry.turn.outcome}:${entry.turn.content}`;
+  }
+  if (entry.kind === "command") {
+    return `${entry.key}:${entry.turn.status}:${entry.turn.exitCode ?? "none"}:${entry.turn.summary}`;
+  }
+  return entry.key;
+}
+
 function buildWorkstationTranscriptTurns(
   snapshot: WorkspaceSnapshot,
 ): readonly WorkstationTranscriptTurn[] {
   const attentionTurns =
     snapshot.missions?.flatMap((mission) =>
       mission.attention.map((attention) => ({
-        id: `attention:${attention.attention_id}`,
+        id: `attention:${mission.id}:${attention.attention_id}`,
         content: `Workstation action pending: ${attention.label}.`,
         source: "orchestrator",
         outcome: "waiting-approval",
@@ -1338,13 +2920,102 @@ function buildWorkstationTranscriptTurns(
   const sessionTurns =
     snapshot.missions?.flatMap((mission) =>
       mission.sessions.map((session) => ({
-        id: `session:${session.session_id}`,
+        id: `session:${mission.id}:${session.session_id}`,
         content: `Workstation outcome: ${session.issue_id} is ${session.status} on ${session.assigned_agent}.`,
         source: session.assigned_agent,
         outcome: session.status,
       })),
     ) ?? [];
   return [...attentionTurns, ...sessionTurns];
+}
+
+function buildWorkspaceQueueTranscriptTurns(
+  snapshot: WorkspaceSnapshot,
+  workspaceQueue: WorkspaceQueueProjection | null,
+): readonly WorkstationTranscriptTurn[] {
+  if (!workspaceQueue) return [];
+  return workspaceQueue.items.flatMap((item) => {
+    if (item.item_type !== "ad-hoc-delegation") return [];
+    const causalOriginMessageId =
+      typeof item.proposed_changes.originating_message_id === "string" &&
+      item.proposed_changes.originating_message_id
+        ? item.proposed_changes.originating_message_id
+        : undefined;
+    const turns: WorkstationTranscriptTurn[] = [
+      {
+        id: `queue-proposal:${item.mission_id}:${item.item_id}`,
+        content:
+          item.source === "agent-console"
+            ? `Coding task proposal ${item.issue_id} was recorded from Agent Console.`
+            : `Coding task proposal ${item.issue_id} was recorded from ${item.source}.`,
+        source: "orchestrator",
+        outcome: "proposed",
+        causalOriginMessageId,
+      },
+    ];
+    if (item.status !== "pending") {
+      const decisionVerb =
+        item.status === "approved"
+          ? "approved"
+          : item.status === "rejected"
+            ? "rejected"
+            : "deferred";
+      turns.push({
+        id: `queue-decision:${item.mission_id}:${item.item_id}:${item.status}`,
+        content: `Mission Commander ${decisionVerb} coding task ${item.issue_id}.`,
+        source: "mission-commander",
+        outcome: item.status,
+        causalOriginMessageId,
+      });
+    }
+    if (item.status === "approved") {
+      const session = snapshot.missions
+        ?.find((mission) => mission.id === item.mission_id)
+        ?.sessions.find((candidate) => candidate.issue_id === item.issue_id);
+      if (session) {
+        turns.push({
+          id: `queue-session:${item.mission_id}:${item.item_id}:${session.session_id}`,
+          content:
+            `Orchestrator queued coding task ${item.issue_id} as ${session.session_id} ` +
+            `on ${session.assigned_agent}.`,
+          source: "orchestrator",
+          outcome: "queued",
+          causalOriginMessageId,
+        });
+      }
+    }
+    return turns;
+  });
+}
+
+function actionTurnHasDurableDelegationProjection(
+  turn: WorkstationActionTurn,
+  snapshot: WorkspaceSnapshot,
+  workspaceQueue: WorkspaceQueueProjection | null,
+): boolean {
+  if (!workspaceQueue) return false;
+  return workspaceQueue.items.some((item) => {
+    if (item.item_type !== "ad-hoc-delegation") return false;
+    const origin = item.proposed_changes.originating_message_id;
+    if (typeof origin === "string") {
+      const proposalPrefix = `chat-task-${origin}-`;
+      const approvalPrefix = `chat-task-approve-${origin}-${item.item_id}-`;
+      if (
+        (turn.id.startsWith(proposalPrefix) || turn.id.startsWith(approvalPrefix)) &&
+        (turn.id.endsWith(":intent") ||
+          turn.id.endsWith(":reaction:pending") ||
+          turn.id.endsWith(":reaction:acknowledged"))
+      ) {
+        return true;
+      }
+    }
+    const session = snapshot.missions
+      ?.find((mission) => mission.id === item.mission_id)
+      ?.sessions.find((candidate) => candidate.issue_id === item.issue_id);
+    if (!session) return false;
+    const runPrefix = `session-run:${missionSessionIdentity(item.mission_id, session.session_id)}:`;
+    return turn.id === `${runPrefix}queued` || turn.id === `${runPrefix}finished`;
+  });
 }
 
 function buildCommandConsoleTurns(
@@ -1415,6 +3086,8 @@ function commandApprovalState(
     if (classification === "frontier-approvable") return "Waiting for Frontier Model approval";
     return "Policy check pending";
   }
+  if (status === "executing") return "Executing in the governed sandbox";
+  if (status === "outcome-unknown") return "Execution started; final outcome is unknown";
   if (status === "denied") return record?.decider ? `Denied by ${record.decider}` : "Denied";
   if (classification === "auto-allowed") return "Auto-allowed by command policy";
   return record?.approver ? `Approved by ${record.approver}` : "Approved by command policy";
@@ -1436,6 +3109,10 @@ function commandOutputSummary(
     return `Captured ${parts.join(" and ")}; inspect full output for terminal bytes.`;
   }
   if (status === "pending-approval") return "Command is waiting for approval before execution.";
+  if (status === "executing") return "Command is executing in the governed sandbox.";
+  if (status === "outcome-unknown") {
+    return "Execution started, but its final outcome was not durably recorded; inspect effects before continuing.";
+  }
   if (status === "completed") return `Completed${exitCode === null ? "" : ` with exit ${exitCode}`} and no output.`;
   if (status === "failed") return `Failed${exitCode === null ? "" : ` with exit ${exitCode}`} and no captured output.`;
   return "Command did not produce captured output.";
@@ -1480,14 +3157,18 @@ function isDoneStatus(status: string): boolean {
 }
 
 function CommandDeck({
+  client,
   snapshot,
   empty,
   actionStatus,
+  actionFailure,
   onSelectView,
   onSwitchMission,
   connectionStatus,
   onReconnect,
   consoleHistory,
+  consoleHistoryLoadFailure,
+  onConsoleHistoryRetry,
   draft,
   onDraftChange,
   scopeDraft,
@@ -1496,21 +3177,32 @@ function CommandDeck({
   scopeActionAvailable,
   onSend,
   messageStatus,
+  messageFailure,
   workingContext,
+  workingContextLoadFailure,
+  onWorkingContextRetry,
   contextStatus,
+  contextActionFailure,
   onCurateContext,
   reviewWorkspace,
+  reviewWorkspaceLoadFailure,
+  onReviewWorkspaceRetry,
   reviewStatus,
   reviewReasons,
   onReviewReasonChange,
   onReviewDecision,
   workspaceQueue,
+  workspaceQueueLoadFailure,
+  onWorkspaceQueueRetry,
   missionDrafts,
+  missionDraftLoadFailure,
+  onMissionDraftRetry,
   missionDraftStatus,
   missionDraftReasons,
   activityJournal,
   activityFilters,
   activityStatus,
+  activityLoadFailure,
   onActivityFilterChange,
   onActivityRefresh,
   queueStatus,
@@ -1532,15 +3224,27 @@ function CommandDeck({
   onCommandAuditOpenChange,
   shellTerminal,
   launchContext,
+  capabilityCatalog,
+  capabilityLoadFailure,
+  onCapabilityRetry,
+  selectedControllerId,
+  onControllerChange,
+  consoleTimelineKey,
+  isInitialConsoleTimelineKey,
+  timelineOrderForKey,
 }: {
+  client: WorkspaceClient;
   snapshot: WorkspaceSnapshot;
   empty: boolean;
   actionStatus: "pending" | "acknowledged" | "stale" | "rejected" | null;
+  actionFailure: string | null;
   onSelectView: (view: string) => void;
   onSwitchMission: (missionId: string) => void;
   connectionStatus: "connected" | "offline" | "reconnecting";
   onReconnect: () => void;
   consoleHistory: readonly AgentConsoleMessage[];
+  consoleHistoryLoadFailure: string | null;
+  onConsoleHistoryRetry: () => void;
   draft: string;
   onDraftChange: (draft: string) => void;
   scopeDraft: ConversationScope | null;
@@ -1548,23 +3252,38 @@ function CommandDeck({
   onApplyScope: (scope?: ConversationScope) => void;
   scopeActionAvailable: boolean;
   onSend: () => void;
-  messageStatus: "pending" | "rejected" | null;
+  messageStatus: "saving" | "responding" | "rejected" | null;
+  messageFailure: string | null;
   workingContext: WorkingContextProjection | null;
+  workingContextLoadFailure: string | null;
+  onWorkingContextRetry: () => void;
   contextStatus: "pending" | "acknowledged" | "stale" | "rejected" | null;
+  contextActionFailure: string | null;
   onCurateContext: (
     sourceId: string,
     disposition: "included" | "pinned" | "excluded",
   ) => void;
   reviewWorkspace: ReviewWorkspaceProjection | null;
+  reviewWorkspaceLoadFailure: string | null;
+  onReviewWorkspaceRetry: () => void;
   reviewStatus: {
     state: "pending" | "acknowledged" | "stale" | "rejected";
     message: string;
   } | null;
   reviewReasons: Record<string, string>;
   onReviewReasonChange: (sessionId: string, reason: string) => void;
-  onReviewDecision: (sessionId: string, decision: ReviewDecision, reason: string) => void;
+  onReviewDecision: (
+    sessionId: string,
+    decision: ReviewDecision,
+    reason: string,
+    missionId?: string,
+  ) => void;
   workspaceQueue: WorkspaceQueueProjection | null;
+  workspaceQueueLoadFailure: string | null;
+  onWorkspaceQueueRetry: () => void;
   missionDrafts: MissionDraftProjection | null;
+  missionDraftLoadFailure: string | null;
+  onMissionDraftRetry: () => void;
   missionDraftStatus: {
     state: "pending" | "acknowledged" | "stale" | "rejected";
     message: string;
@@ -1573,6 +3292,7 @@ function CommandDeck({
   activityJournal: ActivityJournalProjection | null;
   activityFilters: ActivityJournalFilters;
   activityStatus: "pending" | "rejected" | null;
+  activityLoadFailure: string | null;
   onActivityFilterChange: (filters: ActivityJournalFilters) => void;
   onActivityRefresh: () => void;
   queueStatus: {
@@ -1604,8 +3324,32 @@ function CommandDeck({
   onCommandAuditOpenChange: (open: boolean) => void;
   shellTerminal: ShellTerminalController;
   launchContext: AlfredoLaunchContext | null;
+  capabilityCatalog: AgentCapabilityCatalog | null;
+  capabilityLoadFailure: string | null;
+  onCapabilityRetry: () => void;
+  selectedControllerId: string;
+  onControllerChange: (agentId: string) => void;
+  consoleTimelineKey: (message: AgentConsoleMessage) => string;
+  isInitialConsoleTimelineKey: (key: string) => boolean;
+  timelineOrderForKey: (key: string) => number;
 }) {
   const mission = snapshot.active_mission;
+  const [contextInspectorOpen, setContextInspectorOpen] = useState(false);
+  const [detailViewsOpen, setDetailViewsOpen] = useState(false);
+  const [capabilityMenuOpen, setCapabilityMenuOpen] = useState(false);
+  const [capabilityMenuDismissed, setCapabilityMenuDismissed] = useState(false);
+  const [relaunchWorkspace, setRelaunchWorkspace] = useState("");
+  const [workspaceRelaunchStatus, setWorkspaceRelaunchStatus] = useState<{
+    readonly command: string;
+    readonly message: string;
+  } | null>(null);
+  const transcriptRef = useRef<HTMLDivElement>(null);
+  const transcriptShouldFollowRef = useRef(true);
+  const lastOptimisticTimelineKeyRef = useRef<string | null>(null);
+  const capabilityTriggerRef = useRef<HTMLButtonElement>(null);
+  const capabilityMenuRef = useRef<HTMLElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const focusCapabilityOptionOnOpenRef = useRef(false);
   const missions = snapshot.missions?.length
     ? snapshot.missions
     : mission
@@ -1628,6 +3372,22 @@ function CommandDeck({
   };
   const activeViewTitle = viewTitle[snapshot.operations_view] ?? "Mission Board";
   const workingDirectoryLabel = snapshot.workspace_session.workspace_path.split(/[\\/]/).filter(Boolean).at(-1) ?? "Working directory";
+  const recentWorkspaces = Array.from(
+    new Set(
+      [launchContext?.coding_workspace ?? "", ...(launchContext?.recent_workspaces ?? [])].filter(
+        (workspace) => workspace.trim(),
+      ),
+    ),
+  ).slice(0, 10);
+  const selectedRelaunchWorkspace = recentWorkspaces.includes(relaunchWorkspace)
+    ? relaunchWorkspace
+    : recentWorkspaces[0] ?? "";
+  const workspaceRelaunchCommand = selectedRelaunchWorkspace
+    ? workstationRelaunchCommand(
+        selectedRelaunchWorkspace,
+        selectedControllerId || launchContext?.selected_agent || "",
+      )
+    : "";
   const issueSlicesById = new Map(
     snapshot.mission_board.issue_slices?.map((issue) => [issue.issue_id, issue]),
   );
@@ -1652,21 +3412,182 @@ function CommandDeck({
   ];
   const selectedScope = scopeDraft ?? snapshot.conversation_scope;
   const scopeValue = `${selectedScope.kind}:${selectedScope.target_id}`;
-  const contextCounts = workingContext?.sources.reduce<Record<string, number>>(
+  const contextProjection: WorkingContextProjection = workingContext ?? {
+    schema_version: 1,
+    revision: 0,
+    scope: snapshot.conversation_scope,
+    sources: [],
+    content_character_count: 0,
+  };
+  const capabilityQuery = draft.trimStart().startsWith("/")
+    ? draft.trimStart().slice(1).toLowerCase()
+    : "";
+  const skillQuery = capabilityQuery.startsWith("use ")
+    ? capabilityQuery.slice(4).trim()
+    : capabilityQuery.startsWith("skills ")
+      ? capabilityQuery.slice(7).trim()
+      : capabilityQuery;
+  const visibleCommands = capabilityCatalog?.commands.filter((command) => {
+    const query = capabilityQuery.split(/\s+/, 1)[0];
+    return !query || `${command.name} ${command.description}`.toLowerCase().includes(query);
+  }) ?? [];
+  const visibleSkills = capabilityCatalog?.skills.filter((skill) =>
+    !skillQuery || `${skill.name} ${skill.description}`.toLowerCase().includes(skillQuery),
+  ).slice(0, 8) ?? [];
+  const showCapabilityMenu =
+    Boolean(capabilityCatalog) &&
+    !capabilityMenuDismissed &&
+    (capabilityMenuOpen || draft.trimStart().startsWith("/"));
+  const closeCapabilityMenu = (focusTarget: "trigger" | "composer" | "none"): void => {
+    setCapabilityMenuOpen(false);
+    setCapabilityMenuDismissed(true);
+    if (focusTarget === "trigger") capabilityTriggerRef.current?.focus();
+    if (focusTarget === "composer") composerRef.current?.focus();
+  };
+  useEffect(() => {
+    if (!showCapabilityMenu || !focusCapabilityOptionOnOpenRef.current) return;
+    const firstOption = capabilityMenuRef.current?.querySelector<HTMLButtonElement>(
+      "button[data-capability-option]:not(:disabled)",
+    );
+    const fallback = capabilityMenuRef.current?.querySelector<HTMLButtonElement>(
+      "button:not(:disabled)",
+    );
+    (firstOption ?? fallback)?.focus();
+    focusCapabilityOptionOnOpenRef.current = false;
+  }, [showCapabilityMenu, visibleCommands.length, visibleSkills.length]);
+  const controllerAgents = capabilityCatalog?.agents.filter(isEligibleControllerCapability) ?? [];
+  const selectedController = capabilityCatalog?.agents.find(
+    (agent) => agent.id === selectedControllerId,
+  );
+  const contextCounts = contextProjection.sources.reduce<Record<string, number>>(
     (counts, source) => ({ ...counts, [source.kind]: (counts[source.kind] ?? 0) + 1 }),
     {},
   );
   const issueAssignmentBoard = projectIssueAssignmentBoard(snapshot);
   const workstationContinuityKey = workstationContinuityStorageKey(snapshot);
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
+  const [selectedIssueMissionId, setSelectedIssueMissionId] = useState<string | null>(null);
   const [issueFocusTarget, setIssueFocusTarget] = useState<"assignment-board" | "mission-board" | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [selectedSessionMissionId, setSelectedSessionMissionId] = useState<string | null>(null);
   const [expandedWorkstationCardIds, setExpandedWorkstationCardIds] = useState<readonly string[]>([]);
   const [pinnedWorkstationCardIds, setPinnedWorkstationCardIds] = useState<readonly string[]>([]);
   const [workstationFilter, setWorkstationFilter] = useState("");
   const [workstationSort, setWorkstationSort] = useState<"priority" | "name" | "status">("priority");
   const [selectedWorkstationSessionId, setSelectedWorkstationSessionId] = useState<string | null>(null);
   const [selectedWorkstationDiff, setSelectedWorkstationDiff] = useState<WorkstationDiffLink | null>(null);
+  const [sessionArtifactViewer, setSessionArtifactViewer] =
+    useState<SessionArtifactViewerState | null>(null);
+  const artifactLoadSequenceRef = useRef(0);
+  const artifactReturnFocusRef = useRef<HTMLElement | null>(null);
+  const sessionArtifactViewerRef = useRef<HTMLElement | null>(null);
+  const loadSessionArtifact = useCallback(
+    async (target: SessionArtifactViewerTarget): Promise<void> => {
+      if (target.returnFocus) artifactReturnFocusRef.current = target.returnFocus;
+      const sequence = artifactLoadSequenceRef.current + 1;
+      artifactLoadSequenceRef.current = sequence;
+      setSessionArtifactViewer({
+        target,
+        status: "loading",
+        artifact: null,
+        message: "Loading bounded session evidence…",
+        recoverable: true,
+      });
+      if (!client.loadSessionArtifact) {
+        setSessionArtifactViewer({
+          target,
+          status: "error",
+          artifact: null,
+          message: "The bounded session evidence transport is unavailable.",
+          recoverable: false,
+        });
+        return;
+      }
+      const result = await client.loadSessionArtifact(target.request);
+      if (artifactLoadSequenceRef.current !== sequence) return;
+      if (result.kind !== "session-artifact") {
+        setSessionArtifactViewer({
+          target,
+          status: "error",
+          artifact: null,
+          message: result.message,
+          recoverable: result.recoverable,
+        });
+        return;
+      }
+      if (
+        result.artifact.mission_id !== target.request.mission_id ||
+        result.artifact.session_id !== target.request.session_id
+      ) {
+        setSessionArtifactViewer({
+          target,
+          status: "error",
+          artifact: null,
+          message: "The evidence reader returned a mismatched Mission or Local Agent session.",
+          recoverable: true,
+        });
+        return;
+      }
+      setSessionArtifactViewer({
+        target,
+        status: "ready",
+        artifact: result.artifact,
+        message: "",
+        recoverable: true,
+      });
+    },
+    [client],
+  );
+  const openWorkstationDiff = useCallback(
+    (diff: WorkstationDiffLink, returnFocus?: HTMLElement | null): void => {
+      setSelectedWorkstationDiff(diff);
+      void loadSessionArtifact({
+        request: {
+          mission_id: diff.missionId,
+          session_id: diff.sessionId,
+          artifact_ref: diff.href.split("#", 1)[0],
+        },
+        label: diff.label,
+        focusPath: diff.path,
+        returnFocus,
+      });
+    },
+    [loadSessionArtifact],
+  );
+  const openWorkstationEvidence = useCallback(
+    (
+      missionId: string,
+      sessionId: string,
+      artifactRef: string,
+      label: string,
+      returnFocus?: HTMLElement | null,
+    ): void => {
+      void loadSessionArtifact({
+        request: {
+          mission_id: missionId,
+          session_id: sessionId,
+          artifact_ref: artifactRef,
+        },
+        label,
+        returnFocus,
+      });
+    },
+    [loadSessionArtifact],
+  );
+  const closeSessionArtifact = useCallback((): void => {
+    artifactLoadSequenceRef.current += 1;
+    const returnFocus = artifactReturnFocusRef.current;
+    artifactReturnFocusRef.current = null;
+    setSessionArtifactViewer(null);
+    window.setTimeout(() => returnFocus?.focus(), 0);
+  }, []);
+  useLayoutEffect(() => {
+    if (!sessionArtifactViewer?.target) return;
+    const viewer = sessionArtifactViewerRef.current;
+    if (!viewer) return;
+    viewer.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+    viewer.focus({ preventScroll: true });
+  }, [sessionArtifactViewer?.target]);
   useEffect(() => {
     if (!selectedIssueId) return;
     const assignmentDetail =
@@ -1679,8 +3600,22 @@ function CommandDeck({
     }
     document.getElementById("issue-slice-inspector")?.focus();
   }, [issueFocusTarget, selectedIssueId]);
+  const activeMissionId = snapshot.active_mission?.id ?? null;
+  const previousActiveMissionIdRef = useRef(activeMissionId);
+  useEffect(() => {
+    const previousActiveMissionId = previousActiveMissionIdRef.current;
+    previousActiveMissionIdRef.current = activeMissionId;
+    if (previousActiveMissionId === activeMissionId) return;
+    setSelectedIssueId(null);
+    setSelectedIssueMissionId(null);
+    setIssueFocusTarget(null);
+    setSelectedSessionId(null);
+    setSelectedSessionMissionId(null);
+  }, [activeMissionId]);
   const selectedIssue =
-    (selectedIssueId ? issueSlicesById.get(selectedIssueId) : null) ??
+    (selectedIssueId && selectedIssueMissionId === activeMissionId
+      ? issueSlicesById.get(selectedIssueId)
+      : null) ??
     snapshot.mission_board.issue_slices?.[0] ??
     null;
   const workstationProjection = projectWorkstationCards(snapshot, {
@@ -1710,23 +3645,46 @@ function CommandDeck({
     const sessionIds = new Set(
       workstationCards.flatMap((card) => (card.sessionId ? [card.sessionId] : [])),
     );
+    const sessionCardIds = new Set(
+      workstationCards.flatMap((card) => (card.sessionId ? [card.id] : [])),
+    );
     const issueIds = new Set(snapshot.mission_board.ordered_issue_ids);
     if (restored) {
       skipWorkstationContinuityWrite.current = true;
       onCommandAuditOpenChange(restored.commandAuditOpen);
       setSelectedIssueId(
-        restored.selectedIssueId && issueIds.has(restored.selectedIssueId)
+        restored.selectedIssueId &&
+          restored.selectedIssueMissionId === activeMissionId &&
+          issueIds.has(restored.selectedIssueId)
           ? restored.selectedIssueId
           : null,
       );
+      setSelectedIssueMissionId(
+        restored.selectedIssueId &&
+          restored.selectedIssueMissionId === activeMissionId &&
+          issueIds.has(restored.selectedIssueId)
+          ? activeMissionId
+          : null,
+      );
       setIssueFocusTarget(
-        restored.selectedIssueId && issueIds.has(restored.selectedIssueId)
+        restored.selectedIssueId &&
+          restored.selectedIssueMissionId === activeMissionId &&
+          issueIds.has(restored.selectedIssueId)
           ? restored.issueFocusTarget
           : null,
       );
       setSelectedSessionId(
-        restored.selectedSessionId && sessionIds.has(restored.selectedSessionId)
+        restored.selectedSessionId &&
+          restored.selectedSessionMissionId === activeMissionId &&
+          sessionIds.has(restored.selectedSessionId)
           ? restored.selectedSessionId
+          : null,
+      );
+      setSelectedSessionMissionId(
+        restored.selectedSessionId &&
+          restored.selectedSessionMissionId === activeMissionId &&
+          sessionIds.has(restored.selectedSessionId)
+          ? activeMissionId
           : null,
       );
       setExpandedWorkstationCardIds(
@@ -1739,19 +3697,19 @@ function CommandDeck({
       setWorkstationSort(restored.workstationSort);
       setSelectedWorkstationSessionId(
         restored.selectedWorkstationSessionId &&
-          sessionIds.has(restored.selectedWorkstationSessionId)
+          sessionCardIds.has(restored.selectedWorkstationSessionId)
           ? restored.selectedWorkstationSessionId
           : null,
       );
       setSelectedWorkstationDiff(
         restored.selectedWorkstationDiff &&
-          sessionIds.has(restored.selectedWorkstationDiff.sessionId)
+          sessionCardIds.has(restored.selectedWorkstationDiff.cardId)
           ? restored.selectedWorkstationDiff
           : null,
       );
     }
     hydratedWorkstationContinuityKey.current = workstationContinuityKey;
-  }, [onCommandAuditOpenChange, snapshot.mission_board.ordered_issue_ids, workstationCards, workstationContinuityKey]);
+  }, [activeMissionId, onCommandAuditOpenChange, snapshot.mission_board.ordered_issue_ids, workstationCards, workstationContinuityKey]);
   useEffect(() => {
     if (hydratedWorkstationContinuityKey.current !== workstationContinuityKey) return;
     if (skipWorkstationContinuityWrite.current) {
@@ -1762,8 +3720,10 @@ function CommandDeck({
       schema_version: WORKSTATION_CONTINUITY_SCHEMA_VERSION,
       commandAuditOpen,
       selectedIssueId,
+      selectedIssueMissionId,
       issueFocusTarget,
       selectedSessionId,
+      selectedSessionMissionId,
       expandedWorkstationCardIds,
       pinnedWorkstationCardIds,
       workstationFilter,
@@ -1777,19 +3737,148 @@ function CommandDeck({
     pinnedWorkstationCardIds,
     issueFocusTarget,
     selectedIssueId,
+    selectedIssueMissionId,
     selectedSessionId,
+    selectedSessionMissionId,
     selectedWorkstationDiff,
     selectedWorkstationSessionId,
     workstationContinuityKey,
     workstationFilter,
     workstationSort,
   ]);
-  const workstationTranscriptTurns = [
+  const snapshotTranscriptTurns = [
     ...buildWorkstationTranscriptTurns(snapshot),
-    ...workstationActionTurns,
+    ...buildWorkspaceQueueTranscriptTurns(snapshot, workspaceQueue),
   ];
+  const causalSnapshotTimelinePositions = new Map<string, number>();
+  const causalTurnsByOrigin = new Map<string, WorkstationTranscriptTurn[]>();
+  for (const turn of snapshotTranscriptTurns) {
+    if (!turn.causalOriginMessageId) continue;
+    const turns = causalTurnsByOrigin.get(turn.causalOriginMessageId) ?? [];
+    turns.push(turn);
+    causalTurnsByOrigin.set(turn.causalOriginMessageId, turns);
+  }
+  for (const [originMessageId, turns] of causalTurnsByOrigin) {
+    const originIndex = consoleHistory.findIndex(
+      (message) => message.message_id === originMessageId,
+    );
+    if (originIndex < 0) continue;
+    const origin = consoleHistory[originIndex];
+    if (!isInitialConsoleTimelineKey(consoleTimelineKey(origin))) continue;
+    let anchorIndex = originIndex;
+    for (let index = originIndex + 1; index < consoleHistory.length; index += 1) {
+      const candidate = consoleHistory[index];
+      if (candidate.role === "user") break;
+      if (candidate.role === "assistant") {
+        anchorIndex = index;
+        break;
+      }
+    }
+    const anchor = consoleHistory[anchorIndex];
+    const nextMessage = consoleHistory[anchorIndex + 1];
+    const availableSequenceSpan =
+      nextMessage && nextMessage.sequence > anchor.sequence
+        ? nextMessage.sequence - anchor.sequence
+        : 1;
+    for (const [index, turn] of turns.entries()) {
+      causalSnapshotTimelinePositions.set(
+        turn.id,
+        anchor.sequence + (availableSequenceSpan * (index + 1)) / (turns.length + 1),
+      );
+    }
+  }
   const commandConsoleTurns = buildCommandConsoleTurns(shellTerminal);
   const contextualGrantRequest = shellTerminal.contextualGrantRequest;
+  const consoleTimelineEntries: readonly PromptTimelineEntry[] = consoleHistory.map((message) => {
+    const key = consoleTimelineKey(message);
+    return {
+      kind: "console",
+      key,
+      order: timelineOrderForKey(key),
+      canonicalSequence: isInitialConsoleTimelineKey(key) ? message.sequence : null,
+      message,
+    };
+  });
+  const snapshotTimelineEntries: readonly PromptTimelineEntry[] = snapshotTranscriptTurns.map(
+    (turn) => {
+      const key = `workstation-snapshot:${turn.id}`;
+      return {
+        kind: "workstation",
+        key,
+        order: timelineOrderForKey(key),
+        canonicalSequence: causalSnapshotTimelinePositions.get(turn.id) ?? null,
+        turn,
+      };
+    },
+  );
+  const actionTimelineEntries: readonly PromptTimelineEntry[] = workstationActionTurns
+    .filter(
+      (turn) => !actionTurnHasDurableDelegationProjection(
+        turn,
+        snapshot,
+        workspaceQueue,
+      ),
+    )
+    .map((turn) => {
+      const key = `workstation-action:${turn.id}`;
+      return {
+        kind: "workstation",
+        key,
+        order: timelineOrderForKey(key),
+        canonicalSequence: null,
+        turn,
+      };
+    });
+  const commandTimelineEntries: readonly PromptTimelineEntry[] = commandConsoleTurns.map((turn) => {
+    const key = `command:${turn.commandId}`;
+    return {
+      kind: "command",
+      key,
+      order: timelineOrderForKey(key),
+      canonicalSequence: null,
+      turn,
+    };
+  });
+  const latestConsoleTimelineKey = consoleHistory.length
+    ? consoleTimelineKey(consoleHistory[consoleHistory.length - 1])
+    : "console:none";
+  const responsePendingTimelineEntry: PromptTimelineEntry | null =
+    messageStatus === "responding"
+      ? {
+          kind: "response-pending",
+          key: `response-pending:${latestConsoleTimelineKey}`,
+          order: timelineOrderForKey(`response-pending:${latestConsoleTimelineKey}`),
+          canonicalSequence: null,
+        }
+      : null;
+  const promptTimelineEntries = [
+    ...consoleTimelineEntries,
+    ...snapshotTimelineEntries,
+    ...actionTimelineEntries,
+    ...commandTimelineEntries,
+    ...(responsePendingTimelineEntry ? [responsePendingTimelineEntry] : []),
+  ].sort(comparePromptTimelineEntries);
+  const promptTimelineState = promptTimelineEntries.map(promptTimelineVersion).join("\u0000");
+  const optimisticConsoleMessage = [...consoleHistory]
+    .reverse()
+    .find((message) => message.message_id.startsWith("console-pending-"));
+  const optimisticTimelineKey = optimisticConsoleMessage
+    ? consoleTimelineKey(optimisticConsoleMessage)
+    : null;
+  useLayoutEffect(() => {
+    const transcript = transcriptRef.current;
+    if (!transcript) return;
+    const hasNewOptimisticTurn =
+      optimisticTimelineKey !== null &&
+      optimisticTimelineKey !== lastOptimisticTimelineKeyRef.current;
+    if (hasNewOptimisticTurn || transcriptShouldFollowRef.current) {
+      transcript.scrollTop = transcript.scrollHeight;
+      transcriptShouldFollowRef.current = true;
+    }
+    if (hasNewOptimisticTurn) {
+      lastOptimisticTimelineKeyRef.current = optimisticTimelineKey;
+    }
+  }, [optimisticTimelineKey, promptTimelineState]);
   const activeExecutionState =
     actionStatus === "pending"
       ? "Action pending"
@@ -1844,38 +3933,80 @@ function CommandDeck({
               ) : null}
             </div>
 
-            <div className="console-history" role="region" aria-label="Prompt Transcript">
-              {consoleHistory.length === 0 &&
-              workstationTranscriptTurns.length === 0 &&
-              commandConsoleTurns.length === 0 ? (
+            <div className="console-stage">
+            <div
+              ref={transcriptRef}
+              className="console-history"
+              role="region"
+              aria-label="Prompt Transcript"
+              onScroll={(event) => {
+                const transcript = event.currentTarget;
+                const distanceFromBottom =
+                  transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight;
+                transcriptShouldFollowRef.current = distanceFromBottom <= 80;
+              }}
+            >
+              {promptTimelineEntries.length === 0 ? (
                 <p className="system-line">Canonical workspace state restored.</p>
               ) : null}
-              {consoleHistory.map((message) => (
-                <article key={message.message_id} data-outcome={message.outcome}>
-                  <p>{message.content}</p>
-                  <small>{message.source} / {message.outcome}</small>
-                </article>
-              ))}
-              {workstationTranscriptTurns.map((turn) => (
-                <article key={turn.id} data-outcome={turn.outcome}>
-                  <p>{turn.content}</p>
-                  <small>{turn.source} / {turn.outcome}</small>
-                </article>
-              ))}
-              {commandConsoleTurns.map((turn) => (
-                <CommandConsoleCard
-                  key={turn.id}
-                  turn={turn}
-                  actionPending={shellTerminal.actionStatus?.state === "pending"}
-                  denialReason={shellTerminal.denialReasons[turn.commandId] ?? ""}
-                  onDenialReasonChange={(reason) =>
-                    shellTerminal.setDenialReason(turn.commandId, reason)
-                  }
-                  onDecide={(decision) => {
-                    if (turn.record) void shellTerminal.decide(turn.record, decision);
-                  }}
-                />
-              ))}
+              {promptTimelineEntries.map((entry) => {
+                if (entry.kind === "console") {
+                  return (
+                    <article
+                      key={entry.key}
+                      data-timeline-key={entry.key}
+                      data-timeline-kind="console"
+                      data-outcome={entry.message.outcome}
+                    >
+                      <p>{entry.message.content}</p>
+                      <small>{entry.message.source} / {entry.message.outcome}</small>
+                    </article>
+                  );
+                }
+                if (entry.kind === "response-pending") {
+                  return (
+                    <article
+                      key={entry.key}
+                      className="console-response-pending"
+                      data-timeline-key={entry.key}
+                      data-timeline-kind="response-pending"
+                      data-outcome="pending"
+                      aria-live="polite"
+                    >
+                      <p>Alfredo is working…</p>
+                      <small>local controller / responding</small>
+                    </article>
+                  );
+                }
+                if (entry.kind === "workstation") {
+                  return (
+                    <article
+                      key={entry.key}
+                      data-timeline-key={entry.key}
+                      data-timeline-kind="workstation"
+                      data-outcome={entry.turn.outcome}
+                    >
+                      <p>{entry.turn.content}</p>
+                      <small>{entry.turn.source} / {entry.turn.outcome}</small>
+                    </article>
+                  );
+                }
+                return (
+                  <CommandConsoleCard
+                    key={entry.key}
+                    timelineKey={entry.key}
+                    turn={entry.turn}
+                    actionPending={shellTerminal.actionStatus?.state === "pending"}
+                    denialReason={shellTerminal.denialReasons[entry.turn.commandId] ?? ""}
+                    onDenialReasonChange={(reason) =>
+                      shellTerminal.setDenialReason(entry.turn.commandId, reason)
+                    }
+                    onDecide={(decision) => {
+                      if (entry.turn.record) void shellTerminal.decide(entry.turn.record, decision);
+                    }}
+                  />
+                );
+              })}
               {contextualGrantRequest ? (
                 <PathGrantConsolePrompt
                   request={contextualGrantRequest}
@@ -1884,61 +4015,43 @@ function CommandDeck({
                     void shellTerminal.createGrantForRequest(contextualGrantRequest.requestId)
                   }
                   onDeny={() =>
-                    shellTerminal.denyGrantRequest(contextualGrantRequest.requestId)
+                    void shellTerminal.denyGrantRequest(contextualGrantRequest.requestId)
                   }
                 />
               ) : null}
             </div>
 
-            <div className="scope-card">
-              <span className="eyebrow">Conversation Scope / {snapshot.conversation_scope.kind}</span>
-              <strong>{snapshot.conversation_scope.label}</strong>
-              <code>{snapshot.conversation_scope.target_id}</code>
-              <select
-                aria-label="Conversation Scope"
-                value={scopeValue}
-                onChange={(event) => {
-                  const next = scopeOptions.find(
-                    (scope) => `${scope.kind}:${scope.target_id}` === event.target.value,
-                  );
-                  if (next) onScopeDraftChange(next);
-                }}
-              >
-                {scopeOptions.map((scope) => (
-                  <option key={`${scope.kind}:${scope.target_id}`} value={`${scope.kind}:${scope.target_id}`}>
-                    {scope.kind === "working-directory" ? "Working directory" : scope.label}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={() => onApplyScope()}
-                disabled={
-                  !scopeDraft ||
-                  (scopeDraft.kind === snapshot.conversation_scope.kind &&
-                    scopeDraft.target_id === snapshot.conversation_scope.target_id)
-                }
-              >
-                Apply scope
-              </button>
-            </div>
-
-            {workingContext ? (
+            {contextInspectorOpen ? (
               <section className="context-inspector" aria-label="Context Inspector">
                 <div className="context-inspector__heading">
                   <div>
                     <span className="eyebrow">Bounded model input</span>
                     <h3>Context Inspector</h3>
                   </div>
-                  <code>{workingContext.content_character_count} / 4000 chars</code>
+                  <code>
+                    {workingContext
+                      ? `${contextProjection.content_character_count} / 4000 chars`
+                      : "Context unavailable"}
+                  </code>
                 </div>
-                <div className="context-inspector__counts">
-                  {Object.entries(contextCounts ?? {}).map(([kind, count]) => (
-                    <small key={kind}>{count} {kind} {count === 1 ? "source" : "sources"}</small>
-                  ))}
-                </div>
-                <div className="context-inspector__sources">
-                  {workingContext.sources.map((source) => (
+                {workingContextLoadFailure ? (
+                  <div role="alert" className="inline-failure">
+                    <span>{`Working Context load failed: ${workingContextLoadFailure}`}</span>
+                    <button type="button" onClick={onWorkingContextRetry}>
+                      Retry Working Context
+                    </button>
+                  </div>
+                ) : null}
+                {workingContext ? (
+                  <div className="context-inspector__counts">
+                    {Object.entries(contextCounts).map(([kind, count]) => (
+                      <small key={kind}>{count} {kind} {count === 1 ? "source" : "sources"}</small>
+                    ))}
+                  </div>
+                ) : null}
+                {workingContext ? (
+                  <div className="context-inspector__sources">
+                    {contextProjection.sources.map((source) => (
                     <article key={source.source_id} data-disposition={source.disposition}>
                       <small>{source.kind}</small>
                       <strong>{source.label}</strong>
@@ -1971,52 +4084,325 @@ function CommandDeck({
                         </div>
                       )}
                     </article>
-                  ))}
-                </div>
+                    ))}
+                  </div>
+                ) : workingContextLoadFailure ? null : (
+                  <p role="status">Loading Working Context…</p>
+                )}
                 {contextStatus ? (
                   <span role="status" aria-label="Context curation status">
                     {contextStatus[0].toUpperCase() + contextStatus.slice(1)}
+                    {contextActionFailure ? `: ${contextActionFailure}` : ""}
                   </span>
                 ) : null}
+                <div className="context-target-control">
+                  <label>
+                    <span>Conversation target</span>
+                    <select
+                      aria-label="Conversation Scope"
+                      value={scopeValue}
+                      onChange={(event) => {
+                        const next = scopeOptions.find(
+                          (scope) => `${scope.kind}:${scope.target_id}` === event.target.value,
+                        );
+                        if (next) onScopeDraftChange(next);
+                      }}
+                    >
+                      {scopeOptions.map((scope) => (
+                        <option
+                          key={`${scope.kind}:${scope.target_id}`}
+                          value={`${scope.kind}:${scope.target_id}`}
+                        >
+                          {scope.kind === "working-directory" ? "Working directory" : scope.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    onClick={() => onApplyScope()}
+                    disabled={
+                      !scopeActionAvailable ||
+                      !scopeDraft ||
+                      (scopeDraft.kind === snapshot.conversation_scope.kind &&
+                        scopeDraft.target_id === snapshot.conversation_scope.target_id)
+                    }
+                  >
+                    Apply target
+                  </button>
+                </div>
               </section>
             ) : null}
+            </div>
 
             <div className="prompt-composer-dock" role="region" aria-label="Prompt Composer">
+              {showCapabilityMenu ? (
+                <section
+                  ref={capabilityMenuRef}
+                  className="capability-menu"
+                  aria-label="Commands and skills"
+                  onKeyDown={(event) => {
+                    if (event.key !== "Escape") return;
+                    event.preventDefault();
+                    closeCapabilityMenu("trigger");
+                  }}
+                >
+                  <div className="capability-menu__heading">
+                    <div>
+                      <span className="eyebrow">Coding-agent controls</span>
+                      <strong>Commands & skills</strong>
+                    </div>
+                    <button
+                      type="button"
+                      aria-label="Close commands and skills"
+                      onClick={() => closeCapabilityMenu("trigger")}
+                    >Close</button>
+                  </div>
+                  <div className="capability-menu__groups">
+                    <div>
+                      <small>Commands</small>
+                      {visibleCommands.map((command) => (
+                        <button
+                          type="button"
+                          key={command.name}
+                          data-capability-option
+                          onClick={() => {
+                            const takesArgument = /[<[]/.test(command.usage);
+                            onDraftChange(takesArgument ? `${command.name} ` : command.name);
+                            closeCapabilityMenu("composer");
+                          }}
+                        >
+                          <code>{command.usage}</code>
+                          <span>{command.description}</span>
+                        </button>
+                      ))}
+                    </div>
+                    <div>
+                      <small>Installed skills</small>
+                      {visibleSkills.length > 0 ? visibleSkills.map((skill) => (
+                        <button
+                          type="button"
+                          key={skill.name}
+                          data-capability-option
+                          onClick={() => {
+                            onDraftChange(`${skill.invocation} `);
+                            closeCapabilityMenu("composer");
+                          }}
+                        >
+                          <code>${skill.name}</code>
+                          <span>{skill.description}</span>
+                        </button>
+                      )) : <span className="capability-menu__empty">No matching skills</span>}
+                    </div>
+                  </div>
+                </section>
+              ) : null}
+              {capabilityLoadFailure || consoleHistoryLoadFailure ? (
+                <div role="alert" aria-label="Agent Console load recovery">
+                  {capabilityLoadFailure ? (
+                    <div>
+                      <p>Capability catalog load failed: {capabilityLoadFailure}</p>
+                      <button type="button" onClick={onCapabilityRetry}>
+                        Retry capability catalog
+                      </button>
+                    </div>
+                  ) : null}
+                  {consoleHistoryLoadFailure ? (
+                    <div>
+                      <p>Console history load failed: {consoleHistoryLoadFailure}</p>
+                      <button type="button" onClick={onConsoleHistoryRetry}>
+                        Retry console history
+                      </button>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+              <div className="prompt-toolbar" aria-label="Prompt controls">
+                <button
+                  ref={capabilityTriggerRef}
+                  type="button"
+                  aria-label="Browse commands and skills"
+                  aria-expanded={showCapabilityMenu}
+                  disabled={!capabilityCatalog}
+                  title={capabilityCatalog ? "Browse installed commands and skills" : "Capability catalog unavailable"}
+                  onClick={() => {
+                    if (showCapabilityMenu) {
+                      closeCapabilityMenu("none");
+                    } else {
+                      setContextInspectorOpen(false);
+                      focusCapabilityOptionOnOpenRef.current = true;
+                      setCapabilityMenuOpen(true);
+                      setCapabilityMenuDismissed(false);
+                    }
+                  }}
+                >
+                  Commands <kbd>/</kbd>
+                </button>
+                <button
+                  type="button"
+                  aria-label={contextInspectorOpen ? "Close context" : "Inspect context"}
+                  aria-expanded={contextInspectorOpen}
+                  onClick={() => {
+                    if (!contextInspectorOpen) {
+                      setCapabilityMenuOpen(false);
+                      setCapabilityMenuDismissed(true);
+                    }
+                    setContextInspectorOpen((open) => !open);
+                  }}
+                >
+                  {contextInspectorOpen ? "Close context" : `Context · ${snapshot.conversation_scope.label}`}
+                </button>
+              </div>
               <div className="prompt-status-line" aria-label="Prompt status line">
                 <span role="status" aria-label="Connection status">
                   Connection {connectionStatus[0].toUpperCase() + connectionStatus.slice(1)}
                 </span>
-                <span>Controller {launchContext?.selected_agent || "default"}</span>
-                <span>Model {launchContext?.selected_model || "default"}</span>
-                <span>Conversation Scope {snapshot.conversation_scope.label}</span>
-                <span>Workspace {snapshot.workspace_session.workspace_path}</span>
-                <span>Runtime {launchContext?.runtime_root || "backend default"}</span>
+                {controllerAgents.length > 0 ? (
+                  <label className="controller-picker">
+                    <span>Controller</span>
+                    <select
+                      aria-label="Controller model"
+                      value={selectedControllerId}
+                      title={selectedController?.availability_reason || "Select the local controller model"}
+                      onChange={(event) => onControllerChange(event.target.value)}
+                    >
+                      {controllerAgents.map((agent) => (
+                        <option key={agent.id} value={agent.id} disabled={agent.availability !== "available"}>
+                          {agent.id} · {agent.model || agent.runner}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                ) : (
+                  <span>
+                    Controller {launchContext?.selected_agent || "default"} · {launchContext?.selected_model || "default"}
+                  </span>
+                )}
+                <span title={snapshot.workspace_session.workspace_path}>Workspace {workingDirectoryLabel}</span>
                 <span role="status" aria-label="Execution status" aria-live="polite">
                   Execution {activeExecutionState}
                 </span>
-                {launchContext?.recent_workspaces.length ? (
-                  <span>{launchContext.recent_workspaces.length} recent workspaces</span>
-                ) : null}
               </div>
+              {workspaceRelaunchCommand ? (
+                <section className="prompt-status-line" aria-label="Recent workspaces">
+                  <label className="controller-picker">
+                    <span>Recent workspace</span>
+                    <select
+                      aria-label="Workspace to relaunch"
+                      value={selectedRelaunchWorkspace}
+                      onChange={(event) => {
+                        setRelaunchWorkspace(event.target.value);
+                        setWorkspaceRelaunchStatus(null);
+                      }}
+                    >
+                      {recentWorkspaces.map((workspace) => (
+                        <option key={workspace} value={workspace}>
+                          {workspace}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <input
+                    type="text"
+                    aria-label="Workspace relaunch command"
+                    readOnly
+                    value={workspaceRelaunchCommand}
+                    onFocus={(event) => event.currentTarget.select()}
+                  />
+                  <button
+                    type="button"
+                    aria-label="Copy workspace relaunch command"
+                    onClick={() => {
+                      const copiedCommand = workspaceRelaunchCommand;
+                      if (!navigator.clipboard?.writeText) {
+                        setWorkspaceRelaunchStatus({
+                          command: copiedCommand,
+                          message: "Clipboard unavailable. Select the command and run it in a terminal.",
+                        });
+                        return;
+                      }
+                      void navigator.clipboard.writeText(copiedCommand).then(
+                        () =>
+                          setWorkspaceRelaunchStatus({
+                            command: copiedCommand,
+                            message: "Relaunch command copied.",
+                          }),
+                        () =>
+                          setWorkspaceRelaunchStatus({
+                            command: copiedCommand,
+                            message: "Copy failed. Select the command and run it in a terminal.",
+                          }),
+                      );
+                    }}
+                  >
+                    Copy relaunch command
+                  </button>
+                  <span>
+                    Run in a terminal to open a separate workstation; this session stays on {workingDirectoryLabel}.
+                  </span>
+                  {workspaceRelaunchStatus?.command === workspaceRelaunchCommand ? (
+                    <span role="status" aria-label="Workspace relaunch status" aria-live="polite">
+                      {workspaceRelaunchStatus.message}
+                    </span>
+                  ) : null}
+                </section>
+              ) : null}
               <label className="composer prompt-composer">
                 <span className="sr-only">Message Alfredo</span>
                 <textarea
+                  ref={composerRef}
                   aria-label="Message Alfredo"
-                  placeholder="Steer the active scope..."
+                  placeholder="Ask about the project, type / for commands, or create a task…"
+                  maxLength={AGENT_CONSOLE_USER_CONTENT_CHARACTER_LIMIT}
                   rows={3}
                   value={draft}
-                  onChange={(event) => onDraftChange(event.target.value)}
+                  onChange={(event) => {
+                    const nextDraft = event.target.value;
+                    const startsFreshSlash =
+                      nextDraft.trimStart() === "/" ||
+                      (!draft.trimStart().startsWith("/") && nextDraft.trimStart().startsWith("/"));
+                    if (!nextDraft.trimStart().startsWith("/") || startsFreshSlash) {
+                      setCapabilityMenuDismissed(false);
+                    }
+                    if (startsFreshSlash) setContextInspectorOpen(false);
+                    onDraftChange(nextDraft);
+                  }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape" && showCapabilityMenu) {
+                      event.preventDefault();
+                      closeCapabilityMenu("composer");
+                      return;
+                    }
+                    if (
+                      event.key === "Enter" &&
+                      !event.shiftKey &&
+                      !event.nativeEvent.isComposing
+                    ) {
+                      event.preventDefault();
+                      onSend();
+                    }
+                  }}
                 />
                 <button
                   type="button"
                   aria-label="Send prompt"
-                  disabled={!draft.trim() || messageStatus === "pending"}
+                  disabled={
+                    !draft.trim() || messageStatus === "saving" || messageStatus === "responding"
+                  }
                   onClick={onSend}
                 >
                   Send
                 </button>
                 {messageStatus ? (
-                  <span role="status" aria-label="Message status">{messageStatus}</span>
+                  <span role="status" aria-label="Message status">
+                    {messageStatus === "saving"
+                      ? "Saving prompt…"
+                      : messageStatus === "responding"
+                        ? "Controller responding…"
+                        : messageFailure
+                          ? `Prompt was not saved: ${messageFailure} Prompt restored; retry after correcting the reported boundary.`
+                          : "Response failed — prompt restored"}
+                  </span>
                 ) : null}
               </label>
             </div>
@@ -2029,20 +4415,33 @@ function CommandDeck({
               <span className="eyebrow">Persistent supervision</span>
               <h2>Mission Work</h2>
             </div>
-            <span className="connection-pill">
-              {workstationCards.length} streams
-            </span>
+            <div className="mission-work-controls">
+              <span className="connection-pill">
+                {workstationCards.length} streams
+              </span>
+              <button
+                type="button"
+                aria-expanded={detailViewsOpen}
+                onClick={() => setDetailViewsOpen((open) => !open)}
+              >
+                {detailViewsOpen ? "Close detail views" : "Open detail views"}
+              </button>
+            </div>
           </div>
+          <div className="mission-work-scroll">
           <section className="workstation-cards" aria-label="Active Workstations">
             <div className="mission-work-section-heading">
               <div>
                 <span className="eyebrow">Live supervision</span>
-                <h3>Active Workstations</h3>
+                <h3 aria-label="Active Workstations">Agents &amp; subagents</h3>
               </div>
               <button
                 type="button"
                 aria-expanded={commandAuditOpen}
-                onClick={() => onCommandAuditOpenChange(!commandAuditOpen)}
+                onClick={() => {
+                  const nextOpen = !commandAuditOpen;
+                  onCommandAuditOpenChange(nextOpen);
+                }}
               >
                 {commandAuditOpen ? "Close command audit" : "Open command audit"}
               </button>
@@ -2073,14 +4472,25 @@ function CommandDeck({
                   </select>
                 </label>
               </div>
-              {selectedWorkstationDiff ? (
-                <div
-                  className="workstation-local-selection"
-                  role="status"
-                  aria-label="Selected workstation diff"
-                >
-                  Diff opened locally: {selectedWorkstationDiff.path}
+              {sessionArtifactViewer ? (
+                <SessionArtifactViewer
+                  viewerRef={sessionArtifactViewerRef}
+                  state={sessionArtifactViewer}
+                  onRetry={() => void loadSessionArtifact(sessionArtifactViewer.target)}
+                  onClose={closeSessionArtifact}
+                />
+              ) : selectedWorkstationDiff ? (
+                <div className="workstation-local-selection">
+                  <span>Saved review diff: {selectedWorkstationDiff.path}</span>
                   <small>{selectedWorkstationDiff.sessionId}</small>
+                  <button
+                    type="button"
+                    onClick={(event) =>
+                      openWorkstationDiff(selectedWorkstationDiff, event.currentTarget)
+                    }
+                  >
+                    Load saved review diff
+                  </button>
                 </div>
               ) : null}
               {workstationProjection.pendingIntent ? (
@@ -2104,10 +4514,20 @@ function CommandDeck({
                       expanded={expandedWorkstationCardIds.includes(card.id)}
                       pinned={pinnedWorkstationCardIds.includes(card.id)}
                       selectedSessionId={selectedWorkstationSessionId}
+                      agentOptions={capabilityCatalog?.agents.filter(isEligibleWorkerCapability) ?? []}
                       onToggleExpanded={() => toggleExpandedWorkstationCard(card.id)}
                       onTogglePinned={() => togglePinnedWorkstationCard(card.id)}
                       onSelectSession={setSelectedWorkstationSessionId}
-                      onOpenDiff={setSelectedWorkstationDiff}
+                      onOpenDiff={openWorkstationDiff}
+                      onOpenEvidence={(link, returnFocus) =>
+                        openWorkstationEvidence(
+                          card.missionId,
+                          link.sessionId,
+                          link.href,
+                          link.label,
+                          returnFocus,
+                        )
+                      }
                       queueReasons={queueReasons}
                       onQueueReasonChange={onQueueReasonChange}
                       onQueueDecision={onQueueDecision}
@@ -2130,24 +4550,30 @@ function CommandDeck({
               ) : null}
             </div>
           </section>
-          <IssueAssignmentBoard
+          {detailViewsOpen && snapshot.operations_view === "workspace-queue" ? null : <IssueAssignmentBoard
             projection={issueAssignmentBoard}
-            selectedIssueId={issueFocusTarget === "assignment-board" ? selectedIssueId : null}
-            actionPending={actionStatus === "pending"}
-            scopeActionAvailable={scopeActionAvailable}
+            selectedIssueId={
+              issueFocusTarget === "assignment-board" && selectedIssueMissionId === activeMissionId
+                ? selectedIssueId
+                : null
+            }
+            agentOptions={capabilityCatalog?.agents.filter(isEligibleWorkerCapability) ?? []}
             workstationActionState={workstationActionState}
             workstationActionDrafts={workstationActionDrafts}
             workstationActionStatusRef={workstationActionStatusRef}
             onSelectIssue={(issueId) => {
               setSelectedIssueId(issueId);
+              setSelectedIssueMissionId(activeMissionId);
               setIssueFocusTarget("assignment-board");
               setSelectedSessionId(null);
+              setSelectedSessionMissionId(null);
             }}
-            onApplyScope={onApplyScope}
             onWorkstationActionDraftChange={onWorkstationActionDraftChange}
             onWorkstationAction={onWorkstationAction}
-          />
+          />}
+          {detailViewsOpen || commandAuditOpen ? (
           <div className="workstation-panel">
+            {detailViewsOpen ? (
             <section className="operations" aria-label="Workstation Detail Views">
                 <nav className="view-rail" aria-label="Workstation detail views">
                   <button
@@ -2185,6 +4611,7 @@ function CommandDeck({
                 {actionStatus ? (
                   <span role="status" aria-label="Action status" className="connection-pill">
                     {actionStatus[0].toUpperCase() + actionStatus.slice(1)}
+                    {actionFailure ? `: ${actionFailure}` : ""}
                   </span>
                 ) : null}
 
@@ -2192,24 +4619,28 @@ function CommandDeck({
                   {snapshot.operations_view === "review-workspace" ? (
                     <ReviewWorkspace
                       projection={reviewWorkspace}
+                      loadFailure={reviewWorkspaceLoadFailure}
+                      onRetry={onReviewWorkspaceRetry}
                       status={reviewStatus}
                       reasons={reviewReasons}
                       onReasonChange={onReviewReasonChange}
                       onDecision={onReviewDecision}
+                      onOpenEvidence={openWorkstationEvidence}
                     />
                   ) : snapshot.operations_view === "workspace-queue" ? (
                     <WorkspaceQueue
                       projection={workspaceQueue}
+                      loadFailure={workspaceQueueLoadFailure}
+                      onRetry={onWorkspaceQueueRetry}
                       missionDrafts={missionDrafts}
+                      missionDraftLoadFailure={missionDraftLoadFailure}
+                      onMissionDraftRetry={onMissionDraftRetry}
                       missionDraftStatus={missionDraftStatus}
                       missionDraftReasons={missionDraftReasons}
                       status={queueStatus}
-                      latestConsoleMessage={latestConsoleMessage}
                       reasons={queueReasons}
                       onReasonChange={onQueueReasonChange}
                       onDecision={onQueueDecision}
-                      onAdHocProposal={onAdHocProposal}
-                      onMissionDraftCreate={onMissionDraftCreate}
                       onMissionDraftReasonChange={onMissionDraftReasonChange}
                       onMissionDraftDecision={onMissionDraftDecision}
                     />
@@ -2218,8 +4649,11 @@ function CommandDeck({
                       projection={activityJournal}
                       filters={activityFilters}
                       status={activityStatus}
+                      loadFailure={activityLoadFailure}
                       onFilterChange={onActivityFilterChange}
                       onRefresh={onActivityRefresh}
+                      fallbackMissionId={mission?.id ?? ""}
+                      onOpenEvidence={openWorkstationEvidence}
                     />
                   ) : snapshot.operations_view !== "mission-board" ? (
                     <div className="empty-state">
@@ -2334,8 +4768,10 @@ function CommandDeck({
                                       aria-label={`Inspect ${issue.issue_id}`}
                                       onClick={() => {
                                         setSelectedIssueId(issue.issue_id);
+                                        setSelectedIssueMissionId(activeMissionId);
                                         setIssueFocusTarget("mission-board");
                                         setSelectedSessionId(null);
+                                        setSelectedSessionMissionId(null);
                                       }}
                                     >
                                       Inspect
@@ -2348,8 +4784,15 @@ function CommandDeck({
                           {selectedIssue ? (
                             <IssueSliceInspector
                               issue={selectedIssue}
-                              selectedSessionId={selectedSessionId}
-                              onSelectSession={setSelectedSessionId}
+                              selectedSessionId={
+                                selectedSessionMissionId === activeMissionId
+                                  ? selectedSessionId
+                                  : null
+                              }
+                              onSelectSession={(sessionId) => {
+                                setSelectedSessionId(sessionId);
+                                setSelectedSessionMissionId(activeMissionId);
+                              }}
                             />
                           ) : null}
                         </div>
@@ -2358,6 +4801,7 @@ function CommandDeck({
                   )}
                 </section>
             </section>
+            ) : null}
             {commandAuditOpen ? (
               <section className="command-audit" aria-label="Command Audit">
                 <div className="command-audit__heading">
@@ -2370,6 +4814,8 @@ function CommandDeck({
               </section>
             ) : null}
           </div>
+          ) : null}
+          </div>
         </aside>
       </div>
     </div>
@@ -2379,25 +4825,21 @@ function CommandDeck({
 function IssueAssignmentBoard({
   projection,
   selectedIssueId,
-  actionPending,
-  scopeActionAvailable,
+  agentOptions,
   workstationActionState,
   workstationActionDrafts,
   workstationActionStatusRef,
   onSelectIssue,
-  onApplyScope,
   onWorkstationActionDraftChange,
   onWorkstationAction,
 }: {
   projection: IssueAssignmentBoardProjection;
   selectedIssueId: string | null;
-  actionPending: boolean;
-  scopeActionAvailable: boolean;
+  agentOptions: readonly { readonly id: string; readonly model: string }[];
   workstationActionState: WorkstationActionState | null;
   workstationActionDrafts: Record<string, WorkstationActionDraftState>;
   workstationActionStatusRef: RefObject<HTMLSpanElement | null>;
   onSelectIssue: (issueId: string) => void;
-  onApplyScope: (scope: ConversationScope) => void;
   onWorkstationActionDraftChange: (key: string, draft: WorkstationActionDraftState) => void;
   onWorkstationAction: (
     action: WorkstationGovernedAction,
@@ -2429,17 +4871,14 @@ function IssueAssignmentBoard({
           </thead>
           <tbody>
             {projection.rows.map((row) => {
-              const disabledReason = issueScopeDisabledReason(
-                row,
-                scopeActionAvailable,
-                actionPending,
-              );
               const rowActions = row.governedActions.filter(isExecutableWorkstationAction);
               const rowActionState =
-                workstationActionState && workstationActionState.itemId === row.issueId
+                workstationActionState &&
+                rowActions.some(
+                  (action) => workstationActionStateId(action) === workstationActionState.itemId,
+                )
                   ? workstationActionState
                   : null;
-              const helpId = disabledReason ? `issue-assignment-${row.issueId}-scope-help` : undefined;
               return (
                 <tr
                   key={row.issueId}
@@ -2507,23 +4946,10 @@ function IssueAssignmentBoard({
                       actions={rowActions}
                       actionState={rowActionState}
                       drafts={workstationActionDrafts}
+                      agentOptions={agentOptions}
                       onDraftChange={onWorkstationActionDraftChange}
                       onAction={onWorkstationAction}
                     />
-                    <button
-                      type="button"
-                      aria-label={`Set scope to ${row.issueId}`}
-                      aria-describedby={helpId}
-                      disabled={Boolean(disabledReason)}
-                      onClick={() => onApplyScope(row.scope)}
-                    >
-                      Set scope
-                    </button>
-                    {disabledReason ? (
-                      <small id={helpId} className="workstation-card__action-help">
-                        {disabledReason}
-                      </small>
-                    ) : null}
                   </td>
                 </tr>
               );
@@ -2540,12 +4966,14 @@ function IssueAssignmentActions({
   actions,
   actionState,
   drafts,
+  agentOptions,
   onDraftChange,
   onAction,
 }: {
   actions: readonly WorkstationGovernedAction[];
   actionState: WorkstationActionState | null;
   drafts: Record<string, WorkstationActionDraftState>;
+  agentOptions: readonly { readonly id: string; readonly model: string }[];
   onDraftChange: (key: string, draft: WorkstationActionDraftState) => void;
   onAction: (action: WorkstationGovernedAction, draft: WorkstationActionDraftState) => void;
 }): ReactElement | null {
@@ -2558,6 +4986,7 @@ function IssueAssignmentActions({
         const key = workstationActionKey(action);
         const draft = drafts[key] ?? { reason: "", agentId: "" };
         const needsAgent = action.actionType === "model-assignment-change";
+        const hasEligibleAgent = agentOptions.some((agent) => agent.id === draft.agentId);
         const disabledDescription = workstationActionDisabledDescription(
           action,
           targetId,
@@ -2570,22 +4999,35 @@ function IssueAssignmentActions({
           Boolean(action.disabledReason) ||
           !targetId ||
           (action.requiresReason && !draft.reason.trim()) ||
-          (needsAgent && !draft.agentId.trim());
+          (needsAgent && !hasEligibleAgent);
         return (
           <div className="issue-assignment-board__action" key={key}>
             {needsAgent ? (
               <label>
                 <span>Agent</span>
-                <input
-                  aria-label={`Issue assignment agent ${targetId}`}
-                  value={draft.agentId}
-                  onChange={(event) =>
-                    onDraftChange(key, {
-                      ...draft,
-                      agentId: event.target.value,
-                    })
-                  }
-                />
+                {agentOptions.length > 0 ? (
+                  <select
+                    aria-label={`Issue assignment agent ${targetId}`}
+                    value={draft.agentId}
+                    onChange={(event) =>
+                      onDraftChange(key, { ...draft, agentId: event.target.value })
+                    }
+                  >
+                    <option value="">Select a local agent</option>
+                    {agentOptions.map((agent) => (
+                      <option key={agent.id} value={agent.id}>
+                        {agent.id} · {agent.model || "local runner"}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <span
+                    role="status"
+                    aria-label={`Issue assignment worker unavailable ${targetId}`}
+                  >
+                    Worker assignment unavailable: no eligible local workers were discovered.
+                  </span>
+                )}
               </label>
             ) : null}
             {action.requiresReason ? (
@@ -2675,25 +5117,15 @@ function IssueAssignmentDetail({ row }: { row: IssueAssignmentBoardRow }): React
   );
 }
 
-function issueScopeDisabledReason(
-  row: IssueAssignmentBoardRow,
-  scopeActionAvailable: boolean,
-  actionPending: boolean,
-): string | null {
-  if (row.scopeDisabledReason) return row.scopeDisabledReason;
-  if (!scopeActionAvailable) return "Conversation Scope action is unavailable in this client.";
-  return actionPending
-    ? "Conversation Scope action is disabled while the Orchestrator validates another action."
-    : null;
-}
-
 function CommandConsoleCard({
+  timelineKey,
   turn,
   actionPending,
   denialReason,
   onDenialReasonChange,
   onDecide,
 }: {
+  readonly timelineKey: string;
   readonly turn: CommandConsoleTurn;
   readonly actionPending: boolean;
   readonly denialReason: string;
@@ -2706,7 +5138,12 @@ function CommandConsoleCard({
     turn.status === "pending-approval" &&
     (turn.classification === "human-required" || turn.classification === "frontier-approvable");
   return (
-    <article className="command-console-card" data-outcome={turn.status}>
+    <article
+      className="command-console-card"
+      data-timeline-key={timelineKey}
+      data-timeline-kind="command"
+      data-outcome={turn.status}
+    >
       <header>
         <div>
           <span className="eyebrow">Shell Terminal command</span>
@@ -2871,6 +5308,99 @@ function workstationContinuityStorageKey(snapshot: WorkspaceSnapshot): string {
   return `alfredo:workstation-continuity:v1:${workspaceIdentity}`;
 }
 
+function failedWorkstationActionStorageKey(snapshot: WorkspaceSnapshot): string {
+  const workspaceIdentity = encodeURIComponent(
+    `${snapshot.workspace_session.id}:${snapshot.workspace_session.workspace_path}`,
+  );
+  return `alfredo:failed-workstation-actions:v1:${workspaceIdentity}`;
+}
+
+function workstationActionCorrelationId(turnId: string): string | null {
+  const match = turnId.match(
+    /^(.*):(?:intent|reaction:(?:pending|acknowledged|rejected|stale|failed))$/,
+  );
+  return match?.[1] || null;
+}
+
+function failedWorkstationActionTurns(
+  turns: readonly WorkstationActionTurn[],
+): readonly WorkstationActionTurn[] {
+  const terminalOutcomes = new Set(["rejected", "stale", "failed"]);
+  const failedCorrelations = new Set(
+    turns.flatMap((turn) => {
+      if (!terminalOutcomes.has(turn.outcome)) return [];
+      const correlationId = workstationActionCorrelationId(turn.id);
+      return correlationId ? [correlationId] : [];
+    }),
+  );
+  const selected = turns.filter((turn) => {
+    if (terminalOutcomes.has(turn.outcome)) return true;
+    const correlationId = workstationActionCorrelationId(turn.id);
+    return correlationId !== null && failedCorrelations.has(correlationId);
+  });
+  const deduplicated = new Map<string, WorkstationActionTurn>();
+  for (const turn of selected) deduplicated.set(turn.id, turn);
+  return [...deduplicated.values()].slice(-FAILED_WORKSTATION_ACTION_TURN_LIMIT);
+}
+
+function readFailedWorkstationActionContinuity(key: string): readonly WorkstationActionTurn[] {
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return [];
+    const value = JSON.parse(raw) as Partial<FailedWorkstationActionContinuityState>;
+    if (
+      value.schema_version !== FAILED_WORKSTATION_ACTION_CONTINUITY_SCHEMA_VERSION ||
+      !Array.isArray(value.turns)
+    ) {
+      return [];
+    }
+    const validated = value.turns.flatMap((candidate: unknown) => {
+      if (!candidate || typeof candidate !== "object") return [];
+      const turn = candidate as Partial<WorkstationActionTurn>;
+      if (
+        typeof turn.id !== "string" ||
+        !turn.id ||
+        turn.id.length > 512 ||
+        typeof turn.content !== "string" ||
+        !turn.content ||
+        turn.content.length > FAILED_WORKSTATION_ACTION_CONTENT_LIMIT ||
+        typeof turn.source !== "string" ||
+        !turn.source ||
+        turn.source.length > 128 ||
+        typeof turn.outcome !== "string" ||
+        !turn.outcome ||
+        turn.outcome.length > 128
+      ) {
+        return [];
+      }
+      return [{
+        id: turn.id,
+        content: turn.content,
+        source: turn.source,
+        outcome: turn.outcome,
+      }];
+    });
+    return failedWorkstationActionTurns(validated);
+  } catch {
+    return [];
+  }
+}
+
+function writeFailedWorkstationActionContinuity(
+  key: string,
+  turns: readonly WorkstationActionTurn[],
+): void {
+  try {
+    const value: FailedWorkstationActionContinuityState = {
+      schema_version: FAILED_WORKSTATION_ACTION_CONTINUITY_SCHEMA_VERSION,
+      turns: failedWorkstationActionTurns(turns),
+    };
+    window.localStorage.setItem(key, JSON.stringify(value));
+  } catch {
+    // Best-effort local failure continuity must never block canonical workspace state.
+  }
+}
+
 function readWorkstationContinuity(key: string): WorkstationContinuityState | null {
   try {
     const raw = window.localStorage.getItem(key);
@@ -2884,8 +5414,10 @@ function readWorkstationContinuity(key: string): WorkstationContinuityState | nu
           ? value.commandAuditOpen
           : value.leftLaneMode === "terminal",
       selectedIssueId: stringOrNull(value.selectedIssueId),
+      selectedIssueMissionId: stringOrNull(value.selectedIssueMissionId),
       issueFocusTarget: issueFocusTargetOrNull(value.issueFocusTarget),
       selectedSessionId: stringOrNull(value.selectedSessionId),
+      selectedSessionMissionId: stringOrNull(value.selectedSessionMissionId),
       expandedWorkstationCardIds: stringArray(value.expandedWorkstationCardIds),
       pinnedWorkstationCardIds: stringArray(value.pinnedWorkstationCardIds),
       workstationFilter: typeof value.workstationFilter === "string" ? value.workstationFilter : "",
@@ -2933,11 +5465,15 @@ function workstationDiffOrNull(value: unknown): WorkstationDiffLink | null {
   return typeof diff.label === "string" &&
     typeof diff.path === "string" &&
     typeof diff.href === "string" &&
+    typeof diff.missionId === "string" &&
+    typeof diff.cardId === "string" &&
     typeof diff.sessionId === "string"
     ? {
         label: diff.label,
         path: diff.path,
         href: diff.href,
+        missionId: diff.missionId,
+        cardId: diff.cardId,
         sessionId: diff.sessionId,
       }
     : null;
@@ -2991,15 +5527,76 @@ function workstationCardSearchText(card: WorkstationCardProjection): string {
     .toLowerCase();
 }
 
+function SessionArtifactViewer({
+  viewerRef,
+  state,
+  onRetry,
+  onClose,
+}: {
+  viewerRef: RefObject<HTMLElement | null>;
+  state: SessionArtifactViewerState;
+  onRetry: () => void;
+  onClose: () => void;
+}): ReactElement {
+  const artifact = state.artifact;
+  return (
+    <section
+      ref={viewerRef}
+      className="session-artifact-viewer"
+      aria-label="Session evidence viewer"
+      tabIndex={-1}
+    >
+      <header>
+        <div>
+          <span className="eyebrow">Bounded session evidence</span>
+          <h4>{artifact?.label ?? state.target.label}</h4>
+          {state.target.focusPath ? <small>{state.target.focusPath}</small> : null}
+        </div>
+        <button type="button" aria-label="Close session evidence viewer" onClick={onClose}>
+          Close
+        </button>
+      </header>
+      {state.status === "loading" ? (
+        <p role="status">Loading bounded session evidence…</p>
+      ) : null}
+      {state.status === "error" ? (
+        <div className="inline-failure" role="alert">
+          <span>{`Evidence load failed: ${state.message}`}</span>
+          {state.recoverable ? (
+            <button type="button" onClick={onRetry}>Retry evidence</button>
+          ) : null}
+        </div>
+      ) : null}
+      {state.status === "ready" && artifact ? (
+        <div className="session-artifact-viewer__content">
+          <div className="session-artifact-viewer__metadata">
+            <span>{artifact.session_id}</span>
+            <span>{artifact.media_type}</span>
+            <span>{artifact.byte_count.toLocaleString()} bytes shown</span>
+          </div>
+          {artifact.truncated ? (
+            <p role="status">
+              Content is truncated at {artifact.content_limit_bytes.toLocaleString()} bytes.
+            </p>
+          ) : null}
+          <pre aria-label={`${artifact.label} content`}>{artifact.content}</pre>
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function WorkstationCard({
   card,
   expanded,
   pinned,
   selectedSessionId,
+  agentOptions,
   onToggleExpanded,
   onTogglePinned,
   onSelectSession,
   onOpenDiff,
+  onOpenEvidence,
   queueReasons,
   onQueueReasonChange,
   onQueueDecision,
@@ -3016,16 +5613,23 @@ function WorkstationCard({
   expanded: boolean;
   pinned: boolean;
   selectedSessionId: string | null;
+  agentOptions: readonly AgentCapability[];
   onToggleExpanded: () => void;
   onTogglePinned: () => void;
   onSelectSession: (sessionId: string) => void;
-  onOpenDiff: (diff: WorkstationDiffLink) => void;
+  onOpenDiff: (diff: WorkstationDiffLink, returnFocus: HTMLElement) => void;
+  onOpenEvidence: (link: WorkstationEvidenceLink, returnFocus: HTMLElement) => void;
   queueReasons: Record<string, string>;
   onQueueReasonChange: (itemId: string, reason: string) => void;
   onQueueDecision: (itemId: string, decision: WorkspaceQueueDecision, reason: string) => void;
   reviewReasons: Record<string, string>;
   onReviewReasonChange: (sessionId: string, reason: string) => void;
-  onReviewDecision: (sessionId: string, decision: ReviewDecision, reason: string) => void;
+  onReviewDecision: (
+    sessionId: string,
+    decision: ReviewDecision,
+    reason: string,
+    missionId?: string,
+  ) => void;
   workstationActionDrafts: Record<string, WorkstationActionDraftState>;
   onWorkstationActionDraftChange: (key: string, draft: WorkstationActionDraftState) => void;
   onWorkstationAction: (
@@ -3043,8 +5647,8 @@ function WorkstationCard({
   const workstationActions = card.detail.governedActions.filter(isExecutableWorkstationAction);
   const queueItemId = queueActions[0]?.itemId ?? null;
   const queueReason = queueItemId ? queueReasons[queueItemId] ?? "" : "";
-  const workstationActionTargetIds = workstationActions.map(workstationActionTargetId).filter(Boolean);
-  const reviewActionTargetIds = reviewActions.map(workstationActionTargetId).filter(Boolean);
+  const workstationActionTargetIds = workstationActions.map(workstationActionStateId);
+  const reviewActionTargetIds = reviewActions.map(workstationActionStateId);
   const matchingActionState =
     actionState &&
     ((queueItemId && actionState.itemId === queueItemId) ||
@@ -3067,6 +5671,7 @@ function WorkstationCard({
   const cardSummaryId = `${cardDomId}-summary`;
   const cardStatusDescriptionId = `${cardDomId}-status-description`;
   const cardDetailId = `${cardDomId}-detail`;
+  const lastActivity = workstationActivity(card.lastActivity);
   return (
     <article
       className="workstation-card"
@@ -3116,7 +5721,13 @@ function WorkstationCard({
         </div>
         <div>
           <dt>Last activity</dt>
-          <dd>{card.lastActivity}</dd>
+          <dd>
+            {lastActivity ? (
+              <time dateTime={lastActivity.dateTime}>{lastActivity.label}</time>
+            ) : (
+              "Not recorded"
+            )}
+          </dd>
         </div>
         <div>
           <dt>Files</dt>
@@ -3226,7 +5837,8 @@ function WorkstationCard({
         <div className="workstation-card__decision-actions">
           {reviewActions.map((action) => {
             const sessionId = action.sessionId;
-            const reason = reviewReasons[sessionId] ?? "";
+            const reviewStateId = workstationActionStateId(action);
+            const reason = reviewReasons[reviewStateId] ?? "";
             const pending = matchingActionState?.state === "pending";
             const disabledDescription = workstationReviewActionDisabledDescription(
               action,
@@ -3246,7 +5858,7 @@ function WorkstationCard({
                       aria-label={`Workstation review reason ${sessionId}`}
                       rows={2}
                       value={reason}
-                      onChange={(event) => onReviewReasonChange(sessionId, event.target.value)}
+                      onChange={(event) => onReviewReasonChange(reviewStateId, event.target.value)}
                     />
                   </label>
                 ) : null}
@@ -3261,6 +5873,7 @@ function WorkstationCard({
                       sessionId,
                       action.reviewDecision,
                       action.requiresReason ? reason : "",
+                      action.missionId,
                     )
                   }
                 >
@@ -3284,6 +5897,7 @@ function WorkstationCard({
             const draft = workstationActionDrafts[key] ?? { reason: "", agentId: "" };
             const pending = matchingActionState?.state === "pending";
             const needsAgent = action.actionType === "model-assignment-change";
+            const hasEligibleAgent = agentOptions.some((agent) => agent.id === draft.agentId);
             const disabledDescription = workstationActionDisabledDescription(
               action,
               targetId,
@@ -3296,22 +5910,35 @@ function WorkstationCard({
               Boolean(action.disabledReason) ||
               !targetId ||
               (action.requiresReason && !draft.reason.trim()) ||
-              (needsAgent && !draft.agentId.trim());
+              (needsAgent && !hasEligibleAgent);
             return (
               <div className="workstation-card__direct-action" key={key}>
                 {needsAgent ? (
                   <label>
                     <span>Agent</span>
-                    <input
-                      aria-label={`Workstation action agent ${targetId}`}
-                      value={draft.agentId}
-                      onChange={(event) =>
-                        onWorkstationActionDraftChange(key, {
-                          ...draft,
-                          agentId: event.target.value,
-                        })
-                      }
-                    />
+                    {agentOptions.length > 0 ? (
+                      <select
+                        aria-label={`Workstation action agent ${targetId}`}
+                        value={hasEligibleAgent ? draft.agentId : ""}
+                        onChange={(event) =>
+                          onWorkstationActionDraftChange(key, {
+                            ...draft,
+                            agentId: event.target.value,
+                          })
+                        }
+                      >
+                        <option value="">Select a local agent</option>
+                        {agentOptions.map((agent) => (
+                          <option key={agent.id} value={agent.id}>
+                            {agent.id} · {agent.model || agent.runner}
+                          </option>
+                        ))}
+                      </select>
+                    ) : (
+                      <span role="status" aria-label={`Workstation action worker unavailable ${targetId}`}>
+                        Worker assignment unavailable: no eligible local workers were discovered.
+                      </span>
+                    )}
                   </label>
                 ) : null}
                 {action.requiresReason ? (
@@ -3391,10 +6018,10 @@ function WorkstationCard({
               <div className="workstation-card-detail__actions">
                 {card.detail.diffs.map((diff) => (
                   <button
-                    key={diff.href}
+                    key={`${diff.href}:${diff.path}`}
                     type="button"
                     aria-label={`Open diff ${diff.path}`}
-                    onClick={() => onOpenDiff(diff)}
+                    onClick={(event) => onOpenDiff(diff, event.currentTarget)}
                   >
                     {diff.label}
                   </button>
@@ -3411,7 +6038,13 @@ function WorkstationCard({
               <ul>
                 {card.detail.evidenceLinks.map((link) => (
                   <li key={link.href}>
-                    <a href={link.href}>{link.label}</a>
+                    <button
+                      type="button"
+                      aria-label={`Open evidence ${link.label}`}
+                      onClick={(event) => onOpenEvidence(link, event.currentTarget)}
+                    >
+                      {link.label}
+                    </button>
                     <small>{link.sessionId}</small>
                   </li>
                 ))}
@@ -3479,11 +6112,11 @@ function WorkstationCard({
               <button
                 type="button"
                 aria-label={`Select session ${card.detail.originatingSessionId}`}
-                onClick={() => onSelectSession(card.detail.originatingSessionId!)}
+                onClick={() => onSelectSession(card.id)}
               >
                 {card.detail.originatingSessionId}
               </button>
-              {selectedSessionId === card.detail.originatingSessionId ? (
+              {selectedSessionId === card.id ? (
                 <span className="workstation-local-selection">
                   Selected session {card.detail.originatingSessionId}
                 </span>
@@ -3496,6 +6129,28 @@ function WorkstationCard({
   );
 }
 
+const WORKSTATION_ACTIVITY_TIMESTAMP_PATTERN =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+
+function workstationActivity(timestamp: string): { readonly dateTime: string; readonly label: string } | null {
+  if (!WORKSTATION_ACTIVITY_TIMESTAMP_PATTERN.test(timestamp)) return null;
+  const parsed = new Date(timestamp);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return {
+    dateTime: timestamp,
+    label: parsed.toISOString().replace("T", " ").replace(/\.\d{3}Z$/, " UTC"),
+  };
+}
+
+function workstationRelaunchCommand(workspace: string, controllerId: string): string {
+  const controllerArgument = controllerId ? ` --agent ${shellQuote(controllerId)}` : "";
+  return `cd -- ${shellQuote(workspace)} && alfredo workstation${controllerArgument}`;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
 function workstationDomId(value: string): string {
   return `workstation-${value.replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
 }
@@ -3504,10 +6159,12 @@ function workstationCardSummary(card: WorkstationCardProjection): string {
   const blockers = card.approvalBlockers.length
     ? ` Approval blockers: ${card.approvalBlockers.map(workstationSentence).join(" ")}`
     : "";
-  return `${workstationSentence(card.status)} ${workstationSentence(card.currentTask)} Next action: ${workstationSentence(card.nextAction)}${blockers} Last activity: ${workstationSentence(card.lastActivity)}`;
+  const lastActivity = workstationActivity(card.lastActivity)?.label ?? "Not recorded";
+  return `${workstationSentence(card.status)} ${workstationSentence(card.currentTask)} Next action: ${workstationSentence(card.nextAction)}${blockers} Last activity: ${workstationSentence(lastActivity)}`;
 }
 
 const WORKSTATION_STATUS_DESCRIPTIONS: Record<WorkstationCardProjection["status"], string> = {
+  queued: "Queued work has been acknowledged and is waiting for the Local Agent runner to claim it.",
   "waiting-approval": "Waiting for approval. Resolve the visible approval blocker before work can continue.",
   blocked: "Blocked work needs a recovery decision before progress can continue.",
   failed: "Failed work needs review, repair, retry, or human escalation.",
@@ -3595,12 +6252,14 @@ function isExecutableWorkstationAction(
   action: WorkstationGovernedAction,
 ): action is WorkstationGovernedAction & {
   actionType:
+    | "issue-approve"
     | "issue-launch"
     | "issue-retry"
     | "session-cancel"
     | "model-assignment-change";
 } {
   return (
+    action.actionType === "issue-approve" ||
     action.actionType === "issue-launch" ||
     action.actionType === "issue-retry" ||
     action.actionType === "session-cancel" ||
@@ -3623,7 +6282,11 @@ function workstationActionTargetId(action: WorkstationGovernedAction): string {
 }
 
 function workstationActionKey(action: WorkstationGovernedAction): string {
-  return `${action.actionType ?? "workstation-action"}:${workstationActionTargetId(action)}`;
+  return `${action.actionType ?? "workstation-action"}:${workstationActionStateId(action)}`;
+}
+
+function workstationActionStateId(action: WorkstationGovernedAction): string {
+  return JSON.stringify([action.missionId ?? "", workstationActionTargetId(action)]);
 }
 
 function workstationActionRequestTarget(
@@ -3647,18 +6310,40 @@ function governedActionSurface(
   return "Local monitoring only";
 }
 
+function missionIdFromAppLocalHref(href: string | undefined): string {
+  const encoded = href?.match(/^app-local:\/\/missions\/([^/]+)/)?.[1];
+  if (!encoded) return "";
+  try {
+    return decodeURIComponent(encoded);
+  } catch {
+    return "";
+  }
+}
+
 function ActivityJournal({
   projection,
   filters,
   status,
+  loadFailure,
   onFilterChange,
   onRefresh,
+  fallbackMissionId,
+  onOpenEvidence,
 }: {
   projection: ActivityJournalProjection | null;
   filters: ActivityJournalFilters;
   status: "pending" | "rejected" | null;
+  loadFailure: string | null;
   onFilterChange: (filters: ActivityJournalFilters) => void;
   onRefresh: () => void;
+  fallbackMissionId: string;
+  onOpenEvidence: (
+    missionId: string,
+    sessionId: string,
+    artifactRef: string,
+    label: string,
+    returnFocus: HTMLElement,
+  ) => void;
 }) {
   const updateFilter = (key: keyof ActivityJournalFilters, value: string) => {
     onFilterChange({ ...filters, [key]: value });
@@ -3744,6 +6429,13 @@ function ActivityJournal({
         </button>
       </div>
 
+      {loadFailure ? (
+        <div role="alert" className="inline-failure">
+          <span>{`Activity Journal load failed: ${loadFailure}`}</span>
+          <button type="button" onClick={onRefresh}>Retry Activity Journal</button>
+        </div>
+      ) : null}
+
       {status ? (
         <span role="status" aria-label="Activity Journal status" className="connection-pill">
           {status[0].toUpperCase() + status.slice(1)}
@@ -3756,8 +6448,17 @@ function ActivityJournal({
         </div>
       ) : (
         <ol className="activity-list">
-          {entries.map((entry) => (
-            <li key={entry.entry_id}>
+          {entries.map((entry) => {
+            const missionHref = entry.affected_entities.find((entity) =>
+              entity.href.startsWith("app-local://missions/"),
+            )?.href;
+            const missionId = missionIdFromAppLocalHref(missionHref) || fallbackMissionId;
+            const sessionId = entry.affected_entities.find(
+              (entity) =>
+                entity.entity_type === "agent-session" ||
+                entity.entity_type === "evidence-package",
+            )?.entity_id ?? "";
+            return <li key={entry.entry_id}>
               <article className="activity-entry">
                 <header>
                   <time dateTime={entry.recorded_at}>{entry.recorded_at}</time>
@@ -3769,7 +6470,7 @@ function ActivityJournal({
                   {entry.affected_entities.map((entity) => (
                     <div key={`${entry.entry_id}:${entity.entity_type}:${entity.entity_id}`}>
                       <span>{entity.entity_type} / {entity.entity_id}</span>
-                      {entity.href ? (
+                      {entity.href && entity.entity_type !== "evidence-package" ? (
                         <a href={entity.href}>{entity.label}</a>
                       ) : (
                         <strong>{entity.label}</strong>
@@ -3779,14 +6480,29 @@ function ActivityJournal({
                 </div>
                 {entry.evidence_links.length > 0 ? (
                   <div className="activity-entry__evidence">
-                    {entry.evidence_links.map((link) => (
-                      <a key={link} href={link}>{link}</a>
+                    {entry.evidence_links.map((link, index) => (
+                      <button
+                        key={link}
+                        type="button"
+                        disabled={!missionId || !sessionId}
+                        onClick={(event) =>
+                          onOpenEvidence(
+                            missionId,
+                            sessionId,
+                            link,
+                            `Activity evidence ${index + 1}`,
+                            event.currentTarget,
+                          )
+                        }
+                      >
+                        Open activity evidence {index + 1}
+                      </button>
                     ))}
                   </div>
                 ) : null}
               </article>
-            </li>
-          ))}
+            </li>;
+          })}
         </ol>
       )}
     </section>
@@ -3795,21 +6511,26 @@ function ActivityJournal({
 
 function WorkspaceQueue({
   projection,
+  loadFailure,
+  onRetry,
   missionDrafts,
+  missionDraftLoadFailure,
+  onMissionDraftRetry,
   missionDraftStatus,
   missionDraftReasons,
   status,
-  latestConsoleMessage,
   reasons,
   onReasonChange,
   onDecision,
-  onAdHocProposal,
-  onMissionDraftCreate,
   onMissionDraftReasonChange,
   onMissionDraftDecision,
 }: {
   projection: WorkspaceQueueProjection | null;
+  loadFailure: string | null;
+  onRetry: () => void;
   missionDrafts: MissionDraftProjection | null;
+  missionDraftLoadFailure: string | null;
+  onMissionDraftRetry: () => void;
   missionDraftStatus: {
     state: "pending" | "acknowledged" | "stale" | "rejected";
     message: string;
@@ -3819,12 +6540,9 @@ function WorkspaceQueue({
     state: "pending" | "acknowledged" | "stale" | "rejected";
     message: string;
   } | null;
-  latestConsoleMessage: AgentConsoleMessage | null;
   reasons: Record<string, string>;
   onReasonChange: (itemId: string, reason: string) => void;
   onDecision: (itemId: string, decision: WorkspaceQueueDecision, reason: string) => void;
-  onAdHocProposal: (proposal: AdHocDelegationDraft) => void;
-  onMissionDraftCreate: (draft: MissionDraftCreateDraft) => void;
   onMissionDraftReasonChange: (draftId: string, reason: string) => void;
   onMissionDraftDecision: (
     draftId: string,
@@ -3832,47 +6550,46 @@ function WorkspaceQueue({
     reason: string,
   ) => void;
 }) {
-  const [acceptanceCriteria, setAcceptanceCriteria] = useState("");
-  const [allowedPaths, setAllowedPaths] = useState("");
-  const [commandPolicy, setCommandPolicy] = useState("");
-  const [proposedAgent, setProposedAgent] = useState("qwen-coder-local-1");
-  const [draftGoal, setDraftGoal] = useState("");
-  const [selectedAdHocIds, setSelectedAdHocIds] = useState<readonly string[]>([]);
-  const [excludedAdHocIds, setExcludedAdHocIds] = useState<readonly string[]>([]);
-  const [newWorkItems, setNewWorkItems] = useState("");
-  const [dependencies, setDependencies] = useState("");
-  const [unresolvedDecisions, setUnresolvedDecisions] = useState("");
   const decisionStatusRef = useRef<HTMLSpanElement>(null);
+  const missionDraftDecisionStatusRef = useRef<HTMLSpanElement>(null);
   useEffect(() => {
     if (status) decisionStatusRef.current?.focus();
   }, [status]);
+  useEffect(() => {
+    if (missionDraftStatus) missionDraftDecisionStatusRef.current?.focus();
+  }, [missionDraftStatus]);
   if (!projection) {
     return (
       <div className="empty-state">
         <span className="eyebrow">Governance inbox</span>
         <h1>Workspace Queue</h1>
-        <p>Loading queue items.</p>
+        {loadFailure ? (
+          <>
+            <p role="alert">Workspace Queue load failed: {loadFailure}</p>
+            <button type="button" onClick={onRetry}>Retry Workspace Queue</button>
+          </>
+        ) : <p>Loading queue items.</p>}
       </div>
     );
   }
 
-  const parsedCriteria = splitDraftList(acceptanceCriteria);
-  const parsedPaths = splitDraftList(allowedPaths);
-  const parsedPolicy = parseCommandPolicyDraft(commandPolicy);
-  const pendingAdHocItems = projection.items.filter(isPendingAdHocDelegation);
-  const parsedNewWorkItems = splitDraftList(newWorkItems);
-  const parsedDependencies = splitDraftList(dependencies);
-  const parsedUnresolvedDecisions = splitDraftList(unresolvedDecisions);
-  const canPropose =
-    Boolean(latestConsoleMessage) &&
-    parsedCriteria.length > 0 &&
-    parsedPaths.length > 0 &&
-    proposedAgent.trim().length > 0 &&
-    status?.state !== "pending";
-  const canCreateMissionDraft =
-    draftGoal.trim().length > 0 &&
-    (selectedAdHocIds.length > 0 || parsedNewWorkItems.length > 0) &&
-    missionDraftStatus?.state !== "pending";
+  const pendingItems = projection.items.filter((item) => item.status === "pending");
+  const pendingGroups = projection.groups.flatMap((group) => {
+    const items = group.items.filter((item) => item.status === "pending");
+    return items.length > 0 ? [{ ...group, item_count: items.length, items }] : [];
+  });
+  const pendingDrafts = missionDrafts?.drafts.filter((draft) => draft.status === "draft") ?? [];
+  const pendingDraftProjection = missionDrafts
+    ? { ...missionDrafts, drafts: pendingDrafts }
+    : null;
+  const pendingDecisionCount = pendingItems.length + pendingDrafts.length;
+  const decisionInboxComplete =
+    !loadFailure && !missionDraftLoadFailure && missionDrafts !== null;
+  const decisionCountLabel = decisionInboxComplete
+    ? `${pendingDecisionCount} decisions pending`
+    : loadFailure || missionDraftLoadFailure
+      ? "Decision sources unavailable"
+      : "Loading decisions";
 
   return (
     <section className="workspace-queue" aria-label="Workspace Queue">
@@ -3882,10 +6599,15 @@ function WorkspaceQueue({
           <h1>Workspace Queue</h1>
         </div>
         <div className="mission-count">
-          <strong>{projection.items.length}</strong>
-          <span>queue items</span>
+          <strong>{decisionCountLabel}</strong>
         </div>
       </div>
+      {loadFailure ? (
+        <div role="alert" className="inline-failure">
+          <span>{`Workspace Queue load failed: ${loadFailure}`}</span>
+          <button type="button" onClick={onRetry}>Retry Workspace Queue</button>
+        </div>
+      ) : null}
       {status ? (
         <span
           ref={decisionStatusRef}
@@ -3897,190 +6619,36 @@ function WorkspaceQueue({
           {status.state[0].toUpperCase() + status.state.slice(1)}: {status.message}
         </span>
       ) : null}
-      <MissionDrafts
-        projection={missionDrafts}
-        status={missionDraftStatus}
-        reasons={missionDraftReasons}
-        onReasonChange={onMissionDraftReasonChange}
-        onDecision={onMissionDraftDecision}
-      />
-      <section className="queue-proposal" aria-label="Mission Draft creation">
-        <div className="issue-inspector__heading">
-          <div>
-            <span className="eyebrow">Selected ad hoc work</span>
-            <h2>Create Mission Draft</h2>
-            <strong>{pendingAdHocItems.length} available delegations</strong>
-          </div>
-        </div>
-        {pendingAdHocItems.length === 0 ? (
-          <p>No pending Ad Hoc Delegations available.</p>
-        ) : (
-          <div className="draft-selection-list">
-            {pendingAdHocItems.map((item) => (
-              <article key={item.item_id} className="draft-selection-item">
-                <div>
-                  <strong>{item.issue_id}</strong>
-                  <span>{item.requested_action}</span>
-                </div>
-                <label>
-                  <input
-                    type="checkbox"
-                    aria-label={`Include ${item.issue_id}`}
-                    checked={selectedAdHocIds.includes(item.issue_id)}
-                    onChange={(event) => {
-                      if (event.target.checked) {
-                        setSelectedAdHocIds((current) => [...current, item.issue_id]);
-                        setExcludedAdHocIds((current) =>
-                          current.filter((workId) => workId !== item.issue_id),
-                        );
-                        return;
-                      }
-                      setSelectedAdHocIds((current) =>
-                        current.filter((workId) => workId !== item.issue_id),
-                      );
-                    }}
-                  />
-                  <span>Include</span>
-                </label>
-                <label>
-                  <input
-                    type="checkbox"
-                    aria-label={`Exclude ${item.issue_id}`}
-                    checked={excludedAdHocIds.includes(item.issue_id)}
-                    onChange={(event) => {
-                      if (event.target.checked) {
-                        setExcludedAdHocIds((current) => [...current, item.issue_id]);
-                        setSelectedAdHocIds((current) =>
-                          current.filter((workId) => workId !== item.issue_id),
-                        );
-                        return;
-                      }
-                      setExcludedAdHocIds((current) =>
-                        current.filter((workId) => workId !== item.issue_id),
-                      );
-                    }}
-                  />
-                  <span>Exclude</span>
-                </label>
-              </article>
-            ))}
-          </div>
-        )}
-        <label>
-          <span>Proposed goal</span>
-          <input
-            aria-label="Mission Draft proposed goal"
-            value={draftGoal}
-            onChange={(event) => setDraftGoal(event.target.value)}
-          />
-        </label>
-        <label className="composer">
-          <span>New work</span>
-          <textarea
-            aria-label="Mission Draft new work"
-            rows={2}
-            value={newWorkItems}
-            onChange={(event) => setNewWorkItems(event.target.value)}
-          />
-        </label>
-        <label>
-          <span>Dependencies</span>
-          <input
-            aria-label="Mission Draft dependencies"
-            value={dependencies}
-            onChange={(event) => setDependencies(event.target.value)}
-          />
-        </label>
-        <label>
-          <span>Unresolved decisions</span>
-          <input
-            aria-label="Mission Draft unresolved decisions"
-            value={unresolvedDecisions}
-            onChange={(event) => setUnresolvedDecisions(event.target.value)}
-          />
-        </label>
-        <button
-          type="button"
-          disabled={!canCreateMissionDraft}
-          onClick={() =>
-            onMissionDraftCreate({
-              proposedGoal: draftGoal.trim(),
-              selectedAdHocIds,
-              excludedAdHocIds,
-              newWorkItems: parsedNewWorkItems,
-              dependencies: parsedDependencies,
-              unresolvedDecisions: parsedUnresolvedDecisions,
-            })
-          }
+      {missionDraftStatus ? (
+        <span
+          ref={missionDraftDecisionStatusRef}
+          role="status"
+          aria-label="Mission Draft decision status"
+          className="connection-pill"
+          tabIndex={-1}
         >
-          Create Mission Draft
-        </button>
-      </section>
-      <section className="queue-proposal" aria-label="Ad Hoc Delegation proposal">
-        <div className="issue-inspector__heading">
-          <div>
-            <span className="eyebrow">Prompt origin</span>
-            <h2>Ad Hoc Delegation</h2>
-            <strong>{latestConsoleMessage?.message_id ?? "No prompt message"}</strong>
-          </div>
-        </div>
-        <label className="composer">
-          <span>Acceptance criteria</span>
-          <textarea
-            aria-label="Ad Hoc Delegation acceptance criteria"
-            rows={2}
-            value={acceptanceCriteria}
-            onChange={(event) => setAcceptanceCriteria(event.target.value)}
-          />
-        </label>
-        <label>
-          <span>Allowed paths</span>
-          <input
-            aria-label="Ad Hoc Delegation allowed paths"
-            value={allowedPaths}
-            onChange={(event) => setAllowedPaths(event.target.value)}
-          />
-        </label>
-        <label>
-          <span>Command policy</span>
-          <input
-            aria-label="Ad Hoc Delegation command policy"
-            value={commandPolicy}
-            onChange={(event) => setCommandPolicy(event.target.value)}
-          />
-        </label>
-        <label>
-          <span>Proposed Local Agent</span>
-          <input
-            aria-label="Ad Hoc Delegation proposed agent"
-            value={proposedAgent}
-            onChange={(event) => setProposedAgent(event.target.value)}
-          />
-        </label>
-        <button
-          type="button"
-          disabled={!canPropose}
-          onClick={() => {
-            if (!latestConsoleMessage || !canPropose) return;
-            onAdHocProposal({
-              acceptanceCriteria: parsedCriteria,
-              allowedPaths: parsedPaths,
-              commandPolicy: parsedPolicy,
-              proposedAgent: proposedAgent.trim(),
-              originatingMessageId: latestConsoleMessage.message_id,
-            });
-          }}
-        >
-          Propose Ad Hoc Delegation
-        </button>
-      </section>
-      {projection.items.length === 0 ? (
+          {missionDraftStatus.state[0].toUpperCase() + missionDraftStatus.state.slice(1)}: {missionDraftStatus.message}
+        </span>
+      ) : null}
+      {pendingDrafts.length > 0 || missionDraftLoadFailure ? (
+        <MissionDrafts
+          projection={pendingDraftProjection}
+          loadFailure={missionDraftLoadFailure}
+          onRetry={onMissionDraftRetry}
+          status={missionDraftStatus}
+          reasons={missionDraftReasons}
+          onReasonChange={onMissionDraftReasonChange}
+          onDecision={onMissionDraftDecision}
+        />
+      ) : null}
+      {decisionInboxComplete && pendingDecisionCount === 0 ? (
         <div className="empty-state">
-          <h2>No governance items pending</h2>
+          <h2>No decisions pending</h2>
+          <p>New governance requests will appear here when they need your attention.</p>
         </div>
-      ) : (
+      ) : pendingItems.length > 0 ? (
         <div className="queue-groups">
-          {projection.groups.map((group) => (
+          {pendingGroups.map((group) => (
             <section key={group.group_id} className="queue-group">
               <div className="issue-inspector__heading">
                 <div>
@@ -4174,19 +6742,23 @@ function WorkspaceQueue({
             </section>
           ))}
         </div>
-      )}
+      ) : null}
     </section>
   );
 }
 
 function MissionDrafts({
   projection,
+  loadFailure,
+  onRetry,
   status,
   reasons,
   onReasonChange,
   onDecision,
 }: {
   projection: MissionDraftProjection | null;
+  loadFailure: string | null;
+  onRetry: () => void;
   status: {
     state: "pending" | "acknowledged" | "stale" | "rejected";
     message: string;
@@ -4195,10 +6767,6 @@ function MissionDrafts({
   onReasonChange: (draftId: string, reason: string) => void;
   onDecision: (draftId: string, decision: MissionDraftDecision, reason: string) => void;
 }) {
-  const decisionStatusRef = useRef<HTMLSpanElement>(null);
-  useEffect(() => {
-    if (status) decisionStatusRef.current?.focus();
-  }, [status]);
   if (!projection) {
     return (
       <section className="queue-group" aria-label="Mission Drafts">
@@ -4208,7 +6776,12 @@ function MissionDrafts({
             <h2>Mission Drafts</h2>
           </div>
         </div>
-        <p>Loading Mission Drafts.</p>
+        {loadFailure ? (
+          <>
+            <p role="alert">Mission Draft load failed: {loadFailure}</p>
+            <button type="button" onClick={onRetry}>Retry Mission Drafts</button>
+          </>
+        ) : <p>Loading Mission Drafts.</p>}
       </section>
     );
   }
@@ -4221,16 +6794,11 @@ function MissionDrafts({
           <h2>Mission Drafts</h2>
         </div>
       </div>
-      {status ? (
-        <span
-          ref={decisionStatusRef}
-          role="status"
-          aria-label="Mission Draft decision status"
-          className="connection-pill"
-          tabIndex={-1}
-        >
-          {status.state[0].toUpperCase() + status.state.slice(1)}: {status.message}
-        </span>
+      {loadFailure ? (
+        <div role="alert" className="inline-failure">
+          <span>{`Mission Draft load failed: ${loadFailure}`}</span>
+          <button type="button" onClick={onRetry}>Retry Mission Drafts</button>
+        </div>
       ) : null}
       {projection.drafts.length === 0 ? (
         <p>No Mission Drafts proposed.</p>
@@ -4325,27 +6893,6 @@ function MissionDrafts({
   );
 }
 
-function splitDraftList(value: string): string[] {
-  return value
-    .split(/\n|,/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-}
-
-function isPendingAdHocDelegation(item: WorkspaceQueueItem): boolean {
-  return item.item_type === "ad-hoc-delegation" && item.status === "pending";
-}
-
-function parseCommandPolicyDraft(value: string): Record<string, string> {
-  return splitDraftList(value).reduce<Record<string, string>>((policy, entry) => {
-    const [command, level] = entry.split(/=(.*)/s).filter((part) => part !== undefined);
-    if (command?.trim() && level?.trim()) {
-      policy[command.trim()] = level.trim();
-    }
-    return policy;
-  }, {});
-}
-
 function proposedChangeLines(changes: Readonly<Record<string, unknown>>): string[] {
   return Object.entries(changes).flatMap(([field, value]) => {
     if (Array.isArray(value)) {
@@ -4360,12 +6907,17 @@ function proposedChangeLines(changes: Readonly<Record<string, unknown>>): string
 
 function ReviewWorkspace({
   projection,
+  loadFailure,
+  onRetry,
   status,
   reasons,
   onReasonChange,
   onDecision,
+  onOpenEvidence,
 }: {
   projection: ReviewWorkspaceProjection | null;
+  loadFailure: string | null;
+  onRetry: () => void;
   status: {
     state: "pending" | "acknowledged" | "stale" | "rejected";
     message: string;
@@ -4373,6 +6925,13 @@ function ReviewWorkspace({
   reasons: Record<string, string>;
   onReasonChange: (sessionId: string, reason: string) => void;
   onDecision: (sessionId: string, decision: ReviewDecision, reason: string) => void;
+  onOpenEvidence: (
+    missionId: string,
+    sessionId: string,
+    artifactRef: string,
+    label: string,
+    returnFocus: HTMLElement,
+  ) => void;
 }) {
   const decisionStatusRef = useRef<HTMLSpanElement>(null);
   useEffect(() => {
@@ -4383,7 +6942,12 @@ function ReviewWorkspace({
       <div className="empty-state">
         <span className="eyebrow">Evidence decision surface</span>
         <h1>Review Workspace</h1>
-        <p>Loading review evidence.</p>
+        {loadFailure ? (
+          <>
+            <p role="alert">Review Workspace load failed: {loadFailure}</p>
+            <button type="button" onClick={onRetry}>Retry Review Workspace</button>
+          </>
+        ) : <p>Loading review evidence.</p>}
       </div>
     );
   }
@@ -4400,6 +6964,12 @@ function ReviewWorkspace({
           <span>awaiting review</span>
         </div>
       </div>
+      {loadFailure ? (
+        <div role="alert" className="inline-failure">
+          <span>{`Review Workspace load failed: ${loadFailure}`}</span>
+          <button type="button" onClick={onRetry}>Retry Review Workspace</button>
+        </div>
+      ) : null}
       {status ? (
         <span
           ref={decisionStatusRef}
@@ -4470,6 +7040,38 @@ function ReviewWorkspace({
                         <li key={command}>{command}</li>
                       ))}
                     </ul>
+                  )}
+                </section>
+
+                <section>
+                  <h3>Evidence artifacts</h3>
+                  {item.evidence.artifact_links.length === 0 ? (
+                    <p>No safe artifact is registered.</p>
+                  ) : (
+                    <div className="context-inspector__actions">
+                      {item.evidence.artifact_links.map((link, index) => {
+                        const label = /(?:review\.diff|review_diff)(?:$|\/)/i.test(link)
+                          ? "Review diff"
+                          : `Evidence artifact ${index + 1}`;
+                        return (
+                          <button
+                            key={link}
+                            type="button"
+                            onClick={(event) =>
+                              onOpenEvidence(
+                                item.mission_id,
+                                item.session_id,
+                                link,
+                                label,
+                                event.currentTarget,
+                              )
+                            }
+                          >
+                            Open {label.toLowerCase()}
+                          </button>
+                        );
+                      })}
+                    </div>
                   )}
                 </section>
 

@@ -46,8 +46,8 @@ test("records a process-local performance boundary through the native bridge", a
     stage: "S4" as const,
     boundary: "start" as const,
     clock: "native" as const,
-    monotonic_ns: "123456",
-    clock_id: "native:123",
+    monotonic_ns: "",
+    clock_id: "",
     detail: { outcome: "pass" },
   };
   vi.mocked(invoke).mockResolvedValueOnce({ recorded: true });
@@ -56,6 +56,98 @@ test("records a process-local performance boundary through the native bridge", a
 
   expect(invoke).toHaveBeenCalledWith("performance_mark", { request });
   expect(result).toEqual({ recorded: true });
+});
+
+test("preserves a structured Coding Workspace selection failure from Tauri", async () => {
+  const request = {
+    correlation_id: "workspace-select-unsafe-1",
+    workspace_path: "/opt/alfredo/backend",
+    selection_mode: "existing" as const,
+  };
+  vi.mocked(invoke).mockRejectedValueOnce({
+    code: "workspace-unsafe",
+    message: "The selected repository overlaps an Alfredo backend root.",
+    recoverable: true,
+  });
+
+  const result = await new TauriWorkspaceClient().selectCodingWorkspace(request);
+
+  expect(invoke).toHaveBeenCalledWith("coding_workspace_select", { request });
+  expect(result).toEqual({
+    kind: "selection-failure",
+    code: "workspace-unsafe",
+    message: "The selected repository overlaps an Alfredo backend root.",
+    recoverable: true,
+  });
+});
+
+test("submits an explicit Mission choice through Tauri", async () => {
+  const request = {
+    correlation_id: "mission-choice-1",
+    expected_revision: 1,
+    choice: "resume" as const,
+    mission_id: "existing",
+    mission_title: "",
+  };
+  const acknowledgement = {
+    schema_version: 1 as const,
+    correlation_id: request.correlation_id,
+    outcome: "acknowledged" as const,
+    coding_workspace: "/workspace/albert",
+    choice: request.choice,
+    active_mission: "existing",
+    revision: 2,
+    replayed: false,
+    missions: [{ id: "existing", title: "Existing Mission" }],
+    message: "Existing Mission resumed.",
+  };
+  vi.mocked(invoke).mockResolvedValueOnce(acknowledgement);
+
+  const result = await new TauriWorkspaceClient().chooseMission(request);
+
+  expect(invoke).toHaveBeenCalledWith("mission_choice", { request });
+  expect(result).toEqual({ kind: "acknowledged", acknowledgement });
+});
+
+test("loads the installed coding-agent capability catalog through Tauri", async () => {
+  const catalog = {
+    schema_version: 1 as const,
+    default_agent_id: "qwen3-14b",
+    skills: [
+      {
+        name: "diagnose",
+        description: "Diagnose hard bugs.",
+        source: "/workspace/.agents/skills/diagnose/SKILL.md",
+        invocation: "/use diagnose",
+      },
+    ],
+    commands: [
+      {
+        name: "/run",
+        usage: "/run <command>",
+        description: "Run a governed command.",
+        category: "execution",
+      },
+    ],
+    agents: [
+      {
+        id: "qwen3-14b",
+        role: "frontier",
+        provider: "ollama",
+        runner: "ollama",
+        model: "qwen3:14b",
+        routing: "controller",
+        availability: "available",
+        availability_reason: "",
+      },
+    ],
+  };
+  vi.mocked(invoke).mockResolvedValueOnce(catalog);
+
+  const result = await new TauriWorkspaceClient().loadAgentCapabilities();
+
+  expect(invoke).toHaveBeenCalledWith("agent_capabilities");
+  expect(result).toEqual({ kind: "capabilities", catalog });
 });
 
 test("preserves a structured persistence failure from the Tauri bridge", async () => {
@@ -233,6 +325,37 @@ test("appends explicitly scoped Agent Console message through Tauri", async () =
   expect(result).toEqual({ kind: "message", message });
 });
 
+test("generates Agent Console controller response through Tauri", async () => {
+  const request = {
+    expected_revision: 4,
+    message_id: "console-000001",
+    scope_kind: "issue-slice" as const,
+    scope_target: "ISS-01",
+    scope_label: "Restore workspace session",
+    agent_id: "qwen3.6-27b",
+  };
+  const message = {
+    message_id: "console-000002",
+    sequence: 2,
+    role: "assistant" as const,
+    content: "Controller response",
+    scope: snapshot.conversation_scope,
+    outcome: "model-commentary" as const,
+    source: "frontier-model",
+  };
+  const route = {
+    intent: "coding-task" as const,
+    task_request: "Fix workspace polling.",
+    acceptance_criteria: ["Polling recovers after a transient failure."],
+  };
+  vi.mocked(invoke).mockResolvedValueOnce({ message, route });
+
+  const result = await new TauriWorkspaceClient().generateConsoleResponse(request);
+
+  expect(invoke).toHaveBeenCalledWith("agent_console_response", { request });
+  expect(result).toEqual({ kind: "message", message, route });
+});
+
 test("loads the typed Working Context projection through Tauri", async () => {
   const projection = {
     schema_version: 1 as const,
@@ -378,12 +501,28 @@ test("loads the governed Shell Terminal projection through Tauri", async () => {
       {
         grant_id: "path-grant-000001",
         correlation_id: "path-grant-client-1",
+        request_id: "path-grant-request-000001",
         path: "/external/docs",
         access_level: "read" as const,
         duration_seconds: 900,
         granted_by: "mission-commander" as const,
         granted_at: "2026-06-27T08:00:00Z",
         expires_at: "2026-06-27T08:15:00Z",
+      },
+    ],
+    path_grant_requests: [
+      {
+        request_id: "path-grant-request-000001",
+        correlation_id: "terminal-client-1",
+        mission_id: "command-deck",
+        path: "/external/docs",
+        access_level: "read" as const,
+        duration_seconds: 900,
+        requester: "mission-commander",
+        requested_at: "2026-06-27T07:59:00Z",
+        reason: "External documentation requires an Additional Path Grant.",
+        affected_action: "python3 -m unittest --help",
+        status: "granted" as const,
       },
     ],
   };
@@ -448,6 +587,7 @@ test("approves a pending Shell Terminal command through Tauri", async () => {
 test("creates an Additional Path Grant through Tauri", async () => {
   const request = {
     correlation_id: "path-grant-client-2",
+    request_id: "path-grant-request-000002",
     expected_revision: 3,
     path: "/external/docs",
     access_level: "write" as const,
@@ -457,6 +597,7 @@ test("creates an Additional Path Grant through Tauri", async () => {
   const grant = {
     grant_id: "path-grant-000002",
     correlation_id: request.correlation_id,
+    request_id: request.request_id,
     path: request.path,
     access_level: request.access_level,
     duration_seconds: request.duration_seconds,
@@ -470,6 +611,38 @@ test("creates an Additional Path Grant through Tauri", async () => {
 
   expect(invoke).toHaveBeenCalledWith("additional_path_grant_create", { request });
   expect(result).toEqual({ kind: "path-grant", grant });
+});
+
+test("denies a contextual Additional Path Grant request through Tauri", async () => {
+  const request = {
+    correlation_id: "path-grant-denial-client-1",
+    request_id: "contextual-grant-client-1",
+    expected_revision: 4,
+    path: "/external/docs",
+    access_level: "read" as const,
+    duration_seconds: 300,
+    requester: "mission-commander" as const,
+    reason: "The blocked command requested external documentation.",
+    affected_action: "python3 docs/check.py",
+  };
+  const denial = {
+    denial_id: "path-grant-denial-000001",
+    correlation_id: request.correlation_id,
+    request_id: request.request_id,
+    path: request.path,
+    access_level: request.access_level,
+    duration_seconds: request.duration_seconds,
+    denied_by: "mission-commander" as const,
+    denied_at: "2026-07-11T10:30:00Z",
+    reason: request.reason,
+    affected_action: request.affected_action,
+  };
+  vi.mocked(invoke).mockResolvedValueOnce(denial);
+
+  const result = await new TauriWorkspaceClient().denyAdditionalPathGrant(request);
+
+  expect(invoke).toHaveBeenCalledWith("additional_path_grant_deny", { request });
+  expect(result).toEqual({ kind: "path-grant-denied", denial });
 });
 
 test("loads the typed Workspace Queue projection through Tauri", async () => {
@@ -671,6 +844,76 @@ test("maps stale Workstation actions separately from rejected actions", async ()
     code: "stale-action",
     message: "Workspace action expected revision 2, but the current revision is 3.",
     current_revision: 3,
+  });
+});
+
+test("runs an acknowledged queued workstation session through the isolated bridge command", async () => {
+  const request = { session_id: "session-ISS-01-1", mission_id: "command-deck" };
+  const session = {
+    schema_version: 1 as const,
+    mission_id: "command-deck",
+    session_id: request.session_id,
+    issue_id: "ISS-01",
+    status: "evidence-ready",
+    runner_started_at: "2026-07-10T08:00:00Z",
+    runner_ended_at: "2026-07-10T08:00:01Z",
+    runner_exit_status: 0,
+    evidence_valid: true,
+  };
+  vi.mocked(invoke).mockResolvedValueOnce(session);
+
+  const result = await new TauriWorkspaceClient().runWorkstationSession(request);
+
+  expect(invoke).toHaveBeenCalledWith("workstation_session_run", { request });
+  expect(result).toEqual({ kind: "session-finished", session });
+});
+
+test("loads a bounded session artifact through the typed Tauri command", async () => {
+  const request = {
+    mission_id: "command-deck",
+    session_id: "session-ISS-01-1",
+    artifact_ref:
+      "app-local://missions/command-deck/sessions/session-ISS-01-1/artifacts/review_diff/review.diff",
+  };
+  const artifact = {
+    schema_version: 1 as const,
+    mission_id: request.mission_id,
+    session_id: request.session_id,
+    artifact_id: "review_diff",
+    label: "Review diff",
+    media_type: "text/x-diff",
+    content: "--- a/app.py\n+++ b/app.py\n+fixed\n",
+    byte_count: 36,
+    content_limit_bytes: 128000,
+    truncated: false,
+  };
+  vi.mocked(invoke).mockResolvedValueOnce(artifact);
+
+  const result = await new TauriWorkspaceClient().loadSessionArtifact(request);
+
+  expect(invoke).toHaveBeenCalledWith("session_artifact", { request });
+  expect(result).toEqual({ kind: "session-artifact", artifact });
+  expect(result).not.toHaveProperty("artifact.path");
+});
+
+test("preserves a structured bounded artifact read failure for inline retry", async () => {
+  vi.mocked(invoke).mockRejectedValueOnce({
+    code: "session-artifact-not-found",
+    message: "The evidence reference is not registered for this Local Agent session.",
+    recoverable: true,
+  });
+
+  const result = await new TauriWorkspaceClient().loadSessionArtifact({
+    mission_id: "command-deck",
+    session_id: "session-ISS-01-1",
+    artifact_ref: "app-local://evidence/missing",
+  });
+
+  expect(result).toEqual({
+    kind: "session-artifact-failure",
+    code: "session-artifact-not-found",
+    message: "The evidence reference is not registered for this Local Agent session.",
+    recoverable: true,
   });
 });
 

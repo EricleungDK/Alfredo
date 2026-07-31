@@ -1,6 +1,6 @@
 # Documentation Index
 
-**Last updated:** 2026-06-18
+**Last updated:** 2026-07-23
 
 ## Albert MVP
 
@@ -10,10 +10,10 @@
 
 ## Agent Configuration
 
-- [Issue tracker](agents/issue-tracker.md) explains the local markdown issue tracker convention.
+- [Issue tracker](agents/issue-tracker.md) explains the GitHub PRD-parent, ordered sub-issue, and dependency conventions.
 - [Triage labels](agents/triage-labels.md) records the default triage vocabulary.
 - [Domain docs](agents/domain.md) points agents at the root project context.
 
 ## Historical Sources
 
-The `.agent/` and `.scratch/` directories contain implementation reports, PRDs, and completed tracker issues. Use the docs above as the current concise view, then consult those artifacts for detailed history.
+The `.agent/` directory contains implementation reports and orchestration history. `.scratch/` is the read-only archive of tracker records migrated to GitHub on 2026-07-23. Use the docs above and GitHub Issues as the current view, then consult the archive for provenance.

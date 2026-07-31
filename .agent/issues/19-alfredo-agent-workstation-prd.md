@@ -1,6 +1,6 @@
 # Alfredo Agent Workstation Product Requirements Document
 
-Status: ready-for-agent
+Status: ready-for-human
 Type: PRD
 
 ## Problem Statement
@@ -179,3 +179,7 @@ The public product name becomes Alfredo. The public CLI command and npm bin are 
 - The first production slice should be narrow: prove the prompt-dominant shell, live card projection, and one consequential side-pane action that creates a visible prompt/orchestrator turn and updates from acknowledged state.
 - A later migration slice should plan the full Albert-to-Alfredo internal rename, including package names, runtime paths, identifiers, docs, branch prefixes, and compatibility/deprecation policy.
 - After this PRD is accepted, split it into independently grabbable Issue Slices for npm CLI packaging, public command grammar, desktop shell layout, workstation event contract, card projection, consequential action transcript integration, governance coverage, persistence/restart behavior, accessibility/responsive validation, and staged rename work.
+
+## Comments
+
+- 2026-07-13: All AFK implementation slices, including ticket 22, are complete. The current-build Chromium geometry suite passes 4/4 after its tablet-width overflow exposed and drove a real grid-track fix. Ticket 20 remains `ready-for-human` pending the repository-visibility/provenance decision, authorized publication, a fresh public-registry install/PATH/headless-GUI smoke, and one real-display launch; ticket 28 remains `ready-for-human` for independent assistive-technology and visual review. The PRD is therefore `ready-for-human`, not complete.

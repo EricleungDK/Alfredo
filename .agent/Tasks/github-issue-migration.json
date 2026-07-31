@@ -1,0 +1,840 @@
+{
+  "generated_at": "2026-07-23T15:28:56.360757+00:00",
+  "items": {
+    ".scratch/alfredo-agent-workstation/19-alfredo-agent-workstation-prd.md": {
+      "aliases": [
+        ".agent/issues/19-alfredo-agent-workstation-prd.md"
+      ],
+      "blockers": [],
+      "comment_count": 1,
+      "feature": "alfredo-agent-workstation",
+      "github": {
+        "id": 4960277656,
+        "number": 10,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/10"
+      },
+      "issue_type": "prd",
+      "kind": "prd",
+      "parent_source": null,
+      "sequence": null,
+      "sha256": "71da78f3ba589ffabd80789f9a5b45e87eca7a0efe82a21aee06b6a9cde96e04",
+      "status": "ready-for-human",
+      "title": "[PRD] Alfredo Agent Workstation"
+    },
+    ".scratch/alfredo-agent-workstation/20-ship-alfredo-npm-workstation-entrypoint.md": {
+      "aliases": [
+        ".agent/issues/20-ship-alfredo-npm-workstation-entrypoint.md"
+      ],
+      "blockers": [],
+      "comment_count": 3,
+      "feature": "alfredo-agent-workstation",
+      "github": {
+        "id": 4960277741,
+        "number": 11,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/11"
+      },
+      "issue_type": "hitl",
+      "kind": "issue",
+      "parent_source": ".scratch/alfredo-agent-workstation/19-alfredo-agent-workstation-prd.md",
+      "sequence": "20",
+      "sha256": "743a7f94e79e927b8b7b4c44927796b4eabd635ebfa4a47a660bd215a6ba7f4e",
+      "status": "ready-for-human",
+      "title": "20 \u2014 Ship the Alfredo Npm Workstation Entrypoint"
+    },
+    ".scratch/alfredo-agent-workstation/21-add-headless-alfredo-cli-grammar.md": {
+      "aliases": [
+        ".agent/issues/21-add-headless-alfredo-cli-grammar.md"
+      ],
+      "blockers": [
+        ".scratch/alfredo-agent-workstation/20-ship-alfredo-npm-workstation-entrypoint.md"
+      ],
+      "comment_count": 1,
+      "feature": "alfredo-agent-workstation",
+      "github": {
+        "id": 4960277830,
+        "number": 12,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/12"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/alfredo-agent-workstation/19-alfredo-agent-workstation-prd.md",
+      "sequence": "21",
+      "sha256": "ead531a3dab43a5455ba16a7dae0c45d51eabb1d100e7d258f5e982dad84d330",
+      "status": "complete",
+      "title": "21 \u2014 Add Headless Alfredo Cli Grammar"
+    },
+    ".scratch/alfredo-agent-workstation/22-build-prompt-dominant-workstation-shell.md": {
+      "aliases": [
+        ".agent/issues/22-build-prompt-dominant-workstation-shell.md"
+      ],
+      "blockers": [],
+      "comment_count": 2,
+      "feature": "alfredo-agent-workstation",
+      "github": {
+        "id": 4960277903,
+        "number": 13,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/13"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/alfredo-agent-workstation/19-alfredo-agent-workstation-prd.md",
+      "sequence": "22",
+      "sha256": "e130f65767445d9cfdb8698ccdde8c0d09576a9350499a349a0670ed7db7ebed",
+      "status": "complete",
+      "title": "22 \u2014 Build the Prompt Dominant Workstation Shell"
+    },
+    ".scratch/alfredo-agent-workstation/23-project-live-agent-workstation-cards.md": {
+      "aliases": [
+        ".agent/issues/23-project-live-agent-workstation-cards.md"
+      ],
+      "blockers": [
+        ".scratch/alfredo-agent-workstation/22-build-prompt-dominant-workstation-shell.md"
+      ],
+      "comment_count": 0,
+      "feature": "alfredo-agent-workstation",
+      "github": {
+        "id": 4960277996,
+        "number": 14,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/14"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/alfredo-agent-workstation/19-alfredo-agent-workstation-prd.md",
+      "sequence": "23",
+      "sha256": "13d9dd67f192e2915e2d933cdaf9266e019060438fcf86da82612c4185bb234f",
+      "status": "complete",
+      "title": "23 \u2014 Project Live Agent Workstation Cards"
+    },
+    ".scratch/alfredo-agent-workstation/24-expand-workstation-cards-for-operational-detail.md": {
+      "aliases": [
+        ".agent/issues/24-expand-workstation-cards-for-operational-detail.md"
+      ],
+      "blockers": [
+        ".scratch/alfredo-agent-workstation/23-project-live-agent-workstation-cards.md"
+      ],
+      "comment_count": 0,
+      "feature": "alfredo-agent-workstation",
+      "github": {
+        "id": 4960278080,
+        "number": 15,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/15"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/alfredo-agent-workstation/19-alfredo-agent-workstation-prd.md",
+      "sequence": "24",
+      "sha256": "d3f3bef387f612f7054d1a06d166685ceeabbe84589ff05fd23b2a3f4da5dd50",
+      "status": "complete",
+      "title": "24 \u2014 Expand Workstation Cards for Operational Detail"
+    },
+    ".scratch/alfredo-agent-workstation/25-route-first-consequential-workstation-action.md": {
+      "aliases": [
+        ".agent/issues/25-route-first-consequential-workstation-action.md"
+      ],
+      "blockers": [
+        ".scratch/alfredo-agent-workstation/23-project-live-agent-workstation-cards.md"
+      ],
+      "comment_count": 0,
+      "feature": "alfredo-agent-workstation",
+      "github": {
+        "id": 4960278182,
+        "number": 16,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/16"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/alfredo-agent-workstation/19-alfredo-agent-workstation-prd.md",
+      "sequence": "25",
+      "sha256": "9033f809b5e5ebee59e896265e31064c8ff06706ab069f34d1c0167e9eff1ecc",
+      "status": "complete",
+      "title": "25 \u2014 Route the First Consequential Workstation Action"
+    },
+    ".scratch/alfredo-agent-workstation/26-cover-governed-workstation-action-family.md": {
+      "aliases": [
+        ".agent/issues/26-cover-governed-workstation-action-family.md"
+      ],
+      "blockers": [
+        ".scratch/alfredo-agent-workstation/25-route-first-consequential-workstation-action.md"
+      ],
+      "comment_count": 1,
+      "feature": "alfredo-agent-workstation",
+      "github": {
+        "id": 4960278268,
+        "number": 17,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/17"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/alfredo-agent-workstation/19-alfredo-agent-workstation-prd.md",
+      "sequence": "26",
+      "sha256": "bf8f1877be0e0bd56e8db08f6875e66ee0988b99f8501b2e9cb91b0c31dcb76b",
+      "status": "complete",
+      "title": "26 \u2014 Cover the Governed Workstation Action Family"
+    },
+    ".scratch/alfredo-agent-workstation/27-persist-alfredo-workstation-continuity.md": {
+      "aliases": [
+        ".agent/issues/27-persist-alfredo-workstation-continuity.md"
+      ],
+      "blockers": [
+        ".scratch/alfredo-agent-workstation/23-project-live-agent-workstation-cards.md",
+        ".scratch/alfredo-agent-workstation/25-route-first-consequential-workstation-action.md"
+      ],
+      "comment_count": 1,
+      "feature": "alfredo-agent-workstation",
+      "github": {
+        "id": 4960278349,
+        "number": 18,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/18"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/alfredo-agent-workstation/19-alfredo-agent-workstation-prd.md",
+      "sequence": "27",
+      "sha256": "7baa5c0c1a1faf7e3de5cee6758ecd177d0806bc9416f5cce9ceaa03c82719fb",
+      "status": "complete",
+      "title": "27 \u2014 Persist Alfredo Workstation Continuity"
+    },
+    ".scratch/alfredo-agent-workstation/28-validate-alfredo-accessibility-and-responsive-use.md": {
+      "aliases": [
+        ".agent/issues/28-validate-alfredo-accessibility-and-responsive-use.md"
+      ],
+      "blockers": [
+        ".scratch/alfredo-agent-workstation/22-build-prompt-dominant-workstation-shell.md",
+        ".scratch/alfredo-agent-workstation/24-expand-workstation-cards-for-operational-detail.md",
+        ".scratch/alfredo-agent-workstation/26-cover-governed-workstation-action-family.md"
+      ],
+      "comment_count": 2,
+      "feature": "alfredo-agent-workstation",
+      "github": {
+        "id": 4960278428,
+        "number": 19,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/19"
+      },
+      "issue_type": "hitl",
+      "kind": "issue",
+      "parent_source": ".scratch/alfredo-agent-workstation/19-alfredo-agent-workstation-prd.md",
+      "sequence": "28",
+      "sha256": "43c3c0282812c2347ec8c28009a97330802a2271c4c5f97ea178a19eceef7052",
+      "status": "ready-for-human",
+      "title": "28 \u2014 Validate Alfredo Accessibility and Responsive Use"
+    },
+    ".scratch/alfredo-agent-workstation/29-add-alfredo-release-seam-verification.md": {
+      "aliases": [
+        ".agent/issues/29-add-alfredo-release-seam-verification.md"
+      ],
+      "blockers": [],
+      "comment_count": 2,
+      "feature": "alfredo-agent-workstation",
+      "github": {
+        "id": 4960278514,
+        "number": 20,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/20"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/alfredo-agent-workstation/19-alfredo-agent-workstation-prd.md",
+      "sequence": "29",
+      "sha256": "6e057245ea3e8c07f84a589b781e00c72d2c0ed9f3c1933ee6907118f409c00d",
+      "status": "complete",
+      "title": "29 \u2014 Add Alfredo Release Seam Verification"
+    },
+    ".scratch/alfredo-console-first-workstation-redesign/PRD.md": {
+      "aliases": [],
+      "blockers": [],
+      "comment_count": 0,
+      "feature": "alfredo-console-first-workstation-redesign",
+      "github": {
+        "id": 4960278613,
+        "number": 21,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/21"
+      },
+      "issue_type": "prd",
+      "kind": "prd",
+      "parent_source": null,
+      "sequence": null,
+      "sha256": "4b7f27a1744519d581e9d5ca299f791bd34a58517ba541e4424c745d0f32a888",
+      "status": "ready-for-agent",
+      "title": "[PRD] Alfredo Console-First Workstation Redesign"
+    },
+    ".scratch/alfredo-console-first-workstation-redesign/issues/01-console-first-workstation-layout.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/alfredo-agent-workstation/29-add-alfredo-release-seam-verification.md"
+      ],
+      "comment_count": 1,
+      "feature": "alfredo-console-first-workstation-redesign",
+      "github": {
+        "id": 4960278717,
+        "number": 22,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/22"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/alfredo-console-first-workstation-redesign/PRD.md",
+      "sequence": "01",
+      "sha256": "809183cd8d832864501e6b1775f63b016ef14bfb6ede74a1e564b09588b6c8d6",
+      "status": "complete",
+      "title": "01 \u2014 Console First Workstation Layout"
+    },
+    ".scratch/alfredo-console-first-workstation-redesign/issues/02-inline-command-execution-cards.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/alfredo-agent-workstation/29-add-alfredo-release-seam-verification.md",
+        ".scratch/alfredo-console-first-workstation-redesign/issues/01-console-first-workstation-layout.md"
+      ],
+      "comment_count": 1,
+      "feature": "alfredo-console-first-workstation-redesign",
+      "github": {
+        "id": 4960278805,
+        "number": 23,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/23"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/alfredo-console-first-workstation-redesign/PRD.md",
+      "sequence": "02",
+      "sha256": "81f2b59eb700f469ca68f421d323e44d62ec0013c8b88c874ccc8bda53e8d6fb",
+      "status": "complete",
+      "title": "02 \u2014 Inline Command Execution Cards"
+    },
+    ".scratch/alfredo-console-first-workstation-redesign/issues/03-inline-approvals-and-contextual-path-grants.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/alfredo-agent-workstation/29-add-alfredo-release-seam-verification.md",
+        ".scratch/alfredo-console-first-workstation-redesign/issues/02-inline-command-execution-cards.md"
+      ],
+      "comment_count": 4,
+      "feature": "alfredo-console-first-workstation-redesign",
+      "github": {
+        "id": 4960278890,
+        "number": 24,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/24"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/alfredo-console-first-workstation-redesign/PRD.md",
+      "sequence": "03",
+      "sha256": "df59a391dd8e416f6fc1dab760cc6feba23adc842e81408c5418644cccf1bffb",
+      "status": "complete",
+      "title": "03 \u2014 Inline Approvals and Contextual Path Grants"
+    },
+    ".scratch/alfredo-console-first-workstation-redesign/issues/04-mission-work-pane-active-workstation-cards.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/alfredo-agent-workstation/29-add-alfredo-release-seam-verification.md",
+        ".scratch/alfredo-console-first-workstation-redesign/issues/01-console-first-workstation-layout.md"
+      ],
+      "comment_count": 5,
+      "feature": "alfredo-console-first-workstation-redesign",
+      "github": {
+        "id": 4960278967,
+        "number": 25,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/25"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/alfredo-console-first-workstation-redesign/PRD.md",
+      "sequence": "04",
+      "sha256": "93a9725297488562b29e2978894f26b3094e0667c075b3e777db2fd98495b407",
+      "status": "complete",
+      "title": "04 \u2014 Mission Work Pane Active Workstation Cards"
+    },
+    ".scratch/alfredo-console-first-workstation-redesign/issues/05-issue-assignment-board-projection-and-local-navigation.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/alfredo-agent-workstation/29-add-alfredo-release-seam-verification.md",
+        ".scratch/alfredo-console-first-workstation-redesign/issues/04-mission-work-pane-active-workstation-cards.md"
+      ],
+      "comment_count": 6,
+      "feature": "alfredo-console-first-workstation-redesign",
+      "github": {
+        "id": 4960279058,
+        "number": 26,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/26"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/alfredo-console-first-workstation-redesign/PRD.md",
+      "sequence": "05",
+      "sha256": "68bd0598ab065ab814d778752ac0797784e1a7ab79acbee130775e4c7236c153",
+      "status": "completed",
+      "title": "05 \u2014 Issue Assignment Board Projection and Local Navigation"
+    },
+    ".scratch/alfredo-console-first-workstation-redesign/issues/06-governed-issue-assignment-and-launch-actions.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/alfredo-agent-workstation/29-add-alfredo-release-seam-verification.md",
+        ".scratch/alfredo-console-first-workstation-redesign/issues/05-issue-assignment-board-projection-and-local-navigation.md"
+      ],
+      "comment_count": 7,
+      "feature": "alfredo-console-first-workstation-redesign",
+      "github": {
+        "id": 4960279176,
+        "number": 27,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/27"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/alfredo-console-first-workstation-redesign/PRD.md",
+      "sequence": "06",
+      "sha256": "889ce22bae4f6cf44b07835adc67c7df2e7b78bf9183a6e6c984eb633cfcf5f8",
+      "status": "completed",
+      "title": "06 \u2014 Governed Issue Assignment and Launch Actions"
+    },
+    ".scratch/alfredo-console-first-workstation-redesign/issues/07-activity-journal-and-durable-transcript-boundaries.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/alfredo-agent-workstation/29-add-alfredo-release-seam-verification.md",
+        ".scratch/alfredo-console-first-workstation-redesign/issues/02-inline-command-execution-cards.md",
+        ".scratch/alfredo-console-first-workstation-redesign/issues/03-inline-approvals-and-contextual-path-grants.md",
+        ".scratch/alfredo-console-first-workstation-redesign/issues/06-governed-issue-assignment-and-launch-actions.md"
+      ],
+      "comment_count": 3,
+      "feature": "alfredo-console-first-workstation-redesign",
+      "github": {
+        "id": 4960279325,
+        "number": 28,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/28"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/alfredo-console-first-workstation-redesign/PRD.md",
+      "sequence": "07",
+      "sha256": "1f6468121a91111342f12a53fc636b44072eee2b64da97bc32d9465484cfc962",
+      "status": "complete",
+      "title": "07 \u2014 Activity Journal and Durable Transcript Boundaries"
+    },
+    ".scratch/alfredo-console-first-workstation-redesign/issues/08-restart-continuity-through-the-release-seam.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/alfredo-agent-workstation/29-add-alfredo-release-seam-verification.md",
+        ".scratch/alfredo-console-first-workstation-redesign/issues/04-mission-work-pane-active-workstation-cards.md",
+        ".scratch/alfredo-console-first-workstation-redesign/issues/05-issue-assignment-board-projection-and-local-navigation.md",
+        ".scratch/alfredo-console-first-workstation-redesign/issues/07-activity-journal-and-durable-transcript-boundaries.md"
+      ],
+      "comment_count": 5,
+      "feature": "alfredo-console-first-workstation-redesign",
+      "github": {
+        "id": 4960279415,
+        "number": 29,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/29"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/alfredo-console-first-workstation-redesign/PRD.md",
+      "sequence": "08",
+      "sha256": "58863bef89ca7b2c0370c70a3b03cd05feb149ff5db55467aff6fc8a8138356a",
+      "status": "complete",
+      "title": "08 \u2014 Restart Continuity through the Release Seam"
+    },
+    ".scratch/alfredo-console-first-workstation-redesign/issues/09-responsive-and-accessible-workstation-hardening.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/alfredo-agent-workstation/29-add-alfredo-release-seam-verification.md",
+        ".scratch/alfredo-console-first-workstation-redesign/issues/01-console-first-workstation-layout.md",
+        ".scratch/alfredo-console-first-workstation-redesign/issues/02-inline-command-execution-cards.md",
+        ".scratch/alfredo-console-first-workstation-redesign/issues/03-inline-approvals-and-contextual-path-grants.md",
+        ".scratch/alfredo-console-first-workstation-redesign/issues/04-mission-work-pane-active-workstation-cards.md",
+        ".scratch/alfredo-console-first-workstation-redesign/issues/05-issue-assignment-board-projection-and-local-navigation.md",
+        ".scratch/alfredo-console-first-workstation-redesign/issues/06-governed-issue-assignment-and-launch-actions.md",
+        ".scratch/alfredo-console-first-workstation-redesign/issues/07-activity-journal-and-durable-transcript-boundaries.md",
+        ".scratch/alfredo-console-first-workstation-redesign/issues/08-restart-continuity-through-the-release-seam.md"
+      ],
+      "comment_count": 4,
+      "feature": "alfredo-console-first-workstation-redesign",
+      "github": {
+        "id": 4960279495,
+        "number": 30,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/30"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/alfredo-console-first-workstation-redesign/PRD.md",
+      "sequence": "09",
+      "sha256": "85f5104b668e89e83e7f39370c9f279e1aaeeabe1044fa1208652488a312ae21",
+      "status": "complete",
+      "title": "09 \u2014 Responsive and Accessible Workstation Hardening"
+    },
+    ".scratch/local-coding-agent-mvp-development/PRD.md": {
+      "aliases": [],
+      "blockers": [],
+      "comment_count": 0,
+      "feature": "local-coding-agent-mvp-development",
+      "github": {
+        "id": 4960279590,
+        "number": 31,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/31"
+      },
+      "issue_type": "prd",
+      "kind": "prd",
+      "parent_source": ".scratch/local-coding-agent-mvp/PRD.md",
+      "sequence": null,
+      "sha256": "570eec43b559e070064c209b9e58b26288c02a280b2f41b1e75d2516e3c6a2af",
+      "status": "complete",
+      "title": "[PRD] Local Coding Agent MVP Development Roadmap"
+    },
+    ".scratch/local-coding-agent-mvp-development/issues/01-lifecycle-state-cleanup-and-reopen-controls.md": {
+      "aliases": [],
+      "blockers": [],
+      "comment_count": 0,
+      "feature": "local-coding-agent-mvp-development",
+      "github": {
+        "id": 4960279688,
+        "number": 32,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/32"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/local-coding-agent-mvp-development/PRD.md",
+      "sequence": "01",
+      "sha256": "2363d525e51a98d371180a455357b01c111c2dadad3217fea64730a14dd78996",
+      "status": "complete",
+      "title": "01 \u2014 Lifecycle State Cleanup and Reopen Controls"
+    },
+    ".scratch/local-coding-agent-mvp-development/issues/02-textual-tui-mission-board.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/local-coding-agent-mvp-development/issues/01-lifecycle-state-cleanup-and-reopen-controls.md"
+      ],
+      "comment_count": 0,
+      "feature": "local-coding-agent-mvp-development",
+      "github": {
+        "id": 4960279778,
+        "number": 33,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/33"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/local-coding-agent-mvp-development/PRD.md",
+      "sequence": "02",
+      "sha256": "b0b00a986c690e7949ca2b570c986303b1ed3e10cc9247e4119ce4211014207b",
+      "status": "complete",
+      "title": "02 \u2014 Textual TUI Mission Board"
+    },
+    ".scratch/local-coding-agent-mvp-development/issues/03-agent-model-configuration-registry.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/local-coding-agent-mvp-development/issues/01-lifecycle-state-cleanup-and-reopen-controls.md"
+      ],
+      "comment_count": 0,
+      "feature": "local-coding-agent-mvp-development",
+      "github": {
+        "id": 4960279853,
+        "number": 34,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/34"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/local-coding-agent-mvp-development/PRD.md",
+      "sequence": "03",
+      "sha256": "49b4df02592dfb1e6aebbe2ceff9fb06756c369f4c7175b6d52eb0b2bd73885a",
+      "status": "complete",
+      "title": "03 \u2014 Agent Model Configuration Registry"
+    },
+    ".scratch/local-coding-agent-mvp-development/issues/04-tui-assignment-and-launch-controls.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/local-coding-agent-mvp-development/issues/02-textual-tui-mission-board.md",
+        ".scratch/local-coding-agent-mvp-development/issues/03-agent-model-configuration-registry.md"
+      ],
+      "comment_count": 0,
+      "feature": "local-coding-agent-mvp-development",
+      "github": {
+        "id": 4960279934,
+        "number": 35,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/35"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/local-coding-agent-mvp-development/PRD.md",
+      "sequence": "04",
+      "sha256": "1f87ca925a4443a52646798a107633554680a7afc3388a1f504c4dd27c8df479",
+      "status": "complete",
+      "title": "04 \u2014 TUI Assignment and Launch Controls"
+    },
+    ".scratch/local-coding-agent-mvp-development/issues/05-fake-local-agent-runner.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/local-coding-agent-mvp-development/issues/04-tui-assignment-and-launch-controls.md"
+      ],
+      "comment_count": 0,
+      "feature": "local-coding-agent-mvp-development",
+      "github": {
+        "id": 4960280003,
+        "number": 36,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/36"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/local-coding-agent-mvp-development/PRD.md",
+      "sequence": "05",
+      "sha256": "1e6242f6fdaf37b3333ff3647f485cab1aa9453f94a9c56bf21587332137c8a8",
+      "status": "complete",
+      "title": "05 \u2014 Fake Local Agent Runner"
+    },
+    ".scratch/local-coding-agent-mvp-development/issues/06-command-backed-local-agent-runner.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/local-coding-agent-mvp-development/issues/05-fake-local-agent-runner.md"
+      ],
+      "comment_count": 0,
+      "feature": "local-coding-agent-mvp-development",
+      "github": {
+        "id": 4960280076,
+        "number": 37,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/37"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/local-coding-agent-mvp-development/PRD.md",
+      "sequence": "06",
+      "sha256": "ee9b3fc0514f51f89ae664727e729d221e0591d72543fb368769643b3cac61c0",
+      "status": "complete",
+      "title": "06 \u2014 Command Backed Local Agent Runner"
+    },
+    ".scratch/local-coding-agent-mvp-development/issues/07-automated-evidence-collection.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/local-coding-agent-mvp-development/issues/06-command-backed-local-agent-runner.md"
+      ],
+      "comment_count": 0,
+      "feature": "local-coding-agent-mvp-development",
+      "github": {
+        "id": 4960280158,
+        "number": 38,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/38"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/local-coding-agent-mvp-development/PRD.md",
+      "sequence": "07",
+      "sha256": "b72ebd1abdad3b1e1cb2067dd97ca06b1c9c012905d54bc772aed206b03fb783",
+      "status": "complete",
+      "title": "07 \u2014 Automated Evidence Collection"
+    },
+    ".scratch/local-coding-agent-mvp-development/issues/08-tui-review-and-repair-loop.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/local-coding-agent-mvp-development/issues/07-automated-evidence-collection.md"
+      ],
+      "comment_count": 0,
+      "feature": "local-coding-agent-mvp-development",
+      "github": {
+        "id": 4960280237,
+        "number": 39,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/39"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/local-coding-agent-mvp-development/PRD.md",
+      "sequence": "08",
+      "sha256": "98fc1e435207ed0b28c3291d46a41f75b96d0b1c9acf034b84bffd5977547247",
+      "status": "complete",
+      "title": "08 \u2014 TUI Review and Repair Loop"
+    },
+    ".scratch/local-coding-agent-mvp-development/issues/09-pr-readiness-from-tui.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/local-coding-agent-mvp-development/issues/08-tui-review-and-repair-loop.md"
+      ],
+      "comment_count": 0,
+      "feature": "local-coding-agent-mvp-development",
+      "github": {
+        "id": 4960280319,
+        "number": 40,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/40"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/local-coding-agent-mvp-development/PRD.md",
+      "sequence": "09",
+      "sha256": "d2e1ad953aa1aa0db23d19ac962d8bdc6743a720972efbfe7d7d03c9d8fc112b",
+      "status": "complete",
+      "title": "09 \u2014 PR Readiness from TUI"
+    },
+    ".scratch/local-coding-agent-mvp/PRD.md": {
+      "aliases": [],
+      "blockers": [],
+      "comment_count": 0,
+      "feature": "local-coding-agent-mvp",
+      "github": {
+        "id": 4960253304,
+        "number": 1,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/1"
+      },
+      "issue_type": "prd",
+      "kind": "prd",
+      "parent_source": null,
+      "sequence": null,
+      "sha256": "79953dfb0a7da384221905ec89dc20e45149d5269f8745cd6a3a6ad255bd3145",
+      "status": "complete",
+      "title": "[PRD] Local Coding Agent MVP"
+    },
+    ".scratch/local-coding-agent-mvp/issues/01-mission-state-and-record-loading.md": {
+      "aliases": [],
+      "blockers": [],
+      "comment_count": 0,
+      "feature": "local-coding-agent-mvp",
+      "github": {
+        "id": 4960253467,
+        "number": 2,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/2"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/local-coding-agent-mvp/PRD.md",
+      "sequence": "01",
+      "sha256": "48a7bab50fbe06e3bc817f26d10e184f9b57a75e7d99d854539063f59080a5dd",
+      "status": "complete",
+      "title": "01 \u2014 Mission State and Record Loading"
+    },
+    ".scratch/local-coding-agent-mvp/issues/02-review-locking-and-assignment.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/local-coding-agent-mvp/issues/01-mission-state-and-record-loading.md"
+      ],
+      "comment_count": 0,
+      "feature": "local-coding-agent-mvp",
+      "github": {
+        "id": 4960253545,
+        "number": 3,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/3"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/local-coding-agent-mvp/PRD.md",
+      "sequence": "02",
+      "sha256": "4327443b28f7518e33d57e2817a7a892277363eeb61c1ae8948fe7611eaba5cd",
+      "status": "complete",
+      "title": "02 \u2014 Review Locking and Assignment"
+    },
+    ".scratch/local-coding-agent-mvp/issues/03-launch-local-agent-session.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/local-coding-agent-mvp/issues/02-review-locking-and-assignment.md"
+      ],
+      "comment_count": 0,
+      "feature": "local-coding-agent-mvp",
+      "github": {
+        "id": 4960253627,
+        "number": 4,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/4"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/local-coding-agent-mvp/PRD.md",
+      "sequence": "03",
+      "sha256": "725e5bfe5032753cfeafbc895055cbb8120beee0486523cb01f18aa91df80e0d",
+      "status": "complete",
+      "title": "03 \u2014 Launch Local Agent Session"
+    },
+    ".scratch/local-coding-agent-mvp/issues/04-command-and-visibility-policy.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/local-coding-agent-mvp/issues/03-launch-local-agent-session.md"
+      ],
+      "comment_count": 0,
+      "feature": "local-coding-agent-mvp",
+      "github": {
+        "id": 4960253817,
+        "number": 5,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/5"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/local-coding-agent-mvp/PRD.md",
+      "sequence": "04",
+      "sha256": "e5659238277334a0717180ce997793828bd12a4de8ac425ffe551b75bc74994f",
+      "status": "complete",
+      "title": "04 \u2014 Command and Visibility Policy"
+    },
+    ".scratch/local-coding-agent-mvp/issues/05-evidence-package-validation.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/local-coding-agent-mvp/issues/03-launch-local-agent-session.md"
+      ],
+      "comment_count": 0,
+      "feature": "local-coding-agent-mvp",
+      "github": {
+        "id": 4960253904,
+        "number": 6,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/6"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/local-coding-agent-mvp/PRD.md",
+      "sequence": "05",
+      "sha256": "3609f81bfd2f7830e379b5cf744465650eab961ef6a2d2ca3dbb764813dbac6b",
+      "status": "complete",
+      "title": "05 \u2014 Evidence Package Validation"
+    },
+    ".scratch/local-coding-agent-mvp/issues/06-frontier-review-and-repair-policy.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/local-coding-agent-mvp/issues/05-evidence-package-validation.md"
+      ],
+      "comment_count": 0,
+      "feature": "local-coding-agent-mvp",
+      "github": {
+        "id": 4960253986,
+        "number": 7,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/7"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/local-coding-agent-mvp/PRD.md",
+      "sequence": "06",
+      "sha256": "aa6b5f37b0f05d41b0e86f8edace3e9c28dd711d76e2441500d815a71da6ddc8",
+      "status": "complete",
+      "title": "06 \u2014 Frontier Review and Repair Policy"
+    },
+    ".scratch/local-coding-agent-mvp/issues/07-mission-record-generation.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/local-coding-agent-mvp/issues/06-frontier-review-and-repair-policy.md"
+      ],
+      "comment_count": 0,
+      "feature": "local-coding-agent-mvp",
+      "github": {
+        "id": 4960254045,
+        "number": 8,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/8"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/local-coding-agent-mvp/PRD.md",
+      "sequence": "07",
+      "sha256": "ba80ead7651fc2050fa029338aaf7e2dbb74dbe916e09eb80edc7c41a3c11e45",
+      "status": "complete",
+      "title": "07 \u2014 Mission Record Generation"
+    },
+    ".scratch/local-coding-agent-mvp/issues/08-pr-readiness-and-github-fallback.md": {
+      "aliases": [],
+      "blockers": [
+        ".scratch/local-coding-agent-mvp/issues/07-mission-record-generation.md"
+      ],
+      "comment_count": 0,
+      "feature": "local-coding-agent-mvp",
+      "github": {
+        "id": 4960254130,
+        "number": 9,
+        "url": "https://github.com/EricleungDK/Alfredo/issues/9"
+      },
+      "issue_type": "afk",
+      "kind": "issue",
+      "parent_source": ".scratch/local-coding-agent-mvp/PRD.md",
+      "sequence": "08",
+      "sha256": "17b2a5654acc94db87e6b1d7732abeb9b0e57678d1019e6c73fa685d1da305ba",
+      "status": "complete",
+      "title": "08 \u2014 PR Readiness and GitHub Fallback"
+    }
+  },
+  "policy": {
+    "external_prs_are_triage_surface": false,
+    "legacy_agent_issues_included": false,
+    "local_archive_retained": true
+  },
+  "repo": "EricleungDK/Alfredo",
+  "schema_version": 1,
+  "source": ".scratch"
+}

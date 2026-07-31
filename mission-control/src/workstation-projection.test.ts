@@ -30,6 +30,8 @@ const baseSnapshot: WorkspaceSnapshot = {
       {
         issue_id: "ISS-01",
         title: "Build prompt shell",
+        work_type: "AFK",
+        tracker_status: "ready-for-agent",
         lifecycle: "Approved",
         progress: "Runner streaming edits",
         launch_eligible: false,
@@ -82,6 +84,8 @@ const baseSnapshot: WorkspaceSnapshot = {
       {
         issue_id: "ISS-02",
         title: "Review evidence",
+        work_type: "AFK",
+        tracker_status: "complete",
         lifecycle: "Complete",
         progress: "Evidence accepted and PR-ready",
         launch_eligible: false,
@@ -145,6 +149,7 @@ const baseSnapshot: WorkspaceSnapshot = {
           issue_id: "ISS-01",
           assigned_agent: "qwen-coder-local",
           status: "launched",
+          last_activity_at: "2026-07-12T08:31:45+00:00",
           role: "local-agent",
           provider: "ollama",
           model: "qwen3.6:27b",
@@ -178,6 +183,8 @@ function issueSlice(
   return {
     issue_id: overrides.issue_id,
     title: overrides.title,
+    work_type: overrides.work_type,
+    tracker_status: overrides.tracker_status,
     lifecycle: overrides.lifecycle ?? "Approved",
     progress: overrides.progress ?? "Ready for assignment",
     launch_eligible: overrides.launch_eligible ?? false,
@@ -222,8 +229,8 @@ test("projects compact live workstation cards from canonical snapshot state", ()
   expect(projection.revision).toBe(12);
   expect(projection.groups.map((group) => group.id)).toEqual(["active", "done"]);
   expect(projection.groups[0].cards.map((card) => card.id)).toEqual([
-    "attention:delegation-command-deck-ISS-03",
-    "session:session-ISS-01-1",
+    "attention:command-deck:delegation-command-deck-ISS-03",
+    "session:command-deck:session-ISS-01-1",
   ]);
 
   const waiting = projection.groups[0].cards[0];
@@ -231,6 +238,7 @@ test("projects compact live workstation cards from canonical snapshot state", ()
     name: "ISS-03 delegation approval required",
     status: "waiting-approval",
     phase: "Approval",
+    lastActivity: "",
     approvalBlockers: ["ISS-03 delegation approval required"],
     nextAction: "Open Workspace Queue",
     acceptedRevision: 12,
@@ -245,6 +253,7 @@ test("projects compact live workstation cards from canonical snapshot state", ()
     status: "running",
     phase: "streaming",
     progress: "Runner streaming edits",
+    lastActivity: "2026-07-12T08:31:45+00:00",
     filesTouched: 2,
     latestCommandOrTest: "npm test -- workstation-projection.test.ts",
     nextAction: "Runner streaming edits",
@@ -281,6 +290,85 @@ test("keeps frontend-only pending intent separate from accepted workstation stat
   );
 });
 
+test("projects canonical review repair launches for Issue Slice and Ad Hoc sessions", () => {
+  const projection = projectWorkstationCards({
+    ...baseSnapshot,
+    revision: 21,
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      issue_count: 0,
+      ordered_issue_ids: [],
+      ready_issue_ids: [],
+      approved_issue_ids: [],
+      issue_slices: [],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 0,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ISS-REPAIR-1",
+            issue_id: "ISS-REPAIR",
+            assigned_agent: "issue-worker",
+            status: "evidence-ready",
+            task_title: "Repair accepted issue work",
+            review_outcome: "Needs repair",
+            review_next_action: "same-local-agent-repair",
+            repair_action_available: true,
+          },
+          {
+            session_id: "session-ADHOC-000001-1",
+            issue_id: "ADHOC-000001",
+            assigned_agent: "ad-hoc-worker",
+            status: "failed",
+            task_title: "Repair bounded ad hoc work",
+            review_outcome: "Needs repair",
+            review_next_action: "same-local-agent-repair",
+            repair_action_available: true,
+          },
+          {
+            session_id: "session-ISS-FAILED-1",
+            issue_id: "ISS-FAILED",
+            assigned_agent: "ordinary-worker",
+            status: "failed",
+            task_title: "Retry ordinary failed work",
+            repair_action_available: false,
+          },
+        ],
+        attention: [],
+      },
+    ],
+  });
+  const cards = projection.groups.flatMap((group) => group.cards);
+
+  for (const sessionId of ["session-ISS-REPAIR-1", "session-ADHOC-000001-1"]) {
+    const action = cards
+      .find((card) => card.sessionId === sessionId)
+      ?.detail.governedActions.find((candidate) => candidate.actionType === "issue-retry");
+    expect(action).toMatchObject({
+      label: "Launch repair",
+      actionType: "issue-retry",
+      requiresReason: false,
+      missionId: "command-deck",
+      sessionId,
+      expectedRevision: 21,
+      targetIdentity: { kind: "agent-session", id: sessionId },
+    });
+  }
+
+  expect(
+    cards
+      .find((card) => card.sessionId === "session-ISS-FAILED-1")
+      ?.detail.governedActions.find((candidate) => candidate.actionType === "issue-retry"),
+  ).toMatchObject({
+    label: "Retry",
+    requiresReason: true,
+  });
+});
+
 test("projects issue assignment rows from accepted mission and session state", () => {
   const boardSnapshot: WorkspaceSnapshot = {
     ...baseSnapshot,
@@ -315,11 +403,15 @@ test("projects issue assignment rows from accepted mission and session state", (
         issueSlice({
           issue_id: "ISS-READY",
           title: "Unassigned ready work",
+          work_type: "AFK",
+          tracker_status: "ready-for-agent",
           launch_eligible: true,
         }),
         issueSlice({
           issue_id: "ISS-BLOCKED",
           title: "Blocked dependency work",
+          work_type: "AFK",
+          tracker_status: "ready-for-agent",
           progress: "Waiting on release seam",
           blockers: [
             {
@@ -333,6 +425,8 @@ test("projects issue assignment rows from accepted mission and session state", (
         issueSlice({
           issue_id: "ISS-ACTIVE",
           title: "Active implementation",
+          work_type: "AFK",
+          tracker_status: "ready-for-agent",
           progress: "Runner streaming edits",
           sessions: [
             {
@@ -362,6 +456,8 @@ test("projects issue assignment rows from accepted mission and session state", (
         issueSlice({
           issue_id: "ISS-REVIEW",
           title: "Evidence ready",
+          work_type: "AFK",
+          tracker_status: "ready-for-agent",
           progress: "Evidence package ready",
           sessions: [
             {
@@ -381,6 +477,8 @@ test("projects issue assignment rows from accepted mission and session state", (
         issueSlice({
           issue_id: "ISS-DONE",
           title: "Accepted evidence",
+          work_type: "AFK",
+          tracker_status: "complete",
           lifecycle: "Complete",
           progress: "Evidence accepted and PR-ready",
           evidence: {
@@ -395,6 +493,8 @@ test("projects issue assignment rows from accepted mission and session state", (
         issueSlice({
           issue_id: "ISS-MERGED",
           title: "Merged evidence",
+          work_type: "AFK",
+          tracker_status: "merged",
           lifecycle: "Merged",
           progress: "PR merged upstream",
           evidence: {
@@ -409,6 +509,8 @@ test("projects issue assignment rows from accepted mission and session state", (
         issueSlice({
           issue_id: "ISS-FAILED",
           title: "Provider failed",
+          work_type: "AFK",
+          tracker_status: "ready-for-agent",
           progress: "Provider failure recorded",
           sessions: [
             {
@@ -474,11 +576,9 @@ test("projects issue assignment rows from accepted mission and session state", (
     "ISS-READY",
     "ISS-BLOCKED",
     "ISS-ACTIVE",
-      "ISS-REVIEW",
-      "ISS-DONE",
-      "ISS-MERGED",
-      "ISS-FAILED",
-    ]);
+    "ISS-REVIEW",
+    "ISS-FAILED",
+  ]);
   expect(
     board.rows.map((row) => ({
       issueId: row.issueId,
@@ -531,28 +631,8 @@ test("projects issue assignment rows from accepted mission and session state", (
       workstationAgent: "review-subagent",
       scopeDisabledReason: null,
     },
-      {
-        issueId: "ISS-DONE",
-        owner: "Unassigned",
-      assignmentState: "unassigned",
-      state: "complete",
-      blockerState: "clear",
-      workstationSessionId: null,
-        workstationAgent: null,
-        scopeDisabledReason: "Conversation Scope already targets ISS-DONE.",
-      },
-      {
-        issueId: "ISS-MERGED",
-        owner: "Unassigned",
-        assignmentState: "unassigned",
-        state: "merged",
-        blockerState: "clear",
-        workstationSessionId: null,
-        workstationAgent: null,
-        scopeDisabledReason: null,
-      },
-      {
-        issueId: "ISS-FAILED",
+    {
+      issueId: "ISS-FAILED",
       owner: "repair-agent",
       assignmentState: "active",
       state: "failed",
@@ -563,6 +643,181 @@ test("projects issue assignment rows from accepted mission and session state", (
     },
   ]);
   expect(board.rows[1].blockerSummaries).toEqual(["ISS-000 Ready open - Release seam"]);
+});
+
+test("keeps only active AFK work in the Issue Assignment Board", () => {
+  const activeAfk = {
+    ...issueSlice({
+      issue_id: "ISS-22",
+      title: "Finish responsive workstation shell",
+      tracker_status: "ready-for-agent",
+      lifecycle: "Needs review",
+    }),
+    work_type: "AFK",
+  } as WorkspaceIssueSliceSummary;
+  const completedAfk = {
+    ...issueSlice({
+      issue_id: "ISS-20",
+      title: "Ship package entrypoint",
+      tracker_status: "complete",
+      lifecycle: "Merged",
+      sessions: [
+        {
+          session_id: "session-ISS-20-stale",
+          assigned_agent: "stale-worker",
+          role: "local-agent",
+          provider: "ollama",
+          model: "stale-model",
+          status: "running",
+          stale: true,
+          disconnected: true,
+          operation_status: "streaming",
+          failure: "",
+        },
+      ],
+    }),
+    work_type: "AFK",
+  } as WorkspaceIssueSliceSummary;
+  const manualReview = {
+    ...issueSlice({
+      issue_id: "ISS-28",
+      title: "Validate accessibility with a human",
+      tracker_status: "ready-for-human",
+      lifecycle: "Needs human review",
+    }),
+    work_type: "HITL",
+  } as WorkspaceIssueSliceSummary;
+  const mergedAfk = {
+    ...issueSlice({
+      issue_id: "ISS-29",
+      title: "Verify release seam",
+      tracker_status: "merged",
+      lifecycle: "Merged",
+    }),
+    work_type: "AFK",
+  } as WorkspaceIssueSliceSummary;
+  const missingWorkType = issueSlice({
+    issue_id: "ISS-30",
+    title: "Unknown execution ownership",
+    tracker_status: "ready-for-agent",
+    lifecycle: "Needs review",
+  });
+  const missingTrackerStatus = issueSlice({
+    issue_id: "ISS-32",
+    title: "Unknown tracker lifecycle",
+    work_type: "AFK",
+    lifecycle: "Approved",
+    sessions: [
+      {
+        session_id: "session-ISS-32-1",
+        assigned_agent: "unknown-lifecycle-worker",
+        role: "local-agent",
+        provider: "ollama",
+        model: "unknown-model",
+        status: "running",
+        stale: false,
+        disconnected: false,
+        operation_status: "streaming",
+        failure: "",
+      },
+    ],
+  });
+
+  const board = projectIssueAssignmentBoard({
+    ...baseSnapshot,
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      issue_count: 7,
+      ordered_issue_ids: ["ISS-20", "ISS-22", "ISS-28", "ISS-29", "ISS-30", "ISS-31", "ISS-32"],
+      ready_issue_ids: ["ISS-31"],
+      approved_issue_ids: [],
+      issue_slices: [
+        completedAfk,
+        activeAfk,
+        manualReview,
+        mergedAfk,
+        missingWorkType,
+        missingTrackerStatus,
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 7,
+        is_active: true,
+        sessions: [],
+        attention: [],
+      },
+    ],
+  });
+
+  expect(board.rows.map((row) => row.issueId)).toEqual(["ISS-22"]);
+});
+
+test("Issue Assignment Board follows the latest retry session", () => {
+  const oldSession = {
+    session_id: "session-ISS-RETRY-2",
+    assigned_agent: "old-worker",
+    role: "local-agent",
+    provider: "ollama",
+    model: "gemma4:12b",
+    status: "failed",
+    stale: false,
+    disconnected: false,
+    operation_status: "failed",
+    failure: "First attempt failed.",
+  } as const;
+  const currentSession = {
+    ...oldSession,
+    session_id: "session-ISS-RETRY-10",
+    assigned_agent: "repair-worker",
+    model: "gemma4:26b",
+    status: "running",
+    operation_status: "streaming",
+    failure: "",
+  } as const;
+  const [row] = projectIssueAssignmentBoard({
+    ...baseSnapshot,
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      issue_count: 1,
+      ordered_issue_ids: ["ISS-RETRY"],
+      ready_issue_ids: [],
+      approved_issue_ids: ["ISS-RETRY"],
+      issue_slices: [
+        issueSlice({
+          issue_id: "ISS-RETRY",
+          title: "Repair current implementation",
+          work_type: "AFK",
+          tracker_status: "ready-for-agent",
+          sessions: [oldSession, currentSession],
+        }),
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [
+          { ...oldSession, issue_id: "ISS-RETRY" },
+          { ...currentSession, issue_id: "ISS-RETRY" },
+        ],
+        attention: [],
+      },
+    ],
+  }).rows;
+
+  expect(row).toMatchObject({
+    issueId: "ISS-RETRY",
+    owner: "repair-worker",
+    assignmentState: "active",
+    state: "active",
+    workstationSessionId: "session-ISS-RETRY-10",
+    workstationAgent: "repair-worker",
+  });
 });
 
 test("projects Issue Assignment Board governed actions only for canonical unassigned ready work", () => {
@@ -578,11 +833,15 @@ test("projects Issue Assignment Board governed actions only for canonical unassi
         issueSlice({
           issue_id: "ISS-READY",
           title: "Launchable issue",
+          work_type: "AFK",
+          tracker_status: "ready-for-agent",
           launch_eligible: true,
         }),
         issueSlice({
           issue_id: "ISS-BLOCKED",
           title: "Blocked issue",
+          work_type: "AFK",
+          tracker_status: "ready-for-agent",
           launch_eligible: false,
           blockers: [
             {
@@ -596,6 +855,8 @@ test("projects Issue Assignment Board governed actions only for canonical unassi
         issueSlice({
           issue_id: "ISS-ACTIVE",
           title: "Active issue",
+          work_type: "AFK",
+          tracker_status: "ready-for-agent",
           launch_eligible: false,
           sessions: [
             {
@@ -659,6 +920,199 @@ test("projects Issue Assignment Board governed actions only for canonical unassi
   expect(board.rows.find((row) => row.issueId === "ISS-ACTIVE")?.governedActions).toEqual([]);
 });
 
+test("offers agent-ready approval but never approves human-ready or blocked review rows", () => {
+  const board = projectIssueAssignmentBoard({
+    ...baseSnapshot,
+    revision: 25,
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      ordered_issue_ids: ["ISS-AGENT", "ISS-HUMAN", "ISS-BLOCKED"],
+      ready_issue_ids: [],
+      approved_issue_ids: [],
+      issue_slices: [
+        issueSlice({
+          issue_id: "ISS-AGENT",
+          title: "Agent review work",
+          work_type: "AFK",
+          tracker_status: "ready-for-agent",
+          lifecycle: "Needs review",
+        }),
+        issueSlice({
+          issue_id: "ISS-HUMAN",
+          title: "Human acceptance work",
+          work_type: "HITL",
+          tracker_status: "ready-for-human",
+          lifecycle: "Needs review",
+        }),
+        issueSlice({
+          issue_id: "ISS-BLOCKED",
+          title: "Blocked agent review work",
+          work_type: "AFK",
+          tracker_status: "ready-for-agent",
+          lifecycle: "Needs review",
+          blockers: [
+            {
+              issue_id: "ISS-ROOT",
+              title: "Root dependency",
+              lifecycle: "Needs review",
+              satisfied: false,
+            },
+          ],
+        }),
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 3,
+        is_active: true,
+        sessions: [],
+        attention: [],
+      },
+    ],
+  });
+
+  expect(board.rows.find((row) => row.issueId === "ISS-AGENT")).toMatchObject({
+    state: "needs-review",
+    readinessState: "Needs review",
+    governedActions: [
+      expect.objectContaining({
+        label: "Approve for launch",
+        actionType: "issue-approve",
+        requiresReason: false,
+        issueId: "ISS-AGENT",
+        expectedRevision: 25,
+      }),
+    ],
+  });
+  expect(board.rows.find((row) => row.issueId === "ISS-HUMAN")).toBeUndefined();
+  expect(board.rows.find((row) => row.issueId === "ISS-BLOCKED")?.governedActions).toEqual([]);
+});
+
+test("keeps model reassignment available for approved agent-ready work with a stale agent", () => {
+  const staleAssignment = issueSlice({
+    issue_id: "ISS-STALE-AGENT",
+    title: "Replace legacy worker",
+    work_type: "AFK",
+    tracker_status: "ready-for-agent",
+    lifecycle: "Approved",
+    launch_eligible: false,
+    model_assignment: {
+      agent_id: "qwen-coder-local-1",
+      role: "local-agent",
+      provider: "ollama",
+      model: "qwen2.5-coder:14b",
+      availability: "unavailable",
+      availability_reason: "Agent is absent from the current registry.",
+      operation_status: "idle",
+      failure: "",
+    },
+  });
+  const board = projectIssueAssignmentBoard({
+    ...baseSnapshot,
+    revision: 26,
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      ordered_issue_ids: ["ISS-STALE-AGENT"],
+      ready_issue_ids: [],
+      approved_issue_ids: ["ISS-STALE-AGENT"],
+      issue_slices: [staleAssignment],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [],
+        attention: [],
+      },
+    ],
+  });
+
+  expect(board.rows[0]).toMatchObject({
+    owner: "qwen-coder-local-1",
+    assignmentState: "assigned",
+    governedActions: [
+      expect.objectContaining({
+        label: "Change model assignment",
+        actionType: "model-assignment-change",
+        requiresReason: true,
+      }),
+    ],
+  });
+});
+
+test("keeps a ready model-assigned issue launchable until a workstation session exists", () => {
+  const assignedReadyIssue = issueSlice({
+    issue_id: "ISS-READY",
+    title: "Ready assigned work",
+    work_type: "AFK",
+    tracker_status: "ready-for-agent",
+    launch_eligible: true,
+    model_assignment: {
+      agent_id: "qwen-coder-local",
+      role: "local-agent",
+      provider: "ollama",
+      model: "qwen3.6:27b",
+      availability: "available",
+      availability_reason: "",
+      operation_status: "idle",
+      failure: "",
+    },
+  });
+  const snapshot: WorkspaceSnapshot = {
+    ...baseSnapshot,
+    revision: 22,
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      issue_count: 1,
+      ordered_issue_ids: ["ISS-READY"],
+      ready_issue_ids: ["ISS-READY"],
+      approved_issue_ids: ["ISS-READY"],
+      issue_slices: [assignedReadyIssue],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [],
+        attention: [],
+      },
+    ],
+  };
+
+  const [row] = projectIssueAssignmentBoard(snapshot).rows;
+
+  expect(row).toMatchObject({
+    issueId: "ISS-READY",
+    owner: "qwen-coder-local",
+    assignmentState: "assigned",
+    state: "assigned",
+    workstationSessionId: null,
+    workstationAgent: null,
+    workstationStatus: null,
+  });
+  expect(row.governedActions).toEqual([
+    expect.objectContaining({
+      label: "Launch",
+      actionType: "issue-launch",
+      issueId: "ISS-READY",
+      expectedRevision: 22,
+    }),
+    expect.objectContaining({
+      label: "Change model assignment",
+      actionType: "model-assignment-change",
+      issueId: "ISS-READY",
+      expectedRevision: 22,
+    }),
+  ]);
+  expect(projectWorkstationCards(snapshot).groups).toEqual([]);
+});
+
 test("keeps issue assignment linkage qualified to the active mission", () => {
   const duplicateIssueSnapshot: WorkspaceSnapshot = {
     ...baseSnapshot,
@@ -684,6 +1138,8 @@ test("keeps issue assignment linkage qualified to the active mission", () => {
         issueSlice({
           issue_id: "ISS-01",
           title: "Active unassigned issue",
+          work_type: "AFK",
+          tracker_status: "ready-for-agent",
           launch_eligible: true,
         }),
       ],
@@ -735,6 +1191,132 @@ test("keeps issue assignment linkage qualified to the active mission", () => {
   });
 });
 
+test("keeps duplicate issue-id workstation details isolated by mission identity", () => {
+  const activeIssue = issueSlice({
+    issue_id: "ISS-01",
+    title: "Active mission implementation",
+    progress: "Active mission runner streaming",
+    sessions: [
+      {
+        session_id: "session-active-ISS-01-1",
+        assigned_agent: "active-agent",
+        role: "local-agent",
+        provider: "ollama",
+        model: "qwen3.6:27b",
+        status: "launched",
+        stale: false,
+        disconnected: false,
+        operation_status: "streaming",
+        failure: "",
+      },
+    ],
+    evidence: {
+      state: "missing",
+      changed_files: ["active-mission.ts"],
+      commands_run: ["npm test -- active-mission"],
+      test_results: "No evidence package recorded.",
+      risks: "None recorded.",
+      artifact_links: [],
+    },
+  });
+  const snapshot: WorkspaceSnapshot = {
+    ...baseSnapshot,
+    active_mission: {
+      id: "active-mission",
+      title: "Active Mission",
+      issue_count: 1,
+    },
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      prd_title: "Active Mission",
+      issue_count: 1,
+      ordered_issue_ids: ["ISS-01"],
+      ready_issue_ids: [],
+      approved_issue_ids: ["ISS-01"],
+      issue_slices: [activeIssue],
+    },
+    missions: [
+      {
+        id: "active-mission",
+        title: "Active Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-active-ISS-01-1",
+            issue_id: "ISS-01",
+            assigned_agent: "active-agent",
+            status: "launched",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+          },
+        ],
+        attention: [],
+      },
+      {
+        id: "background-mission",
+        title: "Background Mission",
+        issue_count: 1,
+        is_active: false,
+        sessions: [
+          {
+            session_id: "session-background-ISS-01-1",
+            issue_id: "ADHOC-000001",
+            assigned_agent: "background-agent",
+            status: "evidence-ready",
+            role: "subagent",
+            provider: "ollama",
+            model: "qwen2.5-coder:14b",
+            task_title: "Repair background polling from the originating prompt",
+            operation_status: "evidence-ready",
+            failure: "",
+            changed_files: ["src/background-polling.ts"],
+            commands_run: ["npm test -- background-polling"],
+            test_results: "Background polling tests passed.",
+            risks: "None recorded.",
+            artifact_links: [
+              "app-local://missions/background-mission/sessions/session-background-ISS-01-1/artifacts/review_diff/review.diff",
+            ],
+          },
+        ],
+        attention: [],
+      },
+    ],
+  };
+
+  const cards = projectWorkstationCards(snapshot).groups.flatMap((group) => group.cards);
+  const activeCard = cards.find((card) => card.sessionId === "session-active-ISS-01-1");
+  const backgroundCard = cards.find((card) => card.sessionId === "session-background-ISS-01-1");
+
+  expect(cards).toHaveLength(2);
+  expect(activeCard).toMatchObject({
+    missionId: "active-mission",
+    currentTask: "Active mission implementation",
+    filesTouched: 1,
+    latestCommandOrTest: "npm test -- active-mission",
+  });
+  expect(backgroundCard).toMatchObject({
+    missionId: "background-mission",
+    issueId: "ADHOC-000001",
+    currentTask: "Repair background polling from the originating prompt",
+    status: "review-ready",
+    filesTouched: 1,
+    latestCommandOrTest: "npm test -- background-polling",
+  });
+  expect(backgroundCard?.detail.filesTouched).toEqual([
+    { path: "src/background-polling.ts", status: "touched" },
+  ]);
+  expect(backgroundCard?.detail.diffs).toEqual([
+    expect.objectContaining({
+      path: "src/background-polling.ts",
+      href: "app-local://missions/background-mission/sessions/session-background-ISS-01-1/artifacts/review_diff/review.diff",
+      missionId: "background-mission",
+      sessionId: "session-background-ISS-01-1",
+    }),
+  ]);
+});
+
 test("exposes waiting approval card decisions only from pending queue projection", () => {
   const pendingItem = {
     item_id: "delegation-command-deck-ISS-03",
@@ -773,6 +1355,7 @@ test("exposes waiting approval card decisions only from pending queue projection
       requiresReason: false,
       actionType: "workspace-queue-decision",
       actor: "mission-commander",
+      missionId: "command-deck",
       itemId: "delegation-command-deck-ISS-03",
       decision: "approve",
       targetIdentity: {
@@ -786,6 +1369,7 @@ test("exposes waiting approval card decisions only from pending queue projection
       requiresReason: true,
       actionType: "workspace-queue-decision",
       actor: "mission-commander",
+      missionId: "command-deck",
       itemId: "delegation-command-deck-ISS-03",
       decision: "reject",
       targetIdentity: {
@@ -799,6 +1383,7 @@ test("exposes waiting approval card decisions only from pending queue projection
       requiresReason: true,
       actionType: "workspace-queue-decision",
       actor: "mission-commander",
+      missionId: "command-deck",
       itemId: "delegation-command-deck-ISS-03",
       decision: "defer",
       targetIdentity: {
@@ -827,7 +1412,7 @@ test("exposes waiting approval card decisions only from pending queue projection
 });
 
 test("describes the broader governed workstation action family with typed metadata", () => {
-  const projection = projectWorkstationCards({
+  const snapshot: WorkspaceSnapshot = {
     ...baseSnapshot,
     revision: 20,
     mission_board: {
@@ -839,6 +1424,8 @@ test("describes the broader governed workstation action family with typed metada
         {
           issue_id: "ISS-04",
           title: "Launch guarded worker",
+          work_type: "AFK",
+          tracker_status: "ready-for-agent",
           lifecycle: "Ready",
           progress: "Ready for Mission Commander launch",
           launch_eligible: true,
@@ -906,11 +1493,14 @@ test("describes the broader governed workstation action family with typed metada
         attention: [],
       },
     ],
-  });
+  };
+  const projection = projectWorkstationCards(snapshot);
+  const board = projectIssueAssignmentBoard(snapshot);
 
   const cards = projection.groups.flatMap((group) => group.cards);
-  const launchCard = cards.find((card) => card.issueId === "ISS-04");
-  expect(launchCard?.detail.governedActions).toEqual(
+  expect(cards.find((card) => card.issueId === "ISS-04")).toBeUndefined();
+  const launchRow = board.rows.find((row) => row.issueId === "ISS-04");
+  expect(launchRow?.governedActions).toEqual(
     expect.arrayContaining([
       expect.objectContaining({
         actionType: "issue-launch",
@@ -961,41 +1551,90 @@ test("describes the broader governed workstation action family with typed metada
   );
 });
 
-test("projects cancelled sessions as done instead of active work", () => {
-  const projection = projectWorkstationCards({
-    ...baseSnapshot,
-    missions: [
-      {
-        id: "command-deck",
-        title: "Command Deck Mission",
-        issue_count: 3,
-        is_active: true,
-        sessions: [
-          {
-            session_id: "session-ISS-01-1",
-            issue_id: "ISS-01",
-            assigned_agent: "qwen-coder-local",
-            status: "cancelled",
-            role: "local-agent",
-            provider: "ollama",
-            model: "qwen3.6:27b",
-          },
-        ],
-        attention: [],
+test.each(["cancelled", "canceled"] as const)(
+  "keeps %s sessions out of accepted completion projections",
+  (cancellationStatus) => {
+    const cancelledIssue = issueSlice({
+      issue_id: "ISS-CANCELLED",
+      title: "Cancelled implementation",
+      work_type: "AFK",
+      tracker_status: "ready-for-agent",
+      lifecycle: "Complete",
+      sessions: [
+        {
+          session_id: "session-ISS-CANCELLED-1",
+          assigned_agent: "qwen-coder-local",
+          role: "local-agent",
+          provider: "ollama",
+          model: "qwen3.6:27b",
+          status: cancellationStatus,
+          stale: false,
+          disconnected: false,
+          operation_status: cancellationStatus,
+          failure: "",
+        },
+      ],
+      evidence: {
+        state: "accepted",
+        changed_files: ["mission-control/src/workstation-projection.ts"],
+        commands_run: [],
+        test_results: "Prior evidence was accepted before this session was cancelled.",
+        risks: "None recorded.",
+        artifact_links: [],
       },
-    ],
-  });
+    });
+    const cancelledSnapshot: WorkspaceSnapshot = {
+      ...baseSnapshot,
+      mission_board: {
+        ...baseSnapshot.mission_board,
+        issue_count: 1,
+        ordered_issue_ids: ["ISS-CANCELLED"],
+        ready_issue_ids: [],
+        approved_issue_ids: ["ISS-CANCELLED"],
+        issue_slices: [cancelledIssue],
+      },
+      missions: [
+        {
+          id: "command-deck",
+          title: "Command Deck Mission",
+          issue_count: 1,
+          is_active: true,
+          sessions: [
+            {
+              session_id: "session-ISS-CANCELLED-1",
+              issue_id: "ISS-CANCELLED",
+              assigned_agent: "qwen-coder-local",
+              status: cancellationStatus,
+              role: "local-agent",
+              provider: "ollama",
+              model: "qwen3.6:27b",
+            },
+          ],
+          attention: [],
+        },
+      ],
+    };
 
-  const card = projection.groups.flatMap((group) => group.cards).find((item) => item.sessionId === "session-ISS-01-1");
+    const card = projectWorkstationCards(cancelledSnapshot).groups
+      .flatMap((group) => group.cards)
+      .find((item) => item.sessionId === "session-ISS-CANCELLED-1");
+    const [row] = projectIssueAssignmentBoard(cancelledSnapshot).rows;
 
-  expect(card?.status).toBe("done");
-  expect(card?.nextAction).toBe("Review accepted evidence");
-  expect(card?.detail.governedActions).toEqual([
-    { label: "Open Activity", target: "activity", requiresReason: false },
-  ]);
-});
+    expect(card).toMatchObject({
+      status: "failed",
+      nextAction: "Inspect failure evidence",
+    });
+    expect(row).toMatchObject({
+      state: "failed",
+      readinessState: "Failed",
+    });
+  },
+);
 
 test("projects expanded operational detail from canonical issue and session evidence", () => {
+  const reviewDiffRef =
+    "app-local://missions/command-deck/sessions/session-ISS-01-1/artifacts/review_diff/review.diff";
+  const evidenceRef = "artifact://evidence/session-ISS-01-1";
   const projection = projectWorkstationCards({
     ...baseSnapshot,
     mission_board: {
@@ -1006,7 +1645,11 @@ test("projects expanded operational detail from canonical issue and session evid
               ...issue,
               evidence: {
                 ...issue.evidence,
-                artifact_links: ["app-local://evidence/session-ISS-01-1"],
+                artifact_links: [
+                  reviewDiffRef,
+                  "runtime/evidence/session-ISS-01-1.json",
+                  evidenceRef,
+                ],
                 risks: "Review generated CSS responsiveness.",
               },
             }
@@ -1042,20 +1685,29 @@ test("projects expanded operational detail from canonical issue and session evid
       {
         label: "Diff mission-control/src/App.tsx",
         path: "mission-control/src/App.tsx",
-        href: "app-local://diffs/session-ISS-01-1?path=mission-control%2Fsrc%2FApp.tsx",
+        href: reviewDiffRef,
+        missionId: "command-deck",
+        cardId: "session:command-deck:session-ISS-01-1",
         sessionId: "session-ISS-01-1",
       },
       {
         label: "Diff mission-control/src/styles.css",
         path: "mission-control/src/styles.css",
-        href: "app-local://diffs/session-ISS-01-1?path=mission-control%2Fsrc%2Fstyles.css",
+        href: reviewDiffRef,
+        missionId: "command-deck",
+        cardId: "session:command-deck:session-ISS-01-1",
         sessionId: "session-ISS-01-1",
       },
     ],
     evidenceLinks: [
       {
+        label: "Review diff session-ISS-01-1",
+        href: reviewDiffRef,
+        sessionId: "session-ISS-01-1",
+      },
+      {
         label: "Evidence Package session-ISS-01-1",
-        href: "app-local://evidence/session-ISS-01-1",
+        href: evidenceRef,
         sessionId: "session-ISS-01-1",
       },
     ],
@@ -1196,9 +1848,56 @@ test("splits many live cards by mission while retaining active and done buckets"
   });
 });
 
+test("qualifies colliding mission-local session identities and actions by Mission", () => {
+  const sharedSessionId = "session-ISS-01-1";
+  const projection = projectWorkstationCards({
+    ...baseSnapshot,
+    missions: [
+      ...(baseSnapshot.missions ?? []).map((mission) => ({
+        ...mission,
+        attention: [],
+        sessions: mission.sessions
+          .filter((session) => session.issue_id === "ISS-01")
+          .map((session) => ({ ...session, session_id: sharedSessionId })),
+      })),
+      {
+        id: "background-mission",
+        title: "Background Mission",
+        issue_count: 1,
+        is_active: false,
+        sessions: [
+          {
+            session_id: sharedSessionId,
+            issue_id: "ISS-01",
+            assigned_agent: "background-agent",
+            status: "running",
+            role: "subagent",
+            provider: "ollama",
+            model: "qwen2.5-coder:14b",
+          },
+        ],
+        attention: [],
+      },
+    ],
+  });
+
+  const cards = projection.groups.flatMap((group) => group.cards);
+  const collidingCards = cards.filter((card) => card.sessionId === sharedSessionId);
+  expect(collidingCards.map((card) => card.id)).toEqual([
+    "session:command-deck:session-ISS-01-1",
+    "session:background-mission:session-ISS-01-1",
+  ]);
+  expect(
+    collidingCards.map((card) =>
+      card.detail.governedActions.find((action) => action.actionType === "session-cancel")
+        ?.missionId,
+    ),
+  ).toEqual(["command-deck", "background-mission"]);
+});
+
 test("maps canonical session states to every workstation status", () => {
   const cases = [
-    ["queued", "idle", "", "idle"],
+    ["queued", "idle", "", "queued"],
     ["launched", "streaming", "", "running"],
     ["pending-approval", "idle", "", "waiting-approval"],
     ["needs-repair", "idle", "", "blocked"],
@@ -1246,7 +1945,7 @@ test("sorts blocked and waiting approval cards above routine active work while p
   const statuses = [
     ["session-running", "ISS-RUN", "runner-agent", "launched", "streaming", "", "running"],
     ["session-blocked", "ISS-BLOCK", "blocked-agent", "needs-repair", "idle", "", "blocked"],
-    ["session-idle", "ISS-IDLE", "idle-agent", "queued", "idle", "", "idle"],
+    ["session-idle", "ISS-IDLE", "idle-agent", "queued", "idle", "", "queued"],
     ["session-reviewing", "ISS-REVIEW", "review-agent", "needs-review", "idle", "", "reviewing"],
     ["session-ready", "ISS-READY", "evidence-agent", "evidence-ready", "completed", "", "review-ready"],
     ["session-failed", "ISS-FAIL", "failed-agent", "launched", "idle", "Provider failed.", "failed"],
@@ -1343,8 +2042,8 @@ test("sorts blocked and waiting approval cards above routine active work while p
     "blocked",
     "failed",
     "reviewing",
+    "queued",
     "running",
-    "idle",
     "review-ready",
   ]);
   expect(cards.map((card) => [card.status, card.tone])).toEqual([
@@ -1352,8 +2051,8 @@ test("sorts blocked and waiting approval cards above routine active work while p
     ["blocked", "attention"],
     ["failed", "failed"],
     ["reviewing", "active"],
+    ["queued", "active"],
     ["running", "active"],
-    ["idle", "muted"],
     ["review-ready", "active"],
   ]);
 });

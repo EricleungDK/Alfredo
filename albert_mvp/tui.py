@@ -193,7 +193,11 @@ def perform_tui_action(
     if action == "repair":
         if not session_id:
             raise AlbertError("TUI repair action requires --session.")
-        session = mission.launch_repair(session_id, agent_id=agent_id, allowed_paths=allowed_paths or [])
+        session = mission.launch_repair(
+            session_id,
+            agent_id=agent_id,
+            allowed_paths=allowed_paths if allowed_paths else None,
+        )
         return TuiActionResult(
             action=action,
             issue_id=session.issue_id,
@@ -268,7 +272,7 @@ def _review_queue(mission: AlbertMission) -> list[TuiReviewItem]:
             continue
         if not session.evidence_valid:
             continue
-        artifact_links = session.evidence.artifact_links if session.evidence else list(session.artifacts.values())
+        artifact_links = mission.review_artifact_links(session)
         queue.append(
             TuiReviewItem(
                 session_id=session.session_id,

@@ -38,3 +38,9 @@ Harden Alfredo's prompt-first workstation so dense live agent supervision remain
 - Fresh automated gates: `npm test -- App.test.tsx -t "workstation|contrast" --run` (9 passed), `npm run typecheck`, `npm test -- --run` (110 passed), `python3 -m unittest discover -s tests` (176 passed), `cargo test --manifest-path mission-control/src-tauri/Cargo.toml` (27 passed), and `npm run build`.
 - Remaining gate: human confirmation of workstation hierarchy, keyboard flow, screen-reader comprehension, zoom/reflow, and low-vision readability.
 - Audit report: `.agent/Reports/2026-07-06-alfredo-accessibility-responsive-workstation.md`.
+
+### 2026-07-12 — expanded automated scenario awaiting executable browser environment
+
+- The production geometry scenario now opens the capability palette, enabled evidence acceptance, expanded operational detail, and inline artifact viewer at all four viewports before repeating overflow/containment/overlap checks.
+- TypeScript, production build, the 215-test frontend suite, and Playwright discovery pass. Chromium itself could not start in the restricted environment (`sandbox_host ... Operation not permitted`), and the required unsandboxed run was refused because the approval service had exhausted its usage quota. No fresh 4/4 geometry result is claimed.
+- This ticket remains `ready-for-human`; the human hierarchy, keyboard, screen-reader, zoom/reflow, low-vision, and reduced-motion checkbox remains intentionally open.

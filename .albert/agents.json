@@ -1,6 +1,14 @@
 {
   "agents": [
     {
+      "id": "qwen3-14b",
+      "role": "frontier",
+      "provider": "ollama",
+      "runner": "ollama",
+      "model": "qwen3:14b",
+      "routing": "controller"
+    },
+    {
       "id": "qwen3.6-27b",
       "role": "frontier",
       "provider": "ollama",

@@ -1,15 +1,168 @@
 from __future__ import annotations
 
+import codecs
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
+import datetime as datetime_module
 from datetime import datetime, timedelta, timezone
+import fcntl
+from functools import wraps
+from inspect import signature
 import json
+import os
 from pathlib import Path
 import shlex
+import shutil
 import subprocess
+import tempfile
+import threading
 from typing import Any, Literal
 
-from .core import AlbertError, AlbertMission, EvidenceValidationError, IssueSlice, LocalAgentSession
+from .agents import AgentConfig, is_cloud_model, is_eligible_controller_agent
+from .capabilities import CapabilityCatalogService
+from .core import (
+    AlbertError,
+    AlbertMission,
+    EvidenceValidationError,
+    IssueSlice,
+    LocalAgentSession,
+    ReviewDecision,
+    _process_identity,
+    _process_identity_is_live,
+    _run_bounded_process,
+    _trusted_system_executable,
+    sandboxed_process_argv,
+    sanitized_process_environment,
+)
 from .performance import measured_stage
+
+
+_SESSION_ARTIFACT_CONTENT_BYTES_LIMIT = 128_000
+_AGENT_CONSOLE_USER_CONTENT_CHARACTER_LIMIT = 16_000
+_AGENT_CONSOLE_CONTENT_CHARACTER_LIMIT = 100_000
+_CONTROLLER_RECENT_CONVERSATION_CHARACTER_LIMIT = 24_000
+_CONTROLLER_MESSAGE_CHARACTER_LIMIT = 16_000
+_CONTROLLER_INPUT_CHARACTER_LIMIT = 96_000
+
+
+def _valid_session_activity_at(candidate: Any) -> str:
+    if not isinstance(candidate, str) or not candidate.strip():
+        return ""
+    value = candidate.strip()
+    try:
+        parsed = datetime.fromisoformat(
+            value.removesuffix("Z") + ("+00:00" if value.endswith("Z") else "")
+        )
+    except ValueError:
+        return ""
+    return value if parsed.tzinfo is not None else ""
+
+
+def _latest_session_activity_at(session: Any) -> str:
+    for candidate in (
+        session.runner_ended_at,
+        session.cancel_requested_at,
+        session.runner_started_at,
+    ):
+        value = _valid_session_activity_at(candidate)
+        if value:
+            return value
+    return ""
+
+
+_CHRONOLOGY_LOCKS_GUARD = threading.Lock()
+_CHRONOLOGY_LOCKS: dict[str, threading.RLock] = {}
+_CHRONOLOGY_LOCK_DEPTH = threading.local()
+
+
+@contextmanager
+def _chronology_order_lock(path: Path):
+    key = str(path.resolve())
+    with _CHRONOLOGY_LOCKS_GUARD:
+        local_lock = _CHRONOLOGY_LOCKS.setdefault(key, threading.RLock())
+    with local_lock:
+        depths = getattr(_CHRONOLOGY_LOCK_DEPTH, "depths", None)
+        if depths is None:
+            depths = {}
+            _CHRONOLOGY_LOCK_DEPTH.depths = depths
+        depth = depths.get(key, 0)
+        depths[key] = depth + 1
+        try:
+            if depth:
+                yield
+                return
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a+", encoding="utf-8") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        finally:
+            remaining_depth = depths[key] - 1
+            if remaining_depth:
+                depths[key] = remaining_depth
+            else:
+                depths.pop(key, None)
+
+
+def _causal_chronology(method):
+    """Linearize durable effects with Console and Activity audit phases."""
+
+    @wraps(method)
+    def ordered(self, *args, **kwargs):
+        lock_path = (
+            self._snapshots.preferences_path.parent / ".chronology-order.lock"
+        )
+        with _chronology_order_lock(lock_path):
+            return method(self, *args, **kwargs)
+
+    return ordered
+
+
+def _atomic_workspace_action(store_attribute: str | None = None):
+    """Serialize one revision check and its authoritative store mutation."""
+
+    def decorate(method):
+        @wraps(method)
+        def atomic(self, *args, **kwargs):
+            store_path = (
+                self._snapshots.preferences_path
+                if store_attribute is None
+                else getattr(self, store_attribute)
+            )
+            with self._snapshots._action_store_lock(store_path):
+                return method(self, *args, **kwargs)
+
+        return atomic
+
+    return decorate
+
+
+def _audit_rejected_workstation_action(method):
+    """Persist valid Mission Commander action attempts that fail validation."""
+
+    method_signature = signature(method)
+
+    @wraps(method)
+    def audited(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except AlbertError as error:
+            if not isinstance(error, WorkspacePersistenceError):
+                bound = method_signature.bind(self, *args, **kwargs)
+                bound.apply_defaults()
+                self._record_rejected_attempt(
+                    error=error,
+                    **{
+                        key: value
+                        for key, value in bound.arguments.items()
+                        if key != "self"
+                    },
+                )
+            raise
+
+    return audited
 
 
 class WorkspacePersistenceError(AlbertError):
@@ -59,6 +212,21 @@ class WorkingContextCurationError(AlbertError):
         super().__init__(f"Working Context source is not eligible for curation: {source_id}")
 
 
+class SessionArtifactReadError(AlbertError):
+    """A safe, structured failure from the bounded session artifact boundary."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "session-artifact-unavailable",
+        recoverable: bool = True,
+    ):
+        self.code = code
+        self.recoverable = recoverable
+        super().__init__(message)
+
+
 @dataclass(frozen=True)
 class ConversationScope:
     kind: Literal["working-directory", "mission", "issue-slice"]
@@ -87,9 +255,22 @@ class MissionSessionSummary:
     issue_id: str
     assigned_agent: str
     status: str
+    last_activity_at: str
+    runner_started_at: str
     role: str
     provider: str
     model: str
+    task_title: str
+    operation_status: str
+    failure: str
+    changed_files: tuple[str, ...]
+    commands_run: tuple[str, ...]
+    test_results: str
+    risks: str
+    artifact_links: tuple[str, ...]
+    review_outcome: str
+    review_next_action: str
+    repair_action_available: bool
 
 
 @dataclass(frozen=True)
@@ -202,7 +383,14 @@ class ShellTerminalCommandResult:
     command_id: str
     correlation_id: str
     classification: Literal["auto-allowed", "frontier-approvable", "human-required"]
-    status: Literal["pending-approval", "completed", "failed", "denied"]
+    status: Literal[
+        "pending-approval",
+        "executing",
+        "outcome-unknown",
+        "completed",
+        "failed",
+        "denied",
+    ]
     exit_code: int | None
     stdout: str
     stderr: str
@@ -218,15 +406,53 @@ class AdditionalPathGrant:
     granted_by: Literal["mission-commander"]
     granted_at: str
     expires_at: str
+    request_id: str = ""
+
+
+@dataclass(frozen=True)
+class AdditionalPathGrantRequestRecord:
+    request_id: str
+    correlation_id: str
+    mission_id: str
+    path: str
+    access_level: Literal["read", "write"]
+    duration_seconds: int
+    requester: str
+    requested_at: str
+    reason: str
+    affected_action: str
+    status: Literal["pending", "granted", "denied"] = "pending"
+
+
+@dataclass(frozen=True)
+class AdditionalPathGrantDenial:
+    denial_id: str
+    correlation_id: str
+    request_id: str
+    path: str
+    access_level: Literal["read", "write"]
+    duration_seconds: int
+    denied_by: Literal["mission-commander"]
+    denied_at: str
+    reason: str
+    affected_action: str
 
 
 @dataclass(frozen=True)
 class ShellTerminalCommandRecord:
     command_id: str
     correlation_id: str
+    mission_id: str
     command: str
     classification: Literal["auto-allowed", "frontier-approvable", "human-required"]
-    status: Literal["pending-approval", "completed", "failed", "denied"]
+    status: Literal[
+        "pending-approval",
+        "executing",
+        "outcome-unknown",
+        "completed",
+        "failed",
+        "denied",
+    ]
     exit_code: int | None
     working_directory: str
     requested_paths: tuple[str, ...]
@@ -243,21 +469,43 @@ class ShellTerminalProjection:
     revision: int
     commands: tuple[ShellTerminalCommandRecord, ...]
     grants: tuple[AdditionalPathGrant, ...]
+    grant_denials: tuple[AdditionalPathGrantDenial, ...]
+    path_grant_requests: tuple[AdditionalPathGrantRequestRecord, ...]
 
 
 class ShellTerminalService:
     """Executes governed commands while keeping terminal bytes transient."""
 
+    _COMMAND_TIMEOUT_SECONDS = 30
+    _SANDBOX_UNAVAILABLE_EXIT_CODE = 126
+    _OUTPUT_BYTES_LIMIT = 1_000_000
+
     def __init__(self, snapshots: "WorkspaceSnapshotService"):
         self._snapshots = snapshots
         self._terminal_path = snapshots.preferences_path.parent / "shell-terminal.json"
+        self._path_grant_requests_path = (
+            snapshots.preferences_path.parent / "path-grant-requests.json"
+        )
 
     @property
     def terminal_path(self) -> Path:
         return self._terminal_path
 
+    @property
+    def path_grant_requests_path(self) -> Path:
+        return self._path_grant_requests_path
+
+    @_causal_chronology
     def inspect(self) -> ShellTerminalProjection:
         terminal = self._load_terminal()
+        path_grant_requests = self._load_path_grant_requests()
+        if any(
+            record.get("status") == "executing"
+            and self._projected_command_status(record) == "outcome-unknown"
+            for record in terminal["commands"]
+        ):
+            terminal = self._try_persist_orphaned_executions(terminal)
+        self._reconcile_terminal_audit(terminal)
         return ShellTerminalProjection(
             schema_version=1,
             revision=terminal["revision"],
@@ -265,9 +513,10 @@ class ShellTerminalService:
                 ShellTerminalCommandRecord(
                     command_id=item["command_id"],
                     correlation_id=item["correlation_id"],
+                    mission_id=item.get("mission_id", ""),
                     command=item["command"],
                     classification=item["classification"],
-                    status=item["status"],
+                    status=self._projected_command_status(item),
                     exit_code=item["exit_code"],
                     working_directory=item["working_directory"],
                     requested_paths=tuple(item["requested_paths"]),
@@ -280,7 +529,35 @@ class ShellTerminalService:
                 for item in terminal["commands"]
             ),
             grants=tuple(AdditionalPathGrant(**item) for item in terminal["grants"]),
+            grant_denials=tuple(
+                AdditionalPathGrantDenial(**item) for item in terminal["grant_denials"]
+            ),
+            path_grant_requests=tuple(
+                self._projected_path_grant_request(item, terminal=terminal)
+                for item in path_grant_requests["requests"]
+            ),
         )
+
+    @_causal_chronology
+    def reconcile_audit(self) -> None:
+        """Repair missing command audit phases before unrelated chronology advances."""
+        terminal = self._load_terminal()
+        if any(
+            record.get("status") == "executing"
+            and self._projected_command_status(record) == "outcome-unknown"
+            for record in terminal["commands"]
+        ):
+            terminal = self._try_persist_orphaned_executions(terminal)
+        if any(
+            record.get("status") == "executing"
+            and self._projected_command_status(record) == "outcome-unknown"
+            for record in terminal["commands"]
+        ):
+            raise WorkspacePersistenceError(
+                "Shell Terminal outcome recovery is waiting for the command store; "
+                "retry the later action after the active command finishes."
+            )
+        self._reconcile_terminal_audit(terminal)
 
     def submit(
         self,
@@ -298,12 +575,61 @@ class ShellTerminalService:
             raise AlbertError("Shell Terminal command must not be empty")
         if not requester.strip():
             raise AlbertError("Shell Terminal requester must not be empty")
+        if access_level not in {"read", "write"}:
+            raise AlbertError(f"Unknown Shell Terminal access level: {access_level}")
+        with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+            return self._submit_locked(
+                correlation_id=correlation_id,
+                command=command,
+                working_directory=working_directory,
+                requested_paths=requested_paths,
+                requester=requester,
+                access_level=access_level,
+            )
+
+    def _submit_locked(
+        self,
+        *,
+        correlation_id: str,
+        command: str,
+        working_directory: str,
+        requested_paths: list[str],
+        requester: str,
+        access_level: Literal["read", "write"],
+    ) -> ShellTerminalCommandResult:
+        terminal = self._load_terminal()
+        normalized_correlation_id = correlation_id.strip()
+        normalized_working_directory = str(Path(working_directory).resolve())
+        normalized_requested_paths = [
+            str(Path(path).resolve()) for path in requested_paths
+        ]
+        request_payload = {
+            "command": command,
+            "working_directory": normalized_working_directory,
+            "requested_paths": normalized_requested_paths,
+            "requester": requester,
+            "access_level": access_level,
+        }
+        persisted = self._submission_for_correlation(
+            terminal,
+            correlation_id=normalized_correlation_id,
+        )
+        if persisted is not None:
+            if self._submission_request(persisted) != request_payload:
+                raise AlbertError(
+                    f"Shell Terminal correlation id {normalized_correlation_id} was already "
+                    "used for a different request."
+                )
+            if persisted.get("status") == "executing":
+                persisted = self._persist_orphaned_execution(terminal, persisted)
+            self._reconcile_submission_audit(persisted)
+            return self._result_from_record(persisted)
+
         snapshot = self._snapshots.snapshot()
         if snapshot.active_mission is None:
             raise AlbertError("Shell Terminal requires an Active Mission")
         mission = self._snapshots._missions[snapshot.active_mission.id]
-        terminal = self._load_terminal()
-        working_path = Path(working_directory).resolve()
+        working_path = Path(normalized_working_directory)
         if not self._path_authorized(
             working_path,
             access_level=access_level,
@@ -318,77 +644,159 @@ class ShellTerminalService:
                 raise AlbertError(
                     "Shell Terminal working directory Additional Path Grant is expired."
                 )
-            raise AlbertError(
+            reason = (
                 "Shell Terminal working directory is outside the workspace and has no "
                 f"active {access_level} Additional Path Grant."
             )
+            self._record_path_grant_request(
+                correlation_id=normalized_correlation_id,
+                mission_id=mission.mission_id,
+                path=normalized_working_directory,
+                access_level=access_level,
+                requester=requester,
+                reason=reason,
+                affected_action=command,
+            )
+            raise AlbertError(reason)
         outside_paths = [
-            str(Path(path).resolve())
-            for path in requested_paths
+            path
+            for path in normalized_requested_paths
             if not self._path_authorized(
-                Path(path).resolve(),
+                Path(path),
                 access_level=access_level,
                 workspace=mission.target_repo,
                 grants=terminal["grants"],
             )
         ]
         if outside_paths:
-            raise AlbertError(
+            reason = (
                 "Shell Terminal requested path is outside the workspace and has no "
                 f"active {access_level} Additional Path Grant: {outside_paths[0]}"
             )
+            self._record_path_grant_request(
+                correlation_id=normalized_correlation_id,
+                mission_id=mission.mission_id,
+                path=outside_paths[0],
+                access_level=access_level,
+                requester=requester,
+                reason=reason,
+                affected_action=command,
+            )
+            raise AlbertError(reason)
         classification = mission.classify_command(command)
         command_id = f"terminal-command-{len(terminal['commands']) + 1:06d}"
         record = {
             "command_id": command_id,
-            "correlation_id": correlation_id,
+            "correlation_id": normalized_correlation_id,
+            "mission_id": mission.mission_id,
             "command": command,
             "classification": classification,
             "status": "pending-approval",
             "exit_code": None,
             "working_directory": str(working_path),
-            "requested_paths": [str(Path(path).resolve()) for path in requested_paths],
+            "requested_paths": normalized_requested_paths,
             "access_level": access_level,
             "requester": requester,
         }
         if classification != "auto-allowed":
-            self._persist_terminal(
-                revision=terminal["revision"] + 1,
-                commands=[*terminal["commands"], record],
-                grants=terminal["grants"],
+            chronology_path = (
+                self._snapshots.preferences_path.parent
+                / ".chronology-order.lock"
             )
-            required_approver = (
-                "frontier-model"
-                if classification == "frontier-approvable"
-                else "mission-commander"
-            )
-            ActivityJournalService(self._snapshots).record_shell_command_approval_requested(
-                correlation_id=correlation_id,
-                snapshot=snapshot,
-                command_record=record,
-                required_approver=required_approver,
-            )
-            AgentConsoleHistoryService(
-                self._snapshots
-            ).record_shell_command_approval_requested(
-                command_id=command_id,
-                classification=classification,
-                required_approver=required_approver,
-            )
-            return ShellTerminalCommandResult(
-                command_id=command_id,
-                correlation_id=correlation_id,
-                classification=classification,
-                status="pending-approval",
-                exit_code=None,
-                stdout="",
-                stderr="",
-            )
+            with _chronology_order_lock(chronology_path):
+                self._persist_terminal(
+                    revision=terminal["revision"] + 1,
+                    commands=[*terminal["commands"], record],
+                    grants=terminal["grants"],
+                    grant_denials=terminal["grant_denials"],
+                )
+                self._reconcile_submission_audit(record)
+                return ShellTerminalCommandResult(
+                    command_id=command_id,
+                    correlation_id=normalized_correlation_id,
+                    classification=classification,
+                    status="pending-approval",
+                    exit_code=None,
+                    stdout="",
+                    stderr="",
+                )
         return self._execute(
             terminal=terminal,
             record=record,
             record_index=None,
         )
+
+    def _record_path_grant_request(
+        self,
+        *,
+        correlation_id: str,
+        mission_id: str,
+        path: str,
+        access_level: Literal["read", "write"],
+        requester: str,
+        reason: str,
+        affected_action: str,
+    ) -> AdditionalPathGrantRequestRecord:
+        normalized_path = str(Path(path).resolve())
+        with WorkspaceSnapshotService._json_store_lock(
+            self._path_grant_requests_path
+        ):
+            store = self._load_path_grant_requests()
+            matches = [
+                item
+                for item in store["requests"]
+                if item.get("correlation_id") == correlation_id
+                and item.get("path") == normalized_path
+            ]
+            if len(matches) > 1:
+                raise WorkspacePersistenceError(
+                    "Additional Path Grant request boundary is not unique: "
+                    f"{correlation_id}/{normalized_path}"
+                )
+            if matches:
+                request = AdditionalPathGrantRequestRecord(**matches[0])
+                if (
+                    request.mission_id != mission_id
+                    or request.access_level != access_level
+                    or request.duration_seconds != 900
+                    or request.requester != requester
+                    or request.reason != reason
+                    or request.affected_action != affected_action
+                ):
+                    raise AlbertError(
+                        "Shell Terminal correlation id was already used for a different "
+                        "Additional Path Grant request boundary."
+                    )
+            else:
+                request = AdditionalPathGrantRequestRecord(
+                    request_id=(
+                        f"path-grant-request-{len(store['requests']) + 1:06d}"
+                    ),
+                    correlation_id=correlation_id,
+                    mission_id=mission_id,
+                    path=normalized_path,
+                    access_level=access_level,
+                    duration_seconds=900,
+                    requester=requester,
+                    requested_at=datetime.now(timezone.utc)
+                    .isoformat(timespec="seconds")
+                    .replace("+00:00", "Z"),
+                    reason=reason,
+                    affected_action=affected_action,
+                )
+                self._persist_path_grant_requests(
+                    [*store["requests"], asdict(request)]
+                )
+        self._reconcile_path_grant_requested(request)
+        return request
+
+    def _reconcile_path_grant_requested(
+        self,
+        request: AdditionalPathGrantRequestRecord,
+    ) -> None:
+        AgentConsoleHistoryService(
+            self._snapshots
+        ).record_additional_path_grant_requested(request=request)
 
     def create_path_grant(
         self,
@@ -399,6 +807,7 @@ class ShellTerminalService:
         access_level: Literal["read", "write"],
         duration_seconds: int,
         requester: str,
+        request_id: str = "",
     ) -> AdditionalPathGrant:
         if requester != "mission-commander":
             raise AlbertError(
@@ -410,13 +819,81 @@ class ShellTerminalService:
             raise AlbertError(f"Unknown Additional Path Grant access level: {access_level}")
         if duration_seconds <= 0:
             raise AlbertError("Additional Path Grant duration must be positive")
+        with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+            return self._create_path_grant_locked(
+                correlation_id=correlation_id,
+                expected_revision=expected_revision,
+                path=path,
+                access_level=access_level,
+                duration_seconds=duration_seconds,
+                request_id=request_id,
+            )
+
+    def _create_path_grant_locked(
+        self,
+        *,
+        correlation_id: str,
+        expected_revision: int,
+        path: str,
+        access_level: Literal["read", "write"],
+        duration_seconds: int,
+        request_id: str,
+    ) -> AdditionalPathGrant:
         terminal = self._load_terminal()
+        normalized_correlation_id = correlation_id.strip()
+        normalized_path = str(Path(path).resolve())
+        normalized_request_id = request_id.strip()
+        matching_grants = [
+            item
+            for item in terminal["grants"]
+            if item.get("correlation_id") == normalized_correlation_id
+        ]
+        if len(matching_grants) > 1:
+            raise WorkspacePersistenceError(
+                "Additional Path Grant correlation id is not unique: "
+                f"{normalized_correlation_id}"
+            )
+        if matching_grants:
+            grant = AdditionalPathGrant(**matching_grants[0])
+            if (
+                grant.path != normalized_path
+                or grant.access_level != access_level
+                or grant.duration_seconds != duration_seconds
+                or grant.granted_by != "mission-commander"
+                or grant.request_id != normalized_request_id
+            ):
+                raise AlbertError(
+                    "Additional Path Grant correlation id was already used for a "
+                    f"different request: {normalized_correlation_id}"
+                )
+            self._reconcile_path_grant_created(grant)
+            return grant
         if expected_revision != terminal["revision"]:
             raise WorkspaceStaleActionError(
                 expected_revision=expected_revision,
                 current_revision=terminal["revision"],
             )
-        resolved_path = Path(path).resolve()
+        if normalized_request_id:
+            request = self._path_grant_request_by_id(normalized_request_id)
+            if request is None:
+                raise AlbertError(
+                    f"Unknown Additional Path Grant request: {normalized_request_id}"
+                )
+            projected_request = self._projected_path_grant_request(
+                asdict(request),
+                terminal=terminal,
+            )
+            if (
+                projected_request.status != "pending"
+                or request.path != normalized_path
+                or request.access_level != access_level
+                or request.duration_seconds != duration_seconds
+                or request.requester != "mission-commander"
+            ):
+                raise AlbertError(
+                    "Additional Path Grant request does not match the pending typed "
+                    f"boundary: {normalized_request_id}"
+                )
         now = datetime.now(timezone.utc)
         granted_at = now.isoformat(timespec="seconds").replace("+00:00", "Z")
         expires_at = (now + timedelta(seconds=duration_seconds)).isoformat(
@@ -424,28 +901,164 @@ class ShellTerminalService:
         ).replace("+00:00", "Z")
         grant = AdditionalPathGrant(
             grant_id=f"path-grant-{len(terminal['grants']) + 1:06d}",
-            correlation_id=correlation_id,
-            path=str(resolved_path),
+            correlation_id=normalized_correlation_id,
+            path=normalized_path,
             access_level=access_level,
             duration_seconds=duration_seconds,
             granted_by="mission-commander",
             granted_at=granted_at,
             expires_at=expires_at,
+            request_id=normalized_request_id,
         )
         self._persist_terminal(
             revision=terminal["revision"] + 1,
             commands=terminal["commands"],
             grants=[*terminal["grants"], asdict(grant)],
+            grant_denials=terminal["grant_denials"],
         )
+        self._reconcile_path_grant_created(grant)
+        return grant
+
+    def _reconcile_path_grant_created(self, grant: AdditionalPathGrant) -> None:
         ActivityJournalService(self._snapshots).record_additional_path_grant_created(
-            correlation_id=correlation_id,
+            correlation_id=grant.correlation_id,
             snapshot=self._snapshots.snapshot(),
             grant=grant,
         )
         AgentConsoleHistoryService(self._snapshots).record_additional_path_grant_created(
             grant=grant,
         )
-        return grant
+
+    def deny_path_grant_request(
+        self,
+        *,
+        correlation_id: str,
+        request_id: str,
+        expected_revision: int,
+        path: str,
+        access_level: Literal["read", "write"],
+        duration_seconds: int,
+        requester: str,
+        reason: str,
+        affected_action: str,
+    ) -> AdditionalPathGrantDenial:
+        if requester != "mission-commander":
+            raise AlbertError(
+                "Only the Mission Commander can deny an Additional Path Grant request."
+            )
+        if not correlation_id.strip():
+            raise AlbertError("Additional Path Grant denial correlation id must not be empty")
+        if not request_id.strip():
+            raise AlbertError("Additional Path Grant request id must not be empty")
+        if access_level not in {"read", "write"}:
+            raise AlbertError(f"Unknown Additional Path Grant access level: {access_level}")
+        if duration_seconds <= 0:
+            raise AlbertError("Additional Path Grant duration must be positive")
+        if not reason.strip():
+            raise AlbertError("Additional Path Grant denial reason must not be empty")
+        if not affected_action.strip():
+            raise AlbertError("Additional Path Grant affected action must not be empty")
+        with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+            terminal = self._load_terminal()
+            normalized_correlation_id = correlation_id.strip()
+            normalized_request_id = request_id.strip()
+            normalized_path = str(Path(path).resolve())
+            normalized_reason = reason.strip()
+            normalized_affected_action = affected_action.strip()
+            matching_denials = [
+                item
+                for item in terminal["grant_denials"]
+                if item.get("correlation_id") == normalized_correlation_id
+            ]
+            if len(matching_denials) > 1:
+                raise WorkspacePersistenceError(
+                    "Additional Path Grant denial correlation id is not unique: "
+                    f"{normalized_correlation_id}"
+                )
+            if matching_denials:
+                denial = AdditionalPathGrantDenial(**matching_denials[0])
+                if (
+                    denial.request_id != normalized_request_id
+                    or denial.path != normalized_path
+                    or denial.access_level != access_level
+                    or denial.duration_seconds != duration_seconds
+                    or denial.denied_by != "mission-commander"
+                    or denial.reason != normalized_reason
+                    or denial.affected_action != normalized_affected_action
+                ):
+                    raise AlbertError(
+                        "Additional Path Grant denial correlation id was already used "
+                        f"for a different request: {normalized_correlation_id}"
+                    )
+                self._reconcile_path_grant_denied(denial)
+                return denial
+            typed_request = self._path_grant_request_by_id(normalized_request_id)
+            if typed_request is not None:
+                projected_request = self._projected_path_grant_request(
+                    asdict(typed_request),
+                    terminal=terminal,
+                )
+                if (
+                    projected_request.status != "pending"
+                    or typed_request.path != normalized_path
+                    or typed_request.access_level != access_level
+                    or typed_request.duration_seconds != duration_seconds
+                    or typed_request.requester != requester
+                    or typed_request.reason != normalized_reason
+                    or typed_request.affected_action != normalized_affected_action
+                ):
+                    raise AlbertError(
+                        "Additional Path Grant denial does not match the pending typed "
+                        f"boundary: {normalized_request_id}"
+                    )
+            if expected_revision != terminal["revision"]:
+                raise WorkspaceStaleActionError(
+                    expected_revision=expected_revision,
+                    current_revision=terminal["revision"],
+                )
+            denial = AdditionalPathGrantDenial(
+                denial_id=(
+                    f"path-grant-denial-{len(terminal['grant_denials']) + 1:06d}"
+                ),
+                correlation_id=normalized_correlation_id,
+                request_id=normalized_request_id,
+                path=normalized_path,
+                access_level=access_level,
+                duration_seconds=duration_seconds,
+                denied_by="mission-commander",
+                denied_at=datetime.now(timezone.utc)
+                .isoformat(timespec="seconds")
+                .replace("+00:00", "Z"),
+                reason=normalized_reason,
+                affected_action=normalized_affected_action,
+            )
+            self._persist_terminal(
+                revision=terminal["revision"] + 1,
+                commands=terminal["commands"],
+                grants=terminal["grants"],
+                grant_denials=[*terminal["grant_denials"], asdict(denial)],
+            )
+            self._reconcile_path_grant_denied(denial)
+            return denial
+
+    def _reconcile_path_grant_denied(
+        self,
+        denial: AdditionalPathGrantDenial,
+    ) -> None:
+        snapshot = self._snapshots.snapshot()
+        ActivityJournalService(
+            self._snapshots
+        ).record_additional_path_grant_denied(
+            correlation_id=denial.correlation_id,
+            snapshot=snapshot,
+            denial=denial,
+        )
+        AgentConsoleHistoryService(
+            self._snapshots
+        ).record_additional_path_grant_denied(
+            denial=denial,
+            mission_id=snapshot.active_mission.id if snapshot.active_mission else "",
+        )
 
     def change_path_grant(
         self,
@@ -470,6 +1083,15 @@ class ShellTerminalService:
         command_id: str,
         approver: str,
     ) -> ShellTerminalCommandResult:
+        with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+            return self._approve_locked(command_id=command_id, approver=approver)
+
+    def _approve_locked(
+        self,
+        *,
+        command_id: str,
+        approver: str,
+    ) -> ShellTerminalCommandResult:
         terminal = self._load_terminal()
         commands = list(terminal["commands"])
         index = next(
@@ -479,6 +1101,15 @@ class ShellTerminalService:
         if index is None:
             raise AlbertError(f"Unknown Shell Terminal command: {command_id}")
         record = commands[index]
+        if record["status"] == "executing":
+            record = self._persist_orphaned_execution(terminal, record)
+        if record["status"] in {"outcome-unknown", "completed", "failed"}:
+            if record.get("approver") == approver:
+                self._reconcile_submission_audit(record)
+                return self._result_from_record(record)
+            raise AlbertError(
+                f"Shell Terminal command is already {record['status']}: {command_id}"
+            )
         if record["status"] != "pending-approval":
             raise AlbertError(f"Shell Terminal command is already {record['status']}: {command_id}")
         required_approver = (
@@ -509,6 +1140,21 @@ class ShellTerminalService:
             raise AlbertError("Only the Mission Commander can deny a Shell Terminal command.")
         if not reason.strip():
             raise AlbertError("Shell Terminal command denial requires a reason.")
+        with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+            return self._deny_locked(
+                command_id=command_id,
+                decider=decider,
+                reason=reason,
+            )
+
+    @_causal_chronology
+    def _deny_locked(
+        self,
+        *,
+        command_id: str,
+        decider: str,
+        reason: str,
+    ) -> ShellTerminalCommandResult:
         terminal = self._load_terminal()
         commands = list(terminal["commands"])
         index = next(
@@ -518,6 +1164,16 @@ class ShellTerminalService:
         if index is None:
             raise AlbertError(f"Unknown Shell Terminal command: {command_id}")
         record = commands[index]
+        if record["status"] == "denied":
+            if (
+                record.get("decider") == decider
+                and record.get("reason") == reason.strip()
+            ):
+                self._reconcile_submission_audit(record)
+                return self._result_from_record(record)
+            raise AlbertError(
+                f"Shell Terminal command is already denied: {command_id}"
+            )
         if record["status"] != "pending-approval":
             raise AlbertError(f"Shell Terminal command is already {record['status']}: {command_id}")
         denied = {
@@ -531,26 +1187,10 @@ class ShellTerminalService:
             revision=terminal["revision"] + 1,
             commands=commands,
             grants=terminal["grants"],
+            grant_denials=terminal["grant_denials"],
         )
-        ActivityJournalService(self._snapshots).record_shell_command_denied(
-            correlation_id=record["correlation_id"],
-            snapshot=self._snapshots.snapshot(),
-            command_record=denied,
-            reason=reason.strip(),
-        )
-        AgentConsoleHistoryService(self._snapshots).record_shell_command_denied(
-            command_id=record["command_id"],
-            reason=reason.strip(),
-        )
-        return ShellTerminalCommandResult(
-            command_id=record["command_id"],
-            correlation_id=record["correlation_id"],
-            classification=record["classification"],
-            status="denied",
-            exit_code=None,
-            stdout="",
-            stderr="",
-        )
+        self._reconcile_submission_audit(denied)
+        return self._result_from_record(denied)
 
     def _execute(
         self,
@@ -559,20 +1199,118 @@ class ShellTerminalService:
         record: dict[str, Any],
         record_index: int | None,
     ) -> ShellTerminalCommandResult:
-        completed = subprocess.run(
-            shlex.split(record["command"]),
-            cwd=record["working_directory"],
-            capture_output=True,
-            text=True,
-            check=False,
+        bubblewrap = _trusted_system_executable("bwrap")
+        if bubblewrap is None:
+            return self._finish_execution(
+                terminal=terminal,
+                record=record,
+                record_index=record_index,
+                exit_code=self._SANDBOX_UNAVAILABLE_EXIT_CODE,
+                stdout="",
+                stderr=(
+                    "Shell Terminal sandbox unavailable: bubblewrap (bwrap) is required "
+                    "for governed command execution; the command was not executed."
+                ),
+            )
+        sandbox_argv, mount_error = self._sandbox_argv(
+            bubblewrap=bubblewrap,
+            terminal=terminal,
+            record=record,
         )
+        if mount_error:
+            return self._finish_execution(
+                terminal=terminal,
+                record=record,
+                record_index=record_index,
+                exit_code=self._SANDBOX_UNAVAILABLE_EXIT_CODE,
+                stdout="",
+                stderr=mount_error,
+            )
+        attempt_record = {
+            **record,
+            "status": "executing",
+            "exit_code": None,
+            "executor_pid": os.getpid(),
+            "executor_identity": _process_identity(os.getpid()),
+        }
+        commands = list(terminal["commands"])
+        if record_index is None:
+            record_index = len(commands)
+            commands.append(attempt_record)
+        else:
+            commands[record_index] = attempt_record
+        attempt_terminal = {
+            **terminal,
+            "revision": terminal["revision"] + 1,
+            "commands": commands,
+        }
+        chronology_path = (
+            self._snapshots.preferences_path.parent / ".chronology-order.lock"
+        )
+        with _chronology_order_lock(chronology_path):
+            self._persist_terminal(
+                revision=attempt_terminal["revision"],
+                commands=commands,
+                grants=terminal["grants"],
+                grant_denials=terminal["grant_denials"],
+            )
+        try:
+            completed = _run_bounded_process(
+                sandbox_argv,
+                env=sanitized_process_environment(),
+                timeout_seconds=self._COMMAND_TIMEOUT_SECONDS,
+                output_limit_bytes=self._OUTPUT_BYTES_LIMIT,
+            )
+            return self._finish_execution(
+                terminal=attempt_terminal,
+                record=attempt_record,
+                record_index=record_index,
+                exit_code=completed.returncode,
+                stdout=completed.stdout,
+                stderr=completed.stderr,
+            )
+        except BaseException:
+            completion_is_durable = False
+            try:
+                current = self._load_terminal()
+                durable_record = self._submission_for_correlation(
+                    current,
+                    correlation_id=str(record["correlation_id"]),
+                )
+                completion_is_durable = (
+                    durable_record is not None
+                    and durable_record.get("status") in {"completed", "failed"}
+                )
+            except Exception:
+                completion_is_durable = False
+            if not completion_is_durable:
+                self._best_effort_mark_outcome_unknown(
+                    terminal=attempt_terminal,
+                    record=attempt_record,
+                    record_index=record_index,
+                )
+            raise
+
+    @_causal_chronology
+    def _finish_execution(
+        self,
+        *,
+        terminal: dict[str, Any],
+        record: dict[str, Any],
+        record_index: int | None,
+        exit_code: int,
+        stdout: str,
+        stderr: str,
+    ) -> ShellTerminalCommandResult:
         status: Literal["completed", "failed"] = (
-            "completed" if completed.returncode == 0 else "failed"
+            "completed" if exit_code == 0 else "failed"
         )
         completed_record = {
             **record,
             "status": status,
-            "exit_code": completed.returncode,
+            "exit_code": exit_code,
+            "executor_pid": None,
+            "executor_identity": "",
         }
         commands = list(terminal["commands"])
         if record_index is None:
@@ -583,26 +1321,494 @@ class ShellTerminalService:
             revision=terminal["revision"] + 1,
             commands=commands,
             grants=terminal["grants"],
+            grant_denials=terminal["grant_denials"],
         )
-        ActivityJournalService(self._snapshots).record_shell_command_finished(
-            correlation_id=record["correlation_id"],
-            snapshot=self._snapshots.snapshot(),
-            command_record=completed_record,
-        )
-        AgentConsoleHistoryService(self._snapshots).record_shell_command_finished(
-            command_id=record["command_id"],
-            status=status,
-            exit_code=completed.returncode,
-        )
+        self._reconcile_submission_audit(completed_record)
         return ShellTerminalCommandResult(
             command_id=record["command_id"],
             correlation_id=record["correlation_id"],
             classification=record["classification"],
             status=status,
-            exit_code=completed.returncode,
-            stdout=completed.stdout,
-            stderr=completed.stderr,
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
         )
+
+    @_causal_chronology
+    def _best_effort_mark_outcome_unknown(
+        self,
+        *,
+        terminal: dict[str, Any],
+        record: dict[str, Any],
+        record_index: int,
+    ) -> None:
+        unknown = {
+            **record,
+            "status": "outcome-unknown",
+            "exit_code": None,
+            "executor_pid": None,
+            "executor_identity": "",
+        }
+        commands = list(terminal["commands"])
+        commands[record_index] = unknown
+        try:
+            self._persist_terminal(
+                revision=terminal["revision"] + 1,
+                commands=commands,
+                grants=terminal["grants"],
+                grant_denials=terminal["grant_denials"],
+            )
+            self._reconcile_submission_audit(unknown)
+        except Exception:
+            # Preserve the original execution/storage failure. A future locked replay
+            # still converts the durable executing marker and repairs its audit trail
+            # without re-running it.
+            pass
+
+    @_causal_chronology
+    def _persist_orphaned_execution(
+        self,
+        terminal: dict[str, Any],
+        record: dict[str, Any],
+    ) -> dict[str, Any]:
+        commands = list(terminal["commands"])
+        index = commands.index(record)
+        unknown = {
+            **record,
+            "status": "outcome-unknown",
+            "exit_code": None,
+            "executor_pid": None,
+            "executor_identity": "",
+        }
+        commands[index] = unknown
+        self._persist_terminal(
+            revision=terminal["revision"] + 1,
+            commands=commands,
+            grants=terminal["grants"],
+            grant_denials=terminal["grant_denials"],
+        )
+        self._reconcile_submission_audit(unknown)
+        return unknown
+
+    def _persist_orphaned_executions_locked(
+        self,
+        terminal: dict[str, Any],
+    ) -> dict[str, Any]:
+        commands: list[dict[str, Any]] = []
+        changed = False
+        for record in terminal["commands"]:
+            if (
+                record.get("status") == "executing"
+                and self._projected_command_status(record) == "outcome-unknown"
+            ):
+                commands.append(
+                    {
+                        **record,
+                        "status": "outcome-unknown",
+                        "exit_code": None,
+                        "executor_pid": None,
+                        "executor_identity": "",
+                    }
+                )
+                changed = True
+            else:
+                commands.append(record)
+        if not changed:
+            return terminal
+        reconciled = {
+            **terminal,
+            "revision": terminal["revision"] + 1,
+            "commands": commands,
+        }
+        self._persist_terminal(
+            revision=reconciled["revision"],
+            commands=commands,
+            grants=terminal["grants"],
+            grant_denials=terminal["grant_denials"],
+        )
+        return reconciled
+
+    def _try_persist_orphaned_executions(
+        self,
+        observed_terminal: dict[str, Any],
+    ) -> dict[str, Any]:
+        lock_path = self._terminal_path.with_name(
+            f".{self._terminal_path.name}.lock"
+        )
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            try:
+                fcntl.flock(
+                    lock_file.fileno(),
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+            except BlockingIOError:
+                # A live submit/decision owns the command store while it executes.
+                # Preserve non-blocking inspection and retry recovery on the next poll.
+                return observed_terminal
+            try:
+                return self._persist_orphaned_executions_locked(
+                    self._load_terminal()
+                )
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _projected_command_status(record: dict[str, Any]) -> str:
+        if record.get("status") != "executing":
+            return str(record.get("status", "failed"))
+        pid = record.get("executor_pid")
+        identity = record.get("executor_identity")
+        if (
+            isinstance(pid, int)
+            and not isinstance(pid, bool)
+            and isinstance(identity, str)
+            and _process_identity_is_live(pid, identity)
+        ):
+            return "executing"
+        return "outcome-unknown"
+
+    @staticmethod
+    def _submission_request(record: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return {
+                "command": record["command"],
+                "working_directory": record["working_directory"],
+                "requested_paths": list(record["requested_paths"]),
+                "requester": record["requester"],
+                "access_level": record.get("access_level", "read"),
+            }
+        except (KeyError, TypeError) as exc:
+            raise WorkspacePersistenceError(
+                "Shell Terminal command record has an invalid request boundary."
+            ) from exc
+
+    @staticmethod
+    def _submission_for_correlation(
+        terminal: dict[str, Any],
+        *,
+        correlation_id: str,
+    ) -> dict[str, Any] | None:
+        matches = [
+            item
+            for item in terminal["commands"]
+            if item.get("correlation_id") == correlation_id
+        ]
+        if len(matches) > 1:
+            raise WorkspacePersistenceError(
+                f"Shell Terminal correlation id is not unique: {correlation_id}"
+            )
+        return matches[0] if matches else None
+
+    @_causal_chronology
+    def _reconcile_submission_audit(self, record: dict[str, Any]) -> None:
+        classification = str(record["classification"])
+        correlation_id = str(record["correlation_id"])
+        mission_id = str(record.get("mission_id", ""))
+        if classification != "auto-allowed":
+            required_approver = (
+                "frontier-model"
+                if classification == "frontier-approvable"
+                else "mission-commander"
+            )
+            ActivityJournalService(
+                self._snapshots
+            ).record_shell_command_approval_requested(
+                correlation_id=correlation_id,
+                snapshot=self._snapshots.snapshot(),
+                command_record=record,
+                required_approver=required_approver,
+            )
+            AgentConsoleHistoryService(
+                self._snapshots
+            ).record_shell_command_approval_requested(
+                correlation_id=correlation_id,
+                command_id=str(record["command_id"]),
+                classification=classification,
+                required_approver=required_approver,
+                mission_id=mission_id,
+            )
+        approver = str(record.get("approver", ""))
+        if approver:
+            ActivityJournalService(self._snapshots).record_shell_command_approved(
+                correlation_id=correlation_id,
+                snapshot=self._snapshots.snapshot(),
+                command_record=record,
+                approver=approver,
+            )
+            AgentConsoleHistoryService(
+                self._snapshots
+            ).record_shell_command_approved(
+                correlation_id=correlation_id,
+                command_id=str(record["command_id"]),
+                approver=approver,
+                mission_id=mission_id,
+            )
+        if record["status"] == "denied":
+            reason = str(record.get("reason", ""))
+            if record.get("decider") != "mission-commander" or not reason:
+                raise WorkspacePersistenceError(
+                    "Shell Terminal denied command has no valid decision boundary."
+                )
+            ActivityJournalService(self._snapshots).record_shell_command_denied(
+                correlation_id=correlation_id,
+                snapshot=self._snapshots.snapshot(),
+                command_record=record,
+                reason=reason,
+            )
+            AgentConsoleHistoryService(
+                self._snapshots
+            ).record_shell_command_denied(
+                correlation_id=correlation_id,
+                command_id=str(record["command_id"]),
+                reason=reason,
+                mission_id=mission_id,
+            )
+        elif record["status"] in {"completed", "failed"}:
+            exit_code = record.get("exit_code")
+            if not isinstance(exit_code, int):
+                raise WorkspacePersistenceError(
+                    "Shell Terminal completed command has no valid exit code."
+                )
+            ActivityJournalService(self._snapshots).record_shell_command_finished(
+                correlation_id=correlation_id,
+                snapshot=self._snapshots.snapshot(),
+                command_record=record,
+            )
+            AgentConsoleHistoryService(self._snapshots).record_shell_command_finished(
+                correlation_id=correlation_id,
+                command_id=str(record["command_id"]),
+                status=str(record["status"]),
+                exit_code=exit_code,
+                mission_id=mission_id,
+            )
+        elif record["status"] == "outcome-unknown":
+            ActivityJournalService(
+                self._snapshots
+            ).record_shell_command_outcome_unknown(
+                correlation_id=correlation_id,
+                snapshot=self._snapshots.snapshot(),
+                command_record=record,
+            )
+            AgentConsoleHistoryService(
+                self._snapshots
+            ).record_shell_command_outcome_unknown(
+                correlation_id=correlation_id,
+                command_id=str(record["command_id"]),
+                mission_id=mission_id,
+            )
+
+    def _reconcile_terminal_audit(self, terminal: dict[str, Any]) -> None:
+        console_markers = {
+            (message.correlation_id, message.action_phase)
+            for message in AgentConsoleHistoryService(self._snapshots).history()
+            if message.correlation_id and message.action_phase
+        }
+        journal_markers = {
+            (entry.correlation_id, entry.action_type)
+            for entry in ActivityJournalService(self._snapshots).inspect().entries
+        }
+        for item in self._load_path_grant_requests()["requests"]:
+            request = AdditionalPathGrantRequestRecord(**item)
+            audit_correlation_id = f"{request.correlation_id}:{request.request_id}"
+            if (
+                audit_correlation_id,
+                "shell-path-grant-requested",
+            ) not in console_markers:
+                self._reconcile_path_grant_requested(request)
+                console_markers.add(
+                    (audit_correlation_id, "shell-path-grant-requested")
+                )
+        for item in terminal["grants"]:
+            grant = AdditionalPathGrant(**item)
+            if (
+                (grant.correlation_id, "shell-path-grant-created")
+                not in console_markers
+                or (grant.correlation_id, "additional-path-grant-created")
+                not in journal_markers
+            ):
+                self._reconcile_path_grant_created(grant)
+                console_markers.add(
+                    (grant.correlation_id, "shell-path-grant-created")
+                )
+                journal_markers.add(
+                    (grant.correlation_id, "additional-path-grant-created")
+                )
+        for item in terminal["grant_denials"]:
+            denial = AdditionalPathGrantDenial(**item)
+            if (
+                (denial.correlation_id, "shell-path-grant-denied")
+                not in console_markers
+                or (denial.correlation_id, "additional-path-grant-denied")
+                not in journal_markers
+            ):
+                self._reconcile_path_grant_denied(denial)
+                console_markers.add(
+                    (denial.correlation_id, "shell-path-grant-denied")
+                )
+                journal_markers.add(
+                    (denial.correlation_id, "additional-path-grant-denied")
+                )
+        for record in terminal["commands"]:
+            correlation_id = str(record.get("correlation_id", ""))
+            required_console, required_journal = self._audit_requirements(record)
+            if any(
+                (correlation_id, phase) not in console_markers
+                for phase in required_console
+            ) or any(
+                (correlation_id, action_type) not in journal_markers
+                for action_type in required_journal
+            ):
+                self._reconcile_submission_audit(record)
+                console_markers.update(
+                    (correlation_id, phase) for phase in required_console
+                )
+                journal_markers.update(
+                    (correlation_id, action_type)
+                    for action_type in required_journal
+                )
+
+    @staticmethod
+    def _audit_requirements(
+        record: dict[str, Any],
+    ) -> tuple[tuple[str, ...], tuple[str, ...]]:
+        console: list[str] = []
+        journal: list[str] = []
+        if record.get("classification") != "auto-allowed":
+            console.append("shell-approval-request")
+            journal.append("shell-command-approval-requested")
+        if record.get("approver"):
+            console.append("shell-approved")
+            journal.append("shell-command-approved")
+        status = record.get("status")
+        if status == "denied":
+            console.append("shell-denied")
+            journal.append("shell-command-denied")
+        elif status in {"completed", "failed"}:
+            console.append("shell-finished")
+            journal.append(
+                "shell-command-completed"
+                if status == "completed"
+                else "shell-command-failed"
+            )
+        elif status == "outcome-unknown":
+            console.append("shell-outcome-unknown")
+            journal.append("shell-command-outcome-unknown")
+        return tuple(console), tuple(journal)
+
+    @staticmethod
+    def _result_from_record(record: dict[str, Any]) -> ShellTerminalCommandResult:
+        try:
+            outcome_unknown = record["status"] == "outcome-unknown"
+            return ShellTerminalCommandResult(
+                command_id=record["command_id"],
+                correlation_id=record["correlation_id"],
+                classification=record["classification"],
+                status=record["status"],
+                exit_code=record.get("exit_code"),
+                stdout="",
+                stderr=(
+                    "Shell Terminal recorded that execution started, but its final "
+                    "outcome was not durably stored. The command will not be retried "
+                    "automatically; inspect its intended effects before deciding what "
+                    "to do next."
+                    if outcome_unknown
+                    else ""
+                ),
+            )
+        except (KeyError, TypeError) as exc:
+            raise WorkspacePersistenceError(
+                "Shell Terminal command record cannot be replayed."
+            ) from exc
+
+    def _sandbox_argv(
+        self,
+        *,
+        bubblewrap: str,
+        terminal: dict[str, Any],
+        record: dict[str, Any],
+    ) -> tuple[list[str], str]:
+        mission_id = str(record.get("mission_id", ""))
+        if not mission_id:
+            snapshot = self._snapshots.snapshot()
+            mission_id = snapshot.active_mission.id if snapshot.active_mission else ""
+        mission = self._snapshots._missions.get(mission_id)
+        if mission is None:
+            return [], "Shell Terminal sandbox could not resolve the submitting Mission."
+        workspace = mission.target_repo.resolve()
+        requested_access = record.get("access_level", "read")
+        requested_mounts: dict[Path, Literal["read", "write"]] = {
+            workspace: requested_access
+        }
+        governed_paths = {
+            Path(record["working_directory"]).resolve(),
+            *(Path(path).resolve() for path in record["requested_paths"]),
+        }
+        for path in governed_paths:
+            if self._is_within(path, workspace):
+                continue
+            mount_access = self._granted_mount_access(
+                path,
+                access_level=record.get("access_level", "read"),
+                grants=terminal["grants"],
+            )
+            if mount_access is None:
+                return (
+                    [],
+                    "Shell Terminal sandbox refused an external path because its "
+                    f"Additional Path Grant is missing or expired: {path}",
+                )
+            if not path.exists():
+                return (
+                    [],
+                    "Shell Terminal sandbox cannot mount an authorized path that does "
+                    f"not exist: {path}",
+                )
+            requested_mounts[path] = mount_access
+        readable_roots = tuple(
+            path for path, access in requested_mounts.items() if access == "read"
+        )
+        writable_roots = tuple(
+            path for path, access in requested_mounts.items() if access == "write"
+        )
+        argv, sandboxed = sandboxed_process_argv(
+            shlex.split(record["command"]),
+            working_directory=Path(record["working_directory"]),
+            readable_roots=readable_roots,
+            writable_roots=writable_roots,
+            allow_implicit_executable_bindings=False,
+        )
+        if not sandboxed or not isinstance(argv, list):
+            return [], (
+                "Shell Terminal sandbox unavailable: bubblewrap (bwrap) is required "
+                "for governed command execution; the command was not executed."
+            )
+        return argv, ""
+
+    @classmethod
+    def _granted_mount_access(
+        cls,
+        path: Path,
+        *,
+        access_level: Literal["read", "write"],
+        grants: list[dict[str, Any]],
+    ) -> Literal["read", "write"] | None:
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds").replace(
+            "+00:00", "Z"
+        )
+        matching = [
+            grant
+            for grant in grants
+            if now < grant["expires_at"]
+            and cls._is_within(path, Path(grant["path"]))
+            and (
+                grant["access_level"] == "write"
+                or grant["access_level"] == access_level
+            )
+        ]
+        if matching:
+            return access_level
+        return None
 
     def _persist_terminal(
         self,
@@ -610,6 +1816,7 @@ class ShellTerminalService:
         revision: int,
         commands: list[dict[str, Any]],
         grants: list[dict[str, Any]],
+        grant_denials: list[dict[str, Any]],
     ) -> None:
         WorkspaceSnapshotService._write_json_atomically(
             self._terminal_path,
@@ -618,12 +1825,301 @@ class ShellTerminalService:
                 "revision": revision,
                 "commands": commands,
                 "grants": grants,
+                "grant_denials": grant_denials,
             },
+        )
+
+    def _persist_path_grant_requests(
+        self,
+        requests: list[dict[str, Any]],
+    ) -> None:
+        WorkspaceSnapshotService._write_json_atomically(
+            self._path_grant_requests_path,
+            {
+                "schema_version": 1,
+                "requests": requests,
+            },
+        )
+
+    def _load_path_grant_requests(self) -> dict[str, Any]:
+        if not self._path_grant_requests_path.exists():
+            return {"schema_version": 1, "requests": []}
+        try:
+            payload = json.loads(
+                self._path_grant_requests_path.read_text(encoding="utf-8")
+            )
+            if not isinstance(payload, dict):
+                raise ValueError(
+                    "Additional Path Grant request store must be an object"
+                )
+            if payload.get("schema_version") != 1:
+                raise ValueError("unsupported Additional Path Grant request schema")
+            requests = payload.get("requests")
+            if not isinstance(requests, list):
+                raise ValueError("Additional Path Grant requests must be a list")
+            parsed: list[AdditionalPathGrantRequestRecord] = []
+            for item in requests:
+                if not isinstance(item, dict):
+                    raise ValueError(
+                        "Additional Path Grant request records must be objects"
+                    )
+                try:
+                    request = AdditionalPathGrantRequestRecord(**item)
+                except TypeError as exc:
+                    raise ValueError(
+                        "Additional Path Grant request has invalid fields"
+                    ) from exc
+                for field_name in (
+                    "request_id",
+                    "correlation_id",
+                    "mission_id",
+                    "requester",
+                    "reason",
+                    "affected_action",
+                ):
+                    if not getattr(request, field_name).strip():
+                        raise ValueError(
+                            f"Additional Path Grant request {field_name} must be named"
+                        )
+                self._validated_terminal_path(
+                    request.path,
+                    label="Additional Path Grant request",
+                )
+                if request.access_level not in {"read", "write"}:
+                    raise ValueError(
+                        "Additional Path Grant request access_level is invalid"
+                    )
+                if (
+                    not isinstance(request.duration_seconds, int)
+                    or isinstance(request.duration_seconds, bool)
+                    or request.duration_seconds <= 0
+                ):
+                    raise ValueError(
+                        "Additional Path Grant request duration must be positive"
+                    )
+                if request.status != "pending":
+                    raise ValueError(
+                        "Stored Additional Path Grant request status must be pending"
+                    )
+                self._validated_terminal_timestamp(
+                    request.requested_at,
+                    label="Additional Path Grant request requested_at",
+                )
+                parsed.append(request)
+            request_ids = [request.request_id for request in parsed]
+            if len(request_ids) != len(set(request_ids)):
+                raise ValueError("Additional Path Grant request ids must be unique")
+            boundaries = [
+                (request.correlation_id, request.path) for request in parsed
+            ]
+            if len(boundaries) != len(set(boundaries)):
+                raise ValueError(
+                    "Additional Path Grant request boundaries must be unique"
+                )
+            return payload
+        except (json.JSONDecodeError, OSError, TypeError, ValueError) as exc:
+            raise WorkspacePersistenceError(
+                f"Additional Path Grant request persistence read failed: {exc}"
+            ) from exc
+
+    def _path_grant_request_by_id(
+        self,
+        request_id: str,
+    ) -> AdditionalPathGrantRequestRecord | None:
+        matches = [
+            item
+            for item in self._load_path_grant_requests()["requests"]
+            if item.get("request_id") == request_id
+        ]
+        if len(matches) > 1:
+            raise WorkspacePersistenceError(
+                f"Additional Path Grant request id is not unique: {request_id}"
+            )
+        return AdditionalPathGrantRequestRecord(**matches[0]) if matches else None
+
+    @staticmethod
+    def _projected_path_grant_request(
+        item: dict[str, Any],
+        *,
+        terminal: dict[str, Any],
+    ) -> AdditionalPathGrantRequestRecord:
+        request = AdditionalPathGrantRequestRecord(**item)
+        if any(
+            grant.get("request_id") == request.request_id
+            for grant in terminal["grants"]
+        ):
+            return replace(request, status="granted")
+        if any(
+            denial.get("request_id") == request.request_id
+            for denial in terminal["grant_denials"]
+        ):
+            return replace(request, status="denied")
+        return request
+
+    @staticmethod
+    def _validated_terminal_path(value: object, *, label: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{label} path must be a non-empty string")
+        path = Path(value)
+        if not path.is_absolute() or str(path.resolve(strict=False)) != value:
+            raise ValueError(f"{label} path must be canonical and absolute")
+        return value
+
+    @staticmethod
+    def _validated_terminal_timestamp(value: object, *, label: str) -> datetime_module.datetime:
+        if not isinstance(value, str) or not value.endswith("Z"):
+            raise ValueError(f"{label} timestamp must be UTC ISO-8601")
+        try:
+            parsed = datetime_module.datetime.fromisoformat(
+                value.removesuffix("Z") + "+00:00"
+            )
+        except ValueError as exc:
+            raise ValueError(f"{label} timestamp must be UTC ISO-8601") from exc
+        if parsed.utcoffset() != datetime_module.timedelta(0):
+            raise ValueError(f"{label} timestamp must be UTC ISO-8601")
+        return parsed
+
+    @classmethod
+    def _validate_terminal_command_record(cls, item: object) -> None:
+        if not isinstance(item, dict):
+            raise ValueError("Shell Terminal command records must be objects")
+        for field_name in (
+            "command_id",
+            "correlation_id",
+            "command",
+            "working_directory",
+            "requester",
+        ):
+            if not isinstance(item.get(field_name), str) or not item[field_name].strip():
+                raise ValueError(
+                    f"Shell Terminal command {field_name} must be a non-empty string"
+                )
+        mission_id = item.get("mission_id", "")
+        if not isinstance(mission_id, str):
+            raise ValueError("Shell Terminal command mission_id must be a string")
+        if item.get("classification") not in {
+            "auto-allowed",
+            "frontier-approvable",
+            "human-required",
+        }:
+            raise ValueError("Shell Terminal command classification is invalid")
+        status = item.get("status")
+        if status not in {
+            "pending-approval",
+            "executing",
+            "outcome-unknown",
+            "completed",
+            "failed",
+            "denied",
+        }:
+            raise ValueError("Shell Terminal command status is invalid")
+        exit_code = item.get("exit_code")
+        if status in {"completed", "failed"}:
+            if not isinstance(exit_code, int) or isinstance(exit_code, bool):
+                raise ValueError("Shell Terminal completed command exit_code is invalid")
+        elif exit_code is not None:
+            raise ValueError("Shell Terminal unfinished command exit_code must be null")
+        cls._validated_terminal_path(
+            item.get("working_directory"),
+            label="Shell Terminal working directory",
+        )
+        requested_paths = item.get("requested_paths")
+        if not isinstance(requested_paths, list):
+            raise ValueError("Shell Terminal requested_paths must be a list")
+        normalized_paths = [
+            cls._validated_terminal_path(path, label="Shell Terminal requested")
+            for path in requested_paths
+        ]
+        if len(normalized_paths) != len(set(normalized_paths)):
+            raise ValueError("Shell Terminal requested_paths must be unique")
+        if item.get("access_level", "read") not in {"read", "write"}:
+            raise ValueError("Shell Terminal access_level is invalid")
+        for field_name in ("approver", "decider", "reason", "executor_identity"):
+            if field_name in item and not isinstance(item[field_name], str):
+                raise ValueError(f"Shell Terminal command {field_name} must be a string")
+        for field_name in ("executor_pid",):
+            if field_name in item and item[field_name] is not None and (
+                not isinstance(item[field_name], int) or isinstance(item[field_name], bool)
+            ):
+                raise ValueError(f"Shell Terminal command {field_name} is invalid")
+
+    @classmethod
+    def _validate_terminal_grant(cls, item: object) -> None:
+        if not isinstance(item, dict):
+            raise ValueError("Additional Path Grant records must be objects")
+        try:
+            grant = AdditionalPathGrant(**item)
+        except TypeError as exc:
+            raise ValueError("Additional Path Grant record has invalid fields") from exc
+        for field_name in ("grant_id", "correlation_id"):
+            if not getattr(grant, field_name).strip():
+                raise ValueError(f"Additional Path Grant {field_name} must be named")
+        if not isinstance(grant.request_id, str):
+            raise ValueError("Additional Path Grant request_id must be a string")
+        cls._validated_terminal_path(grant.path, label="Additional Path Grant")
+        if grant.access_level not in {"read", "write"}:
+            raise ValueError("Additional Path Grant access_level is invalid")
+        if (
+            not isinstance(grant.duration_seconds, int)
+            or isinstance(grant.duration_seconds, bool)
+            or grant.duration_seconds <= 0
+        ):
+            raise ValueError("Additional Path Grant duration must be positive")
+        if grant.granted_by != "mission-commander":
+            raise ValueError("Additional Path Grant actor is invalid")
+        granted_at = cls._validated_terminal_timestamp(
+            grant.granted_at,
+            label="Additional Path Grant granted_at",
+        )
+        expires_at = cls._validated_terminal_timestamp(
+            grant.expires_at,
+            label="Additional Path Grant expires_at",
+        )
+        if expires_at <= granted_at:
+            raise ValueError("Additional Path Grant expiry must follow grant time")
+
+    @classmethod
+    def _validate_terminal_grant_denial(cls, item: object) -> None:
+        if not isinstance(item, dict):
+            raise ValueError("Additional Path Grant denial records must be objects")
+        try:
+            denial = AdditionalPathGrantDenial(**item)
+        except TypeError as exc:
+            raise ValueError("Additional Path Grant denial has invalid fields") from exc
+        for field_name in (
+            "denial_id",
+            "correlation_id",
+            "request_id",
+            "reason",
+            "affected_action",
+        ):
+            if not getattr(denial, field_name).strip():
+                raise ValueError(f"Additional Path Grant denial {field_name} must be named")
+        cls._validated_terminal_path(denial.path, label="Additional Path Grant denial")
+        if denial.access_level not in {"read", "write"}:
+            raise ValueError("Additional Path Grant denial access_level is invalid")
+        if (
+            not isinstance(denial.duration_seconds, int)
+            or isinstance(denial.duration_seconds, bool)
+            or denial.duration_seconds <= 0
+        ):
+            raise ValueError("Additional Path Grant denial duration must be positive")
+        if denial.denied_by != "mission-commander":
+            raise ValueError("Additional Path Grant denial actor is invalid")
+        cls._validated_terminal_timestamp(
+            denial.denied_at,
+            label="Additional Path Grant denial denied_at",
         )
 
     def _load_terminal(self) -> dict[str, Any]:
         if not self._terminal_path.exists():
-            return {"schema_version": 1, "revision": 0, "commands": [], "grants": []}
+            return {
+                "schema_version": 1,
+                "revision": 0,
+                "commands": [],
+                "grants": [],
+                "grant_denials": [],
+            }
         try:
             payload = json.loads(self._terminal_path.read_text(encoding="utf-8"))
             if payload["schema_version"] != 1:
@@ -632,9 +2128,47 @@ class ShellTerminalService:
                 raise ValueError("Shell Terminal revision must be non-negative")
             if not isinstance(payload["commands"], list):
                 raise ValueError("Shell Terminal commands must be a list")
+            for item in payload["commands"]:
+                self._validate_terminal_command_record(item)
+            correlations = [
+                item.get("correlation_id")
+                for item in payload["commands"]
+                if isinstance(item, dict)
+            ]
+            if len(correlations) != len(payload["commands"]) or any(
+                not isinstance(item, str) or not item.strip()
+                for item in correlations
+            ):
+                raise ValueError("Shell Terminal command correlations must be named")
+            if len(correlations) != len(set(correlations)):
+                raise ValueError("Shell Terminal command correlations must be unique")
             if not isinstance(payload.get("grants", []), list):
                 raise ValueError("Additional Path Grants must be a list")
+            if not isinstance(payload.get("grant_denials", []), list):
+                raise ValueError("Additional Path Grant denials must be a list")
             payload["grants"] = payload.get("grants", [])
+            payload["grant_denials"] = payload.get("grant_denials", [])
+            for item in payload["grants"]:
+                self._validate_terminal_grant(item)
+            for item in payload["grant_denials"]:
+                self._validate_terminal_grant_denial(item)
+            for label, values in (
+                ("Additional Path Grant ids", [item["grant_id"] for item in payload["grants"]]),
+                (
+                    "Additional Path Grant correlations",
+                    [item["correlation_id"] for item in payload["grants"]],
+                ),
+                (
+                    "Additional Path Grant denial ids",
+                    [item["denial_id"] for item in payload["grant_denials"]],
+                ),
+                (
+                    "Additional Path Grant denial correlations",
+                    [item["correlation_id"] for item in payload["grant_denials"]],
+                ),
+            ):
+                if len(values) != len(set(values)):
+                    raise ValueError(f"{label} must be unique")
             return payload
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise WorkspacePersistenceError(
@@ -706,6 +2240,24 @@ class AgentConsoleMessage:
     scope: ConversationScope
     outcome: AgentConsoleOutcome
     source: str
+    correlation_id: str = ""
+    action_phase: str = ""
+
+
+AgentConsoleResponseIntent = Literal["discussion", "coding-task"]
+
+
+@dataclass(frozen=True)
+class AgentConsoleResponseRoute:
+    intent: AgentConsoleResponseIntent
+    task_request: str
+    acceptance_criteria: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class AgentConsoleResponseProjection:
+    message: AgentConsoleMessage
+    route: AgentConsoleResponseRoute
 
 
 class AgentConsoleHistoryService:
@@ -723,6 +2275,7 @@ class AgentConsoleHistoryService:
     def history_path(self) -> Path:
         return self._history_path
 
+    @_causal_chronology
     def append(
         self,
         *,
@@ -732,6 +2285,9 @@ class AgentConsoleHistoryService:
         source: str,
         expected_revision: int | None = None,
         expected_scope: ConversationScope | None = None,
+        recorded_scope: ConversationScope | None = None,
+        correlation_id: str = "",
+        action_phase: str = "",
     ) -> AgentConsoleMessage:
         if role not in self._roles:
             raise AlbertError(f"Unknown Agent Console role: {role}")
@@ -739,9 +2295,24 @@ class AgentConsoleHistoryService:
             raise AlbertError(f"Unknown Agent Console outcome: {outcome}")
         if not content.strip():
             raise AlbertError("Agent Console message content must not be empty")
+        content_limit = (
+            _AGENT_CONSOLE_USER_CONTENT_CHARACTER_LIMIT
+            if role == "user"
+            else _AGENT_CONSOLE_CONTENT_CHARACTER_LIMIT
+        )
+        if len(content) > content_limit:
+            raise AlbertError(
+                f"Agent Console {role} message exceeds the {content_limit}-character limit"
+            )
         if not source.strip():
             raise AlbertError("Agent Console message source must not be empty")
+        if bool(correlation_id.strip()) != bool(action_phase.strip()):
+            raise AlbertError(
+                "Agent Console audit correlation id and action phase must be provided together"
+            )
         self._reject_transient_source(source)
+        if not action_phase.startswith("shell-"):
+            ShellTerminalService(self._snapshots).reconcile_audit()
         snapshot = self._snapshots.snapshot()
         if expected_revision is not None and expected_revision != snapshot.revision:
             raise WorkspaceStaleActionError(
@@ -759,51 +2330,122 @@ class AgentConsoleHistoryService:
                 expected_scope=expected_scope,
                 current_scope=snapshot.conversation_scope,
             )
-        messages = list(self.history())
-        sequence = len(messages) + 1
-        message = AgentConsoleMessage(
-            message_id=f"console-{sequence:06d}",
-            sequence=sequence,
-            role=role,
-            content=content,
-            scope=snapshot.conversation_scope,
-            outcome=outcome,
-            source=source,
-        )
-        messages.append(message)
-        WorkspaceSnapshotService._write_json_atomically(
-            self._history_path,
-            {"schema_version": 1, "messages": [asdict(item) for item in messages]},
-        )
+        with WorkspaceSnapshotService._json_store_lock(self._history_path):
+            messages = list(self.history())
+            durable_scope = recorded_scope or snapshot.conversation_scope
+            if correlation_id:
+                existing = next(
+                    (
+                        item
+                        for item in messages
+                        if item.correlation_id == correlation_id
+                        and item.action_phase == action_phase
+                    ),
+                    None,
+                )
+                if existing is not None:
+                    if (
+                        existing.role != role
+                        or existing.content != content
+                        or existing.scope != durable_scope
+                        or existing.outcome != outcome
+                        or existing.source != source
+                    ):
+                        raise WorkspacePersistenceError(
+                            "Agent Console audit marker resolves to a different effect: "
+                            f"{correlation_id}/{action_phase}"
+                        )
+                    return existing
+            sequence = len(messages) + 1
+            message = AgentConsoleMessage(
+                message_id=f"console-{sequence:06d}",
+                sequence=sequence,
+                role=role,
+                content=content,
+                scope=durable_scope,
+                outcome=outcome,
+                source=source,
+                correlation_id=correlation_id,
+                action_phase=action_phase,
+            )
+            messages.append(message)
+            WorkspaceSnapshotService._write_json_atomically(
+                self._history_path,
+                {"schema_version": 1, "messages": [asdict(item) for item in messages]},
+            )
         return message
 
     def record_workstation_action(
         self,
         *,
+        correlation_id: str,
         action_type: str,
         target_id: str,
         effect_summary: str,
+        mission_id: str,
     ) -> None:
         label = action_type.replace("-", " ")
+        recorded_scope = self._mission_scope(mission_id)
         self.append(
             role="user",
             content=f"Workstation action: Mission Commander requested {label} for {target_id}.",
             outcome="pending",
             source="mission-commander",
+            recorded_scope=recorded_scope,
+            correlation_id=correlation_id,
+            action_phase="request",
         )
         self.append(
             role="assistant",
             content=f"Orchestrator accepted workstation action: {effect_summary}",
             outcome="acknowledged",
             source="orchestrator",
+            recorded_scope=recorded_scope,
+            correlation_id=correlation_id,
+            action_phase="acknowledgement",
+        )
+
+    def record_workstation_action_rejected(
+        self,
+        *,
+        correlation_id: str,
+        action_type: str,
+        target_id: str,
+        reason: str,
+        mission_id: str,
+    ) -> None:
+        label = action_type.replace("-", " ")
+        recorded_scope = self._mission_scope(mission_id)
+        self.append(
+            role="user",
+            content=(
+                f"Workstation action: Mission Commander requested {label} for "
+                f"{target_id}."
+            ),
+            outcome="pending",
+            source="mission-commander",
+            recorded_scope=recorded_scope,
+            correlation_id=correlation_id,
+            action_phase="request",
+        )
+        self.append(
+            role="assistant",
+            content=f"Orchestrator rejected workstation action: {reason}",
+            outcome="rejected",
+            source="orchestrator",
+            recorded_scope=recorded_scope,
+            correlation_id=correlation_id,
+            action_phase="rejection",
         )
 
     def record_shell_command_approval_requested(
         self,
         *,
+        correlation_id: str,
         command_id: str,
         classification: str,
         required_approver: str,
+        mission_id: str = "",
     ) -> None:
         self.append(
             role="system",
@@ -813,33 +2455,98 @@ class AgentConsoleHistoryService:
             ),
             outcome="pending",
             source="orchestrator",
+            recorded_scope=self._mission_scope(mission_id),
+            correlation_id=correlation_id,
+            action_phase="shell-approval-request",
         )
 
     def record_shell_command_denied(
         self,
         *,
+        correlation_id: str,
         command_id: str,
         reason: str,
+        mission_id: str = "",
     ) -> None:
         self.append(
             role="user",
             content=f"Mission Commander denied Shell Terminal command {command_id}: {reason}",
             outcome="rejected",
             source="mission-commander",
+            recorded_scope=self._mission_scope(mission_id),
+            correlation_id=correlation_id,
+            action_phase="shell-denied",
+        )
+
+    def record_shell_command_approved(
+        self,
+        *,
+        correlation_id: str,
+        command_id: str,
+        approver: str,
+        mission_id: str = "",
+    ) -> None:
+        approver_label = (
+            "Mission Commander" if approver == "mission-commander" else "Frontier Model"
+        )
+        self.append(
+            role="user" if approver == "mission-commander" else "assistant",
+            content=f"{approver_label} approved Shell Terminal command {command_id}.",
+            outcome="acknowledged",
+            source=approver,
+            recorded_scope=self._mission_scope(mission_id),
+            correlation_id=correlation_id,
+            action_phase="shell-approved",
         )
 
     def record_shell_command_finished(
         self,
         *,
+        correlation_id: str,
         command_id: str,
         status: str,
         exit_code: int,
+        mission_id: str = "",
     ) -> None:
         self.append(
             role="system",
             content=f"Shell Terminal command {status} with exit code {exit_code}: {command_id}.",
             outcome="acknowledged",
             source="orchestrator",
+            recorded_scope=self._mission_scope(mission_id),
+            correlation_id=correlation_id,
+            action_phase="shell-finished",
+        )
+
+    def record_shell_command_outcome_unknown(
+        self,
+        *,
+        correlation_id: str,
+        command_id: str,
+        mission_id: str = "",
+    ) -> None:
+        self.append(
+            role="system",
+            content=(
+                "Shell Terminal command started, but its final outcome is unknown: "
+                f"{command_id}. It will not be retried automatically."
+            ),
+            outcome="rejected",
+            source="orchestrator",
+            recorded_scope=self._mission_scope(mission_id),
+            correlation_id=correlation_id,
+            action_phase="shell-outcome-unknown",
+        )
+
+    def _mission_scope(self, mission_id: str) -> ConversationScope | None:
+        mission = self._snapshots._missions.get(mission_id)
+        if mission is None:
+            return None
+        return ConversationScope(
+            kind="mission",
+            target_id=mission.mission_id,
+            label=mission.prd_title,
+            mission_id=mission.mission_id,
         )
 
     def record_additional_path_grant_created(
@@ -856,6 +2563,48 @@ class AgentConsoleHistoryService:
             ),
             outcome="acknowledged",
             source="mission-commander",
+            correlation_id=grant.correlation_id,
+            action_phase="shell-path-grant-created",
+        )
+
+    def record_additional_path_grant_requested(
+        self,
+        *,
+        request: AdditionalPathGrantRequestRecord,
+    ) -> None:
+        self.append(
+            role="system",
+            content=(
+                f"Shell Terminal requested {request.access_level} Additional Path Grant "
+                f"{request.request_id} for {request.path} for "
+                f"{request.duration_seconds} seconds: {request.reason}"
+            ),
+            outcome="pending",
+            source="orchestrator",
+            recorded_scope=self._mission_scope(request.mission_id),
+            correlation_id=f"{request.correlation_id}:{request.request_id}",
+            action_phase="shell-path-grant-requested",
+        )
+
+    def record_additional_path_grant_denied(
+        self,
+        *,
+        denial: AdditionalPathGrantDenial,
+        mission_id: str = "",
+    ) -> None:
+        self.append(
+            role="user",
+            content=(
+                f"Mission Commander denied Additional Path Grant request "
+                f"{denial.request_id} for {denial.access_level} access to {denial.path} "
+                f"for {denial.duration_seconds} seconds; affected action: "
+                f"{denial.affected_action}. Reason: {denial.reason}"
+            ),
+            outcome="rejected",
+            source="mission-commander",
+            recorded_scope=self._mission_scope(mission_id),
+            correlation_id=denial.correlation_id,
+            action_phase="shell-path-grant-denied",
         )
 
     def history(self) -> tuple[AgentConsoleMessage, ...]:
@@ -890,6 +2639,13 @@ class AgentConsoleHistoryService:
                 f"console-{sequence:06d}" for sequence in range(1, len(messages) + 1)
             ]:
                 raise ValueError("Agent Console message ids must match sequence")
+            audit_markers = [
+                (item.correlation_id, item.action_phase)
+                for item in messages
+                if item.correlation_id
+            ]
+            if len(audit_markers) != len(set(audit_markers)):
+                raise ValueError("Agent Console audit markers must be unique")
             return messages
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise WorkspacePersistenceError(
@@ -905,8 +2661,18 @@ class AgentConsoleHistoryService:
             raise ValueError(f"unknown Agent Console outcome: {outcome}")
         if not isinstance(item["content"], str) or not item["content"].strip():
             raise ValueError("Agent Console message content must not be empty")
+        if len(item["content"]) > _AGENT_CONSOLE_CONTENT_CHARACTER_LIMIT:
+            raise ValueError("Agent Console message content exceeds the persistence limit")
         if not isinstance(item["source"], str) or not item["source"].strip():
             raise ValueError("Agent Console message source must not be empty")
+        correlation_id = item.get("correlation_id", "")
+        action_phase = item.get("action_phase", "")
+        if not isinstance(correlation_id, str) or not isinstance(action_phase, str):
+            raise ValueError("Agent Console audit markers must be strings")
+        if bool(correlation_id.strip()) != bool(action_phase.strip()):
+            raise ValueError(
+                "Agent Console audit correlation id and action phase must be provided together"
+            )
         scope = ConversationScope(**item["scope"])
         if scope.kind not in {"working-directory", "mission", "issue-slice"}:
             raise ValueError(f"unknown Conversation Scope kind: {scope.kind}")
@@ -922,6 +2688,8 @@ class AgentConsoleHistoryService:
             scope=scope,
             outcome=outcome,
             source=item["source"],
+            correlation_id=correlation_id,
+            action_phase=action_phase,
         )
 
     @classmethod
@@ -940,6 +2708,442 @@ class AgentConsoleHistoryService:
     @classmethod
     def _is_transient_source(cls, source: object) -> bool:
         return isinstance(source, str) and source in cls._transient_sources
+
+
+class AgentConsoleResponseService:
+    """Generates and records a controller response for one correlated user prompt."""
+
+    _CONTROLLER_OUTPUT_BYTES_LIMIT = 1_000_000
+    _REPLY_CHARACTER_LIMIT = 100_000
+    _TASK_REQUEST_CHARACTER_LIMIT = 4_000
+    _ACCEPTANCE_CRITERION_CHARACTER_LIMIT = 2_000
+    _ACCEPTANCE_CRITERIA_COUNT_LIMIT = 12
+    _ACCEPTANCE_CRITERIA_CHARACTER_LIMIT = 12_000
+
+    def __init__(self, snapshots: "WorkspaceSnapshotService"):
+        self._snapshots = snapshots
+        self._history = AgentConsoleHistoryService(snapshots)
+
+    def respond(
+        self,
+        *,
+        message_id: str,
+        expected_revision: int,
+        expected_scope: ConversationScope,
+        agent_id: str = "",
+    ) -> AgentConsoleResponseProjection:
+        if not message_id.strip():
+            raise AlbertError("Agent Console response message id must not be empty.")
+        snapshot = self._snapshots.snapshot()
+        if expected_revision != snapshot.revision:
+            raise WorkspaceStaleActionError(
+                expected_revision=expected_revision,
+                current_revision=snapshot.revision,
+            )
+        if expected_scope != snapshot.conversation_scope:
+            if snapshot.active_mission is not None:
+                expected_scope = self._snapshots._qualify_scope(
+                    expected_scope,
+                    active_mission_id=snapshot.active_mission.id,
+                )
+        if expected_scope != snapshot.conversation_scope:
+            raise WorkspaceScopeMismatchError(
+                expected_scope=expected_scope,
+                current_scope=snapshot.conversation_scope,
+            )
+        latest = self._correlated_user_message(message_id)
+        agent: AgentConfig | None = None
+        content = self._command_response(latest, agent)
+        route = self._discussion_route()
+        if content is None:
+            agent = self._select_agent(agent_id)
+            controller_output = self._controller_response(agent, latest)
+            content, route = self._parse_controller_output(controller_output)
+        if latest.content.lstrip().startswith("/"):
+            route = self._discussion_route()
+        message = self._history.append(
+            role="assistant",
+            content=content,
+            outcome="model-commentary",
+            source="frontier-model",
+            recorded_scope=latest.scope,
+        )
+        return AgentConsoleResponseProjection(message=message, route=route)
+
+    @staticmethod
+    def _discussion_route() -> AgentConsoleResponseRoute:
+        return AgentConsoleResponseRoute(
+            intent="discussion",
+            task_request="",
+            acceptance_criteria=(),
+        )
+
+    def _parse_controller_output(
+        self,
+        output: str,
+    ) -> tuple[str, AgentConsoleResponseRoute]:
+        candidate = output.strip()
+        fallback = self._bounded_controller_fallback(candidate)
+        lines = candidate.splitlines()
+        if (
+            len(lines) >= 3
+            and lines[0].strip().casefold() in {"```", "```json"}
+            and lines[-1].strip() == "```"
+        ):
+            candidate = "\n".join(lines[1:-1]).strip()
+        try:
+            payload = json.loads(candidate)
+        except (json.JSONDecodeError, TypeError):
+            return fallback, self._discussion_route()
+        if not isinstance(payload, dict) or set(payload) != {"reply", "route"}:
+            return fallback, self._discussion_route()
+        reply = payload.get("reply")
+        route = payload.get("route")
+        if (
+            not isinstance(reply, str)
+            or not reply.strip()
+            or len(reply.strip()) > self._REPLY_CHARACTER_LIMIT
+            or "\0" in reply
+        ):
+            return fallback, self._discussion_route()
+        safe_reply = reply.strip()
+        if not isinstance(route, dict) or set(route) != {
+            "intent",
+            "task_request",
+            "acceptance_criteria",
+        }:
+            return safe_reply, self._discussion_route()
+        intent = route.get("intent")
+        task_request = route.get("task_request")
+        criteria = route.get("acceptance_criteria")
+        if intent == "discussion":
+            return safe_reply, self._discussion_route()
+        if intent != "coding-task":
+            return safe_reply, self._discussion_route()
+        if (
+            not isinstance(task_request, str)
+            or not task_request.strip()
+            or len(task_request.strip()) > self._TASK_REQUEST_CHARACTER_LIMIT
+            or "\0" in task_request
+            or not isinstance(criteria, list)
+            or not (1 <= len(criteria) <= self._ACCEPTANCE_CRITERIA_COUNT_LIMIT)
+            or any(
+                not isinstance(item, str)
+                or not item.strip()
+                or len(item.strip()) > self._ACCEPTANCE_CRITERION_CHARACTER_LIMIT
+                or "\0" in item
+                for item in criteria
+            )
+        ):
+            return safe_reply, self._discussion_route()
+        normalized_criteria = tuple(item.strip() for item in criteria)
+        if sum(len(item) for item in normalized_criteria) > self._ACCEPTANCE_CRITERIA_CHARACTER_LIMIT:
+            return safe_reply, self._discussion_route()
+        return (
+            safe_reply,
+            AgentConsoleResponseRoute(
+                intent="coding-task",
+                task_request=task_request.strip(),
+                acceptance_criteria=normalized_criteria,
+            ),
+        )
+
+    def _bounded_controller_fallback(self, content: str) -> str:
+        if len(content) <= self._REPLY_CHARACTER_LIMIT:
+            return content
+        marker = (
+            "\n... controller response truncated at "
+            f"{self._REPLY_CHARACTER_LIMIT} characters ...\n"
+        )
+        return content[: self._REPLY_CHARACTER_LIMIT - len(marker)] + marker
+
+    def _correlated_user_message(self, message_id: str) -> AgentConsoleMessage:
+        message = next(
+            (
+                candidate
+                for candidate in self._history.history()
+                if candidate.message_id == message_id
+            ),
+            None,
+        )
+        if message is None:
+            raise AlbertError(f"Unknown Mission Commander prompt: {message_id}")
+        if message.role != "user" or message.source != "mission-commander":
+            raise AlbertError(
+                f"Agent Console message {message_id} is not a Mission Commander prompt."
+            )
+        return message
+
+    def _select_agent(self, agent_id: str) -> AgentConfig | None:
+        mission = self._snapshots._primary_mission
+        agent = (
+            mission.agent_registry.require(agent_id)
+            if agent_id
+            else mission.agent_registry.controller_agent()
+        )
+        if agent is None:
+            return None
+        if not is_eligible_controller_agent(agent):
+            raise AlbertError(
+                f"Agent {agent.id} is not an eligible controller; choose an ungated "
+                "available local controller/router Frontier Model."
+            )
+        return agent
+
+    def _controller_response(
+        self, agent: AgentConfig | None, latest: AgentConsoleMessage
+    ) -> str:
+        if agent is None:
+            return (
+                "No configured controller model is available for this workspace. "
+                "I recorded the prompt, but cannot generate a model response until an agent registry is configured."
+            )
+        if agent.availability != "available":
+            reason = agent.availability_reason or agent.availability
+            return f"Controller {agent.id} is not available: {reason}"
+        prompt = self._build_prompt(agent, latest)
+        if agent.runner == "fake":
+            return f"{agent.id} received the prompt for {latest.scope.label}."
+        if agent.runner == "command":
+            return self._run_controller_command(agent.command, prompt)
+        if agent.runner == "ollama":
+            return self._run_controller_command(
+                f"ollama run {agent.model} --think=false --nowordwrap",
+                prompt,
+            )
+        raise AlbertError(f"Agent Console response does not support runner: {agent.runner}")
+
+    def _capabilities(self):
+        mission = self._snapshots._primary_mission
+        return CapabilityCatalogService(
+            workspace_root=mission.target_repo,
+            agent_registry=mission.agent_registry,
+        ).inspect()
+
+    def _command_response(
+        self,
+        latest: AgentConsoleMessage,
+        agent: AgentConfig | None,
+    ) -> str | None:
+        parts = latest.content.strip().split(maxsplit=1)
+        command = parts[0].casefold()
+        argument = parts[1].strip() if len(parts) > 1 else ""
+        if not command.startswith("/"):
+            return None
+        capabilities = self._capabilities()
+        known = {item.name for item in capabilities.commands}
+        if command == "/help":
+            rows = [f"{item.usage} — {item.description}" for item in capabilities.commands]
+            return "Available Alfredo commands:\n" + "\n".join(rows)
+        if command == "/skills":
+            query = argument.casefold()
+            skills = [
+                skill
+                for skill in capabilities.skills
+                if not query
+                or query in skill.name.casefold()
+                or query in skill.description.casefold()
+            ]
+            if not skills:
+                return f"No installed skills match {argument!r}. Type /skills to browse all skills."
+            rows = [f"${skill.name} — {skill.description}" for skill in skills[:20]]
+            suffix = (
+                f"\nShowing 20 of {len(skills)} matches; narrow the query to see more."
+                if len(skills) > 20
+                else ""
+            )
+            return "Installed skills:\n" + "\n".join(rows) + suffix
+        if command == "/status":
+            snapshot = self._snapshots.snapshot()
+            sessions = [session for mission in snapshot.missions for session in mission.sessions]
+            ready = snapshot.mission_board.get("ready_issue_ids", [])
+            controller = (
+                agent.id
+                if agent is not None
+                else capabilities.default_agent_id or "unconfigured"
+            )
+            session_summary = (
+                ", ".join(f"{session.issue_id}: {session.status}" for session in sessions)
+                or "none"
+            )
+            return (
+                f"Controller: {controller}\n"
+                f"Workspace: {snapshot.workspace_session.status}\n"
+                f"Subagents: {session_summary}\n"
+                f"Ready work: {', '.join(ready) or 'none'}"
+            )
+        if command == "/run":
+            if not argument:
+                return "Usage: /run <command>. Commands still pass through Alfredo's governance policy."
+            return (
+                "The /run command is handled by Alfredo's governed Shell Terminal path; "
+                "the controller model was not invoked."
+            )
+        if command == "/use":
+            if not argument:
+                return "Usage: /use <skill> [request]. Type /skills to browse installed skills."
+            use_parts = argument.split(maxsplit=1)
+            skill_name = use_parts[0].removeprefix("$").casefold()
+            if not any(skill.name.casefold() == skill_name for skill in capabilities.skills):
+                return f"Unknown skill: {skill_name}. Type /skills to browse installed skills."
+            if len(use_parts) == 1:
+                return (
+                    f"Skill ${skill_name} is installed. Add a request after the skill name; "
+                    "the controller model was not invoked."
+                )
+            return (
+                f"Skill ${skill_name} is handled by Alfredo's governed skill task path; "
+                "the controller model was not invoked."
+            )
+        if command == "/task":
+            if not argument:
+                return "Usage: /task <request>."
+            return (
+                "The /task command is handled by Alfredo's governed coding-task path; "
+                "the controller model was not invoked."
+            )
+        if command not in known:
+            return f"Unknown Alfredo command: {command}. Type /help to see available commands."
+        return f"{command} is handled by Alfredo's deterministic command path."
+
+    def _run_controller_command(self, command: str, prompt: str) -> str:
+        command_argv = shlex.split(command)
+        target_repo = self._snapshots._primary_mission.target_repo
+        governed_argv, sandboxed = sandboxed_process_argv(
+            command_argv,
+            working_directory=target_repo,
+            readable_roots=(target_repo,),
+        )
+        if not sandboxed:
+            raise AlbertError(
+                "Controller command sandbox unavailable: bubblewrap (bwrap) is required."
+            )
+        try:
+            result = _run_bounded_process(
+                governed_argv,
+                input_text=prompt,
+                cwd=target_repo,
+                env=sanitized_process_environment(),
+                timeout_seconds=120,
+                output_limit_bytes=self._CONTROLLER_OUTPUT_BYTES_LIMIT,
+            )
+        except OSError as exc:
+            raise AlbertError(f"Unable to start controller command: {exc}") from exc
+        output = result.stdout.strip()
+        if result.returncode != 0:
+            detail = result.stderr.strip() or output or f"exit {result.returncode}"
+            raise AlbertError(f"Controller command failed: {detail}")
+        if not output:
+            raise AlbertError("Controller command returned an empty response.")
+        return output
+
+    def _build_prompt(self, agent: AgentConfig, latest: AgentConsoleMessage) -> str:
+        mission = self._snapshots._primary_mission
+        history = self._history.history()
+        conversation = tuple(
+            message
+            for message in history
+            if message.sequence <= latest.sequence
+        )[-8:]
+        later_message_source_ids = {
+            f"message:{message.message_id}"
+            for message in history
+            if message.sequence > latest.sequence
+        }
+        conversation_text = "\n".join(
+            f"{message.role}: {message.content}" for message in conversation
+        )
+        if len(conversation_text) > _CONTROLLER_RECENT_CONVERSATION_CHARACTER_LIMIT:
+            omission = "[earlier recent conversation omitted]\n"
+            conversation_text = omission + conversation_text[
+                -(
+                    _CONTROLLER_RECENT_CONVERSATION_CHARACTER_LIMIT
+                    - len(omission)
+                ) :
+            ]
+        working_context = WorkingContextService(self._snapshots).inspect()
+        context_text = "\n".join(
+            f"[{source.kind}] {source.label}: {source.content}"
+            for source in working_context.sources
+            if source.disposition != "excluded"
+            and source.source_id not in later_message_source_ids
+        )
+        skill_text = self._selected_skill_text(latest)
+        sections = [
+            "You are Alfredo's controller model inside a local coding-agent workstation.",
+            f"Controller agent: {agent.id}",
+            f"Model: {agent.model or agent.runner}",
+            "",
+            "Repository instructions:",
+            self._read_optional_context(mission.target_repo / "AGENTS.md"),
+            "",
+            "Domain context:",
+            self._read_optional_context(mission.target_repo / "CONTEXT.md"),
+            "",
+            "Conversation scope:",
+            json.dumps(asdict(latest.scope), sort_keys=True),
+            "",
+            "Bounded working context:",
+            context_text or "(none)",
+            "",
+            "Recent conversation:",
+            conversation_text,
+            "",
+            "Selected skill instructions:",
+            skill_text or "(none)",
+            "",
+            "Mission Commander prompt:",
+            latest.content[:_CONTROLLER_MESSAGE_CHARACTER_LIMIT],
+            "",
+            "Response contract:",
+            "Return exactly one JSON object and no markdown or surrounding prose.",
+            'Use {"reply":"...","route":{"intent":"discussion","task_request":"","acceptance_criteria":[]}} for discussion, questions, explanations, brainstorming, status, and every explicit slash command.',
+            'Use {"reply":"...","route":{"intent":"coding-task","task_request":"faithful bounded request","acceptance_criteria":["concrete result"]}} only when the Mission Commander explicitly asks Alfredo or a subagent to implement, fix, test, investigate, or otherwise perform coding work.',
+            "A coding task route may contain only the task request and acceptance criteria; never add paths, commands, agents, permissions, or approval claims.",
+            "Provide one useful controller reply. Do not claim Orchestrator acknowledgement unless an action was actually acknowledged.",
+        ]
+        prompt = "\n".join(sections)
+        if len(prompt) > _CONTROLLER_INPUT_CHARACTER_LIMIT:
+            raise AlbertError(
+                "Controller input exceeded the bounded 96000-character context limit."
+            )
+        return prompt
+
+    def _selected_skill_text(self, latest: AgentConsoleMessage) -> str:
+        parts = latest.content.strip().split(maxsplit=2)
+        if len(parts) < 2 or parts[0].casefold() != "/use":
+            return ""
+        skill_name = parts[1].removeprefix("$").casefold()
+        skill = next(
+            (
+                item
+                for item in self._capabilities().skills
+                if item.name.casefold() == skill_name
+            ),
+            None,
+        )
+        if skill is None:
+            return ""
+        try:
+            with Path(skill.source).open("r", encoding="utf-8") as skill_file:
+                return skill_file.read(12_000)
+        except (OSError, UnicodeError):
+            return ""
+
+    def _read_optional_context(self, path: Path) -> str:
+        repository_root = self._snapshots._primary_mission.target_repo.resolve()
+        try:
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(repository_root)
+        except (OSError, ValueError):
+            return "(not present)"
+        if not resolved.is_file():
+            return "(not present)"
+        try:
+            with resolved.open("r", encoding="utf-8") as context_file:
+                return context_file.read(8000)
+        except (OSError, UnicodeError):
+            return "(not present)"
 
 
 WorkingContextSourceKind = Literal[
@@ -976,6 +3180,20 @@ class WorkingContextProjection:
 class WorkingContextAcknowledgement:
     outcome: Literal["acknowledged"]
     revision: int
+
+
+@dataclass(frozen=True)
+class SessionArtifactProjection:
+    schema_version: int
+    mission_id: str
+    session_id: str
+    artifact_id: str
+    label: str
+    media_type: str
+    content: str
+    byte_count: int
+    content_limit_bytes: int
+    truncated: bool
 
 
 @dataclass(frozen=True)
@@ -1080,9 +3298,11 @@ class WorkspaceQueueAcknowledgement:
     item_id: str
     item_status: WorkspaceQueueItemStatus
     effect_summary: str
+    session_id: str | None = None
 
 
 WorkstationActionType = Literal[
+    "issue-approve",
     "issue-launch",
     "issue-retry",
     "session-cancel",
@@ -1180,6 +3400,7 @@ class WorkspaceQueueService:
             groups=self._groups(items),
         )
 
+    @_atomic_workspace_action("_queue_path")
     def propose_issue_contract_change(
         self,
         *,
@@ -1196,21 +3417,18 @@ class WorkspaceQueueService:
         evidence_requirements: list[str] | None = None,
     ) -> WorkspaceQueueAcknowledgement:
         snapshot = self._snapshots.snapshot()
-        if expected_revision != snapshot.revision:
-            raise WorkspaceStaleActionError(
-                expected_revision=expected_revision,
-                current_revision=snapshot.revision,
-            )
         if not correlation_id.strip():
             raise AlbertError("Workspace Queue correlation id must not be empty")
         if not source.strip():
             raise AlbertError("Workspace Queue item source must not be empty")
+        queue = self._load_queue()
+        mission_id = self._queue_request_mission_id(
+            queue,
+            correlation_id=correlation_id,
+            request_kind="issue-change-proposal",
+            mission_id=mission_id,
+        )
         mission = self._mission_for_queue_action(snapshot, mission_id)
-        if issue_id not in mission.issues:
-            raise AlbertError(f"Unknown Issue Slice for Workspace Queue: {issue_id}")
-        issue = mission.issues[issue_id]
-        if not issue.locked:
-            raise AlbertError(f"{issue_id} is not locked; edit the accepted contract directly.")
         proposed_changes = self._proposed_changes(
             what_to_build=what_to_build,
             acceptance_criteria=acceptance_criteria,
@@ -1221,8 +3439,31 @@ class WorkspaceQueueService:
         )
         if not proposed_changes:
             raise AlbertError("Issue Change Proposal requires at least one governed-field change.")
+        request_payload = {
+            "mission_id": mission.mission_id,
+            "issue_id": issue_id,
+            "source": source,
+            "proposed_changes": proposed_changes,
+        }
+        replay = self._replay_queue_request(
+            queue,
+            correlation_id=correlation_id,
+            request_kind="issue-change-proposal",
+            request_payload=request_payload,
+        )
+        if replay is not None:
+            return replay
+        if expected_revision != snapshot.revision:
+            raise WorkspaceStaleActionError(
+                expected_revision=expected_revision,
+                current_revision=snapshot.revision,
+            )
+        if issue_id not in mission.issues:
+            raise AlbertError(f"Unknown Issue Slice for Workspace Queue: {issue_id}")
+        issue = mission.issues[issue_id]
+        if not issue.locked:
+            raise AlbertError(f"{issue_id} is not locked; edit the accepted contract directly.")
 
-        queue = self._load_queue()
         sequence = len(queue["items"]) + 1
         item_id = f"issue-change-{mission.mission_id}-{issue_id}-{sequence:06d}"
         item = WorkspaceQueueItem(
@@ -1242,15 +3483,7 @@ class WorkspaceQueueService:
         )
         items = [*queue["items"], item]
         revision = queue["revision"] + 1
-        WorkspaceSnapshotService._write_json_atomically(
-            self._queue_path,
-            {
-                "schema_version": 1,
-                "revision": revision,
-                "items": [asdict(queue_item) for queue_item in items],
-            },
-        )
-        return WorkspaceQueueAcknowledgement(
+        acknowledgement = WorkspaceQueueAcknowledgement(
             correlation_id=correlation_id,
             outcome="acknowledged",
             revision=revision,
@@ -1260,7 +3493,24 @@ class WorkspaceQueueService:
                 f"{issue_id} accepted contract is unchanged; proposal {item_id} is pending."
             ),
         )
+        receipt = self._queue_receipt(
+            correlation_id=correlation_id,
+            request_kind="issue-change-proposal",
+            request_payload=request_payload,
+            acknowledgement=acknowledgement,
+        )
+        WorkspaceSnapshotService._write_json_atomically(
+            self._queue_path,
+            {
+                "schema_version": 1,
+                "revision": revision,
+                "items": [asdict(queue_item) for queue_item in items],
+                "receipts": [*queue["receipts"], receipt],
+            },
+        )
+        return acknowledgement
 
+    @_atomic_workspace_action("_queue_path")
     def request_frontier_confirmation(
         self,
         *,
@@ -1275,11 +3525,6 @@ class WorkspaceQueueService:
         mission_id: str | None = None,
     ) -> WorkspaceQueueAcknowledgement:
         snapshot = self._snapshots.snapshot()
-        if expected_revision != snapshot.revision:
-            raise WorkspaceStaleActionError(
-                expected_revision=expected_revision,
-                current_revision=snapshot.revision,
-            )
         if not correlation_id.strip():
             raise AlbertError("Workspace Queue correlation id must not be empty")
         for label, value in [
@@ -1292,11 +3537,46 @@ class WorkspaceQueueService:
                 raise AlbertError(f"Workspace Queue Frontier Confirmation {label} must not be empty")
         if not isinstance(payload, dict) or not payload:
             raise AlbertError("Workspace Queue Frontier Confirmation payload must not be empty")
+        queue = self._load_queue()
+        mission_id = self._queue_request_mission_id(
+            queue,
+            correlation_id=correlation_id,
+            request_kind="frontier-confirmation-proposal",
+            mission_id=mission_id,
+        )
         mission = self._mission_for_queue_action(snapshot, mission_id)
+        request_payload = {
+            "mission_id": mission.mission_id,
+            "issue_id": issue_id,
+            "source": source,
+            "requested_action": requested_action,
+            "affected_boundary": affected_boundary,
+            "consequence": consequence,
+            "payload": dict(payload),
+        }
+        replay = self._replay_queue_request(
+            queue,
+            correlation_id=correlation_id,
+            request_kind="frontier-confirmation-proposal",
+            request_payload=request_payload,
+        )
+        if replay is not None:
+            item = self._queue_item_for_acknowledgement(queue, replay)
+            ActivityJournalService(
+                self._snapshots
+            ).record_frontier_confirmation_requested(
+                correlation_id=correlation_id,
+                item=item,
+            )
+            return replay
+        if expected_revision != snapshot.revision:
+            raise WorkspaceStaleActionError(
+                expected_revision=expected_revision,
+                current_revision=snapshot.revision,
+            )
         if issue_id not in mission.issues:
             raise AlbertError(f"Unknown Issue Slice for Workspace Queue: {issue_id}")
 
-        queue = self._load_queue()
         sequence = len(queue["items"]) + 1
         item_id = f"frontier-confirmation-{mission.mission_id}-{issue_id}-{sequence:06d}"
         item = WorkspaceQueueItem(
@@ -1312,16 +3592,6 @@ class WorkspaceQueueService:
             proposed_changes=dict(payload),
         )
         revision = queue["revision"] + 1
-        WorkspaceSnapshotService._write_json_atomically(
-            self._queue_path,
-            {
-                "schema_version": 1,
-                "revision": revision,
-                "items": [
-                    asdict(queue_item) for queue_item in [*queue["items"], item]
-                ],
-            },
-        )
         acknowledgement = WorkspaceQueueAcknowledgement(
             correlation_id=correlation_id,
             outcome="acknowledged",
@@ -1330,12 +3600,30 @@ class WorkspaceQueueService:
             item_status="pending",
             effect_summary=f"Frontier Confirmation {item_id} is pending.",
         )
+        receipt = self._queue_receipt(
+            correlation_id=correlation_id,
+            request_kind="frontier-confirmation-proposal",
+            request_payload=request_payload,
+            acknowledgement=acknowledgement,
+        )
+        WorkspaceSnapshotService._write_json_atomically(
+            self._queue_path,
+            {
+                "schema_version": 1,
+                "revision": revision,
+                "items": [
+                    asdict(queue_item) for queue_item in [*queue["items"], item]
+                ],
+                "receipts": [*queue["receipts"], receipt],
+            },
+        )
         ActivityJournalService(self._snapshots).record_frontier_confirmation_requested(
             correlation_id=correlation_id,
             item=item,
         )
         return acknowledgement
 
+    @_atomic_workspace_action("_queue_path")
     def propose_ad_hoc_delegation(
         self,
         *,
@@ -1351,11 +3639,6 @@ class WorkspaceQueueService:
         mission_id: str | None = None,
     ) -> WorkspaceQueueAcknowledgement:
         snapshot = self._snapshots.snapshot()
-        if expected_revision != snapshot.revision:
-            raise WorkspaceStaleActionError(
-                expected_revision=expected_revision,
-                current_revision=snapshot.revision,
-            )
         if not correlation_id.strip():
             raise AlbertError("Workspace Queue correlation id must not be empty")
         if not source.strip():
@@ -1370,10 +3653,99 @@ class WorkspaceQueueService:
             raise AlbertError("Ad Hoc Delegation allowed paths must not be empty")
         if any(not command.strip() or not policy.strip() for command, policy in command_policy.items()):
             raise AlbertError("Ad Hoc Delegation command policy entries must not be empty")
+        queue = self._load_queue()
+        persisted_receipt = next(
+            (
+                receipt
+                for receipt in queue["receipts"]
+                if receipt.get("correlation_id") == correlation_id
+            ),
+            None,
+        )
+        if persisted_receipt is not None:
+            persisted_request = persisted_receipt.get("request")
+            if (
+                persisted_receipt.get("request_kind")
+                != "ad-hoc-delegation-proposal"
+                or not isinstance(persisted_request, dict)
+            ):
+                raise AlbertError(
+                    f"Workspace Queue correlation id {correlation_id} was already used "
+                    "for a different request."
+                )
+            persisted_mission_id = str(persisted_request.get("mission_id", ""))
+            persisted_mission = self._snapshots._missions.get(persisted_mission_id)
+            if persisted_mission is None:
+                raise WorkspacePersistenceError(
+                    f"Workspace Queue receipt references unknown Mission: "
+                    f"{persisted_mission_id}"
+                )
+            replay_scope = self._snapshots._qualify_scope(
+                scope,
+                active_mission_id=persisted_mission_id,
+            )
+            replay_origin = next(
+                (
+                    message
+                    for message in AgentConsoleHistoryService(self._snapshots).history()
+                    if message.message_id == originating_message_id
+                ),
+                None,
+            )
+            replay_request = {
+                "source": source,
+                "mission_id": (
+                    mission_id if mission_id is not None else persisted_mission_id
+                ),
+                "scope": asdict(replay_scope),
+                "acceptance_criteria": list(acceptance_criteria),
+                "allowed_paths": list(allowed_paths),
+                "command_policy": dict(command_policy),
+                "proposed_agent": proposed_agent,
+                "originating_message_id": originating_message_id,
+                "goal": replay_origin.content if replay_origin is not None else "",
+            }
+            replay = self._replay_queue_request(
+                queue,
+                correlation_id=correlation_id,
+                request_kind="ad-hoc-delegation-proposal",
+                request_payload=replay_request,
+            )
+            if replay is None:  # pragma: no cover - receipt was selected above
+                raise WorkspacePersistenceError(
+                    f"Workspace Queue receipt disappeared during replay: {correlation_id}"
+                )
+            return replay
         mission = self._mission_for_queue_action(snapshot, mission_id)
         scope = self._snapshots._qualify_scope(scope, active_mission_id=mission.mission_id)
+        origin = next(
+            (
+                message
+                for message in AgentConsoleHistoryService(self._snapshots).history()
+                if message.message_id == originating_message_id
+            ),
+            None,
+        )
+        if (
+            origin is None
+            or origin.role != "user"
+            or origin.source != "mission-commander"
+        ):
+            raise AlbertError(
+                f"Agent Console message {originating_message_id} is not a "
+                "Mission Commander prompt."
+            )
+        scope_mission_id = (
+            snapshot.active_mission.id
+            if scope.kind == "working-directory" and snapshot.active_mission is not None
+            else scope.mission_id
+        )
+        if origin.scope != scope or scope_mission_id != mission.mission_id:
+            raise AlbertError(
+                f"Agent Console message {originating_message_id} scope and Mission "
+                "must exactly match the Ad Hoc Delegation proposal."
+            )
 
-        queue = self._load_queue()
         sequence = len(queue["items"]) + 1
         work_id = f"ADHOC-{sequence:06d}"
         item_id = f"ad-hoc-delegation-{mission.mission_id}-{sequence:06d}"
@@ -1397,18 +3769,35 @@ class WorkspaceQueueService:
                 "command_policy": dict(command_policy),
                 "proposed_agent": proposed_agent,
                 "originating_message_id": originating_message_id,
+                "goal": origin.content,
             },
         )
+        request_payload = {
+            "source": source,
+            "mission_id": mission.mission_id,
+            "scope": asdict(scope),
+            "acceptance_criteria": list(acceptance_criteria),
+            "allowed_paths": list(allowed_paths),
+            "command_policy": dict(command_policy),
+            "proposed_agent": proposed_agent,
+            "originating_message_id": originating_message_id,
+            "goal": origin.content,
+        }
+        replay = self._replay_queue_request(
+            queue,
+            correlation_id=correlation_id,
+            request_kind="ad-hoc-delegation-proposal",
+            request_payload=request_payload,
+        )
+        if replay is not None:
+            return replay
+        if expected_revision != snapshot.revision:
+            raise WorkspaceStaleActionError(
+                expected_revision=expected_revision,
+                current_revision=snapshot.revision,
+            )
         revision = queue["revision"] + 1
-        WorkspaceSnapshotService._write_json_atomically(
-            self._queue_path,
-            {
-                "schema_version": 1,
-                "revision": revision,
-                "items": [asdict(queue_item) for queue_item in [*queue["items"], item]],
-            },
-        )
-        return WorkspaceQueueAcknowledgement(
+        acknowledgement = WorkspaceQueueAcknowledgement(
             correlation_id=correlation_id,
             outcome="acknowledged",
             revision=revision,
@@ -1416,6 +3805,321 @@ class WorkspaceQueueService:
             item_status="pending",
             effect_summary=f"Ad Hoc Delegation {work_id} is pending approval.",
         )
+        receipt = self._queue_receipt(
+            correlation_id=correlation_id,
+            request_kind="ad-hoc-delegation-proposal",
+            request_payload=request_payload,
+            acknowledgement=acknowledgement,
+        )
+        WorkspaceSnapshotService._write_json_atomically(
+            self._queue_path,
+            {
+                "schema_version": 1,
+                "revision": revision,
+                "items": [asdict(queue_item) for queue_item in [*queue["items"], item]],
+                "receipts": [*queue["receipts"], receipt],
+            },
+        )
+        return acknowledgement
+
+    @staticmethod
+    def _queue_receipt(
+        *,
+        correlation_id: str,
+        request_kind: str,
+        request_payload: dict[str, Any],
+        acknowledgement: WorkspaceQueueAcknowledgement,
+    ) -> dict[str, Any]:
+        return {
+            "correlation_id": correlation_id,
+            "request_kind": request_kind,
+            "request": request_payload,
+            "acknowledgement": asdict(acknowledgement),
+        }
+
+    @staticmethod
+    def _replay_queue_request(
+        queue: dict[str, Any],
+        *,
+        correlation_id: str,
+        request_kind: str,
+        request_payload: dict[str, Any],
+    ) -> WorkspaceQueueAcknowledgement | None:
+        receipt = WorkspaceQueueService._queue_receipt_for_correlation(
+            queue,
+            correlation_id=correlation_id,
+        )
+        if receipt is None:
+            return None
+        if (
+            receipt.get("request_kind") != request_kind
+            or receipt.get("request") != request_payload
+        ):
+            raise AlbertError(
+                f"Workspace Queue correlation id {correlation_id} was already used "
+                "for a different request."
+            )
+        try:
+            acknowledgement = WorkspaceQueueAcknowledgement(
+                **receipt["acknowledgement"]
+            )
+        except (KeyError, TypeError) as exc:
+            raise WorkspacePersistenceError(
+                f"Workspace Queue receipt is invalid: {correlation_id}"
+            ) from exc
+        WorkspaceQueueService._validate_queue_acknowledgement(
+            queue,
+            receipt=receipt,
+            acknowledgement=acknowledgement,
+        )
+        return acknowledgement
+
+    @staticmethod
+    def _validate_queue_acknowledgement(
+        queue: dict[str, Any],
+        *,
+        receipt: dict[str, Any],
+        acknowledgement: WorkspaceQueueAcknowledgement,
+    ) -> None:
+        correlation_id = receipt.get("correlation_id")
+        request_kind = receipt.get("request_kind")
+        request = receipt.get("request")
+        if (
+            acknowledgement.correlation_id != correlation_id
+            or acknowledgement.outcome != "acknowledged"
+            or not isinstance(acknowledgement.revision, int)
+            or isinstance(acknowledgement.revision, bool)
+            or acknowledgement.revision < 1
+            or acknowledgement.revision > queue["revision"]
+            or not isinstance(request, dict)
+        ):
+            raise WorkspacePersistenceError(
+                f"Workspace Queue receipt acknowledgement is invalid: {correlation_id}"
+            )
+        receipts = queue.get("receipts")
+        if not isinstance(receipts, list):
+            raise WorkspacePersistenceError(
+                f"Workspace Queue receipt history is invalid: {correlation_id}"
+            )
+        receipt_positions = [
+            position
+            for position, candidate in enumerate(receipts)
+            if candidate.get("correlation_id") == correlation_id
+        ]
+        base_revision = queue["revision"] - len(receipts)
+        if (
+            len(receipt_positions) != 1
+            or base_revision < 1
+            or acknowledgement.revision
+            != base_revision + receipt_positions[0] + 1
+        ):
+            raise WorkspacePersistenceError(
+                f"Workspace Queue receipt revision is invalid: {correlation_id}"
+            )
+        item = next(
+            (
+                candidate
+                for candidate in queue["items"]
+                if candidate.item_id == acknowledgement.item_id
+            ),
+            None,
+        )
+        if item is None:
+            raise WorkspacePersistenceError(
+                f"Workspace Queue receipt item is unavailable: {correlation_id}"
+            )
+
+        expected_effect = ""
+        session_allowed = False
+        if request_kind == "issue-change-proposal":
+            expected_request = {
+                "mission_id": item.mission_id,
+                "issue_id": item.issue_id,
+                "source": item.source,
+                "proposed_changes": item.proposed_changes,
+            }
+            if (
+                item.item_type != "issue-change-proposal"
+                or request != expected_request
+            ):
+                raise WorkspacePersistenceError(
+                    "Workspace Queue Issue Change receipt does not match its item."
+                )
+            expected_effect = (
+                f"{item.issue_id} accepted contract is unchanged; proposal "
+                f"{item.item_id} is pending."
+            )
+        elif request_kind == "frontier-confirmation-proposal":
+            expected_request = {
+                "mission_id": item.mission_id,
+                "issue_id": item.issue_id,
+                "source": item.source,
+                "requested_action": item.requested_action,
+                "affected_boundary": item.affected_boundary,
+                "consequence": item.consequence,
+                "payload": item.proposed_changes,
+            }
+            if item.item_type != "frontier-confirmation" or request != expected_request:
+                raise WorkspacePersistenceError(
+                    "Workspace Queue Frontier receipt does not match its item."
+                )
+            expected_effect = f"Frontier Confirmation {item.item_id} is pending."
+        elif request_kind == "ad-hoc-delegation-proposal":
+            expected_request = {
+                "source": item.source,
+                "mission_id": item.mission_id,
+                "scope": item.proposed_changes.get("scope"),
+                "acceptance_criteria": item.proposed_changes.get(
+                    "acceptance_criteria"
+                ),
+                "allowed_paths": item.proposed_changes.get("allowed_paths"),
+                "command_policy": item.proposed_changes.get("command_policy"),
+                "proposed_agent": item.proposed_changes.get("proposed_agent"),
+                "originating_message_id": item.proposed_changes.get(
+                    "originating_message_id"
+                ),
+                "goal": item.proposed_changes.get("goal"),
+            }
+            if item.item_type != "ad-hoc-delegation" or request != expected_request:
+                raise WorkspacePersistenceError(
+                    "Workspace Queue delegation receipt does not match its item."
+                )
+            expected_effect = (
+                f"Ad Hoc Delegation {item.issue_id} is pending approval."
+            )
+        elif request_kind == "workspace-queue-decision":
+            if request.get("item_id") != item.item_id:
+                raise WorkspacePersistenceError(
+                    "Workspace Queue decision receipt targets the wrong item."
+                )
+            decision = request.get("decision")
+            expected_status = {
+                "approve": "approved",
+                "reject": "rejected",
+                "defer": "deferred",
+            }.get(decision)
+            if expected_status is None or acknowledgement.item_status != expected_status:
+                raise WorkspacePersistenceError(
+                    "Workspace Queue decision receipt has an invalid outcome."
+                )
+            if item.status != acknowledgement.item_status:
+                raise WorkspacePersistenceError(
+                    "Workspace Queue decision receipt does not match canonical item state."
+                )
+            if decision == "approve" and item.item_type == "issue-change-proposal":
+                expected_effect = (
+                    f"Applied {item.item_id}; {item.issue_id} is reopened for re-review."
+                )
+            elif decision == "approve" and item.item_type == "ad-hoc-delegation":
+                session_allowed = True
+                if not acknowledgement.session_id:
+                    raise WorkspacePersistenceError(
+                        "Approved Ad Hoc Delegation receipt has no Local Agent session."
+                    )
+                expected_effect = (
+                    f"Approved {item.item_id}; queued {item.issue_id} as "
+                    f"{acknowledgement.session_id}."
+                )
+            elif decision == "approve":
+                expected_effect = (
+                    f"Approved {item.item_id}; Frontier action may proceed from the "
+                    "Workspace Queue acknowledgement."
+                )
+            elif decision == "reject":
+                expected_effect = (
+                    f"Rejected {item.item_id}; accepted Mission state is unchanged."
+                )
+            else:
+                expected_effect = (
+                    f"Deferred {item.item_id}; accepted Mission state is unchanged."
+                )
+        else:
+            raise WorkspacePersistenceError(
+                f"Workspace Queue receipt kind is invalid: {request_kind}"
+            )
+
+        if request_kind != "workspace-queue-decision":
+            if acknowledgement.item_status != "pending":
+                raise WorkspacePersistenceError(
+                    "Workspace Queue proposal receipt must retain a pending acknowledgement."
+                )
+        if not session_allowed and acknowledgement.session_id is not None:
+            raise WorkspacePersistenceError(
+                "Workspace Queue receipt contains a Local Agent session outside a delegation."
+            )
+        if acknowledgement.effect_summary != expected_effect:
+            raise WorkspacePersistenceError(
+                "Workspace Queue receipt effect summary does not match its canonical effect."
+            )
+
+    @staticmethod
+    def _queue_receipt_for_correlation(
+        queue: dict[str, Any],
+        *,
+        correlation_id: str,
+    ) -> dict[str, Any] | None:
+        matches = [
+            item
+            for item in queue["receipts"]
+            if item.get("correlation_id") == correlation_id
+        ]
+        if len(matches) > 1:
+            raise WorkspacePersistenceError(
+                f"Workspace Queue correlation id is not unique: {correlation_id}"
+            )
+        return matches[0] if matches else None
+
+    @classmethod
+    def _queue_request_mission_id(
+        cls,
+        queue: dict[str, Any],
+        *,
+        correlation_id: str,
+        request_kind: str,
+        mission_id: str | None,
+    ) -> str | None:
+        receipt = cls._queue_receipt_for_correlation(
+            queue,
+            correlation_id=correlation_id,
+        )
+        if receipt is None:
+            return mission_id
+        persisted_request = receipt.get("request")
+        if (
+            receipt.get("request_kind") != request_kind
+            or not isinstance(persisted_request, dict)
+        ):
+            raise AlbertError(
+                f"Workspace Queue correlation id {correlation_id} was already used "
+                "for a different request."
+            )
+        persisted_mission_id = persisted_request.get("mission_id")
+        if not isinstance(persisted_mission_id, str) or not persisted_mission_id.strip():
+            raise WorkspacePersistenceError(
+                f"Workspace Queue receipt has no valid Mission: {correlation_id}"
+            )
+        if mission_id is not None and mission_id != persisted_mission_id:
+            raise AlbertError(
+                f"Workspace Queue correlation id {correlation_id} was already used "
+                "for a different request."
+            )
+        return persisted_mission_id
+
+    @staticmethod
+    def _queue_item_for_acknowledgement(
+        queue: dict[str, Any],
+        acknowledgement: WorkspaceQueueAcknowledgement,
+    ) -> WorkspaceQueueItem:
+        matches = [
+            item
+            for item in queue["items"]
+            if item.item_id == acknowledgement.item_id
+        ]
+        if len(matches) != 1:
+            raise WorkspacePersistenceError(
+                "Workspace Queue acknowledgement does not resolve to one canonical item."
+            )
+        return matches[0]
 
     def _mission_for_queue_action(
         self, snapshot: WorkspaceSnapshot, mission_id: str | None
@@ -1444,6 +4148,7 @@ class WorkspaceQueueService:
             for (item_type, mission_id), group_items in sorted(grouped.items())
         )
 
+    @_atomic_workspace_action("_queue_path")
     @measured_stage("R2", workflows={"queue-defer", "queue-approve"})
     def decide(
         self,
@@ -1473,11 +4178,24 @@ class WorkspaceQueueService:
         if decision in {"reject", "defer"} and not reason.strip():
             raise AlbertError("Reject and defer Workspace Queue decisions require a reason.")
         queue = self._load_queue()
-        if expected_revision != queue["revision"]:
-            raise WorkspaceStaleActionError(
-                expected_revision=expected_revision,
-                current_revision=queue["revision"],
-            )
+        request_payload = {
+            "item_id": item_id,
+            "decision": decision,
+            "reason": reason.strip(),
+            "action_type": action_type,
+            "actor": actor,
+            "target_kind": target_kind,
+            "target_id": target_id,
+        }
+        replay = self._replay_queue_request(
+            queue,
+            correlation_id=correlation_id,
+            request_kind="workspace-queue-decision",
+            request_payload=request_payload,
+        )
+        if replay is not None:
+            self._reconcile_queue_decision_audit(queue, replay)
+            return replay
         items = list(queue["items"])
         index = next(
             (position for position, item in enumerate(items) if item.item_id == item_id),
@@ -1487,20 +4205,61 @@ class WorkspaceQueueService:
             raise AlbertError(f"Unknown Workspace Queue item: {item_id}")
         item = items[index]
         if item.status != "pending":
+            if expected_revision != queue["revision"]:
+                raise WorkspaceStaleActionError(
+                    expected_revision=expected_revision,
+                    current_revision=queue["revision"],
+                )
             raise AlbertError(f"Workspace Queue item is already {item.status}: {item_id}")
 
+        durable_effect = self._durable_queue_approval_effect(item)
+        if durable_effect is not None:
+            effect_correlation, effect_request, recovered_session = durable_effect
+            if (
+                decision != "approve"
+                or correlation_id != effect_correlation
+                or request_payload != effect_request
+            ):
+                raise WorkspacePersistenceError(
+                    f"Workspace Queue {item_id} approval effect is already durable; "
+                    "only the exact original approval may finalize its receipt."
+                )
+        elif expected_revision != queue["revision"]:
+            raise WorkspaceStaleActionError(
+                expected_revision=expected_revision,
+                current_revision=queue["revision"],
+            )
+
         item_status: WorkspaceQueueItemStatus
-        launched_session: LocalAgentSession | None = None
+        launched_session: LocalAgentSession | None = (
+            recovered_session if durable_effect is not None else None
+        )
         if decision == "approve":
             if item.item_type == "issue-change-proposal":
-                self._apply_issue_change_proposal(item, reason=reason)
+                if durable_effect is None:
+                    self._apply_issue_change_proposal(
+                        item,
+                        correlation_id=correlation_id,
+                        reason=reason,
+                        decision_request=request_payload,
+                    )
                 effect_summary = (
                     f"Applied {item_id}; {item.issue_id} is reopened for re-review."
                 )
             elif item.item_type == "ad-hoc-delegation":
-                launched_session = self._launch_ad_hoc_delegation(item, reason=reason)
+                if durable_effect is None:
+                    launched_session = self._launch_ad_hoc_delegation(
+                        item,
+                        reason=reason,
+                        correlation_id=correlation_id,
+                        decision_request=request_payload,
+                    )
+                if launched_session is None:
+                    raise WorkspacePersistenceError(
+                        "Workspace Queue Ad Hoc approval has no durable session effect."
+                    )
                 effect_summary = (
-                    f"Approved {item_id}; launched {item.issue_id} as "
+                    f"Approved {item_id}; queued {item.issue_id} as "
                     f"{launched_session.session_id}."
                 )
             else:
@@ -1518,14 +4277,6 @@ class WorkspaceQueueService:
 
         items[index] = replace(item, status=item_status)
         revision = queue["revision"] + 1
-        WorkspaceSnapshotService._write_json_atomically(
-            self._queue_path,
-            {
-                "schema_version": 1,
-                "revision": revision,
-                "items": [asdict(queue_item) for queue_item in items],
-            },
-        )
         acknowledgement = WorkspaceQueueAcknowledgement(
             correlation_id=correlation_id,
             outcome="acknowledged",
@@ -1533,23 +4284,288 @@ class WorkspaceQueueService:
             item_id=item_id,
             item_status=item_status,
             effect_summary=effect_summary,
+            session_id=(
+                launched_session.session_id if launched_session is not None else None
+            ),
         )
-        ActivityJournalService(self._snapshots).record_workspace_queue_decision(
+        receipt = self._queue_receipt(
             correlation_id=correlation_id,
-            item=item,
-            item_status=item_status,
-            effect_summary=effect_summary,
+            request_kind="workspace-queue-decision",
+            request_payload=request_payload,
+            acknowledgement=acknowledgement,
         )
-        if launched_session is not None:
-            ActivityJournalService(self._snapshots).record_orchestrator_session_launched(
-                correlation_id=correlation_id,
-                item=item,
-                session=launched_session,
-            )
+        WorkspaceSnapshotService._write_json_atomically(
+            self._queue_path,
+            {
+                "schema_version": 1,
+                "revision": revision,
+                "items": [asdict(queue_item) for queue_item in items],
+                "receipts": [*queue["receipts"], receipt],
+            },
+        )
+        self._reconcile_queue_decision_audit(
+            {
+                **queue,
+                "revision": revision,
+                "items": items,
+                "receipts": [*queue["receipts"], receipt],
+            },
+            acknowledgement,
+        )
         return acknowledgement
 
+    def _durable_queue_approval_effect(
+        self,
+        item: WorkspaceQueueItem,
+    ) -> tuple[str, dict[str, Any], LocalAgentSession | None] | None:
+        if item.item_type not in {"issue-change-proposal", "ad-hoc-delegation"}:
+            return None
+        mission = self._snapshots._missions.get(item.mission_id)
+        if mission is None:
+            raise WorkspacePersistenceError(
+                f"Workspace Queue item references an unavailable Mission: {item.mission_id}"
+            )
+        if mission.runtime_path.exists():
+            try:
+                with mission._runtime_lock(exclusive=False):
+                    mission._load_runtime()
+            except (OSError, json.JSONDecodeError) as exc:
+                raise WorkspacePersistenceError(
+                    "Workspace Queue could not inspect its durable approval effect."
+                ) from exc
+
+        if item.item_type == "issue-change-proposal":
+            markers = [
+                marker
+                for marker in mission.workstation_actions.values()
+                if isinstance(marker, dict)
+                and marker.get("action_type") == "workspace-queue-decision"
+                and marker.get("decision") == "approve"
+                and marker.get("item_id") == item.item_id
+            ]
+            if not markers:
+                return None
+            if len(markers) != 1:
+                raise WorkspacePersistenceError(
+                    f"Workspace Queue {item.item_id} has multiple durable approval effects."
+                )
+            marker = markers[0]
+            expected_boundary = {
+                "mission_id": item.mission_id,
+                "issue_id": item.issue_id,
+                "proposed_changes": item.proposed_changes,
+            }
+            if any(marker.get(field) != value for field, value in expected_boundary.items()):
+                raise WorkspacePersistenceError(
+                    f"Workspace Queue {item.item_id} durable Issue effect is inconsistent."
+                )
+            correlation_id = marker.get("correlation_id")
+            request = marker.get("request")
+            if (
+                not isinstance(correlation_id, str)
+                or not correlation_id.strip()
+                or not isinstance(request, dict)
+            ):
+                raise WorkspacePersistenceError(
+                    f"Workspace Queue {item.item_id} durable Issue effect has no exact request."
+                )
+            return correlation_id, request, None
+
+        sessions = [
+            session
+            for session in mission.sessions.values()
+            if session.issue_id == item.issue_id
+            and session.task_packet.get("work_kind") == "ad-hoc-delegation"
+        ]
+        if not sessions:
+            return None
+        if len(sessions) != 1:
+            raise WorkspacePersistenceError(
+                f"Workspace Queue {item.item_id} has multiple durable delegation effects."
+            )
+        session = sessions[0]
+        approval = session.task_packet.get("queue_approval")
+        if not isinstance(approval, dict):
+            raise WorkspacePersistenceError(
+                f"Workspace Queue {item.item_id} durable session has no exact approval."
+            )
+        correlation_id = approval.get("correlation_id")
+        request = approval.get("request")
+        if (
+            not isinstance(correlation_id, str)
+            or not correlation_id.strip()
+            or not isinstance(request, dict)
+            or not self._session_matches_ad_hoc_delegation(
+                item,
+                session,
+                approval_correlation_id=correlation_id,
+                decision_request=request,
+            )
+        ):
+            raise WorkspacePersistenceError(
+                f"Workspace Queue {item.item_id} durable session boundary is inconsistent."
+            )
+        return correlation_id, request, session
+
+    def _reconcile_queue_decision_audit(
+        self,
+        queue: dict[str, Any],
+        acknowledgement: WorkspaceQueueAcknowledgement,
+    ) -> None:
+        item = next(
+            (
+                candidate
+                for candidate in queue["items"]
+                if candidate.item_id == acknowledgement.item_id
+            ),
+            None,
+        )
+        if item is None or item.status != acknowledgement.item_status:
+            raise WorkspacePersistenceError(
+                "Workspace Queue receipt does not match its canonical item state."
+            )
+        self._reconcile_queue_proposal_audit(queue, item)
+        session: LocalAgentSession | None = None
+        if acknowledgement.session_id is not None:
+            receipt = self._queue_receipt_for_correlation(
+                queue,
+                correlation_id=acknowledgement.correlation_id,
+            )
+            decision_request = receipt.get("request") if receipt is not None else None
+            if not isinstance(decision_request, dict):
+                raise WorkspacePersistenceError(
+                    "Workspace Queue delegation audit has no exact decision request."
+                )
+            mission = self._snapshots._missions.get(item.mission_id)
+            if mission is not None and mission.runtime_path.exists():
+                try:
+                    with mission._runtime_lock(exclusive=False):
+                        mission._load_runtime()
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise WorkspacePersistenceError(
+                        "Workspace Queue audit replay could not refresh its Mission runtime."
+                    ) from exc
+            session = (
+                mission.sessions.get(acknowledgement.session_id)
+                if mission is not None
+                else None
+            )
+            if session is None:
+                raise WorkspacePersistenceError(
+                    "Workspace Queue receipt references an unavailable Local Agent session."
+                )
+            if not self._session_matches_ad_hoc_delegation(
+                item,
+                session,
+                approval_correlation_id=acknowledgement.correlation_id,
+                decision_request=decision_request,
+            ):
+                raise WorkspacePersistenceError(
+                    "Workspace Queue Local Agent session does not match the approved "
+                    "delegation boundary."
+                )
+
+        journal = ActivityJournalService(self._snapshots)
+        journal.record_workspace_queue_decision(
+            correlation_id=acknowledgement.correlation_id,
+            item=item,
+            item_status=acknowledgement.item_status,
+            effect_summary=acknowledgement.effect_summary,
+        )
+        if session is not None:
+            journal.record_orchestrator_session_launched(
+                correlation_id=acknowledgement.correlation_id,
+                item=item,
+                session=session,
+            )
+
+    def _reconcile_queue_proposal_audit(
+        self,
+        queue: dict[str, Any],
+        item: WorkspaceQueueItem,
+    ) -> None:
+        if item.item_type != "frontier-confirmation":
+            return
+        matches = [
+            receipt
+            for receipt in queue["receipts"]
+            if receipt.get("request_kind") == "frontier-confirmation-proposal"
+            and isinstance(receipt.get("acknowledgement"), dict)
+            and receipt["acknowledgement"].get("item_id") == item.item_id
+        ]
+        if len(matches) != 1:
+            raise WorkspacePersistenceError(
+                f"Workspace Queue Frontier item {item.item_id} has no unique proposal receipt."
+            )
+        receipt = matches[0]
+        request = receipt.get("request")
+        correlation_id = receipt.get("correlation_id")
+        if not isinstance(request, dict) or not isinstance(correlation_id, str):
+            raise WorkspacePersistenceError(
+                f"Workspace Queue Frontier item {item.item_id} proposal receipt is invalid."
+            )
+        proposal_ack = self._replay_queue_request(
+            queue,
+            correlation_id=correlation_id,
+            request_kind="frontier-confirmation-proposal",
+            request_payload=request,
+        )
+        if proposal_ack is None or proposal_ack.item_id != item.item_id:
+            raise WorkspacePersistenceError(
+                f"Workspace Queue Frontier item {item.item_id} proposal is unavailable."
+            )
+        ActivityJournalService(
+            self._snapshots
+        ).record_frontier_confirmation_requested(
+            correlation_id=correlation_id,
+            item=item,
+        )
+
+    @staticmethod
+    def _session_matches_ad_hoc_delegation(
+        item: WorkspaceQueueItem,
+        session: LocalAgentSession,
+        *,
+        approval_correlation_id: str | None = None,
+        decision_request: dict[str, Any] | None = None,
+    ) -> bool:
+        if item.item_type != "ad-hoc-delegation":
+            return False
+        proposed = item.proposed_changes
+        expected_agent = proposed.get("proposed_agent")
+        expected_packet = {
+            "issue_id": item.issue_id,
+            "work_kind": "ad-hoc-delegation",
+            "goal": proposed.get("goal", f"Ad Hoc Delegation {item.issue_id}"),
+            "conversation_scope": proposed.get("scope"),
+            "acceptance_criteria": proposed.get("acceptance_criteria"),
+            "allowed_paths": proposed.get("allowed_paths"),
+            "command_policy": proposed.get("command_policy"),
+            "assigned_agent": expected_agent,
+            "originating_message_id": proposed.get("originating_message_id"),
+        }
+        matches = (
+            session.issue_id == item.issue_id
+            and session.assigned_agent == expected_agent
+            and all(
+                session.task_packet.get(field_name) == value
+                for field_name, value in expected_packet.items()
+            )
+        )
+        if not matches or approval_correlation_id is None:
+            return matches
+        return session.task_packet.get("queue_approval") == {
+            "correlation_id": approval_correlation_id,
+            "request": decision_request,
+        }
+
     def _launch_ad_hoc_delegation(
-        self, item: WorkspaceQueueItem, *, reason: str
+        self,
+        item: WorkspaceQueueItem,
+        *,
+        reason: str,
+        correlation_id: str,
+        decision_request: dict[str, Any],
     ) -> LocalAgentSession:
         if item.item_type != "ad-hoc-delegation":
             raise AlbertError(f"Workspace Queue item is not an Ad Hoc Delegation: {item.item_id}")
@@ -1570,52 +4586,120 @@ class WorkspaceQueueService:
             raise AlbertError(
                 f"Ad Hoc Delegation {item.issue_id} is missing: {', '.join(missing)}"
             )
-        command_policy = dict(proposed["command_policy"])
-        denied_commands = [
-            command
-            for command, policy in command_policy.items()
-            if policy != "auto-allowed" or mission.classify_command(command) != "auto-allowed"
-        ]
-        if denied_commands:
-            raise AlbertError(
-                f"Ad Hoc Delegation {item.issue_id} requires auto-allowed command policy "
-                f"before launch: {', '.join(denied_commands)}"
+        with mission._runtime_lock(exclusive=True):
+            if mission.runtime_path.exists():
+                mission._load_runtime()
+            command_policy = dict(proposed["command_policy"])
+            denied_commands = [
+                command
+                for command, policy in command_policy.items()
+                if policy != "auto-allowed"
+                or mission.classify_command(command) != "auto-allowed"
+            ]
+            if denied_commands:
+                raise AlbertError(
+                    f"Ad Hoc Delegation {item.issue_id} requires auto-allowed command "
+                    f"policy before launch: {', '.join(denied_commands)}"
+                )
+
+            existing_sessions = [
+                session
+                for session in mission.sessions.values()
+                if session.issue_id == item.issue_id
+                and session.task_packet.get("work_kind") == "ad-hoc-delegation"
+            ]
+            if len(existing_sessions) > 1:
+                raise AlbertError(
+                    f"Ad Hoc Delegation {item.issue_id} has multiple persisted sessions."
+                )
+            if existing_sessions:
+                existing = existing_sessions[0]
+                if not self._session_matches_ad_hoc_delegation(
+                    item,
+                    existing,
+                    approval_correlation_id=correlation_id,
+                    decision_request=decision_request,
+                ):
+                    raise AlbertError(
+                        f"Ad Hoc Delegation {item.issue_id} persisted session boundary "
+                        "does not match the approved request."
+                    )
+                return existing
+
+            session_id = f"session-{item.issue_id}-{len(mission.sessions) + 1}"
+            worktree_path = mission._session_worktree_path(session_id)
+            assigned_agent = str(proposed["proposed_agent"])
+            agent_config = mission.agent_registry.find(assigned_agent)
+            if mission.agent_registry.configured and agent_config is None:
+                raise AlbertError(f"Unknown configured agent: {assigned_agent}")
+            if agent_config is not None and (
+                agent_config.requires_approval
+                or is_cloud_model(agent_config.model)
+            ):
+                raise AlbertError(
+                    f"Ad Hoc Delegation {item.issue_id} agent {assigned_agent} requires "
+                    "explicit delegation approval and cannot use automatic approval."
+                )
+            if agent_config is not None and agent_config not in mission.assignment_agents():
+                raise AlbertError(
+                    f"Ad Hoc Delegation {item.issue_id} agent {assigned_agent} is not "
+                    "assignable; choose a non-controller worker that is not delegate-only."
+                )
+            if agent_config is not None and agent_config.availability != "available":
+                availability_reason = (
+                    agent_config.availability_reason or agent_config.availability
+                )
+                raise AlbertError(
+                    f"Ad Hoc Delegation {item.issue_id} assigned model is unavailable: "
+                    f"{availability_reason}."
+                )
+            if agent_config is not None and agent_config.runner in {"command", "ollama"}:
+                runner_command = mission._runner_command(agent_config)
+                runner_policy = mission.classify_command(runner_command)
+                if runner_policy != "auto-allowed":
+                    raise AlbertError(
+                        f"Ad Hoc Delegation {item.issue_id} command runner policy is "
+                        f"{runner_policy}; auto-allowed is required."
+                    )
+            session = LocalAgentSession(
+                session_id=session_id,
+                issue_id=item.issue_id,
+                assigned_agent=assigned_agent,
+                worktree_path=worktree_path,
+                task_packet={
+                    "issue_id": item.issue_id,
+                    "work_kind": "ad-hoc-delegation",
+                    "goal": str(
+                        proposed.get("goal", f"Ad Hoc Delegation {item.issue_id}")
+                    ),
+                    "conversation_scope": dict(proposed["scope"]),
+                    "acceptance_criteria": list(proposed["acceptance_criteria"]),
+                    "allowed_paths": list(proposed["allowed_paths"]),
+                    "command_policy": command_policy,
+                    "assigned_agent": assigned_agent,
+                    "agent_config": mission._agent_config_for(assigned_agent),
+                    "originating_message_id": str(proposed["originating_message_id"]),
+                    "queue_approval": {
+                        "correlation_id": correlation_id,
+                        "request": dict(decision_request),
+                    },
+                },
+                status="queued",
             )
+            mission.sessions[session_id] = session
+            audit_reason = reason.strip() or "Workspace Queue ad hoc delegation approved."
+            mission._record(f"{item.issue_id} queued as {session_id}: {audit_reason}")
+            mission._write_runtime_payload(mission._runtime_payload())
+            return session
 
-        session_id = f"session-{item.issue_id}-{len(mission.sessions) + 1}"
-        worktree_path = (
-            mission.target_repo.parent
-            / ".albert-worktrees"
-            / mission.target_repo.name
-            / item.issue_id
-        )
-        worktree_path.mkdir(parents=True, exist_ok=True)
-        assigned_agent = str(proposed["proposed_agent"])
-        session = LocalAgentSession(
-            session_id=session_id,
-            issue_id=item.issue_id,
-            assigned_agent=assigned_agent,
-            worktree_path=worktree_path,
-            task_packet={
-                "issue_id": item.issue_id,
-                "work_kind": "ad-hoc-delegation",
-                "goal": f"Ad Hoc Delegation {item.issue_id}",
-                "conversation_scope": dict(proposed["scope"]),
-                "acceptance_criteria": list(proposed["acceptance_criteria"]),
-                "allowed_paths": list(proposed["allowed_paths"]),
-                "command_policy": command_policy,
-                "assigned_agent": assigned_agent,
-                "agent_config": mission._agent_config_for(assigned_agent),
-                "originating_message_id": str(proposed["originating_message_id"]),
-            },
-        )
-        mission.sessions[session_id] = session
-        audit_reason = reason.strip() or "Workspace Queue ad hoc delegation approved."
-        mission._record(f"{item.issue_id} launched as {session_id}: {audit_reason}")
-        mission._persist()
-        return session
-
-    def _apply_issue_change_proposal(self, item: WorkspaceQueueItem, *, reason: str) -> None:
+    def _apply_issue_change_proposal(
+        self,
+        item: WorkspaceQueueItem,
+        *,
+        correlation_id: str,
+        reason: str,
+        decision_request: dict[str, Any],
+    ) -> None:
         if item.item_type != "issue-change-proposal":
             raise AlbertError(f"Workspace Queue item is not an Issue Change Proposal: {item.item_id}")
         if item.mission_id not in self._snapshots._missions:
@@ -1623,21 +4707,23 @@ class WorkspaceQueueService:
         mission = self._snapshots._missions[item.mission_id]
         if item.issue_id not in mission.issues:
             raise AlbertError(f"Unknown Issue Slice for Workspace Queue item: {item.issue_id}")
-        issue = mission.issues[item.issue_id]
-        issue.locked = False
-        for field_name, value in item.proposed_changes.items():
-            if field_name in {"acceptance_criteria", "blocked_by", "evidence_requirements"}:
-                setattr(issue, field_name, list(value))
-            elif field_name in {"what_to_build", "type", "risk"}:
-                setattr(issue, field_name, value)
-            else:
-                raise AlbertError(f"Unknown governed field in Issue Change Proposal: {field_name}")
-        issue.contract_overridden = True
-        issue.review_state = "needs-review"
-        issue.status = "needs-review"
         audit_reason = reason.strip() or "Workspace Queue proposal approved."
-        mission._record(f"{item.issue_id} changed through Workspace Queue: {audit_reason}")
-        mission._persist()
+        mission._apply_governed_issue_change(
+            item.issue_id,
+            proposed_changes=item.proposed_changes,
+            reason=audit_reason,
+            action_marker={
+                "correlation_id": correlation_id,
+                "action_type": "workspace-queue-decision",
+                "decision": "approve",
+                "item_id": item.item_id,
+                "mission_id": item.mission_id,
+                "issue_id": item.issue_id,
+                "reason": reason.strip(),
+                "proposed_changes": dict(item.proposed_changes),
+                "request": dict(decision_request),
+            },
+        )
 
     @staticmethod
     def _proposed_changes(
@@ -1666,7 +4752,12 @@ class WorkspaceQueueService:
 
     def _load_queue(self) -> dict[str, Any]:
         if not self._queue_path.exists():
-            return {"schema_version": 1, "revision": 1, "items": []}
+            return {
+                "schema_version": 1,
+                "revision": 1,
+                "items": [],
+                "receipts": [],
+            }
         try:
             data = json.loads(self._queue_path.read_text(encoding="utf-8"))
             if data["schema_version"] != 1:
@@ -1675,10 +4766,36 @@ class WorkspaceQueueService:
                 raise ValueError("Workspace Queue revision must be positive")
             if not isinstance(data["items"], list):
                 raise ValueError("Workspace Queue items must be a list")
+            item_ids = [
+                item.get("item_id")
+                for item in data["items"]
+                if isinstance(item, dict)
+            ]
+            if len(item_ids) != len(data["items"]) or any(
+                not isinstance(item_id, str) or not item_id.strip()
+                for item_id in item_ids
+            ):
+                raise ValueError("Workspace Queue item ids must be named")
+            if len(item_ids) != len(set(item_ids)):
+                raise ValueError("Workspace Queue item ids must be unique")
+            receipts = data.get("receipts", [])
+            if not isinstance(receipts, list) or any(
+                not isinstance(receipt, dict) for receipt in receipts
+            ):
+                raise ValueError("Workspace Queue receipts must be a list of objects")
+            receipt_correlations = [receipt.get("correlation_id") for receipt in receipts]
+            if any(
+                not isinstance(correlation, str) or not correlation.strip()
+                for correlation in receipt_correlations
+            ):
+                raise ValueError("Workspace Queue receipt correlations must be named")
+            if len(receipt_correlations) != len(set(receipt_correlations)):
+                raise ValueError("Workspace Queue receipt correlations must be unique")
             return {
                 "schema_version": 1,
                 "revision": data["revision"],
                 "items": [self._parse_item(item) for item in data["items"]],
+                "receipts": receipts,
             }
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise WorkspacePersistenceError(
@@ -1733,10 +4850,13 @@ class MissionDraftService:
     def drafts_path(self) -> Path:
         return self._drafts_path
 
+    @_atomic_workspace_action("_drafts_path")
     def inspect(self, *, mission_id: str | None = None) -> MissionDraftProjection:
         if mission_id is not None and mission_id not in self._snapshots._missions:
             raise AlbertError(f"Unknown Mission for Mission Draft filter: {mission_id}")
         drafts = self._load_drafts()
+        drafts = self._ensure_draft_receipt_protocol(drafts)
+        self._reconcile_draft_receipts(drafts)
         items = tuple(
             draft
             for draft in drafts["drafts"]
@@ -1748,6 +4868,7 @@ class MissionDraftService:
             drafts=items,
         )
 
+    @_atomic_workspace_action("_drafts_path")
     def create_draft(
         self,
         *,
@@ -1762,15 +4883,45 @@ class MissionDraftService:
         mission_id: str | None = None,
     ) -> MissionDraftAcknowledgement:
         snapshot = self._snapshots.snapshot()
+        if not correlation_id.strip():
+            raise AlbertError("Mission Draft correlation id must not be empty")
+        drafts = self._load_drafts()
+        drafts = self._ensure_draft_receipt_protocol(drafts)
+        self._reconcile_draft_receipts(drafts)
+        mission_id = self._draft_create_mission_id(
+            drafts,
+            correlation_id=correlation_id,
+            mission_id=mission_id,
+        )
+        mission = self._mission_for_draft_action(snapshot, mission_id)
+        request_payload = {
+            "mission_id": mission.mission_id,
+            "proposed_goal": proposed_goal,
+            "selected_ad_hoc_ids": list(selected_ad_hoc_ids),
+            "excluded_ad_hoc_ids": list(excluded_ad_hoc_ids),
+            "new_work_items": list(new_work_items),
+            "dependencies": list(dependencies),
+            "unresolved_decisions": list(unresolved_decisions),
+        }
+        replay = self._replay_draft_request(
+            drafts,
+            correlation_id=correlation_id,
+            request_kind="mission-draft-create",
+            request_payload=request_payload,
+        )
+        if replay is not None:
+            acknowledgement, effect_draft = replay
+            self._reconcile_draft_audit(
+                action="create",
+                acknowledgement=acknowledgement,
+                draft=effect_draft,
+            )
+            return acknowledgement
         if expected_revision != snapshot.revision:
             raise WorkspaceStaleActionError(
                 expected_revision=expected_revision,
                 current_revision=snapshot.revision,
             )
-        if not correlation_id.strip():
-            raise AlbertError("Mission Draft correlation id must not be empty")
-        mission = self._mission_for_draft_action(snapshot, mission_id)
-        drafts = self._load_drafts()
         sequence = len(drafts["drafts"]) + 1
         draft_id = f"mission-draft-{mission.mission_id}-{sequence:06d}"
         draft = self._draft_from_inputs(
@@ -1784,14 +4935,6 @@ class MissionDraftService:
             unresolved_decisions=unresolved_decisions,
         )
         revision = drafts["revision"] + 1
-        WorkspaceSnapshotService._write_json_atomically(
-            self._drafts_path,
-            {
-                "schema_version": 1,
-                "revision": revision,
-                "drafts": [asdict(item) for item in [*drafts["drafts"], draft]],
-            },
-        )
         acknowledgement = MissionDraftAcknowledgement(
             correlation_id=correlation_id,
             outcome="acknowledged",
@@ -1802,13 +4945,29 @@ class MissionDraftService:
                 f"Mission Draft {draft_id} is proposed; accepted Mission state is unchanged."
             ),
         )
-        ActivityJournalService(self._snapshots).record_mission_draft_created(
+        receipt = self._draft_receipt(
             correlation_id=correlation_id,
+            request_kind="mission-draft-create",
+            request_payload=request_payload,
+            acknowledgement=acknowledgement,
+            prior_draft=None,
+            effect_draft=draft,
+        )
+        self._persist_drafts(
+            revision=revision,
+            drafts=[*drafts["drafts"], draft],
+            receipts=[*drafts["receipts"], receipt],
+            legacy_receipt_count=drafts["legacy_receipt_count"],
+            legacy_draft_ids=drafts["legacy_draft_ids"],
+        )
+        self._reconcile_draft_audit(
+            action="create",
+            acknowledgement=acknowledgement,
             draft=draft,
-            effect_summary=acknowledgement.effect_summary,
         )
         return acknowledgement
 
+    @_atomic_workspace_action("_drafts_path")
     def update_draft(
         self,
         *,
@@ -1827,6 +4986,31 @@ class MissionDraftService:
         if not draft_id.strip():
             raise AlbertError("Mission Draft id must not be empty")
         drafts = self._load_drafts()
+        drafts = self._ensure_draft_receipt_protocol(drafts)
+        self._reconcile_draft_receipts(drafts)
+        request_payload = {
+            "draft_id": draft_id,
+            "proposed_goal": proposed_goal,
+            "selected_ad_hoc_ids": list(selected_ad_hoc_ids),
+            "excluded_ad_hoc_ids": list(excluded_ad_hoc_ids),
+            "new_work_items": list(new_work_items),
+            "dependencies": list(dependencies),
+            "unresolved_decisions": list(unresolved_decisions),
+        }
+        replay = self._replay_draft_request(
+            drafts,
+            correlation_id=correlation_id,
+            request_kind="mission-draft-update",
+            request_payload=request_payload,
+        )
+        if replay is not None:
+            acknowledgement, effect_draft = replay
+            self._reconcile_draft_audit(
+                action="update",
+                acknowledgement=acknowledgement,
+                draft=effect_draft,
+            )
+            return acknowledgement
         if expected_revision != drafts["revision"]:
             raise WorkspaceStaleActionError(
                 expected_revision=expected_revision,
@@ -1856,14 +5040,6 @@ class MissionDraftService:
         )
         items[index] = updated
         revision = drafts["revision"] + 1
-        WorkspaceSnapshotService._write_json_atomically(
-            self._drafts_path,
-            {
-                "schema_version": 1,
-                "revision": revision,
-                "drafts": [asdict(item) for item in items],
-            },
-        )
         acknowledgement = MissionDraftAcknowledgement(
             correlation_id=correlation_id,
             outcome="acknowledged",
@@ -1874,13 +5050,29 @@ class MissionDraftService:
                 f"Mission Draft {draft_id} revision is proposed; accepted Mission state is unchanged."
             ),
         )
-        ActivityJournalService(self._snapshots).record_mission_draft_updated(
+        receipt = self._draft_receipt(
             correlation_id=correlation_id,
+            request_kind="mission-draft-update",
+            request_payload=request_payload,
+            acknowledgement=acknowledgement,
+            prior_draft=current,
+            effect_draft=updated,
+        )
+        self._persist_drafts(
+            revision=revision,
+            drafts=items,
+            receipts=[*drafts["receipts"], receipt],
+            legacy_receipt_count=drafts["legacy_receipt_count"],
+            legacy_draft_ids=drafts["legacy_draft_ids"],
+        )
+        self._reconcile_draft_audit(
+            action="update",
+            acknowledgement=acknowledgement,
             draft=updated,
-            effect_summary=acknowledgement.effect_summary,
         )
         return acknowledgement
 
+    @_atomic_workspace_action("_drafts_path")
     def confirm_draft(
         self,
         *,
@@ -1896,6 +5088,27 @@ class MissionDraftService:
         if not reason.strip():
             raise AlbertError("Mission Draft confirmation requires a reason.")
         drafts = self._load_drafts()
+        drafts = self._ensure_draft_receipt_protocol(drafts)
+        self._reconcile_draft_receipts(drafts)
+        request_payload = {
+            "draft_id": draft_id,
+            "reason": reason.strip(),
+        }
+        replay = self._replay_draft_request(
+            drafts,
+            correlation_id=correlation_id,
+            request_kind="mission-draft-confirm",
+            request_payload=request_payload,
+        )
+        if replay is not None:
+            acknowledgement, effect_draft = replay
+            self._reconcile_draft_audit(
+                action="confirm",
+                acknowledgement=acknowledgement,
+                draft=effect_draft,
+                reason=reason.strip(),
+            )
+            return acknowledgement
         if expected_revision != drafts["revision"]:
             raise WorkspaceStaleActionError(
                 expected_revision=expected_revision,
@@ -1915,38 +5128,53 @@ class MissionDraftService:
             raise AlbertError(f"Unknown Mission for Mission Draft: {draft.mission_id}")
 
         mission = self._snapshots._missions[draft.mission_id]
-        issue = self._create_confirmed_issue_slice(mission, draft)
-        items[index] = replace(draft, status="confirmed")
-        revision = drafts["revision"] + 1
-        WorkspaceSnapshotService._write_json_atomically(
-            self._drafts_path,
-            {
-                "schema_version": 1,
-                "revision": revision,
-                "drafts": [asdict(item) for item in items],
-            },
-        )
-        mission._record(f"{issue.id} created from Mission Draft {draft_id}: {reason.strip()}")
-        mission._persist()
-        acknowledgement = MissionDraftAcknowledgement(
-            correlation_id=correlation_id,
-            outcome="acknowledged",
-            revision=revision,
-            draft_id=draft_id,
-            draft_status="confirmed",
-            effect_summary=(
-                f"Mission Draft {draft_id} confirmed as accepted Issue Slice {issue.id}."
-            ),
-            accepted_issue_id=issue.id,
-        )
-        ActivityJournalService(self._snapshots).record_mission_draft_confirmed(
-            correlation_id=correlation_id,
+        with mission._runtime_lock(exclusive=True):
+            self._refresh_confirmed_mission_state(mission)
+            issue = self._plan_confirmed_issue_slice(mission, draft)
+            items[index] = replace(draft, status="confirmed")
+            revision = drafts["revision"] + 1
+            acknowledgement = MissionDraftAcknowledgement(
+                correlation_id=correlation_id,
+                outcome="acknowledged",
+                revision=revision,
+                draft_id=draft_id,
+                draft_status="confirmed",
+                effect_summary=(
+                    f"Mission Draft {draft_id} confirmed as accepted Issue Slice {issue.id}."
+                ),
+                accepted_issue_id=issue.id,
+            )
+            receipt = self._draft_receipt(
+                correlation_id=correlation_id,
+                request_kind="mission-draft-confirm",
+                request_payload=request_payload,
+                acknowledgement=acknowledgement,
+                prior_draft=draft,
+                effect_draft=draft,
+            )
+            self._persist_drafts(
+                revision=revision,
+                drafts=items,
+                receipts=[*drafts["receipts"], receipt],
+                legacy_receipt_count=drafts["legacy_receipt_count"],
+                legacy_draft_ids=drafts["legacy_draft_ids"],
+            )
+            confirmed_issue = self._reconcile_confirmed_issue_slice_locked(
+                mission,
+                draft,
+                issue_id=issue.id,
+                reason=reason.strip(),
+            )
+        self._reconcile_draft_audit(
+            action="confirm",
+            acknowledgement=acknowledgement,
             draft=draft,
-            issue=issue,
-            effect_summary=acknowledgement.effect_summary,
+            reason=reason.strip(),
+            confirmed_issue=confirmed_issue,
         )
         return acknowledgement
 
+    @_atomic_workspace_action("_drafts_path")
     def abandon_draft(
         self,
         *,
@@ -1962,6 +5190,26 @@ class MissionDraftService:
         if not reason.strip():
             raise AlbertError("Mission Draft abandonment requires a reason.")
         drafts = self._load_drafts()
+        drafts = self._ensure_draft_receipt_protocol(drafts)
+        self._reconcile_draft_receipts(drafts)
+        request_payload = {
+            "draft_id": draft_id,
+            "reason": reason.strip(),
+        }
+        replay = self._replay_draft_request(
+            drafts,
+            correlation_id=correlation_id,
+            request_kind="mission-draft-abandon",
+            request_payload=request_payload,
+        )
+        if replay is not None:
+            acknowledgement, effect_draft = replay
+            self._reconcile_draft_audit(
+                action="abandon",
+                acknowledgement=acknowledgement,
+                draft=effect_draft,
+            )
+            return acknowledgement
         if expected_revision != drafts["revision"]:
             raise WorkspaceStaleActionError(
                 expected_revision=expected_revision,
@@ -1980,14 +5228,6 @@ class MissionDraftService:
         abandoned = replace(draft, status="abandoned")
         items[index] = abandoned
         revision = drafts["revision"] + 1
-        WorkspaceSnapshotService._write_json_atomically(
-            self._drafts_path,
-            {
-                "schema_version": 1,
-                "revision": revision,
-                "drafts": [asdict(item) for item in items],
-            },
-        )
         acknowledgement = MissionDraftAcknowledgement(
             correlation_id=correlation_id,
             outcome="acknowledged",
@@ -1995,15 +5235,782 @@ class MissionDraftService:
             draft_id=draft_id,
             draft_status="abandoned",
             effect_summary=(
-                f"Mission Draft {draft_id} abandoned; accepted Mission state is unchanged."
+                f"Mission Draft {draft_id} abandoned; accepted Mission state is unchanged. "
+                f"Reason: {reason.strip()}"
             ),
         )
-        ActivityJournalService(self._snapshots).record_mission_draft_abandoned(
+        receipt = self._draft_receipt(
             correlation_id=correlation_id,
+            request_kind="mission-draft-abandon",
+            request_payload=request_payload,
+            acknowledgement=acknowledgement,
+            prior_draft=draft,
+            effect_draft=abandoned,
+        )
+        self._persist_drafts(
+            revision=revision,
+            drafts=items,
+            receipts=[*drafts["receipts"], receipt],
+            legacy_receipt_count=drafts["legacy_receipt_count"],
+            legacy_draft_ids=drafts["legacy_draft_ids"],
+        )
+        self._reconcile_draft_audit(
+            action="abandon",
+            acknowledgement=acknowledgement,
             draft=abandoned,
-            effect_summary=acknowledgement.effect_summary,
         )
         return acknowledgement
+
+    @staticmethod
+    def _draft_receipt(
+        *,
+        correlation_id: str,
+        request_kind: str,
+        request_payload: dict[str, Any],
+        acknowledgement: MissionDraftAcknowledgement,
+        prior_draft: MissionDraft | None,
+        effect_draft: MissionDraft,
+    ) -> dict[str, Any]:
+        return {
+            "receipt_version": 2,
+            "correlation_id": correlation_id,
+            "request_kind": request_kind,
+            "request": request_payload,
+            "acknowledgement": asdict(acknowledgement),
+            "prior_draft": (
+                asdict(prior_draft) if prior_draft is not None else None
+            ),
+            "effect_draft": asdict(effect_draft),
+        }
+
+    @staticmethod
+    def _draft_receipt_for_correlation(
+        drafts: dict[str, Any],
+        *,
+        correlation_id: str,
+    ) -> dict[str, Any] | None:
+        matches = [
+            item
+            for item in drafts["receipts"]
+            if item.get("correlation_id") == correlation_id
+        ]
+        if len(matches) > 1:
+            raise WorkspacePersistenceError(
+                f"Mission Draft correlation id is not unique: {correlation_id}"
+            )
+        return matches[0] if matches else None
+
+    def _replay_draft_request(
+        self,
+        drafts: dict[str, Any],
+        *,
+        correlation_id: str,
+        request_kind: str,
+        request_payload: dict[str, Any],
+    ) -> tuple[MissionDraftAcknowledgement, MissionDraft] | None:
+        receipt = self._draft_receipt_for_correlation(
+            drafts,
+            correlation_id=correlation_id,
+        )
+        if receipt is None:
+            return None
+        if (
+            receipt.get("request_kind") != request_kind
+            or receipt.get("request") != request_payload
+        ):
+            raise AlbertError(
+                f"Mission Draft correlation id {correlation_id} was already used "
+                "for a different request."
+            )
+        try:
+            acknowledgement = MissionDraftAcknowledgement(
+                **receipt["acknowledgement"]
+            )
+            effect_draft = self._parse_draft(receipt["effect_draft"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise WorkspacePersistenceError(
+                f"Mission Draft receipt is invalid: {correlation_id}"
+            ) from exc
+        if (
+            acknowledgement.correlation_id != correlation_id
+            or acknowledgement.draft_id != effect_draft.draft_id
+        ):
+            raise WorkspacePersistenceError(
+                f"Mission Draft receipt identity is invalid: {correlation_id}"
+            )
+        self._validate_draft_receipt(
+            drafts,
+            receipt=receipt,
+            acknowledgement=acknowledgement,
+            effect_draft=effect_draft,
+        )
+        return acknowledgement, effect_draft
+
+    def _validate_draft_receipt(
+        self,
+        drafts: dict[str, Any],
+        *,
+        receipt: dict[str, Any],
+        acknowledgement: MissionDraftAcknowledgement,
+        effect_draft: MissionDraft,
+    ) -> None:
+        correlation_id = receipt.get("correlation_id")
+        request_kind = receipt.get("request_kind")
+        request = receipt.get("request")
+        positions = [
+            position
+            for position, candidate in enumerate(drafts["receipts"])
+            if candidate.get("correlation_id") == correlation_id
+        ]
+        base_revision = drafts["revision"] - len(drafts["receipts"])
+        canonical_matches = [
+            draft
+            for draft in drafts["drafts"]
+            if draft.draft_id == acknowledgement.draft_id
+        ]
+        receipt_version = receipt.get("receipt_version")
+        if (
+            acknowledgement.outcome != "acknowledged"
+            or not isinstance(acknowledgement.revision, int)
+            or isinstance(acknowledgement.revision, bool)
+            or len(positions) != 1
+            or base_revision < 1
+            or acknowledgement.revision != base_revision + positions[0] + 1
+            or len(canonical_matches) != 1
+            or canonical_matches[0].mission_id != effect_draft.mission_id
+            or not isinstance(request, dict)
+        ):
+            raise WorkspacePersistenceError(
+                f"Mission Draft receipt acknowledgement is invalid: {correlation_id}"
+            )
+
+        if request_kind == "mission-draft-create":
+            expected_request_fields = {
+                "mission_id",
+                "proposed_goal",
+                "selected_ad_hoc_ids",
+                "excluded_ad_hoc_ids",
+                "new_work_items",
+                "dependencies",
+                "unresolved_decisions",
+            }
+            request_matches_effect = (
+                set(request) == expected_request_fields
+                and effect_draft.status == "draft"
+                and effect_draft.mission_id == request.get("mission_id")
+                and effect_draft.proposed_goal == request.get("proposed_goal")
+                and [
+                    work.work_id for work in effect_draft.included_ad_hoc_work
+                ]
+                == request.get("selected_ad_hoc_ids")
+                and list(effect_draft.excluded_ad_hoc_work_ids)
+                == request.get("excluded_ad_hoc_ids")
+                and list(effect_draft.new_work_items) == request.get("new_work_items")
+                and list(effect_draft.dependencies) == request.get("dependencies")
+                and list(effect_draft.unresolved_decisions)
+                == request.get("unresolved_decisions")
+            )
+            expected_effect = (
+                f"Mission Draft {effect_draft.draft_id} is proposed; accepted "
+                "Mission state is unchanged."
+            )
+            if (
+                not request_matches_effect
+                or acknowledgement.draft_status != "draft"
+                or acknowledgement.accepted_issue_id
+                or acknowledgement.effect_summary != expected_effect
+            ):
+                raise WorkspacePersistenceError(
+                    f"Mission Draft receipt does not match its create effect: "
+                    f"{correlation_id}"
+                )
+            return
+
+        if request_kind == "mission-draft-confirm":
+            expected_request_fields = {"draft_id", "reason"}
+            accepted_issue_id = acknowledgement.accepted_issue_id
+            expected_effect = (
+                f"Mission Draft {effect_draft.draft_id} confirmed as accepted "
+                f"Issue Slice {accepted_issue_id}."
+            )
+            canonical = canonical_matches[0]
+            if (
+                set(request) != expected_request_fields
+                or request.get("draft_id") != effect_draft.draft_id
+                or not isinstance(request.get("reason"), str)
+                or not str(request["reason"]).strip()
+                or effect_draft.status != "draft"
+                or canonical != replace(effect_draft, status="confirmed")
+                or acknowledgement.draft_status != "confirmed"
+                or not isinstance(accepted_issue_id, str)
+                or not accepted_issue_id.strip()
+                or acknowledgement.effect_summary != expected_effect
+            ):
+                raise WorkspacePersistenceError(
+                    f"Mission Draft receipt does not match its confirm effect: "
+                    f"{correlation_id}"
+                )
+            self._validate_confirmed_receipt_issue(
+                acknowledgement=acknowledgement,
+                draft=effect_draft,
+                reason=str(request["reason"]),
+            )
+            return
+
+        if request_kind == "mission-draft-update":
+            expected_request_fields = {
+                "draft_id",
+                "proposed_goal",
+                "selected_ad_hoc_ids",
+                "excluded_ad_hoc_ids",
+                "new_work_items",
+                "dependencies",
+                "unresolved_decisions",
+            }
+            request_matches_effect = (
+                set(request) == expected_request_fields
+                and request.get("draft_id") == effect_draft.draft_id
+                and effect_draft.status == "draft"
+                and effect_draft.proposed_goal == request.get("proposed_goal")
+                and [
+                    work.work_id for work in effect_draft.included_ad_hoc_work
+                ]
+                == request.get("selected_ad_hoc_ids")
+                and list(effect_draft.excluded_ad_hoc_work_ids)
+                == request.get("excluded_ad_hoc_ids")
+                and list(effect_draft.new_work_items) == request.get("new_work_items")
+                and list(effect_draft.dependencies) == request.get("dependencies")
+                and list(effect_draft.unresolved_decisions)
+                == request.get("unresolved_decisions")
+            )
+            expected_effect = (
+                f"Mission Draft {effect_draft.draft_id} revision is proposed; "
+                "accepted Mission state is unchanged."
+            )
+            if (
+                not request_matches_effect
+                or acknowledgement.draft_status != "draft"
+                or acknowledgement.accepted_issue_id
+                or acknowledgement.effect_summary != expected_effect
+            ):
+                raise WorkspacePersistenceError(
+                    f"Mission Draft receipt does not match its update effect: "
+                    f"{correlation_id}"
+                )
+            return
+
+        if request_kind == "mission-draft-abandon":
+            if receipt_version == 2:
+                expected_effect = (
+                    f"Mission Draft {effect_draft.draft_id} abandoned; accepted "
+                    f"Mission state is unchanged. Reason: "
+                    f"{str(request.get('reason', '')).strip()}"
+                )
+            else:
+                expected_effect = (
+                    f"Mission Draft {effect_draft.draft_id} abandoned; accepted "
+                    "Mission state is unchanged."
+                )
+            if (
+                set(request) != {"draft_id", "reason"}
+                or request.get("draft_id") != effect_draft.draft_id
+                or not isinstance(request.get("reason"), str)
+                or not str(request["reason"]).strip()
+                or effect_draft.status != "abandoned"
+                or canonical_matches[0] != effect_draft
+                or acknowledgement.draft_status != "abandoned"
+                or acknowledgement.accepted_issue_id
+                or acknowledgement.effect_summary != expected_effect
+            ):
+                raise WorkspacePersistenceError(
+                    f"Mission Draft receipt abandonment reason/effect does not match: "
+                    f"{correlation_id}"
+                )
+            return
+
+        raise WorkspacePersistenceError(
+            f"Mission Draft receipt kind is invalid: {request_kind}"
+        )
+
+    def _validate_confirmed_receipt_issue(
+        self,
+        *,
+        acknowledgement: MissionDraftAcknowledgement,
+        draft: MissionDraft,
+        reason: str,
+    ) -> None:
+        mission = self._snapshots._missions.get(draft.mission_id)
+        if mission is None:
+            raise WorkspacePersistenceError(
+                f"Mission Draft receipt references unknown Mission: {draft.mission_id}"
+            )
+        try:
+            with mission._runtime_lock(exclusive=False):
+                mission.issues = mission._load_issues()
+                if mission.runtime_path.exists():
+                    mission._load_runtime()
+        except (AlbertError, OSError, json.JSONDecodeError) as exc:
+            raise WorkspacePersistenceError(
+                "Mission Draft receipt could not refresh its accepted Issue effect."
+            ) from exc
+
+        accepted_issue_id = acknowledgement.accepted_issue_id
+        timeline_marker = f" created from Mission Draft {draft.draft_id}:"
+        expected_timeline_entry = (
+            f"{accepted_issue_id} created from Mission Draft {draft.draft_id}: "
+            f"{reason.strip()}"
+        )
+        matching_timeline_entries = [
+            entry for entry in mission.timeline if timeline_marker in entry
+        ]
+        if matching_timeline_entries and matching_timeline_entries != [
+            expected_timeline_entry
+        ]:
+            raise WorkspacePersistenceError(
+                "Mission Draft receipt accepted Issue timeline marker conflicts with "
+                "its exact request."
+            )
+        timeline_issue_ids = {
+            entry.split(" created from Mission Draft ", 1)[0]
+            for entry in matching_timeline_entries
+        }
+        if timeline_issue_ids and timeline_issue_ids != {accepted_issue_id}:
+            raise WorkspacePersistenceError(
+                "Mission Draft receipt accepted Issue conflicts with its durable effect."
+            )
+
+        accepted = mission.issues.get(accepted_issue_id)
+        if timeline_issue_ids:
+            if accepted is None:
+                raise WorkspacePersistenceError(
+                    "Mission Draft receipt accepted Issue effect is missing."
+                )
+            planned = self._confirmed_issue_slice(
+                mission,
+                draft,
+                issue_id=accepted_issue_id,
+            )
+            self._validate_confirmed_issue_identity(accepted, planned)
+            return
+        if accepted is not None:
+            planned = self._confirmed_issue_slice(
+                mission,
+                draft,
+                issue_id=accepted_issue_id,
+            )
+            self._validate_confirmed_issue_slice(accepted, planned)
+            return
+
+        matching_effect_ids: list[str] = []
+        for issue in mission.issues.values():
+            issue_timeline_prefix = (
+                f"{issue.id} created from Mission Draft "
+            )
+            if any(
+                entry.startswith(issue_timeline_prefix)
+                and timeline_marker not in entry
+                for entry in mission.timeline
+            ):
+                continue
+            planned_for_issue = self._confirmed_issue_slice(
+                mission,
+                draft,
+                issue_id=issue.id,
+            )
+            if (
+                issue.what_to_build == planned_for_issue.what_to_build
+                and issue.acceptance_criteria == planned_for_issue.acceptance_criteria
+                and Path(issue.source_path).resolve()
+                == Path(planned_for_issue.source_path).resolve()
+            ):
+                matching_effect_ids.append(issue.id)
+        if matching_effect_ids:
+            raise WorkspacePersistenceError(
+                "Mission Draft receipt accepted Issue conflicts with an existing effect."
+            )
+
+        planned = self._plan_confirmed_issue_slice(mission, draft)
+        if planned.id != accepted_issue_id:
+            raise WorkspacePersistenceError(
+                "Mission Draft receipt accepted Issue is not the exact recoverable effect."
+            )
+
+    def _draft_create_mission_id(
+        self,
+        drafts: dict[str, Any],
+        *,
+        correlation_id: str,
+        mission_id: str | None,
+    ) -> str | None:
+        receipt = self._draft_receipt_for_correlation(
+            drafts,
+            correlation_id=correlation_id,
+        )
+        if receipt is None:
+            return mission_id
+        persisted_request = receipt.get("request")
+        if (
+            receipt.get("request_kind") != "mission-draft-create"
+            or not isinstance(persisted_request, dict)
+        ):
+            raise AlbertError(
+                f"Mission Draft correlation id {correlation_id} was already used "
+                "for a different request."
+            )
+        persisted_mission_id = persisted_request.get("mission_id")
+        if not isinstance(persisted_mission_id, str) or not persisted_mission_id.strip():
+            raise WorkspacePersistenceError(
+                f"Mission Draft receipt has no valid Mission: {correlation_id}"
+            )
+        if mission_id is not None and mission_id != persisted_mission_id:
+            raise AlbertError(
+                f"Mission Draft correlation id {correlation_id} was already used "
+                "for a different request."
+            )
+        return persisted_mission_id
+
+    def _persist_drafts(
+        self,
+        *,
+        revision: int,
+        drafts: list[MissionDraft],
+        receipts: list[dict[str, Any]],
+        legacy_receipt_count: int,
+        legacy_draft_ids: list[str],
+    ) -> None:
+        WorkspaceSnapshotService._write_json_atomically(
+            self._drafts_path,
+            {
+                "schema_version": 1,
+                "receipt_protocol_version": 2,
+                "legacy_receipt_count": legacy_receipt_count,
+                "legacy_draft_ids": legacy_draft_ids,
+                "revision": revision,
+                "drafts": [asdict(item) for item in drafts],
+                "receipts": receipts,
+            },
+        )
+
+    def _ensure_draft_receipt_protocol(
+        self,
+        drafts: dict[str, Any],
+    ) -> dict[str, Any]:
+        if drafts["receipt_protocol_version"] == 2:
+            return drafts
+        # Validate the legacy semantics before marking those exact receipts as
+        # compatibility-only. Once the store is upgraded, later current receipts
+        # cannot be downgraded into this prefix.
+        self._validated_draft_receipt_chain(drafts)
+        upgraded_receipts = [
+            {**receipt, "receipt_version": 1}
+            for receipt in drafts["receipts"]
+        ]
+        legacy_receipt_count = len(upgraded_receipts)
+        receipted_draft_ids = {
+            str(receipt.get("acknowledgement", {}).get("draft_id", ""))
+            for receipt in upgraded_receipts
+            if isinstance(receipt.get("acknowledgement"), dict)
+        }
+        legacy_draft_ids = [
+            draft.draft_id
+            for draft in drafts["drafts"]
+            if draft.draft_id not in receipted_draft_ids
+        ]
+        self._persist_drafts(
+            revision=drafts["revision"],
+            drafts=drafts["drafts"],
+            receipts=upgraded_receipts,
+            legacy_receipt_count=legacy_receipt_count,
+            legacy_draft_ids=legacy_draft_ids,
+        )
+        return {
+            **drafts,
+            "receipt_protocol_version": 2,
+            "legacy_receipt_count": legacy_receipt_count,
+            "legacy_draft_ids": legacy_draft_ids,
+            "receipts": upgraded_receipts,
+        }
+
+    def _reconcile_draft_receipts(self, drafts: dict[str, Any]) -> None:
+        decoded = self._validated_draft_receipt_chain(drafts)
+        self._validate_draft_audit_causality(decoded)
+        for receipt, acknowledgement, effect_draft in decoded:
+            request_kind = receipt.get("request_kind")
+            action = {
+                "mission-draft-create": "create",
+                "mission-draft-update": "update",
+                "mission-draft-confirm": "confirm",
+                "mission-draft-abandon": "abandon",
+            }.get(request_kind)
+            if action is None:
+                raise WorkspacePersistenceError(
+                    f"Mission Draft receipt kind is invalid: {request_kind}"
+                )
+            request = receipt.get("request")
+            if not isinstance(request, dict):  # pragma: no cover - chain validates it
+                raise WorkspacePersistenceError(
+                    "Mission Draft receipt has no valid request boundary."
+                )
+            self._reconcile_draft_audit(
+                action=action,
+                acknowledgement=acknowledgement,
+                draft=effect_draft,
+                reason=(
+                    str(request.get("reason", ""))
+                    if action == "confirm"
+                    else ""
+                ),
+            )
+
+    def _validate_draft_audit_causality(
+        self,
+        decoded: list[
+            tuple[
+                dict[str, Any],
+                MissionDraftAcknowledgement,
+                MissionDraft,
+            ]
+        ],
+    ) -> None:
+        entries = ActivityJournalService(self._snapshots).inspect().entries
+        by_phase: dict[tuple[str, str], list[ActivityJournalEntry]] = {}
+        for entry in entries:
+            by_phase.setdefault(
+                (entry.correlation_id, entry.action_type),
+                [],
+            ).append(entry)
+        draft_state: dict[str, tuple[bool, int]] = {}
+        for receipt, acknowledgement, _effect_draft in decoded:
+            action_type = {
+                "mission-draft-create": "mission-draft-created",
+                "mission-draft-update": "mission-draft-updated",
+                "mission-draft-confirm": "mission-draft-confirmed",
+                "mission-draft-abandon": "mission-draft-abandoned",
+            }[str(receipt["request_kind"])]
+            matches = by_phase.get(
+                (acknowledgement.correlation_id, action_type),
+                [],
+            )
+            if len(matches) > 1:
+                raise WorkspacePersistenceError(
+                    "Mission Draft audit causal order contains a duplicate lifecycle phase."
+                )
+            missing_prior, prior_sequence = draft_state.get(
+                acknowledgement.draft_id,
+                (False, 0),
+            )
+            if matches:
+                sequence = matches[0].sequence
+                if missing_prior or sequence <= prior_sequence:
+                    raise WorkspacePersistenceError(
+                        "Mission Draft audit causal order conflicts with receipt order."
+                    )
+                draft_state[acknowledgement.draft_id] = (False, sequence)
+            else:
+                draft_state[acknowledgement.draft_id] = (
+                    True,
+                    prior_sequence,
+                )
+
+    def _validated_draft_receipt_chain(
+        self,
+        drafts: dict[str, Any],
+    ) -> list[
+        tuple[
+            dict[str, Any],
+            MissionDraftAcknowledgement,
+            MissionDraft,
+        ]
+    ]:
+        decoded: list[
+            tuple[
+                dict[str, Any],
+                MissionDraftAcknowledgement,
+                MissionDraft,
+            ]
+        ] = []
+        states: dict[str, MissionDraft] = {}
+        for receipt in drafts["receipts"]:
+            correlation_id = receipt.get("correlation_id")
+            request_kind = receipt.get("request_kind")
+            request = receipt.get("request")
+            if not isinstance(correlation_id, str) or not isinstance(request, dict):
+                raise WorkspacePersistenceError(
+                    "Mission Draft receipt chain has an invalid request boundary."
+                )
+            replay = self._replay_draft_request(
+                drafts,
+                correlation_id=correlation_id,
+                request_kind=str(request_kind),
+                request_payload=request,
+            )
+            if replay is None:  # pragma: no cover - iterating the selected receipt
+                raise WorkspacePersistenceError(
+                    f"Mission Draft receipt chain is unavailable: {correlation_id}"
+                )
+            acknowledgement, effect_draft = replay
+            prior_payload = receipt.get("prior_draft")
+            receipt_version = receipt.get("receipt_version")
+            if receipt_version == 2:
+                if "prior_draft" not in receipt:
+                    raise WorkspacePersistenceError(
+                        f"Mission Draft receipt chain is missing its explicit prior effect: "
+                        f"{correlation_id}"
+                    )
+                try:
+                    prior_draft = (
+                        self._parse_draft(prior_payload)
+                        if prior_payload is not None
+                        else None
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise WorkspacePersistenceError(
+                        f"Mission Draft receipt chain has an invalid prior effect: "
+                        f"{correlation_id}"
+                    ) from exc
+            else:
+                prior_draft = states.get(effect_draft.draft_id)
+
+            current = states.get(effect_draft.draft_id)
+            if request_kind == "mission-draft-create":
+                if current is not None or prior_draft is not None:
+                    raise WorkspacePersistenceError(
+                        "Mission Draft receipt chain contains a duplicate create effect."
+                    )
+                next_state = effect_draft
+            elif request_kind == "mission-draft-update":
+                if (
+                    current is not None
+                    and prior_draft != current
+                    or prior_draft is not None
+                    and prior_draft.status != "draft"
+                ):
+                    raise WorkspacePersistenceError(
+                        "Mission Draft receipt chain update does not follow its prior state."
+                    )
+                next_state = effect_draft
+            elif request_kind == "mission-draft-confirm":
+                if (
+                    prior_draft is None
+                    or prior_draft.status != "draft"
+                    or effect_draft != prior_draft
+                    or current is not None
+                    and prior_draft != current
+                ):
+                    raise WorkspacePersistenceError(
+                        "Mission Draft receipt chain confirmation does not follow its prior state."
+                    )
+                next_state = replace(effect_draft, status="confirmed")
+            elif request_kind == "mission-draft-abandon":
+                if (
+                    prior_draft is None
+                    or prior_draft.status != "draft"
+                    or effect_draft != replace(prior_draft, status="abandoned")
+                    or current is not None
+                    and prior_draft != current
+                ):
+                    raise WorkspacePersistenceError(
+                        "Mission Draft receipt chain abandonment does not follow its prior state."
+                    )
+                next_state = effect_draft
+            else:
+                raise WorkspacePersistenceError(
+                    f"Mission Draft receipt chain kind is invalid: {request_kind}"
+                )
+            states[effect_draft.draft_id] = next_state
+            decoded.append((receipt, acknowledgement, effect_draft))
+
+        canonical = {draft.draft_id: draft for draft in drafts["drafts"]}
+        if len(canonical) != len(drafts["drafts"]):
+            raise WorkspacePersistenceError(
+                "Mission Draft receipt chain has duplicate canonical draft ids."
+            )
+        for draft_id, state in states.items():
+            if canonical.get(draft_id) != state:
+                raise WorkspacePersistenceError(
+                    f"Mission Draft receipt chain does not match canonical state: {draft_id}"
+                )
+        if drafts["receipt_protocol_version"] == 2:
+            legacy_draft_ids = set(drafts["legacy_draft_ids"])
+            if not legacy_draft_ids.issubset(canonical) or (
+                set(canonical) != set(states) | legacy_draft_ids
+            ):
+                raise WorkspacePersistenceError(
+                    "Mission Draft receipt chain canonical coverage is incomplete."
+                )
+        return decoded
+
+    def _reconcile_draft_audit(
+        self,
+        *,
+        action: Literal["create", "update", "confirm", "abandon"],
+        acknowledgement: MissionDraftAcknowledgement,
+        draft: MissionDraft,
+        reason: str = "",
+        confirmed_issue: IssueSlice | None = None,
+    ) -> None:
+        canonical = next(
+            (
+                item
+                for item in self._load_drafts()["drafts"]
+                if item.draft_id == acknowledgement.draft_id
+            ),
+            None,
+        )
+        if canonical is None or canonical.mission_id != draft.mission_id:
+            raise WorkspacePersistenceError(
+                "Mission Draft receipt does not resolve to canonical draft state."
+            )
+        if action == "confirm":
+            if canonical.status != "confirmed" or not acknowledgement.accepted_issue_id:
+                raise WorkspacePersistenceError(
+                    "Confirmed Mission Draft receipt does not match canonical state."
+                )
+            mission = self._snapshots._missions.get(draft.mission_id)
+            if mission is None:
+                raise WorkspacePersistenceError(
+                    f"Mission Draft receipt references unknown Mission: {draft.mission_id}"
+                )
+            issue = confirmed_issue or self._reconcile_confirmed_issue_slice(
+                mission,
+                draft,
+                issue_id=acknowledgement.accepted_issue_id,
+                reason=reason,
+            )
+            if issue.id != acknowledgement.accepted_issue_id:
+                raise WorkspacePersistenceError(
+                    "Confirmed Mission Draft effect does not match its receipt."
+                )
+            ActivityJournalService(self._snapshots).record_mission_draft_confirmed(
+                correlation_id=acknowledgement.correlation_id,
+                draft=draft,
+                issue=issue,
+                effect_summary=acknowledgement.effect_summary,
+            )
+            return
+        if action == "abandon" and canonical.status != "abandoned":
+            raise WorkspacePersistenceError(
+                "Abandoned Mission Draft receipt does not match canonical state."
+            )
+        journal = ActivityJournalService(self._snapshots)
+        if action == "create":
+            journal.record_mission_draft_created(
+                correlation_id=acknowledgement.correlation_id,
+                draft=draft,
+                effect_summary=acknowledgement.effect_summary,
+            )
+        elif action == "update":
+            journal.record_mission_draft_updated(
+                correlation_id=acknowledgement.correlation_id,
+                draft=draft,
+                effect_summary=acknowledgement.effect_summary,
+            )
+        else:
+            journal.record_mission_draft_abandoned(
+                correlation_id=acknowledgement.correlation_id,
+                draft=draft,
+                effect_summary=acknowledgement.effect_summary,
+            )
 
     def _mission_for_draft_action(
         self, snapshot: WorkspaceSnapshot, mission_id: str | None
@@ -2091,7 +6098,7 @@ class MissionDraftService:
         if any(not item.strip() for item in items):
             raise AlbertError(f"Mission Draft {label} must not contain empty values")
 
-    def _create_confirmed_issue_slice(
+    def _plan_confirmed_issue_slice(
         self, mission: AlbertMission, draft: MissionDraft
     ) -> IssueSlice:
         sequence = self._next_issue_sequence(mission)
@@ -2102,36 +6109,29 @@ class MissionDraftService:
             sequence += 1
             issue_id = f"ISS-{sequence:02d}"
             source_path = mission.issues_dir / f"{sequence:02d}-{slug}.md"
+        return self._confirmed_issue_slice(mission, draft, issue_id=issue_id)
+
+    def _confirmed_issue_slice(
+        self,
+        mission: AlbertMission,
+        draft: MissionDraft,
+        *,
+        issue_id: str,
+    ) -> IssueSlice:
+        sequence_text = issue_id.removeprefix("ISS-")
+        if (
+            not issue_id.startswith("ISS-")
+            or not sequence_text.isdigit()
+            or f"ISS-{int(sequence_text):02d}" != issue_id
+        ):
+            raise WorkspacePersistenceError(
+                f"Mission Draft receipt has an invalid accepted Issue Slice id: {issue_id}"
+            )
+        sequence = int(sequence_text)
+        slug = self._slug(draft.proposed_goal)
+        source_path = mission.issues_dir / f"{sequence:02d}-{slug}.md"
         acceptance = self._confirmed_acceptance_criteria(draft)
-        source_path.parent.mkdir(parents=True, exist_ok=True)
-        source_path.write_text(
-            "\n".join(
-                [
-                    "Status: ready-for-agent",
-                    "Type: AFK",
-                    "Risk: Medium",
-                    "",
-                    "## Parent",
-                    "",
-                    "Mission Draft",
-                    "",
-                    "## What to build",
-                    "",
-                    draft.proposed_goal,
-                    "",
-                    "## Acceptance criteria",
-                    "",
-                    *[f"- [ ] {item}" for item in acceptance],
-                    "",
-                    "## Blocked by",
-                    "",
-                    "None - can start immediately",
-                    "",
-                ]
-            ),
-            encoding="utf-8",
-        )
-        issue = IssueSlice(
+        return IssueSlice(
             id=issue_id,
             slug=slug,
             title=slug.replace("-", " ").title(),
@@ -2146,8 +6146,159 @@ class MissionDraftService:
             blocked_by=[],
             source_path=str(source_path),
         )
-        mission.issues[issue_id] = issue
+
+    def _reconcile_confirmed_issue_slice(
+        self,
+        mission: AlbertMission,
+        draft: MissionDraft,
+        *,
+        issue_id: str,
+        reason: str,
+    ) -> IssueSlice:
+        with mission._runtime_lock(exclusive=True):
+            self._refresh_confirmed_mission_state(mission)
+            return self._reconcile_confirmed_issue_slice_locked(
+                mission,
+                draft,
+                issue_id=issue_id,
+                reason=reason,
+            )
+
+    def _reconcile_confirmed_issue_slice_locked(
+        self,
+        mission: AlbertMission,
+        draft: MissionDraft,
+        *,
+        issue_id: str,
+        reason: str,
+    ) -> IssueSlice:
+        planned = self._confirmed_issue_slice(
+            mission,
+            draft,
+            issue_id=issue_id,
+        )
+        timeline_entry = (
+            f"{issue_id} created from Mission Draft {draft.draft_id}: {reason.strip()}"
+        )
+        source_path = Path(planned.source_path)
+        if source_path.exists():
+            try:
+                persisted = mission._parse_issue(source_path)
+            except (AlbertError, OSError, UnicodeError) as exc:
+                raise WorkspacePersistenceError(
+                    f"Confirmed Mission Draft Issue Slice cannot be reconstructed: {exc}"
+                ) from exc
+            self._validate_confirmed_issue_slice(persisted, planned)
+        else:
+            if issue_id in mission.issues:
+                raise WorkspacePersistenceError(
+                    f"Confirmed Mission Draft Issue Slice source is missing: {issue_id}"
+                )
+            self._write_text_atomically(
+                source_path,
+                self._confirmed_issue_source(draft),
+            )
+            persisted = planned
+
+        existing = mission.issues.get(issue_id)
+        if existing is not None:
+            if timeline_entry in mission.timeline:
+                self._validate_confirmed_issue_identity(existing, planned)
+            else:
+                self._validate_confirmed_issue_slice(existing, planned)
+            issue = existing
+        else:
+            mission.issues[issue_id] = persisted
+            issue = persisted
+        if timeline_entry not in mission.timeline:
+            mission._record(timeline_entry)
+        # Persist on every reconciliation. A prior attempt may have updated this
+        # in-memory Mission before its runtime write failed, so object equality
+        # alone cannot prove that the canonical runtime contains the effect.
+        mission._persist(_runtime_lock_held=True)
         return issue
+
+    @staticmethod
+    def _refresh_confirmed_mission_state(mission: AlbertMission) -> None:
+        mission.issues = mission._load_issues()
+        if mission.runtime_path.exists():
+            mission._load_runtime()
+
+    @staticmethod
+    def _validate_confirmed_issue_identity(
+        persisted: IssueSlice,
+        planned: IssueSlice,
+    ) -> None:
+        if (
+            persisted.id != planned.id
+            or Path(persisted.source_path).resolve()
+            != Path(planned.source_path).resolve()
+        ):
+            raise WorkspacePersistenceError(
+                f"Confirmed Mission Draft Issue Slice identity conflicts with {planned.id}."
+            )
+
+    @staticmethod
+    def _validate_confirmed_issue_slice(
+        persisted: IssueSlice,
+        planned: IssueSlice,
+    ) -> None:
+        if (
+            persisted.id != planned.id
+            or Path(persisted.source_path).resolve() != Path(planned.source_path).resolve()
+            or persisted.what_to_build != planned.what_to_build
+            or persisted.acceptance_criteria != planned.acceptance_criteria
+        ):
+            raise WorkspacePersistenceError(
+                f"Confirmed Mission Draft Issue Slice boundary conflicts with {planned.id}."
+            )
+
+    def _confirmed_issue_source(self, draft: MissionDraft) -> str:
+        acceptance = self._confirmed_acceptance_criteria(draft)
+        return "\n".join(
+            [
+                "Status: ready-for-agent",
+                "Type: AFK",
+                "Risk: Medium",
+                "",
+                "## Parent",
+                "",
+                "Mission Draft",
+                "",
+                "## What to build",
+                "",
+                draft.proposed_goal,
+                "",
+                "## Acceptance criteria",
+                "",
+                *[f"- [ ] {item}" for item in acceptance],
+                "",
+                "## Blocked by",
+                "",
+                "None - can start immediately",
+                "",
+            ]
+        )
+
+    @staticmethod
+    def _write_text_atomically(path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary.write(content)
+                temporary_path = Path(temporary.name)
+            temporary_path.replace(path)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
 
     @staticmethod
     def _next_issue_sequence(mission: AlbertMission) -> int:
@@ -2181,7 +6332,15 @@ class MissionDraftService:
 
     def _load_drafts(self) -> dict[str, Any]:
         if not self._drafts_path.exists():
-            return {"schema_version": 1, "revision": 1, "drafts": []}
+            return {
+                "schema_version": 1,
+                "receipt_protocol_version": 2,
+                "legacy_receipt_count": 0,
+                "legacy_draft_ids": [],
+                "revision": 1,
+                "drafts": [],
+                "receipts": [],
+            }
         try:
             data = json.loads(self._drafts_path.read_text(encoding="utf-8"))
             if data["schema_version"] != 1:
@@ -2190,10 +6349,73 @@ class MissionDraftService:
                 raise ValueError("Mission Draft revision must be positive")
             if not isinstance(data["drafts"], list):
                 raise ValueError("Mission Draft drafts must be a list")
+            receipt_protocol_version = data.get("receipt_protocol_version", 1)
+            if receipt_protocol_version not in {1, 2}:
+                raise ValueError("unsupported Mission Draft receipt protocol")
+            if receipt_protocol_version == 1 and (
+                "legacy_receipt_count" in data or "legacy_draft_ids" in data
+            ):
+                raise ValueError("Mission Draft receipt protocol downgrade is invalid")
+            receipts = data.get("receipts", [])
+            if not isinstance(receipts, list) or any(
+                not isinstance(receipt, dict) for receipt in receipts
+            ):
+                raise ValueError("Mission Draft receipts must be a list of objects")
+            receipt_correlations = [receipt.get("correlation_id") for receipt in receipts]
+            if any(
+                not isinstance(correlation, str) or not correlation.strip()
+                for correlation in receipt_correlations
+            ):
+                raise ValueError("Mission Draft receipt correlations must be named")
+            if len(receipt_correlations) != len(set(receipt_correlations)):
+                raise ValueError("Mission Draft receipt correlations must be unique")
+            legacy_receipt_count = (
+                data.get("legacy_receipt_count", 0)
+                if receipt_protocol_version == 2
+                else len(receipts)
+            )
+            if (
+                not isinstance(legacy_receipt_count, int)
+                or isinstance(legacy_receipt_count, bool)
+                or legacy_receipt_count < 0
+                or legacy_receipt_count > len(receipts)
+            ):
+                raise ValueError("Mission Draft legacy receipt count is invalid")
+            legacy_draft_ids = (
+                data.get("legacy_draft_ids", [])
+                if receipt_protocol_version == 2
+                else []
+            )
+            if (
+                not isinstance(legacy_draft_ids, list)
+                or any(
+                    not isinstance(draft_id, str) or not draft_id.strip()
+                    for draft_id in legacy_draft_ids
+                )
+                or len(legacy_draft_ids) != len(set(legacy_draft_ids))
+            ):
+                raise ValueError("Mission Draft legacy draft ids are invalid")
+            if receipt_protocol_version == 1 and any(
+                receipt.get("receipt_version") is not None
+                or receipt.get("request_fingerprint") is not None
+                or "prior_draft" in receipt
+                for receipt in receipts
+            ):
+                raise ValueError("Mission Draft receipt protocol downgrade is invalid")
+            if receipt_protocol_version == 2 and any(
+                receipt.get("receipt_version") != (1 if index < legacy_receipt_count else 2)
+                or "request_fingerprint" in receipt
+                for index, receipt in enumerate(receipts)
+            ):
+                raise ValueError("Mission Draft receipt protocol downgrade is invalid")
             return {
                 "schema_version": 1,
+                "receipt_protocol_version": receipt_protocol_version,
+                "legacy_receipt_count": legacy_receipt_count,
+                "legacy_draft_ids": legacy_draft_ids,
                 "revision": data["revision"],
                 "drafts": [self._parse_draft(item) for item in data["drafts"]],
+                "receipts": receipts,
             }
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise WorkspacePersistenceError(
@@ -2239,6 +6461,232 @@ class MissionDraftService:
         )
 
 
+class SessionArtifactService:
+    """Reads one explicitly registered, review-safe session artifact as bounded text."""
+
+    _labels = {
+        "review_diff": ("Review diff", "text/x-diff"),
+        "result": ("Runner result", "application/json"),
+        "completion": ("Completion record", "application/json"),
+        "fake_log": ("Fake Agent log", "text/plain"),
+    }
+
+    def __init__(self, snapshots: "WorkspaceSnapshotService"):
+        self._snapshots = snapshots
+
+    def read(
+        self,
+        *,
+        mission_id: str,
+        session_id: str,
+        artifact_ref: str,
+    ) -> SessionArtifactProjection:
+        mission = self._snapshots._missions.get(mission_id)
+        if mission is None:
+            raise SessionArtifactReadError(
+                "The requested Mission evidence boundary is unavailable.",
+                code="session-artifact-not-found",
+            )
+        session = mission.sessions.get(session_id)
+        if session is None:
+            raise SessionArtifactReadError(
+                "The requested Local Agent session is unavailable.",
+                code="session-artifact-not-found",
+            )
+        reference = artifact_ref.strip()
+        if not reference:
+            raise SessionArtifactReadError(
+                "The evidence reference must not be empty.",
+                code="session-artifact-not-found",
+            )
+
+        for artifact_key, registered_path in sorted(session.artifacts.items()):
+            if not mission._artifact_is_safe_for_review(artifact_key):
+                continue
+            opaque_ref = mission.review_artifact_reference(session, artifact_key)
+            if reference not in {opaque_ref, registered_path}:
+                continue
+            return self._read_registered_artifact(
+                mission=mission,
+                session=session,
+                artifact_key=artifact_key,
+                registered_path=registered_path,
+            )
+
+        if reference in mission.review_artifact_links(session) and (
+            reference.startswith("app-local://")
+            or reference.startswith("artifact://evidence/")
+        ):
+            return self._runtime_evidence_projection(mission=mission, session=session)
+
+        raise SessionArtifactReadError(
+            "The evidence reference is not registered for this Local Agent session.",
+            code="session-artifact-not-found",
+        )
+
+    def _read_registered_artifact(
+        self,
+        *,
+        mission: AlbertMission,
+        session: LocalAgentSession,
+        artifact_key: str,
+        registered_path: str,
+    ) -> SessionArtifactProjection:
+        artifact_root = (mission.runtime_dir / "sessions" / session.session_id).resolve()
+        candidate = Path(registered_path)
+        try:
+            resolved = candidate.resolve(strict=True)
+            resolved.relative_to(artifact_root)
+        except (OSError, ValueError):
+            raise SessionArtifactReadError(
+                "The registered evidence artifact is outside its session runtime boundary.",
+                code="session-artifact-forbidden",
+                recoverable=False,
+            ) from None
+        if candidate.is_symlink() or not resolved.is_file():
+            raise SessionArtifactReadError(
+                "The registered evidence artifact is not a regular session file.",
+                code="session-artifact-forbidden",
+                recoverable=False,
+            )
+        decoder = codecs.getincrementaldecoder("utf-8")()
+        captured = bytearray()
+        capture_limit = _SESSION_ARTIFACT_CONTENT_BYTES_LIMIT + 4
+        try:
+            with resolved.open("rb") as artifact_stream:
+                while chunk := artifact_stream.read(64 * 1024):
+                    if b"\0" in chunk:
+                        raise SessionArtifactReadError(
+                            "The registered evidence artifact is not safe text.",
+                            code="session-artifact-unsupported",
+                            recoverable=False,
+                        )
+                    decoder.decode(chunk, final=False)
+                    remaining = capture_limit - len(captured)
+                    if remaining > 0:
+                        captured.extend(chunk[:remaining])
+                decoder.decode(b"", final=True)
+        except OSError:
+            raise SessionArtifactReadError(
+                "The registered evidence artifact could not be read.",
+            ) from None
+        except UnicodeDecodeError:
+            raise SessionArtifactReadError(
+                "The registered evidence artifact is not valid UTF-8 text.",
+                code="session-artifact-unsupported",
+                recoverable=False,
+            ) from None
+        payload = bytes(captured)
+        content, byte_count, truncated = self._bounded_content(
+            mission,
+            session,
+            payload,
+        )
+        default_label = artifact_key.replace("_", " ").capitalize()
+        label, media_type = self._labels.get(
+            artifact_key,
+            (
+                default_label,
+                "application/json" if artifact_key.endswith("_result") else "text/plain",
+            ),
+        )
+        return SessionArtifactProjection(
+            schema_version=1,
+            mission_id=mission.mission_id,
+            session_id=session.session_id,
+            artifact_id=artifact_key,
+            label=label,
+            media_type=media_type,
+            content=content,
+            byte_count=byte_count,
+            content_limit_bytes=_SESSION_ARTIFACT_CONTENT_BYTES_LIMIT,
+            truncated=truncated,
+        )
+
+    def _runtime_evidence_projection(
+        self,
+        *,
+        mission: AlbertMission,
+        session: LocalAgentSession,
+    ) -> SessionArtifactProjection:
+        if session.evidence is None:
+            raise SessionArtifactReadError(
+                "The Local Agent session has no runtime Evidence Package.",
+                code="session-artifact-not-found",
+            )
+        evidence = session.evidence
+        payload = json.dumps(
+            {
+                "evidence_valid": session.evidence_valid,
+                "changed_files": evidence.changed_files,
+                "diff_summary": evidence.diff_summary,
+                "commands_run": evidence.commands_run,
+                "test_results": evidence.test_results,
+                "known_risks": evidence.known_risks,
+                "proposed_context_updates": evidence.proposed_context_updates,
+            },
+            indent=2,
+            sort_keys=True,
+        ).encode("utf-8")
+        content, byte_count, truncated = self._bounded_content(
+            mission,
+            session,
+            payload,
+        )
+        return SessionArtifactProjection(
+            schema_version=1,
+            mission_id=mission.mission_id,
+            session_id=session.session_id,
+            artifact_id="evidence-package",
+            label="Evidence Package",
+            media_type="application/json",
+            content=content,
+            byte_count=byte_count,
+            content_limit_bytes=_SESSION_ARTIFACT_CONTENT_BYTES_LIMIT,
+            truncated=truncated,
+        )
+
+    @staticmethod
+    def _bounded_content(
+        mission: AlbertMission,
+        session: LocalAgentSession,
+        payload: bytes,
+    ) -> tuple[str, int, bool]:
+        truncated = len(payload) > _SESSION_ARTIFACT_CONTENT_BYTES_LIMIT
+        content = payload[:_SESSION_ARTIFACT_CONTENT_BYTES_LIMIT].decode(
+            "utf-8",
+            errors="ignore",
+        )
+        known_paths = {
+            str(mission.target_repo): "[workspace]",
+            str(mission.runtime_root): "[runtime]",
+            str(mission.runtime_dir): "[mission-runtime]",
+            str(session.worktree_path): "[worktree]",
+            **{
+                artifact_path: "[session-artifact]"
+                for artifact_path in session.artifacts.values()
+            },
+        }
+        for host_path, replacement in sorted(
+            known_paths.items(),
+            key=lambda item: len(item[0]),
+            reverse=True,
+        ):
+            if not host_path:
+                continue
+            content = content.replace(host_path, replacement)
+            content = content.replace(host_path.replace("\\", "/"), replacement)
+        encoded = content.encode("utf-8")
+        if len(encoded) > _SESSION_ARTIFACT_CONTENT_BYTES_LIMIT:
+            content = encoded[:_SESSION_ARTIFACT_CONTENT_BYTES_LIMIT].decode(
+                "utf-8",
+                errors="ignore",
+            )
+            encoded = content.encode("utf-8")
+            truncated = True
+        return content, len(encoded), truncated
+
+
 class ReviewWorkspaceService:
     """Builds the exclusive evidence-decision projection for the active Mission."""
 
@@ -2250,6 +6698,7 @@ class ReviewWorkspaceService:
         "known_risks",
         "proposed_context_updates",
     ]
+    _reviewable_statuses = {"evidence-ready", "failed", "cancelled", "completed"}
 
     def __init__(self, snapshots: "WorkspaceSnapshotService"):
         self._snapshots = snapshots
@@ -2267,7 +6716,7 @@ class ReviewWorkspaceService:
         items = tuple(
             self._item(mission, session)
             for session in sorted(mission.sessions.values(), key=lambda item: item.session_id)
-            if session.status not in {"reviewed", "complete"}
+            if session.status in self._reviewable_statuses
         )
         return ReviewWorkspaceProjection(
             schema_version=1,
@@ -2276,30 +6725,77 @@ class ReviewWorkspaceService:
             items=items,
         )
 
+    @_atomic_workspace_action()
     def decide(
         self,
         *,
         correlation_id: str,
         expected_revision: int,
         session_id: str,
+        mission_id: str | None = None,
         decision: Literal["accept", "repair", "escalate-human"],
         reason: str = "",
         failure_type: str = "",
     ) -> ReviewWorkspaceDecisionAcknowledgement:
         snapshot = self._snapshots.snapshot()
+        if not correlation_id.strip():
+            raise AlbertError("Review decision correlation id must not be empty")
+        persisted = self._review_for_correlation(correlation_id)
+        if persisted is not None:
+            persisted_mission, persisted_review = persisted
+            request_payload = self._request_payload(
+                mission_id=(
+                    mission_id
+                    or str(
+                        persisted_review.workspace_action.get("request", {}).get(
+                            "mission_id",
+                            persisted_mission.mission_id,
+                        )
+                    )
+                ),
+                session_id=session_id,
+                decision=decision,
+                reason=reason,
+                failure_type=failure_type,
+            )
+            metadata = persisted_review.workspace_action
+            if metadata.get("request") != request_payload:
+                raise AlbertError(
+                    "Review decision correlation id was already used for a different request."
+                )
+            return self._acknowledge_review(
+                correlation_id=correlation_id,
+                mission=persisted_mission,
+                review=persisted_review,
+            )
         if expected_revision != snapshot.revision:
             raise WorkspaceStaleActionError(
                 expected_revision=expected_revision,
                 current_revision=snapshot.revision,
             )
-        if not correlation_id.strip():
-            raise AlbertError("Review decision correlation id must not be empty")
-        if snapshot.active_mission is None:
-            raise AlbertError("Review Workspace requires an active Mission")
-        mission = self._snapshots._missions[snapshot.active_mission.id]
+        target_mission_id = mission_id or (
+            snapshot.active_mission.id if snapshot.active_mission is not None else ""
+        )
+        if not target_mission_id:
+            raise AlbertError("Review Workspace requires an active or explicit Mission")
+        mission = self._snapshots._missions.get(target_mission_id)
+        if mission is None:
+            raise AlbertError(f"Unknown Review Workspace Mission: {target_mission_id}")
+        request_payload = self._request_payload(
+            mission_id=target_mission_id,
+            session_id=session_id,
+            decision=decision,
+            reason=reason,
+            failure_type=failure_type,
+        )
         if session_id not in mission.sessions:
             raise AlbertError(f"Unknown Review Workspace session: {session_id}")
         session = mission.sessions[session_id]
+        if session.status not in self._reviewable_statuses:
+            raise AlbertError(
+                f"{session_id} cannot be reviewed from {session.status}; "
+                "evidence-ready or terminal state is required."
+            )
         if decision == "accept":
             missing = (
                 session.evidence.missing_fields()
@@ -2327,15 +6823,87 @@ class ReviewWorkspaceService:
             session_id,
             review_outcome,
             reason=review_reason,
-            failure_type=failure_type,
+            failure_type=failure_type.strip(),
+            allowed_session_statuses=self._reviewable_statuses,
+            workspace_action={
+                "correlation_id": correlation_id,
+                "request": request_payload,
+            },
         )
+        return self._acknowledge_review(
+            correlation_id=correlation_id,
+            mission=mission,
+            review=review,
+        )
+
+    @staticmethod
+    def _request_payload(
+        *,
+        mission_id: str,
+        session_id: str,
+        decision: str,
+        reason: str,
+        failure_type: str,
+    ) -> dict[str, str]:
+        return {
+            "mission_id": mission_id,
+            "session_id": session_id,
+            "decision": decision,
+            "reason": reason.strip(),
+            "failure_type": failure_type.strip(),
+        }
+
+    def _review_for_correlation(
+        self,
+        correlation_id: str,
+    ) -> tuple[AlbertMission, ReviewDecision] | None:
+        matches: list[tuple[AlbertMission, ReviewDecision]] = []
+        for mission in self._snapshots._missions.values():
+            if mission.runtime_path.exists():
+                with mission._runtime_lock(exclusive=False):
+                    mission._load_runtime()
+            for review in mission.reviews:
+                metadata = review.workspace_action
+                if metadata.get("correlation_id") == correlation_id:
+                    matches.append((mission, review))
+        if len(matches) > 1:
+            raise WorkspacePersistenceError(
+                f"Review decision correlation id is not unique: {correlation_id}"
+            )
+        return matches[0] if matches else None
+
+    def _acknowledge_review(
+        self,
+        *,
+        correlation_id: str,
+        mission: AlbertMission,
+        review: ReviewDecision,
+    ) -> ReviewWorkspaceDecisionAcknowledgement:
+        snapshot = self._snapshots.snapshot()
+        existing_event = next(
+            (
+                event
+                for event in self._snapshots.events()
+                if event.correlation_id == correlation_id
+            ),
+            None,
+        )
+        if existing_event is None:
+            updated = self._snapshots._update_preferences_locked(
+                active_mission_id=(
+                    snapshot.active_mission.id
+                    if snapshot.active_mission is not None
+                    else mission.mission_id
+                ),
+                conversation_scope=snapshot.conversation_scope,
+                operations_view=snapshot.operations_view,
+                event_metadata={"correlation_id": correlation_id},
+            )
+            revision = updated.revision
+        else:
+            revision = existing_event.revision
+        session = mission.sessions[review.session_id]
         issue = mission.issues.get(review.issue_id)
-        updated = self._snapshots.update_preferences(
-            active_mission_id=mission.mission_id,
-            conversation_scope=snapshot.conversation_scope,
-            operations_view=snapshot.operations_view,
-            event_metadata={"correlation_id": correlation_id},
-        )
         lifecycle = (
             mission._issue_lifecycle(issue)
             if issue
@@ -2346,17 +6914,17 @@ class ReviewWorkspaceService:
             mission=mission,
             issue_id=review.issue_id,
             issue_title=issue.title if issue else str(session.task_packet.get("goal", review.issue_id)),
-            session_id=session_id,
+            session_id=review.session_id,
             review_outcome=review.outcome,
             next_action=review.next_action,
-            evidence_links=tuple(session.evidence.artifact_links) if session.evidence else (),
+            evidence_links=tuple(mission.review_artifact_links(session)),
         )
         return ReviewWorkspaceDecisionAcknowledgement(
             correlation_id=correlation_id,
             outcome="acknowledged",
-            revision=updated.revision,
+            revision=revision,
             issue_id=review.issue_id,
-            session_id=session_id,
+            session_id=review.session_id,
             review_outcome=review.outcome,
             next_action=review.next_action,
             issue_lifecycle=lifecycle,
@@ -2407,7 +6975,7 @@ class ReviewWorkspaceService:
                 test_results=evidence.test_results if evidence else "",
                 risks=evidence.known_risks if evidence else "",
                 proposed_context_updates=evidence.proposed_context_updates if evidence else "",
-                artifact_links=list(evidence.artifact_links) if evidence else [],
+                artifact_links=mission.review_artifact_links(session),
             ),
             visibility_limitations=[
                 ReviewWorkspaceVisibilityLimitation(
@@ -2472,6 +7040,7 @@ class WorkstationActionService:
     """Applies typed Agent Workstation actions against acknowledged Orchestrator state."""
 
     _actions = {
+        "issue-approve",
         "issue-launch",
         "issue-retry",
         "session-cancel",
@@ -2482,6 +7051,8 @@ class WorkstationActionService:
     def __init__(self, snapshots: "WorkspaceSnapshotService"):
         self._snapshots = snapshots
 
+    @_audit_rejected_workstation_action
+    @_atomic_workspace_action()
     def submit(
         self,
         *,
@@ -2491,6 +7062,7 @@ class WorkstationActionService:
         expected_revision: int,
         target_kind: str,
         target_id: str,
+        mission_id: str | None = None,
         issue_id: str = "",
         session_id: str = "",
         agent_id: str = "",
@@ -2499,38 +7071,113 @@ class WorkstationActionService:
         command_policy: dict[str, str] | None = None,
     ) -> WorkstationActionAcknowledgement:
         snapshot = self._snapshots.snapshot()
-        if expected_revision != snapshot.revision:
-            raise WorkspaceStaleActionError(
-                expected_revision=expected_revision,
-                current_revision=snapshot.revision,
-            )
         if not correlation_id.strip():
             raise AlbertError("Workstation action correlation id must not be empty")
         if actor not in self._actors:
             raise AlbertError(f"Unknown Workstation action actor: {actor}")
         if action_type not in self._actions:
             raise AlbertError(f"Unknown Workstation action type: {action_type}")
-        if snapshot.active_mission is None:
-            raise AlbertError("Workstation actions require an active Mission")
-        mission = self._snapshots._missions[snapshot.active_mission.id]
+        target_mission_id = mission_id or (
+            snapshot.active_mission.id if snapshot.active_mission is not None else ""
+        )
+        if not target_mission_id:
+            raise AlbertError("Workstation actions require an active or explicit Mission")
+        mission = self._snapshots._missions.get(target_mission_id)
+        if mission is None:
+            raise AlbertError(f"Unknown Workstation Mission: {target_mission_id}")
+        if mission.runtime_path.exists():
+            with mission._runtime_lock(exclusive=False):
+                mission._load_runtime()
+        request_payload = {
+            "issue_id": issue_id,
+            "session_id": session_id,
+            "agent_id": agent_id,
+            "reason": reason.strip(),
+            "allowed_paths": list(allowed_paths or []),
+            "command_policy": dict(command_policy or {}),
+        }
+        request_boundary = {
+            "action_type": action_type,
+            "actor": actor,
+            "mission_id": target_mission_id,
+            "target_kind": target_kind,
+            "target_id": target_id,
+            **request_payload,
+        }
+        replay = self._replay_receipt(
+            correlation_id=correlation_id,
+            request_boundary=request_boundary,
+        )
+        if replay is not None:
+            return replay
+        canonical_action = self._canonical_action_for_correlation(
+            correlation_id=correlation_id,
+            request_boundary=request_boundary,
+        )
+        recovering_action = canonical_action is not None
+        recovered_session = canonical_action[1] if canonical_action is not None else None
+        if not recovering_action and expected_revision != snapshot.revision:
+            raise WorkspaceStaleActionError(
+                expected_revision=expected_revision,
+                current_revision=snapshot.revision,
+            )
+
+        workstation_action = {
+            "correlation_id": correlation_id,
+            "action_type": action_type,
+            "target_kind": target_kind,
+            "target_id": target_id,
+            "request": request_payload,
+        }
 
         acknowledged_issue_id = issue_id
         acknowledged_session_id = session_id
         journal_actor: ActivityActor = "mission-commander"
-        if action_type == "issue-launch":
+        if action_type == "issue-approve":
             self._validate_issue_target(
                 target_kind=target_kind,
                 target_id=target_id,
                 issue_id=issue_id,
             )
-            session = mission.launch_issue(
-                issue_id,
-                allowed_paths=allowed_paths or [],
-                command_policy=command_policy or {},
+            issue = mission.issues.get(issue_id)
+            if issue is None:
+                raise AlbertError(f"Unknown Issue Slice: {issue_id}")
+            if not recovering_action:
+                if issue.tracker_status.casefold() not in {
+                    "approved",
+                    "ready",
+                    "ready-for-agent",
+                }:
+                    raise AlbertError(
+                        f"{issue_id} tracker status {issue.tracker_status!r} is not ready for agent approval"
+                    )
+                mission.approve_issue(
+                    issue_id,
+                    workstation_action=workstation_action,
+                )
+            acknowledged_session_id = ""
+            effect_summary = f"Mission Commander approved {issue_id} for governed Local Agent launch."
+        elif action_type == "issue-launch":
+            self._validate_issue_target(
+                target_kind=target_kind,
+                target_id=target_id,
+                issue_id=issue_id,
             )
+            session = recovered_session
+            if recovering_action and session is None:
+                raise WorkspacePersistenceError(
+                    f"Recovered Workstation launch has no session: {correlation_id}"
+                )
+            if session is None:
+                session = mission.launch_issue(
+                    issue_id,
+                    allowed_paths=allowed_paths or [],
+                    command_policy=command_policy or {},
+                    workstation_action=workstation_action,
+                )
             acknowledged_session_id = session.session_id
             effect_summary = (
-                f"Orchestrator launched {issue_id} as {session.session_id}."
+                f"Orchestrator queued {issue_id} as {session.session_id}."
             )
             journal_actor = "orchestrator"
         elif action_type == "issue-retry":
@@ -2539,7 +7186,15 @@ class WorkstationActionService:
                 target_id=target_id,
                 session_id=session_id,
             )
-            if not reason.strip():
+            review_workspace_repair = self._review_workspace_repair(
+                mission,
+                session_id,
+            )
+            if (
+                not recovering_action
+                and not reason.strip()
+                and review_workspace_repair is None
+            ):
                 raise AlbertError("Retry requires a reason.")
             prior_session = mission.sessions.get(session_id)
             if prior_session is None:
@@ -2547,15 +7202,29 @@ class WorkstationActionService:
             acknowledged_issue_id = issue_id or prior_session.issue_id
             if acknowledged_issue_id != prior_session.issue_id:
                 raise AlbertError("issue id must match session issue id")
-            session = mission.launch_repair(
-                session_id,
-                agent_id=agent_id,
-                allowed_paths=allowed_paths or [],
-                command_policy=command_policy or {},
-            )
+            session = recovered_session
+            if recovering_action and session is None:
+                raise WorkspacePersistenceError(
+                    f"Recovered Workstation retry has no session: {correlation_id}"
+                )
+            if session is None:
+                if (
+                    review_workspace_repair is not None
+                    and self._repair_child_for_session(mission, session_id) is not None
+                ):
+                    raise AlbertError(
+                        f"Review Workspace repair was already launched for {session_id}."
+                    )
+                session = mission.launch_repair(
+                    session_id,
+                    agent_id=agent_id,
+                    allowed_paths=allowed_paths if allowed_paths else None,
+                    command_policy=command_policy if command_policy else None,
+                    workstation_action=workstation_action,
+                )
             acknowledged_session_id = session.session_id
             effect_summary = (
-                f"Orchestrator retried {acknowledged_issue_id} as "
+                f"Orchestrator queued repair for {acknowledged_issue_id} as "
                 f"{session.session_id} from {prior_session.session_id}."
             )
             journal_actor = "orchestrator"
@@ -2573,12 +7242,20 @@ class WorkstationActionService:
             acknowledged_issue_id = issue_id or session.issue_id
             if acknowledged_issue_id != session.issue_id:
                 raise AlbertError("issue id must match session issue id")
-            cancelled = mission.cancel_session(session_id, reason=reason)
+            cancelled = (
+                session
+                if recovering_action
+                else mission.cancel_session(
+                    session_id,
+                    reason=reason,
+                    workstation_action=workstation_action,
+                )
+            )
             acknowledged_session_id = cancelled.session_id
             effect_summary = (
                 f"Orchestrator cancelled {cancelled.session_id} for "
-                f"{acknowledged_issue_id}. Persisted session state is cancelled; "
-                "runner process termination is not available in this MVP."
+                f"{acknowledged_issue_id}. Runner termination was requested and "
+                "the terminal cancelled state will be preserved."
             )
             journal_actor = "orchestrator"
         else:
@@ -2591,40 +7268,306 @@ class WorkstationActionService:
                 raise AlbertError("Model assignment changes require an agent id.")
             if not reason.strip():
                 raise AlbertError("Model assignment changes require a reason.")
-            mission.assign_issue(issue_id, agent_id, notes=reason)
+            if not recovering_action:
+                mission.assign_issue(
+                    issue_id,
+                    agent_id,
+                    notes=reason,
+                    workstation_action=workstation_action,
+                )
             effect_summary = (
                 f"Mission Commander assigned {issue_id} to {agent_id}: {reason}"
             )
 
-        updated = self._snapshots.update_preferences(
-            active_mission_id=mission.mission_id,
-            conversation_scope=snapshot.conversation_scope,
-            operations_view=snapshot.operations_view,
-            event_metadata={"correlation_id": correlation_id},
-        )
-        ActivityJournalService(self._snapshots).record_workstation_action(
-            correlation_id=correlation_id,
-            actor=journal_actor,
-            action_type=action_type,
-            mission=mission,
-            issue_id=acknowledged_issue_id,
-            session_id=acknowledged_session_id,
-            effect_summary=effect_summary,
-        )
-        AgentConsoleHistoryService(self._snapshots).record_workstation_action(
-            action_type=action_type,
-            target_id=target_id,
-            effect_summary=effect_summary,
-        )
-        return WorkstationActionAcknowledgement(
+        acknowledgement = WorkstationActionAcknowledgement(
             correlation_id=correlation_id,
             outcome="acknowledged",
-            revision=updated.revision,
+            revision=snapshot.revision + 1,
             action_type=action_type,  # type: ignore[arg-type]
             issue_id=acknowledged_issue_id,
             session_id=acknowledged_session_id,
             effect_summary=effect_summary,
         )
+        updated = self._snapshots._update_preferences_locked(
+            active_mission_id=(
+                snapshot.active_mission.id
+                if snapshot.active_mission is not None
+                else mission.mission_id
+            ),
+            conversation_scope=snapshot.conversation_scope,
+            operations_view=snapshot.operations_view,
+            event_metadata={"correlation_id": correlation_id},
+            workstation_receipt={
+                "correlation_id": correlation_id,
+                "request": request_boundary,
+                "acknowledgement": asdict(acknowledgement),
+            },
+        )
+        if updated.revision != acknowledgement.revision:
+            raise WorkspacePersistenceError(
+                "Workstation action acknowledgement revision did not match the "
+                "serialized action transaction."
+            )
+        self._reconcile_audit_side_effects(
+            request_boundary=request_boundary,
+            acknowledgement=acknowledgement,
+            journal_actor=journal_actor,
+        )
+        return acknowledgement
+
+    def _record_rejected_attempt(
+        self,
+        *,
+        error: AlbertError,
+        correlation_id: str,
+        action_type: WorkstationActionType | str,
+        actor: str,
+        target_kind: str,
+        target_id: str,
+        mission_id: str | None = None,
+        **_request: Any,
+    ) -> None:
+        if (
+            not correlation_id.strip()
+            or actor != "mission-commander"
+            or action_type not in self._actions
+            or not target_kind.strip()
+            or not target_id.strip()
+        ):
+            return
+        snapshot = self._snapshots.snapshot()
+        target_mission_id = mission_id or (
+            snapshot.active_mission.id if snapshot.active_mission is not None else ""
+        )
+        if target_mission_id not in self._snapshots._missions:
+            return
+        AgentConsoleHistoryService(
+            self._snapshots
+        ).record_workstation_action_rejected(
+            correlation_id=correlation_id,
+            action_type=str(action_type),
+            target_id=target_id,
+            reason=str(error),
+            mission_id=target_mission_id,
+        )
+
+    def _reconcile_audit_side_effects(
+        self,
+        *,
+        request_boundary: dict[str, Any],
+        acknowledgement: WorkstationActionAcknowledgement,
+        journal_actor: ActivityActor | None = None,
+    ) -> None:
+        mission_id = request_boundary.get("mission_id")
+        target_id = request_boundary.get("target_id")
+        action_type = request_boundary.get("action_type")
+        if (
+            not isinstance(mission_id, str)
+            or mission_id not in self._snapshots._missions
+            or not isinstance(target_id, str)
+            or not isinstance(action_type, str)
+        ):
+            raise WorkspacePersistenceError(
+                "Workstation action receipt has an invalid audit boundary."
+            )
+        mission = self._snapshots._missions[mission_id]
+        actor = journal_actor or (
+            "orchestrator"
+            if action_type in {"issue-launch", "issue-retry", "session-cancel"}
+            else "mission-commander"
+        )
+        ActivityJournalService(self._snapshots).record_workstation_action(
+            correlation_id=acknowledgement.correlation_id,
+            actor=actor,
+            action_type=action_type,
+            mission=mission,
+            issue_id=acknowledgement.issue_id,
+            session_id=acknowledgement.session_id,
+            effect_summary=acknowledgement.effect_summary,
+        )
+        AgentConsoleHistoryService(self._snapshots).record_workstation_action(
+            correlation_id=acknowledgement.correlation_id,
+            action_type=action_type,
+            target_id=target_id,
+            effect_summary=acknowledgement.effect_summary,
+            mission_id=mission_id,
+        )
+
+    @staticmethod
+    def _review_workspace_repair(
+        mission: AlbertMission,
+        session_id: str,
+    ) -> ReviewDecision | None:
+        review = mission._latest_review_for_session(session_id)
+        if (
+            review is None
+            or review.outcome != "Needs repair"
+            or review.next_action not in {
+                "same-local-agent-repair",
+                "fresh-local-agent-repair",
+            }
+        ):
+            return None
+        return review
+
+    @staticmethod
+    def _repair_child_for_session(
+        mission: AlbertMission,
+        session_id: str,
+    ) -> LocalAgentSession | None:
+        return next(
+            (
+                candidate
+                for candidate in mission.sessions.values()
+                if isinstance(candidate.task_packet.get("repair_context"), dict)
+                and candidate.task_packet["repair_context"].get("prior_session_id")
+                == session_id
+            ),
+            None,
+        )
+
+    def _replay_receipt(
+        self,
+        *,
+        correlation_id: str,
+        request_boundary: dict[str, Any],
+    ) -> WorkstationActionAcknowledgement | None:
+        preferences = self._snapshots._load_preferences()
+        receipt = next(
+            (
+                item
+                for item in preferences["workstation_receipts"]
+                if item.get("correlation_id") == correlation_id
+            ),
+            None,
+        )
+        if receipt is None:
+            return None
+        if receipt.get("request") != request_boundary:
+            raise AlbertError(
+                "Workstation action correlation id was already used for a different "
+                "request boundary."
+            )
+        try:
+            acknowledgement = WorkstationActionAcknowledgement(
+                **receipt["acknowledgement"]
+            )
+        except (KeyError, TypeError) as exc:
+            raise WorkspacePersistenceError(
+                f"Workstation action receipt is invalid: {correlation_id}"
+            ) from exc
+        if (
+            acknowledgement.correlation_id != correlation_id
+            or acknowledgement.action_type != request_boundary["action_type"]
+        ):
+            raise WorkspacePersistenceError(
+                f"Workstation action receipt boundary is invalid: {correlation_id}"
+            )
+        self._reconcile_audit_side_effects(
+            request_boundary=request_boundary,
+            acknowledgement=acknowledgement,
+        )
+        return acknowledgement
+
+    def _canonical_action_for_correlation(
+        self,
+        *,
+        correlation_id: str,
+        request_boundary: dict[str, Any],
+    ) -> tuple[AlbertMission, LocalAgentSession | None] | None:
+        matches: list[
+            tuple[AlbertMission, LocalAgentSession | None, dict[str, Any]]
+        ] = []
+        for mission in self._snapshots._missions.values():
+            if mission.runtime_path.exists():
+                with mission._runtime_lock(exclusive=False):
+                    mission._load_runtime()
+            durable_marker = mission.workstation_actions.get(correlation_id)
+            if durable_marker is not None:
+                matches.append(
+                    (
+                        mission,
+                        None,
+                        self._normalized_canonical_action_boundary(
+                            mission=mission,
+                            correlation_id=correlation_id,
+                            marker=durable_marker,
+                        ),
+                    )
+                )
+            for session in mission.sessions.values():
+                marker = session.task_packet.get("workstation_action")
+                if not isinstance(marker, dict):
+                    continue
+                if marker.get("correlation_id") != correlation_id:
+                    continue
+                matches.append(
+                    (
+                        mission,
+                        session,
+                        self._normalized_canonical_action_boundary(
+                            mission=mission,
+                            correlation_id=correlation_id,
+                            marker=marker,
+                        ),
+                    )
+                )
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise WorkspacePersistenceError(
+                f"Workstation action correlation id is not unique: {correlation_id}"
+            )
+        mission, session, persisted_boundary = matches[0]
+        if persisted_boundary != request_boundary:
+            raise AlbertError(
+                "Workstation action correlation id was already used for a different "
+                "request boundary."
+            )
+        return mission, session
+
+    @staticmethod
+    def _normalized_canonical_action_boundary(
+        *,
+        mission: AlbertMission,
+        correlation_id: str,
+        marker: dict[str, Any],
+    ) -> dict[str, Any]:
+        expected_request_fields = {
+            "issue_id",
+            "session_id",
+            "agent_id",
+            "reason",
+            "allowed_paths",
+            "command_policy",
+        }
+        request = marker.get("request")
+        if (
+            marker.get("correlation_id") != correlation_id
+            or not isinstance(marker.get("action_type"), str)
+            or not isinstance(marker.get("target_kind"), str)
+            or not isinstance(marker.get("target_id"), str)
+            or not isinstance(request, dict)
+            or set(request) != expected_request_fields
+        ):
+            raise WorkspacePersistenceError(
+                f"Workstation action recovery marker is invalid: {correlation_id}"
+            )
+        if not isinstance(request.get("allowed_paths"), list) or not isinstance(
+            request.get("command_policy"),
+            dict,
+        ):
+            raise WorkspacePersistenceError(
+                f"Workstation action recovery boundary is invalid: {correlation_id}"
+            )
+        return {
+            "action_type": marker["action_type"],
+            "actor": "mission-commander",
+            "mission_id": mission.mission_id,
+            "target_kind": marker["target_kind"],
+            "target_id": marker["target_id"],
+            **request,
+        }
 
     @staticmethod
     def _validate_issue_target(*, target_kind: str, target_id: str, issue_id: str) -> None:
@@ -2716,6 +7659,7 @@ class WorkingContextService:
             ),
         )
 
+    @_atomic_workspace_action("_curation_path")
     def curate(
         self,
         *,
@@ -3012,6 +7956,37 @@ class ActivityJournalService:
             affected_entities=affected_entities,
             evidence_links=(),
             correlation_id=correlation_id,
+            replay_existing=True,
+        )
+
+    def record_shell_command_approved(
+        self,
+        *,
+        correlation_id: str,
+        snapshot: WorkspaceSnapshot,
+        command_record: dict[str, Any],
+        approver: str,
+    ) -> ActivityJournalEntry:
+        actor: ActivityActor = (
+            "frontier-model" if approver == "frontier-model" else "mission-commander"
+        )
+        approver_label = (
+            "Frontier Model" if actor == "frontier-model" else "Mission Commander"
+        )
+        return self._append(
+            actor=actor,
+            action_type="shell-command-approved",
+            summary=(
+                f"{approver_label} approved Shell Terminal command "
+                f"{command_record['command_id']}."
+            ),
+            affected_entities=self._shell_command_entities(
+                snapshot=snapshot,
+                command_record=command_record,
+            ),
+            evidence_links=(),
+            correlation_id=correlation_id,
+            replay_existing=True,
         )
 
     def record_review_decision(
@@ -3070,6 +8045,7 @@ class ActivityJournalService:
             affected_entities=affected_entities,
             evidence_links=evidence_links,
             correlation_id=correlation_id,
+            replay_existing=True,
         )
 
     def record_workspace_queue_decision(
@@ -3131,6 +8107,7 @@ class ActivityJournalService:
             ),
             evidence_links=(),
             correlation_id=correlation_id,
+            replay_existing=True,
         )
 
     def record_mission_draft_created(
@@ -3163,6 +8140,7 @@ class ActivityJournalService:
             ),
             evidence_links=(),
             correlation_id=correlation_id,
+            replay_existing=True,
         )
 
     def record_mission_draft_confirmed(
@@ -3205,6 +8183,7 @@ class ActivityJournalService:
             ),
             evidence_links=(),
             correlation_id=correlation_id,
+            replay_existing=True,
         )
 
     def record_mission_draft_updated(
@@ -3237,6 +8216,7 @@ class ActivityJournalService:
             ),
             evidence_links=(),
             correlation_id=correlation_id,
+            replay_existing=True,
         )
 
     def record_mission_draft_abandoned(
@@ -3269,6 +8249,7 @@ class ActivityJournalService:
             ),
             evidence_links=(),
             correlation_id=correlation_id,
+            replay_existing=True,
         )
 
     def record_workstation_action(
@@ -3323,6 +8304,7 @@ class ActivityJournalService:
             affected_entities=tuple(affected_entities),
             evidence_links=(),
             correlation_id=correlation_id,
+            replay_existing=True,
         )
 
     def record_frontier_confirmation_requested(
@@ -3367,6 +8349,7 @@ class ActivityJournalService:
             ),
             evidence_links=(),
             correlation_id=correlation_id,
+            replay_existing=True,
         )
 
     def record_orchestrator_session_launched(
@@ -3383,7 +8366,7 @@ class ActivityJournalService:
             actor="orchestrator",
             action_type="local-agent-session-launched",
             summary=(
-                f"Orchestrator launched {session.session_id} for {item.issue_id} "
+                f"Orchestrator queued {session.session_id} for {item.issue_id} "
                 f"within the acknowledged Workspace Queue boundaries."
             ),
             affected_entities=(
@@ -3420,6 +8403,7 @@ class ActivityJournalService:
             ),
             evidence_links=(),
             correlation_id=correlation_id,
+            replay_existing=True,
         )
 
     def record_shell_command_approval_requested(
@@ -3443,6 +8427,7 @@ class ActivityJournalService:
             ),
             evidence_links=(),
             correlation_id=correlation_id,
+            replay_existing=True,
         )
 
     def record_shell_command_denied(
@@ -3466,6 +8451,7 @@ class ActivityJournalService:
             ),
             evidence_links=(),
             correlation_id=correlation_id,
+            replay_existing=True,
         )
 
     def record_shell_command_finished(
@@ -3491,6 +8477,31 @@ class ActivityJournalService:
             ),
             evidence_links=(),
             correlation_id=correlation_id,
+            replay_existing=True,
+        )
+
+    def record_shell_command_outcome_unknown(
+        self,
+        *,
+        correlation_id: str,
+        snapshot: WorkspaceSnapshot,
+        command_record: dict[str, Any],
+    ) -> ActivityJournalEntry:
+        return self._append(
+            actor="orchestrator",
+            action_type="shell-command-outcome-unknown",
+            summary=(
+                f"Orchestrator recorded that Shell Terminal command "
+                f"{command_record['command_id']} started but its final outcome is unknown; "
+                "it will not be retried automatically."
+            ),
+            affected_entities=self._shell_command_entities(
+                snapshot=snapshot,
+                command_record=command_record,
+            ),
+            evidence_links=(),
+            correlation_id=correlation_id,
+            replay_existing=True,
         )
 
     def record_additional_path_grant_created(
@@ -3536,6 +8547,57 @@ class ActivityJournalService:
             affected_entities=tuple(entities),
             evidence_links=(),
             correlation_id=correlation_id,
+            replay_existing=True,
+        )
+
+    def record_additional_path_grant_denied(
+        self,
+        *,
+        correlation_id: str,
+        snapshot: WorkspaceSnapshot,
+        denial: AdditionalPathGrantDenial,
+    ) -> ActivityJournalEntry:
+        active = snapshot.active_mission
+        entities = [
+            ActivityAffectedEntity(
+                entity_type="workspace-session",
+                entity_id=snapshot.workspace_session.id,
+                label=snapshot.workspace_session.id,
+            )
+        ]
+        if active is not None:
+            entities.append(
+                ActivityAffectedEntity(
+                    entity_type="mission",
+                    entity_id=active.id,
+                    label=active.title,
+                    href=f"app-local://missions/{active.id}",
+                )
+            )
+        entities.append(
+            ActivityAffectedEntity(
+                entity_type="additional-path-grant-request",
+                entity_id=denial.request_id,
+                label=denial.path,
+                href=(
+                    "app-local://workspace/shell-terminal#"
+                    f"grant-request-{denial.request_id}"
+                ),
+            )
+        )
+        return self._append(
+            actor="mission-commander",
+            action_type="additional-path-grant-denied",
+            summary=(
+                f"Mission Commander denied {denial.access_level} Additional Path Grant "
+                f"request {denial.request_id} for {denial.path} for "
+                f"{denial.duration_seconds} seconds; affected action: "
+                f"{denial.affected_action}. Reason: {denial.reason}"
+            ),
+            affected_entities=tuple(entities),
+            evidence_links=(),
+            correlation_id=correlation_id,
+            replay_existing=True,
         )
 
     def record_local_agent_evidence(
@@ -3553,7 +8615,7 @@ class ActivityJournalService:
             if session.issue_id in mission.issues
             else str(session.task_packet.get("goal", session.issue_id))
         )
-        evidence_links = tuple(evidence.artifact_links)
+        evidence_links = tuple(mission.review_artifact_links(session))
         evidence_href = (
             evidence_links[0]
             if evidence_links
@@ -3599,12 +8661,14 @@ class ActivityJournalService:
             correlation_id=f"evidence:{session.session_id}",
         )
 
-    @staticmethod
     def _shell_command_entities(
+        self,
         *,
         snapshot: WorkspaceSnapshot,
         command_record: dict[str, Any],
     ) -> tuple[ActivityAffectedEntity, ...]:
+        mission_id = str(command_record.get("mission_id", ""))
+        mission = self._snapshots._missions.get(mission_id)
         active = snapshot.active_mission
         entities = [
             ActivityAffectedEntity(
@@ -3613,7 +8677,16 @@ class ActivityJournalService:
                 label=snapshot.workspace_session.id,
             )
         ]
-        if active is not None:
+        if mission is not None:
+            entities.append(
+                ActivityAffectedEntity(
+                    entity_type="mission",
+                    entity_id=mission.mission_id,
+                    label=mission.prd_title,
+                    href=f"app-local://missions/{mission.mission_id}",
+                )
+            )
+        elif active is not None:
             entities.append(
                 ActivityAffectedEntity(
                     entity_type="mission",
@@ -3635,6 +8708,7 @@ class ActivityJournalService:
         )
         return tuple(entities)
 
+    @_causal_chronology
     def _append(
         self,
         *,
@@ -3644,6 +8718,7 @@ class ActivityJournalService:
         affected_entities: tuple[ActivityAffectedEntity, ...],
         evidence_links: tuple[str, ...],
         correlation_id: str,
+        replay_existing: bool = False,
     ) -> ActivityJournalEntry:
         if actor not in self._actors:
             raise AlbertError(f"Unknown Activity Journal actor: {actor}")
@@ -3653,31 +8728,77 @@ class ActivityJournalService:
             raise AlbertError("Activity Journal summary must not be empty")
         if any(not isinstance(link, str) or not link.strip() for link in evidence_links):
             raise AlbertError("Activity Journal evidence links must not be empty")
-        journal = self._load_journal()
-        sequence = len(journal["entries"]) + 1
-        entry = ActivityJournalEntry(
-            entry_id=f"activity-{sequence:06d}",
-            sequence=sequence,
-            recorded_at=datetime.now(timezone.utc)
-            .isoformat(timespec="seconds")
-            .replace("+00:00", "Z"),
-            actor=actor,
-            action_type=action_type,
-            summary=summary,
-            affected_entities=affected_entities,
-            evidence_links=evidence_links,
-            correlation_id=correlation_id,
-        )
-        revision = journal["revision"] + 1
+        if not (
+            action_type.startswith("shell-")
+            or action_type.startswith("additional-path-grant-")
+        ):
+            ShellTerminalService(self._snapshots).reconcile_audit()
         try:
-            WorkspaceSnapshotService._write_json_atomically(
-                self._journal_path,
-                {
-                    "schema_version": 1,
-                    "revision": revision,
-                    "entries": [asdict(item) for item in [*journal["entries"], entry]],
-                },
-            )
+            with WorkspaceSnapshotService._json_store_lock(self._journal_path):
+                journal = self._load_journal()
+                if replay_existing:
+                    existing = [
+                        entry
+                        for entry in journal["entries"]
+                        if entry.correlation_id == correlation_id
+                        and entry.action_type == action_type
+                    ]
+                    if len(existing) > 1:
+                        raise WorkspacePersistenceError(
+                            "Activity Journal contains duplicate audit phases for "
+                            f"{correlation_id}: {action_type}."
+                        )
+                    if existing:
+                        entry = existing[0]
+                        if (
+                            entry.actor != actor
+                            or entry.summary != summary
+                            or tuple(
+                                (
+                                    entity.entity_type,
+                                    entity.entity_id,
+                                    entity.href,
+                                )
+                                for entity in entry.affected_entities
+                            )
+                            != tuple(
+                                (
+                                    entity.entity_type,
+                                    entity.entity_id,
+                                    entity.href,
+                                )
+                                for entity in affected_entities
+                            )
+                            or entry.evidence_links != evidence_links
+                        ):
+                            raise AlbertError(
+                                "Activity Journal correlation id and action type were already "
+                                "used for a different audit effect."
+                            )
+                        return entry
+                sequence = len(journal["entries"]) + 1
+                entry = ActivityJournalEntry(
+                    entry_id=f"activity-{sequence:06d}",
+                    sequence=sequence,
+                    recorded_at=datetime.now(timezone.utc)
+                    .isoformat(timespec="seconds")
+                    .replace("+00:00", "Z"),
+                    actor=actor,
+                    action_type=action_type,
+                    summary=summary,
+                    affected_entities=affected_entities,
+                    evidence_links=evidence_links,
+                    correlation_id=correlation_id,
+                )
+                revision = journal["revision"] + 1
+                WorkspaceSnapshotService._write_json_atomically(
+                    self._journal_path,
+                    {
+                        "schema_version": 1,
+                        "revision": revision,
+                        "entries": [asdict(item) for item in [*journal["entries"], entry]],
+                    },
+                )
         except OSError as exc:
             raise WorkspacePersistenceError(
                 f"Activity Journal persistence write failed: {exc}"
@@ -3823,6 +8944,7 @@ class WorkspaceSyncService:
     def __init__(self, snapshots: WorkspaceSnapshotService):
         self._snapshots = snapshots
 
+    @_atomic_workspace_action()
     def submit_action(self, action: WorkspaceAction) -> WorkspaceActionAcknowledgement:
         current = self._snapshots.snapshot()
         if action.expected_revision != current.revision:
@@ -3830,7 +8952,7 @@ class WorkspaceSyncService:
                 expected_revision=action.expected_revision,
                 current_revision=current.revision,
             )
-        updated = self._snapshots.update_preferences(
+        updated = self._snapshots._update_preferences_locked(
             active_mission_id=action.active_mission_id,
             conversation_scope=action.conversation_scope,
             operations_view=action.operations_view,
@@ -3887,6 +9009,7 @@ class WorkspaceSnapshotService:
         self._mission = mission
         self._missions = {item.mission_id: item for item in all_missions}
         self._preferences_path = mission.runtime_dir / "workspace-preferences.json"
+        self._action_lock_target = mission.runtime_dir / "workspace-action-transaction"
         evidence_activity_recorder = ActivityJournalService(self).record_local_agent_evidence
         for item in all_missions:
             item._evidence_activity_recorder = evidence_activity_recorder
@@ -3941,6 +9064,23 @@ class WorkspaceSnapshotService:
         operations_view: str,
         event_metadata: dict[str, str] | None = None,
     ) -> WorkspaceSnapshot:
+        with self._action_store_lock(self._preferences_path):
+            return self._update_preferences_locked(
+                active_mission_id=active_mission_id,
+                conversation_scope=conversation_scope,
+                operations_view=operations_view,
+                event_metadata=event_metadata,
+            )
+
+    def _update_preferences_locked(
+        self,
+        *,
+        active_mission_id: str,
+        conversation_scope: ConversationScope,
+        operations_view: str,
+        event_metadata: dict[str, str] | None = None,
+        workstation_receipt: dict[str, Any] | None = None,
+    ) -> WorkspaceSnapshot:
         if active_mission_id not in self._missions:
             raise AlbertError(f"Unknown Active Mission: {active_mission_id}")
         if operations_view not in {"mission-board", "review-workspace", "workspace-queue", "activity"}:
@@ -3957,6 +9097,7 @@ class WorkspaceSnapshotService:
         current = self._load_preferences()
         revision = current["revision"] + 1
         events = list(current["events"])
+        workstation_receipts = list(current["workstation_receipts"])
         if event_metadata is not None:
             correlation_id = event_metadata["correlation_id"]
             events.append(
@@ -3970,12 +9111,15 @@ class WorkspaceSnapshotService:
                     "operations_view": operations_view,
                 }
             )
+        if workstation_receipt is not None:
+            workstation_receipts.append(workstation_receipt)
         data = {
             "revision": revision,
             "active_mission_id": active_mission_id,
             "conversation_scope": asdict(conversation_scope),
             "operations_view": operations_view,
             "events": events,
+            "workstation_receipts": workstation_receipts,
         }
         self._write_json_atomically(self._preferences_path, data)
         return self.snapshot()
@@ -4022,6 +9166,7 @@ class WorkspaceSnapshotService:
                 ),
                 "operations_view": "mission-board",
                 "events": [],
+                "workstation_receipts": [],
             }
         try:
             data = json.loads(self._preferences_path.read_text(encoding="utf-8"))
@@ -4032,6 +9177,13 @@ class WorkspaceSnapshotService:
                 data["events"] = []
             if not isinstance(data["events"], list):
                 raise ValueError("events must be a list")
+            if "workstation_receipts" not in data:
+                data["workstation_receipts"] = []
+            if not isinstance(data["workstation_receipts"], list) or any(
+                not isinstance(receipt, dict)
+                for receipt in data["workstation_receipts"]
+            ):
+                raise ValueError("Workstation action receipts must be a list of objects")
             return data
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise WorkspacePersistenceError(f"Workspace persistence read failed: {exc}") from exc
@@ -4069,13 +9221,27 @@ class WorkspaceSnapshotService:
     def _mission_summary(
         self, mission: AlbertMission, *, is_active: bool
     ) -> WorkspaceMissionSummary:
-        sessions = tuple(
-            MissionSessionSummary(
+        def summarize_session(session: Any) -> MissionSessionSummary:
+            canonical = mission._session_summary(session)
+            evidence = session.evidence
+            issue = mission.issues.get(session.issue_id)
+            latest_review = mission._latest_review_for_session(session.session_id)
+            review_workspace_repair = WorkstationActionService._review_workspace_repair(
+                mission,
+                session.session_id,
+            )
+            return MissionSessionSummary(
                 session_id=session.session_id,
                 issue_id=session.issue_id,
                 assigned_agent=session.assigned_agent,
                 status=session.status,
-                role=str((session.task_packet.get("agent_config") or {}).get("role", "local-agent")),
+                last_activity_at=_latest_session_activity_at(session),
+                runner_started_at=_valid_session_activity_at(session.runner_started_at),
+                role=str(
+                    (session.task_packet.get("agent_config") or {}).get(
+                        "role", "local-agent"
+                    )
+                ),
                 provider=str(
                     (session.task_packet.get("agent_config") or {}).get(
                         "provider", "unconfigured"
@@ -4086,7 +9252,32 @@ class WorkspaceSnapshotService:
                         "model", session.assigned_agent
                     )
                 ),
+                task_title=(
+                    issue.title
+                    if issue is not None
+                    else str(session.task_packet.get("goal", session.issue_id))
+                ),
+                operation_status=str(canonical["operation_status"]),
+                failure=str(canonical["failure"]),
+                changed_files=tuple(evidence.changed_files) if evidence else (),
+                commands_run=tuple(evidence.commands_run) if evidence else (),
+                test_results=evidence.test_results if evidence else "",
+                risks=evidence.known_risks if evidence else "",
+                artifact_links=tuple(mission.review_artifact_links(session)),
+                review_outcome=latest_review.outcome if latest_review else "",
+                review_next_action=latest_review.next_action if latest_review else "",
+                repair_action_available=(
+                    review_workspace_repair is not None
+                    and WorkstationActionService._repair_child_for_session(
+                        mission,
+                        session.session_id,
+                    )
+                    is None
+                ),
             )
+
+        sessions = tuple(
+            summarize_session(session)
             for session in sorted(mission.sessions.values(), key=lambda item: item.session_id)
         )
         attention: list[WorkspaceQueueAttention] = []
@@ -4148,8 +9339,39 @@ class WorkspaceSnapshotService:
         )
 
     @staticmethod
+    @contextmanager
+    def _json_store_lock(path: Path):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = path.with_name(f".{path.name}.lock")
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @contextmanager
+    def _action_store_lock(self, store_path: Path):
+        with self._json_store_lock(self._action_lock_target):
+            with self._json_store_lock(store_path):
+                yield
+
+    @staticmethod
     def _write_json_atomically(path: Path, data: dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        temporary.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        temporary.replace(path)
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                temporary.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+                temporary_path = Path(temporary.name)
+            temporary_path.replace(path)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()

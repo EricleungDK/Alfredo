@@ -1,0 +1,19 @@
+{
+  "productName": "Alfredo · Rust Shadow Review",
+  "build": {
+    "beforeDevCommand": "npm run dev -- --mode rust-orchestrator-gui --port 1422",
+    "devUrl": "http://localhost:1422"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Alfredo · Rust Shadow Review",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 1040,
+        "minHeight": 700,
+        "resizable": true
+      }
+    ]
+  }
+}

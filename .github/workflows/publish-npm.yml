@@ -1,0 +1,270 @@
+name: Publish Alfredo npm release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact Alfredo package version to publish
+        required: true
+        default: 0.1.0
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: alfredo-npm-production
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Verify, publish, and reinstall Alfredo
+    runs-on: ubuntu-24.04
+    environment: npm-production
+    defaults:
+      run:
+        working-directory: mission-control
+    env:
+      VERSION: ${{ inputs.version }}
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+      REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+    steps:
+      - name: Check out the exact source revision
+        uses: actions/checkout@v6
+
+      - name: Set up Node.js for npm publication
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+          registry-url: https://registry.npmjs.org/
+          package-manager-cache: false
+
+      - name: Require a reviewed public main revision
+        run: |
+          test "${GITHUB_REF}" = "refs/heads/main"
+          if test "${REPOSITORY_PRIVATE}" != "false"; then
+            echo "::error::npm provenance requires the Alfredo source repository to be public."
+            exit 1
+          fi
+
+      - name: Install Linux desktop and headless-display dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes \
+            bubblewrap \
+            build-essential \
+            curl \
+            dbus-x11 \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            wget \
+            xauth \
+            xvfb
+
+      - name: Install locked JavaScript dependencies
+        run: npm ci
+
+      - name: Validate the requested version
+        run: |
+          PACKAGE_VERSION="$(node -p "require('./package.json').version")"
+          test "${PACKAGE_VERSION}" = "${VERSION}"
+
+      - name: Run backend tests
+        working-directory: .
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
+
+      - name: Run frontend tests and production build
+        run: |
+          npm test -- --run
+          npm run typecheck
+          npm run build
+
+      - name: Install the release layout browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Run the four-viewport production layout gate
+        run: npm run test:layout
+
+      - name: Run desktop bridge tests
+        run: |
+          cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+          cargo test --manifest-path src-tauri/Cargo.toml
+
+      - name: Build, install, and GUI-test the release packages
+        run: dbus-run-session -- xvfb-run -a npm run release:verify
+
+      - name: Recheck the verified publish inputs
+        run: npm run release:check
+
+      - name: Preserve the verified publish inputs as a workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: alfredo-npm-${{ inputs.version }}-verified
+          path: mission-control/release/out/verified/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Publish with a first-release token or npm trusted publishing
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          verify_npm_provenance() {
+            PACKAGE_SPEC="$1"
+            EXPECTED_NAME="$2"
+            AUDIT_ROOT="$3"
+            PROVENANCE_VERIFIED=0
+            for ATTEMPT in 1 2 3 4 5 6; do
+              rm -rf "${AUDIT_ROOT}" "${AUDIT_ROOT}-cache"
+              mkdir -p "${AUDIT_ROOT}"
+              node -e '
+                require("node:fs").writeFileSync(
+                  process.argv[1],
+                  JSON.stringify({ name: "alfredo-provenance-audit", version: "0.0.0", private: true }),
+                );
+              ' "${AUDIT_ROOT}/package.json"
+              if NODE_AUTH_TOKEN="" npm install \
+                --prefix "${AUDIT_ROOT}" \
+                --cache "${AUDIT_ROOT}-cache" \
+                --registry https://registry.npmjs.org/ \
+                --ignore-scripts \
+                --include=optional \
+                --save-exact \
+                "${PACKAGE_SPEC}" \
+                && (cd "${AUDIT_ROOT}" && NODE_AUTH_TOKEN="" npm audit signatures --json --include-attestations > provenance-audit.json) \
+                && node -e '
+                  const report = require(process.argv[1]);
+                  const expectedName = process.argv[2];
+                  const expectedVersion = process.argv[3];
+                  const predicateType = "https://slsa.dev/provenance/v1";
+                  const verified = report.verified?.find(
+                    (entry) => entry.name === expectedName && entry.version === expectedVersion,
+                  );
+                  if (
+                    report.invalid?.length !== 0 ||
+                    report.missing?.length !== 0 ||
+                    verified?.attestations?.provenance?.predicateType !== predicateType ||
+                    !verified?.attestationBundles?.some(
+                      (attestation) => attestation.predicateType === predicateType,
+                    )
+                  ) process.exit(1);
+                ' "${AUDIT_ROOT}/provenance-audit.json" "${EXPECTED_NAME}" "${VERSION}"; then
+                PROVENANCE_VERIFIED=1
+                break
+              fi
+              sleep 10
+            done
+            test "${PROVENANCE_VERIFIED}" = "1"
+          }
+
+          EXPECTED_PLATFORM_INTEGRITY="$(node -e '
+            const manifest = require("./release/out/verified/manifest.json");
+            process.stdout.write(manifest.packages.find(({ role }) => role === "platform").integrity);
+          ')"
+          EXPECTED_META_INTEGRITY="$(node -e '
+            const manifest = require("./release/out/verified/manifest.json");
+            process.stdout.write(manifest.packages.find(({ role }) => role === "meta").integrity);
+          ')"
+
+          PLATFORM_VIEW_ERROR="${RUNNER_TEMP}/alfredo-platform-view-error.log"
+          if REMOTE_PLATFORM_INTEGRITY="$(npm view "alfredo-agent-linux-x64-gnu@${VERSION}" dist.integrity --prefer-online 2>"${PLATFORM_VIEW_ERROR}")"; then
+            test "${REMOTE_PLATFORM_INTEGRITY}" = "${EXPECTED_PLATFORM_INTEGRITY}"
+          elif grep -q "E404" "${PLATFORM_VIEW_ERROR}"; then
+            npm publish release/out/verified/alfredo-agent-linux-x64-gnu-${VERSION}.tgz --access public --provenance
+          else
+            cat "${PLATFORM_VIEW_ERROR}" >&2
+            exit 1
+          fi
+
+          REMOTE_PLATFORM_INTEGRITY=""
+          for ATTEMPT in 1 2 3 4 5 6; do
+            REMOTE_PLATFORM_INTEGRITY="$(npm view "alfredo-agent-linux-x64-gnu@${VERSION}" dist.integrity --prefer-online 2>/dev/null || true)"
+            test "${REMOTE_PLATFORM_INTEGRITY}" != "${EXPECTED_PLATFORM_INTEGRITY}" || break
+            sleep 10
+          done
+          test "${REMOTE_PLATFORM_INTEGRITY}" = "${EXPECTED_PLATFORM_INTEGRITY}"
+          verify_npm_provenance "alfredo-agent-linux-x64-gnu@${VERSION}" "alfredo-agent-linux-x64-gnu" "${RUNNER_TEMP}/alfredo-platform-provenance-audit"
+
+          META_VIEW_ERROR="${RUNNER_TEMP}/alfredo-meta-view-error.log"
+          if REMOTE_META_INTEGRITY="$(npm view "alfredo-agent@${VERSION}" dist.integrity --prefer-online 2>"${META_VIEW_ERROR}")"; then
+            test "${REMOTE_META_INTEGRITY}" = "${EXPECTED_META_INTEGRITY}"
+          elif grep -q "E404" "${META_VIEW_ERROR}"; then
+            npm publish release/out/verified/alfredo-agent-${VERSION}.tgz --access public --provenance
+          else
+            cat "${META_VIEW_ERROR}" >&2
+            exit 1
+          fi
+
+          REMOTE_META_INTEGRITY=""
+          for ATTEMPT in 1 2 3 4 5 6; do
+            REMOTE_META_INTEGRITY="$(npm view "alfredo-agent@${VERSION}" dist.integrity --prefer-online 2>/dev/null || true)"
+            test "${REMOTE_META_INTEGRITY}" != "${EXPECTED_META_INTEGRITY}" || break
+            sleep 10
+          done
+          test "${REMOTE_META_INTEGRITY}" = "${EXPECTED_META_INTEGRITY}"
+          verify_npm_provenance "alfredo-agent@${VERSION}" "alfredo-agent" "${RUNNER_TEMP}/alfredo-meta-provenance-audit"
+
+      - name: Install only from the public registry and launch Alfredo
+        env:
+          NODE_AUTH_TOKEN: ""
+        run: |
+          PREFIX="${RUNNER_TEMP}/alfredo-registry-prefix"
+          CACHE="${RUNNER_TEMP}/alfredo-registry-cache"
+          WORKSPACE="${RUNNER_TEMP}/alfredo-registry-workspace"
+          RUNTIME="${RUNNER_TEMP}/alfredo-registry-runtime"
+          rm -rf "${PREFIX}" "${CACHE}" "${WORKSPACE}" "${RUNTIME}"
+          mkdir -p "${PREFIX}" "${CACHE}" "${WORKSPACE}" "${RUNTIME}"
+
+          INSTALLED=0
+          for ATTEMPT in 1 2 3 4 5 6; do
+            if npm install --global \
+              --prefix "${PREFIX}" \
+              --cache "${CACHE}" \
+              --registry https://registry.npmjs.org/ \
+              --include=optional \
+              "alfredo-agent@${VERSION}"; then
+              INSTALLED=1
+              break
+            fi
+            sleep 10
+          done
+          test "${INSTALLED}" = "1"
+
+          NODE_BIN="$(dirname "$(command -v node)")"
+          export PATH="${PREFIX}/bin:${NODE_BIN}:/usr/bin:/bin"
+          test "$(command -v alfredo)" = "${PREFIX}/bin/alfredo"
+          test "$(alfredo --version)" = "Alfredo ${VERSION}"
+          export ALFREDO_RUNTIME_ROOT="${RUNTIME}"
+          export ALFREDO_GUI_SMOKE=1
+          export ALFREDO_SELECTED_WORKSPACE="${WORKSPACE}"
+          export ALFREDO_EXPECTED_BACKEND_ROOT="${PREFIX}/lib/node_modules/alfredo-agent/bundled-backend"
+
+          dbus-run-session -- xvfb-run -a bash -euxo pipefail -c '
+            cd "${ALFREDO_SELECTED_WORKSPACE}"
+            alfredo >"${ALFREDO_RUNTIME_ROOT}/stdout.log" 2>"${ALFREDO_RUNTIME_ROOT}/stderr.log" &
+            ALFREDO_PID=$!
+            trap '\''kill -TERM "${ALFREDO_PID}" 2>/dev/null || true'\'' EXIT
+            for ATTEMPT in $(seq 1 180); do
+              test ! -f "${ALFREDO_RUNTIME_ROOT}/gui-smoke-ready.json" || break
+              kill -0 "${ALFREDO_PID}"
+              sleep 0.25
+            done
+            test -f "${ALFREDO_RUNTIME_ROOT}/gui-smoke-ready.json"
+            node -e '\''
+              const marker = require(process.env.ALFREDO_RUNTIME_ROOT + "/gui-smoke-ready.json");
+              if (
+                marker.schema_version !== 1 ||
+                marker.status !== "ready" ||
+                !Number.isInteger(marker.process_id) ||
+                marker.selected_workspace !== process.env.ALFREDO_SELECTED_WORKSPACE ||
+                marker.backend_root !== process.env.ALFREDO_EXPECTED_BACKEND_ROOT
+              ) process.exit(1);
+            '\''
+            sleep 1
+            kill -0 "${ALFREDO_PID}"
+          '

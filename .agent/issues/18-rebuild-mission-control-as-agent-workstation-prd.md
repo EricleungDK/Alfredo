@@ -1,6 +1,6 @@
 # PRD: Rebuild Mission Control as an Agent Workstation
 
-Status: ready-for-agent
+Status: wontfix
 Type: PRD
 
 ## Problem Statement
@@ -123,3 +123,7 @@ The first controller model will be the configured local frontier model through O
 - The completed Agent Console work implemented scoped persistent messages, not a streaming LLM loop. This PRD treats the missing loop as a core product gap.
 - The completed launch work improved command behavior, but this PRD requires packaged native app behavior with actionable startup preflight and backend/runtime decoupling.
 - After this PRD is accepted, it should be split into independently grabbable issue slices. The likely slices are launch packaging/preflight, controller-turn runtime, policy-gated tool lifecycle, workstation shell layout, visual redesign/design-system pass, and end-to-end verification.
+
+## Comments
+
+- 2026-07-12: Closed as superseded. Alfredo Agent Workstation PRD 19 explicitly replaced this desktop-first framing with the npm-entrypoint, prompt-dominant product direction while preserving the Orchestrator authority model.

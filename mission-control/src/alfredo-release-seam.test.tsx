@@ -39,8 +39,6 @@ function writeReleaseTracker(root: string) {
   writeFileSync(
     resolve(issues, "01-release-seam.md"),
     [
-      "# Verify Alfredo release seam",
-      "",
       "Status: ready-for-agent",
       "Type: AFK",
       "Suggested agent: fake-local",
@@ -70,6 +68,14 @@ function writeReleaseTracker(root: string) {
     `${JSON.stringify(
       {
         agents: [
+          {
+            id: "fake-controller",
+            role: "frontier",
+            provider: "test",
+            runner: "fake",
+            model: "deterministic-controller",
+            routing: "controller",
+          },
           {
             id: "fake-local",
             role: "local-agent",
@@ -130,6 +136,10 @@ function createBackendClient(options: {
 
   return {
     loadLaunchContext: async () => ({ kind: "launch-context", context: options.launchContext }),
+    loadAgentCapabilities: async () => ({
+      kind: "capabilities",
+      catalog: backendJson(["agent-capabilities", ...common]),
+    }),
     loadSnapshot: async () => {
       const snapshot = backendJson(["workspace-snapshot", ...common]);
       return { kind: snapshot.workspace_session.status === "empty" ? "empty" : "ready", snapshot };
@@ -138,6 +148,91 @@ function createBackendClient(options: {
       kind: "history",
       history: backendJson(["agent-console-history", ...common]) as AgentConsoleHistory,
     }),
+    appendConsoleMessage: async (request) => ({
+      kind: "message",
+      message: backendJson([
+        "agent-console-message",
+        ...common,
+        "--role",
+        request.role,
+        "--content",
+        request.content,
+        "--outcome",
+        request.outcome,
+        "--source",
+        request.source,
+        "--expected-revision",
+        String(request.expected_revision),
+        "--scope-kind",
+        request.scope_kind,
+        "--scope-target",
+        request.scope_target,
+        "--scope-label",
+        request.scope_label,
+        ...(request.scope_mission_id
+          ? ["--scope-mission-id", request.scope_mission_id]
+          : []),
+      ]),
+    }),
+    loadWorkspaceQueue: async () => ({
+      kind: "workspace-queue",
+      projection: backendJson(["workspace-queue", ...common]),
+    }),
+    submitAdHocDelegationProposal: async (request) => {
+      const args = [
+        "ad-hoc-delegation-proposal",
+        ...common,
+        "--correlation-id",
+        request.correlation_id,
+        "--expected-revision",
+        String(request.expected_revision),
+        "--source",
+        request.source,
+        "--scope-kind",
+        request.scope_kind,
+        "--scope-target",
+        request.scope_target,
+        "--scope-label",
+        request.scope_label,
+        "--proposed-agent",
+        request.proposed_agent,
+        "--originating-message-id",
+        request.originating_message_id,
+      ];
+      request.acceptance_criteria.forEach((criterion) => {
+        args.push("--acceptance-criterion", criterion);
+      });
+      request.allowed_paths.forEach((path) => {
+        args.push("--allowed-path", path);
+      });
+      Object.entries(request.command_policy).forEach(([command, policy]) => {
+        args.push("--command-policy", `${command}=${policy}`);
+      });
+      if (request.mission_id) args.push("--queue-mission-id", request.mission_id);
+      return { kind: "acknowledged", acknowledgement: backendJson(args) };
+    },
+    submitWorkspaceQueueDecision: async (request) => {
+      const args: string[] = [
+        "workspace-queue-decision",
+        ...common,
+        "--correlation-id",
+        request.correlation_id,
+        "--expected-queue-revision",
+        String(request.expected_revision),
+        "--item-id",
+        request.item_id,
+        "--decision",
+        request.decision,
+        "--reason",
+        request.reason ?? "",
+      ];
+      if (request.action_type) args.push("--action-type", request.action_type);
+      if (request.actor) args.push("--actor", request.actor);
+      if (request.target) {
+        args.push("--target-kind", request.target.kind, "--target-id", request.target.id);
+      }
+      return { kind: "acknowledged", acknowledgement: backendJson(args) };
+    },
     submitWorkstationAction: async (request) => {
       options.workstationActions.push(request);
       const acknowledgement = backendJson([
@@ -162,6 +257,18 @@ function createBackendClient(options: {
       ]);
       return { kind: "acknowledged", acknowledgement };
     },
+    runWorkstationSession: async (request) => ({
+      kind: "session-finished",
+      session: backendJson([
+        "workstation-session-run",
+        ...common,
+        "--session-id",
+        request.session_id,
+        ...(request.mission_id
+          ? ["--session-mission-id", request.mission_id]
+          : []),
+      ]),
+    }),
     submitAction: async (request) => {
       options.viewActions.push(request);
       const acknowledgement = backendJson([
@@ -203,11 +310,12 @@ function createBackendClient(options: {
 test("release seam covers launch intent, workstation action acknowledgement, journal, and restart restore", async () => {
   window.localStorage.clear();
   const root = mkdtempSync(resolve(tmpdir(), "alfredo-release-seam-"));
+  const trackedSessionId = "session-ISS-01-2";
 
   try {
     const runtimeRoot = resolve(root, "runtime");
     const { workspace, tracker, issues, agentConfig } = writeReleaseTracker(root);
-    const launch = spawnSync(process.execPath, [alfredoBinPath(), "--agent", "fake-local"], {
+    const launch = spawnSync(process.execPath, [alfredoBinPath(), "--agent", "fake-controller"], {
       cwd: workspace,
       encoding: "utf8",
       env: {
@@ -223,8 +331,8 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
     expect(launchPlan).toMatchObject({
       product: "Alfredo",
       launch: "workstation",
-      selected_agent: "fake-local",
-      selected_model: "deterministic-fake",
+      selected_agent: "fake-controller",
+      selected_model: "deterministic-controller",
       starting_location: workspace,
       workspace_selection: {
         schema_version: 1,
@@ -236,12 +344,14 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
       runtime_root: runtimeRoot,
       recent_workspaces: [],
     });
+    expect(launchPlan).not.toHaveProperty("selected_workspace");
     expect(launchPlan.preflight.map((check: { name: string }) => check.name)).toEqual([
       "product_install",
       "node_runtime",
       "npm_runtime",
       "desktop_shell",
       "backend_process",
+      "sandbox_runtime",
       "starting_location_access",
       "writable_runtime",
       "ollama",
@@ -278,7 +388,6 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
       return result.stdout;
     };
     const runBackend = (args: readonly string[]) => JSON.parse(runBackendText(args));
-    runBackendText(["approve", ...common, "ISS-01"]);
     runBackend([
       "agent-console-message",
       ...common,
@@ -328,7 +437,7 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
         schema_version: 1,
         selected_agent: launchPlan.selected_agent,
         selected_model: launchPlan.selected_model,
-        starting_location: launchPlan.starting_location,
+        starting_location: workspace,
         coding_workspace: workspace,
         active_mission: "release-smoke",
         phase: "workspace-ready",
@@ -348,27 +457,125 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
     const first = render(<App client={client} />);
     expect(await screen.findByRole("main", { name: "Prompt Workstation" })).toBeVisible();
     const statusLine = screen.getByLabelText("Prompt status line");
-    expect(within(statusLine).getByText("Controller fake-local")).toBeVisible();
-    expect(within(statusLine).getByText("Model deterministic-fake")).toBeVisible();
-    expect(within(statusLine).getByText(`Workspace ${workspace}`)).toBeVisible();
-    expect(within(statusLine).getByText(`Runtime ${runtimeRoot}`)).toBeVisible();
-    expect(statusLine).not.toHaveTextContent(/recent workspaces/);
+    const controllerPicker = screen.getByRole("combobox", { name: "Controller model" });
+    expect(controllerPicker).toHaveValue("fake-controller");
+    expect((controllerPicker as HTMLSelectElement).selectedOptions[0]).toHaveTextContent(
+      "fake-controller · deterministic-controller",
+    );
+    expect(statusLine).toHaveTextContent("Workspace workspace");
+    expect(statusLine).not.toHaveTextContent(/Runtime|recent workspaces/);
     expect(screen.getByRole("textbox", { name: "Message Alfredo" })).toBeVisible();
-    expect(await screen.findByText("Launch the release seam verification.")).toBeVisible();
-    expect(await screen.findByText(/keep the action governed/)).toBeVisible();
+    expect(screen.getByText("Launch the release seam verification.")).toBeVisible();
+    expect(screen.getByText(/keep the action governed/)).toBeVisible();
 
-    const cards = screen.getByRole("region", { name: "Workstation Cards" });
-    expect(within(cards).getByText("Release Seam")).toBeVisible();
-    fireEvent.click(await within(cards).findByRole("button", { name: "Launch ISS-01" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Message Alfredo" }), {
+      target: { value: "Please fix the release seam polling with a subagent" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send prompt" }));
+    expect(
+      await screen.findByText("Please fix the release seam polling with a subagent"),
+    ).toBeVisible();
+    await waitFor(() => {
+      expect(screen.getAllByText("session-ADHOC-000001-1").length).toBeGreaterThan(0);
+    }, { timeout: 10_000 });
+    expect(
+      await screen.findByText(
+        "Mission Commander approved coding task ADHOC-000001.",
+      ),
+    ).toBeVisible();
+    expect(
+      screen.getByText(
+        "Orchestrator queued coding task ADHOC-000001 as session-ADHOC-000001-1 on fake-local.",
+      ),
+    ).toBeVisible();
+    expect(
+      await screen.findByText(
+        "Workstation outcome: ADHOC-000001 is evidence-ready on fake-local.",
+      ),
+    ).toBeVisible();
+    fireEvent.change(screen.getByRole("textbox", { name: "Message Alfredo" }), {
+      target: { value: "While that runs, explain the documentation layout." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send prompt" }));
+    const immediateTranscript = screen.getByRole("region", { name: "Prompt Transcript" });
+    const immediateOrderedTurns = [
+      await within(immediateTranscript).findByText(
+        "Please fix the release seam polling with a subagent",
+      ),
+      within(immediateTranscript).getByText(
+        "Coding task proposal ADHOC-000001 was recorded from Agent Console.",
+      ),
+      within(immediateTranscript).getByText(
+        "Mission Commander approved coding task ADHOC-000001.",
+      ),
+      within(immediateTranscript).getByText(
+        "Orchestrator queued coding task ADHOC-000001 as session-ADHOC-000001-1 on fake-local.",
+      ),
+      await within(immediateTranscript).findByText(
+        "While that runs, explain the documentation layout.",
+      ),
+    ].map((node) => node.closest("[data-timeline-key]"));
+    expect(immediateOrderedTurns.every(Boolean)).toBe(true);
+    for (let index = 0; index < immediateOrderedTurns.length - 1; index += 1) {
+      expect(
+        immediateOrderedTurns[index]!.compareDocumentPosition(
+          immediateOrderedTurns[index + 1]!,
+        ) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    }
+
+    const assignmentBoard = screen.getByRole("table", { name: "Issue Assignment Board" });
+    expect(within(assignmentBoard).getByText("Release Seam")).toBeVisible();
+    fireEvent.click(
+      await within(assignmentBoard).findByRole("button", { name: "Approve for launch ISS-01" }),
+    );
+
+    await waitFor(() => expect(workstationActions[0]).toEqual({
+      correlation_id: "workstation-issue-approve-alfredo-release-ISS-01-1",
+      action_type: "issue-approve",
+      actor: "mission-commander",
+      expected_revision: 1,
+      target: { kind: "issue-slice", id: "ISS-01" },
+      mission_id: "alfredo-release",
+      issue_id: "ISS-01",
+      session_id: undefined,
+      agent_id: undefined,
+      reason: undefined,
+      allowed_paths: [],
+      command_policy: {},
+    }));
+    expect(
+      await within(screen.getByRole("region", { name: "Prompt Transcript" })).findByText(
+        /approved ISS-01 for governed Local Agent launch/,
+      ),
+    ).toBeVisible();
+    fireEvent.click(
+      await within(assignmentBoard).findByRole("button", { name: "Launch ISS-01" }),
+    );
 
     await waitFor(() =>
       expect(workstationActions).toEqual([
         {
-          correlation_id: "workstation-issue-launch-ISS-01-1",
-          action_type: "issue-launch",
+          correlation_id: "workstation-issue-approve-alfredo-release-ISS-01-1",
+          action_type: "issue-approve",
           actor: "mission-commander",
           expected_revision: 1,
           target: { kind: "issue-slice", id: "ISS-01" },
+          mission_id: "alfredo-release",
+          issue_id: "ISS-01",
+          session_id: undefined,
+          agent_id: undefined,
+          reason: undefined,
+          allowed_paths: [],
+          command_policy: {},
+        },
+        {
+          correlation_id: "workstation-issue-launch-alfredo-release-ISS-01-2",
+          action_type: "issue-launch",
+          actor: "mission-commander",
+          expected_revision: 2,
+          target: { kind: "issue-slice", id: "ISS-01" },
+          mission_id: "alfredo-release",
           issue_id: "ISS-01",
           session_id: undefined,
           agent_id: undefined,
@@ -379,21 +586,27 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
       ]),
     );
     expect(await screen.findByText(/Workstation action: Mission Commander requested Launch ISS-01/)).toBeVisible();
-    expect(await screen.findByText(/Orchestrator accepted workstation action: Orchestrator launched ISS-01/)).toBeVisible();
-    expect(screen.getAllByText("session-ISS-01-1").length).toBeGreaterThan(0);
+    expect(await screen.findByText(/Orchestrator accepted workstation action: Orchestrator queued ISS-01/)).toBeVisible();
+    expect(screen.getAllByText(trackedSessionId).length).toBeGreaterThan(0);
     fireEvent.click(screen.getByRole("button", { name: "Inspect assignment ISS-01" }));
     expect(screen.getByRole("region", { name: "Issue Assignment Detail" })).toHaveTextContent(
       "Release Seam",
     );
 
+    fireEvent.click(screen.getByRole("button", { name: "Open detail views" }));
     fireEvent.click(screen.getByRole("button", { name: "Activity" }));
     const journal = await screen.findByRole("region", { name: "Activity Journal" });
-    expect(within(journal).getByText("Orchestrator launched ISS-01 as session-ISS-01-1.")).toBeVisible();
-    expect(within(journal).getByText("issue-slice / ISS-01")).toBeVisible();
+    expect(within(journal).getByText(`Orchestrator queued ISS-01 as ${trackedSessionId}.`)).toBeVisible();
+    expect(
+      within(journal).getByText(
+        `Local Agent fake-local submitted validated evidence for ${trackedSessionId}.`,
+      ),
+    ).toBeVisible();
+    expect(within(journal).getAllByText("issue-slice / ISS-01")).toHaveLength(3);
     expect(viewActions).toEqual([
       {
-        correlation_id: "operations-view-activity-2",
-        expected_revision: 2,
+        correlation_id: "operations-view-activity-3",
+        expected_revision: 3,
         operations_view: "activity",
       },
     ]);
@@ -402,16 +615,58 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
     first.unmount();
     render(<App client={client} />);
     const restoredTranscript = await screen.findByRole("region", { name: "Prompt Transcript" });
-    expect(await within(restoredTranscript).findByText("Workstation action: Mission Commander requested issue launch for ISS-01.")).toBeVisible();
-    expect(await within(restoredTranscript).findByText("Orchestrator accepted workstation action: Orchestrator launched ISS-01 as session-ISS-01-1.")).toBeVisible();
+    expect(
+      await within(restoredTranscript).findByText(
+        "Coding task proposal ADHOC-000001 was recorded from Agent Console.",
+      ),
+    ).toBeVisible();
+    expect(
+      within(restoredTranscript).getByText(
+        "Mission Commander approved coding task ADHOC-000001.",
+      ),
+    ).toBeVisible();
+    expect(
+      within(restoredTranscript).getByText(
+        "Orchestrator queued coding task ADHOC-000001 as session-ADHOC-000001-1 on fake-local.",
+      ),
+    ).toBeVisible();
+    const restoredOrderedTurns = [
+      within(restoredTranscript).getByText(
+        "Please fix the release seam polling with a subagent",
+      ),
+      within(restoredTranscript).getByText(
+        "Coding task proposal ADHOC-000001 was recorded from Agent Console.",
+      ),
+      within(restoredTranscript).getByText(
+        "Mission Commander approved coding task ADHOC-000001.",
+      ),
+      within(restoredTranscript).getByText(
+        "Orchestrator queued coding task ADHOC-000001 as session-ADHOC-000001-1 on fake-local.",
+      ),
+      within(restoredTranscript).getByText(
+        "While that runs, explain the documentation layout.",
+      ),
+    ].map((node) => node.closest("[data-timeline-key]"));
+    expect(restoredOrderedTurns.every(Boolean)).toBe(true);
+    for (let index = 0; index < restoredOrderedTurns.length - 1; index += 1) {
+      expect(
+        restoredOrderedTurns[index]!.compareDocumentPosition(restoredOrderedTurns[index + 1]!) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+    }
+    expect(within(restoredTranscript).getByText("Workstation action: Mission Commander requested issue launch for ISS-01.")).toBeVisible();
+    expect(within(restoredTranscript).getByText(`Orchestrator accepted workstation action: Orchestrator queued ISS-01 as ${trackedSessionId}.`)).toBeVisible();
+    expect(screen.getByRole("button", { name: "Open detail views" })).toBeVisible();
+    expect(screen.queryByRole("region", { name: "Activity Journal" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Open detail views" }));
     const restoredJournal = await screen.findByRole("region", { name: "Activity Journal" });
-    expect(within(restoredJournal).getByText("Orchestrator launched ISS-01 as session-ISS-01-1.")).toBeVisible();
+    expect(within(restoredJournal).getByText(`Orchestrator queued ISS-01 as ${trackedSessionId}.`)).toBeVisible();
     const restoredAssignmentDetail = screen.getByRole("region", { name: "Issue Assignment Detail" });
     expect(restoredAssignmentDetail).toHaveTextContent("ISS-01");
     expect(restoredAssignmentDetail).toHaveTextContent("Release Seam");
-    expect(screen.getAllByText("session-ISS-01-1").length).toBeGreaterThan(0);
-    expect(screen.getByLabelText("Prompt status line")).toHaveTextContent(`Workspace ${workspace}`);
+    expect(screen.getAllByText(trackedSessionId).length).toBeGreaterThan(0);
+    expect(screen.getByLabelText("Prompt status line")).toHaveTextContent("Workspace workspace");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
-});
+}, 15_000);

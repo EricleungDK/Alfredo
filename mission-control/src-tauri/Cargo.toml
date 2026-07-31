@@ -1,17 +1,18 @@
 [package]
-name = "albert-mission-control"
+name = "alfredo-desktop"
 version = "0.1.0"
 description = "Albert Command Deck desktop bridge"
 edition = "2021"
 
 [[bin]]
-name = "albert-mission-control"
+name = "alfredo-desktop"
 path = "src/main.rs"
 required-features = ["desktop"]
 
 [features]
 default = ["desktop"]
 desktop = ["dep:tauri", "tauri/wry"]
+rust-orchestrator-prototype = []
 
 [lib]
 name = "albert_mission_control"

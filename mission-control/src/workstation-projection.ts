@@ -1,5 +1,6 @@
 import type {
   WorkspaceIssueSessionDetail,
+  WorkspaceIssueEvidenceSummary,
   WorkspaceIssueSliceSummary,
   WorkspaceMissionSummary,
   WorkspaceQueueDecision,
@@ -11,6 +12,7 @@ import type {
 } from "./contracts";
 
 export type WorkstationCardStatus =
+  | "queued"
   | "thinking"
   | "running"
   | "idle"
@@ -42,6 +44,8 @@ export interface WorkstationDiffLink {
   readonly label: string;
   readonly path: string;
   readonly href: string;
+  readonly missionId: string;
+  readonly cardId: string;
   readonly sessionId: string;
 }
 
@@ -77,6 +81,7 @@ export interface WorkstationGovernedAction {
   readonly requiresReason: boolean;
   readonly actionType?:
     | "workspace-queue-decision"
+    | "issue-approve"
     | "issue-launch"
     | "issue-retry"
     | "session-cancel"
@@ -86,6 +91,7 @@ export interface WorkstationGovernedAction {
     | "mission-draft-decision"
     | "conversation-scope-change";
   readonly actor?: "mission-commander";
+  readonly missionId?: string;
   readonly itemId?: string;
   readonly issueId?: string;
   readonly sessionId?: string;
@@ -157,6 +163,7 @@ export interface WorkstationProjection {
 }
 
 export type IssueAssignmentRowState =
+  | "needs-review"
   | "unassigned-ready"
   | "assigned"
   | "blocked"
@@ -207,31 +214,26 @@ export function projectWorkstationCards(
   snapshot: WorkspaceSnapshot,
   options: ProjectWorkstationOptions = {},
 ): WorkstationProjection {
+  const activeMissionId = snapshot.active_mission?.id ?? null;
   const issueSlices = new Map(
-    snapshot.mission_board.issue_slices?.map((issue) => [issue.issue_id, issue]),
+    snapshot.mission_board.issue_slices?.map((issue) => [
+      missionIssueKey(activeMissionId, issue.issue_id),
+      issue,
+    ]),
   );
-  const sessionIssueIds = new Set(
-    snapshot.missions?.flatMap((mission) =>
-      mission.sessions.map((session) => session.issue_id),
-    ) ?? [],
-  );
-  const launchableIssueCards =
-    snapshot.mission_board.issue_slices
-      ?.filter((issue) => issue.launch_eligible && !sessionIssueIds.has(issue.issue_id))
-      .map((issue) => projectLaunchableIssueCard(snapshot, issue)) ?? [];
   const cards =
     snapshot.missions?.flatMap((mission) => [
       ...mission.attention.map((attention) =>
         projectAttentionCard(snapshot, mission, attention, options.workspaceQueue ?? null),
       ),
       ...mission.sessions.map((session) => {
-        const issue = issueSlices.get(session.issue_id);
+        const issue = issueSlices.get(missionIssueKey(mission.id, session.issue_id));
         const detail = issue?.sessions.find((item) => item.session_id === session.session_id);
         return projectSessionCard(snapshot, mission, session, issue, detail);
       }),
     ]) ?? [];
 
-  const groups = groupCards([...launchableIssueCards, ...cards]);
+  const groups = groupCards(cards);
   return {
     revision: snapshot.revision,
     groups,
@@ -239,21 +241,65 @@ export function projectWorkstationCards(
   };
 }
 
+function missionIssueKey(missionId: string | null, issueId: string): string {
+  return JSON.stringify([missionId, issueId]);
+}
+
 export function projectIssueAssignmentBoard(snapshot: WorkspaceSnapshot): IssueAssignmentBoardProjection {
   const issueSlices = new Map(
     snapshot.mission_board.issue_slices?.map((issue) => [issue.issue_id, issue]),
   );
-  const rows = snapshot.mission_board.ordered_issue_ids.map((issueId) => {
+  const rows = snapshot.mission_board.ordered_issue_ids.flatMap((issueId) => {
     const issue = issueSlices.get(issueId);
-    return issue
-      ? projectIssueAssignmentRow(snapshot, issue)
-      : projectFallbackIssueAssignmentRow(snapshot, issueId);
+    if (issue) {
+      return isActiveAfkAssignmentIssue(issue)
+        ? [projectIssueAssignmentRow(snapshot, issue)]
+        : [];
+    }
+    return [];
   });
 
   return {
     revision: snapshot.revision,
     rows,
   };
+}
+
+const TERMINAL_TRACKER_STATUSES = new Set([
+  "canceled",
+  "cancelled",
+  "closed",
+  "complete",
+  "completed",
+  "done",
+  "merged",
+  "rejected",
+  "wont-fix",
+  "wontfix",
+]);
+
+function isActiveAfkAssignmentIssue(issue: WorkspaceIssueSliceSummary): boolean {
+  const workType = issue.work_type?.trim().toLowerCase() ?? "";
+  if (workType !== "afk") return false;
+  const trackerStatus = (issue.tracker_status ?? "").trim().toLowerCase();
+  if (!trackerStatus) return false;
+  if (trackerStatus === "ready-for-human" || trackerStatus === "needs-human-review") {
+    return false;
+  }
+  if (TERMINAL_TRACKER_STATUSES.has(trackerStatus)) return false;
+  const currentSession = latestSession(issue.sessions);
+  if (
+    currentSession &&
+    canonicalStatus(
+      currentSession.status,
+      currentSession.operation_status,
+      currentSession.failure,
+    ) !== "done"
+  ) {
+    return true;
+  }
+  const lifecycle = issue.lifecycle.trim().toLowerCase();
+  return !lifecycle.includes("complete") && !lifecycle.includes("merged");
 }
 
 function projectIssueAssignmentRow(
@@ -265,7 +311,7 @@ function projectIssueAssignmentRow(
   const issueSession =
     (missionSession
       ? issue.sessions.find((session) => session.session_id === missionSession.session_id)
-      : null) ?? issue.sessions[0] ?? null;
+      : null) ?? latestSession(issue.sessions);
   const workstationStatus = canonicalStatus(
     issueSession?.status ?? missionSession?.status ?? "",
     issueSession?.operation_status ?? issue.model_assignment.operation_status,
@@ -291,8 +337,7 @@ function projectIssueAssignmentRow(
     blockerSummaries: issue.blockers.map(blockerSummary),
     workstationSessionId,
     workstationAgent: missionSession?.assigned_agent ?? issueSession?.assigned_agent ?? null,
-    workstationStatus:
-      (missionSession?.status ?? issueSession?.status ?? issue.model_assignment.operation_status) || null,
+    workstationStatus: (missionSession?.status ?? issueSession?.status) || null,
     scope: {
       kind: "issue-slice",
       target_id: issue.issue_id,
@@ -306,37 +351,8 @@ function projectIssueAssignmentRow(
       assignmentState,
       workstationSessionId,
       snapshot.revision,
+      ownerMissionId ?? undefined,
     ),
-  };
-}
-
-function projectFallbackIssueAssignmentRow(
-  snapshot: WorkspaceSnapshot,
-  issueId: string,
-): IssueAssignmentBoardRow {
-  const ready = snapshot.mission_board.ready_issue_ids.includes(issueId);
-  const state: IssueAssignmentRowState = ready ? "unassigned-ready" : "blocked";
-  return {
-    issueId,
-    title: ready ? "Launch eligible" : "Waiting on canonical Issue Slice details",
-    owner: "Unassigned",
-    assignmentState: "unassigned",
-    state,
-    lifecycleState: ready ? "Ready" : "Blocked",
-    readinessState: readinessLabel(state),
-    blockerState: ready ? "clear" : "blocked",
-    blockerSummaries: ready ? [] : ["Canonical Issue Slice detail unavailable"],
-    workstationSessionId: null,
-    workstationAgent: null,
-    workstationStatus: null,
-    scope: {
-      kind: "issue-slice",
-      target_id: issueId,
-      label: issueId,
-      mission_id: snapshot.active_mission?.id ?? null,
-    },
-    scopeDisabledReason: scopeDisabledReason(snapshot, issueId, snapshot.active_mission?.id ?? null),
-    governedActions: [],
   };
 }
 
@@ -346,39 +362,68 @@ function issueAssignmentGovernedActions(
   assignmentState: IssueAssignmentState,
   workstationSessionId: string | null,
   expectedRevision: number,
+  missionId?: string,
 ): readonly WorkstationGovernedAction[] {
-  if (
-    state !== "unassigned-ready" ||
-    assignmentState !== "unassigned" ||
-    workstationSessionId ||
-    !issue.launch_eligible
-  ) {
+  if (workstationSessionId || issue.blockers.some((blocker) => !blocker.satisfied)) {
     return [];
   }
-  return [
-    {
+  const trackerStatus = issue.tracker_status?.toLowerCase() ?? "";
+  const lifecycle = issue.lifecycle.toLowerCase();
+  if (state === "needs-review") {
+    return trackerStatus === "ready-for-agent"
+      ? [
+          {
+            label: "Approve for launch",
+            target: "mission-board",
+            requiresReason: false,
+            actionType: "issue-approve",
+            actor: "mission-commander",
+            missionId,
+            issueId: issue.issue_id,
+            expectedRevision,
+            targetIdentity: { kind: "issue-slice", id: issue.issue_id },
+            recoveryPath: "Refresh the Issue Assignment Board and approve the current Issue Slice state.",
+          },
+        ]
+      : [];
+  }
+
+  const launchable =
+    issue.launch_eligible && (state === "unassigned-ready" || state === "assigned");
+  const assignmentManageable =
+    launchable || (trackerStatus === "ready-for-agent" && lifecycle.includes("approved"));
+  if (!launchable && !assignmentManageable) return [];
+
+  const actions: WorkstationGovernedAction[] = [];
+  if (launchable) {
+    actions.push({
       label: "Launch",
       target: "mission-board",
       requiresReason: false,
       actionType: "issue-launch",
       actor: "mission-commander",
+      missionId,
       issueId: issue.issue_id,
       expectedRevision,
       targetIdentity: { kind: "issue-slice", id: issue.issue_id },
       recoveryPath: "Refresh the Issue Assignment Board and retry from the current Issue Slice state.",
-    },
-    {
-      label: "Assign model",
+    });
+  }
+  if (assignmentManageable) {
+    actions.push({
+      label: assignmentState === "assigned" ? "Change model assignment" : "Assign model",
       target: "mission-board",
       requiresReason: true,
       actionType: "model-assignment-change",
       actor: "mission-commander",
+      missionId,
       issueId: issue.issue_id,
       expectedRevision,
       targetIdentity: { kind: "issue-slice", id: issue.issue_id },
       recoveryPath: "Provide the target agent id and reason, then retry from the acknowledged row state.",
-    },
-  ];
+    });
+  }
+  return actions;
 }
 
 function missionSessionForIssue(
@@ -387,7 +432,25 @@ function missionSessionForIssue(
   missionId: string | null,
 ): WorkspaceMissionSummary["sessions"][number] | null {
   const mission = (snapshot.missions ?? []).find((candidate) => candidate.id === missionId);
-  return mission?.sessions.find((candidate) => candidate.issue_id === issueId) ?? null;
+  return latestSession(
+    mission?.sessions.filter((candidate) => candidate.issue_id === issueId) ?? [],
+  );
+}
+
+function latestSession<T extends { readonly session_id: string }>(
+  sessions: readonly T[],
+): T | null {
+  return sessions.reduce<T | null>((latest, candidate) => {
+    if (latest === null) return candidate;
+    const latestSequence = sessionSequence(latest.session_id);
+    const candidateSequence = sessionSequence(candidate.session_id);
+    return candidateSequence >= latestSequence ? candidate : latest;
+  }, null);
+}
+
+function sessionSequence(sessionId: string): number {
+  const match = sessionId.match(/-(\d+)$/);
+  return match ? Number.parseInt(match[1], 10) : -1;
 }
 
 function assignmentStateForIssue(
@@ -416,6 +479,9 @@ function issueAssignmentRowState(
   }
   if (status === "review-ready") return "review-ready";
   if (issue.blockers.some((blocker) => !blocker.satisfied)) return "blocked";
+  if (lifecycle.includes("needs review") || lifecycle.includes("needs-review")) {
+    return "needs-review";
+  }
   if (assignmentState === "active") return "active";
   if (issue.launch_eligible && assignmentState === "unassigned") return "unassigned-ready";
   if (assignmentState === "assigned") return "assigned";
@@ -435,6 +501,7 @@ function blockerSummary(blocker: WorkspaceIssueSliceSummary["blockers"][number])
 
 function readinessLabel(state: IssueAssignmentRowState): string {
   const labels: Record<IssueAssignmentRowState, string> = {
+    "needs-review": "Needs review",
     "unassigned-ready": "Ready",
     assigned: "Assigned",
     blocked: "Blocked",
@@ -460,93 +527,6 @@ function scopeDisabledReason(
     : null;
 }
 
-function projectLaunchableIssueCard(
-  snapshot: WorkspaceSnapshot,
-  issue: WorkspaceIssueSliceSummary,
-): WorkstationCardProjection {
-  const mission = snapshot.active_mission;
-  const missionId = mission?.id ?? issue.issue_id;
-  const missionTitle = mission?.title ?? snapshot.mission_board.prd_title;
-  return {
-    id: `issue:${issue.issue_id}`,
-    missionId,
-    missionTitle,
-    name: issue.model_assignment.agent_id || issue.provenance.role,
-    sessionId: null,
-    issueId: issue.issue_id,
-    model: issue.model_assignment.model || issue.provenance.model,
-    role: issue.model_assignment.role || issue.provenance.role,
-    currentTask: issue.title,
-    status: "waiting-approval",
-    phase: issue.model_assignment.operation_status || issue.lifecycle,
-    progress: issue.progress,
-    lastActivity: `Revision ${snapshot.revision}`,
-    approvalBlockers: [],
-    filesTouched: issue.evidence.changed_files.length,
-    latestCommandOrTest: latestEvidenceLine(issue),
-    nextAction: "Launch through Mission Board governance",
-    acceptedRevision: snapshot.revision,
-    attention: true,
-    tone: "attention",
-    detail: {
-      originatingSessionId: null,
-      issueId: issue.issue_id,
-      toolActivity: [
-        {
-          kind: "operation-summary",
-          label: "Launch readiness",
-          summary: issue.progress || "Issue Slice is launch eligible.",
-        },
-      ],
-      filesTouched: issue.evidence.changed_files.map((path) => ({ path, status: "touched" })),
-      diffs: [],
-      evidenceLinks: [],
-      terminalExcerpts: [],
-      reviewState: {
-        evidenceState: issue.evidence.state,
-        lifecycle: issue.lifecycle,
-        risks: issue.evidence.risks || "No risks recorded.",
-        reviewReady: false,
-      },
-      governedActions: [
-        {
-          label: "Launch",
-          target: "mission-board",
-          requiresReason: false,
-          actionType: "issue-launch",
-          actor: "mission-commander",
-          issueId: issue.issue_id,
-          expectedRevision: snapshot.revision,
-          targetIdentity: { kind: "issue-slice", id: issue.issue_id },
-          recoveryPath: "Refresh the Mission Board and retry launch from the current Issue Slice state.",
-        },
-        {
-          label: "Change model assignment",
-          target: "mission-board",
-          requiresReason: true,
-          actionType: "model-assignment-change",
-          actor: "mission-commander",
-          issueId: issue.issue_id,
-          expectedRevision: snapshot.revision,
-          recoveryPath: "Open the Issue Slice inspector and submit a model assignment change there.",
-          targetIdentity: { kind: "issue-slice", id: issue.issue_id },
-        },
-        {
-          label: "Change Conversation Scope",
-          target: "agent-console",
-          requiresReason: false,
-          actionType: "conversation-scope-change",
-          actor: "mission-commander",
-          issueId: issue.issue_id,
-          expectedRevision: snapshot.revision,
-          targetIdentity: { kind: "conversation-scope", id: issue.issue_id },
-          recoveryPath: "Use the Conversation Scope selector near the composer.",
-        },
-      ],
-    },
-  };
-}
-
 function projectAttentionCard(
   snapshot: WorkspaceSnapshot,
   mission: WorkspaceMissionSummary,
@@ -555,7 +535,7 @@ function projectAttentionCard(
 ): WorkstationCardProjection {
   const queueItem = pendingQueueItemForAttention(workspaceQueue, attention);
   return {
-    id: `attention:${attention.attention_id}`,
+    id: `attention:${mission.id}:${attention.attention_id}`,
     missionId: mission.id,
     missionTitle: mission.title,
     name: attention.label,
@@ -567,7 +547,7 @@ function projectAttentionCard(
     status: "waiting-approval",
     phase: "Approval",
     progress: "Workspace Queue item pending",
-    lastActivity: `Revision ${snapshot.revision}`,
+    lastActivity: "",
     approvalBlockers: [attention.label],
     filesTouched: 0,
     latestCommandOrTest: "No command or test summary",
@@ -631,6 +611,7 @@ function workspaceQueueDecisionActions(
     target: "workspace-queue" as const,
     actionType: "workspace-queue-decision" as const,
     actor: "mission-commander" as const,
+    missionId: item.mission_id,
     itemId: item.item_id,
     targetIdentity: {
       kind: "workspace-queue-item" as const,
@@ -646,13 +627,18 @@ function projectSessionCard(
   issue: WorkspaceIssueSliceSummary | undefined,
   detail: WorkspaceIssueSessionDetail | undefined,
 ): WorkstationCardProjection {
-  const status = canonicalStatus(session.status, detail?.operation_status, detail?.failure);
-  const latestCommandOrTest = latestEvidenceLine(issue);
-  const progress = issue?.progress ?? detail?.operation_status ?? session.status;
-  const failure = detail?.failure ? [detail.failure] : [];
-  const attention = status === "blocked" || status === "failed";
+  const cardId = workstationSessionCardId(mission.id, session.session_id);
+  const operationStatus = detail?.operation_status || session.operation_status || "";
+  const failureSummary = detail?.failure || session.failure || "";
+  const status = canonicalStatus(session.status, operationStatus, failureSummary);
+  const evidence = issue?.evidence ?? missionSessionEvidence(session);
+  const latestCommandOrTest = latestEvidenceLine(evidence);
+  const progress = issue?.progress ?? (operationStatus || session.status);
+  const failure = failureSummary ? [failureSummary] : [];
+  const repairActionAvailable = Boolean(session.repair_action_available);
+  const attention = repairActionAvailable || status === "blocked" || status === "failed";
   return {
-    id: `session:${session.session_id}`,
+    id: cardId,
     missionId: mission.id,
     missionTitle: mission.title,
     name: session.assigned_agent,
@@ -660,31 +646,50 @@ function projectSessionCard(
     issueId: session.issue_id,
     model: detail?.model || session.model || issue?.model_assignment.model || session.assigned_agent,
     role: detail?.role || session.role || issue?.model_assignment.role || "agent",
-    currentTask: issue?.title ?? session.issue_id,
+    currentTask: issue?.title ?? (session.task_title || session.issue_id),
     status,
-    phase: detail?.operation_status || session.status,
+    phase: operationStatus || session.status,
     progress,
-    lastActivity: lastActivity(snapshot, detail, latestCommandOrTest),
+    lastActivity: session.last_activity_at ?? "",
     approvalBlockers: failure,
-    filesTouched: issue?.evidence.changed_files.length ?? 0,
+    filesTouched: evidence.changed_files.length,
     latestCommandOrTest,
-    nextAction: nextAction(status, progress, detail?.failure),
+    nextAction: repairActionAvailable
+      ? "Launch repair"
+      : nextAction(status, progress, detail?.failure),
     acceptedRevision: snapshot.revision,
     attention,
     tone: toneForStatus(status),
-    detail: sessionDetail(status, session.session_id, session.issue_id, issue, detail, snapshot.revision),
+    detail: sessionDetail(
+      status,
+      mission.id,
+      cardId,
+      session.session_id,
+      session.issue_id,
+      issue,
+      detail,
+      evidence,
+      snapshot.revision,
+      repairActionAvailable,
+      session.review_outcome,
+    ),
   };
 }
 
 function sessionDetail(
   status: WorkstationCardStatus,
+  missionId: string,
+  cardId: string,
   sessionId: string,
   issueId: string,
   issue: WorkspaceIssueSliceSummary | undefined,
   detail: WorkspaceIssueSessionDetail | undefined,
+  evidence: WorkspaceIssueEvidenceSummary,
   acceptedRevision = 0,
+  repairActionAvailable = false,
+  reviewOutcome = "",
 ): WorkstationCardDetail {
-  const commands = issue?.evidence.commands_run ?? [];
+  const commands = evidence.commands_run;
   const toolActivity: WorkstationToolActivity[] = [
     ...commands.map((command) => ({
       kind: "command-summary" as const,
@@ -707,16 +712,29 @@ function sessionDetail(
     });
   }
 
-  const changedFiles = issue?.evidence.changed_files ?? [];
+  const changedFiles = evidence.changed_files;
   const filesTouched = changedFiles.map((path) => ({ path, status: "touched" }));
-  const diffs = changedFiles.map((path) => ({
-    label: `Diff ${path}`,
-    path,
-    href: `app-local://diffs/${sessionId}?path=${encodeURIComponent(path)}`,
-    sessionId,
-  }));
-  const evidenceLinks = (issue?.evidence.artifact_links ?? []).map((href) => ({
-    label: `Evidence Package ${sessionId}`,
+  const readableArtifactLinks = evidence.artifact_links.filter(
+    (href) => href.startsWith("app-local://") || href.startsWith("artifact://evidence/"),
+  );
+  const reviewDiffArtifact = readableArtifactLinks.find((href) =>
+    /(?:^|[/\\])(?:review\.diff|review_diff)$/i.test(href),
+  );
+  const diffs = reviewDiffArtifact
+    ? changedFiles.map((path) => ({
+        label: `Diff ${path}`,
+        path,
+        href: reviewDiffArtifact,
+        missionId,
+        cardId,
+        sessionId,
+      }))
+    : [];
+  const evidenceLinks = readableArtifactLinks.map((href) => ({
+    label:
+      href === reviewDiffArtifact
+        ? `Review diff ${sessionId}`
+        : `Evidence Package ${sessionId}`,
     href,
     sessionId,
   }));
@@ -726,11 +744,11 @@ function sessionDetail(
       excerpt: command,
       sessionId,
     })),
-    ...(issue?.evidence.test_results
+    ...(evidence.test_results
       ? [
           {
             label: "Test summary",
-            excerpt: issue.evidence.test_results,
+            excerpt: evidence.test_results,
             sessionId,
           },
         ]
@@ -746,13 +764,24 @@ function sessionDetail(
     evidenceLinks,
     terminalExcerpts,
     reviewState: {
-      evidenceState: issue?.evidence.state ?? "missing",
-      lifecycle: issue?.lifecycle ?? status,
-      risks: issue?.evidence.risks || "No risks recorded.",
+      evidenceState: evidence.state,
+      lifecycle: issue?.lifecycle ?? (reviewOutcome || status),
+      risks: evidence.risks || "No risks recorded.",
       reviewReady: status === "review-ready",
     },
-    governedActions: governedActions(status, sessionId, issueId, acceptedRevision),
+    governedActions: governedActions(
+      status,
+      sessionId,
+      issueId,
+      acceptedRevision,
+      missionId,
+      repairActionAvailable,
+    ),
   };
+}
+
+function workstationSessionCardId(missionId: string, sessionId: string): string {
+  return `session:${missionId}:${sessionId}`;
 }
 
 function groupCards(cards: readonly WorkstationCardProjection[]): readonly WorkstationCardGroup[] {
@@ -806,11 +835,12 @@ function statusPriority(status: WorkstationCardStatus): number {
     blocked: 1,
     failed: 2,
     reviewing: 3,
-    running: 4,
-    idle: 5,
-    thinking: 6,
-    "review-ready": 7,
-    done: 8,
+    queued: 4,
+    running: 5,
+    idle: 6,
+    thinking: 7,
+    "review-ready": 8,
+    done: 9,
   };
   return priority[status];
 }
@@ -818,7 +848,12 @@ function statusPriority(status: WorkstationCardStatus): number {
 function toneForStatus(status: WorkstationCardStatus): WorkstationCardProjection["tone"] {
   if (status === "failed") return "failed";
   if (status === "waiting-approval" || status === "blocked") return "attention";
-  if (status === "running" || status === "reviewing" || status === "review-ready") return "active";
+  if (
+    status === "queued" ||
+    status === "running" ||
+    status === "reviewing" ||
+    status === "review-ready"
+  ) return "active";
   return "muted";
 }
 
@@ -829,7 +864,7 @@ function canonicalStatus(
 ): WorkstationCardStatus {
   const status = `${rawStatus} ${rawOperationStatus}`.toLowerCase();
   if (failure || status.includes("failed") || status.includes("rejected")) return "failed";
-  if (status.includes("cancelled") || status.includes("canceled")) return "done";
+  if (status.includes("cancelled") || status.includes("canceled")) return "failed";
   if (status.includes("evidence-ready") || status.includes("awaiting-review")) return "review-ready";
   if (status.includes("waiting") || status.includes("approval") || status.includes("pending")) {
     return "waiting-approval";
@@ -844,8 +879,8 @@ function canonicalStatus(
   ) {
     return "done";
   }
+  if (status.includes("queued")) return "queued";
   if (
-    status.includes("queued") ||
     status.includes("not-started") ||
     (status.includes("idle") && !status.includes("launched"))
   ) {
@@ -862,24 +897,35 @@ function canonicalStatus(
   return "thinking";
 }
 
-function latestEvidenceLine(issue: WorkspaceIssueSliceSummary | undefined): string {
-  const command = issue?.evidence.commands_run.at(-1);
+function missionSessionEvidence(
+  session: WorkspaceMissionSummary["sessions"][number],
+): WorkspaceIssueEvidenceSummary {
+  const changedFiles = session.changed_files ?? [];
+  const commandsRun = session.commands_run ?? [];
+  const artifactLinks = session.artifact_links ?? [];
+  const hasEvidence =
+    changedFiles.length > 0 ||
+    commandsRun.length > 0 ||
+    Boolean(session.test_results) ||
+    artifactLinks.length > 0;
+  const accepted = /reviewed|complete|done/i.test(session.status);
+  return {
+    state: hasEvidence ? (accepted ? "accepted" : "ready-for-review") : "missing",
+    changed_files: changedFiles,
+    commands_run: commandsRun,
+    test_results: session.test_results || "No evidence package recorded.",
+    risks: session.risks || "None recorded.",
+    artifact_links: artifactLinks,
+  };
+}
+
+function latestEvidenceLine(evidence: WorkspaceIssueEvidenceSummary): string {
+  const command = evidence.commands_run.at(-1);
   if (command) return command;
-  const tests = issue?.evidence.test_results;
+  const tests = evidence.test_results;
   return tests && tests !== "No evidence package recorded."
     ? tests
     : "No command or test summary";
-}
-
-function lastActivity(
-  snapshot: WorkspaceSnapshot,
-  detail: WorkspaceIssueSessionDetail | undefined,
-  latestCommandOrTest: string,
-): string {
-  if (detail?.failure) return detail.failure;
-  if (latestCommandOrTest !== "No command or test summary") return latestCommandOrTest;
-  if (detail?.operation_status) return `Revision ${snapshot.revision} / ${detail.operation_status}`;
-  return `Revision ${snapshot.revision}`;
 }
 
 function nextAction(
@@ -892,6 +938,7 @@ function nextAction(
   if (status === "blocked") return progress || "Resolve blocker";
   if (status === "review-ready") return "Open Review Workspace";
   if (status === "done") return "Review accepted evidence";
+  if (status === "queued") return "Waiting for the Local Agent runner";
   if (status === "idle") return progress || "Await launch or assignment";
   return progress || "Monitor active work";
 }
@@ -901,16 +948,35 @@ function governedActions(
   sessionId: string,
   issueId: string,
   expectedRevision: number,
+  missionId: string,
+  repairActionAvailable = false,
 ): readonly WorkstationGovernedAction[] {
+  if (repairActionAvailable) {
+    return [
+      {
+        label: "Launch repair",
+        target: "mission-board",
+        requiresReason: false,
+        actionType: "issue-retry",
+        actor: "mission-commander",
+        missionId,
+        sessionId,
+        issueId,
+        expectedRevision,
+        recoveryPath: "Reload canonical Mission Work and launch the current Review Workspace repair action.",
+        targetIdentity: { kind: "agent-session", id: sessionId },
+      },
+    ];
+  }
   if (status === "waiting-approval") {
     return [{ label: "Open Workspace Queue", target: "workspace-queue", requiresReason: false }];
   }
   if (status === "review-ready") {
     return [
       { label: "Open Review Workspace", target: "review-workspace", requiresReason: false },
-      reviewAction("Accept evidence", "accept", sessionId, issueId, expectedRevision, false),
-      reviewAction("Request repair", "repair", sessionId, issueId, expectedRevision, true),
-      reviewAction("Escalate human review", "escalate-human", sessionId, issueId, expectedRevision, false),
+      reviewAction("Accept evidence", "accept", missionId, sessionId, issueId, expectedRevision, false),
+      reviewAction("Request repair", "repair", missionId, sessionId, issueId, expectedRevision, true),
+      reviewAction("Escalate human review", "escalate-human", missionId, sessionId, issueId, expectedRevision, false),
     ];
   }
   if (status === "failed" || status === "blocked") {
@@ -921,14 +987,15 @@ function governedActions(
         requiresReason: true,
         actionType: "issue-retry",
         actor: "mission-commander",
+        missionId,
         sessionId,
         issueId,
         expectedRevision,
         recoveryPath: "Open the Review Workspace, provide a repair reason, and submit the repair request.",
         targetIdentity: { kind: "agent-session", id: sessionId },
       },
-      reviewAction("Request repair", "repair", sessionId, issueId, expectedRevision, true),
-      reviewAction("Escalate human review", "escalate-human", sessionId, issueId, expectedRevision, false),
+      reviewAction("Request repair", "repair", missionId, sessionId, issueId, expectedRevision, true),
+      reviewAction("Escalate human review", "escalate-human", missionId, sessionId, issueId, expectedRevision, false),
     ];
   }
   if (status === "done") {
@@ -941,6 +1008,7 @@ function governedActions(
       requiresReason: true,
       actionType: "session-cancel",
       actor: "mission-commander",
+      missionId,
       sessionId,
       issueId,
       expectedRevision,
@@ -954,6 +1022,7 @@ function governedActions(
 function reviewAction(
   label: string,
   reviewDecision: ReviewDecision,
+  missionId: string,
   sessionId: string,
   issueId: string,
   expectedRevision: number,
@@ -965,6 +1034,7 @@ function reviewAction(
     requiresReason,
     actionType: "review-decision",
     actor: "mission-commander",
+    missionId,
     sessionId,
     issueId,
     reviewDecision,

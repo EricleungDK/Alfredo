@@ -3,19 +3,30 @@ from __future__ import annotations
 import argparse
 from dataclasses import asdict
 import json
+import os
+import shlex
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
-from .agents import AgentConfigError
+from .agents import AgentConfigError, load_agent_registry
+from .capabilities import (
+    CapabilityCatalogService,
+    OllamaHealthProbe,
+    OllamaHealthSnapshot,
+)
 from .core import AlbertError, AlbertMission, EvidencePackage, EvidenceValidationError
 from .tui import build_tui_state, perform_tui_action, render_tui_state
 from .workspace import (
     AgentConsoleHistoryService,
+    AgentConsoleResponseService,
     ActivityJournalService,
     ConversationScope,
     MissionDraftService,
     ReviewWorkspaceService,
+    SessionArtifactReadError,
+    SessionArtifactService,
     ShellTerminalService,
     WorkspaceAction,
     WorkspaceQueueService,
@@ -32,7 +43,41 @@ from .workspace import (
 from .workspace_selection import (
     CodingWorkspaceSelectionError,
     CodingWorkspaceSelectionService,
+    MissionChoiceError,
+    WorkspaceJourneyStore,
 )
+
+
+_OLLAMA_HEALTH_CACHE_SECONDS = 2.0
+_ollama_health_cache: dict[str, tuple[float, OllamaHealthSnapshot]] = {}
+
+
+def _cached_ollama_health() -> OllamaHealthSnapshot:
+    cache_key = os.environ.get("OLLAMA_HOST", "").strip()
+    now = time.monotonic()
+    cached = _ollama_health_cache.get(cache_key)
+    if cached is not None and now - cached[0] < _OLLAMA_HEALTH_CACHE_SECONDS:
+        return cached[1]
+    health = OllamaHealthProbe()()
+    _ollama_health_cache[cache_key] = (now, health)
+    return health
+
+
+def _live_agent_availability(
+    *,
+    workspace_root: Path,
+    registry_path: Path,
+) -> dict[str, tuple[str, str]]:
+    registry = load_agent_registry(registry_path)
+    agents = CapabilityCatalogService(
+        workspace_root=workspace_root,
+        agent_registry=registry,
+        ollama_probe=_cached_ollama_health,
+    ).agent_availability()
+    return {
+        agent.id: (agent.availability, agent.availability_reason)
+        for agent in agents
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,6 +89,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     agents = subparsers.add_parser("agents", help="List configured Frontier and Local Agent models.")
     _add_common_args(agents)
+
+    agent_capabilities = subparsers.add_parser(
+        "agent-capabilities",
+        help="Return installed skills, slash commands, and configured agents as JSON.",
+    )
+    _add_common_args(agent_capabilities, require_mission_state=False)
+    agent_capabilities.add_argument("--skill-root", action="append", default=[])
+    agent_capabilities.add_argument("--global-skill-root", action="append", default=None)
 
     headless_run = subparsers.add_parser(
         "headless-run",
@@ -85,6 +138,35 @@ def build_parser() -> argparse.ArgumentParser:
     coding_workspace_select.add_argument("--runtime-root", required=True)
     coding_workspace_select.add_argument("--correlation-id", required=True)
     coding_workspace_select.add_argument("--forbidden-root", action="append", default=[])
+
+    mission_options = subparsers.add_parser(
+        "mission-options",
+        help="Return explicit Resume Mission and Start New Mission choices as JSON.",
+    )
+    mission_options.add_argument("--starting-location", required=True)
+    mission_options.add_argument("--coding-workspace", required=True)
+    mission_options.add_argument("--runtime-root", required=True)
+
+    mission_choice = subparsers.add_parser(
+        "mission-choice",
+        help="Resume an exact Mission or create a distinct new Mission as JSON.",
+    )
+    mission_choice.add_argument("--starting-location", required=True)
+    mission_choice.add_argument("--coding-workspace", required=True)
+    mission_choice.add_argument("--runtime-root", required=True)
+    mission_choice.add_argument("--correlation-id", required=True)
+    mission_choice.add_argument("--expected-revision", required=True, type=int)
+    mission_choice.add_argument("--choice", required=True, choices=["resume", "new"])
+    mission_choice.add_argument("--mission-id", required=True)
+    mission_choice.add_argument("--mission-title", default="")
+
+    workspace_context = subparsers.add_parser(
+        "workspace-context",
+        help="Restore the canonical Workspace and Mission journey as JSON.",
+    )
+    workspace_context.add_argument("--starting-location", required=True)
+    workspace_context.add_argument("--runtime-root", required=True)
+
     workspace_action = subparsers.add_parser(
         "workspace-action",
         help="Submit a correlated semantic Workspace Session action as JSON.",
@@ -168,12 +250,30 @@ def build_parser() -> argparse.ArgumentParser:
     )
     agent_console_message.add_argument("--scope-target", required=True)
     agent_console_message.add_argument("--scope-label", required=True)
+    agent_console_message.add_argument("--scope-mission-id", default="")
 
     agent_console_history = subparsers.add_parser(
         "agent-console-history",
         help="Return the continuous Agent Console history as JSON.",
     )
     _add_common_args(agent_console_history)
+
+    agent_console_response = subparsers.add_parser(
+        "agent-console-response",
+        help="Generate and append a controller response to one correlated Agent Console prompt.",
+    )
+    _add_common_args(agent_console_response)
+    agent_console_response.add_argument("--message-id", required=True)
+    agent_console_response.add_argument("--expected-revision", required=True, type=int)
+    agent_console_response.add_argument(
+        "--scope-kind",
+        required=True,
+        choices=["working-directory", "mission", "issue-slice"],
+    )
+    agent_console_response.add_argument("--scope-target", required=True)
+    agent_console_response.add_argument("--scope-label", required=True)
+    agent_console_response.add_argument("--scope-mission-id", default="")
+    agent_console_response.add_argument("--agent-id", default="")
 
     working_context = subparsers.add_parser(
         "working-context",
@@ -199,6 +299,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Return the active Mission Review Workspace projection as JSON.",
     )
     _add_common_args(review_workspace)
+
+    session_artifact = subparsers.add_parser(
+        "session-artifact",
+        help="Read one registered review-safe Local Agent artifact as bounded JSON text.",
+    )
+    _add_common_args(session_artifact)
+    session_artifact.add_argument("--artifact-mission-id", required=True)
+    session_artifact.add_argument("--session-id", required=True)
+    session_artifact.add_argument("--artifact-ref", required=True)
 
     activity_journal = subparsers.add_parser(
         "activity-journal",
@@ -242,6 +351,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_common_args(path_grant_create)
     path_grant_create.add_argument("--correlation-id", required=True)
+    path_grant_create.add_argument("--request-id", default="")
     path_grant_create.add_argument("--expected-terminal-revision", required=True, type=int)
     path_grant_create.add_argument("--path", required=True)
     path_grant_create.add_argument(
@@ -249,6 +359,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     path_grant_create.add_argument("--duration-seconds", required=True, type=int)
     path_grant_create.add_argument("--requester", required=True)
+
+    path_grant_deny = subparsers.add_parser(
+        "additional-path-grant-deny",
+        help="Deny one contextual Additional Path Grant request as JSON.",
+    )
+    _add_common_args(path_grant_deny)
+    path_grant_deny.add_argument("--correlation-id", required=True)
+    path_grant_deny.add_argument("--request-id", required=True)
+    path_grant_deny.add_argument("--expected-terminal-revision", required=True, type=int)
+    path_grant_deny.add_argument("--path", required=True)
+    path_grant_deny.add_argument(
+        "--access-level", required=True, choices=["read", "write"]
+    )
+    path_grant_deny.add_argument("--duration-seconds", required=True, type=int)
+    path_grant_deny.add_argument("--requester", required=True)
+    path_grant_deny.add_argument("--reason", required=True)
+    path_grant_deny.add_argument("--affected-action", required=True)
 
     shell_terminal_decision = subparsers.add_parser(
         "shell-terminal-decision",
@@ -282,6 +409,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     review_decision.add_argument("--target-id", required=True)
     review_decision.add_argument("--session-id", required=True)
+    review_decision.add_argument("--review-mission-id", default="")
     review_decision.add_argument(
         "--decision", required=True, choices=["accept", "repair", "escalate-human"]
     )
@@ -354,6 +482,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--action-type",
         required=True,
         choices=[
+            "issue-approve",
             "issue-launch",
             "issue-retry",
             "session-cancel",
@@ -367,12 +496,21 @@ def build_parser() -> argparse.ArgumentParser:
         "--target-kind", required=True, choices=["issue-slice", "agent-session"]
     )
     workstation_action.add_argument("--target-id", required=True)
+    workstation_action.add_argument("--action-mission-id", default="")
     workstation_action.add_argument("--issue-id", default="")
     workstation_action.add_argument("--session-id", default="")
     workstation_action.add_argument("--agent", default="")
     workstation_action.add_argument("--reason", default="")
     workstation_action.add_argument("--allowed-path", action="append", default=[])
     workstation_action.add_argument("--command-policy", action="append", default=[])
+
+    workstation_session_run = subparsers.add_parser(
+        "workstation-session-run",
+        help="Execute one persisted queued Local Agent session and return its lifecycle as JSON.",
+    )
+    _add_common_args(workstation_session_run)
+    workstation_session_run.add_argument("--session-id", required=True)
+    workstation_session_run.add_argument("--session-mission-id", default="")
 
     mission_drafts = subparsers.add_parser(
         "mission-drafts",
@@ -505,11 +643,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _add_common_args(parser: argparse.ArgumentParser) -> None:
+def _add_common_args(
+    parser: argparse.ArgumentParser, *, require_mission_state: bool = True
+) -> None:
     parser.add_argument("--target-repo", required=True)
-    parser.add_argument("--tracker-dir", required=True)
+    parser.add_argument("--tracker-dir", required=require_mission_state, default="")
     parser.add_argument("--issues-dir", default="")
-    parser.add_argument("--runtime-root", required=True)
+    parser.add_argument("--runtime-root", required=require_mission_state, default="")
     parser.add_argument("--mission-id", default="mission-001")
     parser.add_argument("--agent-config", default="")
     parser.add_argument("--mission-catalog", default="")
@@ -601,6 +741,21 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    except SessionArtifactReadError as exc:
+        print(
+            json.dumps(
+                {
+                    "error": {
+                        "code": exc.code,
+                        "message": str(exc),
+                        "recoverable": exc.recoverable,
+                    }
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 1
     except CodingWorkspaceSelectionError as exc:
         print(
             json.dumps(
@@ -615,6 +770,18 @@ def main(argv: list[str] | None = None) -> int:
             ),
             file=sys.stderr,
         )
+        return 1
+    except MissionChoiceError as exc:
+        error_payload: dict[str, object] = {
+            "code": exc.code,
+            "message": str(exc),
+            "recoverable": exc.recoverable,
+        }
+        if exc.expected_revision is not None:
+            error_payload["expected_revision"] = exc.expected_revision
+        if exc.current_revision is not None:
+            error_payload["current_revision"] = exc.current_revision
+        print(json.dumps({"error": error_payload}, sort_keys=True), file=sys.stderr)
         return 1
     except EvidenceValidationError as exc:
         print(
@@ -649,8 +816,41 @@ def _run(args: argparse.Namespace) -> int:
         )
         print(json.dumps(acknowledgement.to_dict(), sort_keys=True))
         return 0
+    if args.command in {"mission-options", "mission-choice", "workspace-context"}:
+        return _run_mission_journey(args)
+    if args.command == "agent-capabilities":
+        workspace_root = Path(args.target_repo)
+        registry_path = (
+            Path(args.agent_config)
+            if args.agent_config
+            else workspace_root / ".albert" / "agents.json"
+        )
+        registry = load_agent_registry(registry_path)
+        projection = CapabilityCatalogService(
+            workspace_root=workspace_root,
+            agent_registry=registry,
+            skill_roots=[Path(root) for root in args.skill_root],
+            global_skill_roots=(
+                [Path(root) for root in args.global_skill_root]
+                if args.global_skill_root is not None
+                else None
+            ),
+            ollama_probe=_cached_ollama_health,
+        ).inspect()
+        print(json.dumps(projection.to_dict(), sort_keys=True))
+        return 0
+    target_repo = Path(args.target_repo)
+    registry_path = (
+        Path(args.agent_config)
+        if args.agent_config
+        else target_repo / ".albert" / "agents.json"
+    )
+    availability_snapshot = _live_agent_availability(
+        workspace_root=target_repo,
+        registry_path=registry_path,
+    )
     mission = AlbertMission(
-        target_repo=Path(args.target_repo),
+        target_repo=target_repo,
         tracker_dir=Path(args.tracker_dir),
         runtime_root=Path(args.runtime_root),
         mission_id=args.mission_id,
@@ -667,19 +867,23 @@ def _run(args: argparse.Namespace) -> int:
             "workspace-mission-switch",
             "agent-console-message",
             "agent-console-history",
+            "agent-console-response",
             "working-context",
             "working-context-curate",
             "review-workspace",
+            "session-artifact",
             "activity-journal",
             "shell-terminal",
             "shell-terminal-submit",
             "additional-path-grant-create",
+            "additional-path-grant-deny",
             "shell-terminal-decision",
             "review-decision",
             "workspace-queue",
             "ad-hoc-delegation-proposal",
             "workspace-queue-decision",
             "workstation-action",
+            "workstation-session-run",
             "mission-drafts",
             "mission-draft-create",
             "mission-draft-update",
@@ -687,6 +891,7 @@ def _run(args: argparse.Namespace) -> int:
             "mission-draft-abandon",
         },
         issues_dir=Path(args.issues_dir) if args.issues_dir else None,
+        agent_availability_snapshot=availability_snapshot,
     ).load()
     workspace_commands = {
         "workspace-snapshot",
@@ -696,19 +901,23 @@ def _run(args: argparse.Namespace) -> int:
         "workspace-mission-switch",
         "agent-console-message",
         "agent-console-history",
+        "agent-console-response",
         "working-context",
         "working-context-curate",
         "review-workspace",
+        "session-artifact",
         "activity-journal",
         "shell-terminal",
         "shell-terminal-submit",
         "additional-path-grant-create",
+        "additional-path-grant-deny",
         "shell-terminal-decision",
         "review-decision",
         "workspace-queue",
         "ad-hoc-delegation-proposal",
         "workspace-queue-decision",
         "workstation-action",
+        "workstation-session-run",
         "mission-drafts",
         "mission-draft-create",
         "mission-draft-update",
@@ -829,6 +1038,7 @@ def _run(args: argparse.Namespace) -> int:
                 kind=args.scope_kind,
                 target_id=args.scope_target,
                 label=args.scope_label,
+                mission_id=args.scope_mission_id or None,
             ),
         )
         print(json.dumps(asdict(message), sort_keys=True))
@@ -841,6 +1051,20 @@ def _run(args: argparse.Namespace) -> int:
                 sort_keys=True,
             )
         )
+        return 0
+    if args.command == "agent-console-response":
+        response = AgentConsoleResponseService(snapshots).respond(
+            message_id=args.message_id,
+            expected_revision=args.expected_revision,
+            expected_scope=ConversationScope(
+                kind=args.scope_kind,
+                target_id=args.scope_target,
+                label=args.scope_label,
+                mission_id=args.scope_mission_id or None,
+            ),
+            agent_id=args.agent_id,
+        )
+        print(json.dumps(asdict(response), sort_keys=True))
         return 0
     if args.command == "working-context":
         projection = WorkingContextService(snapshots).inspect()
@@ -856,6 +1080,14 @@ def _run(args: argparse.Namespace) -> int:
         return 0
     if args.command == "review-workspace":
         projection = ReviewWorkspaceService(snapshots).inspect()
+        print(json.dumps(asdict(projection), sort_keys=True))
+        return 0
+    if args.command == "session-artifact":
+        projection = SessionArtifactService(snapshots).read(
+            mission_id=args.artifact_mission_id,
+            session_id=args.session_id,
+            artifact_ref=args.artifact_ref,
+        )
         print(json.dumps(asdict(projection), sort_keys=True))
         return 0
     if args.command == "activity-journal":
@@ -887,6 +1119,7 @@ def _run(args: argparse.Namespace) -> int:
     if args.command == "additional-path-grant-create":
         grant = ShellTerminalService(snapshots).create_path_grant(
             correlation_id=args.correlation_id,
+            request_id=args.request_id,
             expected_revision=args.expected_terminal_revision,
             path=args.path,
             access_level=args.access_level,
@@ -894,6 +1127,20 @@ def _run(args: argparse.Namespace) -> int:
             requester=args.requester,
         )
         print(json.dumps(asdict(grant), sort_keys=True))
+        return 0
+    if args.command == "additional-path-grant-deny":
+        denial = ShellTerminalService(snapshots).deny_path_grant_request(
+            correlation_id=args.correlation_id,
+            request_id=args.request_id,
+            expected_revision=args.expected_terminal_revision,
+            path=args.path,
+            access_level=args.access_level,
+            duration_seconds=args.duration_seconds,
+            requester=args.requester,
+            reason=args.reason,
+            affected_action=args.affected_action,
+        )
+        print(json.dumps(asdict(denial), sort_keys=True))
         return 0
     if args.command == "shell-terminal-decision":
         terminal = ShellTerminalService(snapshots)
@@ -921,6 +1168,7 @@ def _run(args: argparse.Namespace) -> int:
             correlation_id=args.correlation_id,
             expected_revision=args.expected_revision,
             session_id=args.session_id,
+            mission_id=args.review_mission_id or None,
             decision=args.decision,
             reason=args.reason,
             failure_type=args.failure_type,
@@ -975,6 +1223,7 @@ def _run(args: argparse.Namespace) -> int:
             expected_revision=args.expected_revision,
             target_kind=args.target_kind,
             target_id=args.target_id,
+            mission_id=args.action_mission_id or None,
             issue_id=args.issue_id,
             session_id=args.session_id,
             agent_id=args.agent,
@@ -983,6 +1232,20 @@ def _run(args: argparse.Namespace) -> int:
             command_policy=_parse_command_policy(args.command_policy),
         )
         print(json.dumps(asdict(acknowledgement), sort_keys=True))
+        return 0
+    if args.command == "workstation-session-run":
+        mission_for_session = _mission_containing_session(
+            snapshots,
+            session_id=args.session_id,
+            mission_id=args.session_mission_id,
+        )
+        session = mission_for_session.run_session(args.session_id)
+        print(
+            json.dumps(
+                _workstation_session_payload(mission_for_session, session),
+                sort_keys=True,
+            )
+        )
         return 0
     if args.command == "mission-drafts":
         projection = MissionDraftService(snapshots).inspect(
@@ -1090,8 +1353,31 @@ def _run(args: argparse.Namespace) -> int:
         return 0
     if args.command == "launch":
         session = mission.launch_issue(args.issue_id, allowed_paths=args.allowed_path)
-        print(f"Launched {session.issue_id} as {session.session_id}")
+        print(f"Queued {session.issue_id} as {session.session_id}")
         print(f"Worktree: {session.worktree_path}")
+        runner_args = [
+            sys.executable,
+            "-m",
+            "albert_mvp",
+            "workstation-session-run",
+            "--target-repo",
+            str(mission.target_repo),
+            "--tracker-dir",
+            str(mission.tracker_dir),
+            "--issues-dir",
+            str(mission.issues_dir),
+            "--runtime-root",
+            str(mission.runtime_root),
+            "--mission-id",
+            mission.mission_id,
+            "--agent-config",
+            str(mission.agent_config_path),
+            "--session-id",
+            session.session_id,
+            "--session-mission-id",
+            mission.mission_id,
+        ]
+        print(f"Run: {shlex.join(runner_args)}")
         return 0
     if args.command == "route":
         decision = mission.route_issue(args.issue_id)
@@ -1139,6 +1425,32 @@ def _run(args: argparse.Namespace) -> int:
         print(pr.body)
         return 0
     return 1
+
+
+def _run_mission_journey(args: argparse.Namespace) -> int:
+    journey = WorkspaceJourneyStore(Path(args.runtime_root))
+    if args.command == "mission-options":
+        projection = journey.mission_options(
+            starting_location=Path(args.starting_location),
+            coding_workspace=Path(args.coding_workspace),
+        )
+        print(json.dumps(projection, sort_keys=True))
+        return 0
+    if args.command == "mission-choice":
+        acknowledgement = journey.choose_mission(
+            starting_location=Path(args.starting_location),
+            coding_workspace=Path(args.coding_workspace),
+            correlation_id=args.correlation_id,
+            expected_revision=args.expected_revision,
+            choice=args.choice,
+            mission_id=args.mission_id,
+            mission_title=args.mission_title,
+        )
+        print(json.dumps(acknowledgement, sort_keys=True))
+        return 0
+    projection = journey.workspace_context(starting_location=Path(args.starting_location))
+    print(json.dumps(projection, sort_keys=True))
+    return 0
 
 
 def _parse_command_policy(entries: list[str]) -> dict[str, str]:
@@ -1193,6 +1505,48 @@ def _headless_session_payload(
     }
 
 
+def _mission_containing_session(
+    snapshots: WorkspaceSnapshotService,
+    *,
+    session_id: str,
+    mission_id: str,
+) -> AlbertMission:
+    if mission_id:
+        mission = snapshots._missions.get(mission_id)
+        if mission is None:
+            raise AlbertError(f"Unknown Mission for workstation session: {mission_id}")
+        if session_id not in mission.sessions:
+            raise AlbertError(f"Unknown Local Agent session in {mission_id}: {session_id}")
+        return mission
+    matches = [
+        mission for mission in snapshots._missions.values() if session_id in mission.sessions
+    ]
+    if not matches:
+        raise AlbertError(f"Unknown Local Agent session: {session_id}")
+    if len(matches) > 1:
+        raise AlbertError(
+            f"Local Agent session {session_id} is ambiguous; provide --session-mission-id."
+        )
+    return matches[0]
+
+
+def _workstation_session_payload(
+    mission: AlbertMission,
+    session: Any,
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "mission_id": mission.mission_id,
+        "session_id": session.session_id,
+        "issue_id": session.issue_id,
+        "status": session.status,
+        "runner_started_at": session.runner_started_at,
+        "runner_ended_at": session.runner_ended_at,
+        "runner_exit_status": session.runner_exit_status,
+        "evidence_valid": session.evidence_valid,
+    }
+
+
 def _load_workspace_service(
     args: argparse.Namespace, primary: AlbertMission
 ) -> WorkspaceSnapshotService:
@@ -1224,6 +1578,7 @@ def _load_workspace_service(
                     mission_id=mission_id,
                     agent_config_path=primary.agent_config_path,
                     allow_empty_tracker=True,
+                    agent_availability_snapshot=primary.agent_availability_snapshot,
                 ).load()
             )
         return WorkspaceSnapshotService(primary, missions=tuple(missions))

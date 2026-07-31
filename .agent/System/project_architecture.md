@@ -1,21 +1,55 @@
-# Project Architecture - Albert MVP
+# Project Architecture — Alfredo Local Coding-Agent Workstation
 
-**Last Updated**: 2026-06-26
+**Last Updated**: 2026-07-13
+
+## Overview
+
+Alfredo is a local-first coding-agent workstation with a Python Orchestrator, React prompt UI, Tauri desktop bridge, npm launcher, and Ollama-backed controller/worker models. The Orchestrator remains authoritative for missions, Issue Slices, permissions, execution, evidence, and review. The UI provides a Codex/OpenCode-style conversation and command experience beside persistent canonical subagent and ticket status.
 
 ## Quick Overview
 
-Albert is a local coding-agent orchestrator MVP. It starts from local markdown Product Requirements Documents and Issue Slices, renders a textual mission-control TUI, persists runtime state outside the target repo, lets Qwen route approved work to the right agent tier, launches bounded Local Agent sessions in isolated worktrees, collects Evidence Packages, routes Frontier review outcomes, relaunches repair sessions with prior review context, and prepares PR instructions without auto-merging.
+Alfredo starts from local markdown Product Requirements Documents and Issue Slices, persists runtime state outside the target repo, lets a controller route approved work to the right worker tier, launches Local Agent sessions in isolated worktrees, collects Evidence Packages, routes review outcomes, relaunches repairs with prior patch/review context, and prepares PR instructions without auto-merging. The textual TUI remains a fallback; the default product surface is the prompt-dominant Alfredo Workstation.
 
 The MVP now includes real runner paths: deterministic fake runner, command-backed runner, and an Ollama runner that asks a configured model for a JSON file plan and writes generated files into the isolated worktree. A live Qwen3.6-27B run generated a runnable `prototype_app.py` and moved the slice to PR-ready after review. Gemma workers have also been live-verified, including a repair loop after a failed first pass.
 
 ## Tech Stack
 
-- Python 3 stdlib only.
+- Python 3 stdlib application code, with Bubblewrap required for governed Ubuntu child-process isolation.
 - `unittest` for acceptance coverage.
 - Local markdown tracker under `.scratch/`.
 - Local model execution through Ollama.
 - App-local runtime JSON and bulky artifacts stored outside the target repo.
 - Command Deck desktop work uses React 19 and TypeScript behind a Tauri 2 shell, while Python remains the authoritative Orchestrator.
+
+## Alfredo Prompt Workstation and Governed Runtime (2026-07-11)
+
+The production UI is a responsive two-lane workstation. Agent Console is the dominant prompt lane and presents one arrival-ordered chronology for optimistic user prompts, controller responses, commands, approval cards, typed workstation actions, and outcomes. On restart, durable proposal/approval/queued milestones are causally reinserted after the controller turn associated with their originating message, before later chat. Mission Work remains visible beside it and projects real Mission-qualified Local Agent sessions, attention, workable Issue Slices, evidence, and governed controls. Conversation Scope still qualifies Working Context but is deliberately contained in the Context Inspector instead of driving tickets or the primary status line.
+
+The capability catalog discovers workspace, personal, Codex, and plugin skills; exposes `/help`, `/skills`, `/use`, `/run`, `/task`, and `/status`; probes configured model availability; and distinguishes controller/router identities from assignable workers. Discovery reads only a cumulative 64 KiB UTF-8 front-matter prefix from each `SKILL.md`, stops at its closing delimiter, and never allocates a large skill body. The launcher defaults to qwen3:14b for responsive controller discussion, does not prewarm it during startup, and treats the invocation directory only as a Starting Location. Install root, backend root, Starting Location, acknowledged Coding Workspace, runtime root, and later Workspace Session remain separate. Generated release packages include the Python backend and default agent registry staged under `bundled-backend`; an explicit `ALBERT_BACKEND_ROOT` wins, while source-repository and bundled layouts remain coherent fallbacks. PRD Markdown is excluded from actionable ticket selection.
+
+Mission Work uses validated backend timestamps for last activity and never fabricates recency from revision numbers or evidence count. Recent workspaces expose shell-quoted relaunch commands that preserve the selected controller and can be copied without mutating the currently connected backend. Accepted and pending state remains authoritative in Python; React stores only a bounded workspace-scoped tail of terminal negative Workstation action groups so a rejection that never reached the backend remains visible after a desktop refresh.
+
+Agent Console routing has two layers. Explicit `/task`, narrow remediation imperatives, `Please ask a subagent to …` prefixes, and `… with a subagent` suffixes use a deterministic low-latency fast path. Questions, explanations, ambiguous checks, and other natural prompts use the controller's bounded typed route: `discussion` or `coding-task` with a task request and acceptance criteria. Malformed, blank, oversized, or unsupported model output falls back to discussion; slash commands cannot be redispatched by the model. Controller routing identifies intent only. Worker selection separately requires explicit assignable/ungated/non-delegate/local/available worker authority; missing metadata, cloud models, and controller/router/frontier routing fail closed. The Qwen router's delegate-only escalation path remains a distinct governed decision.
+
+Coding requests create governed Ad Hoc Delegation or Issue Slice sessions rather than pretending a chat acknowledgement is execution. The automatic Ad Hoc path persists the user turn, creates a proposal, reloads its canonical queue item, and verifies exact Mission, scope, original goal, acceptance criteria, allowed paths, command policy, eligible worker, and originating message before submitting a correlated approval. Unsafe, unavailable, gated, delegate-only, or mismatched work remains pending for manual handling. Sessions persist `queued` before work begins, execute in isolated Git worktrees or bounded directory copies, expose cancellation and Mission-qualified status, and survive concurrent runners. Normal and repair launch share one cross-process allocator lock, so their session identities cannot collide. Dead runner owners are detected by Linux PID start identity and requeued up to a fixed limit. UI dispatch independently retries a still-canonical queued session three times with bounded backoff.
+
+Ollama workers return JSON file/command plans. File writes are safe-path and allowed-path checked; auto-allowed command results feed a maximum three-round repair loop so the model can fix failing tests in the same session. Any persisted repairable review—whether created through Review Workspace, TUI, CLI, or legacy state—projects one canonical repair action after reload. It queues exactly one new session and inherits the prior patch, allowed paths, and command policy, including Ad Hoc work. Before any worktree effect, tracked parent changes, bounded untracked sources, and prior-session repair inputs are staged with manifests/digests and a durable pending marker; recovery applies those exact artifacts idempotently and marks them applied instead of rereading mutable source worktrees. Automated evidence emits a bounded real `review.diff`, redacts Blocked/Local-only file contents, distinguishes ready-for-review from accepted state, and journals only validated packages.
+
+All child command, worker, controller, router, Git-control, and Shell paths use sanitized environments and bounded process execution; governed model/command paths additionally use Bubblewrap. The sandbox constructs a minimal filesystem view instead of exposing the host root: system runtime files are read-only; controller/router repositories are read-only; Local Agent worktrees are isolated; Shell mounts respect requested read/write access and explicit Additional Path Grants; `/tmp` is private and validated executable/script paths cannot escape through symlinks; timeouts and missing Bubblewrap fail closed. Trusted `bwrap`/`prlimit` resolution does not accept a child-controlled `PATH`, and output/path decoding is strict UTF-8. Governed commands enter user and PID namespaces before resource limits are applied. Inside the PID namespace, `albert_mvp.process_supervisor` acts as a subreaper, waits for descendants after the leader exits, and terminates descendants that create their own session or scrub inherited environment. Git probes distinguish a genuine non-repository from unexpected failure, and worktree/probe/path output is bounded. Aggregate stdout/stderr capture is fixed-buffer; timeout or overflow terminates the governed namespace. Address-space, file-size, open-file, and process-count limits apply inside that namespace. Model plans are rejected before mutation when file count, per-file bytes, aggregate bytes, command count, or command length exceed their bounds. Command-produced changes outside declared `allowed_paths` invalidate the session.
+
+Workspace state mutations use cross-process coordinator/store locks. Preferences, Workspace Queue, Mission Drafts, Working Context, Workstation actions, and Review decisions keep the expected-revision check and authoritative mutation in one transaction, so concurrent same-revision actions produce one success and one stale rejection rather than lost events or duplicate launches. Session-producing Workstation actions embed the normalized request in the created session; approve, assignment, and cancellation co-persist it in the Mission runtime's `workstation_actions` ledger in the same atomic replacement as the domain mutation. Recovery checks these canonical markers before stale-revision rejection, then finalizes a preference receipt and idempotently reconciles Activity Journal plus Agent Console audit turns. Completed receipts replay directly after the same reconciliation check. Correlation reuse with any boundary change is rejected. Session launch rechecks the current role, approval, and live availability. Retry inherits the prior allowed-path and command-policy boundary unless an explicit governed replacement is supplied. Review rechecks a reviewable terminal/evidence state inside the same transaction so queued or running work cannot be accepted.
+
+Review artifacts cross a separate bounded read boundary. Python `SessionArtifactService.read()` is exposed as CLI `session-artifact --artifact-mission-id --session-id --artifact-ref`, Tauri `session_artifact`, and `WorkspaceClient.loadSessionArtifact()`. The exact Mission/session/reference must identify a registered review-safe artifact. Files must be regular non-symlink UTF-8 text below that session's runtime directory; the service validates the entire file incrementally for UTF-8 and NUL bytes while retaining only the bounded display prefix. The response is capped at 128,000 UTF-8 bytes, uses opaque app-local references, redacts known host roots, and contains no path/reference field. Projection drops unregistered relative links rather than rendering controls the reader cannot open. React renders compatible results inline with loading, truncation, recoverable failure, retry, close, and managed focus/scroll behavior instead of navigating to a local file.
+
+Implementation and current release evidence are consolidated in [the 2026-07-12 install and Queue acceptance correction](../Reports/2026-07-12-alfredo-install-queue-acceptance-correction.md); [the 2026-07-11 workstation report](../Reports/2026-07-11-alfredo-one-shot-workstation.md) is retained as superseded history.
+
+## Acknowledged Coding Workspace Boundary
+
+Issue 57 adds a pre-Mission launch contract. The npm launcher emits `workspace_selection` with `phase: selection-required`, the exact Starting Location, and null Coding Workspace/Mission fields. It does not inspect trackers, choose a repository, infer a Mission, or add the invocation directory to recent workspaces.
+
+Python `CodingWorkspaceSelectionService` is the validation authority for both the one-process `coding-workspace-select` CLI and persistent transport. Existing selection requires the exact readable/writable Git repository root; create mode is limited below the Starting Location and initializes Git. Install, backend, and runtime overlap in either direction is rejected before acknowledgement. Failures carry stable code, message, and recoverability.
+
+Tauri retains a separate mutexed process binding only after Python returns the correlated acknowledgement; the hashable persistent-backend configuration is not mutated. That binding is immutable for the desktop process: exact in-process correlation replay returns the same receipt, while changed-boundary reuse or a second selection fails before another Python effect. Launch context then reports `mission-choice-required`, and every Mission-qualified Tauri command returns `mission-selection-required` until Issue 58 establishes a Mission. React renders this state in Agent Console, keeps pending/failure states unacknowledged, and never loads a Workspace Session snapshot before Mission choice. Restart restoration remains Issue 58 scope.
 
 ## Command Deck Workspace Snapshot Boundary
 
@@ -59,26 +93,34 @@ Command Deck Issue 09 adds Workspace Queue as the governance inbox for Issue Cha
 
 Command Deck Issue 10 adds Ad Hoc Delegations as a distinct Workspace Queue item type. Proposed delegations capture originating Agent Console context, accepted Conversation Scope, acceptance criteria, allowed paths, command policy, and proposed Local Agent. The proposal path is exposed through the `ad-hoc-delegation-proposal` CLI command, Tauri `ad_hoc_delegation_proposal` command, and a compact React Workspace Queue form sourced from the latest Agent Console message. Approval creates bounded `ADHOC-*` `LocalAgentSession` records without adding `mission.issues` entries; non-auto-allowed command policies deny launch and leave the queue item pending. Workspace Mission summaries expose ad hoc session status plus role/provider/model provenance, and Review Workspace accepts valid Evidence Packages for ad hoc sessions as complete bounded work without changing Issue Slice lifecycle.
 
-Command Deck Issue 11 adds `MissionDraftService` as the backend proposal boundary for assembling selected Ad Hoc Delegations and new work before accepted mission state changes. Drafts persist in `mission-drafts.json` with their own revision, included `ADHOC-*` work, explicit exclusions, new work, dependencies, and unresolved decisions. Creating or editing a draft does not change Workspace revision, sessions, Issue Slices, or mission-specific context. Draft edits rebuild included work only from explicitly selected ids so later unselected Ad Hoc Delegations are not attached silently. Confirmation requires the current draft revision and creates a durable accepted Issue Slice through `AlbertMission`, while abandonment and stale confirmation preserve existing missions. The CLI exposes the boundary through `mission-drafts`, `mission-draft-create`, `mission-draft-update`, `mission-draft-confirm`, and `mission-draft-abandon`; Tauri exposes typed `mission_drafts`, `mission_draft_create`, and `mission_draft_decision` commands. React's Workspace Queue lets the Mission Commander include/exclude pending Ad Hoc Delegations, enter proposed goal/new work/dependencies/unresolved decisions, create a Mission Draft through the Orchestrator, review the proposed scope before confirmation, require a reason for Confirm/Abandon, and reload canonical state only after acknowledgement.
+Command Deck Issue 11 adds `MissionDraftService` as the backend proposal boundary for assembling selected Ad Hoc Delegations and new work before accepted mission state changes. Drafts persist in `mission-drafts.json` with their own revision, included `ADHOC-*` work, explicit exclusions, new work, dependencies, unresolved decisions, and ordered lifecycle receipts. Each current receipt binds its predecessor, exact request/reason, effect draft, acknowledgement, and canonical coverage; downgrade or coherent substitution fails closed. Creating or editing a draft does not change Workspace revision, sessions, Issue Slices, or mission-specific context. Confirmation creates and can recover exactly one accepted Issue Slice, while later separately governed Issue changes remain legitimate; abandonment and stale confirmation preserve existing missions. Missing audit phases reconcile only in causal order, and irreparably inverted legacy chronology fails closed. The CLI exposes the boundary through `mission-drafts`, `mission-draft-create`, `mission-draft-update`, `mission-draft-confirm`, and `mission-draft-abandon`; Tauri exposes typed `mission_drafts`, `mission_draft_create`, and `mission_draft_decision` commands. React's Workspace Queue lets the Mission Commander include/exclude pending Ad Hoc Delegations, enter proposed goal/new work/dependencies/unresolved decisions, create a Mission Draft through the Orchestrator, review the proposed scope before confirmation, require a reason for Confirm/Abandon, and reload canonical state only after acknowledgement.
 
 Command Deck Issue 12 adds `ActivityJournalService` as a persistence concern separate from canonical snapshot/runtime state. `activity-journal.json` stores contiguous append-only entries with UTC time, Mission Commander/Orchestrator/Frontier Model/Local Agent attribution, stable action type and correlation, affected-entity links, and available evidence links. The journal records acknowledged workspace navigation, Review Workspace decisions, Workspace Queue decisions, Mission Draft lifecycle actions, Frontier Confirmation requests, Orchestrator session launches, and validated Local Agent Evidence Packages; pending token/terminal output, stale actions, and failed evidence remain excluded. Search plus Mission, actor, action-type, and inclusive time filters preserve chronological order through Python CLI, Tauri, TypeScript client, and React Activity. A journal write failure is surfaced as `WorkspacePersistenceError` after any already-completed canonical write—cross-file atomicity is not claimed—and restart tests independently compare canonical reconstruction with retained journal order and attribution.
 
-Command Deck Issue 13 adds Shell Terminal as a distinct left-lane mode. Python owns command classification, tokenized `shell=False` execution, approval and denial state, immutable bounded Additional Path Grants, expiry enforcement, and persisted command metadata. Tauri transports typed projection, submit, decision, and grant requests/results without becoming an authority boundary. React owns only lane selection, independent form drafts, pending/error presentation, and current-application-session stdout/stderr. Restored command records contain metadata only: terminal bytes never enter canonical Workspace Session snapshots, Agent Console history, Shared Context, or the Activity Journal. Terminal mode replaces Conversation Scope with the explicit execution-boundary fields of working directory, requested paths, requester, and read/write access.
+Command Deck Issue 13 introduced Shell Terminal; the 2026-07-11 workstation correction integrates it as `/run` and the expandable Command Audit rather than a competing primary lane. Python owns command classification, argv-only `shell=False` execution, approval/denial state, immutable bounded Additional Path Grants, expiry enforcement, Mission attribution, and persisted metadata. It writes `executing` plus process identity before launch; canonical inspection keeps a live attempt visible or durably converts a dead owner to `outcome-unknown`. Submit/approval/denial replay is exact and never re-executes an unknown command. Missing approval, denial, finished, or unknown audit phases reconcile before later Console/Activity entries. Commands execute in a minimal Bubblewrap view whose workspace and external mounts honor requested read/write access and whose `/tmp` executable/script paths cannot escape through symlinks. Tauri transports typed requests/results without becoming an authority boundary. React polls during submission and approval, reloads after a lost response, and retains stdout/stderr only for the current application session; raw bytes never become accepted mission state or Activity evidence.
 
 Command Deck Issue 14 hardens the React projection without changing Orchestrator authority. Semantic landmarks and labelled controls cover both left-lane modes and every Operations Workspace workflow; programmatic focus moves to inspectors and decision outcomes; reduced-motion and constrained-width CSS preserve reachable content; and danger/warning treatments remain textual as well as visual. The final hierarchy and assistive-technology confirmation remains a human review gate.
 
-## Project Structure
+## Directory Structure
 
 - `albert_mvp/core.py` - Orchestrator domain model: PRD loading, Issue Slice parsing, Issue Graph ordering, lifecycle state, review locking, Qwen-controlled delegation, gated delegation approval, launch sessions, repair relaunch sessions, command/file policy, runner execution, Evidence Package validation, Frontier Reviewer outcomes, mission records, and PR prep.
 - `albert_mvp/agents.py` - Agent registry loading and validation for configured Frontier/router, worker, and delegate-only agent roles.
+- `albert_mvp/capabilities.py` - installed skill/slash-command catalog plus provider-neutral controller/worker availability projection.
+- `albert_mvp/process_supervisor.py` - PID-namespace subreaper that keeps descendants governed after their leader exits.
+- `albert_mvp/server.py` - persistent correlated JSON transport that avoids a Python startup per UI poll or command.
 - `albert_mvp/tui.py` - Textual mission-control TUI state, renderer, and TUI-backed actions.
 - `albert_mvp/cli.py` - CLI command surface over the core and TUI actions.
 - `tests/test_albert_mvp.py` - end-to-end acceptance tests for the MVP workflow and development backlog.
-- `albert_mvp/workspace.py` - versioned Workspace Session state, synchronization, deliberate scope changes, Active Mission switching, Working Context curation, Review Workspace evidence decisions, Workspace Queue governance/ad hoc delegation decisions, Mission Draft proposal/confirmation state, append-only Activity Journal, and atomic scoped Agent Console history.
+- `albert_mvp/workspace.py` - versioned Workspace Session state, synchronization, typed controller routing, automatic exact-boundary Ad Hoc Delegation, Active Mission switching, Working Context curation, bounded session-artifact reads, Review Workspace evidence decisions, Workspace Queue governance, Mission Draft proposal/confirmation state, append-only Activity Journal, receipts, and durable scoped Agent Console history.
 - `tests/test_workspace_snapshot.py` - snapshot, restart, empty-state, and persistence-failure integration coverage.
 - `mission-control/src/` - React/TypeScript Command Deck projection and interaction tests.
 - `mission-control/src-tauri/` - Tauri 2 desktop shell, typed Python bridge, and desktop-to-backend integration tests.
-- `.albert/agents.json` - model registry. Qwen3.6-27B is the frontier/router; Gemma4-12B and Gemma4-26B are normal local workers; Qwen2.5-Coder 14B and DeepSeek-R1 14B are local delegate-only escalation targets.
+- `mission-control/bin/alfredo.js` and `bin/desktop-adapter.js` - public npm grammar, preflight, workspace/controller selection, exact-version native-adapter validation, and direct installed AppImage launch; repository layout alone retains the development-shell path.
+- `mission-control/scripts/build-desktop-release.js` and `build-npm-release.js` - production AppImage build plus deterministic generation of the minimal `alfredo-agent` meta package and `alfredo-agent-linux-x64-gnu` platform package.
+- `mission-control/scripts/verify-installed-release.js` and `check-verified-release.js` - isolated-registry meta-only npm install, exact pack-manifest audit, fresh-prefix realpath containment, PATH resolution, installed AppImage integrity/version verification, bounded process-group frontend-plus-backend GUI readiness smoke, and staged same-job publish-input preservation/revalidation.
+- `mission-control/tests/alfredo-entrypoint.test.js`, `desktop-adapter.test.js`, and `build-npm-release.test.js` - package generation, meta-only registry resolution, plain no-argument launch, and fail-closed adapter/catalog/integrity coverage.
+- `mission-control/e2e/responsive-layout.pw.ts` - four-viewport production geometry scenarios for palette, evidence action, expanded detail, and artifact viewer states.
+- `.albert/agents.json` - model registry. Qwen3-14B is the default controller, Qwen3.6-27B is the frontier/router, Gemma4-12B and Gemma4-26B are normal local workers, and Qwen2.5-Coder 14B plus DeepSeek-R1 14B are local delegate-only escalation targets.
 - `.scratch/local-coding-agent-mvp/` - product PRD and Issue Slice workflow records.
 - `.scratch/local-coding-agent-mvp-development/` - implementation roadmap and completed development backlog.
 - `docs/agents/` - per-repo configuration for local engineering skills.
@@ -92,6 +134,8 @@ Command Deck Issue 14 hardens the React projection without changing Orchestrator
 - Reopen control: completed or stuck slices require explicit reopen with a recorded reason before re-review.
 - Agent registry: configured agents include stable id, role, provider, runner, command/model details, routing role, delegate-only visibility, approval requirements, and provider-neutral availability. Unknown assignments are rejected when a registry is configured.
 - Qwen-controlled routing: approved issues can be routed through the configured `routing: router` agent. Qwen returns a structured delegation decision with complexity, recommended agent, reason, and approval requirement.
+- Agent Console controller route: deterministic explicit-task classification and a typed model fallback distinguish discussion from a bounded coding task; neither path grants authority or directly assigns a gated/delegate-only worker.
+- Governed prompt delegation: an automatic proposal may be approved only after the reloaded canonical boundary exactly matches its Mission, scope, goal, criteria, paths, policy, eligible worker, and origin.
 - Delegate-only policy: delegate agents are hidden from normal assignment and cannot be launched until Qwen selects them. Configured gated or cloud delegates require explicit `approve-delegation` before Albert records their runner command as allowed.
 - Local Agent launch: approved unblocked slices create isolated worktrees and session records with task packets, allowed paths, command policy, and evidence requirements.
 - Runner execution: fake, command, and Ollama runners record artifacts and produce automated Evidence Packages.
@@ -99,18 +143,82 @@ Command Deck Issue 14 hardens the React projection without changing Orchestrator
 - Command policy: commands classify as `auto-allowed`, `frontier-approvable`, or `human-required` before execution.
 - Visibility policy: files classify as `Normal`, `Local-only`, or `Blocked` for Frontier Model access.
 - Evidence Package: changed files, diff summary, commands, test results, risks, proposed context updates, and artifacts are required before approval.
-- Review Workspace: active sessions awaiting review expose complete and incomplete evidence, visibility limitations, missing evidence, and acknowledged accept/repair/human-escalation decisions.
-- Workspace Queue: locked Issue Change Proposals and Frontier Confirmations remain pending until acknowledged approve/reject/defer decisions; queue items expose source, requested action, affected boundary, consequence, and compact `workspace-queue#...` attention links.
+- Session Artifact reader: exact registered review-safe evidence is returned as bounded inline text through opaque references; raw host paths and arbitrary file reads never cross into React.
+- Review Workspace: reviewable evidence-ready or terminal sessions expose complete and incomplete evidence, visibility limitations, missing evidence, and acknowledged accept/repair/human-escalation decisions; queued and running sessions remain ineligible.
+- Workspace Queue: locked Issue Change Proposals and Frontier Confirmations remain pending until acknowledged approve/reject/defer decisions; queue items expose source, requested action, affected boundary, consequence, and compact `workspace-queue#...` attention links. React treats Queue as a decision-only lower-pane replacement: resolved history, the Issue Assignment Board, and standing Mission Draft/Ad Hoc creation forms are absent while Queue is open.
 - Ad Hoc Delegation: Agent Console intent can become a pending Workspace Queue proposal and only approved proposals launch bounded `ADHOC-*` Local Agent sessions; these sessions require auto-allowed command policy, Evidence Packages, and Review Workspace acceptance while remaining distinct from Issue Slices.
 - Mission Draft: selected Ad Hoc Delegations and new work persist as proposed state until Mission Commander confirmation; confirmation creates an accepted Issue Slice, while edit, abandon, and stale-confirmation paths preserve existing Mission state.
 - Activity Journal: meaningful acknowledged actions persist chronologically with actor, affected-entity, queue/session/evidence links, and independent filters; canonical snapshots reconstruct current state separately, and transient or failed output is excluded.
-- Shell Terminal: governed command metadata and Additional Path Grants persist through Python; immediate terminal bytes remain transient React response state and are excluded from accepted mission state and the Activity Journal.
+- Shell Terminal: governed command metadata and Additional Path Grants persist through Python; contextual path needs first become append-only typed request records, and grant/denial decisions bind the exact pending request instead of parsing UI prose. Immediate terminal bytes remain transient React response state and are excluded from accepted mission state and the Activity Journal.
 - Frontier Reviewer: review outcomes drive PR readiness, repair routing, or escalation; accepted evidence is Complete/PR-ready and never presented as merged.
 - Repair relaunch: repairable review outcomes can launch a new Local Agent session for the same or specified fresh agent, carrying prior review outcome, reason, evidence, and artifact links in the task packet.
 - PR preparation: the tool generates branch/PR instructions or a `gh pr create` command when available, but never marks a slice merge-approved.
 - Mission records: generated Markdown is written inside the target repo; runtime state and bulky evidence stay outside it.
+- Public distribution: the source npm workspace is private. Release generation emits a tiny CLI/backend meta package and an exact-version AppImage adapter package. The currently verified native artifact baseline is Ubuntu 24.04 x64 with glibc 2.39; broader compatibility is not claimed. The meta launcher resolves the exact optional platform dependency from npm's installed dependency graph, validates package/adapter identity, containment, executable mode, SHA-256, and native version, then directly spawns it. Missing Ollama/model readiness is advisory so the workstation can open before local-model setup; Bubblewrap readiness is a separate non-blocking preflight warning because governed execution requires it. A passing production gate stages and replaces its exact tarballs plus SHA-256/SHA-512 manifest for the next same-job check/publish steps. The co-located manifest is not an external attestation. The provenance workflow fails closed unless GitHub is public and the ref is `main`; partial retries reuse an immutable registry version only when its integrity matches and npm cryptographically verifies its exact SLSA v1 provenance attestation. The platform attestation is required before any meta publication. Registry installation is not claimed until the workflow's fresh registry-only headless-GUI smoke passes, and visual acceptance still requires a human launch on a real display. See the [acceptance correction report](../Reports/2026-07-12-alfredo-install-queue-acceptance-correction.md).
+
+### Common Pitfalls Corrected 2026-07-12
+
+- Do not treat `npm pack`, manual tar extraction, `node bin/alfredo.js`, or `ALFREDO_DESKTOP_DRY_RUN` as proof of a public install path. Acceptance requires registry identity, real npm install, PATH linking, and native execution.
+- Markdown ticket metadata may follow an H1 and blank line. Stopping metadata parsing at the first blank silently turns completed/HITL history into active AFK work.
+- Queue is an actionable inbox, not a place to co-locate creation/configuration workflows or repeat the assignment/archive matrix.
+
+### AppImage Python Environment Boundary Corrected 2026-07-13
+
+Tauri's AppImage wrapper exports bundle-oriented `PYTHONHOME` and `PYTHONPATH` values. Alfredo intentionally ships its Python source but uses a compatible host Python interpreter; inheriting those wrapper values makes host Python search a nonexistent bundled standard library and fail before `encodings` loads. Every persistent or isolated backend `Command` removes both variables while retaining Alfredo's explicit backend/config/workspace environment. A child-process Rust regression poisons the parent environment and proves a real backend snapshot still succeeds.
+
+### Production Measurement Cohorts
+
+Issue 62 adds a non-authoritative measurement plane around the unchanged
+launcher, Tauri, React, persistent transport, and Python authority boundaries.
+Each process appends correlation-scoped S0-S9 or R0-R6 marks using only its own
+monotonic clock. The outer driver owns S0, exact source/archive and packaged
+artifact proof, sequential balanced randomized AB/BA scheduling, fixture
+proofs, and raw JSON Lines retention.
+
+Static fixtures contain complete canonical file bundles and tree hashes, but no
+build digest or claimed correctness result. The lifecycle restores and rereads
+the bundle before every sample. Each production run binds that byte-identical workload to the clean
+committed source, exact artifact, and separately recorded contract, replay,
+crash-cut, packaging, and rollback evidence emitted by the fixed hashed
+repository runner. Process-warm variants keep one installed desktop each, use
+separate scratch-contained fixture/control/readiness paths, and bind every mark
+to that native PID and desktop-session id. Partial measurement environments,
+changed evidence, dirty source, under-sized cohorts, missing stages, command
+failure, or any failed gate invalidate samples and block speed claims.
+
+React records usable S8 and hydrated S9 after two rendered frames. Queue R5 is
+the canonical visible result; R6 is later and requires the distinct durable
+`runner_started_at` projection, not general session activity. The operator
+contract is documented in
+[`mission-control/performance/README.md`](../../mission-control/performance/README.md).
+No production cohort has been run or accepted merely by adding this
+instrumentation.
 
 ## Verification
+
+Current 2026-07-13 acceptance-correction gate:
+
+- The rebuilt production AppImage gate passes on Ubuntu 24.04 x64 with glibc 2.39: the generated packages install into a clean prefix through a meta-only isolated registry request, both tarballs are fetched once, plain `alfredo` resolves through PATH, the 77,761,016-byte native artifact (`sha256:3faec58bc4e4a0b1c825cb58a3ec5475e5daac36bb0c839e0699ae6ddf006be2`) reports `Alfredo Desktop 0.1.0` without Cargo/Tauri on PATH, the frontend loads, and the installed backend returns its workspace snapshot.
+- The verifier preserves only those exact passing tarballs, while `release:check` independently verifies their production kind, order, containment, byte counts, SHA-256/SHA-512 values, package manifests, aliases, and exact optional dependency. The platform tarball SHA-256 is `f7bb312dc35463c093fd9a02619297b5a949483dc1cb194c3b02ed94b77ebe18`; the meta tarball SHA-256 is `b0a19555ae0e848a729d5415cb3dcdbed7d3ddc343b90de8b592f8ce548f0313`. Both pass local npm publish dry-runs. Public installation remains unclaimed until the protected hosted workflow publishes them and passes its public-registry reinstall/GUI gate.
+- Clean-runtime projections are coherent after completing the final AFK layout slice: Queue items `0`, pending Mission Drafts `0`, assignment rows `0`, and `ready_issue_ids: []`. Missing type/status metadata fails closed instead of recreating manual or historical rows.
+- `python3 -m unittest discover -s tests -p 'test_*.py'`: 418 tests ran; 417 passed and one optional live-Ollama smoke skipped.
+- `npm test -- --run`: 227 frontend/launcher/distribution tests passed across 10 files, including 23 assignment-projection and 121 rendered App tests.
+- `cargo test --manifest-path mission-control/src-tauri/Cargo.toml`: 38 Rust/Tauri bridge tests passed, including the production GUI readiness marker contract and poisoned-AppImage-Python-environment regression.
+- `npm run typecheck` and `npm run build`: passed.
+- `npm run test:layout`: 4/4 production Chromium cases passed at 1440×900, 1100×760, 820×900, and 390×844. The first unrestricted run caught 84 px of tablet overflow and an off-viewport Send control; explicit `minmax(0, 1fr)` prompt/composer tracks fixed the intrinsic-width cause before the green rerun.
+
+Superseded 2026-07-11 release evidence retained for traceability:
+
+- `python3 -m unittest discover -s tests`: 416 run, 415 passed, 1 optional live-Ollama smoke skipped.
+- `npm test -- --run`: 215 React, projection, client, launcher, package, style, synchronization, and real-backend release-seam tests passed across 8 files, including 122 rendered App tests.
+- `npm run typecheck` and `npm run build`: passed; the production Vite bundle builds successfully.
+- `cargo fmt -- --check` and the full manifest `cargo test`: passed all 36 Tauri/Python bridge tests.
+- `npm run test:layout`: the production build and discovery of all four expanded geometry cases passed, but Chromium startup was blocked by the restricted environment (`sandbox_host ... Operation not permitted`). The required unsandboxed rerun was refused because the approval service had exhausted its usage quota; no final geometry assertion is therefore claimed green.
+- Focused launcher/package coverage passed 32 tests, but later acceptance showed its “actual packed consumer” manually extracted the archive and invoked Node directly. It did not prove npm installation, PATH linking, registry identity, or a production desktop; see the correction report above.
+- Persistent transport warm p95 remains below the enforced 150 ms budget; previously measured warm qwen3:14b controller chat median is about 1.07 seconds.
+- Concurrency tests cover sessions and every expected-revision workspace action family; adversarial tests cover read/write sandboxing, environment sanitization, crash recovery, role governance, allowed paths, secret redaction, and Mission attribution.
+
+Historical slice gates follow for traceability:
 
 - `python3 -m unittest discover -s tests` passes 148 tests.
 - `npm test -- --run` passes under `mission-control/` with 55 frontend, transport, and reducer tests.
@@ -130,7 +238,34 @@ Command Deck Issue 14 hardens the React projection without changing Orchestrator
 
 ## Performance Targets
 
-- Board/TUI load should be effectively instant for small local issue sets.
-- Runtime writes should be deterministic JSON updates.
+- Warm persistent Orchestrator requests must remain below 150 ms p95 for the enforced test workload.
+- User prompts render optimistically before persistence or inference completes; qwen3:14b remains the default low-latency controller, with model loading kept out of launcher startup rather than prewarmed.
+- Runtime writes must be atomic and concurrent same-revision decisions must never both succeed.
 - Runner artifacts should be linked, not embedded into mission Markdown.
-- The MVP should remain dependency-free until a richer interactive TUI requires otherwise.
+- Model and command execution may be slow, but it must remain deferred, cancellable, observable, and independent of UI polling.
+
+## Implementation Report Index
+
+The architecture above incorporates the following dated implementation evidence:
+
+- [2026-06-15 local coding-agent MVP](../Reports/2026-06-15-local-coding-agent-mvp.md)
+- [2026-06-16 repair relaunch](../Reports/2026-06-16-albert-repair-relaunch.md)
+- [2026-06-16 TUI and Ollama completion](../Reports/2026-06-16-albert-tui-ollama-completion.md)
+- [2026-06-16 Gemma live verification](../Reports/2026-06-16-gemma-live-verification.md)
+- [2026-06-16 Gemma26 repair-loop verification](../Reports/2026-06-16-gemma26-repair-loop-verification.md)
+- [2026-06-18 Qwen controlled delegation](../Reports/2026-06-18-qwen-controlled-delegation.md)
+- [2026-06-19 Command Deck workspace-restore progress](../Reports/2026-06-19-command-deck-workspace-restore-progress.md)
+- [2026-06-20 Command Deck live sync](../Reports/2026-06-20-command-deck-live-sync.md)
+- [2026-06-20 Command Deck workspace restore](../Reports/2026-06-20-command-deck-workspace-restore.md)
+- [2026-06-21 Agent Console conversation scope](../Reports/2026-06-21-agent-console-conversation-scope.md)
+- [2026-06-21 Working Context inspector](../Reports/2026-06-21-working-context-inspector.md)
+- [2026-06-25 Issue Graph inspector](../Reports/2026-06-25-issue-graph-inspector.md)
+- [2026-06-25 provider-neutral model assignments](../Reports/2026-06-25-provider-neutral-model-assignments.md)
+- [2026-06-25 Review Workspace evidence packages](../Reports/2026-06-25-review-workspace-evidence-packages.md)
+- [2026-06-26 Ad Hoc Delegation](../Reports/2026-06-26-ad-hoc-delegation.md)
+- [2026-06-26 Workspace Queue governance](../Reports/2026-06-26-workspace-queue-governance.md)
+- [2026-06-29 governed Shell Terminal](../Reports/2026-06-29-governed-shell-terminal.md)
+- [2026-07-01 accessible responsive Command Deck](../Reports/2026-07-01-accessible-responsive-command-deck.md)
+- [2026-07-06 Alfredo accessibility and responsive workstation](../Reports/2026-07-06-alfredo-accessibility-responsive-workstation.md)
+- [2026-07-11 Alfredo one-shot workstation](../Reports/2026-07-11-alfredo-one-shot-workstation.md)
+- [2026-07-12 Alfredo install and Queue acceptance correction](../Reports/2026-07-12-alfredo-install-queue-acceptance-correction.md)

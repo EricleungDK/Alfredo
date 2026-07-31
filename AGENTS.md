@@ -9,7 +9,7 @@ Before planning or implementing any change:
 1. Read `.agent/README.md`.
 2. Read `.agent/Tasks/context.md`.
 3. Read the relevant docs under `.agent/System/`, `.agent/SOP/`, and `.agent/Tasks/`.
-4. If there is no active planning artifact, read issue PRDs / slices from `.scratch/`.
+4. If there is no active planning artifact, read the relevant GitHub PRD parent and its Issue Slice sub-issues.
 
 This repository uses `.agent/Tasks/context.md` as the source of truth for agent orchestration:
 
@@ -23,7 +23,7 @@ After significant planning or implementation, update `.agent/Tasks/context.md` w
 
 ### Issue tracker
 
-Issues and PRDs are tracked as local markdown files under `.scratch/`. See `docs/agents/issue-tracker.md`.
+GitHub Issues is the authoritative tracker. Each PRD is a `[PRD]` parent issue with ordered native Issue Slice sub-issues and native dependency edges. External PRs are not a triage surface. `.scratch/` is a read-only migration archive. See `docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
@@ -36,4 +36,3 @@ This is a single-context repo with a root `CONTEXT.md`. See `docs/agents/domain.
 ### User instruction
 
 After each implementation, provide user the instruction reply with the commands that they can use for viewing the current coding results, i.e. application GUI skeleton.
-

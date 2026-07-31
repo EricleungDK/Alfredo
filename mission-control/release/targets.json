@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "targets": [
+    {
+      "platform": "linux",
+      "arch": "x64",
+      "libc": "glibc",
+      "package": "alfredo-agent-linux-x64-gnu",
+      "artifact_directory": "release/bundle/appimage",
+      "artifact_suffix": ".AppImage",
+      "executable": "bin/alfredo-desktop.AppImage"
+    }
+  ]
+}

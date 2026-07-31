@@ -1,38 +1,49 @@
 {
-  "name": "alfredo",
+  "name": "alfredo-workstation-development",
   "version": "0.1.0",
+  "private": true,
+  "description": "Development workspace for the Alfredo coding-agent workstation",
   "type": "module",
   "bin": {
-    "alfredo": "./bin/alfredo.js",
-    "albert": "./bin/alfredo.js"
+    "alfredo": "bin/alfredo.js",
+    "albert": "bin/alfredo.js"
   },
   "scripts": {
     "dev": "vite",
+    "prototype:journey": "vite --mode workspace-mission-journey --host 127.0.0.1 --port 14873 --strictPort",
+    "prototype:tree": "vite --mode mission-execution-tree --host 127.0.0.1 --port 14874 --strictPort",
+    "prototype:rust-orchestrator": "cargo run --release --manifest-path src-tauri/prototypes/rust-orchestrator-slice/Cargo.toml --",
+    "prototype:rust-gui": "tauri dev --features rust-orchestrator-prototype --config src-tauri/tauri.rust-orchestrator-prototype.conf.json",
     "desktop": "tauri dev",
-    "desktop:build": "tauri build",
-    "build": "tsc -b && vite build",
-    "typecheck": "tsc -b --pretty false",
+    "desktop:build": "node scripts/build-desktop-release.js --native-only",
+    "release:build": "node scripts/build-desktop-release.js",
+    "release:check": "node scripts/check-verified-release.js",
+    "release:clean": "node scripts/build-npm-release.js clean",
+    "release:verify": "node scripts/verify-installed-release.js",
     "performance:fixtures": "node scripts/performance-cohorts.js fixture-check --manifest performance/fixtures/v1/manifest.json",
     "performance:check": "node scripts/performance-driver.js check",
     "performance:gate": "node scripts/performance-driver.js record-gate",
     "performance:run": "node scripts/performance-driver.js run",
     "performance:report": "node scripts/performance-cohorts.js report",
     "test:performance": "node --test tests/performance-cohorts.test.js tests/performance-driver.test.js tests/performance-instrumentation.test.js tests/performance-lifecycle.test.js",
-    "test": "vitest"
-  },
-  "dependencies": {
-    "@tauri-apps/api": "^2.0.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "build": "tsc -b && vite build",
+    "typecheck": "tsc -b --pretty false",
+    "test": "vitest",
+    "test:layout": "npm run build && playwright test",
+    "test:prototype-journey": "playwright test --config playwright.prototype.config.ts"
   },
   "devDependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "@tauri-apps/cli": "^2.0.0",
+    "@playwright/test": "^1.61.1",
+    "@vitejs/plugin-react": "^4.3.0",
     "@testing-library/jest-dom": "^6.6.0",
     "@testing-library/react": "^16.1.0",
-    "@tauri-apps/cli": "^2.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^4.3.0",
     "jsdom": "^26.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
     "typescript": "^5.7.0",
     "vite": "^6.0.0",
     "vitest": "^3.0.0"

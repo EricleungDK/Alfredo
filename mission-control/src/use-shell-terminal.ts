@@ -1,6 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type {
+  AdditionalPathGrantRequestRecord,
   PathAccessLevel,
+  ShellTerminalCommandRequest,
   ShellTerminalCommandRecord,
   ShellTerminalCommandResult,
   ShellTerminalProjection,
@@ -42,13 +44,14 @@ export interface ShellTerminalController {
   readonly setAccessLevel: (value: PathAccessLevel) => void;
   readonly load: () => Promise<boolean>;
   readonly submit: () => Promise<void>;
+  readonly submitCommand: (command: string) => Promise<void>;
   readonly setDenialReason: (commandId: string, reason: string) => void;
   readonly decide: (
     command: ShellTerminalCommandRecord,
     decision: "approve" | "deny",
   ) => Promise<void>;
   readonly createGrantForRequest: (requestId: string) => Promise<void>;
-  readonly denyGrantRequest: (requestId: string) => void;
+  readonly denyGrantRequest: (requestId: string) => Promise<void>;
 }
 
 export interface ShellTerminalWorkstationActionTurn {
@@ -60,7 +63,15 @@ export interface ShellTerminalWorkstationActionTurn {
 
 export interface ShellTerminalOptions {
   readonly onWorkstationActionTurn?: (turn: ShellTerminalWorkstationActionTurn) => void;
+  readonly onCommandTurnAvailable?: (commandId: string) => void;
 }
+
+interface RetryableShellSubmission {
+  readonly correlationId: string;
+  readonly requestKey: string;
+}
+
+let shellSubmissionSequence = 0;
 
 export function useShellTerminal(
   client: WorkspaceClient,
@@ -82,32 +93,36 @@ export function useShellTerminal(
   const [denialReasons, setDenialReasons] = useState<Record<string, string>>({});
   const [contextualGrantRequest, setContextualGrantRequest] =
     useState<ContextualPathGrantRequest | null>(null);
+  const pathGrantDenialAttemptRef = useRef(0);
+  const retryableSubmissionRef = useRef<RetryableShellSubmission | null>(null);
+  const onWorkstationActionTurn = options.onWorkstationActionTurn;
+  const onCommandTurnAvailable = options.onCommandTurnAvailable;
 
   useEffect(() => {
     if (workspacePath) setWorkingDirectory((current) => current || workspacePath);
   }, [workspacePath]);
 
   const emitActionStart = useCallback(
-    (correlationId: string, label: string) => {
-      options.onWorkstationActionTurn?.({
+    (correlationId: string, label: string): void => {
+      onWorkstationActionTurn?.({
         id: `${correlationId}:intent`,
         content: `Workstation action: Mission Commander requested ${label}.`,
         source: "mission-commander",
         outcome: "pending",
       });
-      options.onWorkstationActionTurn?.({
+      onWorkstationActionTurn?.({
         id: `${correlationId}:reaction:pending`,
         content: "Orchestrator validating workstation action.",
         source: "orchestrator",
         outcome: "pending",
       });
     },
-    [options],
+    [onWorkstationActionTurn],
   );
 
   const emitActionFinish = useCallback(
-    (correlationId: string, outcome: "acknowledged" | "rejected", message: string) => {
-      options.onWorkstationActionTurn?.({
+    (correlationId: string, outcome: "acknowledged" | "rejected", message: string): void => {
+      onWorkstationActionTurn?.({
         id: `${correlationId}:reaction:${outcome}`,
         content:
           outcome === "acknowledged"
@@ -117,10 +132,10 @@ export function useShellTerminal(
         outcome,
       });
     },
-    [options],
+    [onWorkstationActionTurn],
   );
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (): Promise<boolean> => {
     if (!client.loadShellTerminal) {
       setLoadStatus("rejected");
       setErrorMessage("Shell Terminal transport is unavailable.");
@@ -133,51 +148,100 @@ export function useShellTerminal(
       setErrorMessage(result.message);
       return false;
     }
+    for (const command of result.projection.commands) {
+      onCommandTurnAvailable?.(command.command_id);
+    }
+    setContextualGrantRequest((current) => {
+      const requests = result.projection.path_grant_requests ?? [];
+      const newestPending = [...requests]
+        .reverse()
+        .find((request) => request.status === "pending");
+      if (newestPending) return contextualGrantRequestFromRecord(newestPending);
+      const currentRecord = current
+        ? requests.find((request) => request.request_id === current.requestId)
+        : undefined;
+      return currentRecord ? contextualGrantRequestFromRecord(currentRecord) : null;
+    });
     setProjection(result.projection);
     setLoadStatus("idle");
     setErrorMessage("");
     return true;
-  }, [client]);
+  }, [client, onCommandTurnAvailable]);
 
-  const submit = useCallback(async () => {
-    if (!commandDraft.trim() || !workingDirectory.trim()) return;
-    if (!client.submitShellTerminalCommand) {
-      setActionStatus({ state: "rejected", message: "Shell Terminal command transport is unavailable." });
-      return;
-    }
-    setActionStatus({ state: "pending", message: "Command submission pending." });
-    const command = commandDraft.trim();
+  const submitCommand = useCallback(async (requestedCommand: string) => {
+    if (!requestedCommand.trim() || !workingDirectory.trim()) return;
+    const command = requestedCommand.trim();
     const requestedPaths = requestedPathsDraft
       .split(/\r?\n/)
       .map((path) => path.trim())
       .filter(Boolean);
-    const result = await client.submitShellTerminalCommand({
-      correlation_id: `terminal-command-${Date.now()}`,
+    const requestKey = JSON.stringify({
       command,
       working_directory: workingDirectory.trim(),
       requested_paths: requestedPaths,
       requester: "mission-commander",
       access_level: accessLevel,
     });
-    if (result.kind !== "command-result") {
-      setActionStatus({ state: "rejected", message: result.message });
-      const grantRequest = buildContextualGrantRequest({
-        command,
-        workingDirectory: workingDirectory.trim(),
-        requestedPaths,
-        accessLevel,
-        reason: result.message,
+    const retryable = retryableSubmissionRef.current;
+    const correlationId =
+      retryable?.requestKey === requestKey
+        ? retryable.correlationId
+        : `terminal-command-${Date.now()}-${++shellSubmissionSequence}`;
+    if (!client.submitShellTerminalCommand) {
+      const message = "Shell Terminal command transport is unavailable.";
+      setActionStatus({ state: "rejected", message });
+      onWorkstationActionTurn?.({
+        id: `${correlationId}:reaction:rejected`,
+        content: `Shell Terminal command rejected: ${message}`,
+        source: "orchestrator",
+        outcome: "rejected",
       });
-      if (grantRequest) {
-        setContextualGrantRequest(grantRequest);
-      }
       return;
     }
+    const request: ShellTerminalCommandRequest = {
+      correlation_id: correlationId,
+      command,
+      working_directory: workingDirectory.trim(),
+      requested_paths: requestedPaths,
+      requester: "mission-commander",
+      access_level: accessLevel,
+    };
+    retryableSubmissionRef.current = { correlationId, requestKey };
+    setActionStatus({ state: "pending", message: "Command submission pending." });
+    const result = await awaitWithTerminalPolling(
+      client.submitShellTerminalCommand(request),
+      load,
+    );
+    if (result.kind !== "command-result") {
+      setActionStatus({ state: "rejected", message: result.message });
+      onWorkstationActionTurn?.({
+        id: `${correlationId}:reaction:rejected`,
+        content: `Shell Terminal command rejected: ${result.message}`,
+        source: "orchestrator",
+        outcome: "rejected",
+      });
+      await load();
+      return;
+    }
+    retryableSubmissionRef.current = null;
+    onCommandTurnAvailable?.(result.result.command_id);
     setTranscript((entries) => [...entries, { ...result.result, command }]);
-    setCommandDraft("");
+    setCommandDraft((current) => (current.trim() === command ? "" : current));
     setActionStatus({ state: "acknowledged", message: `Command ${result.result.status}.` });
     await load();
-  }, [accessLevel, client, commandDraft, load, requestedPathsDraft, workingDirectory]);
+  }, [
+    accessLevel,
+    client,
+    load,
+    onCommandTurnAvailable,
+    onWorkstationActionTurn,
+    requestedPathsDraft,
+    workingDirectory,
+  ]);
+
+  const submit = useCallback(async () => {
+    await submitCommand(commandDraft);
+  }, [commandDraft, submitCommand]);
 
   const setDenialReason = useCallback((commandId: string, reason: string) => {
     setDenialReasons((current) => ({ ...current, [commandId]: reason }));
@@ -199,24 +263,29 @@ export function useShellTerminal(
     const correlationId = `terminal-decision-${decision}-${command.command_id}`;
     emitActionStart(correlationId, `${decision === "approve" ? "Approve" : "Deny"} terminal command ${command.command_id}`);
     setActionStatus({ state: "pending", message: `Decision pending for ${command.command_id}.` });
-    const result = await client.decideShellTerminalCommand({
-      command_id: command.command_id,
-      decision,
-      actor: "mission-commander",
-      reason,
-    });
+    const result = await awaitWithTerminalPolling(
+      client.decideShellTerminalCommand({
+        command_id: command.command_id,
+        decision,
+        actor: "mission-commander",
+        reason,
+      }),
+      load,
+    );
     if (result.kind !== "command-result") {
       setActionStatus({ state: "rejected", message: result.message });
       emitActionFinish(correlationId, "rejected", result.message);
+      await load();
       return;
     }
+    onCommandTurnAvailable?.(result.result.command_id);
     if (result.result.stdout || result.result.stderr) {
       setTranscript((entries) => [...entries, { ...result.result, command: command.command }]);
     }
     setActionStatus({ state: "acknowledged", message: `Command ${result.result.status}.` });
     emitActionFinish(correlationId, "acknowledged", `Command ${result.result.status}.`);
     await load();
-  }, [client, denialReasons, emitActionFinish, emitActionStart, load]);
+  }, [client, denialReasons, emitActionFinish, emitActionStart, load, onCommandTurnAvailable]);
 
   const createGrantForRequest = useCallback(async (requestId: string) => {
     const request = contextualGrantRequest;
@@ -233,6 +302,7 @@ export function useShellTerminal(
     setActionStatus({ state: "pending", message: "Additional Path Grant creation pending." });
     const result = await client.createAdditionalPathGrant({
       correlation_id: correlationId,
+      request_id: request.requestId,
       expected_revision: projection?.revision ?? 0,
       path: request.path,
       access_level: request.accessLevel,
@@ -250,26 +320,43 @@ export function useShellTerminal(
     await load();
   }, [client, contextualGrantRequest, emitActionFinish, emitActionStart, load, projection?.revision]);
 
-  const denyGrantRequest = useCallback((requestId: string) => {
-    setContextualGrantRequest((request) => {
-      if (!request || request.requestId !== requestId || request.status !== "pending") return request;
-      const correlationId = `path-grant-denied-${requestId}`;
-      options.onWorkstationActionTurn?.({
-        id: `${correlationId}:intent`,
-        content: `Workstation action: Mission Commander denied Additional Path Grant for ${request.path}.`,
-        source: "mission-commander",
-        outcome: "rejected",
-      });
-      options.onWorkstationActionTurn?.({
-        id: `${correlationId}:reaction:denied`,
-        content: `Orchestrator left command blocked: Additional Path Grant denied for ${request.affectedAction}.`,
-        source: "orchestrator",
-        outcome: "rejected",
-      });
-      setActionStatus({ state: "acknowledged", message: "Additional Path Grant request denied." });
-      return { ...request, status: "denied" };
+  const denyGrantRequest = useCallback(async (requestId: string) => {
+    const request = contextualGrantRequest;
+    if (!request || request.requestId !== requestId || request.status !== "pending") return;
+    pathGrantDenialAttemptRef.current += 1;
+    const correlationId =
+      `path-grant-denied-${requestId}-${pathGrantDenialAttemptRef.current}`;
+    if (!client.denyAdditionalPathGrant) {
+      const message = "Additional Path Grant denial transport is unavailable.";
+      setActionStatus({ state: "rejected", message });
+      emitActionFinish(correlationId, "rejected", message);
+      return;
+    }
+    emitActionStart(correlationId, `Deny Additional Path Grant for ${request.path}`);
+    setActionStatus({ state: "pending", message: "Additional Path Grant denial pending." });
+    const result = await client.denyAdditionalPathGrant({
+      correlation_id: correlationId,
+      request_id: request.requestId,
+      expected_revision: projection?.revision ?? 0,
+      path: request.path,
+      access_level: request.accessLevel,
+      duration_seconds: request.durationSeconds,
+      requester: "mission-commander",
+      reason: request.reason,
+      affected_action: request.affectedAction,
     });
-  }, [options]);
+    if (result.kind !== "path-grant-denied") {
+      setActionStatus({ state: "rejected", message: result.message });
+      emitActionFinish(correlationId, "rejected", result.message);
+      return;
+    }
+    setContextualGrantRequest({ ...request, status: "denied" });
+    const message =
+      `Recorded ${result.denial.denial_id}; ${request.affectedAction} remains blocked.`;
+    setActionStatus({ state: "acknowledged", message });
+    emitActionFinish(correlationId, "acknowledged", message);
+    await load();
+  }, [client, contextualGrantRequest, emitActionFinish, emitActionStart, load, projection?.revision]);
 
   return {
     commandDraft,
@@ -289,6 +376,7 @@ export function useShellTerminal(
     setAccessLevel,
     load,
     submit,
+    submitCommand,
     setDenialReason,
     decide,
     createGrantForRequest,
@@ -296,32 +384,41 @@ export function useShellTerminal(
   };
 }
 
-function buildContextualGrantRequest({
-  command,
-  workingDirectory,
-  requestedPaths,
-  accessLevel,
-  reason,
-}: {
-  readonly command: string;
-  readonly workingDirectory: string;
-  readonly requestedPaths: readonly string[];
-  readonly accessLevel: PathAccessLevel;
-  readonly reason: string;
-}): ContextualPathGrantRequest | null {
-  if (!reason.toLowerCase().includes("additional path grant")) return null;
-  const path =
-    reason.toLowerCase().includes("working directory")
-      ? workingDirectory
-      : requestedPaths[0] ?? workingDirectory;
-  if (!path) return null;
+async function awaitWithTerminalPolling<T>(
+  operation: Promise<T>,
+  reload: () => Promise<boolean>,
+): Promise<T> {
+  let settled = false;
+  let pollTimer: number | undefined;
+  const poll = (): void => {
+    pollTimer = window.setTimeout(() => {
+      if (settled) return;
+      void reload()
+        .catch(() => false)
+        .finally(() => {
+          if (!settled) poll();
+        });
+    }, 150);
+  };
+  poll();
+  try {
+    return await operation;
+  } finally {
+    settled = true;
+    if (pollTimer !== undefined) window.clearTimeout(pollTimer);
+  }
+}
+
+function contextualGrantRequestFromRecord(
+  request: AdditionalPathGrantRequestRecord,
+): ContextualPathGrantRequest {
   return {
-    requestId: `contextual-grant-${Date.now()}`,
-    path,
-    accessLevel,
-    durationSeconds: 900,
-    reason,
-    affectedAction: command,
-    status: "pending",
+    requestId: request.request_id,
+    path: request.path,
+    accessLevel: request.access_level,
+    durationSeconds: request.duration_seconds,
+    reason: request.reason,
+    affectedAction: request.affected_action,
+    status: request.status,
   };
 }

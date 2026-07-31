@@ -46,9 +46,16 @@ export interface AlfredoLaunchContext {
   readonly starting_location: string;
   readonly coding_workspace: string | null;
   readonly active_mission: string | null;
+  readonly revision?: number;
+  readonly known_missions?: readonly MissionChoiceOption[];
   readonly phase: "selection-required" | "mission-choice-required" | "workspace-ready";
   readonly runtime_root: string;
   readonly recent_workspaces: readonly string[];
+}
+
+export interface MissionChoiceOption {
+  readonly id: string;
+  readonly title: string;
 }
 
 export type AlfredoLaunchContextResult =
@@ -76,6 +83,7 @@ export interface CodingWorkspaceAcknowledgement {
   readonly active_mission: null;
   readonly replayed: boolean;
   readonly message: string;
+  readonly known_missions?: readonly MissionChoiceOption[];
 }
 
 export type CodingWorkspaceSelectionResult =
@@ -85,6 +93,84 @@ export type CodingWorkspaceSelectionResult =
     }
   | {
       readonly kind: "selection-failure";
+      readonly code: string;
+      readonly message: string;
+      readonly recoverable: boolean;
+    };
+
+export interface MissionChoiceRequest {
+  readonly correlation_id: string;
+  readonly expected_revision: number;
+  readonly choice: "resume" | "new";
+  readonly mission_id: string;
+  readonly mission_title?: string;
+}
+
+export interface MissionChoiceAcknowledgement {
+  readonly schema_version: 1;
+  readonly correlation_id: string;
+  readonly outcome: "acknowledged";
+  readonly coding_workspace: string;
+  readonly choice: "resume" | "new";
+  readonly active_mission: string;
+  readonly revision: number;
+  readonly replayed: boolean;
+  readonly missions: readonly MissionChoiceOption[];
+  readonly message: string;
+}
+
+export type MissionChoiceResult =
+  | {
+      readonly kind: "acknowledged";
+      readonly acknowledgement: MissionChoiceAcknowledgement;
+    }
+  | {
+      readonly kind: "mission-choice-failure";
+      readonly code: string;
+      readonly message: string;
+      readonly recoverable: boolean;
+    };
+
+export interface SkillCapability {
+  readonly name: string;
+  readonly description: string;
+  readonly source: string;
+  readonly invocation: string;
+}
+
+export interface CommandCapability {
+  readonly name: string;
+  readonly usage: string;
+  readonly description: string;
+  readonly category: string;
+}
+
+export interface AgentCapability {
+  readonly id: string;
+  readonly role: string;
+  readonly provider: string;
+  readonly runner: string;
+  readonly model: string;
+  readonly routing: string;
+  readonly availability: string;
+  readonly availability_reason: string;
+  readonly assignable?: boolean;
+  readonly delegate_only?: boolean;
+  readonly requires_approval?: boolean;
+}
+
+export interface AgentCapabilityCatalog {
+  readonly schema_version: 1;
+  readonly default_agent_id: string;
+  readonly skills: readonly SkillCapability[];
+  readonly commands: readonly CommandCapability[];
+  readonly agents: readonly AgentCapability[];
+}
+
+export type AgentCapabilityCatalogResult =
+  | { readonly kind: "capabilities"; readonly catalog: AgentCapabilityCatalog }
+  | {
+      readonly kind: "capabilities-failure";
       readonly code: string;
       readonly message: string;
       readonly recoverable: boolean;
@@ -177,6 +263,8 @@ export type ShellTerminalClassification =
   | "human-required";
 export type ShellTerminalCommandStatus =
   | "pending-approval"
+  | "executing"
+  | "outcome-unknown"
   | "completed"
   | "failed"
   | "denied";
@@ -207,6 +295,34 @@ export interface AdditionalPathGrant {
   readonly granted_by: "mission-commander";
   readonly granted_at: string;
   readonly expires_at: string;
+  readonly request_id?: string;
+}
+
+export interface AdditionalPathGrantRequestRecord {
+  readonly request_id: string;
+  readonly correlation_id: string;
+  readonly mission_id: string;
+  readonly path: string;
+  readonly access_level: PathAccessLevel;
+  readonly duration_seconds: number;
+  readonly requester: string;
+  readonly requested_at: string;
+  readonly reason: string;
+  readonly affected_action: string;
+  readonly status: "pending" | "granted" | "denied";
+}
+
+export interface AdditionalPathGrantDenial {
+  readonly denial_id: string;
+  readonly correlation_id: string;
+  readonly request_id: string;
+  readonly path: string;
+  readonly access_level: PathAccessLevel;
+  readonly duration_seconds: number;
+  readonly denied_by: "mission-commander";
+  readonly denied_at: string;
+  readonly reason: string;
+  readonly affected_action: string;
 }
 
 export interface ShellTerminalProjection {
@@ -214,6 +330,8 @@ export interface ShellTerminalProjection {
   readonly revision: number;
   readonly commands: readonly ShellTerminalCommandRecord[];
   readonly grants: readonly AdditionalPathGrant[];
+  readonly grant_denials?: readonly AdditionalPathGrantDenial[];
+  readonly path_grant_requests?: readonly AdditionalPathGrantRequestRecord[];
 }
 
 export type ShellTerminalLoadResult =
@@ -261,6 +379,7 @@ export type ShellTerminalDecisionResult =
 
 export interface AdditionalPathGrantRequest {
   readonly correlation_id: string;
+  readonly request_id: string;
   readonly expected_revision: number;
   readonly path: string;
   readonly access_level: PathAccessLevel;
@@ -272,6 +391,22 @@ export type AdditionalPathGrantCreateResult =
   | { readonly kind: "path-grant"; readonly grant: AdditionalPathGrant }
   | { readonly kind: "path-grant-rejected"; readonly code: string; readonly message: string };
 
+export interface AdditionalPathGrantDenialRequest {
+  readonly correlation_id: string;
+  readonly request_id: string;
+  readonly expected_revision: number;
+  readonly path: string;
+  readonly access_level: PathAccessLevel;
+  readonly duration_seconds: number;
+  readonly requester: "mission-commander";
+  readonly reason: string;
+  readonly affected_action: string;
+}
+
+export type AdditionalPathGrantDenialResult =
+  | { readonly kind: "path-grant-denied"; readonly denial: AdditionalPathGrantDenial }
+  | { readonly kind: "path-grant-rejected"; readonly code: string; readonly message: string };
+
 export interface AgentConsoleMessageRequest {
   readonly role: AgentConsoleRole;
   readonly content: string;
@@ -281,10 +416,44 @@ export interface AgentConsoleMessageRequest {
   readonly scope_kind: ConversationScopeKind;
   readonly scope_target: string;
   readonly scope_label: string;
+  readonly scope_mission_id?: string;
+}
+
+export interface AgentConsoleResponseRequest {
+  readonly expected_revision: number;
+  readonly message_id: string;
+  readonly scope_kind: ConversationScopeKind;
+  readonly scope_target: string;
+  readonly scope_label: string;
+  readonly scope_mission_id?: string;
+  readonly agent_id?: string;
 }
 
 export type AgentConsoleMessageResult =
   | { readonly kind: "message"; readonly message: AgentConsoleMessage }
+  | {
+      readonly kind: "message-rejected";
+      readonly code: string;
+      readonly message: string;
+    };
+
+export interface AgentConsoleResponseRoute {
+  readonly intent: "discussion" | "coding-task";
+  readonly task_request: string;
+  readonly acceptance_criteria: readonly string[];
+}
+
+export interface AgentConsoleResponseProjection {
+  readonly message: AgentConsoleMessage;
+  readonly route: AgentConsoleResponseRoute;
+}
+
+export type AgentConsoleResponseResult =
+  | {
+      readonly kind: "message";
+      readonly message: AgentConsoleMessage;
+      readonly route: AgentConsoleResponseRoute;
+    }
   | {
       readonly kind: "message-rejected";
       readonly code: string;
@@ -409,6 +578,7 @@ export interface ReviewDecisionRequest {
   readonly actor: "mission-commander";
   readonly expected_revision: number;
   readonly target: ReviewDecisionTarget;
+  readonly mission_id?: string;
   readonly session_id: string;
   readonly decision: ReviewDecision;
   readonly reason: string;
@@ -520,6 +690,7 @@ export interface WorkspaceQueueAcknowledgement {
   readonly item_id: string;
   readonly item_status: WorkspaceQueueItemStatus;
   readonly effect_summary: string;
+  readonly session_id?: string | null;
 }
 
 export type WorkspaceQueueDecisionResult =
@@ -537,6 +708,7 @@ export type WorkspaceQueueDecisionResult =
 export type AdHocDelegationProposalResult = WorkspaceQueueDecisionResult;
 
 export type WorkstationActionType =
+  | "issue-approve"
   | "issue-launch"
   | "issue-retry"
   | "session-cancel"
@@ -550,6 +722,7 @@ export interface WorkstationActionRequest {
   readonly target:
     | { readonly kind: "issue-slice"; readonly id: string }
     | { readonly kind: "agent-session"; readonly id: string };
+  readonly mission_id?: string;
   readonly issue_id?: string;
   readonly session_id?: string;
   readonly agent_id?: string;
@@ -567,6 +740,55 @@ export interface WorkstationActionAcknowledgement {
   readonly session_id: string;
   readonly effect_summary: string;
 }
+
+export interface WorkstationSessionRunRequest {
+  readonly session_id: string;
+  readonly mission_id?: string;
+}
+
+export interface WorkstationSessionRunProjection {
+  readonly schema_version: 1;
+  readonly mission_id: string;
+  readonly session_id: string;
+  readonly issue_id: string;
+  readonly status: string;
+  readonly runner_started_at: string;
+  readonly runner_ended_at: string;
+  readonly runner_exit_status: number | null;
+  readonly evidence_valid: boolean;
+}
+
+export type WorkstationSessionRunResult =
+  | { readonly kind: "session-finished"; readonly session: WorkstationSessionRunProjection }
+  | { readonly kind: "session-failed"; readonly code: string; readonly message: string };
+
+export interface SessionArtifactReadRequest {
+  readonly mission_id: string;
+  readonly session_id: string;
+  readonly artifact_ref: string;
+}
+
+export interface SessionArtifactProjection {
+  readonly schema_version: 1;
+  readonly mission_id: string;
+  readonly session_id: string;
+  readonly artifact_id: string;
+  readonly label: string;
+  readonly media_type: string;
+  readonly content: string;
+  readonly byte_count: number;
+  readonly content_limit_bytes: number;
+  readonly truncated: boolean;
+}
+
+export type SessionArtifactReadResult =
+  | { readonly kind: "session-artifact"; readonly artifact: SessionArtifactProjection }
+  | {
+      readonly kind: "session-artifact-failure";
+      readonly code: string;
+      readonly message: string;
+      readonly recoverable: boolean;
+    };
 
 export type WorkstationActionResult =
   | {
@@ -752,6 +974,8 @@ export interface WorkspaceModelAssignment {
 export interface WorkspaceIssueSliceSummary {
   readonly issue_id: string;
   readonly title: string;
+  readonly work_type?: string;
+  readonly tracker_status?: string;
   readonly lifecycle: string;
   readonly progress: string;
   readonly launch_eligible: boolean;
@@ -769,9 +993,22 @@ export interface MissionSessionSummary {
   readonly issue_id: string;
   readonly assigned_agent: string;
   readonly status: string;
+  readonly last_activity_at?: string;
+  readonly runner_started_at?: string;
   readonly role?: string;
   readonly provider?: string;
   readonly model?: string;
+  readonly task_title?: string;
+  readonly operation_status?: string;
+  readonly failure?: string;
+  readonly changed_files?: readonly string[];
+  readonly commands_run?: readonly string[];
+  readonly test_results?: string;
+  readonly risks?: string;
+  readonly artifact_links?: readonly string[];
+  readonly review_outcome?: string;
+  readonly review_next_action?: string;
+  readonly repair_action_available?: boolean;
 }
 
 export interface WorkspaceQueueAttention {

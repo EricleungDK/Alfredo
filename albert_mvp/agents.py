@@ -10,6 +10,18 @@ class AgentConfigError(Exception):
     """Raised when the local agent registry config is invalid."""
 
 
+def is_cloud_model(model: str) -> bool:
+    """Return whether a configured model uses the governed cloud suffix."""
+
+    return model.strip().casefold().endswith(":cloud")
+
+
+_LOCAL_EXECUTION_PROVIDERS = frozenset(
+    {"command", "fake", "local", "ollama", "test", "test-harness"}
+)
+_LOCAL_EXECUTION_RUNNERS = frozenset({"command", "fake", "ollama"})
+
+
 @dataclass(frozen=True)
 class AgentConfig:
     id: str
@@ -20,6 +32,7 @@ class AgentConfig:
     command: str = ""
     test_command: str = ""
     routing: str = ""
+    assignable: bool = True
     delegate_only: bool = False
     requires_approval: bool = False
     availability: str = "available"
@@ -40,6 +53,8 @@ class AgentConfig:
             data["test_command"] = self.test_command
         if self.routing:
             data["routing"] = self.routing
+        if not self.assignable:
+            data["assignable"] = False
         if self.delegate_only:
             data["delegate_only"] = self.delegate_only
         if self.requires_approval:
@@ -57,6 +72,48 @@ class AgentConfig:
         if self.model:
             return f"{prefix}{self.provider}:{self.model}"
         return prefix + (self.provider or self.runner)
+
+
+def has_local_execution_boundary(agent: AgentConfig) -> bool:
+    """Return whether both provider and runner are explicitly local-capable."""
+
+    return (
+        agent.provider.strip().casefold() in _LOCAL_EXECUTION_PROVIDERS
+        and agent.runner.strip().casefold() in _LOCAL_EXECUTION_RUNNERS
+        and not is_cloud_model(agent.model)
+    )
+
+
+def is_eligible_assignment_agent(agent: AgentConfig) -> bool:
+    """Return whether an agent may be selected as an ordinary Local Agent worker."""
+
+    routing = agent.routing.strip().casefold()
+    has_worker_role = routing == "worker" or (
+        not routing and agent.role.strip().casefold() == "local-agent"
+    )
+    return (
+        has_worker_role
+        and agent.assignable
+        and not agent.delegate_only
+        and not agent.requires_approval
+        and has_local_execution_boundary(agent)
+    )
+
+
+def is_eligible_controller_agent(agent: AgentConfig) -> bool:
+    """Return whether an agent may act as a local controller or router."""
+
+    routing = agent.routing.strip().casefold()
+    has_controller_role = routing in {"controller", "router", "frontier"} or (
+        not routing and agent.role.strip().casefold() == "frontier"
+    )
+    return (
+        has_controller_role
+        and not agent.delegate_only
+        and not agent.requires_approval
+        and has_local_execution_boundary(agent)
+        and agent.availability.strip().casefold() == "available"
+    )
 
 
 @dataclass(frozen=True)
@@ -79,6 +136,23 @@ class AgentRegistry:
         if not agent:
             raise AgentConfigError(f"Unknown configured agent: {agent_id}")
         return agent
+
+    def controller_agent(self) -> AgentConfig | None:
+        for routing in ("controller", "router", "frontier"):
+            for agent in self.agents:
+                if (
+                    agent.routing.casefold() == routing
+                    and is_eligible_controller_agent(agent)
+                ):
+                    return agent
+        for agent in self.agents:
+            if (
+                not agent.routing.strip()
+                and agent.role.casefold() == "frontier"
+                and is_eligible_controller_agent(agent)
+            ):
+                return agent
+        return None
 
 
 def load_agent_registry(path: Path | None) -> AgentRegistry:
@@ -113,8 +187,15 @@ def _parse_agent(path: Path, index: int, raw_agent: Any, seen: set[str]) -> Agen
     command = str(raw_agent.get("command", "")).strip()
     test_command = str(raw_agent.get("test_command", "")).strip()
     routing = str(raw_agent.get("routing", "")).strip()
-    delegate_only = bool(raw_agent.get("delegate_only", False))
-    requires_approval = bool(raw_agent.get("requires_approval", False))
+    assignable = _optional_bool(raw_agent, "assignable", True, path, agent_id)
+    delegate_only = _optional_bool(raw_agent, "delegate_only", False, path, agent_id)
+    requires_approval = _optional_bool(
+        raw_agent,
+        "requires_approval",
+        False,
+        path,
+        agent_id,
+    )
     availability = str(raw_agent.get("availability", "available")).strip() or "available"
     availability_reason = str(raw_agent.get("availability_reason", "")).strip()
     if availability not in {"available", "unavailable", "disconnected"}:
@@ -132,6 +213,7 @@ def _parse_agent(path: Path, index: int, raw_agent: Any, seen: set[str]) -> Agen
         command=command,
         test_command=test_command,
         routing=routing,
+        assignable=assignable,
         delegate_only=delegate_only,
         requires_approval=requires_approval,
         availability=availability,
@@ -143,4 +225,19 @@ def _required(raw_agent: dict[str, Any], field_name: str, path: Path, label: obj
     value = str(raw_agent.get(field_name, "")).strip()
     if not value:
         raise AgentConfigError(f"{path} agent entry {label} is missing {field_name}.")
+    return value
+
+
+def _optional_bool(
+    raw_agent: dict[str, Any],
+    field_name: str,
+    default: bool,
+    path: Path,
+    label: object,
+) -> bool:
+    value = raw_agent.get(field_name, default)
+    if not isinstance(value, bool):
+        raise AgentConfigError(
+            f"{path} agent entry {label} field {field_name!r} must be a JSON boolean."
+        )
     return value

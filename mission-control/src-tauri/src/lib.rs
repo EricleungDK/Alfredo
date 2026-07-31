@@ -12,6 +12,10 @@ use std::sync::{
 };
 use std::time::Instant;
 
+#[cfg(feature = "rust-orchestrator-prototype")]
+#[path = "../prototypes/rust-orchestrator-slice/src/model.rs"]
+mod rust_orchestrator_prototype_model;
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct BridgeConfig {
     pub python: String,
@@ -407,9 +411,17 @@ pub struct AlfredoLaunchContext {
     pub starting_location: String,
     pub coding_workspace: Option<String>,
     pub active_mission: Option<String>,
+    pub revision: u64,
+    pub known_missions: Vec<MissionChoiceOption>,
     pub phase: String,
     pub runtime_root: String,
     pub recent_workspaces: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MissionChoiceOption {
+    pub id: String,
+    pub title: String,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -430,12 +442,68 @@ pub struct CodingWorkspaceAcknowledgement {
     pub active_mission: Option<String>,
     pub replayed: bool,
     pub message: String,
+    #[serde(default)]
+    pub known_missions: Vec<MissionChoiceOption>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MissionChoiceRequest {
+    pub correlation_id: String,
+    pub expected_revision: u64,
+    pub choice: String,
+    pub mission_id: String,
+    #[serde(default)]
+    pub mission_title: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MissionChoiceAcknowledgement {
+    pub schema_version: u32,
+    pub correlation_id: String,
+    pub outcome: String,
+    pub coding_workspace: String,
+    pub choice: String,
+    pub active_mission: String,
+    pub revision: u64,
+    pub replayed: bool,
+    pub missions: Vec<MissionChoiceOption>,
+    pub message: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct PersistedMissionOption {
+    id: String,
+    title: String,
+    tracker_dir: String,
+    #[serde(default)]
+    issues_dir: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PersistedWorkspaceSession {
+    starting_location: String,
+    coding_workspace: String,
+    revision: u64,
+    active_mission: Option<String>,
+    missions: Vec<PersistedMissionOption>,
+    mission_catalog: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct PersistedWorkspaceSessions {
+    schema_version: u32,
+    sessions: Vec<PersistedWorkspaceSession>,
 }
 
 #[derive(Clone, Debug, Default)]
 struct WorkspaceBindingState {
     coding_workspace: Option<PathBuf>,
     active_mission: Option<String>,
+    revision: u64,
+    known_missions: Vec<MissionChoiceOption>,
+    missions: Vec<PersistedMissionOption>,
+    mission_catalog: Option<PathBuf>,
+    persistence_failure: Option<BridgeFailure>,
     pending_selection: Option<PendingWorkspaceSelection>,
     accepted_selection: Option<AcceptedWorkspaceSelection>,
 }
@@ -465,11 +533,161 @@ impl WorkspaceBinding {
         Self::default()
     }
 
+    fn from_config(config: &BridgeConfig) -> Self {
+        let binding = Self::default();
+        if let Err(error) = binding.reload_from_persistence(config) {
+            let mut state = binding
+                .inner
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.persistence_failure = Some(error);
+            drop(state);
+            return binding;
+        }
+        binding
+    }
+
     fn state(&self) -> WorkspaceBindingState {
         self.inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
+    }
+
+    fn ensure_persistence_healthy(&self) -> Result<(), BridgeFailure> {
+        self.state().persistence_failure.map_or(Ok(()), Err)
+    }
+
+    fn reload_from_persistence(&self, config: &BridgeConfig) -> Result<(), BridgeFailure> {
+        let path = config.runtime_root.join("workspace-sessions.json");
+        if !path.exists() {
+            return Ok(());
+        }
+        let payload: PersistedWorkspaceSessions =
+            serde_json::from_slice(&fs::read(&path).map_err(|error| BridgeFailure {
+                code: "persistence-read-failure".to_owned(),
+                message: format!("The canonical Workspace journey could not be read: {error}"),
+                recoverable: true,
+            })?)
+            .map_err(|error| BridgeFailure {
+                code: "persistence-read-failure".to_owned(),
+                message: format!("The canonical Workspace journey is invalid: {error}"),
+                recoverable: false,
+            })?;
+        if payload.schema_version != 1 {
+            return Err(BridgeFailure {
+                code: "persistence-read-failure".to_owned(),
+                message: format!(
+                    "Unsupported canonical Workspace journey schema version {}.",
+                    payload.schema_version
+                ),
+                recoverable: false,
+            });
+        }
+        let starting_location = canonical_or_original(&bridge_starting_location(config));
+        let matching_sessions = payload
+            .sessions
+            .iter()
+            .filter(|session| {
+                canonical_or_original(Path::new(&session.starting_location)) == starting_location
+            })
+            .collect::<Vec<_>>();
+        if matching_sessions.len() > 1 {
+            // A Starting Location can own several acknowledged workspaces. Do
+            // not infer one from recency; leave the gate active so the user
+            // can acknowledge the exact repository explicitly.
+            return Ok(());
+        }
+        let Some(session) = matching_sessions.first() else {
+            return Ok(());
+        };
+        let coding_workspace = PathBuf::from(&session.coding_workspace)
+            .canonicalize()
+            .map_err(|error| BridgeFailure {
+                code: "workspace-restore-failure".to_owned(),
+                message: format!("The acknowledged Coding Workspace is unavailable: {error}"),
+                recoverable: true,
+            })?;
+        if session.revision == 0 || session.mission_catalog.trim().is_empty() {
+            return Err(BridgeFailure {
+                code: "persistence-read-failure".to_owned(),
+                message:
+                    "The canonical Workspace journey has an invalid revision or Mission catalog."
+                        .to_owned(),
+                recoverable: false,
+            });
+        }
+        let known_missions = session
+            .missions
+            .iter()
+            .map(|mission| MissionChoiceOption {
+                id: mission.id.clone(),
+                title: mission.title.clone(),
+            })
+            .collect::<Vec<_>>();
+        let mut state = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.coding_workspace = Some(coding_workspace);
+        state.active_mission = session.active_mission.clone();
+        state.revision = session.revision;
+        state.known_missions = known_missions;
+        state.missions = session.missions.clone();
+        state.mission_catalog = Some(PathBuf::from(&session.mission_catalog));
+        state.persistence_failure = None;
+        Ok(())
+    }
+
+    fn require_workspace(&self) -> Result<(), BridgeFailure> {
+        self.ensure_persistence_healthy()?;
+        if self.state().coding_workspace.is_none() {
+            return Err(BridgeFailure {
+                code: "coding-workspace-selection-required".to_owned(),
+                message: "Choose or create a Coding Workspace before choosing a Mission."
+                    .to_owned(),
+                recoverable: true,
+            });
+        }
+        Ok(())
+    }
+
+    fn bound_config(&self, config: &BridgeConfig) -> Result<BridgeConfig, BridgeFailure> {
+        self.require_active_mission()?;
+        let state = self.state();
+        let active_mission = state.active_mission.clone().ok_or_else(|| BridgeFailure {
+            code: "mission-selection-required".to_owned(),
+            message: "Choose Resume Mission or Start New Mission before using Mission commands."
+                .to_owned(),
+            recoverable: true,
+        })?;
+        let mission = state
+            .missions
+            .iter()
+            .find(|mission| mission.id == active_mission)
+            .ok_or_else(|| BridgeFailure {
+                code: "persistence-read-failure".to_owned(),
+                message: "The active Mission is missing from the canonical Mission catalog."
+                    .to_owned(),
+                recoverable: false,
+            })?;
+        let coding_workspace = state.coding_workspace.ok_or_else(|| BridgeFailure {
+            code: "coding-workspace-selection-required".to_owned(),
+            message: "Choose or create a Coding Workspace before using Mission commands."
+                .to_owned(),
+            recoverable: true,
+        })?;
+        let mut bound = config.clone();
+        bound.target_repo = coding_workspace;
+        bound.tracker_dir = PathBuf::from(&mission.tracker_dir);
+        bound.issues_dir = if mission.issues_dir.trim().is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(&mission.issues_dir))
+        };
+        bound.mission_id = active_mission;
+        bound.mission_catalog = state.mission_catalog;
+        Ok(bound)
     }
 
     pub fn acknowledge(
@@ -534,6 +752,10 @@ impl WorkspaceBinding {
         }
         state.coding_workspace = Some(coding_workspace);
         state.active_mission = None;
+        state.revision = 1;
+        state.known_missions = acknowledgement.known_missions.clone();
+        state.missions.clear();
+        state.mission_catalog = None;
         state.pending_selection = None;
         state.accepted_selection = Some(AcceptedWorkspaceSelection {
             correlation_id: request.correlation_id.clone(),
@@ -575,6 +797,14 @@ impl WorkspaceBinding {
             let mut acknowledgement = accepted.acknowledgement.clone();
             acknowledgement.replayed = true;
             return Ok(Some(acknowledgement));
+        }
+        if state.coding_workspace.is_some() {
+            return Err(BridgeFailure {
+                code: "workspace-already-selected".to_owned(),
+                message: "This Alfredo process already has an acknowledged Coding Workspace."
+                    .to_owned(),
+                recoverable: false,
+            });
         }
         if let Some(pending) = state.pending_selection.as_ref() {
             if pending.correlation_id == request.correlation_id
@@ -619,6 +849,7 @@ impl WorkspaceBinding {
     }
 
     pub fn require_active_mission(&self) -> Result<(), BridgeFailure> {
+        self.ensure_persistence_healthy()?;
         let state = self.state();
         if state.coding_workspace.is_none() {
             return Err(BridgeFailure {
@@ -641,46 +872,47 @@ impl WorkspaceBinding {
     }
 }
 
-pub fn execute_coding_workspace_select(
-    config: &BridgeConfig,
-    starting_location: &std::path::Path,
-    request: &CodingWorkspaceSelectionRequest,
-) -> Result<CodingWorkspaceAcknowledgement, BridgeFailure> {
-    let mut command = BackendCommand {
-        config,
-        argv: vec!["coding-workspace-select".to_owned()],
-    };
-    command
-        .arg("--starting-location")
-        .arg(starting_location)
-        .arg("--workspace-path")
-        .arg(&request.workspace_path)
-        .arg("--selection-mode")
-        .arg(&request.selection_mode)
-        .arg("--runtime-root")
-        .arg(&config.runtime_root)
-        .arg("--correlation-id")
-        .arg(&request.correlation_id)
-        .arg("--forbidden-root")
-        .arg(&config.backend_root)
-        .arg("--forbidden-root")
-        .arg(&config.runtime_root);
-    if let Some(install_root) = std::env::var_os("ALFREDO_INSTALL_ROOT") {
-        if !install_root.is_empty() {
-            command
-                .arg("--forbidden-root")
-                .arg(PathBuf::from(install_root));
-        }
-    }
-    let output = command.output().map_err(|error| BridgeFailure {
-        code: "backend-startup-failure".to_owned(),
-        message: format!("Unable to start the Alfredo backend: {error}"),
-        recoverable: true,
-    })?;
-    decode_backend_json(
-        process_output(output),
-        "Coding Workspace selection acknowledgement",
-    )
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SkillCapability {
+    pub name: String,
+    pub description: String,
+    pub source: String,
+    pub invocation: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct CommandCapability {
+    pub name: String,
+    pub usage: String,
+    pub description: String,
+    pub category: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AgentCapability {
+    pub id: String,
+    pub role: String,
+    pub provider: String,
+    pub runner: String,
+    pub model: String,
+    pub routing: String,
+    pub availability: String,
+    pub availability_reason: String,
+    #[serde(default)]
+    pub assignable: bool,
+    #[serde(default)]
+    pub delegate_only: bool,
+    #[serde(default)]
+    pub requires_approval: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AgentCapabilityCatalog {
+    pub schema_version: u32,
+    pub default_agent_id: String,
+    pub skills: Vec<SkillCapability>,
+    pub commands: Vec<CommandCapability>,
+    pub agents: Vec<AgentCapability>,
 }
 
 impl BridgeConfig {
@@ -717,8 +949,24 @@ impl BridgeConfig {
         if let Some(selected_workspace) = std::env::var_os("ALFREDO_SELECTED_WORKSPACE") {
             config.target_repo = PathBuf::from(selected_workspace);
         }
+        if let Some(tracker_dir) = std::env::var_os("ALBERT_TRACKER_DIR") {
+            config.tracker_dir = PathBuf::from(tracker_dir);
+        }
+        if let Some(issues_dir) = std::env::var_os("ALBERT_ISSUES_DIR") {
+            config.issues_dir = Some(PathBuf::from(issues_dir));
+        }
+        if let Ok(mission_id) = std::env::var("ALBERT_MISSION_ID") {
+            if !mission_id.trim().is_empty() {
+                config.mission_id = mission_id;
+            }
+        }
         if let Some(runtime_root) = std::env::var_os("ALFREDO_RUNTIME_ROOT") {
             config.runtime_root = PathBuf::from(runtime_root);
+        }
+        if let Some(agent_config) = std::env::var_os("ALFREDO_AGENT_CONFIG") {
+            if !agent_config.is_empty() {
+                config.agent_config = Some(PathBuf::from(agent_config));
+            }
         }
         config.mission_catalog = std::env::var_os("ALBERT_MISSION_CATALOG").map(PathBuf::from);
         config
@@ -758,10 +1006,16 @@ pub fn build_launch_context_with_binding(
             .into_owned(),
         coding_workspace,
         active_mission,
+        revision: binding.revision,
+        known_missions: binding.known_missions,
         phase: phase.to_owned(),
         runtime_root: config.runtime_root.to_string_lossy().into_owned(),
         recent_workspaces: recent_workspaces(&config.runtime_root),
     }
+}
+
+fn canonical_or_original(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 pub fn build_launch_context(config: &BridgeConfig) -> AlfredoLaunchContext {
@@ -785,6 +1039,7 @@ fn bridge_starting_location(config: &BridgeConfig) -> PathBuf {
                 .unwrap_or_else(std::env::temp_dir)
         })
 }
+
 #[derive(Debug, Deserialize)]
 struct PersistentResponse {
     id: String,
@@ -900,6 +1155,15 @@ struct BackendCommand<'a> {
     argv: Vec<String>,
 }
 
+fn decode_isolated_process_stream(bytes: Vec<u8>, stream_name: &str) -> io::Result<String> {
+    String::from_utf8(bytes).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Albert backend {stream_name} was not valid UTF-8: {error}"),
+        )
+    })
+}
+
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 static BACKENDS: OnceLock<Mutex<HashMap<BridgeConfig, BackendProcess>>> = OnceLock::new();
 
@@ -937,6 +1201,25 @@ impl BackendCommand<'_> {
             }
         }
         unreachable!()
+    }
+
+    /// Run a potentially long command outside the shared persistent backend.
+    ///
+    /// Controller inference, governed shell commands, and agent execution must
+    /// not hold the supervisor mutex: snapshot polling and acknowledgements
+    /// need to remain responsive while longer work is running.
+    fn isolated_output(&mut self) -> io::Result<ProcessOutput> {
+        let output = python_backend_process(self.config)
+            .arg("-m")
+            .arg("albert_mvp")
+            .args(&self.argv)
+            .stdin(Stdio::null())
+            .output()?;
+        Ok(ProcessOutput {
+            success: output.status.success(),
+            stdout: decode_isolated_process_stream(output.stdout, "stdout")?,
+            stderr: decode_isolated_process_stream(output.stderr, "stderr")?,
+        })
     }
 }
 
@@ -1004,11 +1287,37 @@ pub struct MissionSessionSummary {
     pub assigned_agent: String,
     pub status: String,
     #[serde(default)]
+    pub last_activity_at: String,
+    #[serde(default)]
+    pub runner_started_at: String,
+    #[serde(default)]
     pub role: String,
     #[serde(default)]
     pub provider: String,
     #[serde(default)]
     pub model: String,
+    #[serde(default)]
+    pub task_title: String,
+    #[serde(default)]
+    pub operation_status: String,
+    #[serde(default)]
+    pub failure: String,
+    #[serde(default)]
+    pub changed_files: Vec<String>,
+    #[serde(default)]
+    pub commands_run: Vec<String>,
+    #[serde(default)]
+    pub test_results: String,
+    #[serde(default)]
+    pub risks: String,
+    #[serde(default)]
+    pub artifact_links: Vec<String>,
+    #[serde(default)]
+    pub review_outcome: String,
+    #[serde(default)]
+    pub review_next_action: String,
+    #[serde(default)]
+    pub repair_action_available: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1111,6 +1420,10 @@ pub struct WorkspaceModelAssignment {
 pub struct WorkspaceIssueSliceSummary {
     pub issue_id: String,
     pub title: String,
+    #[serde(default)]
+    pub work_type: String,
+    #[serde(default)]
+    pub tracker_status: String,
     pub lifecycle: String,
     pub progress: String,
     pub launch_eligible: bool,
@@ -1190,6 +1503,20 @@ pub struct AgentConsoleMessageRequest {
     pub scope_kind: String,
     pub scope_target: String,
     pub scope_label: String,
+    #[serde(default)]
+    pub scope_mission_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AgentConsoleResponseRequest {
+    pub expected_revision: u64,
+    pub message_id: String,
+    pub scope_kind: String,
+    pub scope_target: String,
+    pub scope_label: String,
+    #[serde(default)]
+    pub scope_mission_id: String,
+    pub agent_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1201,6 +1528,27 @@ pub struct AgentConsoleMessage {
     pub scope: ConversationScope,
     pub outcome: String,
     pub source: String,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+pub enum AgentConsoleResponseIntent {
+    #[serde(rename = "discussion")]
+    Discussion,
+    #[serde(rename = "coding-task")]
+    CodingTask,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AgentConsoleResponseRoute {
+    pub intent: AgentConsoleResponseIntent,
+    pub task_request: String,
+    pub acceptance_criteria: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AgentConsoleResponseProjection {
+    pub message: AgentConsoleMessage,
+    pub route: AgentConsoleResponseRoute,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1297,6 +1645,8 @@ pub struct ReviewDecisionRequest {
     pub actor: String,
     pub expected_revision: u64,
     pub target: ReviewDecisionTarget,
+    #[serde(default)]
+    pub mission_id: String,
     pub session_id: String,
     pub decision: String,
     pub reason: String,
@@ -1388,6 +1738,37 @@ pub struct AdditionalPathGrant {
     pub granted_by: String,
     pub granted_at: String,
     pub expires_at: String,
+    #[serde(default)]
+    pub request_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AdditionalPathGrantRequestRecord {
+    pub request_id: String,
+    pub correlation_id: String,
+    pub mission_id: String,
+    pub path: String,
+    pub access_level: String,
+    pub duration_seconds: u64,
+    pub requester: String,
+    pub requested_at: String,
+    pub reason: String,
+    pub affected_action: String,
+    pub status: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AdditionalPathGrantDenial {
+    pub denial_id: String,
+    pub correlation_id: String,
+    pub request_id: String,
+    pub path: String,
+    pub access_level: String,
+    pub duration_seconds: u64,
+    pub denied_by: String,
+    pub denied_at: String,
+    pub reason: String,
+    pub affected_action: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1396,6 +1777,10 @@ pub struct ShellTerminalProjection {
     pub revision: u64,
     pub commands: Vec<ShellTerminalCommandRecord>,
     pub grants: Vec<AdditionalPathGrant>,
+    #[serde(default)]
+    pub grant_denials: Vec<AdditionalPathGrantDenial>,
+    #[serde(default)]
+    pub path_grant_requests: Vec<AdditionalPathGrantRequestRecord>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1430,11 +1815,26 @@ pub struct ShellTerminalDecisionRequest {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AdditionalPathGrantRequest {
     pub correlation_id: String,
+    #[serde(default)]
+    pub request_id: String,
     pub expected_revision: u64,
     pub path: String,
     pub access_level: String,
     pub duration_seconds: u64,
     pub requester: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AdditionalPathGrantDenialRequest {
+    pub correlation_id: String,
+    pub request_id: String,
+    pub expected_revision: u64,
+    pub path: String,
+    pub access_level: String,
+    pub duration_seconds: u64,
+    pub requester: String,
+    pub reason: String,
+    pub affected_action: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1515,6 +1915,8 @@ pub struct WorkspaceQueueAcknowledgement {
     pub item_id: String,
     pub item_status: String,
     pub effect_summary: String,
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1530,6 +1932,8 @@ pub struct WorkstationActionRequest {
     pub actor: String,
     pub expected_revision: u64,
     pub target: WorkstationActionTarget,
+    #[serde(default)]
+    pub mission_id: String,
     #[serde(default)]
     pub issue_id: String,
     #[serde(default)]
@@ -1553,6 +1957,47 @@ pub struct WorkstationActionAcknowledgement {
     pub issue_id: String,
     pub session_id: String,
     pub effect_summary: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WorkstationSessionRunRequest {
+    pub session_id: String,
+    #[serde(default)]
+    pub mission_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WorkstationSessionRunProjection {
+    pub schema_version: u32,
+    pub mission_id: String,
+    pub session_id: String,
+    pub issue_id: String,
+    pub status: String,
+    pub runner_started_at: String,
+    pub runner_ended_at: String,
+    pub runner_exit_status: Option<i64>,
+    pub evidence_valid: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SessionArtifactRequest {
+    pub mission_id: String,
+    pub session_id: String,
+    pub artifact_ref: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SessionArtifactProjection {
+    pub schema_version: u32,
+    pub mission_id: String,
+    pub session_id: String,
+    pub artifact_id: String,
+    pub label: String,
+    pub media_type: String,
+    pub content: String,
+    pub byte_count: usize,
+    pub content_limit_bytes: usize,
+    pub truncated: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -1619,11 +2064,95 @@ pub struct MissionDraftAcknowledgement {
     pub accepted_issue_id: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct BridgeFailure {
     pub code: String,
     pub message: String,
     pub recoverable: bool,
+}
+
+#[cfg(feature = "rust-orchestrator-prototype")]
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+pub struct RustPrototypePythonAuthority {
+    pub revision: u64,
+    pub workspace_path: String,
+    pub workspace_status: String,
+    pub active_mission_id: Option<String>,
+    pub active_mission_title: Option<String>,
+}
+
+#[cfg(feature = "rust-orchestrator-prototype")]
+#[derive(Debug, Deserialize, Serialize)]
+pub struct RustOrchestratorPrototypeRequest {
+    pub operation: String,
+    #[serde(default)]
+    pub state: Option<rust_orchestrator_prototype_model::PrototypeState>,
+    #[serde(default)]
+    pub action: Option<rust_orchestrator_prototype_model::Action>,
+}
+
+#[cfg(feature = "rust-orchestrator-prototype")]
+#[derive(Debug, Serialize)]
+pub struct RustOrchestratorPrototypeResponse {
+    pub schema_version: u32,
+    pub mode: String,
+    pub state: rust_orchestrator_prototype_model::PrototypeState,
+    pub receipt: Option<rust_orchestrator_prototype_model::EffectReceipt>,
+    pub python_authority: RustPrototypePythonAuthority,
+    pub python_unchanged_during_request: bool,
+    pub canonical_writes_performed: bool,
+    pub elapsed_micros: u128,
+    pub message: String,
+}
+
+#[cfg(feature = "rust-orchestrator-prototype")]
+fn rust_prototype_failure(
+    failure: rust_orchestrator_prototype_model::DecisionFailure,
+) -> BridgeFailure {
+    BridgeFailure {
+        code: failure.code,
+        message: failure.message,
+        recoverable: failure.recoverable,
+    }
+}
+
+#[cfg(feature = "rust-orchestrator-prototype")]
+fn rust_prototype_python_authority(snapshot: &WorkspaceSnapshot) -> RustPrototypePythonAuthority {
+    RustPrototypePythonAuthority {
+        revision: snapshot.revision,
+        workspace_path: snapshot.workspace_session.workspace_path.clone(),
+        workspace_status: snapshot.workspace_session.status.clone(),
+        active_mission_id: snapshot
+            .active_mission
+            .as_ref()
+            .map(|mission| mission.id.clone()),
+        active_mission_title: snapshot
+            .active_mission
+            .as_ref()
+            .map(|mission| mission.title.clone()),
+    }
+}
+
+#[cfg(feature = "rust-orchestrator-prototype")]
+fn rust_prototype_import_snapshot(
+    config: &BridgeConfig,
+    snapshot: &WorkspaceSnapshot,
+) -> Result<rust_orchestrator_prototype_model::PrototypeState, BridgeFailure> {
+    let encoded = serde_json::to_string(snapshot).map_err(|error| BridgeFailure {
+        code: "contract-failure".to_owned(),
+        message: format!(
+            "Unable to encode the live Python snapshot for Rust shadow import: {error}"
+        ),
+        recoverable: true,
+    })?;
+    let starting_location = config
+        .target_repo
+        .parent()
+        .unwrap_or(config.target_repo.as_path())
+        .to_string_lossy()
+        .into_owned();
+    rust_orchestrator_prototype_model::import_legacy_v1(&encoded, starting_location)
+        .map_err(rust_prototype_failure)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1710,9 +2239,101 @@ pub fn execute_snapshot(config: &BridgeConfig) -> Result<WorkspaceSnapshot, Brid
     record_native_performance_mark(
         "S7",
         "end",
-        serde_json::json!({"outcome": if decoded.is_ok() { "pass" } else { "fail" }}),
+        serde_json::json!({
+            "outcome": if decoded.is_ok() { "pass" } else { "fail" },
+        }),
     )?;
     decoded
+}
+
+pub fn execute_agent_capabilities(
+    config: &BridgeConfig,
+) -> Result<AgentCapabilityCatalog, BridgeFailure> {
+    let output = configured_python_command(config, "agent-capabilities")
+        .output()
+        .map_err(|error| BridgeFailure {
+            code: "backend-startup-failure".to_owned(),
+            message: format!("Unable to start the Albert backend: {error}"),
+            recoverable: true,
+        })?;
+    decode_backend_json(process_output(output), "agent capability catalog")
+}
+
+pub fn execute_coding_workspace_select(
+    config: &BridgeConfig,
+    starting_location: &std::path::Path,
+    request: &CodingWorkspaceSelectionRequest,
+) -> Result<CodingWorkspaceAcknowledgement, BridgeFailure> {
+    let mut command = BackendCommand {
+        config,
+        argv: vec!["coding-workspace-select".to_owned()],
+    };
+    command
+        .arg("--starting-location")
+        .arg(starting_location)
+        .arg("--workspace-path")
+        .arg(&request.workspace_path)
+        .arg("--selection-mode")
+        .arg(&request.selection_mode)
+        .arg("--runtime-root")
+        .arg(&config.runtime_root)
+        .arg("--correlation-id")
+        .arg(&request.correlation_id)
+        .arg("--forbidden-root")
+        .arg(&config.backend_root)
+        .arg("--forbidden-root")
+        .arg(&config.runtime_root);
+    if let Some(install_root) = std::env::var_os("ALFREDO_INSTALL_ROOT") {
+        if !install_root.is_empty() {
+            command
+                .arg("--forbidden-root")
+                .arg(PathBuf::from(install_root));
+        }
+    }
+    let output = command.output().map_err(|error| BridgeFailure {
+        code: "backend-startup-failure".to_owned(),
+        message: format!("Unable to start the Alfredo backend: {error}"),
+        recoverable: true,
+    })?;
+    decode_backend_json(
+        process_output(output),
+        "Coding Workspace selection acknowledgement",
+    )
+}
+
+pub fn execute_mission_choice(
+    config: &BridgeConfig,
+    starting_location: &Path,
+    coding_workspace: &Path,
+    request: &MissionChoiceRequest,
+) -> Result<MissionChoiceAcknowledgement, BridgeFailure> {
+    let mut command = BackendCommand {
+        config,
+        argv: vec!["mission-choice".to_owned()],
+    };
+    command
+        .arg("--starting-location")
+        .arg(starting_location)
+        .arg("--coding-workspace")
+        .arg(coding_workspace)
+        .arg("--runtime-root")
+        .arg(&config.runtime_root)
+        .arg("--correlation-id")
+        .arg(&request.correlation_id)
+        .arg("--expected-revision")
+        .arg(request.expected_revision.to_string())
+        .arg("--choice")
+        .arg(&request.choice)
+        .arg("--mission-id")
+        .arg(&request.mission_id)
+        .arg("--mission-title")
+        .arg(&request.mission_title);
+    let output = command.output().map_err(|error| BridgeFailure {
+        code: "backend-startup-failure".to_owned(),
+        message: format!("Unable to start the Alfredo backend: {error}"),
+        recoverable: true,
+    })?;
+    decode_backend_json(process_output(output), "Mission choice acknowledgement")
 }
 
 fn configured_python_command<'a>(config: &'a BridgeConfig, subcommand: &str) -> BackendCommand<'a> {
@@ -1873,7 +2494,8 @@ pub fn execute_console_message(
     config: &BridgeConfig,
     message: &AgentConsoleMessageRequest,
 ) -> Result<AgentConsoleMessage, BridgeFailure> {
-    let output = configured_python_command(config, "agent-console-message")
+    let mut command = configured_python_command(config, "agent-console-message");
+    command
         .arg("--role")
         .arg(&message.role)
         .arg("--content")
@@ -1889,14 +2511,52 @@ pub fn execute_console_message(
         .arg("--scope-target")
         .arg(&message.scope_target)
         .arg("--scope-label")
-        .arg(&message.scope_label)
-        .output()
-        .map_err(|error| BridgeFailure {
-            code: "backend-startup-failure".to_owned(),
-            message: format!("Unable to start the Albert backend: {error}"),
-            recoverable: true,
-        })?;
+        .arg(&message.scope_label);
+    if !message.scope_mission_id.is_empty() {
+        command
+            .arg("--scope-mission-id")
+            .arg(&message.scope_mission_id);
+    }
+    let output = command.output().map_err(|error| BridgeFailure {
+        code: "backend-startup-failure".to_owned(),
+        message: format!("Unable to start the Albert backend: {error}"),
+        recoverable: true,
+    })?;
     decode_backend_json(process_output(output), "Agent Console message")
+}
+
+pub fn execute_console_response(
+    config: &BridgeConfig,
+    request: &AgentConsoleResponseRequest,
+) -> Result<AgentConsoleResponseProjection, BridgeFailure> {
+    let mut command = configured_python_command(config, "agent-console-response");
+    command
+        .arg("--expected-revision")
+        .arg(request.expected_revision.to_string())
+        .arg("--message-id")
+        .arg(&request.message_id)
+        .arg("--scope-kind")
+        .arg(&request.scope_kind)
+        .arg("--scope-target")
+        .arg(&request.scope_target)
+        .arg("--scope-label")
+        .arg(&request.scope_label);
+    if !request.scope_mission_id.is_empty() {
+        command
+            .arg("--scope-mission-id")
+            .arg(&request.scope_mission_id);
+    }
+    if let Some(agent_id) = &request.agent_id {
+        if !agent_id.is_empty() {
+            command.arg("--agent-id").arg(agent_id);
+        }
+    }
+    let output = command.isolated_output().map_err(|error| BridgeFailure {
+        code: "backend-startup-failure".to_owned(),
+        message: format!("Unable to start the Albert backend: {error}"),
+        recoverable: true,
+    })?;
+    decode_backend_json(process_output(output), "Agent Console response")
 }
 
 pub fn execute_console_history(
@@ -1982,6 +2642,9 @@ pub fn execute_review_decision(
         .arg(&request.decision)
         .arg("--reason")
         .arg(&request.reason);
+    if !request.mission_id.is_empty() {
+        command.arg("--review-mission-id").arg(&request.mission_id);
+    }
     if let Some(failure_type) = &request.failure_type {
         if !failure_type.is_empty() {
             command.arg("--failure-type").arg(failure_type);
@@ -2060,7 +2723,7 @@ pub fn execute_shell_terminal_submit(
     for path in &request.requested_paths {
         command.arg("--requested-path").arg(path);
     }
-    let output = command.output().map_err(|error| BridgeFailure {
+    let output = command.isolated_output().map_err(|error| BridgeFailure {
         code: "backend-startup-failure".to_owned(),
         message: format!("Unable to start the Albert backend: {error}"),
         recoverable: true,
@@ -2081,7 +2744,7 @@ pub fn execute_shell_terminal_decision(
         .arg(&request.actor)
         .arg("--reason")
         .arg(&request.reason)
-        .output()
+        .isolated_output()
         .map_err(|error| BridgeFailure {
             code: "backend-startup-failure".to_owned(),
             message: format!("Unable to start the Albert backend: {error}"),
@@ -2097,6 +2760,8 @@ pub fn execute_additional_path_grant_create(
     let output = configured_python_command(config, "additional-path-grant-create")
         .arg("--correlation-id")
         .arg(&request.correlation_id)
+        .arg("--request-id")
+        .arg(&request.request_id)
         .arg("--expected-terminal-revision")
         .arg(request.expected_revision.to_string())
         .arg("--path")
@@ -2114,6 +2779,38 @@ pub fn execute_additional_path_grant_create(
             recoverable: true,
         })?;
     decode_backend_json(process_output(output), "Additional Path Grant result")
+}
+
+pub fn execute_additional_path_grant_deny(
+    config: &BridgeConfig,
+    request: &AdditionalPathGrantDenialRequest,
+) -> Result<AdditionalPathGrantDenial, BridgeFailure> {
+    let output = configured_python_command(config, "additional-path-grant-deny")
+        .arg("--correlation-id")
+        .arg(&request.correlation_id)
+        .arg("--request-id")
+        .arg(&request.request_id)
+        .arg("--expected-terminal-revision")
+        .arg(request.expected_revision.to_string())
+        .arg("--path")
+        .arg(&request.path)
+        .arg("--access-level")
+        .arg(&request.access_level)
+        .arg("--duration-seconds")
+        .arg(request.duration_seconds.to_string())
+        .arg("--requester")
+        .arg(&request.requester)
+        .arg("--reason")
+        .arg(&request.reason)
+        .arg("--affected-action")
+        .arg(&request.affected_action)
+        .output()
+        .map_err(|error| BridgeFailure {
+            code: "backend-startup-failure".to_owned(),
+            message: format!("Unable to start the Albert backend: {error}"),
+            recoverable: true,
+        })?;
+    decode_backend_json(process_output(output), "Additional Path Grant denial")
 }
 
 pub fn execute_workspace_queue(
@@ -2232,6 +2929,9 @@ pub fn execute_workstation_action(
         .arg(&request.target.kind)
         .arg("--target-id")
         .arg(&request.target.id);
+    if !request.mission_id.is_empty() {
+        command.arg("--action-mission-id").arg(&request.mission_id);
+    }
     if !request.issue_id.is_empty() {
         command.arg("--issue-id").arg(&request.issue_id);
     }
@@ -2258,6 +2958,43 @@ pub fn execute_workstation_action(
         recoverable: true,
     })?;
     decode_backend_json(process_output(output), "Workstation action acknowledgement")
+}
+
+pub fn execute_workstation_session_run(
+    config: &BridgeConfig,
+    request: &WorkstationSessionRunRequest,
+) -> Result<WorkstationSessionRunProjection, BridgeFailure> {
+    let mut command = configured_python_command(config, "workstation-session-run");
+    command.arg("--session-id").arg(&request.session_id);
+    if !request.mission_id.is_empty() {
+        command.arg("--session-mission-id").arg(&request.mission_id);
+    }
+    let output = command.isolated_output().map_err(|error| BridgeFailure {
+        code: "backend-startup-failure".to_owned(),
+        message: format!("Unable to start the deferred Local Agent runner: {error}"),
+        recoverable: true,
+    })?;
+    decode_backend_json(process_output(output), "Workstation session lifecycle")
+}
+
+pub fn execute_session_artifact(
+    config: &BridgeConfig,
+    request: &SessionArtifactRequest,
+) -> Result<SessionArtifactProjection, BridgeFailure> {
+    let output = configured_python_command(config, "session-artifact")
+        .arg("--artifact-mission-id")
+        .arg(&request.mission_id)
+        .arg("--session-id")
+        .arg(&request.session_id)
+        .arg("--artifact-ref")
+        .arg(&request.artifact_ref)
+        .output()
+        .map_err(|error| BridgeFailure {
+            code: "backend-startup-failure".to_owned(),
+            message: format!("Unable to start the bounded evidence reader: {error}"),
+            recoverable: true,
+        })?;
+    decode_backend_json(process_output(output), "session artifact projection")
 }
 
 pub fn execute_mission_drafts(
@@ -2347,6 +3084,117 @@ pub fn execute_mission_draft_decision(
 }
 
 #[cfg(feature = "desktop")]
+async fn run_blocking_bridge<T, F>(job: F) -> Result<T, BridgeFailure>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, BridgeFailure> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(job)
+        .await
+        .map_err(|error| BridgeFailure {
+            code: "bridge-worker-failure".to_owned(),
+            message: format!("The desktop bridge worker did not complete: {error}"),
+            recoverable: true,
+        })?
+}
+
+#[cfg(feature = "desktop")]
+fn write_gui_smoke_ready(
+    config: &BridgeConfig,
+    context: &AlfredoLaunchContext,
+) -> Result<(), BridgeFailure> {
+    fs::create_dir_all(&config.runtime_root).map_err(|error| BridgeFailure {
+        code: "gui-smoke-marker-failure".to_owned(),
+        message: format!("Unable to create the Alfredo GUI smoke runtime directory: {error}"),
+        recoverable: false,
+    })?;
+    let custom_marker = std::env::var("ALFREDO_WARM_READY_MARKER")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from);
+    let marker = custom_marker
+        .clone()
+        .unwrap_or_else(|| config.runtime_root.join("gui-smoke-ready.json"));
+    if custom_marker.is_some() {
+        if !marker.is_absolute() {
+            return Err(BridgeFailure {
+                code: "gui-smoke-marker-failure".to_owned(),
+                message: "ALFREDO_WARM_READY_MARKER must be absolute".to_owned(),
+                recoverable: false,
+            });
+        }
+        marker
+            .parent()
+            .ok_or_else(|| BridgeFailure {
+                code: "gui-smoke-marker-failure".to_owned(),
+                message: "The warm readiness marker has no parent directory".to_owned(),
+                recoverable: false,
+            })?
+            .canonicalize()
+            .map_err(|error| BridgeFailure {
+                code: "gui-smoke-marker-failure".to_owned(),
+                message: format!("The warm readiness marker parent is unavailable: {error}"),
+                recoverable: false,
+            })?;
+        if fs::symlink_metadata(&marker).is_ok() {
+            return Err(BridgeFailure {
+                code: "gui-smoke-marker-failure".to_owned(),
+                message: "The warm readiness marker must be create-only".to_owned(),
+                recoverable: false,
+            });
+        }
+    }
+    let desktop_session_id = std::env::var("ALFREDO_MEASUREMENT_DESKTOP_SESSION_ID")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    if custom_marker.is_some() && desktop_session_id.is_none() {
+        return Err(BridgeFailure {
+            code: "gui-smoke-marker-failure".to_owned(),
+            message: "ALFREDO_MEASUREMENT_DESKTOP_SESSION_ID is required for warm readiness"
+                .to_owned(),
+            recoverable: false,
+        });
+    }
+    let payload = serde_json::json!({
+        "schema_version": 1,
+        "status": "ready",
+        "process_id": std::process::id(),
+        "phase": context.phase,
+        "starting_location": context.starting_location,
+        "coding_workspace": context.coding_workspace,
+        "active_mission": context.active_mission,
+        "backend_root": config.backend_root.to_string_lossy(),
+        "desktop_session_id": desktop_session_id,
+    });
+    let encoded = serde_json::to_vec_pretty(&payload).expect("GUI smoke marker should serialize");
+    let write_result = if custom_marker.is_some() {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&marker)
+            .and_then(|mut output| output.write_all(&encoded))
+    } else {
+        fs::write(&marker, encoded)
+    };
+    write_result.map_err(|error| BridgeFailure {
+        code: "gui-smoke-marker-failure".to_owned(),
+        message: format!("Unable to write the Alfredo GUI smoke marker: {error}"),
+        recoverable: false,
+    })
+}
+
+#[cfg(feature = "desktop")]
+fn record_gui_smoke_ready(
+    config: &BridgeConfig,
+    context: &AlfredoLaunchContext,
+) -> Result<(), BridgeFailure> {
+    if std::env::var("ALFREDO_GUI_SMOKE").as_deref() == Ok("1") {
+        write_gui_smoke_ready(config, context)?;
+    }
+    Ok(())
+}
+
+#[cfg(feature = "desktop")]
 #[tauri::command]
 fn performance_mark(
     request: PerformanceMarkRequest,
@@ -2397,9 +3245,20 @@ fn workspace_snapshot(
     config: tauri::State<'_, BridgeConfig>,
     binding: tauri::State<'_, WorkspaceBinding>,
 ) -> Result<WorkspaceSnapshot, BridgeFailure> {
-    binding.require_active_mission()?;
+    let bound_config = binding.bound_config(config.inner())?;
     record_native_performance_mark("S4", "end", serde_json::json!({"outcome": "pass"}))?;
-    execute_snapshot(config.inner())
+    let snapshot = execute_snapshot(&bound_config)?;
+    let context = build_launch_context_with_binding(config.inner(), binding.inner());
+    record_gui_smoke_ready(config.inner(), &context)?;
+    Ok(snapshot)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn agent_capabilities(
+    config: tauri::State<'_, BridgeConfig>,
+) -> Result<AgentCapabilityCatalog, BridgeFailure> {
+    execute_agent_capabilities(config.inner())
 }
 
 #[cfg(feature = "desktop")]
@@ -2407,8 +3266,11 @@ fn workspace_snapshot(
 fn alfredo_launch_context(
     config: tauri::State<'_, BridgeConfig>,
     binding: tauri::State<'_, WorkspaceBinding>,
-) -> AlfredoLaunchContext {
-    build_launch_context_with_binding(config.inner(), binding.inner())
+) -> Result<AlfredoLaunchContext, BridgeFailure> {
+    binding.reload_from_persistence(config.inner())?;
+    let context = build_launch_context_with_binding(config.inner(), binding.inner());
+    record_gui_smoke_ready(config.inner(), &context)?;
+    Ok(context)
 }
 
 #[cfg(feature = "desktop")]
@@ -2433,7 +3295,10 @@ fn coding_workspace_select(
         }
     };
     match binding.acknowledge(&request, &acknowledgement) {
-        Ok(()) => Ok(acknowledgement),
+        Ok(()) => {
+            binding.reload_from_persistence(config.inner())?;
+            Ok(acknowledgement)
+        }
         Err(error) => {
             binding.release_selection(&request);
             Err(error)
@@ -2443,13 +3308,37 @@ fn coding_workspace_select(
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
+fn mission_choice(
+    config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
+    request: MissionChoiceRequest,
+) -> Result<MissionChoiceAcknowledgement, BridgeFailure> {
+    binding.require_workspace()?;
+    let state = binding.state();
+    let coding_workspace = state.coding_workspace.ok_or_else(|| BridgeFailure {
+        code: "coding-workspace-selection-required".to_owned(),
+        message: "Choose or create a Coding Workspace before choosing a Mission.".to_owned(),
+        recoverable: true,
+    })?;
+    let acknowledgement = execute_mission_choice(
+        config.inner(),
+        &bridge_starting_location(config.inner()),
+        &coding_workspace,
+        &request,
+    )?;
+    binding.reload_from_persistence(config.inner())?;
+    Ok(acknowledgement)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
 fn workspace_updates(
     config: tauri::State<'_, BridgeConfig>,
     binding: tauri::State<'_, WorkspaceBinding>,
     after_revision: u64,
 ) -> Result<WorkspaceUpdateBatch, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_updates(config.inner(), after_revision)
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_updates(&bound_config, after_revision)
 }
 
 #[cfg(feature = "desktop")]
@@ -2459,8 +3348,8 @@ fn workspace_action(
     binding: tauri::State<'_, WorkspaceBinding>,
     action: WorkspaceActionRequest,
 ) -> Result<WorkspaceActionAcknowledgement, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_action(config.inner(), &action)
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_action(&bound_config, &action)
 }
 
 #[cfg(feature = "desktop")]
@@ -2470,8 +3359,8 @@ fn workspace_scope(
     binding: tauri::State<'_, WorkspaceBinding>,
     scope: WorkspaceScopeRequest,
 ) -> Result<WorkspaceActionAcknowledgement, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_scope(config.inner(), &scope)
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_scope(&bound_config, &scope)
 }
 
 #[cfg(feature = "desktop")]
@@ -2481,8 +3370,8 @@ fn workspace_mission_switch(
     binding: tauri::State<'_, WorkspaceBinding>,
     request: WorkspaceMissionSwitchRequest,
 ) -> Result<WorkspaceActionAcknowledgement, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_mission_switch(config.inner(), &request)
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_mission_switch(&bound_config, &request)
 }
 
 #[cfg(feature = "desktop")]
@@ -2492,8 +3381,19 @@ fn agent_console_message(
     binding: tauri::State<'_, WorkspaceBinding>,
     message: AgentConsoleMessageRequest,
 ) -> Result<AgentConsoleMessage, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_console_message(config.inner(), &message)
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_console_message(&bound_config, &message)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn agent_console_response(
+    config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
+    request: AgentConsoleResponseRequest,
+) -> Result<AgentConsoleResponseProjection, BridgeFailure> {
+    let config = binding.bound_config(config.inner())?;
+    run_blocking_bridge(move || execute_console_response(&config, &request)).await
 }
 
 #[cfg(feature = "desktop")]
@@ -2502,8 +3402,8 @@ fn agent_console_history(
     config: tauri::State<'_, BridgeConfig>,
     binding: tauri::State<'_, WorkspaceBinding>,
 ) -> Result<AgentConsoleHistory, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_console_history(config.inner())
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_console_history(&bound_config)
 }
 
 #[cfg(feature = "desktop")]
@@ -2512,8 +3412,8 @@ fn working_context(
     config: tauri::State<'_, BridgeConfig>,
     binding: tauri::State<'_, WorkspaceBinding>,
 ) -> Result<WorkingContextProjection, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_working_context(config.inner())
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_working_context(&bound_config)
 }
 
 #[cfg(feature = "desktop")]
@@ -2523,8 +3423,8 @@ fn working_context_curate(
     binding: tauri::State<'_, WorkspaceBinding>,
     request: WorkingContextCurationRequest,
 ) -> Result<WorkingContextAcknowledgement, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_working_context_curate(config.inner(), &request)
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_working_context_curate(&bound_config, &request)
 }
 
 #[cfg(feature = "desktop")]
@@ -2533,8 +3433,8 @@ fn review_workspace(
     config: tauri::State<'_, BridgeConfig>,
     binding: tauri::State<'_, WorkspaceBinding>,
 ) -> Result<ReviewWorkspaceProjection, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_review_workspace(config.inner())
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_review_workspace(&bound_config)
 }
 
 #[cfg(feature = "desktop")]
@@ -2544,8 +3444,8 @@ fn review_decision(
     binding: tauri::State<'_, WorkspaceBinding>,
     request: ReviewDecisionRequest,
 ) -> Result<ReviewDecisionAcknowledgement, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_review_decision(config.inner(), &request)
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_review_decision(&bound_config, &request)
 }
 
 #[cfg(feature = "desktop")]
@@ -2555,8 +3455,8 @@ fn activity_journal(
     binding: tauri::State<'_, WorkspaceBinding>,
     filters: ActivityJournalFilters,
 ) -> Result<ActivityJournalProjection, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_activity_journal(config.inner(), &filters)
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_activity_journal(&bound_config, &filters)
 }
 
 #[cfg(feature = "desktop")]
@@ -2565,30 +3465,30 @@ fn shell_terminal(
     config: tauri::State<'_, BridgeConfig>,
     binding: tauri::State<'_, WorkspaceBinding>,
 ) -> Result<ShellTerminalProjection, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_shell_terminal(config.inner())
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_shell_terminal(&bound_config)
 }
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-fn shell_terminal_submit(
+async fn shell_terminal_submit(
     config: tauri::State<'_, BridgeConfig>,
     binding: tauri::State<'_, WorkspaceBinding>,
     request: ShellTerminalCommandRequest,
 ) -> Result<ShellTerminalCommandResult, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_shell_terminal_submit(config.inner(), &request)
+    let config = binding.bound_config(config.inner())?;
+    run_blocking_bridge(move || execute_shell_terminal_submit(&config, &request)).await
 }
 
 #[cfg(feature = "desktop")]
 #[tauri::command]
-fn shell_terminal_decision(
+async fn shell_terminal_decision(
     config: tauri::State<'_, BridgeConfig>,
     binding: tauri::State<'_, WorkspaceBinding>,
     request: ShellTerminalDecisionRequest,
 ) -> Result<ShellTerminalCommandResult, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_shell_terminal_decision(config.inner(), &request)
+    let config = binding.bound_config(config.inner())?;
+    run_blocking_bridge(move || execute_shell_terminal_decision(&config, &request)).await
 }
 
 #[cfg(feature = "desktop")]
@@ -2598,8 +3498,19 @@ fn additional_path_grant_create(
     binding: tauri::State<'_, WorkspaceBinding>,
     request: AdditionalPathGrantRequest,
 ) -> Result<AdditionalPathGrant, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_additional_path_grant_create(config.inner(), &request)
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_additional_path_grant_create(&bound_config, &request)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn additional_path_grant_deny(
+    config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
+    request: AdditionalPathGrantDenialRequest,
+) -> Result<AdditionalPathGrantDenial, BridgeFailure> {
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_additional_path_grant_deny(&bound_config, &request)
 }
 
 #[cfg(feature = "desktop")]
@@ -2608,8 +3519,8 @@ fn workspace_queue(
     config: tauri::State<'_, BridgeConfig>,
     binding: tauri::State<'_, WorkspaceBinding>,
 ) -> Result<WorkspaceQueueProjection, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_workspace_queue(config.inner())
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_workspace_queue(&bound_config)
 }
 
 #[cfg(feature = "desktop")]
@@ -2619,8 +3530,8 @@ fn ad_hoc_delegation_proposal(
     binding: tauri::State<'_, WorkspaceBinding>,
     request: AdHocDelegationProposalRequest,
 ) -> Result<WorkspaceQueueAcknowledgement, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_ad_hoc_delegation_proposal(config.inner(), &request)
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_ad_hoc_delegation_proposal(&bound_config, &request)
 }
 
 #[cfg(feature = "desktop")]
@@ -2630,9 +3541,9 @@ fn workspace_queue_decision(
     binding: tauri::State<'_, WorkspaceBinding>,
     request: WorkspaceQueueDecisionRequest,
 ) -> Result<WorkspaceQueueAcknowledgement, BridgeFailure> {
-    binding.require_active_mission()?;
+    let bound_config = binding.bound_config(config.inner())?;
     record_native_performance_mark("R1", "end", serde_json::json!({"outcome": "pass"}))?;
-    execute_workspace_queue_decision(config.inner(), &request)
+    execute_workspace_queue_decision(&bound_config, &request)
 }
 
 #[cfg(feature = "desktop")]
@@ -2642,8 +3553,110 @@ fn workstation_action(
     binding: tauri::State<'_, WorkspaceBinding>,
     request: WorkstationActionRequest,
 ) -> Result<WorkstationActionAcknowledgement, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_workstation_action(config.inner(), &request)
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_workstation_action(&bound_config, &request)
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+async fn workstation_session_run(
+    config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
+    request: WorkstationSessionRunRequest,
+) -> Result<WorkstationSessionRunProjection, BridgeFailure> {
+    let config = binding.bound_config(config.inner())?;
+    run_blocking_bridge(move || execute_workstation_session_run(&config, &request)).await
+}
+
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn session_artifact(
+    config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
+    request: SessionArtifactRequest,
+) -> Result<SessionArtifactProjection, BridgeFailure> {
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_session_artifact(&bound_config, &request)
+}
+
+/// PROTOTYPE ONLY: exercise a Rust-owned decision slice against a read-only
+/// import of the live Python snapshot. The command never writes canonical state.
+#[cfg(all(feature = "desktop", feature = "rust-orchestrator-prototype"))]
+#[tauri::command]
+fn rust_orchestrator_prototype(
+    config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
+    request: RustOrchestratorPrototypeRequest,
+) -> Result<RustOrchestratorPrototypeResponse, BridgeFailure> {
+    let bound_config = binding.bound_config(config.inner())?;
+    let started = Instant::now();
+    let before_snapshot = execute_snapshot(&bound_config)?;
+    let before_authority = rust_prototype_python_authority(&before_snapshot);
+    let (state, receipt, message) = match request.operation.as_str() {
+        "load" | "rollback" => (
+            rust_prototype_import_snapshot(config.inner(), &before_snapshot)?,
+            None,
+            if request.operation == "rollback" {
+                "Rust shadow state was discarded and re-imported from live Python authority."
+                    .to_owned()
+            } else {
+                "Live Python authority was imported into the Rust shadow without a write."
+                    .to_owned()
+            },
+        ),
+        "reset-selection" => (
+            rust_orchestrator_prototype_model::PrototypeState::selection_required(
+                config
+                    .target_repo
+                    .parent()
+                    .unwrap_or(config.target_repo.as_path())
+                    .to_string_lossy()
+                    .into_owned(),
+            ),
+            None,
+            "Rust shadow returned to a distinct Starting Location; Python remained active."
+                .to_owned(),
+        ),
+        "apply" => {
+            let state = request.state.ok_or_else(|| BridgeFailure {
+                code: "contract-failure".to_owned(),
+                message: "Rust shadow apply requires the displayed prototype state.".to_owned(),
+                recoverable: true,
+            })?;
+            let action = request.action.ok_or_else(|| BridgeFailure {
+                code: "contract-failure".to_owned(),
+                message: "Rust shadow apply requires one typed action.".to_owned(),
+                recoverable: true,
+            })?;
+            let transition = rust_orchestrator_prototype_model::apply(&state, action)
+                .map_err(rust_prototype_failure)?;
+            let message = transition.receipt.message.clone();
+            (transition.state, Some(transition.receipt), message)
+        }
+        _ => {
+            return Err(BridgeFailure {
+                code: "contract-failure".to_owned(),
+                message: format!(
+                    "Unknown Rust Orchestrator prototype operation: {}",
+                    request.operation
+                ),
+                recoverable: true,
+            });
+        }
+    };
+    let after_snapshot = execute_snapshot(&bound_config)?;
+    let after_authority = rust_prototype_python_authority(&after_snapshot);
+    Ok(RustOrchestratorPrototypeResponse {
+        schema_version: 1,
+        mode: "rust-shadow".to_owned(),
+        state,
+        receipt,
+        python_authority: after_authority.clone(),
+        python_unchanged_during_request: before_authority == after_authority,
+        canonical_writes_performed: false,
+        elapsed_micros: started.elapsed().as_micros(),
+        message,
+    })
 }
 
 #[cfg(feature = "desktop")]
@@ -2652,8 +3665,8 @@ fn mission_drafts(
     config: tauri::State<'_, BridgeConfig>,
     binding: tauri::State<'_, WorkspaceBinding>,
 ) -> Result<MissionDraftProjection, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_mission_drafts(config.inner())
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_mission_drafts(&bound_config)
 }
 
 #[cfg(feature = "desktop")]
@@ -2663,8 +3676,8 @@ fn mission_draft_create(
     binding: tauri::State<'_, WorkspaceBinding>,
     request: MissionDraftCreateRequest,
 ) -> Result<MissionDraftAcknowledgement, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_mission_draft_create(config.inner(), &request)
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_mission_draft_create(&bound_config, &request)
 }
 
 #[cfg(feature = "desktop")]
@@ -2674,43 +3687,87 @@ fn mission_draft_decision(
     binding: tauri::State<'_, WorkspaceBinding>,
     request: MissionDraftDecisionRequest,
 ) -> Result<MissionDraftAcknowledgement, BridgeFailure> {
-    binding.require_active_mission()?;
-    execute_mission_draft_decision(config.inner(), &request)
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_mission_draft_decision(&bound_config, &request)
 }
 
 #[cfg(feature = "desktop")]
 pub fn run() {
-    tauri::Builder::default()
-        .manage(BridgeConfig::from_environment())
-        .manage(WorkspaceBinding::from_environment())
-        .invoke_handler(tauri::generate_handler![
-            performance_mark,
-            alfredo_launch_context,
-            coding_workspace_select,
-            workspace_snapshot,
-            workspace_updates,
-            workspace_action,
-            workspace_scope,
-            workspace_mission_switch,
-            agent_console_message,
-            agent_console_history,
-            working_context,
-            working_context_curate,
-            review_workspace,
-            review_decision,
-            activity_journal,
-            shell_terminal,
-            shell_terminal_submit,
-            shell_terminal_decision,
-            additional_path_grant_create,
-            workspace_queue,
-            ad_hoc_delegation_proposal,
-            workspace_queue_decision,
-            workstation_action,
-            mission_drafts,
-            mission_draft_create,
-            mission_draft_decision
-        ])
+    let config = BridgeConfig::from_environment();
+    let binding = WorkspaceBinding::from_config(&config);
+    let builder = tauri::Builder::default().manage(config).manage(binding);
+    #[cfg(not(feature = "rust-orchestrator-prototype"))]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        performance_mark,
+        alfredo_launch_context,
+        coding_workspace_select,
+        mission_choice,
+        workspace_snapshot,
+        agent_capabilities,
+        workspace_updates,
+        workspace_action,
+        workspace_scope,
+        workspace_mission_switch,
+        agent_console_message,
+        agent_console_response,
+        agent_console_history,
+        working_context,
+        working_context_curate,
+        review_workspace,
+        review_decision,
+        activity_journal,
+        shell_terminal,
+        shell_terminal_submit,
+        shell_terminal_decision,
+        additional_path_grant_create,
+        additional_path_grant_deny,
+        workspace_queue,
+        ad_hoc_delegation_proposal,
+        workspace_queue_decision,
+        workstation_action,
+        workstation_session_run,
+        session_artifact,
+        mission_drafts,
+        mission_draft_create,
+        mission_draft_decision
+    ]);
+    #[cfg(feature = "rust-orchestrator-prototype")]
+    let builder = builder.invoke_handler(tauri::generate_handler![
+        performance_mark,
+        alfredo_launch_context,
+        coding_workspace_select,
+        mission_choice,
+        workspace_snapshot,
+        agent_capabilities,
+        workspace_updates,
+        workspace_action,
+        workspace_scope,
+        workspace_mission_switch,
+        agent_console_message,
+        agent_console_response,
+        agent_console_history,
+        working_context,
+        working_context_curate,
+        review_workspace,
+        review_decision,
+        activity_journal,
+        shell_terminal,
+        shell_terminal_submit,
+        shell_terminal_decision,
+        additional_path_grant_create,
+        additional_path_grant_deny,
+        workspace_queue,
+        ad_hoc_delegation_proposal,
+        workspace_queue_decision,
+        workstation_action,
+        workstation_session_run,
+        session_artifact,
+        rust_orchestrator_prototype,
+        mission_drafts,
+        mission_draft_create,
+        mission_draft_decision
+    ]);
+    builder
         .build(tauri::generate_context!())
         .expect("Albert Mission Control should build")
         .run(|_app_handle, event| {
@@ -2724,7 +3781,714 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn isolated_process_stream_rejects_invalid_utf8() {
+        let error = decode_isolated_process_stream(vec![0xff], "stdout")
+            .expect_err("invalid UTF-8 must not enter typed bridge decoding");
+
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("stdout"));
+    }
+
+    #[test]
+    fn performance_writer_preserves_native_monotonic_sample_identity() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("alfredo-performance-rust-{unique}"));
+        fs::create_dir_all(&root).expect("measurement fixture should be created");
+        let path = root.join("raw.jsonl");
+        let identity = PerformanceIdentity {
+            run_id: "rust-run-001".to_owned(),
+            sample_id: "rust-sample-001".to_owned(),
+            cohort_id: "startup-process-cold".to_owned(),
+            correlation_id: "startup-rust-001".to_owned(),
+            fixture_id: "minimal-ready-v1".to_owned(),
+            fixture_sha256: "c4cef5ccc043bb6476e6e07195f979ea722e20abf3890c10d06de8ad1628839b"
+                .to_owned(),
+            source_sha256: "a57b5956d8222b2ba001365fbff13e74350051ff13d5ba9dbe7fbeede203e721"
+                .to_owned(),
+            artifact_sha256: "6e68b39f69f605a9218e74dd48f091460ccf15768b922d5b7dfda9ec1e84c2ac"
+                .to_owned(),
+            variant: "python".to_owned(),
+            workflow: "startup".to_owned(),
+            mode: "process-cold".to_owned(),
+            desktop_pid: None,
+            desktop_session_id: None,
+        };
+
+        write_performance_mark(
+            &path,
+            &identity,
+            "native-shell",
+            "native-shell:123",
+            "S5",
+            "start",
+            "1000000",
+            serde_json::json!({"outcome": "pass"}),
+        )
+        .expect("start mark should be written");
+        write_performance_mark(
+            &path,
+            &identity,
+            "native-shell",
+            "native-shell:123",
+            "S5",
+            "end",
+            "2500000",
+            serde_json::json!({"outcome": "pass"}),
+        )
+        .expect("end mark should be written");
+
+        let records: Vec<serde_json::Value> = fs::read_to_string(&path)
+            .expect("raw evidence should be readable")
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("mark should be JSON"))
+            .collect();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0]["sample_id"], "rust-sample-001");
+        assert_eq!(records[0]["stage"], "S5");
+        assert_eq!(records[0]["boundary"], "start");
+        assert_eq!(records[1]["boundary"], "end");
+        assert_eq!(records[1]["monotonic_ns"], "2500000");
+
+        fs::remove_dir_all(root).expect("measurement fixture should be removed");
+    }
+
+    #[test]
+    fn performance_control_file_binds_a_warm_sample_to_the_desktop_process() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("alfredo-performance-control-{unique}"));
+        fs::create_dir_all(&root).expect("measurement fixture should be created");
+        let output = root.join("raw.jsonl");
+        let control = root.join("control.json");
+        fs::write(
+            &control,
+            serde_json::to_vec(&serde_json::json!({
+                "jsonl_path": output,
+                "run_id": "rust-run-001",
+                "sample_id": "rust-warm-sample-001",
+                "cohort_id": "queue-defer-process-warm",
+                "correlation_id": "rust-warm-001",
+                "fixture_id": "pending-ad-hoc-v1",
+                "fixture_sha256": "c4cef5ccc043bb6476e6e07195f979ea722e20abf3890c10d06de8ad1628839b",
+                "source_sha256": "a57b5956d8222b2ba001365fbff13e74350051ff13d5ba9dbe7fbeede203e721",
+                "artifact_sha256": "6e68b39f69f605a9218e74dd48f091460ccf15768b922d5b7dfda9ec1e84c2ac",
+                "variant": "python",
+                "workflow": "queue-defer",
+                "mode": "process-warm",
+                "desktop_pid": 4101,
+                "desktop_session_id": "desktop-one"
+            }))
+            .expect("measurement control should serialize"),
+        )
+        .expect("measurement control should be written");
+
+        let (_, identity) = performance_identity_from_control(&control)
+            .expect("measurement control should parse")
+            .expect("measurement control should be armed");
+        assert_eq!(identity.sample_id, "rust-warm-sample-001");
+        assert_eq!(identity.desktop_pid, Some(4101));
+        assert_eq!(identity.desktop_session_id.as_deref(), Some("desktop-one"));
+
+        fs::remove_dir_all(root).expect("measurement fixture should be removed");
+    }
+
+    #[test]
+    fn performance_command_is_an_explicit_noop_without_measurement_environment() {
+        let acknowledgement = performance_mark(PerformanceMarkRequest {
+            stage: "S3".to_owned(),
+            boundary: "start".to_owned(),
+            clock: "frontend".to_owned(),
+            monotonic_ns: "1".to_owned(),
+            clock_id: "frontend:test".to_owned(),
+            detail: serde_json::json!({"outcome": "pass"}),
+        })
+        .expect("an ordinary desktop run must not require measurement");
+
+        assert!(!acknowledgement.recorded);
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn gui_smoke_marker_records_frontend_and_backend_readiness_context() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("alfredo-gui-smoke-{unique}"));
+        let workspace = root.join("workspace");
+        let runtime_root = root.join("runtime");
+        fs::create_dir_all(&workspace).expect("workspace fixture should be created");
+        let mut config = BridgeConfig::for_repository(root.clone());
+        config.target_repo = workspace.clone();
+        config.runtime_root = runtime_root.clone();
+        let context = AlfredoLaunchContext {
+            schema_version: 1,
+            selected_agent: "qwen3-14b".to_owned(),
+            selected_model: "qwen3:14b".to_owned(),
+            starting_location: workspace.to_string_lossy().into_owned(),
+            coding_workspace: None,
+            active_mission: None,
+            phase: "selection-required".to_owned(),
+            runtime_root: runtime_root.to_string_lossy().into_owned(),
+            recent_workspaces: vec![],
+            revision: 0,
+            known_missions: vec![],
+        };
+
+        write_gui_smoke_ready(&config, &context).expect("GUI smoke marker should be written");
+        let marker: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(runtime_root.join("gui-smoke-ready.json"))
+                .expect("GUI smoke marker should be readable"),
+        )
+        .expect("GUI smoke marker should be valid JSON");
+
+        assert_eq!(marker["schema_version"], 1);
+        assert_eq!(marker["status"], "ready");
+        assert_eq!(marker["phase"], "selection-required");
+        assert_eq!(
+            marker["starting_location"].as_str(),
+            Some(workspace.to_string_lossy().as_ref())
+        );
+        assert!(marker["coding_workspace"].is_null());
+        assert!(marker["active_mission"].is_null());
+        assert_eq!(
+            marker["backend_root"].as_str(),
+            Some(root.to_string_lossy().as_ref())
+        );
+        assert!(marker["process_id"].as_u64().is_some());
+        fs::remove_dir_all(root).expect("GUI smoke fixture should be removed");
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn workspace_binding_restores_the_exact_mission_from_canonical_journey_state() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("alfredo-mission-restore-{unique}"));
+        let backend_root = root.join("backend");
+        let workspace = root.join("workspace");
+        let tracker = workspace.join(".alfredo/missions/modernization");
+        let issues = tracker.join("issues");
+        let runtime_root = root.join("runtime");
+        fs::create_dir_all(&backend_root).expect("backend fixture");
+        fs::create_dir_all(&issues).expect("mission fixture");
+        fs::create_dir_all(&runtime_root).expect("runtime fixture");
+        let mut config = BridgeConfig::for_repository(backend_root);
+        config.runtime_root = runtime_root.clone();
+        let starting_location = bridge_starting_location(&config);
+        let catalog = runtime_root.join("workspace-mission-catalogs/catalog.json");
+        let journey = serde_json::json!({
+            "schema_version": 1,
+            "sessions": [{
+                "starting_location": starting_location.to_string_lossy(),
+                "coding_workspace": workspace.to_string_lossy(),
+                "revision": 2,
+                "active_mission": "modernization",
+                "missions": [{
+                    "id": "modernization",
+                    "title": "Modernization Mission",
+                    "tracker_dir": tracker.to_string_lossy(),
+                    "issues_dir": issues.to_string_lossy()
+                }],
+                "mission_catalog": catalog.to_string_lossy(),
+                "selection": {
+                    "correlation_id": "selection-1",
+                    "selection_mode": "existing"
+                },
+                "receipts": {}
+            }]
+        });
+        fs::write(
+            runtime_root.join("workspace-sessions.json"),
+            serde_json::to_vec(&journey).expect("journey should serialize"),
+        )
+        .expect("journey should be persisted");
+
+        let binding = WorkspaceBinding::from_config(&config);
+        let context = build_launch_context_with_binding(&config, &binding);
+        assert_eq!(context.phase, "workspace-ready");
+        assert_eq!(context.revision, 2);
+        assert_eq!(context.active_mission.as_deref(), Some("modernization"));
+        assert_eq!(context.known_missions[0].id, "modernization");
+
+        let bound = binding
+            .bound_config(&config)
+            .expect("restored Mission should bind backend configuration");
+        assert_eq!(
+            bound.target_repo,
+            workspace.canonicalize().expect("workspace root")
+        );
+        assert_eq!(bound.mission_id, "modernization");
+        assert_eq!(
+            bound.tracker_dir,
+            tracker.canonicalize().expect("tracker root")
+        );
+        assert_eq!(bound.mission_catalog, Some(catalog));
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn desktop_bridge_mission_choice_preserves_structured_failure_and_new_identity() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("alfredo-mission-choice-{unique}"));
+        let starting_location = root.join("projects");
+        let coding_workspace = starting_location.join("project");
+        let tracker = coding_workspace.join(".agent/issues");
+        let runtime_root = root.join("runtime");
+        fs::create_dir_all(&tracker).expect("workspace fixture");
+        fs::write(tracker.join("PRD.md"), "# Existing Mission\n").expect("PRD fixture");
+        let git = Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&coding_workspace)
+            .output()
+            .expect("git should start");
+        assert!(
+            git.status.success(),
+            "{}",
+            String::from_utf8_lossy(&git.stderr)
+        );
+        let backend_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("backend root");
+        let mut config = BridgeConfig::for_repository(backend_root);
+        config.runtime_root = runtime_root;
+        let request = CodingWorkspaceSelectionRequest {
+            correlation_id: "mission-choice-selection".to_owned(),
+            workspace_path: coding_workspace.to_string_lossy().into_owned(),
+            selection_mode: "existing".to_owned(),
+        };
+        let binding = WorkspaceBinding::default();
+        assert!(binding
+            .reserve_selection(&request)
+            .expect("selection should reserve")
+            .is_none());
+        let selection = execute_coding_workspace_select(&config, &starting_location, &request)
+            .expect("workspace should be acknowledged");
+        binding
+            .acknowledge(&request, &selection)
+            .expect("native binding should accept workspace");
+
+        let missing = execute_mission_choice(
+            &config,
+            &starting_location,
+            &coding_workspace,
+            &MissionChoiceRequest {
+                correlation_id: "mission-choice-missing".to_owned(),
+                expected_revision: 1,
+                choice: "resume".to_owned(),
+                mission_id: "missing".to_owned(),
+                mission_title: String::new(),
+            },
+        )
+        .expect_err("unknown Mission must remain structured");
+        assert_eq!(missing.code, "mission-not-found");
+
+        let created = execute_mission_choice(
+            &config,
+            &starting_location,
+            &coding_workspace,
+            &MissionChoiceRequest {
+                correlation_id: "mission-choice-new".to_owned(),
+                expected_revision: 1,
+                choice: "new".to_owned(),
+                mission_id: "modernization".to_owned(),
+                mission_title: "Modernization Mission".to_owned(),
+            },
+        )
+        .expect("new Mission should be acknowledged");
+        assert_eq!(created.choice, "new");
+        assert_eq!(created.active_mission, "modernization");
+        assert_eq!(created.revision, 2);
+        assert!(coding_workspace
+            .join(".alfredo/missions/modernization/PRD.md")
+            .is_file());
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn appimage_python_environment_does_not_poison_backend_snapshot() {
+        const CHILD_PROCESS: &str = "ALFREDO_APPIMAGE_PYTHON_ENV_TEST_CHILD";
+        if std::env::var(CHILD_PROCESS).as_deref() == Ok("1") {
+            let unique = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock should be after epoch")
+                .as_nanos();
+            let root = std::env::temp_dir().join(format!("alfredo-appimage-python-env-{unique}"));
+            let target_repo = root.join("workspace");
+            let tracker_dir = root.join("tracker");
+            let runtime_root = root.join("runtime");
+            fs::create_dir_all(&target_repo).expect("workspace fixture should be created");
+            fs::create_dir_all(&tracker_dir).expect("tracker fixture should be created");
+            let backend_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .canonicalize()
+                .expect("backend root should resolve");
+            let config = BridgeConfig {
+                python: "python3".to_owned(),
+                backend_root,
+                target_repo: target_repo.clone(),
+                tracker_dir,
+                issues_dir: None,
+                runtime_root,
+                mission_id: "appimage-python-environment".to_owned(),
+                agent_config: None,
+                mission_catalog: None,
+            };
+
+            let snapshot = execute_snapshot(&config)
+                .expect("AppImage launch environment must not poison the host Python backend");
+            assert_eq!(
+                snapshot.workspace_session.workspace_path,
+                target_repo.to_string_lossy()
+            );
+            shutdown_backends();
+            fs::remove_dir_all(root)
+                .expect("AppImage Python environment fixture should be removed");
+            return;
+        }
+
+        let output = Command::new(std::env::current_exe().expect("test executable should resolve"))
+            .arg("--exact")
+            .arg("tests::appimage_python_environment_does_not_poison_backend_snapshot")
+            .arg("--nocapture")
+            .env(CHILD_PROCESS, "1")
+            .env("PYTHONHOME", "/missing/appimage/usr")
+            .env("PYTHONPATH", "/missing/appimage/usr/share/pyshared")
+            .output()
+            .expect("poisoned AppImage child test should launch");
+        assert!(
+            output.status.success(),
+            "poisoned AppImage child failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn blocking_bridge_job_does_not_stall_followup_ipc_work() {
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let slow = tauri::async_runtime::spawn(run_blocking_bridge(move || {
+            entered_tx
+                .send(())
+                .expect("slow bridge should announce that it started");
+            release_rx
+                .recv()
+                .expect("test should release the slow bridge");
+            Ok::<_, BridgeFailure>("slow")
+        }));
+
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("slow bridge should enter its blocking worker");
+
+        let (fast_tx, fast_rx) = std::sync::mpsc::channel();
+        let fast = tauri::async_runtime::spawn(async move {
+            let result = run_blocking_bridge(|| Ok::<_, BridgeFailure>("snapshot")).await;
+            fast_tx
+                .send(result)
+                .expect("fast bridge result receiver should remain available");
+        });
+        let fast_result = fast_rx.recv_timeout(Duration::from_secs(2));
+
+        release_tx
+            .send(())
+            .expect("slow bridge receiver should remain available");
+        let slow_result = tauri::async_runtime::block_on(slow)
+            .expect("slow async task should join")
+            .expect("slow blocking bridge should succeed");
+        tauri::async_runtime::block_on(fast).expect("fast async task should join");
+
+        assert_eq!(slow_result, "slow");
+        assert_eq!(
+            fast_result
+                .expect("followup bridge work should finish before slow work is released")
+                .expect("followup bridge work should succeed"),
+            "snapshot"
+        );
+    }
+
+    #[test]
+    fn parses_agent_capability_catalog() {
+        let output = ProcessOutput {
+            success: true,
+            stdout: r#"{
+                "schema_version": 1,
+                "default_agent_id": "qwen3-14b",
+                "skills": [{
+                    "name": "diagnose",
+                    "description": "Diagnose hard bugs.",
+                    "source": "/workspace/.agents/skills/diagnose/SKILL.md",
+                    "invocation": "/use diagnose"
+                }],
+                "commands": [{
+                    "name": "/run",
+                    "usage": "/run <command>",
+                    "description": "Run a governed command.",
+                    "category": "execution"
+                }],
+                "agents": [{
+                    "id": "qwen3-14b",
+                    "role": "frontier",
+                    "provider": "ollama",
+                    "runner": "ollama",
+                    "model": "qwen3:14b",
+                    "routing": "controller",
+                    "availability": "available",
+                    "availability_reason": ""
+                }]
+            }"#
+            .to_owned(),
+            stderr: String::new(),
+        };
+
+        let catalog: AgentCapabilityCatalog =
+            decode_backend_json(output, "agent capability catalog").expect("catalog should decode");
+
+        assert_eq!(catalog.default_agent_id, "qwen3-14b");
+        assert_eq!(catalog.skills[0].invocation, "/use diagnose");
+        assert_eq!(catalog.commands[0].name, "/run");
+    }
+
+    #[test]
+    fn desktop_bridge_acknowledges_an_exact_coding_workspace_without_a_mission() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("alfredo-workspace-select-{unique}"));
+        let starting_location = root.join("projects");
+        let coding_workspace = starting_location.join("existing");
+        let runtime_root = root.join("runtime");
+        fs::create_dir_all(&coding_workspace).expect("coding workspace");
+        let git = Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&coding_workspace)
+            .output()
+            .expect("git should start");
+        assert!(
+            git.status.success(),
+            "{}",
+            String::from_utf8_lossy(&git.stderr)
+        );
+        let backend_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("backend root");
+        let mut config = BridgeConfig::for_repository(backend_root);
+        config.runtime_root = runtime_root;
+
+        let request = CodingWorkspaceSelectionRequest {
+            correlation_id: "workspace-select-rust-1".to_owned(),
+            workspace_path: coding_workspace.to_string_lossy().into_owned(),
+            selection_mode: "existing".to_owned(),
+        };
+        let binding = WorkspaceBinding::default();
+        assert!(binding
+            .reserve_selection(&request)
+            .expect("the first selection should reserve the effect")
+            .is_none());
+        let pending = binding
+            .reserve_selection(&request)
+            .expect_err("a concurrent request must not repeat the effect");
+        assert_eq!(pending.code, "workspace-selection-pending");
+        let pending_conflict = binding
+            .reserve_selection(&CodingWorkspaceSelectionRequest {
+                correlation_id: request.correlation_id.clone(),
+                workspace_path: starting_location
+                    .join("different")
+                    .to_string_lossy()
+                    .into_owned(),
+                selection_mode: "create".to_owned(),
+            })
+            .expect_err("a pending correlation must retain its exact boundary");
+        assert_eq!(pending_conflict.code, "correlation-conflict");
+        let acknowledgement =
+            execute_coding_workspace_select(&config, &starting_location, &request)
+                .expect("selection should be acknowledged");
+
+        assert_eq!(acknowledgement.schema_version, 1);
+        assert_eq!(acknowledgement.outcome, "acknowledged");
+        assert_eq!(
+            acknowledgement.coding_workspace,
+            coding_workspace
+                .canonicalize()
+                .expect("canonical workspace")
+                .to_string_lossy()
+        );
+        assert!(acknowledgement.active_mission.is_none());
+
+        binding
+            .acknowledge(&request, &acknowledgement)
+            .expect("acknowledged workspace should become the native binding");
+        let replay = binding
+            .reserve_selection(&request)
+            .expect("exact correlation replay should remain valid")
+            .expect("accepted correlation should replay");
+        assert!(replay.replayed);
+        let changed_request = CodingWorkspaceSelectionRequest {
+            correlation_id: request.correlation_id.clone(),
+            workspace_path: starting_location
+                .join("different")
+                .to_string_lossy()
+                .into_owned(),
+            selection_mode: "create".to_owned(),
+        };
+        let conflict = binding
+            .reserve_selection(&changed_request)
+            .expect_err("changed selection boundary must not reuse a correlation");
+        assert_eq!(conflict.code, "correlation-conflict");
+        let second_selection = CodingWorkspaceSelectionRequest {
+            correlation_id: "workspace-select-rust-2".to_owned(),
+            workspace_path: starting_location
+                .join("different")
+                .to_string_lossy()
+                .into_owned(),
+            selection_mode: "create".to_owned(),
+        };
+        let already_selected = binding
+            .reserve_selection(&second_selection)
+            .expect_err("an acknowledged process binding must not be retargeted");
+        assert_eq!(already_selected.code, "workspace-already-selected");
+        let context = build_launch_context_with_binding(&config, &binding);
+        assert_eq!(context.phase, "mission-choice-required");
+        assert_eq!(
+            context.coding_workspace.as_deref(),
+            Some(
+                coding_workspace
+                    .canonicalize()
+                    .expect("canonical workspace")
+                    .to_string_lossy()
+                    .as_ref()
+            )
+        );
+        let failure = binding
+            .require_active_mission()
+            .expect_err("Mission-qualified commands must remain blocked");
+        assert_eq!(failure.code, "mission-selection-required");
+        assert!(failure.recoverable);
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn parses_finished_workstation_session_lifecycle() {
+        let output = ProcessOutput {
+            success: true,
+            stdout: r#"{
+                "schema_version": 1,
+                "mission_id": "command-deck",
+                "session_id": "session-ISS-01-1",
+                "issue_id": "ISS-01",
+                "status": "evidence-ready",
+                "runner_started_at": "2026-07-10T08:00:00Z",
+                "runner_ended_at": "2026-07-10T08:00:01Z",
+                "runner_exit_status": 0,
+                "evidence_valid": true
+            }"#
+            .to_owned(),
+            stderr: String::new(),
+        };
+
+        let lifecycle: WorkstationSessionRunProjection =
+            decode_backend_json(output, "Workstation session lifecycle")
+                .expect("session lifecycle should decode");
+
+        assert_eq!(lifecycle.session_id, "session-ISS-01-1");
+        assert_eq!(lifecycle.runner_exit_status, Some(0));
+        assert!(lifecycle.evidence_valid);
+    }
+
+    #[test]
+    fn parses_bounded_session_artifact_without_a_host_path() {
+        let output = ProcessOutput {
+            success: true,
+            stdout: r#"{
+                "schema_version": 1,
+                "mission_id": "command-deck",
+                "session_id": "session-ISS-01-1",
+                "artifact_id": "review_diff",
+                "label": "Review diff",
+                "media_type": "text/x-diff",
+                "content": "--- a/app.py\n+++ b/app.py\n+fixed\n",
+                "byte_count": 36,
+                "content_limit_bytes": 128000,
+                "truncated": false
+            }"#
+            .to_owned(),
+            stderr: String::new(),
+        };
+
+        let artifact: SessionArtifactProjection =
+            decode_backend_json(output, "session artifact projection")
+                .expect("session artifact should decode");
+
+        assert_eq!(artifact.artifact_id, "review_diff");
+        assert_eq!(artifact.media_type, "text/x-diff");
+        assert!(artifact.content.contains("+fixed"));
+        assert_eq!(artifact.content_limit_bytes, 128_000);
+        assert!(!artifact.truncated);
+    }
+
+    #[test]
+    fn parses_typed_controller_coding_task_route() {
+        let output = ProcessOutput {
+            success: true,
+            stdout: r#"{
+                "message": {
+                    "message_id": "console-000002",
+                    "sequence": 2,
+                    "role": "assistant",
+                    "content": "I can route that bounded task.",
+                    "scope": {
+                        "kind": "working-directory",
+                        "target_id": "/workspace/albert",
+                        "label": "albert",
+                        "mission_id": null
+                    },
+                    "outcome": "model-commentary",
+                    "source": "frontier-model"
+                },
+                "route": {
+                    "intent": "coding-task",
+                    "task_request": "Fix workspace polling.",
+                    "acceptance_criteria": [
+                        "Polling recovers after a transient failure."
+                    ]
+                }
+            }"#
+            .to_owned(),
+            stderr: String::new(),
+        };
+
+        let response: AgentConsoleResponseProjection =
+            decode_backend_json(output, "Agent Console response")
+                .expect("controller response should decode");
+
+        assert_eq!(response.message.message_id, "console-000002");
+        assert_eq!(
+            response.route.intent,
+            AgentConsoleResponseIntent::CodingTask
+        );
+        assert_eq!(response.route.task_request, "Fix workspace polling.");
+        assert_eq!(response.route.acceptance_criteria.len(), 1);
+    }
 
     #[test]
     fn parses_a_successful_versioned_workspace_snapshot() {
@@ -2759,6 +4523,8 @@ mod tests {
                         {
                             "issue_id": "ISS-01",
                             "title": "Restore workspace session",
+                            "work_type": "AFK",
+                            "tracker_status": "ready-for-agent",
                             "lifecycle": "Ready",
                             "progress": "Launch eligible",
                             "launch_eligible": true,
@@ -2815,7 +4581,24 @@ mod tests {
                             ]
                         }
                     ]
-                }
+                },
+                "missions": [{
+                    "id": "command-deck",
+                    "title": "Command Deck Mission",
+                    "issue_count": 2,
+                    "is_active": true,
+                    "sessions": [{
+                        "session_id": "session-ISS-01-1",
+                        "issue_id": "ISS-01",
+                        "assigned_agent": "qwen-coder-local",
+                        "status": "evidence-ready",
+                        "last_activity_at": "2026-07-12T08:31:45+00:00",
+                        "review_outcome": "Needs repair",
+                        "review_next_action": "same-local-agent-repair",
+                        "repair_action_available": true
+                    }],
+                    "attention": []
+                }]
             }"#
             .to_owned(),
             stderr: String::new(),
@@ -2828,6 +4611,11 @@ mod tests {
         assert_eq!(snapshot.workspace_session.id, "workspace-command-deck");
         assert_eq!(snapshot.active_mission.unwrap().id, "command-deck");
         assert_eq!(snapshot.mission_board.issue_slices[0].issue_id, "ISS-01");
+        assert_eq!(snapshot.mission_board.issue_slices[0].work_type, "AFK");
+        assert_eq!(
+            snapshot.mission_board.issue_slices[0].tracker_status,
+            "ready-for-agent"
+        );
         assert_eq!(
             snapshot.mission_board.issue_slices[0].sessions[0].provider,
             "ollama"
@@ -2838,6 +4626,19 @@ mod tests {
                 .availability,
             "available"
         );
+        assert_eq!(
+            snapshot.missions[0].sessions[0].review_outcome,
+            "Needs repair"
+        );
+        assert_eq!(
+            snapshot.missions[0].sessions[0].review_next_action,
+            "same-local-agent-repair"
+        );
+        assert_eq!(
+            snapshot.missions[0].sessions[0].last_activity_at,
+            "2026-07-12T08:31:45+00:00"
+        );
+        assert!(snapshot.missions[0].sessions[0].repair_action_available);
     }
 
     #[test]
@@ -3003,7 +4804,49 @@ None - can start immediately
     }
 
     #[test]
-    fn launch_context_surfaces_agent_runtime_and_recent_workspaces() {
+    fn environment_registry_is_the_authority_for_desktop_capabilities() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("alfredo-bridge-registry-{unique}"));
+        let agent_config = root.join("custom-agents.json");
+        fs::create_dir_all(&root).expect("registry fixture root");
+        fs::write(
+            &agent_config,
+            r#"{
+                "agents": [{
+                    "id": "custom-controller",
+                    "role": "frontier",
+                    "provider": "fake",
+                    "runner": "fake",
+                    "model": "deterministic-custom",
+                    "routing": "controller"
+                }]
+            }"#,
+        )
+        .expect("custom registry");
+        let prior_agent_config = std::env::var_os("ALFREDO_AGENT_CONFIG");
+        std::env::set_var("ALFREDO_AGENT_CONFIG", &agent_config);
+
+        let config = BridgeConfig::from_environment();
+
+        if let Some(prior_agent_config) = prior_agent_config {
+            std::env::set_var("ALFREDO_AGENT_CONFIG", prior_agent_config);
+        } else {
+            std::env::remove_var("ALFREDO_AGENT_CONFIG");
+        }
+        assert_eq!(config.agent_config.as_deref(), Some(agent_config.as_path()));
+        let catalog = execute_agent_capabilities(&config)
+            .expect("desktop capabilities should use the launcher registry");
+        assert_eq!(catalog.default_agent_id, "custom-controller");
+        assert_eq!(catalog.agents.len(), 1);
+        assert_eq!(catalog.agents[0].id, "custom-controller");
+        fs::remove_dir_all(root).expect("temporary registry fixture should be removed");
+    }
+
+    #[test]
+    fn launch_context_surfaces_selection_required_starting_location() {
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock should be valid")
@@ -3247,12 +5090,26 @@ None - can start immediately
                 "grants": [{
                     "grant_id": "path-grant-000001",
                     "correlation_id": "path-grant-rust-1",
+                    "request_id": "path-grant-request-000001",
                     "path": "/external/docs",
                     "access_level": "read",
                     "duration_seconds": 900,
                     "granted_by": "mission-commander",
                     "granted_at": "2026-06-27T08:00:00Z",
                     "expires_at": "2026-06-27T08:15:00Z"
+                }],
+                "path_grant_requests": [{
+                    "request_id": "path-grant-request-000001",
+                    "correlation_id": "terminal-rust-1",
+                    "mission_id": "command-deck",
+                    "path": "/external/docs",
+                    "access_level": "read",
+                    "duration_seconds": 900,
+                    "requester": "mission-commander",
+                    "requested_at": "2026-06-27T07:59:00Z",
+                    "reason": "External documentation requires an Additional Path Grant.",
+                    "affected_action": "python3 docs/check.py",
+                    "status": "granted"
                 }]
             }"#
             .to_owned(),
@@ -3267,6 +5124,11 @@ None - can start immediately
         assert_eq!(projection.commands[0].exit_code, Some(0));
         assert_eq!(projection.grants[0].duration_seconds, 900);
         assert_eq!(projection.grants[0].granted_by, "mission-commander");
+        assert_eq!(
+            projection.path_grant_requests[0].request_id,
+            "path-grant-request-000001"
+        );
+        assert_eq!(projection.path_grant_requests[0].status, "granted");
     }
 
     #[test]
@@ -3319,7 +5181,11 @@ None - can start immediately
 
         let projection = execute_shell_terminal(&config).expect("terminal should inspect");
 
-        assert_eq!(result["status"], "completed");
+        assert_eq!(
+            result["status"], "completed",
+            "Shell Terminal stderr: {}",
+            result["stderr"]
+        );
         assert_eq!(projection.commands[0].command_id, "terminal-command-000001");
         assert_eq!(projection.commands[0].status, "completed");
         fs::remove_dir_all(root).expect("fixture cleanup");
@@ -3376,7 +5242,11 @@ None - can start immediately
 
         assert_eq!(result.correlation_id, "terminal-bridge-submit-2");
         assert_eq!(result.classification, "auto-allowed");
-        assert_eq!(result.status, "completed");
+        assert_eq!(
+            result.status, "completed",
+            "Shell Terminal stderr: {}",
+            result.stderr
+        );
         assert_eq!(result.exit_code, Some(0));
         assert!(result.stdout.contains("usage:"));
         assert!(result.stderr.is_empty());
@@ -3445,7 +5315,11 @@ None - can start immediately
         assert_eq!(pending.status, "pending-approval");
         assert_eq!(pending.classification, "human-required");
         assert_eq!(result.command_id, pending.command_id);
-        assert_eq!(result.status, "completed");
+        assert_eq!(
+            result.status, "completed",
+            "Shell Terminal stderr: {}",
+            result.stderr
+        );
         assert_eq!(result.stdout.trim(), "human approved");
         fs::remove_dir_all(root).expect("fixture cleanup");
     }
@@ -3489,8 +5363,22 @@ None - can start immediately
             agent_config: None,
             mission_catalog: None,
         };
+        let blocked = ShellTerminalCommandRequest {
+            correlation_id: "terminal-path-grant-bridge-1".to_owned(),
+            command: "python3 -m unittest --help".to_owned(),
+            working_directory: config.target_repo.display().to_string(),
+            requested_paths: vec![external_path.display().to_string()],
+            requester: "mission-commander".to_owned(),
+            access_level: "write".to_owned(),
+        };
+        execute_shell_terminal_submit(&config, &blocked)
+            .expect_err("external command path should require typed authority");
+        let pending_projection =
+            execute_shell_terminal(&config).expect("typed grant request should inspect");
+        let request_id = pending_projection.path_grant_requests[0].request_id.clone();
         let request = AdditionalPathGrantRequest {
             correlation_id: "path-grant-bridge-1".to_owned(),
+            request_id: request_id.clone(),
             expected_revision: 0,
             path: external_path.display().to_string(),
             access_level: "write".to_owned(),
@@ -3508,7 +5396,74 @@ None - can start immediately
         assert_eq!(grant.access_level, "write");
         assert_eq!(grant.duration_seconds, 900);
         assert_eq!(grant.granted_by, "mission-commander");
+        assert_eq!(grant.request_id, request_id);
         assert_eq!(projection.grants[0].grant_id, grant.grant_id);
+        assert_eq!(projection.path_grant_requests[0].status, "granted");
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn desktop_bridge_denies_contextual_path_grant_through_python_backend() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("albert-tauri-path-denial-{unique}"));
+        let target_repo = root.join("target");
+        let external_path = root.join("external-docs");
+        let tracker_dir = root.join("tracker");
+        let issues_dir = tracker_dir.join("issues");
+        let runtime_root = root.join("runtime");
+        fs::create_dir_all(&target_repo).expect("target repo");
+        fs::create_dir_all(&external_path).expect("external path");
+        fs::create_dir_all(&issues_dir).expect("issues dir");
+        fs::write(tracker_dir.join("PRD.md"), "# Path Grant Denial Bridge\n").expect("PRD");
+        fs::write(
+            issues_dir.join("01-terminal.md"),
+            "Status: ready-for-agent\nType: AFK\n\n## Parent\n\nPRD.md\n\n## What to build\n\nPath grant denial bridge.\n\n## Acceptance criteria\n\n- [ ] Denial is durable.\n\n## Blocked by\n\nNone - can start immediately\n",
+        )
+        .expect("issue");
+        let config = BridgeConfig {
+            python: "python3".to_owned(),
+            backend_root: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .canonicalize()
+                .expect("backend root"),
+            target_repo,
+            tracker_dir,
+            issues_dir: None,
+            runtime_root,
+            mission_id: "path-grant-denial-bridge".to_owned(),
+            agent_config: None,
+            mission_catalog: None,
+        };
+        let request = AdditionalPathGrantDenialRequest {
+            correlation_id: "path-grant-denial-bridge-1".to_owned(),
+            request_id: "contextual-grant-bridge-1".to_owned(),
+            expected_revision: 0,
+            path: external_path.display().to_string(),
+            access_level: "read".to_owned(),
+            duration_seconds: 300,
+            requester: "mission-commander".to_owned(),
+            reason: "The blocked command requested external documentation.".to_owned(),
+            affected_action: "python3 docs/check.py".to_owned(),
+        };
+
+        let denial = execute_additional_path_grant_deny(&config, &request)
+            .expect("path grant request should be denied");
+        let projection = execute_shell_terminal(&config).expect("terminal should inspect");
+        let journal = execute_activity_journal(&config, &ActivityJournalFilters::default())
+            .expect("journal should inspect");
+
+        assert_eq!(denial.denial_id, "path-grant-denial-000001");
+        assert_eq!(denial.request_id, "contextual-grant-bridge-1");
+        assert!(projection.grants.is_empty());
+        assert_eq!(projection.grant_denials[0].denial_id, denial.denial_id);
+        assert_eq!(
+            journal.entries[0].action_type,
+            "additional-path-grant-denied"
+        );
+        assert_eq!(journal.entries[0].correlation_id, request.correlation_id);
         fs::remove_dir_all(root).expect("fixture cleanup");
     }
 
@@ -3824,16 +5779,42 @@ None - can start immediately
                 scope_kind: "issue-slice".to_owned(),
                 scope_target: "ISS-01".to_owned(),
                 scope_label: "Console".to_owned(),
+                scope_mission_id: "agent-console".to_owned(),
             },
         )
         .expect("message should append");
+        let response = execute_console_response(
+            &config,
+            &AgentConsoleResponseRequest {
+                expected_revision: 2,
+                message_id: "console-000001".to_owned(),
+                scope_kind: "issue-slice".to_owned(),
+                scope_target: "ISS-01".to_owned(),
+                scope_label: "Console".to_owned(),
+                scope_mission_id: "agent-console".to_owned(),
+                agent_id: None,
+            },
+        )
+        .expect("controller response should append");
 
         let restored = execute_console_history(&config).expect("history should restore");
 
-        assert_eq!(restored.messages.len(), 1);
+        assert_eq!(restored.messages.len(), 2);
         assert_eq!(restored.messages[0].message_id, "console-000001");
         assert_eq!(restored.messages[0].scope.kind, "issue-slice");
         assert_eq!(restored.messages[0].scope.target_id, "ISS-01");
+        assert_eq!(response.message.role, "assistant");
+        assert_eq!(response.message.outcome, "model-commentary");
+        assert!(response
+            .message
+            .content
+            .contains("No configured controller model is available"));
+        assert_eq!(
+            response.route.intent,
+            AgentConsoleResponseIntent::Discussion
+        );
+        assert!(response.route.task_request.is_empty());
+        assert!(response.route.acceptance_criteria.is_empty());
         fs::remove_dir_all(root).expect("fixture cleanup");
     }
 
@@ -3881,6 +5862,7 @@ None - can start immediately
                 scope_kind: "working-directory".to_owned(),
                 scope_target: target_repo.display().to_string(),
                 scope_label: "target".to_owned(),
+                scope_mission_id: String::new(),
             },
         )
         .expect("origin message should append");
@@ -3965,6 +5947,7 @@ None - can start immediately
                     kind: "issue-slice".to_owned(),
                     id: "ISS-01".to_owned(),
                 },
+                mission_id: "workstation-action-bridge".to_owned(),
                 issue_id: "ISS-01".to_owned(),
                 session_id: String::new(),
                 agent_id: String::new(),
@@ -4032,6 +6015,7 @@ None - can start immediately
                     kind: "issue-slice".to_owned(),
                     id: "ISS-01".to_owned(),
                 },
+                mission_id: "review-decision-bridge".to_owned(),
                 issue_id: "ISS-01".to_owned(),
                 session_id: String::new(),
                 agent_id: String::new(),
@@ -4040,18 +6024,40 @@ None - can start immediately
                 command_policy: std::collections::BTreeMap::new(),
             },
         )
-        .expect("launch should create a reviewable session");
+        .expect("launch should create a queued session");
+        let cancelled = execute_workstation_action(
+            &config,
+            &WorkstationActionRequest {
+                correlation_id: "tauri-review-cancel-1".to_owned(),
+                action_type: "session-cancel".to_owned(),
+                actor: "mission-commander".to_owned(),
+                expected_revision: launch.revision,
+                target: WorkstationActionTarget {
+                    kind: "agent-session".to_owned(),
+                    id: launch.session_id.clone(),
+                },
+                mission_id: "review-decision-bridge".to_owned(),
+                issue_id: "ISS-01".to_owned(),
+                session_id: launch.session_id.clone(),
+                agent_id: String::new(),
+                reason: "Create terminal evidence for the bridge review.".to_owned(),
+                allowed_paths: Vec::new(),
+                command_policy: std::collections::BTreeMap::new(),
+            },
+        )
+        .expect("cancel should make the session reviewable");
         let review = execute_review_decision(
             &config,
             &ReviewDecisionRequest {
                 correlation_id: "tauri-review-repair-1".to_owned(),
                 action_type: "review-decision".to_owned(),
                 actor: "mission-commander".to_owned(),
-                expected_revision: launch.revision,
+                expected_revision: cancelled.revision,
                 target: ReviewDecisionTarget {
                     kind: "agent-session".to_owned(),
                     id: launch.session_id.clone(),
                 },
+                mission_id: "review-decision-bridge".to_owned(),
                 session_id: launch.session_id.clone(),
                 decision: "repair".to_owned(),
                 reason: "Needs focused repair.".to_owned(),
@@ -4071,6 +6077,7 @@ None - can start immediately
                     kind: "agent-session".to_owned(),
                     id: "session-other".to_owned(),
                 },
+                mission_id: "review-decision-bridge".to_owned(),
                 session_id: launch.session_id,
                 decision: "repair".to_owned(),
                 reason: "Needs focused repair.".to_owned(),
@@ -4134,6 +6141,7 @@ None - can start immediately
                 scope_kind: "working-directory".to_owned(),
                 scope_target: target_repo.display().to_string(),
                 scope_label: "target".to_owned(),
+                scope_mission_id: String::new(),
             },
         )
         .expect("origin message should append");
@@ -4325,6 +6333,7 @@ None - can start immediately
                 scope_kind: "working-directory".to_owned(),
                 scope_target: config.target_repo.to_string_lossy().into_owned(),
                 scope_label: "target".to_owned(),
+                scope_mission_id: String::new(),
             },
         )
         .expect("message should append");
@@ -4430,6 +6439,7 @@ None - can start immediately
                 scope_kind: "working-directory".to_owned(),
                 scope_target: config.target_repo.to_string_lossy().into_owned(),
                 scope_label: "target".to_owned(),
+                scope_mission_id: String::new(),
             },
         )
         .expect("message");
@@ -4458,125 +6468,6 @@ None - can start immediately
             history.messages[0].content,
             "Continuous mission conversation"
         );
-        fs::remove_dir_all(root).expect("fixture cleanup");
-    }
-    #[test]
-    fn desktop_bridge_acknowledges_an_exact_coding_workspace_without_a_mission() {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock should be valid")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("alfredo-workspace-select-{unique}"));
-        let starting_location = root.join("projects");
-        let coding_workspace = starting_location.join("existing");
-        let runtime_root = root.join("runtime");
-        fs::create_dir_all(&coding_workspace).expect("coding workspace");
-        let git = Command::new("git")
-            .args(["init", "--quiet"])
-            .arg(&coding_workspace)
-            .output()
-            .expect("git should start");
-        assert!(
-            git.status.success(),
-            "{}",
-            String::from_utf8_lossy(&git.stderr)
-        );
-        let backend_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .canonicalize()
-            .expect("backend root");
-        let mut config = BridgeConfig::for_repository(backend_root);
-        config.runtime_root = runtime_root;
-
-        let request = CodingWorkspaceSelectionRequest {
-            correlation_id: "workspace-select-rust-1".to_owned(),
-            workspace_path: coding_workspace.to_string_lossy().into_owned(),
-            selection_mode: "existing".to_owned(),
-        };
-        let binding = WorkspaceBinding::default();
-        assert!(binding
-            .reserve_selection(&request)
-            .expect("the first selection should reserve the effect")
-            .is_none());
-        let pending = binding
-            .reserve_selection(&request)
-            .expect_err("a concurrent request must not repeat the effect");
-        assert_eq!(pending.code, "workspace-selection-pending");
-        let pending_conflict = binding
-            .reserve_selection(&CodingWorkspaceSelectionRequest {
-                correlation_id: request.correlation_id.clone(),
-                workspace_path: starting_location
-                    .join("different")
-                    .to_string_lossy()
-                    .into_owned(),
-                selection_mode: "create".to_owned(),
-            })
-            .expect_err("a pending correlation must retain its exact boundary");
-        assert_eq!(pending_conflict.code, "correlation-conflict");
-        let acknowledgement =
-            execute_coding_workspace_select(&config, &starting_location, &request)
-                .expect("selection should be acknowledged");
-
-        assert_eq!(acknowledgement.schema_version, 1);
-        assert_eq!(acknowledgement.outcome, "acknowledged");
-        assert_eq!(
-            acknowledgement.coding_workspace,
-            coding_workspace
-                .canonicalize()
-                .expect("canonical workspace")
-                .to_string_lossy()
-        );
-        assert!(acknowledgement.active_mission.is_none());
-
-        binding
-            .acknowledge(&request, &acknowledgement)
-            .expect("acknowledged workspace should become the native binding");
-        let replay = binding
-            .reserve_selection(&request)
-            .expect("exact correlation replay should remain valid")
-            .expect("accepted correlation should replay");
-        assert!(replay.replayed);
-        let changed_request = CodingWorkspaceSelectionRequest {
-            correlation_id: request.correlation_id.clone(),
-            workspace_path: starting_location
-                .join("different")
-                .to_string_lossy()
-                .into_owned(),
-            selection_mode: "create".to_owned(),
-        };
-        let conflict = binding
-            .reserve_selection(&changed_request)
-            .expect_err("changed selection boundary must not reuse a correlation");
-        assert_eq!(conflict.code, "correlation-conflict");
-        let second_selection = CodingWorkspaceSelectionRequest {
-            correlation_id: "workspace-select-rust-2".to_owned(),
-            workspace_path: starting_location
-                .join("different")
-                .to_string_lossy()
-                .into_owned(),
-            selection_mode: "create".to_owned(),
-        };
-        let already_selected = binding
-            .reserve_selection(&second_selection)
-            .expect_err("an acknowledged process binding must not be retargeted");
-        assert_eq!(already_selected.code, "workspace-already-selected");
-        let context = build_launch_context_with_binding(&config, &binding);
-        assert_eq!(context.phase, "mission-choice-required");
-        assert_eq!(
-            context.coding_workspace.as_deref(),
-            Some(
-                coding_workspace
-                    .canonicalize()
-                    .expect("canonical workspace")
-                    .to_string_lossy()
-                    .as_ref()
-            )
-        );
-        let failure = binding
-            .require_active_mission()
-            .expect_err("Mission-qualified commands must remain blocked");
-        assert_eq!(failure.code, "mission-selection-required");
-        assert!(failure.recoverable);
         fs::remove_dir_all(root).expect("fixture cleanup");
     }
 }

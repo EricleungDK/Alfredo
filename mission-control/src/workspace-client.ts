@@ -5,11 +5,19 @@ import type {
   CodingWorkspaceAcknowledgement,
   CodingWorkspaceSelectionRequest,
   CodingWorkspaceSelectionResult,
+  MissionChoiceAcknowledgement,
+  MissionChoiceRequest,
+  MissionChoiceResult,
+  AgentCapabilityCatalog,
+  AgentCapabilityCatalogResult,
   AgentConsoleHistory,
   AgentConsoleHistoryResult,
   AgentConsoleMessage,
   AgentConsoleMessageRequest,
   AgentConsoleMessageResult,
+  AgentConsoleResponseProjection,
+  AgentConsoleResponseRequest,
+  AgentConsoleResponseResult,
   AdHocDelegationProposalRequest,
   AdHocDelegationProposalResult,
   ActivityJournalFilters,
@@ -17,6 +25,9 @@ import type {
   ActivityJournalProjection,
   AdditionalPathGrant,
   AdditionalPathGrantCreateResult,
+  AdditionalPathGrantDenial,
+  AdditionalPathGrantDenialRequest,
+  AdditionalPathGrantDenialResult,
   AdditionalPathGrantRequest,
   ShellTerminalLoadResult,
   ShellTerminalProjection,
@@ -61,6 +72,12 @@ import type {
   WorkstationActionAcknowledgement,
   WorkstationActionRequest,
   WorkstationActionResult,
+  WorkstationSessionRunProjection,
+  WorkstationSessionRunRequest,
+  WorkstationSessionRunResult,
+  SessionArtifactProjection,
+  SessionArtifactReadRequest,
+  SessionArtifactReadResult,
 } from "./contracts";
 
 export interface WorkspaceClient {
@@ -71,6 +88,8 @@ export interface WorkspaceClient {
   selectCodingWorkspace?(
     request: CodingWorkspaceSelectionRequest,
   ): Promise<CodingWorkspaceSelectionResult>;
+  chooseMission?(request: MissionChoiceRequest): Promise<MissionChoiceResult>;
+  loadAgentCapabilities?(): Promise<AgentCapabilityCatalogResult>;
   loadSnapshot(): Promise<WorkspaceLoadResult>;
   loadConsoleHistory?(): Promise<AgentConsoleHistoryResult>;
   loadUpdates?(afterRevision: number): Promise<WorkspaceUpdatesResult>;
@@ -78,6 +97,9 @@ export interface WorkspaceClient {
   changeScope?(scope: WorkspaceScopeRequest): Promise<WorkspaceActionResult>;
   switchMission?(request: WorkspaceMissionSwitchRequest): Promise<WorkspaceActionResult>;
   appendConsoleMessage?(message: AgentConsoleMessageRequest): Promise<AgentConsoleMessageResult>;
+  generateConsoleResponse?(
+    request: AgentConsoleResponseRequest,
+  ): Promise<AgentConsoleResponseResult>;
   loadWorkingContext?(): Promise<WorkingContextLoadResult>;
   curateWorkingContext?(
     request: WorkingContextCurationRequest,
@@ -94,6 +116,9 @@ export interface WorkspaceClient {
   createAdditionalPathGrant?(
     request: AdditionalPathGrantRequest,
   ): Promise<AdditionalPathGrantCreateResult>;
+  denyAdditionalPathGrant?(
+    request: AdditionalPathGrantDenialRequest,
+  ): Promise<AdditionalPathGrantDenialResult>;
   submitReviewDecision?(request: ReviewDecisionRequest): Promise<ReviewDecisionResult>;
   loadWorkspaceQueue?(): Promise<WorkspaceQueueLoadResult>;
   submitAdHocDelegationProposal?(
@@ -103,6 +128,8 @@ export interface WorkspaceClient {
     request: WorkspaceQueueDecisionRequest,
   ): Promise<WorkspaceQueueDecisionResult>;
   submitWorkstationAction?(request: WorkstationActionRequest): Promise<WorkstationActionResult>;
+  runWorkstationSession?(request: WorkstationSessionRunRequest): Promise<WorkstationSessionRunResult>;
+  loadSessionArtifact?(request: SessionArtifactReadRequest): Promise<SessionArtifactReadResult>;
   loadMissionDrafts?(): Promise<MissionDraftLoadResult>;
   submitMissionDraftCreate?(request: MissionDraftCreateRequest): Promise<MissionDraftCreateResult>;
   submitMissionDraftDecision?(
@@ -159,6 +186,52 @@ export class TauriWorkspaceClient implements WorkspaceClient {
       }
       return {
         kind: "selection-failure",
+        code: "backend-startup-failure",
+        message: error instanceof Error ? error.message : String(error),
+        recoverable: true,
+      };
+    }
+  }
+
+  async chooseMission(request: MissionChoiceRequest): Promise<MissionChoiceResult> {
+    try {
+      const acknowledgement = await invoke<MissionChoiceAcknowledgement>("mission_choice", {
+        request,
+      });
+      return { kind: "acknowledged", acknowledgement };
+    } catch (error) {
+      if (isBridgeFailure(error)) {
+        return {
+          kind: "mission-choice-failure",
+          code: error.code,
+          message: error.message,
+          recoverable: error.recoverable,
+        };
+      }
+      return {
+        kind: "mission-choice-failure",
+        code: "backend-startup-failure",
+        message: error instanceof Error ? error.message : String(error),
+        recoverable: true,
+      };
+    }
+  }
+
+  async loadAgentCapabilities(): Promise<AgentCapabilityCatalogResult> {
+    try {
+      const catalog = await invoke<AgentCapabilityCatalog>("agent_capabilities");
+      return { kind: "capabilities", catalog };
+    } catch (error) {
+      if (isBridgeFailure(error)) {
+        return {
+          kind: "capabilities-failure",
+          code: error.code,
+          message: error.message,
+          recoverable: error.recoverable,
+        };
+      }
+      return {
+        kind: "capabilities-failure",
         code: "backend-startup-failure",
         message: error instanceof Error ? error.message : String(error),
         recoverable: true,
@@ -317,6 +390,26 @@ export class TauriWorkspaceClient implements WorkspaceClient {
     try {
       const appended = await invoke<AgentConsoleMessage>("agent_console_message", { message });
       return { kind: "message", message: appended };
+    } catch (error) {
+      if (isBridgeFailure(error)) {
+        return { kind: "message-rejected", code: error.code, message: error.message };
+      }
+      return {
+        kind: "message-rejected",
+        code: "backend-startup-failure",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  async generateConsoleResponse(
+    request: AgentConsoleResponseRequest,
+  ): Promise<AgentConsoleResponseResult> {
+    try {
+      const response = await invoke<AgentConsoleResponseProjection>("agent_console_response", {
+        request,
+      });
+      return { kind: "message", message: response.message, route: response.route };
     } catch (error) {
       if (isBridgeFailure(error)) {
         return { kind: "message-rejected", code: error.code, message: error.message };
@@ -504,6 +597,26 @@ export class TauriWorkspaceClient implements WorkspaceClient {
     }
   }
 
+  async denyAdditionalPathGrant(
+    request: AdditionalPathGrantDenialRequest,
+  ): Promise<AdditionalPathGrantDenialResult> {
+    try {
+      const denial = await invoke<AdditionalPathGrantDenial>("additional_path_grant_deny", {
+        request,
+      });
+      return { kind: "path-grant-denied", denial };
+    } catch (error) {
+      if (isBridgeFailure(error)) {
+        return { kind: "path-grant-rejected", code: error.code, message: error.message };
+      }
+      return {
+        kind: "path-grant-rejected",
+        code: "backend-startup-failure",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
   async submitReviewDecision(request: ReviewDecisionRequest): Promise<ReviewDecisionResult> {
     try {
       const acknowledgement = await invoke<ReviewDecisionAcknowledgement>(
@@ -607,6 +720,50 @@ export class TauriWorkspaceClient implements WorkspaceClient {
         kind: "rejected",
         code: "backend-startup-failure",
         message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  async runWorkstationSession(
+    request: WorkstationSessionRunRequest,
+  ): Promise<WorkstationSessionRunResult> {
+    try {
+      const session = await invoke<WorkstationSessionRunProjection>("workstation_session_run", {
+        request,
+      });
+      return { kind: "session-finished", session };
+    } catch (error) {
+      if (isBridgeFailure(error)) {
+        return { kind: "session-failed", code: error.code, message: error.message };
+      }
+      return {
+        kind: "session-failed",
+        code: "backend-startup-failure",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  async loadSessionArtifact(
+    request: SessionArtifactReadRequest,
+  ): Promise<SessionArtifactReadResult> {
+    try {
+      const artifact = await invoke<SessionArtifactProjection>("session_artifact", { request });
+      return { kind: "session-artifact", artifact };
+    } catch (error) {
+      if (isBridgeFailure(error)) {
+        return {
+          kind: "session-artifact-failure",
+          code: error.code,
+          message: error.message,
+          recoverable: error.recoverable,
+        };
+      }
+      return {
+        kind: "session-artifact-failure",
+        code: "backend-startup-failure",
+        message: error instanceof Error ? error.message : String(error),
+        recoverable: true,
       };
     }
   }
