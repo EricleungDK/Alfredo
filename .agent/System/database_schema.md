@@ -1,6 +1,6 @@
 # Persistence Schema
 
-**Last Updated:** 2026-07-30
+**Last Updated:** 2026-08-02
 
 Alfredo has no relational database and no database migration layer. Authoritative configuration begins in local Markdown/JSON files, while runtime projections are versioned JSON documents stored below the configured app-local runtime root. Each Python authority store listed below uses atomic sibling-file replacement; append or read-modify-write stores additionally use `flock`, and expected-revision action families share a cross-process coordinator lock.
 
@@ -10,6 +10,7 @@ There are no SQL tables. The table-like JSON stores are:
 
 | Store | Owner | Key fields | Purpose |
 |---|---|---|---|
+| `workspace-sessions.json` | `WorkspaceJourneyStore` | Starting Location, Coding Workspace, revision, Active Mission, known Missions, mission catalog, selection and choice receipts | Canonical pre-session workspace/Mission journey and exact restart restoration |
 | `runtime.json` | `AlbertMission` | mission, issues, sessions, reviews, delegations, command policy, `workstation_actions`, timeline | Canonical mission runtime, Local Agent lifecycle, and mutation-coincident Workstation recovery markers |
 | `workspace-preferences.json` | `WorkspaceSnapshotService` | revision, active mission, conversation scope, operations view, events, `workstation_receipts` | Canonical desktop projection preferences, ordered updates, and idempotent Workstation action acknowledgements |
 | `agent-console-history.json` | `AgentConsoleHistoryService` | message id, sequence, role, content, scope, outcome, source, optional correlation id/action phase | Durable unified controller/workstation chronology and idempotent Workstation audit phases |
@@ -26,7 +27,7 @@ Finalized Agent Console user/controller turns remain in the durable full history
 
 ## Non-Authoritative Continuity
 
-- The launcher keeps best-effort `recent-workspaces.json` and `launch-context.json` below the runtime root. A Starting Location is never added to recent workspaces merely because Alfredo was invoked there. The Issue 57 Coding Workspace acknowledgement is process-local and grants no Mission authority; persisted selected-workspace/Mission restart continuity belongs to Issue 58.
+- The launcher keeps best-effort `recent-workspaces.json` and `launch-context.json` below the runtime root. A Starting Location is never added to recent workspaces merely because Alfredo was invoked there, and selecting a recent entry is an explicit relaunch only. Authority for restart continuity comes from `workspace-sessions.json`, not either launcher convenience file.
 - React uses workspace-scoped browser keys for selected controller, local card/detail continuity, and at most 100 terminal negative Workstation action turns with per-turn content bounds. Corrupt, pending-only, or accepted-only local records cannot create canonical state.
 - `MissionSessionSummary.last_activity_at` is derived from validated session timestamps (terminal end/cancel/start fallback) rather than stored as a separate mutable authority record. `runner_started_at` is projected separately from its exact durable session field for R6 evidence. Malformed timestamps fail projection validation; absence renders as `Not recorded`.
 - Production measurement JSON Lines and correctness-gate files are append-only, non-authoritative evidence outside the runtime stores above. They bind fixture bytes, clean source archive, packaged artifact, variant, cohort, correlation, and monotonic stage marks but cannot mutate or replace Mission truth.

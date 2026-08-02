@@ -1,6 +1,6 @@
 # API Endpoints and Command Boundaries
 
-**Last Updated:** 2026-07-30
+**Last Updated:** 2026-08-02
 
 Alfredo is a local desktop application, not an HTTP service. Its public application boundary is a versioned JSON command protocol shared by the React client, the Tauri bridge, the persistent Python server, and the one-process Python CLI fallback. Python remains authoritative; Tauri validates and transports typed payloads, while React renders acknowledged projections.
 
@@ -10,7 +10,7 @@ The endpoint families are:
 
 | Family | Representative commands | Purpose |
 |---|---|---|
-| Launch and selection | Tauri `alfredo_launch_context`; CLI/persistent `coding-workspace-select` | Expose Starting Location with no implicit repository, then validate and acknowledge an exact existing or newly created Git repository |
+| Launch and selection | Tauri `alfredo_launch_context`, `coding_workspace_select`, `mission_choice`; CLI/persistent `coding-workspace-select`, `mission-options`, `mission-choice`, `workspace-context` | Expose Starting Location with no implicit repository, acknowledge an exact Git repository, require explicit Mission choice, and restore the exact acknowledged journey |
 | Workspace projection | `workspace-snapshot`, `workspace-updates`, `workspace-action` | Load canonical state and apply expected-revision navigation/preferences |
 | Agent Console | `agent-capabilities`, `agent-console-message`, `agent-console-response`, `agent-console-history` | Discover commands/skills/models, append a prompt, generate a correlated controller response, and restore chronology |
 | Working Context | `working-context`, `working-context-curate`, `workspace-scope` | Inspect bounded context and deliberately curate or qualify a prompt |
@@ -24,7 +24,7 @@ The endpoint families are:
 
 The desktop bridge starts a persistent `python3 -m albert_mvp.server` process and exchanges newline-delimited correlated CLI envelopes. It builds the same arguments as the one-process `python3 -m albert_mvp <command>` fallback. Transport persistence is an optimization, not an authority change.
 
-Before a Mission exists, `alfredo_launch_context` returns schema version 1, Starting Location, nullable Coding Workspace and Active Mission, and one of `selection-required | mission-choice-required | workspace-ready`. `coding-workspace-select` accepts `correlation_id`, exact `workspace_path`, and `existing | create`; its acknowledgement includes the canonical Starting Location, canonical Coding Workspace, null Active Mission, replay status, and human-readable message. Structured failures include `workspace-invalid`, `workspace-unsafe`, `workspace-create-failed`, `workspace-validation-failed`, and correlation/contract failures. Tauri binds the first acknowledged repository immutably for that process, permits only exact correlation replay, rejects retargeting before another Python effect, and blocks all Mission-qualified commands until Mission choice. No `workspace-snapshot` exists in selection-required or mission-choice-required state.
+Before a Mission exists, `alfredo_launch_context` returns schema version 1, Starting Location, nullable Coding Workspace and Active Mission, and one of `selection-required | mission-choice-required | workspace-ready`. `coding-workspace-select` accepts `correlation_id`, exact `workspace_path`, and `existing | create`; its acknowledgement includes the canonical Starting Location, canonical Coding Workspace, null Active Mission, replay status, and human-readable message. `mission-options` exposes known Missions for that exact acknowledged workspace. `mission-choice` requires the current journey revision and either resumes one exact known Mission or creates one distinct Mission identity; `workspace-context` restores the acknowledged canonical workspace/Mission state. Tauri binds the first acknowledged repository immutably for that process, permits only exact correlation replay, rejects retargeting before another Python effect, and blocks all Mission-qualified commands until a validated choice acknowledgement names the requested Mission. Structured failures remain typed and recoverable where appropriate. No `workspace-snapshot` exists in selection-required or mission-choice-required state.
 
 `workspace-snapshot.mission_board.issue_slices[]` includes both `tracker_status` and `work_type`. The desktop uses those authoritative metadata fields to project active AFK assignment work while excluding terminal history and human-only checks. This is a presentation filter only: it does not remove issues from the canonical mission graph or alter blocker evaluation. Queue creation APIs remain available to the prompt/controller path, while the Queue UI exposes only pending decision APIs. See the [2026-07-12 acceptance correction](../Reports/2026-07-12-alfredo-install-queue-acceptance-correction.md).
 

@@ -49,7 +49,9 @@ Issue 57 adds a pre-Mission launch contract. The npm launcher emits `workspace_s
 
 Python `CodingWorkspaceSelectionService` is the validation authority for both the one-process `coding-workspace-select` CLI and persistent transport. Existing selection requires the exact readable/writable Git repository root; create mode is limited below the Starting Location and initializes Git. Install, backend, and runtime overlap in either direction is rejected before acknowledgement. Failures carry stable code, message, and recoverability.
 
-Tauri retains a separate mutexed process binding only after Python returns the correlated acknowledgement; the hashable persistent-backend configuration is not mutated. That binding is immutable for the desktop process: exact in-process correlation replay returns the same receipt, while changed-boundary reuse or a second selection fails before another Python effect. Launch context then reports `mission-choice-required`, and every Mission-qualified Tauri command returns `mission-selection-required` until Issue 58 establishes a Mission. React renders this state in Agent Console, keeps pending/failure states unacknowledged, and never loads a Workspace Session snapshot before Mission choice. Restart restoration remains Issue 58 scope.
+Tauri retains a separate mutexed process binding only after Python returns the correlated acknowledgement; the hashable persistent-backend configuration is not mutated. That binding is immutable for the desktop process: exact in-process correlation replay returns the same receipt, while changed-boundary reuse or a second selection fails before another Python effect. Launch context then reports `mission-choice-required`, and every Mission-qualified Tauri command returns `mission-selection-required` until Mission choice. React renders this state in Agent Console, keeps pending/failure states unacknowledged, and never loads a Workspace Session snapshot before Mission choice.
+
+Issue 58 completes the post-selection boundary. Python `WorkspaceJourneyStore` persists the canonical Starting Location, Coding Workspace, discovered Mission options, exact Active Mission, revision, and correlated receipts in `workspace-sessions.json`. Resume accepts only the named known Mission; Start New allocates a distinct non-duplicating Mission identity. The one-process CLI, persistent transport, Tauri bridge, and React gate all use the same acknowledgement contract. On process or desktop restart Tauri restores only an unambiguous canonical journey, while recent-workspace entries remain explicit relaunch intents and cannot silently retarget a connected process.
 
 ## Command Deck Workspace Snapshot Boundary
 
@@ -248,6 +250,7 @@ Historical slice gates follow for traceability:
 
 The architecture above incorporates the following dated implementation evidence:
 
+- [2026-08-02 Mission choice, restart continuity, and source-launch diagnosis](../Reports/2026-08-02-mission-choice-restart-continuity.md)
 - [2026-06-15 local coding-agent MVP](../Reports/2026-06-15-local-coding-agent-mvp.md)
 - [2026-06-16 repair relaunch](../Reports/2026-06-16-albert-repair-relaunch.md)
 - [2026-06-16 TUI and Ollama completion](../Reports/2026-06-16-albert-tui-ollama-completion.md)

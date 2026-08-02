@@ -1,4 +1,13 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -666,6 +675,77 @@ test("alfredo reports separate startup preflight checks", () => {
     status: "not_run",
     copyable_action: "bwrap --version",
   });
+});
+
+test("alfredo reports missing lockfile dependencies before starting the development desktop", () => {
+  const sourceRoot = mkdtempSync(resolve(tmpdir(), "alfredo-missing-tauri-source-"));
+  const sourceProject = resolve(sourceRoot, "mission-control");
+  const sourceBin = resolve(sourceProject, "bin");
+  const sourceScripts = resolve(sourceProject, "scripts");
+  const runtimeRoot = resolve(sourceRoot, "runtime");
+  mkdirSync(sourceBin, { recursive: true });
+  mkdirSync(sourceScripts, { recursive: true });
+  mkdirSync(resolve(sourceRoot, "albert_mvp"));
+  mkdirSync(resolve(sourceRoot, ".albert"));
+  writeFileSync(resolve(sourceProject, "package.json"), '{"type":"module"}\n', "utf8");
+  writeFileSync(resolve(sourceRoot, ".albert", "agents.json"), '{"agents":[]}\n', "utf8");
+  copyFileSync(alfredoBinPath(), resolve(sourceBin, "alfredo.js"));
+  copyFileSync(
+    resolve(projectRoot, "bin", "desktop-adapter.js"),
+    resolve(sourceBin, "desktop-adapter.js"),
+  );
+  copyFileSync(
+    resolve(projectRoot, "scripts", "performance-recorder.js"),
+    resolve(sourceScripts, "performance-recorder.js"),
+  );
+
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [resolve(sourceBin, "alfredo.js"), "--agent", "qwen3.6-27b"],
+      {
+        cwd: sourceRoot,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          ALBERT_BACKEND_ROOT: repositoryRoot,
+          ALFREDO_RUNTIME_ROOT: runtimeRoot,
+        },
+      },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Alfredo startup preflight failed:");
+    expect(result.stderr).toContain("Local Tauri CLI is unavailable");
+    expect(result.stderr).toContain("npm ci");
+    expect(result.stderr).not.toContain("tauri: command not found");
+  } finally {
+    rmSync(sourceRoot, { recursive: true, force: true });
+  }
+});
+
+test("alfredo reports a missing Cargo toolchain before starting the development desktop", () => {
+  const runtimeRoot = mkdtempSync(resolve(tmpdir(), "alfredo-missing-cargo-runtime-"));
+
+  try {
+    const result = runAlfredo(["--agent", "qwen3.6-27b"], {
+      env: {
+        CARGO: "alfredo-cargo-unavailable-for-test",
+        ALFREDO_RUNTIME_ROOT: runtimeRoot,
+      },
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("Alfredo startup preflight failed:");
+    expect(result.stderr).toContain("desktop_shell");
+    expect(result.stderr).toContain("Cargo is unavailable");
+    expect(result.stderr).toContain("alfredo-cargo-unavailable-for-test --version");
+    expect(result.stderr).not.toContain("failed to run cargo metadata");
+  } finally {
+    rmSync(runtimeRoot, { recursive: true, force: true });
+  }
 });
 
 test("alfredo launch passes controller, Starting Location, and runtime without a workspace", () => {

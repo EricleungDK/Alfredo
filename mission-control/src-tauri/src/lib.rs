@@ -3983,6 +3983,8 @@ mod tests {
         fs::create_dir_all(&backend_root).expect("backend fixture");
         fs::create_dir_all(&issues).expect("mission fixture");
         fs::create_dir_all(&runtime_root).expect("runtime fixture");
+        let canonical_tracker = tracker.canonicalize().expect("tracker root");
+        let canonical_issues = issues.canonicalize().expect("issues root");
         let mut config = BridgeConfig::for_repository(backend_root);
         config.runtime_root = runtime_root.clone();
         let starting_location = bridge_starting_location(&config);
@@ -3997,8 +3999,8 @@ mod tests {
                 "missions": [{
                     "id": "modernization",
                     "title": "Modernization Mission",
-                    "tracker_dir": tracker.to_string_lossy(),
-                    "issues_dir": issues.to_string_lossy()
+                    "tracker_dir": canonical_tracker.to_string_lossy(),
+                    "issues_dir": canonical_issues.to_string_lossy()
                 }],
                 "mission_catalog": catalog.to_string_lossy(),
                 "selection": {
@@ -4029,10 +4031,7 @@ mod tests {
             workspace.canonicalize().expect("workspace root")
         );
         assert_eq!(bound.mission_id, "modernization");
-        assert_eq!(
-            bound.tracker_dir,
-            tracker.canonicalize().expect("tracker root")
-        );
+        assert_eq!(bound.tracker_dir, canonical_tracker);
         assert_eq!(bound.mission_catalog, Some(catalog));
         fs::remove_dir_all(root).expect("fixture cleanup");
     }
@@ -4117,6 +4116,66 @@ mod tests {
         assert!(coding_workspace
             .join(".alfredo/missions/modernization/PRD.md")
             .is_file());
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn desktop_bridge_resumes_the_exact_known_mission() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("alfredo-mission-resume-{unique}"));
+        let starting_location = root.join("projects");
+        let coding_workspace = starting_location.join("project");
+        let tracker = coding_workspace.join(".agent/issues");
+        let runtime_root = root.join("runtime");
+        fs::create_dir_all(&tracker).expect("workspace fixture");
+        fs::write(tracker.join("PRD.md"), "# Existing Mission\n").expect("PRD fixture");
+        let git = Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&coding_workspace)
+            .output()
+            .expect("git should start");
+        assert!(
+            git.status.success(),
+            "{}",
+            String::from_utf8_lossy(&git.stderr)
+        );
+        let backend_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("backend root");
+        let mut config = BridgeConfig::for_repository(backend_root);
+        config.runtime_root = runtime_root;
+        let selection_request = CodingWorkspaceSelectionRequest {
+            correlation_id: "mission-resume-selection".to_owned(),
+            workspace_path: coding_workspace.to_string_lossy().into_owned(),
+            selection_mode: "existing".to_owned(),
+        };
+
+        execute_coding_workspace_select(&config, &starting_location, &selection_request)
+            .expect("workspace should be acknowledged");
+        let resumed = execute_mission_choice(
+            &config,
+            &starting_location,
+            &coding_workspace,
+            &MissionChoiceRequest {
+                correlation_id: "mission-resume-choice".to_owned(),
+                expected_revision: 1,
+                choice: "resume".to_owned(),
+                mission_id: "agent-issues".to_owned(),
+                mission_title: String::new(),
+            },
+        )
+        .expect("known Mission should resume");
+
+        assert_eq!(resumed.choice, "resume");
+        assert_eq!(resumed.active_mission, "agent-issues");
+        assert_eq!(resumed.revision, 2);
+        assert_eq!(resumed.missions.len(), 1);
+        assert_eq!(resumed.missions[0].id, "agent-issues");
         fs::remove_dir_all(root).expect("fixture cleanup");
     }
 

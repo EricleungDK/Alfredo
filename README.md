@@ -1,6 +1,6 @@
 # Alfredo Local Coding-Agent Workstation
 
-**Last updated:** 2026-07-30
+**Last updated:** 2026-08-02
 
 Alfredo is a local-first coding-agent workstation with a prompt-dominant React/Tauri interface and an authoritative Python Orchestrator. Use it for fast project discussion, skills and slash commands, governed coding tasks, and visible Local Agent work. The secondary Mission Work lane shows real subagent sessions, workable Issue Slices, evidence, and typed review/retry/cancel actions.
 
@@ -35,10 +35,13 @@ For source development, the repository launcher deliberately retains the Tauri d
 
 ```bash
 cd /path/to/local-coding-agent/mission-control
-npm install
+npm ci
+cargo --version
 cd ..
 node mission-control/bin/alfredo.js workstation --agent qwen3-14b
 ```
+
+The source launcher checks for the lockfile-installed local Tauri CLI and Cargo before spawning the desktop process. A missing prerequisite fails with an Alfredo preflight message and a copyable repair command instead of exposing a raw child-process error. These development requirements do not apply to the packaged native desktop.
 
 For the browser-rendered GUI skeleton:
 
@@ -57,6 +60,7 @@ npm run desktop
 ## What Works
 
 - Selection-required startup from a distinct Starting Location, with acknowledged existing/new Git repository selection and no fabricated Mission or Workspace Session.
+- Explicit exact Resume Mission or distinct Start New Mission choice after workspace acknowledgement, with canonical workspace/Mission restoration across process and desktop restart.
 - One durable Agent Console chronology for controller discussion, commands, skills, coding requests, proposals, approvals, and outcomes.
 - `/help`, `/skills`, `/use`, `/run`, `/task`, and `/status`, plus natural-language coding-task routing.
 - Governed automatic delegation only after an exact canonical Mission/scope/goal/path/policy/worker boundary check.
