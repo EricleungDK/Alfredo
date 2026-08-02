@@ -113,6 +113,113 @@ class PersistentOrchestratorServerTests(unittest.TestCase):
             self.assertEqual(json.loads(payloads[2]["stdout"])["active_mission"], "agent-issues")
             self.assertEqual(json.loads(payloads[3]["stdout"])["phase"], "workspace-ready")
 
+    def test_warm_transport_recovers_from_failed_resume_and_starts_new_mission(self) -> None:
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            starting = root / "projects"
+            workspace = starting / "project"
+            tracker = workspace / ".agent" / "issues"
+            tracker.mkdir(parents=True)
+            subprocess.run(
+                ["git", "init", "--quiet", str(workspace)],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            (tracker / "PRD.md").write_text("# Existing Mission\n", encoding="utf-8")
+            runtime = root / "runtime"
+            requests = io.StringIO(
+                "\n".join(
+                    json.dumps(request)
+                    for request in [
+                        {
+                            "id": "select",
+                            "argv": [
+                                "coding-workspace-select",
+                                "--starting-location",
+                                str(starting),
+                                "--workspace-path",
+                                str(workspace),
+                                "--selection-mode",
+                                "existing",
+                                "--runtime-root",
+                                str(runtime),
+                                "--correlation-id",
+                                "server-new-selection",
+                            ],
+                        },
+                        {
+                            "id": "missing",
+                            "argv": [
+                                "mission-choice",
+                                "--starting-location",
+                                str(starting),
+                                "--coding-workspace",
+                                str(workspace),
+                                "--runtime-root",
+                                str(runtime),
+                                "--correlation-id",
+                                "server-missing-choice",
+                                "--expected-revision",
+                                "1",
+                                "--choice",
+                                "resume",
+                                "--mission-id",
+                                "missing",
+                            ],
+                        },
+                        {
+                            "id": "new",
+                            "argv": [
+                                "mission-choice",
+                                "--starting-location",
+                                str(starting),
+                                "--coding-workspace",
+                                str(workspace),
+                                "--runtime-root",
+                                str(runtime),
+                                "--correlation-id",
+                                "server-new-choice",
+                                "--expected-revision",
+                                "1",
+                                "--choice",
+                                "new",
+                                "--mission-id",
+                                "modernization",
+                                "--mission-title",
+                                "Modernization Mission",
+                            ],
+                        },
+                        {
+                            "id": "restored",
+                            "argv": [
+                                "workspace-context",
+                                "--starting-location",
+                                str(starting),
+                                "--runtime-root",
+                                str(runtime),
+                            ],
+                        },
+                    ]
+                )
+                + "\n"
+            )
+            responses = io.StringIO()
+
+            serve(requests, responses)
+
+            payloads = [json.loads(line) for line in responses.getvalue().splitlines()]
+            self.assertEqual(
+                [(item["id"], item["success"]) for item in payloads],
+                [("select", True), ("missing", False), ("new", True), ("restored", True)],
+            )
+            self.assertEqual(json.loads(payloads[1]["stderr"])["error"]["code"], "mission-not-found")
+            self.assertEqual(json.loads(payloads[2]["stdout"])["active_mission"], "modernization")
+            restored = json.loads(payloads[3]["stdout"])
+            self.assertEqual(restored["phase"], "workspace-ready")
+            self.assertEqual(restored["active_mission"], "modernization")
+            self.assertTrue((workspace / ".alfredo/missions/modernization/PRD.md").is_file())
+
     def test_serves_correlated_requests_until_input_closes(self) -> None:
         parent = r"C:\tmp" if os.name == "nt" else None
         with tempfile.TemporaryDirectory(dir=parent) as root_value:

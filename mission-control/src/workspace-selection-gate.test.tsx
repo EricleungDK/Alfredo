@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { App } from "./App";
 import type { WorkspaceClient } from "./workspace-client";
 
@@ -139,6 +139,123 @@ test("requires explicit Resume Mission or Start New Mission choices before loadi
   });
   expect(await screen.findByRole("alert")).toHaveTextContent("mission-not-found");
   expect(loadSnapshot).not.toHaveBeenCalled();
+});
+
+test("rejects an acknowledgement for a different Mission without leaving the gate", async () => {
+  const missionChoiceContext = {
+    ...selectionRequiredContext,
+    coding_workspace: "/home/mission-commander/projects/acknowledged",
+    phase: "mission-choice-required" as const,
+    revision: 1,
+    known_missions: [{ id: "existing", title: "Existing Mission" }],
+  };
+  const loadSnapshot = vi.fn(async () => ({
+    kind: "contract-failure" as const,
+    message: "snapshot must remain blocked for a mismatched Mission acknowledgement",
+    recoverable: false,
+  }));
+  const chooseMission = vi.fn(async (request: MissionRequest) => ({
+    kind: "acknowledged" as const,
+    acknowledgement: {
+      schema_version: 1 as const,
+      correlation_id: request.correlation_id,
+      outcome: "acknowledged" as const,
+      coding_workspace: missionChoiceContext.coding_workspace,
+      choice: request.choice,
+      active_mission: "different-mission",
+      revision: 2,
+      replayed: false,
+      missions: [{ id: "different-mission", title: "Different Mission" }],
+      message: "A different Mission was selected.",
+    },
+  }));
+
+  render(
+    <App
+      client={{
+        loadLaunchContext: async () => ({
+          kind: "launch-context",
+          context: missionChoiceContext,
+        }),
+        loadSnapshot,
+        chooseMission,
+      }}
+    />,
+  );
+
+  fireEvent.click(await screen.findByRole("button", { name: /Resume Mission/ }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent(
+    "invalid-mission-acknowledgement",
+  );
+  expect(screen.getByText("Mission selection required")).toBeVisible();
+  expect(loadSnapshot).not.toHaveBeenCalled();
+});
+
+test.each([
+  { choice: "resume" as const, title: "", expectedMissionId: "existing" },
+  { choice: "new" as const, title: "Modernization", expectedMissionId: "modernization" },
+])("loads canonical work only after an acknowledged $choice choice", async ({
+  choice,
+  title,
+  expectedMissionId,
+}) => {
+  const missionChoiceContext = {
+    ...selectionRequiredContext,
+    coding_workspace: "/home/mission-commander/projects/acknowledged",
+    phase: "mission-choice-required" as const,
+    revision: 1,
+    known_missions: [{ id: "existing", title: "Existing Mission" }],
+  };
+  const loadSnapshot = vi.fn(() => new Promise<never>(() => undefined));
+  const chooseMission = vi.fn(async (request: MissionRequest) => ({
+    kind: "acknowledged" as const,
+    acknowledgement: {
+      schema_version: 1 as const,
+      correlation_id: request.correlation_id,
+      outcome: "acknowledged" as const,
+      coding_workspace: missionChoiceContext.coding_workspace,
+      choice: request.choice,
+      active_mission: request.mission_id,
+      revision: 2,
+      replayed: false,
+      missions: [
+        { id: "existing", title: "Existing Mission" },
+        ...(request.choice === "new"
+          ? [{ id: request.mission_id, title: request.mission_title ?? "" }]
+          : []),
+      ],
+      message: request.choice === "resume" ? "Existing Mission resumed." : "New Mission started.",
+    },
+  }));
+
+  render(
+    <App
+      client={{
+        loadLaunchContext: async () => ({
+          kind: "launch-context",
+          context: missionChoiceContext,
+        }),
+        loadSnapshot,
+        chooseMission,
+      }}
+    />,
+  );
+
+  if (choice === "new") {
+    fireEvent.change(await screen.findByRole("textbox", { name: "New Mission title" }), {
+      target: { value: title },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Start New Mission" }));
+  } else {
+    fireEvent.click(await screen.findByRole("button", { name: /Resume Mission/ }));
+  }
+
+  expect(chooseMission).toHaveBeenCalledWith(
+    expect.objectContaining({ choice, mission_id: expectedMissionId }),
+  );
+  await waitFor(() => expect(loadSnapshot).toHaveBeenCalledOnce());
+  expect(screen.queryByText("Mission selection required")).not.toBeInTheDocument();
 });
 
 test("keeps selection required after a structured failure and permits an acknowledged retry", async () => {

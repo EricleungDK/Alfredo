@@ -2474,7 +2474,8 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         acknowledgement.correlation_id !== request.correlation_id ||
         acknowledgement.coding_workspace !== launchContext.coding_workspace ||
         acknowledgement.choice !== choice ||
-        !acknowledgement.active_mission
+        acknowledgement.active_mission !== missionId ||
+        !acknowledgement.missions.some((mission) => mission.id === missionId)
       ) {
         setMissionChoiceStatus({
           state: "rejected",

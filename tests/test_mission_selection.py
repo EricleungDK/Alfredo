@@ -118,7 +118,7 @@ class MissionSelectionCliTests(unittest.TestCase):
         )
         self.assertEqual(exit_code, 0, stderr)
         self.assertEqual(restored["phase"], "workspace-ready")
-        self.assertEqual(restored["coding_workspace"], str(self.coding_workspace))
+        self.assertEqual(restored["coding_workspace"], str(self.coding_workspace.resolve()))
         self.assertEqual(restored["active_mission"], "agent-issues")
 
     def test_start_new_mission_creates_distinct_identity_and_exact_replay(self) -> None:

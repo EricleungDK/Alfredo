@@ -168,9 +168,27 @@ function buildPreflight(plan, selectedAgentConfig, desktopTarget) {
   const shouldRunExternalChecks = dryRunMode() === "";
   const requiresNpmRuntime = desktopTarget.kind === "development";
   const pythonCommand = process.env.ALBERT_PYTHON ?? (process.platform === "win32" ? "python" : "python3");
+  const tauriCommand = resolve(
+    projectRoot,
+    "node_modules",
+    ".bin",
+    process.platform === "win32" ? "tauri.cmd" : "tauri",
+  );
+  const cargoCommand = process.env.CARGO ?? "cargo";
   const npmVersion = shouldRunExternalChecks && requiresNpmRuntime
     ? spawnSync("npm", ["--version"], { encoding: "utf8", timeout: 5000 })
     : null;
+  const tauriReady =
+    !requiresNpmRuntime ||
+    !shouldRunExternalChecks ||
+    accessStatus(tauriCommand, constants.R_OK | constants.X_OK);
+  const cargoVersion = shouldRunExternalChecks && requiresNpmRuntime && tauriReady
+    ? spawnSync(cargoCommand, ["--version"], { encoding: "utf8", timeout: 5000 })
+    : null;
+  const developmentDesktopReady =
+    !requiresNpmRuntime ||
+    !shouldRunExternalChecks ||
+    (tauriReady && cargoVersion?.status === 0);
   const backendHelp = shouldRunExternalChecks
     ? spawnSync(pythonCommand, ["-m", "albert_mvp", "--help"], {
         cwd: backendRoot,
@@ -196,11 +214,24 @@ function buildPreflight(plan, selectedAgentConfig, desktopTarget) {
   const desktopProbeExpected = `Alfredo Desktop ${desktopTarget.version ?? ""}`;
   const desktopReady =
     desktopTarget.kind !== "unavailable" &&
+    developmentDesktopReady &&
     (desktopTarget.kind !== "native" ||
       !shouldRunExternalChecks ||
       (desktopProbe?.status === 0 && desktopProbe.stdout.trim() === desktopProbeExpected));
   const desktopDetail =
-    desktopTarget.kind === "native" && shouldRunExternalChecks
+    desktopTarget.kind === "development" && shouldRunExternalChecks
+      ? !tauriReady
+        ? `${desktopTarget.detail} Local Tauri CLI is unavailable; install the lockfile dependencies.`
+        : cargoVersion?.status !== 0
+          ? `${desktopTarget.detail} Cargo is unavailable: ${(
+              cargoVersion?.stderr ||
+              cargoVersion?.error?.message ||
+              `${cargoCommand} --version failed`
+            )
+              .toString()
+              .trim()}.`
+          : `${desktopTarget.detail} Tauri CLI and Cargo are available.`
+      : desktopTarget.kind === "native" && shouldRunExternalChecks
       ? desktopReady
         ? `${desktopTarget.detail} Native probe: ${desktopProbeExpected}.`
         : `${desktopTarget.detail} Native probe failed: ${(
@@ -266,7 +297,11 @@ function buildPreflight(plan, selectedAgentConfig, desktopTarget) {
       "desktop_shell",
       desktopReady ? PREFLIGHT_PASS : PREFLIGHT_FAIL,
       desktopDetail,
-      desktopTarget.copyable_action,
+      desktopTarget.kind === "development" && shouldRunExternalChecks && !tauriReady
+        ? `cd "${projectRoot}" && npm ci`
+        : desktopTarget.kind === "development" && shouldRunExternalChecks && cargoVersion?.status !== 0
+          ? `${cargoCommand} --version`
+          : desktopTarget.copyable_action,
     ),
     preflightCheck(
       "backend_process",

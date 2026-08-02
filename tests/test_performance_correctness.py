@@ -85,11 +85,15 @@ class PerformanceCorrectnessTests(unittest.TestCase):
             originating_message_id=origin.message_id,
         )
 
-        with patch.object(
-            AlbertMission,
-            "_persist",
-            side_effect=OSError("simulated cut before first durable write"),
-        ):
+        original_replace = Path.replace
+        [runtime_path] = (path.resolve() for path in self.runtime.glob("*/runtime.json"))
+
+        def cut_before_runtime_replace(source: Path, destination: str | Path) -> Path:
+            if Path(destination).resolve() == runtime_path:
+                raise OSError("simulated cut before first durable write")
+            return original_replace(source, destination)
+
+        with patch.object(Path, "replace", autospec=True, side_effect=cut_before_runtime_replace):
             with self.assertRaisesRegex(OSError, "before first durable write"):
                 queue.decide(
                     correlation_id="pre-write-cut-decision-1",
