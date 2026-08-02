@@ -332,6 +332,27 @@ h5 {
   border-left-color: var(--danger);
 }
 
+.console-history > article[data-authority="commentary"] {
+  border-left-style: dashed;
+  background: #171a1a;
+}
+
+.console-authority-note {
+  padding: 0.55rem 0.65rem;
+  border: 1px solid #8f7d45;
+  border-radius: 7px;
+  background: #272315;
+  color: #f3df9a;
+  font-weight: 650;
+}
+
+.console-receipt-identity {
+  display: block;
+  margin-top: 0.3rem;
+  color: var(--lime);
+  overflow-wrap: anywhere;
+}
+
 .console-history article p {
   margin: 0 0 0.42rem;
   white-space: pre-wrap;

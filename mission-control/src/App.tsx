@@ -2831,6 +2831,8 @@ interface WorkstationTranscriptTurn {
   readonly source: string;
   readonly outcome: string;
   readonly causalOriginMessageId?: string;
+  readonly receiptCorrelationId?: string;
+  readonly receiptPhase?: string;
 }
 
 interface CommandConsoleTurn {
@@ -2895,10 +2897,24 @@ function comparePromptTimelineEntries(
 
 function promptTimelineVersion(entry: PromptTimelineEntry): string {
   if (entry.kind === "console") {
-    return `${entry.key}:${entry.message.outcome}:${entry.message.content}`;
+    return [
+      entry.key,
+      entry.message.outcome,
+      entry.message.content,
+      entry.message.correlation_id ?? "",
+      entry.message.action_phase ?? "",
+      entry.message.action_outcome ?? "",
+      entry.message.action_message ?? "",
+    ].join(":");
   }
   if (entry.kind === "workstation") {
-    return `${entry.key}:${entry.turn.outcome}:${entry.turn.content}`;
+    return [
+      entry.key,
+      entry.turn.outcome,
+      entry.turn.content,
+      entry.turn.receiptCorrelationId ?? "",
+      entry.turn.receiptPhase ?? "",
+    ].join(":");
   }
   if (entry.kind === "command") {
     return `${entry.key}:${entry.turn.status}:${entry.turn.exitCode ?? "none"}:${entry.turn.summary}`;
@@ -2920,12 +2936,57 @@ function buildWorkstationTranscriptTurns(
     ) ?? [];
   const sessionTurns =
     snapshot.missions?.flatMap((mission) =>
-      mission.sessions.map((session) => ({
-        id: `session:${mission.id}:${session.session_id}`,
-        content: `Workstation outcome: ${session.issue_id} is ${session.status} on ${session.assigned_agent}.`,
-        source: session.assigned_agent,
-        outcome: session.status,
-      })),
+      mission.sessions.flatMap((session) => {
+        const turns: WorkstationTranscriptTurn[] = [];
+        if (session.runner_started_at && session.launch_correlation_id) {
+          turns.push({
+            id: `session-running:${mission.id}:${session.session_id}`,
+            content:
+              `Orchestrator started canonical session ${session.session_id} for ` +
+              `${session.issue_id} on ${session.assigned_agent}.`,
+            source: "orchestrator",
+            outcome: "running",
+            receiptCorrelationId: session.launch_correlation_id,
+            receiptPhase: "running",
+          });
+        }
+        if (session.evidence_correlation_id) {
+          turns.push({
+            id: `session-evidence:${mission.id}:${session.session_id}`,
+            content:
+              `Local Agent ${session.assigned_agent} submitted validated evidence for ` +
+              `${session.session_id}.`,
+            source: session.assigned_agent,
+            outcome: "evidence-ready",
+            receiptCorrelationId: session.evidence_correlation_id,
+            receiptPhase: "evidence",
+          });
+        }
+        if (session.review_correlation_id && session.review_outcome) {
+          turns.push({
+            id: `session-review:${mission.id}:${session.session_id}`,
+            content: `Review Decision: ${session.review_outcome} for ${session.session_id}.`,
+            source: "mission-commander",
+            outcome: "review-decision",
+            receiptCorrelationId: session.review_correlation_id,
+            receiptPhase: "review-decision",
+          });
+          if (
+            session.review_outcome === "Approved" ||
+            session.review_outcome === "Approved with limitations"
+          ) {
+            turns.push({
+              id: `session-completion:${mission.id}:${session.session_id}`,
+              content: `Accepted completion: ${session.session_id} is complete.`,
+              source: "orchestrator",
+              outcome: "accepted-completion",
+              receiptCorrelationId: session.review_correlation_id,
+              receiptPhase: "accepted-completion",
+            });
+          }
+        }
+        return turns;
+      }),
     ) ?? [];
   return [...attentionTurns, ...sessionTurns];
 }
@@ -2952,6 +3013,8 @@ function buildWorkspaceQueueTranscriptTurns(
         source: "orchestrator",
         outcome: "proposed",
         causalOriginMessageId,
+        receiptCorrelationId: item.proposal_correlation_id || undefined,
+        receiptPhase: item.proposal_correlation_id ? "proposal" : undefined,
       },
     ];
     if (item.status !== "pending") {
@@ -2967,6 +3030,8 @@ function buildWorkspaceQueueTranscriptTurns(
         source: "mission-commander",
         outcome: item.status,
         causalOriginMessageId,
+        receiptCorrelationId: item.decision_correlation_id || undefined,
+        receiptPhase: item.decision_correlation_id ? "decision" : undefined,
       });
     }
     if (item.status === "approved") {
@@ -2982,6 +3047,8 @@ function buildWorkspaceQueueTranscriptTurns(
           source: "orchestrator",
           outcome: "queued",
           causalOriginMessageId,
+          receiptCorrelationId: item.decision_correlation_id || undefined,
+          receiptPhase: item.decision_correlation_id ? "session-queued" : undefined,
         });
       }
     }
@@ -3958,9 +4025,27 @@ function CommandDeck({
                       data-timeline-key={entry.key}
                       data-timeline-kind="console"
                       data-outcome={entry.message.outcome}
+                      data-authority={
+                        entry.message.outcome === "model-commentary"
+                          ? "commentary"
+                          : entry.message.correlation_id
+                            ? "canonical-receipt"
+                            : "canonical-record"
+                      }
                     >
+                      {entry.message.outcome === "model-commentary" ? (
+                        <p className="console-authority-note" role="status">
+                          {entry.message.action_message ||
+                            "Controller commentary only. No Orchestrator action receipt is attached."}
+                        </p>
+                      ) : null}
                       <p>{entry.message.content}</p>
                       <small>{entry.message.source} / {entry.message.outcome}</small>
+                      {entry.message.correlation_id && entry.message.action_phase ? (
+                        <small className="console-receipt-identity">
+                          Receipt {entry.message.correlation_id} · {entry.message.action_phase}
+                        </small>
+                      ) : null}
                     </article>
                   );
                 }
@@ -3986,9 +4071,19 @@ function CommandDeck({
                       data-timeline-key={entry.key}
                       data-timeline-kind="workstation"
                       data-outcome={entry.turn.outcome}
+                      data-authority={
+                        entry.turn.receiptCorrelationId
+                          ? "canonical-receipt"
+                          : "canonical-record"
+                      }
                     >
                       <p>{entry.turn.content}</p>
                       <small>{entry.turn.source} / {entry.turn.outcome}</small>
+                      {entry.turn.receiptCorrelationId && entry.turn.receiptPhase ? (
+                        <small className="console-receipt-identity">
+                          Receipt {entry.turn.receiptCorrelationId} · {entry.turn.receiptPhase}
+                        </small>
+                      ) : null}
                     </article>
                   );
                 }

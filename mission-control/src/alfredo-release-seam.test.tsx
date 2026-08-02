@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -309,7 +310,7 @@ function createBackendClient(options: {
 
 test("release seam covers launch intent, workstation action acknowledgement, journal, and restart restore", async () => {
   window.localStorage.clear();
-  const root = mkdtempSync(resolve(tmpdir(), "alfredo-release-seam-"));
+  const root = realpathSync(mkdtempSync(resolve(tmpdir(), "alfredo-release-seam-")));
   const trackedSessionId = "session-ISS-01-2";
 
   try {
@@ -490,7 +491,7 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
     ).toBeVisible();
     expect(
       await screen.findByText(
-        "Workstation outcome: ADHOC-000001 is evidence-ready on fake-local.",
+        "Local Agent fake-local submitted validated evidence for session-ADHOC-000001-1.",
       ),
     ).toBeVisible();
     fireEvent.change(screen.getByRole("textbox", { name: "Message Alfredo" }), {

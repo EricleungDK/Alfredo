@@ -1,7 +1,7 @@
 # Alfredo / Albert Project Documentation
 
-**Last Updated**: 2026-07-13
-**Status**: Prompt-first Alfredo workstation, decision-only Queue, four-viewport layout, and corrected local release candidate verified; authenticated npm publication, registry-only install, real-display launch, and human accessibility review remain explicit
+**Last Updated**: 2026-08-02
+**Status**: Prompt-first Alfredo workstation with explicit Coding Workspace/Mission continuity and receipt-bound conversational action truth; authenticated npm publication, registry-only install, and the documented human/release follow-up remain explicit
 
 ## Quick Start
 
@@ -65,6 +65,8 @@
 ## Reports
 
 - [Alfredo install and Queue acceptance correction](Reports/2026-07-12-alfredo-install-queue-acceptance-correction.md) is the current release/acceptance report and explicitly supersedes the 2026-07-11 package-completion claim.
+- [Conversational action receipt binding](Reports/2026-08-02-conversational-action-receipts.md) records the Issue #59 implementation, public seams, and verification evidence.
+- [Workspace selection and false-success diagnosis](Reports/2026-07-24-workspace-selection-false-success-diagnosis.md) records the defect and the receipt-truth blueprint resolved by Issue #59.
 - [Alfredo one-shot workstation correction](Reports/2026-07-11-alfredo-one-shot-workstation.md) remains the historical implementation report.
 - Historical implementation reports remain in [`Reports/`](Reports/) and are indexed from [project architecture](System/project_architecture.md#implementation-report-index).
 

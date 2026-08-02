@@ -2414,6 +2414,40 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         ):
             WorkspaceQueueService(self.load_service()).inspect()
 
+    def test_workspace_queue_rejects_forged_projected_receipt_identities(self) -> None:
+        snapshots = self.load_service()
+        snapshots._primary_mission.approve_issue("ISS-01")
+        queue = WorkspaceQueueService(snapshots)
+        proposal = queue.propose_issue_contract_change(
+            correlation_id="projected-receipt-proposal-1",
+            expected_revision=1,
+            issue_id="ISS-01",
+            source="issue-slice-inspector",
+            risk="Receipt identities remain bound to canonical records.",
+        )
+        queue.decide(
+            correlation_id="projected-receipt-decision-1",
+            expected_revision=proposal.revision,
+            item_id=proposal.item_id,
+            decision="reject",
+            reason="Keep the accepted boundary unchanged.",
+        )
+        persisted = json.loads(queue.queue_path.read_text(encoding="utf-8"))
+
+        for field_name, forged_value in (
+            ("proposal_correlation_id", "projected-receipt-decision-1"),
+            ("decision_correlation_id", "projected-receipt-proposal-1"),
+        ):
+            with self.subTest(field_name=field_name):
+                forged = json.loads(json.dumps(persisted))
+                forged["items"][0][field_name] = forged_value
+                queue.queue_path.write_text(json.dumps(forged), encoding="utf-8")
+                with self.assertRaisesRegex(
+                    WorkspacePersistenceError,
+                    "receipt identity",
+                ):
+                    WorkspaceQueueService(self.load_service()).inspect()
+
     def test_queue_replay_rejects_forged_inner_acknowledgement_boundaries(
         self,
     ) -> None:
@@ -3965,6 +3999,8 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(item.proposed_changes["allowed_paths"], ["docs/smoke-tests.md"])
         self.assertEqual(item.proposed_changes["proposed_agent"], "qwen-coder-local-1")
         self.assertEqual(item.proposed_changes["originating_message_id"], origin.message_id)
+        self.assertEqual(item.proposal_correlation_id, "ad-hoc-delegation-1")
+        self.assertEqual(item.decision_correlation_id, "")
         self.assertEqual(snapshots._primary_mission.sessions, {})
 
     def test_rejected_ad_hoc_delegation_preserves_no_launch_state(self) -> None:
@@ -4001,6 +4037,14 @@ class WorkspaceSnapshotTest(unittest.TestCase):
 
         self.assertEqual(acknowledgement.item_status, "rejected")
         self.assertEqual(item.status, "rejected")
+        self.assertEqual(
+            item.proposal_correlation_id,
+            "ad-hoc-delegation-reject-1",
+        )
+        self.assertEqual(
+            item.decision_correlation_id,
+            "ad-hoc-delegation-reject-decision-1",
+        )
         self.assertEqual(snapshots._primary_mission.sessions, {})
 
     def test_approved_ad_hoc_delegation_launches_bounded_session_without_issue_slice(self) -> None:
@@ -4343,9 +4387,15 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(acknowledgement.session_id, "session-ADHOC-000001-1")
         self.assertEqual(replayed_acknowledgement, acknowledgement)
         self.assertEqual(len(mission.sessions), 1)
+        restored_item = service.inspect(item_type="ad-hoc-delegation").items[0]
+        self.assertEqual(restored_item.status, "approved")
         self.assertEqual(
-            service.inspect(item_type="ad-hoc-delegation").items[0].status,
-            "approved",
+            restored_item.proposal_correlation_id,
+            "ad-hoc-transport-proposal-1",
+        )
+        self.assertEqual(
+            restored_item.decision_correlation_id,
+            "ad-hoc-transport-decision-1",
         )
         with self.assertRaisesRegex(AlbertError, "different request"):
             service.decide(
@@ -4934,6 +4984,19 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertNotIn("ADHOC-000001", mission.issues)
         self.assertEqual(mission.sessions["session-ADHOC-000001-1"].status, "reviewed")
         self.assertEqual(mission.sessions["session-ADHOC-000001-1"].cleanup_eligible, True)
+        session_summary = snapshots.snapshot().missions[0].sessions[0]
+        self.assertEqual(
+            session_summary.launch_correlation_id,
+            "ad-hoc-delegation-review-decision-1",
+        )
+        self.assertEqual(
+            session_summary.evidence_correlation_id,
+            "evidence:session-ADHOC-000001-1",
+        )
+        self.assertEqual(
+            session_summary.review_correlation_id,
+            "ad-hoc-delegation-review-accept-1",
+        )
 
     def test_mission_draft_records_selected_excluded_and_new_work_without_accepting_state(self) -> None:
         snapshots = self.load_service()
@@ -8775,6 +8838,45 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         with self.assertRaises(WorkspacePersistenceError):
             AgentConsoleHistoryService(self.load_service()).history()
 
+    def test_agent_console_history_rejects_receipt_identity_on_model_commentary(
+        self,
+    ) -> None:
+        history = AgentConsoleHistoryService(self.load_service())
+
+        with self.assertRaisesRegex(
+            AlbertError,
+            "Model commentary cannot carry an Orchestrator receipt identity",
+        ):
+            history.append(
+                role="assistant",
+                content="I completed the requested action.",
+                outcome="model-commentary",
+                source="frontier-model",
+                correlation_id="forged-receipt-1",
+                action_phase="accepted-completion",
+                action_outcome="no-action",
+                action_message="No action taken.",
+            )
+
+        history.append(
+            role="assistant",
+            content="This remains controller commentary.",
+            outcome="model-commentary",
+            source="frontier-model",
+            action_outcome="no-action",
+            action_message="No action taken.",
+        )
+        persisted = json.loads(history.history_path.read_text(encoding="utf-8"))
+        persisted["messages"][0]["correlation_id"] = "forged-receipt-2"
+        persisted["messages"][0]["action_phase"] = "accepted-completion"
+        history.history_path.write_text(json.dumps(persisted), encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            WorkspacePersistenceError,
+            "model commentary cannot carry an Orchestrator receipt identity",
+        ):
+            AgentConsoleHistoryService(self.load_service()).history()
+
     def test_cli_appends_scoped_agent_console_message(self) -> None:
         output = io.StringIO()
 
@@ -8829,9 +8931,12 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         responder.write_text(
             "\n".join(
                 [
+                    "import json",
                     "import sys",
                     "prompt = sys.stdin.read()",
-                    "print('assistant response; AGENTS=' + str('ALFREDO-AGENTS' in prompt))",
+                    "reply = 'assistant response; AGENTS=' + str('ALFREDO-AGENTS' in prompt)",
+                    "print(json.dumps({'reply': reply, 'route': {'intent': 'discussion', "
+                    "'task_request': '', 'acceptance_criteria': []}}))",
                 ]
             ),
             encoding="utf-8",
@@ -8960,7 +9065,13 @@ class WorkspaceSnapshotTest(unittest.TestCase):
             },
         }
 
-        with patch("albert_mvp.workspace._run_bounded_process") as run:
+        with (
+            patch(
+                "albert_mvp.workspace.sandboxed_process_argv",
+                return_value=(["controller"], True),
+            ),
+            patch("albert_mvp.workspace._run_bounded_process") as run,
+        ):
             run.return_value = subprocess.CompletedProcess(
                 args=[],
                 returncode=0,
@@ -8987,10 +9098,138 @@ class WorkspaceSnapshotTest(unittest.TestCase):
                 "Focused polling tests pass.",
             ),
         )
+        self.assertEqual(response.message.action_outcome, "awaiting-orchestrator")
+        self.assertEqual(
+            response.message.action_message,
+            "Coding task route selected. No action has occurred until a correlated "
+            "Orchestrator receipt is recorded.",
+        )
         controller_prompt = run.call_args.kwargs["input_text"]
         self.assertIn("Return exactly one JSON object", controller_prompt)
         self.assertIn('"intent":"coding-task"', controller_prompt)
         self.assertIn('"intent":"discussion"', controller_prompt)
+        self.assertIn(
+            "must never claim that an action was proposed, approved, launched, "
+            "created, changed, reviewed, or completed",
+            controller_prompt,
+        )
+
+    def test_success_sounding_discussion_records_explicit_no_action_truth(self) -> None:
+        snapshots = self.load_service()
+        snapshots._primary_mission.agent_registry.agents.append(
+            workspace_module.AgentConfig(
+                id="truth-controller",
+                role="frontier",
+                provider="command",
+                runner="command",
+                command="controller",
+                routing="controller",
+            )
+        )
+        scope = snapshots.snapshot().conversation_scope
+        prompt = AgentConsoleHistoryService(snapshots).append(
+            role="user",
+            content="Yes, create the requested folder in this Coding Workspace now.",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        controller_output = {
+            "reply": "Done — I created the requested folder.",
+            "route": {
+                "intent": "discussion",
+                "task_request": "",
+                "acceptance_criteria": [],
+            },
+        }
+
+        with (
+            patch(
+                "albert_mvp.workspace.sandboxed_process_argv",
+                return_value=(["controller"], True),
+            ),
+            patch("albert_mvp.workspace._run_bounded_process") as run,
+        ):
+            run.return_value = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=json.dumps(controller_output),
+                stderr="",
+            )
+            response = AgentConsoleResponseService(snapshots).respond(
+                message_id=prompt.message_id,
+                expected_revision=1,
+                expected_scope=scope,
+                agent_id="truth-controller",
+            )
+
+        self.assertEqual(response.route.intent, "discussion")
+        self.assertEqual(response.message.outcome, "model-commentary")
+        self.assertNotIn("created the requested folder", response.message.content)
+        self.assertIn("unverified effect claim", response.message.content.casefold())
+        self.assertEqual(response.message.action_outcome, "no-action")
+        self.assertEqual(
+            response.message.action_message,
+            "No action taken. Controller prose is commentary and no correlated "
+            "Orchestrator receipt exists.",
+        )
+        self.assertEqual(WorkspaceQueueService(snapshots).inspect().items, ())
+        self.assertEqual(snapshots._primary_mission.sessions, {})
+        restored = AgentConsoleHistoryService(self.load_service()).history()[-1]
+        self.assertEqual(restored.action_outcome, "no-action")
+        self.assertEqual(restored.action_message, response.message.action_message)
+
+    def test_malformed_success_sounding_controller_output_does_not_survive_as_primary_reply(
+        self,
+    ) -> None:
+        snapshots = self.load_service()
+        snapshots._primary_mission.agent_registry.agents.append(
+            workspace_module.AgentConfig(
+                id="malformed-truth-controller",
+                role="frontier",
+                provider="command",
+                runner="command",
+                command="controller",
+                routing="controller",
+            )
+        )
+        scope = snapshots.snapshot().conversation_scope
+        prompt = AgentConsoleHistoryService(snapshots).append(
+            role="user",
+            content="Create the requested folder now.",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        with (
+            patch(
+                "albert_mvp.workspace.sandboxed_process_argv",
+                return_value=(["controller"], True),
+            ),
+            patch("albert_mvp.workspace._run_bounded_process") as run,
+        ):
+            run.return_value = subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout="Done — I created the requested folder.",
+                stderr="",
+            )
+            response = AgentConsoleResponseService(snapshots).respond(
+                message_id=prompt.message_id,
+                expected_revision=1,
+                expected_scope=scope,
+                agent_id="malformed-truth-controller",
+            )
+
+        self.assertEqual(response.route.intent, "discussion")
+        self.assertNotIn("created the requested folder", response.message.content)
+        self.assertIn("malformed", response.message.content.casefold())
+        self.assertEqual(response.message.action_outcome, "no-action")
+        self.assertEqual(WorkspaceQueueService(snapshots).inspect().items, ())
+        self.assertEqual(snapshots._primary_mission.sessions, {})
 
     def test_controller_route_safely_falls_back_to_discussion(self) -> None:
         snapshots = self.load_service()
@@ -9050,7 +9289,13 @@ class WorkspaceSnapshotTest(unittest.TestCase):
                     expected_revision=1,
                     expected_scope=scope,
                 )
-                with patch("albert_mvp.workspace._run_bounded_process") as run:
+                with (
+                    patch(
+                        "albert_mvp.workspace.sandboxed_process_argv",
+                        return_value=(["controller"], True),
+                    ),
+                    patch("albert_mvp.workspace._run_bounded_process") as run,
+                ):
                     run.return_value = subprocess.CompletedProcess(
                         args=[],
                         returncode=0,
@@ -9067,9 +9312,15 @@ class WorkspaceSnapshotTest(unittest.TestCase):
                 self.assertEqual(response.route.intent, "discussion")
                 self.assertEqual(response.route.task_request, "")
                 self.assertEqual(response.route.acceptance_criteria, ())
-                self.assertTrue(response.message.content)
+                self.assertEqual(
+                    response.message.content,
+                    "The controller response was malformed and remains discussion. "
+                    "No action taken.",
+                )
+                self.assertEqual(response.message.action_outcome, "no-action")
+                self.assertNotIn("Do not", response.message.content)
 
-    def test_oversized_malformed_controller_fallback_is_safely_truncated_in_history(
+    def test_oversized_malformed_controller_output_is_replaced_in_history(
         self,
     ) -> None:
         snapshots = self.load_service()
@@ -9094,7 +9345,13 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         )
         oversized_malformed_output = "not-json:" + ("界" * 100_500)
 
-        with patch("albert_mvp.workspace._run_bounded_process") as run:
+        with (
+            patch(
+                "albert_mvp.workspace.sandboxed_process_argv",
+                return_value=(["controller"], True),
+            ),
+            patch("albert_mvp.workspace._run_bounded_process") as run,
+        ):
             run.return_value = subprocess.CompletedProcess(
                 args=[],
                 returncode=0,
@@ -9108,11 +9365,14 @@ class WorkspaceSnapshotTest(unittest.TestCase):
                 agent_id="oversized-fallback-controller",
             )
 
-        marker = "\n... controller response truncated at 100000 characters ...\n"
         self.assertEqual(response.route.intent, "discussion")
-        self.assertEqual(len(response.message.content), 100_000)
-        self.assertTrue(response.message.content.startswith("not-json:界界界"))
-        self.assertTrue(response.message.content.endswith(marker))
+        self.assertEqual(
+            response.message.content,
+            "The controller response was malformed and remains discussion. "
+            "No action taken.",
+        )
+        self.assertEqual(response.message.action_outcome, "no-action")
+        self.assertNotIn("not-json", response.message.content)
         persisted = AgentConsoleHistoryService(snapshots).history()[-1]
         self.assertEqual(persisted.content, response.message.content)
 

@@ -12,7 +12,7 @@ The endpoint families are:
 |---|---|---|
 | Launch and selection | Tauri `alfredo_launch_context`, `coding_workspace_select`, `mission_choice`; CLI/persistent `coding-workspace-select`, `mission-options`, `mission-choice`, `workspace-context` | Expose Starting Location with no implicit repository, acknowledge an exact Git repository, require explicit Mission choice, and restore the exact acknowledged journey |
 | Workspace projection | `workspace-snapshot`, `workspace-updates`, `workspace-action` | Load canonical state and apply expected-revision navigation/preferences |
-| Agent Console | `agent-capabilities`, `agent-console-message`, `agent-console-response`, `agent-console-history` | Discover commands/skills/models, append a prompt, generate a correlated controller response, and restore chronology |
+| Agent Console | `agent-capabilities`, `agent-console-message`, `agent-console-response`, `agent-console-history` | Discover commands/skills/models, append a prompt, generate typed controller commentary with an explicit action outcome, and restore chronology |
 | Working Context | `working-context`, `working-context-curate`, `workspace-scope` | Inspect bounded context and deliberately curate or qualify a prompt |
 | Governed work | `workspace-queue`, `workspace-queue-decision`, `ad-hoc-delegation-proposal`, `workstation-action` | Propose, approve, assign, launch, cancel, and inspect Mission-qualified work |
 | Deferred execution | `workstation-session-run` | Claim exactly one persisted queued session and run it outside the UI request path |
@@ -54,7 +54,7 @@ Illustrative request:
 }
 ```
 
-Request validation rejects missing identities, malformed booleans, unknown commands/skills/agents, stale revisions, role-ineligible assignments, unapproved mutations, unsafe paths, and command boundaries that exceed declared access. Controller and worker authority is explicit: cloud, unavailable, gated, delegate-only, controller/router/frontier-routed, or metadata-incomplete capabilities cannot be selected as ordinary workers. Workstation session actions persist their request marker in the created session; approve, assignment, and cancellation persist it in the Mission runtime alongside the mutation. An exact retry checks that canonical marker before the stale-revision guard, completes or replays the preference acknowledgement, and idempotently restores missing Journal/Console audit phases. Workspace Queue keeps the exact proposal/decision request and acknowledgement together, validates its history-derived revision and semantic effect, and recovers an already-durable issue/session effect without accepting a contradictory later decision. Mission Draft receipts additionally bind ordered prior/effect draft state, acknowledgement, accepted Issue identity, and decision reason into one canonical lifecycle chain. Reusing a correlation id with a different Mission, scope, goal, criteria, paths, policy, worker, origin, target, decision, or draft state is rejected.
+Request validation rejects missing identities, malformed booleans, unknown commands/skills/agents, stale revisions, role-ineligible assignments, unapproved mutations, unsafe paths, and command boundaries that exceed declared access. Controller and worker authority is explicit: cloud, unavailable, gated, delegate-only, controller/router/frontier-routed, or metadata-incomplete capabilities cannot be selected as ordinary workers. Workstation session actions persist their request marker in the created session; approve, assignment, and cancellation persist it in the Mission runtime alongside the mutation. An exact retry checks that canonical marker before the stale-revision guard, completes or replays the preference acknowledgement, and idempotently restores missing Journal/Console audit phases. Workspace Queue keeps the exact proposal/decision request and acknowledgement together, projects their validated correlation ids on each item, validates its history-derived revision and semantic effect, and recovers an already-durable issue/session effect without accepting a contradictory later decision. A projected Queue correlation that does not resolve to the exact canonical item, receipt kind, request, acknowledgement, and state fails the persistence read. Mission Draft receipts additionally bind ordered prior/effect draft state, acknowledgement, accepted Issue identity, and decision reason into one canonical lifecycle chain. Reusing a correlation id with a different Mission, scope, goal, criteria, paths, policy, worker, origin, target, decision, actor, or draft state is rejected.
 
 When Shell rejects an out-of-workspace boundary, the backend persists a typed contextual request containing `request_id`, correlation, Mission, canonical path, access level, 900-second duration, reason, affected action, and validated request time. `shell-terminal` projects that request and its derived `pending | granted | denied` status. Path-grant creation may include `request_id` and must exactly match the pending record; denial likewise binds the known request. Changed paths/access/duration, malformed timestamps, duplicate ids, or replayed decisions fail closed. React hydrates this projection directly and never reconstructs authority by parsing error prose.
 
@@ -64,7 +64,7 @@ Local model prompts run with sanitized environments and minimal Bubblewrap mount
 
 ## Response
 
-The persistent envelope returns the same transport `id`, `success`, and captured `stdout`/`stderr`; successful stdout contains the typed JSON projection emitted by the selected CLI command. Canonical state projections carry the schema version and revision required by their own contract; response-only projections such as Agent Console routing or Session Artifact content intentionally omit an unrelated workspace revision. Mutations distinguish acknowledged, queued/pending, and rejected outcomes; a task acknowledgement is never presented as completed execution. Agent Console records preserve a single arrival-ordered chronology, and session projections expose canonical `queued`, `running`, `evidence-ready`, `reviewed`/`complete`, `cancelled`, or `failed` state as applicable.
+The persistent envelope returns the same transport `id`, `success`, and captured `stdout`/`stderr`; successful stdout contains the typed JSON projection emitted by the selected CLI command. Canonical state projections carry the schema version and revision required by their own contract; response-only projections such as Agent Console routing or Session Artifact content intentionally omit an unrelated workspace revision. Mutations distinguish acknowledged, queued/pending, and rejected outcomes; a task acknowledgement is never presented as completed execution. Agent Console records preserve a single arrival-ordered chronology. Controller replies persist `action_outcome: no-action | awaiting-orchestrator` and an explicit `action_message`; neither value is an effect receipt. Canonical Console events may instead carry the exact `correlation_id` plus `action_phase`. Session projections expose canonical state plus launch, evidence, and review correlation ids only when those identities are present in the authoritative session, evidence, and Review Decision records.
 
 `agent-console-response` returns the persisted assistant message and a typed controller route:
 
@@ -74,7 +74,9 @@ The persistent envelope returns the same transport `id`, `success`, and captured
     "message_id": "console-000043",
     "role": "assistant",
     "content": "I can delegate that bounded reliability change.",
-    "outcome": "model-commentary"
+    "outcome": "model-commentary",
+    "action_outcome": "awaiting-orchestrator",
+    "action_message": "Coding task route selected. No action has occurred until a correlated Orchestrator receipt is recorded."
   },
   "route": {
     "intent": "coding-task",
@@ -84,7 +86,7 @@ The persistent envelope returns the same transport `id`, `success`, and captured
 }
 ```
 
-The only route intents are `discussion` and `coding-task`. Invalid JSON, extra fields, blank or oversized values, invalid criteria, and unsupported intent values safely produce a discussion route. Deterministic slash commands never become coding-task routes. Explicit delegation has narrow deterministic prefix and suffix forms—such as `Please ask a subagent to fix …` and `fix … with a subagent`—while questions, explanations, and ambiguous checks remain controller discussion.
+The only route intents are `discussion` and `coding-task`. Invalid JSON, extra fields, blank or oversized values, invalid criteria, and unsupported intent values produce a fixed malformed-response discussion message and cannot preserve the model's prose. Success-sounding controller claims are replaced by a fixed unverified-effect message rather than retained as action truth. Deterministic slash commands never become coding-task routes. Explicit delegation has narrow deterministic prefix and suffix forms—such as `Please ask a subagent to fix …` and `fix … with a subagent`—while questions, explanations, and ambiguous checks remain controller discussion. React renders commentary and its no-action/awaiting outcome separately from proposal, decision, queued, running, evidence, Review Decision, and accepted-completion events; each effect milestone displays its exact canonical correlation and phase. See the [false-success diagnosis](../Reports/2026-07-24-workspace-selection-false-success-diagnosis.md) and [Issue #59 implementation report](../Reports/2026-08-02-conversational-action-receipts.md).
 
 Illustrative response:
 
@@ -101,10 +103,14 @@ Failures return `success: false`; `stderr` contains a structured error with a st
 
 Workspace session summaries expose validated `last_activity_at` from terminal
 session timestamps and a distinct validated `runner_started_at`. The latter is
-the only rendered R6 runner-claim source; later cancellation, completion, or
-general activity cannot masquerade as runner start. Malformed values fail the
-projection and absent values remain absent. UI cancellation maps to terminal
-unsuccessful/failed presentation rather than a completed card. A valid
+the only rendered R6 runner-claim source; a conversational running milestone
+also requires `launch_correlation_id`. Validated evidence projects
+`evidence_correlation_id`, and a persisted Review Decision projects
+`review_correlation_id`; only Approved outcomes may add a separate accepted-
+completion phase. Later cancellation, completion, or general activity cannot
+masquerade as runner start. Malformed values fail the projection and absent
+values remain absent. UI cancellation maps to terminal unsuccessful/failed
+presentation rather than a completed card. A valid
 Workstation request that reaches Python and is rejected persists durable Console
 `request`/`rejection` phases. A transport failure before Python receives the
 request cannot claim a backend audit event; React may retain only its bounded

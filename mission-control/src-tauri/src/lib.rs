@@ -1313,6 +1313,12 @@ pub struct MissionSessionSummary {
     #[serde(default)]
     pub artifact_links: Vec<String>,
     #[serde(default)]
+    pub launch_correlation_id: String,
+    #[serde(default)]
+    pub evidence_correlation_id: String,
+    #[serde(default)]
+    pub review_correlation_id: String,
+    #[serde(default)]
     pub review_outcome: String,
     #[serde(default)]
     pub review_next_action: String,
@@ -1528,6 +1534,14 @@ pub struct AgentConsoleMessage {
     pub scope: ConversationScope,
     pub outcome: String,
     pub source: String,
+    #[serde(default)]
+    pub correlation_id: String,
+    #[serde(default)]
+    pub action_phase: String,
+    #[serde(default)]
+    pub action_outcome: String,
+    #[serde(default)]
+    pub action_message: String,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Serialize)]
@@ -1849,6 +1863,10 @@ pub struct WorkspaceQueueItem {
     pub consequence: String,
     pub issue_id: String,
     pub proposed_changes: serde_json::Value,
+    #[serde(default)]
+    pub proposal_correlation_id: String,
+    #[serde(default)]
+    pub decision_correlation_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -5897,6 +5915,13 @@ None - can start immediately
         assert_eq!(restored.messages[0].scope.target_id, "ISS-01");
         assert_eq!(response.message.role, "assistant");
         assert_eq!(response.message.outcome, "model-commentary");
+        assert_eq!(response.message.action_outcome, "no-action");
+        assert!(response
+            .message
+            .action_message
+            .starts_with("No action taken."));
+        assert!(response.message.correlation_id.is_empty());
+        assert!(response.message.action_phase.is_empty());
         assert!(response
             .message
             .content
@@ -5922,6 +5947,7 @@ None - can start immediately
         let issues_dir = tracker_dir.join("issues");
         let runtime_root = root.join("runtime");
         fs::create_dir_all(&target_repo).expect("target repo");
+        let target_repo = target_repo.canonicalize().expect("canonical target repo");
         fs::create_dir_all(&issues_dir).expect("issues dir");
         fs::write(tracker_dir.join("PRD.md"), "# Ad Hoc Mission\n").expect("PRD");
         fs::write(
@@ -5987,9 +6013,38 @@ None - can start immediately
         assert_eq!(acknowledgement.item_status, "pending");
         assert_eq!(queue.items[0].item_type, "ad-hoc-delegation");
         assert_eq!(queue.items[0].issue_id, "ADHOC-000001");
+        assert_eq!(queue.items[0].proposal_correlation_id, "tauri-ad-hoc-1");
+        assert!(queue.items[0].decision_correlation_id.is_empty());
         assert_eq!(
             queue.items[0].proposed_changes["allowed_paths"][0],
             "docs/smoke-tests.md"
+        );
+        execute_workspace_queue_decision(
+            &config,
+            &WorkspaceQueueDecisionRequest {
+                correlation_id: "tauri-ad-hoc-approve-1".to_owned(),
+                action_type: "workspace-queue-decision".to_owned(),
+                actor: "mission-commander".to_owned(),
+                expected_revision: acknowledgement.revision,
+                target: Some(WorkspaceQueueDecisionTarget {
+                    kind: "workspace-queue-item".to_owned(),
+                    id: acknowledgement.item_id.clone(),
+                }),
+                item_id: acknowledgement.item_id,
+                decision: "approve".to_owned(),
+                reason: "Approved for typed bridge verification.".to_owned(),
+            },
+        )
+        .expect("ad hoc proposal should be approved");
+        let approved_queue = execute_workspace_queue(&config).expect("queue should restore");
+        let snapshot = execute_snapshot(&config).expect("session summary should restore");
+        assert_eq!(
+            approved_queue.items[0].decision_correlation_id,
+            "tauri-ad-hoc-approve-1"
+        );
+        assert_eq!(
+            snapshot.missions[0].sessions[0].launch_correlation_id,
+            "tauri-ad-hoc-approve-1"
         );
         fs::remove_dir_all(root).expect("fixture cleanup");
     }

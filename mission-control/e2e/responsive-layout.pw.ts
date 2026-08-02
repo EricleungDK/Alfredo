@@ -353,6 +353,10 @@ async function installTauriFixture(page: Page): Promise<void> {
           },
         },
       });
+      Object.defineProperty(window, "isTauri", {
+        configurable: true,
+        value: true,
+      });
     },
     { fixtureSnapshot: snapshot, fixtureHistory: history },
   );
