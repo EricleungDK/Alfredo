@@ -26,6 +26,8 @@ After installing the declared dependencies and Rust toolchain, the real managed 
 
 The Mission Commander then supplied a screenshot stuck on `Connecting to Alfredo` / `Waiting for an authoritative workspace snapshot`. The exact screen reproduced three times from a standalone `npm run dev` browser preview: `__TAURI_INTERNALS__` was absent and five native `invoke` calls rejected before any canonical state could render. A standalone Vite process also prevented the managed native launcher from starting because it already occupied port 1420.
 
+The correction is recorded in local commit `f8a4e21` and in the authoritative [Issue #58 correction](https://github.com/EricleungDK/Alfredo/issues/58#issuecomment-5160236107). The branch has not been pushed.
+
 After stopping the standalone preview, the restored native path exposed a second defect at the first authoritative boundary. The generated all-Missions catalog included the Active Mission, while the snapshot CLI also loaded that Mission as its primary argument. `WorkspaceSnapshotService` therefore received the same Mission twice and rejected startup with `Workspace Mission ids must be unique`.
 
 The corrective implementation now:
