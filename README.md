@@ -43,12 +43,14 @@ node mission-control/bin/alfredo.js workstation --agent qwen3-14b
 
 The source launcher checks for the lockfile-installed local Tauri CLI and Cargo before spawning the desktop process. A missing prerequisite fails with an Alfredo preflight message and a copyable repair command instead of exposing a raw child-process error. These development requirements do not apply to the packaged native desktop.
 
-For the browser-rendered GUI skeleton:
+For a visual-only browser preview without the desktop bridge or authoritative workspace data:
 
 ```bash
 cd mission-control
 npm run dev
 ```
+
+The preview reports that the desktop bridge is unavailable. Use the managed workstation launcher above to open the functional application.
 
 For the Tauri development window without the managed launcher:
 

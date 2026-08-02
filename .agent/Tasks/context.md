@@ -4,7 +4,24 @@
 
 ## Active Orchestration Context
 
-<!-- refreshed 2026-08-02 for the current #58 implementation and post-#62 launch diagnosis run -->
+<!-- refreshed 2026-08-02 for the native app stuck on authoritative workspace snapshot diagnosis -->
+
+- **Captured For Run**: `2026-08-02 - Diagnose and fix the native Alfredo window stuck on Connecting to Alfredo / Waiting for an authoritative workspace snapshot`
+- **Current Mission Focus**: `Correct the exact post-launch connecting screen at both observed boundaries: standalone browser preview without Tauri IPC and restored native snapshot composition with the Active Mission duplicated by the all-Missions catalog.`
+- **Active Agent Focus**: `Codex root owns the strict diagnosing-bugs loop. No subagent is active for this run.`
+- **Model Assignments (active run)**: `Codex root completed the strict diagnosis, red-first regressions, implementation, focused verification, documentation correction, and live managed-launch check without a subagent.`
+- **Coordination State**: `The prior #58 run closed GitHub Issue #58 and committed 697df31 plus cdca81c, but its gui-smoke-ready evidence was emitted before React proved workspace_snapshot returned. The corrective changes are now verified locally and the #58 issue record must be amended after the corrective commit.`
+- **Fixed Boundaries**: `Preserve the exact Coding Workspace and Mission continuity guarantees from #58 and the fail-closed measurement contracts from #62. Python remains authoritative; Tauri transports typed results; React may leave the connecting screen only after an acknowledged canonical snapshot. Do not silently fall back to fabricated UI state or retarget the backend.`
+- **Testing Seam Direction**: `The browser loop asserts the exact connecting text is absent and the actionable bridge message is present. Python and Rust regressions replay a persisted journey whose generated catalog contains the Active Mission and require one authoritative snapshot with no duplicate identity.`
+- **Current Implementation State**: `TauriWorkspaceClient detects non-Tauri preview mode before performance, launch-context, or snapshot IPC and returns a structured nonrecoverable bridge message. The Python catalog loader reuses the exact primary Mission entry and rejects duplicate ids or mismatched primary paths. README and the #58 report distinguish visual preview from functional managed desktop.`
+- **Concurrent #58/#62 Checkpoint**: `The correction preserves #58's exact Coding Workspace/Mission continuity and does not change #62 instrumentation. Catalog reconciliation remains inside the existing authoritative snapshot operation; non-Tauri detection prevents invalid IPC without moving S0-S9/R0-R6 marks. No dependency edge or semantic conflict exists.`
+- **Focused Evidence So Far**: `Red evidence: 3/3 browser reproductions with undefined __TAURI_INTERNALS__, five invoke errors, and exact connecting text; managed launch blocked by the standalone Vite port; exact native snapshot rejected Workspace Mission ids must be unique. Green evidence: 4/4 Mission-selection tests, 9/9 selection/server tests, 36/36 WorkspaceClient tests, targeted React startup-failure test, focused restored Tauri-to-Python snapshot test, typecheck, Vite build, exact public current-journey replay, and browser Playwright check with no connecting state or page errors. A fresh managed native process is running with Coding Workspace Alfredo and Active Mission agent-issues.`
+- **Pending Blockers**: `No implementation blocker. macOS keeps the full-screen Ghostty Space active despite acknowledging Alfredo activation; use Cmd+Tab for the direct native-window inspection. Broad Darwin suites retain documented Ubuntu bubblewrap and macOS /var alias failures unrelated to this correction.`
+- **Next Decisions / Actions**: `Remove generated Tauri schema output, run final formatting/diff/status checks, commit the corrective slice, amend GitHub Issue #58 with the corrected evidence, and leave the managed native process running for inspection. Do not push unless explicitly requested.`
+
+## Previous Orchestration Context (historical - #58 completion and initial startup diagnosis)
+
+<!-- refreshed 2026-08-02 for the #58 implementation and initial post-#62 launch diagnosis run -->
 
 - **Captured For Run**: `2026-08-02 - Complete GitHub Issue #58 while diagnosing the current app launch failure after Issue #62`
 - **Current Mission Focus**: `Finish Issue #58 end to end on current main: require an explicit exact Resume Mission or distinct Start New Mission choice after Coding Workspace acknowledgement, restore the canonical Coding Workspace and Mission across process/desktop restart, keep recent-workspace relaunches explicit and non-retargeting, and verify CLI, persistent transport, Tauri, React, restart, and structured failure behavior.`

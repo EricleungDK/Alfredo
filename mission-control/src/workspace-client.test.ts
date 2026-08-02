@@ -1,8 +1,8 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { TauriWorkspaceClient } from "./workspace-client";
 import type { WorkspaceSnapshot } from "./contracts";
 
-vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(), isTauri: vi.fn(() => true) }));
 
 const snapshot: WorkspaceSnapshot = {
   schema_version: 1,
@@ -39,6 +39,25 @@ test("loads a ready canonical snapshot through the Tauri command", async () => {
 
   expect(invoke).toHaveBeenCalledWith("workspace_snapshot");
   expect(result).toEqual({ kind: "ready", snapshot });
+});
+
+test("browser preview reports an actionable desktop bridge failure without invoking IPC", async () => {
+  vi.mocked(isTauri).mockReturnValue(false);
+  const invokeCallsBefore = vi.mocked(invoke).mock.calls.length;
+
+  try {
+    const result = await new TauriWorkspaceClient().loadSnapshot();
+
+    expect(vi.mocked(invoke).mock.calls).toHaveLength(invokeCallsBefore);
+    expect(result).toEqual({
+      kind: "startup-failure",
+      message:
+        "The browser preview has no Alfredo desktop bridge. Start the managed workstation from the repository root.",
+      recoverable: false,
+    });
+  } finally {
+    vi.mocked(isTauri).mockReturnValue(true);
+  }
 });
 
 test("records a process-local performance boundary through the native bridge", async () => {

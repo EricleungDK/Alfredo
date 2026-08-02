@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import type {
   AlfredoLaunchContext,
   AlfredoLaunchContextResult,
@@ -137,14 +137,26 @@ export interface WorkspaceClient {
   ): Promise<MissionDraftDecisionResult>;
 }
 
+const DESKTOP_BRIDGE_UNAVAILABLE =
+  "The browser preview has no Alfredo desktop bridge. Start the managed workstation from the repository root.";
+
 export class TauriWorkspaceClient implements WorkspaceClient {
   async recordPerformanceMark(
     request: PerformanceMarkRequest,
   ): Promise<PerformanceMarkAcknowledgement> {
+    if (!isTauri()) return { recorded: false };
     return invoke<PerformanceMarkAcknowledgement>("performance_mark", { request });
   }
 
   async loadLaunchContext(): Promise<AlfredoLaunchContextResult> {
+    if (!isTauri()) {
+      return {
+        kind: "launch-context-failure",
+        code: "backend-startup-failure",
+        message: DESKTOP_BRIDGE_UNAVAILABLE,
+        recoverable: false,
+      };
+    }
     try {
       const context = await invoke<AlfredoLaunchContext>("alfredo_launch_context");
       return { kind: "launch-context", context };
@@ -240,6 +252,13 @@ export class TauriWorkspaceClient implements WorkspaceClient {
   }
 
   async loadSnapshot(): Promise<WorkspaceLoadResult> {
+    if (!isTauri()) {
+      return {
+        kind: "startup-failure",
+        message: DESKTOP_BRIDGE_UNAVAILABLE,
+        recoverable: false,
+      };
+    }
     try {
       const snapshot = await invoke<WorkspaceSnapshot>("workspace_snapshot");
       return {

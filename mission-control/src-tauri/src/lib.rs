@@ -3983,12 +3983,28 @@ mod tests {
         fs::create_dir_all(&backend_root).expect("backend fixture");
         fs::create_dir_all(&issues).expect("mission fixture");
         fs::create_dir_all(&runtime_root).expect("runtime fixture");
+        fs::write(tracker.join("PRD.md"), "# Modernization Mission\n")
+            .expect("Mission PRD fixture");
         let canonical_tracker = tracker.canonicalize().expect("tracker root");
         let canonical_issues = issues.canonicalize().expect("issues root");
         let mut config = BridgeConfig::for_repository(backend_root);
         config.runtime_root = runtime_root.clone();
         let starting_location = bridge_starting_location(&config);
         let catalog = runtime_root.join("workspace-mission-catalogs/catalog.json");
+        fs::create_dir_all(catalog.parent().expect("catalog parent")).expect("catalog directory");
+        fs::write(
+            &catalog,
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": 1,
+                "missions": [{
+                    "mission_id": "modernization",
+                    "tracker_dir": canonical_tracker.to_string_lossy(),
+                    "issues_dir": canonical_issues.to_string_lossy()
+                }]
+            }))
+            .expect("catalog should serialize"),
+        )
+        .expect("catalog should be persisted");
         let journey = serde_json::json!({
             "schema_version": 1,
             "sessions": [{
@@ -4023,7 +4039,7 @@ mod tests {
         assert_eq!(context.active_mission.as_deref(), Some("modernization"));
         assert_eq!(context.known_missions[0].id, "modernization");
 
-        let bound = binding
+        let mut bound = binding
             .bound_config(&config)
             .expect("restored Mission should bind backend configuration");
         assert_eq!(
@@ -4033,6 +4049,23 @@ mod tests {
         assert_eq!(bound.mission_id, "modernization");
         assert_eq!(bound.tracker_dir, canonical_tracker);
         assert_eq!(bound.mission_catalog, Some(catalog));
+        let repository_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("repository root");
+        bound.backend_root = repository_root.clone();
+        bound.agent_config = Some(repository_root.join(".albert/agents.json"));
+        let snapshot = execute_snapshot(&bound)
+            .expect("catalog containing the Active Mission should produce a snapshot");
+        assert_eq!(
+            snapshot
+                .active_mission
+                .as_ref()
+                .map(|mission| mission.id.as_str()),
+            Some("modernization")
+        );
+        assert_eq!(snapshot.missions.len(), 1);
+        assert_eq!(snapshot.missions[0].id, "modernization");
         fs::remove_dir_all(root).expect("fixture cleanup");
     }
 

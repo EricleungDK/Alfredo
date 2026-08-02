@@ -121,6 +121,58 @@ class MissionSelectionCliTests(unittest.TestCase):
         self.assertEqual(restored["coding_workspace"], str(self.coding_workspace.resolve()))
         self.assertEqual(restored["active_mission"], "agent-issues")
 
+    def test_resumed_journey_catalog_produces_one_canonical_workspace_snapshot(self) -> None:
+        self.select_workspace()
+        exit_code, _, stderr = self.run_cli(
+            "mission-choice",
+            "--starting-location",
+            str(self.starting_location),
+            "--coding-workspace",
+            str(self.coding_workspace),
+            "--runtime-root",
+            str(self.runtime_root),
+            "--correlation-id",
+            "resume-for-snapshot",
+            "--expected-revision",
+            "1",
+            "--choice",
+            "resume",
+            "--mission-id",
+            "agent-issues",
+        )
+        self.assertEqual(exit_code, 0, stderr)
+        exit_code, context, stderr = self.run_cli(
+            "workspace-context",
+            "--starting-location",
+            str(self.starting_location),
+            "--runtime-root",
+            str(self.runtime_root),
+        )
+        self.assertEqual(exit_code, 0, stderr)
+
+        exit_code, snapshot, stderr = self.run_cli(
+            "workspace-snapshot",
+            "--target-repo",
+            str(self.coding_workspace),
+            "--tracker-dir",
+            str(self.tracker),
+            "--issues-dir",
+            str(self.tracker),
+            "--runtime-root",
+            str(self.runtime_root),
+            "--mission-id",
+            "agent-issues",
+            "--mission-catalog",
+            str(context["mission_catalog"]),
+        )
+
+        self.assertEqual(exit_code, 0, stderr)
+        self.assertEqual(snapshot["active_mission"]["id"], "agent-issues")
+        self.assertEqual(
+            [mission["id"] for mission in snapshot["missions"]],
+            ["agent-issues"],
+        )
+
     def test_start_new_mission_creates_distinct_identity_and_exact_replay(self) -> None:
         self.select_workspace()
 

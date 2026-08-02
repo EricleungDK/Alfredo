@@ -1558,6 +1558,7 @@ def _load_workspace_service(
         if payload["schema_version"] != 1 or not isinstance(payload["missions"], list):
             raise ValueError("unsupported mission catalog schema")
         missions = []
+        catalog_mission_ids: set[str] = set()
         for item in payload["missions"]:
             mission_id = item["mission_id"]
             tracker_dir = Path(item["tracker_dir"])
@@ -1569,6 +1570,17 @@ def _load_workspace_service(
                 issues_dir = catalog_path.parent / issues_dir
             if not isinstance(mission_id, str) or not mission_id.strip():
                 raise ValueError("mission id must not be empty")
+            if mission_id in catalog_mission_ids:
+                raise ValueError(f"duplicate mission id: {mission_id}")
+            catalog_mission_ids.add(mission_id)
+            if mission_id == primary.mission_id:
+                catalog_issues_dir = issues_dir or (tracker_dir / "issues")
+                if (
+                    tracker_dir.resolve() != primary.tracker_dir
+                    or catalog_issues_dir.resolve() != primary.issues_dir
+                ):
+                    raise ValueError("primary Mission paths do not match the active Mission")
+                continue
             missions.append(
                 AlbertMission(
                     target_repo=primary.target_repo,
