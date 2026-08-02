@@ -192,6 +192,10 @@ export interface AgentConsoleMessage {
   readonly scope: ConversationScope;
   readonly outcome: AgentConsoleOutcome;
   readonly source: string;
+  readonly correlation_id?: string;
+  readonly action_phase?: string;
+  readonly action_outcome?: "no-action" | "awaiting-orchestrator" | "";
+  readonly action_message?: string;
 }
 
 export interface AgentConsoleHistory {
@@ -626,6 +630,8 @@ export interface WorkspaceQueueItem {
   readonly consequence: string;
   readonly issue_id: string;
   readonly proposed_changes: Readonly<Record<string, unknown>>;
+  readonly proposal_correlation_id?: string;
+  readonly decision_correlation_id?: string;
 }
 
 export interface WorkspaceQueueGroup {
@@ -1006,6 +1012,9 @@ export interface MissionSessionSummary {
   readonly test_results?: string;
   readonly risks?: string;
   readonly artifact_links?: readonly string[];
+  readonly launch_correlation_id?: string;
+  readonly evidence_correlation_id?: string;
+  readonly review_correlation_id?: string;
   readonly review_outcome?: string;
   readonly review_next_action?: string;
   readonly repair_action_available?: boolean;

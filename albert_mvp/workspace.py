@@ -11,6 +11,7 @@ from inspect import signature
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -268,6 +269,9 @@ class MissionSessionSummary:
     test_results: str
     risks: str
     artifact_links: tuple[str, ...]
+    launch_correlation_id: str
+    evidence_correlation_id: str
+    review_correlation_id: str
     review_outcome: str
     review_next_action: str
     repair_action_available: bool
@@ -2229,6 +2233,7 @@ AgentConsoleRole = Literal["user", "assistant", "system"]
 AgentConsoleOutcome = Literal[
     "proposed", "pending", "acknowledged", "rejected", "model-commentary"
 ]
+AgentConsoleActionOutcome = Literal["no-action", "awaiting-orchestrator"]
 
 
 @dataclass(frozen=True)
@@ -2242,6 +2247,8 @@ class AgentConsoleMessage:
     source: str
     correlation_id: str = ""
     action_phase: str = ""
+    action_outcome: AgentConsoleActionOutcome | Literal[""] = ""
+    action_message: str = ""
 
 
 AgentConsoleResponseIntent = Literal["discussion", "coding-task"]
@@ -2288,6 +2295,8 @@ class AgentConsoleHistoryService:
         recorded_scope: ConversationScope | None = None,
         correlation_id: str = "",
         action_phase: str = "",
+        action_outcome: AgentConsoleActionOutcome | Literal[""] = "",
+        action_message: str = "",
     ) -> AgentConsoleMessage:
         if role not in self._roles:
             raise AlbertError(f"Unknown Agent Console role: {role}")
@@ -2309,6 +2318,22 @@ class AgentConsoleHistoryService:
         if bool(correlation_id.strip()) != bool(action_phase.strip()):
             raise AlbertError(
                 "Agent Console audit correlation id and action phase must be provided together"
+            )
+        if outcome == "model-commentary" and correlation_id.strip():
+            raise AlbertError(
+                "Model commentary cannot carry an Orchestrator receipt identity"
+            )
+        if action_outcome not in {"", "no-action", "awaiting-orchestrator"}:
+            raise AlbertError(f"Unknown Agent Console action outcome: {action_outcome}")
+        if bool(action_outcome) != bool(action_message.strip()):
+            raise AlbertError(
+                "Agent Console action outcome and message must be provided together"
+            )
+        if action_outcome and (
+            outcome != "model-commentary" or source != "frontier-model"
+        ):
+            raise AlbertError(
+                "Only Frontier Model commentary may carry a controller action outcome"
             )
         self._reject_transient_source(source)
         if not action_phase.startswith("shell-"):
@@ -2350,6 +2375,8 @@ class AgentConsoleHistoryService:
                         or existing.scope != durable_scope
                         or existing.outcome != outcome
                         or existing.source != source
+                        or existing.action_outcome != action_outcome
+                        or existing.action_message != action_message
                     ):
                         raise WorkspacePersistenceError(
                             "Agent Console audit marker resolves to a different effect: "
@@ -2367,6 +2394,8 @@ class AgentConsoleHistoryService:
                 source=source,
                 correlation_id=correlation_id,
                 action_phase=action_phase,
+                action_outcome=action_outcome,
+                action_message=action_message,
             )
             messages.append(message)
             WorkspaceSnapshotService._write_json_atomically(
@@ -2667,11 +2696,31 @@ class AgentConsoleHistoryService:
             raise ValueError("Agent Console message source must not be empty")
         correlation_id = item.get("correlation_id", "")
         action_phase = item.get("action_phase", "")
+        action_outcome = item.get("action_outcome", "")
+        action_message = item.get("action_message", "")
         if not isinstance(correlation_id, str) or not isinstance(action_phase, str):
             raise ValueError("Agent Console audit markers must be strings")
         if bool(correlation_id.strip()) != bool(action_phase.strip()):
             raise ValueError(
                 "Agent Console audit correlation id and action phase must be provided together"
+            )
+        if outcome == "model-commentary" and correlation_id.strip():
+            raise ValueError(
+                "model commentary cannot carry an Orchestrator receipt identity"
+            )
+        if action_outcome not in {"", "no-action", "awaiting-orchestrator"}:
+            raise ValueError(f"unknown Agent Console action outcome: {action_outcome}")
+        if not isinstance(action_message, str):
+            raise ValueError("Agent Console action message must be a string")
+        if bool(action_outcome) != bool(action_message.strip()):
+            raise ValueError(
+                "Agent Console action outcome and message must be provided together"
+            )
+        if action_outcome and (
+            outcome != "model-commentary" or item["source"] != "frontier-model"
+        ):
+            raise ValueError(
+                "only Frontier Model commentary may carry a controller action outcome"
             )
         scope = ConversationScope(**item["scope"])
         if scope.kind not in {"working-directory", "mission", "issue-slice"}:
@@ -2690,6 +2739,8 @@ class AgentConsoleHistoryService:
             source=item["source"],
             correlation_id=correlation_id,
             action_phase=action_phase,
+            action_outcome=action_outcome,
+            action_message=action_message,
         )
 
     @classmethod
@@ -2719,6 +2770,28 @@ class AgentConsoleResponseService:
     _ACCEPTANCE_CRITERION_CHARACTER_LIMIT = 2_000
     _ACCEPTANCE_CRITERIA_COUNT_LIMIT = 12
     _ACCEPTANCE_CRITERIA_CHARACTER_LIMIT = 12_000
+    _NO_ACTION_MESSAGE = (
+        "No action taken. Controller prose is commentary and no correlated "
+        "Orchestrator receipt exists."
+    )
+    _AWAITING_ORCHESTRATOR_MESSAGE = (
+        "Coding task route selected. No action has occurred until a correlated "
+        "Orchestrator receipt is recorded."
+    )
+    _MALFORMED_RESPONSE_MESSAGE = (
+        "The controller response was malformed and remains discussion. No action taken."
+    )
+    _UNVERIFIED_EFFECT_CLAIM_MESSAGE = (
+        "The controller returned an unverified effect claim. No action claim was retained."
+    )
+    _EFFECT_CLAIM_PATTERN = re.compile(
+        r"(?:^\s*(?:done|completed|finished)\b|"
+        r"\b(?:i|we|alfredo|orchestrator)\s+(?:have\s+|has\s+)?"
+        r"(?:proposed|approved|queued|launched|started|created|wrote|updated|changed|"
+        r"modified|deleted|removed|reviewed|accepted|completed|finished|implemented|"
+        r"fixed|ran|executed)\b)",
+        re.IGNORECASE,
+    )
 
     def __init__(self, snapshots: "WorkspaceSnapshotService"):
         self._snapshots = snapshots
@@ -2759,14 +2832,27 @@ class AgentConsoleResponseService:
             agent = self._select_agent(agent_id)
             controller_output = self._controller_response(agent, latest)
             content, route = self._parse_controller_output(controller_output)
+            if self._EFFECT_CLAIM_PATTERN.search(content):
+                content = self._UNVERIFIED_EFFECT_CLAIM_MESSAGE
         if latest.content.lstrip().startswith("/"):
             route = self._discussion_route()
+        action_outcome: AgentConsoleActionOutcome = (
+            "awaiting-orchestrator"
+            if route.intent == "coding-task"
+            else "no-action"
+        )
         message = self._history.append(
             role="assistant",
             content=content,
             outcome="model-commentary",
             source="frontier-model",
             recorded_scope=latest.scope,
+            action_outcome=action_outcome,
+            action_message=(
+                self._AWAITING_ORCHESTRATOR_MESSAGE
+                if action_outcome == "awaiting-orchestrator"
+                else self._NO_ACTION_MESSAGE
+            ),
         )
         return AgentConsoleResponseProjection(message=message, route=route)
 
@@ -2783,7 +2869,6 @@ class AgentConsoleResponseService:
         output: str,
     ) -> tuple[str, AgentConsoleResponseRoute]:
         candidate = output.strip()
-        fallback = self._bounded_controller_fallback(candidate)
         lines = candidate.splitlines()
         if (
             len(lines) >= 3
@@ -2794,9 +2879,9 @@ class AgentConsoleResponseService:
         try:
             payload = json.loads(candidate)
         except (json.JSONDecodeError, TypeError):
-            return fallback, self._discussion_route()
+            return self._MALFORMED_RESPONSE_MESSAGE, self._discussion_route()
         if not isinstance(payload, dict) or set(payload) != {"reply", "route"}:
-            return fallback, self._discussion_route()
+            return self._MALFORMED_RESPONSE_MESSAGE, self._discussion_route()
         reply = payload.get("reply")
         route = payload.get("route")
         if (
@@ -2805,21 +2890,21 @@ class AgentConsoleResponseService:
             or len(reply.strip()) > self._REPLY_CHARACTER_LIMIT
             or "\0" in reply
         ):
-            return fallback, self._discussion_route()
+            return self._MALFORMED_RESPONSE_MESSAGE, self._discussion_route()
         safe_reply = reply.strip()
         if not isinstance(route, dict) or set(route) != {
             "intent",
             "task_request",
             "acceptance_criteria",
         }:
-            return safe_reply, self._discussion_route()
+            return self._MALFORMED_RESPONSE_MESSAGE, self._discussion_route()
         intent = route.get("intent")
         task_request = route.get("task_request")
         criteria = route.get("acceptance_criteria")
         if intent == "discussion":
             return safe_reply, self._discussion_route()
         if intent != "coding-task":
-            return safe_reply, self._discussion_route()
+            return self._MALFORMED_RESPONSE_MESSAGE, self._discussion_route()
         if (
             not isinstance(task_request, str)
             or not task_request.strip()
@@ -2835,10 +2920,10 @@ class AgentConsoleResponseService:
                 for item in criteria
             )
         ):
-            return safe_reply, self._discussion_route()
+            return self._MALFORMED_RESPONSE_MESSAGE, self._discussion_route()
         normalized_criteria = tuple(item.strip() for item in criteria)
         if sum(len(item) for item in normalized_criteria) > self._ACCEPTANCE_CRITERIA_CHARACTER_LIMIT:
-            return safe_reply, self._discussion_route()
+            return self._MALFORMED_RESPONSE_MESSAGE, self._discussion_route()
         return (
             safe_reply,
             AgentConsoleResponseRoute(
@@ -2847,15 +2932,6 @@ class AgentConsoleResponseService:
                 acceptance_criteria=normalized_criteria,
             ),
         )
-
-    def _bounded_controller_fallback(self, content: str) -> str:
-        if len(content) <= self._REPLY_CHARACTER_LIMIT:
-            return content
-        marker = (
-            "\n... controller response truncated at "
-            f"{self._REPLY_CHARACTER_LIMIT} characters ...\n"
-        )
-        return content[: self._REPLY_CHARACTER_LIMIT - len(marker)] + marker
 
     def _correlated_user_message(self, message_id: str) -> AgentConsoleMessage:
         message = next(
@@ -2894,16 +2970,20 @@ class AgentConsoleResponseService:
         self, agent: AgentConfig | None, latest: AgentConsoleMessage
     ) -> str:
         if agent is None:
-            return (
+            return self._discussion_output(
                 "No configured controller model is available for this workspace. "
                 "I recorded the prompt, but cannot generate a model response until an agent registry is configured."
             )
         if agent.availability != "available":
             reason = agent.availability_reason or agent.availability
-            return f"Controller {agent.id} is not available: {reason}"
+            return self._discussion_output(
+                f"Controller {agent.id} is not available: {reason}"
+            )
         prompt = self._build_prompt(agent, latest)
         if agent.runner == "fake":
-            return f"{agent.id} received the prompt for {latest.scope.label}."
+            return self._discussion_output(
+                f"{agent.id} received the prompt for {latest.scope.label}."
+            )
         if agent.runner == "command":
             return self._run_controller_command(agent.command, prompt)
         if agent.runner == "ollama":
@@ -2912,6 +2992,19 @@ class AgentConsoleResponseService:
                 prompt,
             )
         raise AlbertError(f"Agent Console response does not support runner: {agent.runner}")
+
+    @staticmethod
+    def _discussion_output(reply: str) -> str:
+        return json.dumps(
+            {
+                "reply": reply,
+                "route": {
+                    "intent": "discussion",
+                    "task_request": "",
+                    "acceptance_criteria": [],
+                },
+            }
+        )
 
     def _capabilities(self):
         mission = self._snapshots._primary_mission
@@ -3100,7 +3193,7 @@ class AgentConsoleResponseService:
             'Use {"reply":"...","route":{"intent":"discussion","task_request":"","acceptance_criteria":[]}} for discussion, questions, explanations, brainstorming, status, and every explicit slash command.',
             'Use {"reply":"...","route":{"intent":"coding-task","task_request":"faithful bounded request","acceptance_criteria":["concrete result"]}} only when the Mission Commander explicitly asks Alfredo or a subagent to implement, fix, test, investigate, or otherwise perform coding work.',
             "A coding task route may contain only the task request and acceptance criteria; never add paths, commands, agents, permissions, or approval claims.",
-            "Provide one useful controller reply. Do not claim Orchestrator acknowledgement unless an action was actually acknowledged.",
+            "Provide one useful controller reply. Controller prose is commentary and must never claim that an action was proposed, approved, launched, created, changed, reviewed, or completed; only a separate correlated Orchestrator receipt may make that claim.",
         ]
         prompt = "\n".join(sections)
         if len(prompt) > _CONTROLLER_INPUT_CHARACTER_LIMIT:
@@ -3271,6 +3364,8 @@ class WorkspaceQueueItem:
     consequence: str
     issue_id: str
     proposed_changes: dict[str, Any]
+    proposal_correlation_id: str = ""
+    decision_correlation_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -3480,6 +3575,7 @@ class WorkspaceQueueService:
             ),
             issue_id=issue_id,
             proposed_changes=proposed_changes,
+            proposal_correlation_id=correlation_id,
         )
         items = [*queue["items"], item]
         revision = queue["revision"] + 1
@@ -3590,6 +3686,7 @@ class WorkspaceQueueService:
             consequence=consequence,
             issue_id=issue_id,
             proposed_changes=dict(payload),
+            proposal_correlation_id=correlation_id,
         )
         revision = queue["revision"] + 1
         acknowledgement = WorkspaceQueueAcknowledgement(
@@ -3771,6 +3868,7 @@ class WorkspaceQueueService:
                 "originating_message_id": originating_message_id,
                 "goal": origin.content,
             },
+            proposal_correlation_id=correlation_id,
         )
         request_payload = {
             "source": source,
@@ -4275,7 +4373,11 @@ class WorkspaceQueueService:
             item_status = "deferred"
             effect_summary = f"Deferred {item_id}; accepted Mission state is unchanged."
 
-        items[index] = replace(item, status=item_status)
+        items[index] = replace(
+            item,
+            status=item_status,
+            decision_correlation_id=correlation_id,
+        )
         revision = queue["revision"] + 1
         acknowledgement = WorkspaceQueueAcknowledgement(
             correlation_id=correlation_id,
@@ -4791,16 +4893,67 @@ class WorkspaceQueueService:
                 raise ValueError("Workspace Queue receipt correlations must be named")
             if len(receipt_correlations) != len(set(receipt_correlations)):
                 raise ValueError("Workspace Queue receipt correlations must be unique")
-            return {
+            queue = {
                 "schema_version": 1,
                 "revision": data["revision"],
                 "items": [self._parse_item(item) for item in data["items"]],
                 "receipts": receipts,
             }
+            self._validate_item_receipt_identities(queue)
+            return queue
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise WorkspacePersistenceError(
                 f"Workspace Queue persistence read failed: {exc}"
             ) from exc
+
+    @staticmethod
+    def _validate_item_receipt_identities(queue: dict[str, Any]) -> None:
+        proposal_kinds = {
+            "issue-change-proposal": "issue-change-proposal",
+            "frontier-confirmation": "frontier-confirmation-proposal",
+            "ad-hoc-delegation": "ad-hoc-delegation-proposal",
+        }
+        for item in queue["items"]:
+            for correlation_id, expected_kind, label in (
+                (
+                    item.proposal_correlation_id,
+                    proposal_kinds[item.item_type],
+                    "proposal",
+                ),
+                (
+                    item.decision_correlation_id,
+                    "workspace-queue-decision",
+                    "decision",
+                ),
+            ):
+                if not correlation_id:
+                    continue
+                matches = [
+                    receipt
+                    for receipt in queue["receipts"]
+                    if receipt.get("correlation_id") == correlation_id
+                    and isinstance(receipt.get("acknowledgement"), dict)
+                    and receipt["acknowledgement"].get("item_id") == item.item_id
+                ]
+                if len(matches) != 1 or matches[0].get("request_kind") != expected_kind:
+                    raise WorkspacePersistenceError(
+                        f"Workspace Queue {label} receipt identity does not match "
+                        f"canonical item {item.item_id}."
+                    )
+                try:
+                    acknowledgement = WorkspaceQueueAcknowledgement(
+                        **matches[0]["acknowledgement"]
+                    )
+                except TypeError as exc:
+                    raise WorkspacePersistenceError(
+                        f"Workspace Queue {label} receipt identity is invalid for "
+                        f"{item.item_id}."
+                    ) from exc
+                WorkspaceQueueService._validate_queue_acknowledgement(
+                    queue,
+                    receipt=matches[0],
+                    acknowledgement=acknowledgement,
+                )
 
     def _parse_item(self, item: dict[str, Any]) -> WorkspaceQueueItem:
         item_type = item["item_type"]
@@ -4823,6 +4976,14 @@ class WorkspaceQueueService:
         ]:
             if not isinstance(item[field_name], str) or not item[field_name].strip():
                 raise ValueError(f"Workspace Queue {field_name} must not be empty")
+        proposal_correlation_id = item.get("proposal_correlation_id", "")
+        decision_correlation_id = item.get("decision_correlation_id", "")
+        if not isinstance(proposal_correlation_id, str) or not isinstance(
+            decision_correlation_id, str
+        ):
+            raise ValueError("Workspace Queue receipt identities must be strings")
+        if status == "pending" and decision_correlation_id:
+            raise ValueError("Pending Workspace Queue items cannot have a decision receipt")
         return WorkspaceQueueItem(
             item_id=item["item_id"],
             mission_id=item["mission_id"],
@@ -4834,6 +4995,8 @@ class WorkspaceQueueService:
             consequence=item["consequence"],
             issue_id=item["issue_id"],
             proposed_changes=proposed_changes,
+            proposal_correlation_id=proposal_correlation_id,
+            decision_correlation_id=decision_correlation_id,
         )
 
 
@@ -9226,6 +9389,30 @@ class WorkspaceSnapshotService:
             evidence = session.evidence
             issue = mission.issues.get(session.issue_id)
             latest_review = mission._latest_review_for_session(session.session_id)
+            launch_action = session.task_packet.get("queue_approval")
+            if not isinstance(launch_action, dict):
+                launch_action = session.task_packet.get("workstation_action")
+            launch_correlation = (
+                launch_action.get("correlation_id")
+                if isinstance(launch_action, dict)
+                else None
+            )
+            launch_correlation_id = (
+                launch_correlation.strip()
+                if isinstance(launch_correlation, str)
+                else ""
+            )
+            review_correlation = (
+                latest_review.workspace_action.get("correlation_id")
+                if latest_review is not None
+                and isinstance(latest_review.workspace_action, dict)
+                else None
+            )
+            review_correlation_id = (
+                review_correlation.strip()
+                if isinstance(review_correlation, str)
+                else ""
+            )
             review_workspace_repair = WorkstationActionService._review_workspace_repair(
                 mission,
                 session.session_id,
@@ -9264,6 +9451,13 @@ class WorkspaceSnapshotService:
                 test_results=evidence.test_results if evidence else "",
                 risks=evidence.known_risks if evidence else "",
                 artifact_links=tuple(mission.review_artifact_links(session)),
+                launch_correlation_id=launch_correlation_id,
+                evidence_correlation_id=(
+                    f"evidence:{session.session_id}"
+                    if session.evidence_valid and evidence is not None
+                    else ""
+                ),
+                review_correlation_id=review_correlation_id,
                 review_outcome=latest_review.outcome if latest_review else "",
                 review_next_action=latest_review.next_action if latest_review else "",
                 repair_action_available=(

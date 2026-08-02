@@ -269,6 +269,8 @@ test("opens to a console-first workstation with persistent Mission Work beside i
             assigned_agent: "qwen-coder-local",
             status: "running",
             last_activity_at: "2026-07-12T08:31:45+00:00",
+            runner_started_at: "2026-07-12T08:30:00+00:00",
+            launch_correlation_id: "workstation-launch-ISS-01-1",
             role: "local-agent",
             provider: "ollama",
             model: "qwen3.6:27b",
@@ -345,7 +347,8 @@ test("opens to a console-first workstation with persistent Mission Work beside i
   expect(within(transcript).getByText("Implement the next Alfredo workstation slice.")).toBeVisible();
   expect(within(transcript).getByText(/durable and route execution/)).toBeVisible();
   expect(within(transcript).getByText("Workstation action pending: ISS-02 delegation approval required.")).toBeVisible();
-  expect(within(transcript).getByText("Workstation outcome: ISS-01 is running on qwen-coder-local.")).toBeVisible();
+  expect(within(transcript).getByText("Orchestrator started canonical session session-ISS-01-1 for ISS-01 on qwen-coder-local.")).toBeVisible();
+  expect(within(transcript).getByText("Receipt workstation-launch-ISS-01-1 · running")).toBeVisible();
   expect(screen.getByRole("complementary", { name: "Mission Work" })).toBeVisible();
   expect(screen.getByRole("heading", { name: "Mission Work" })).toBeVisible();
   expect(screen.getByRole("heading", { name: "Active Workstations" })).toBeVisible();
@@ -2693,6 +2696,8 @@ test("keeps polling after an empty update batch and discovers out-of-band subage
             issue_id: "ISS-01",
             assigned_agent: "gemma4-12b",
             status: "running",
+            runner_started_at: "2026-07-12T08:30:00+00:00",
+            launch_correlation_id: "workstation-launch-out-of-band",
             role: "local-agent",
             provider: "ollama",
             model: "gemma4:12b",
@@ -2721,7 +2726,7 @@ test("keeps polling after an empty update batch and discovers out-of-band subage
 
   expect(await screen.findByText("Execution Session running")).toBeVisible();
   expect(loads).toBeGreaterThanOrEqual(3);
-  expect(screen.getByText(/Workstation outcome: ISS-01 is running on gemma4-12b/)).toBeVisible();
+  expect(screen.getByText(/Orchestrator started canonical session session-out-of-band for ISS-01 on gemma4-12b/)).toBeVisible();
 });
 
 test("quiet polling retries transient failures without replacing identical canonical state", async () => {
@@ -8104,6 +8109,8 @@ test("restores durable delegation milestones beside their originating controller
         affected_boundary: "ad-hoc-delegation",
         consequence: "Approval queues one bounded Local Agent session.",
         issue_id: "ADHOC-000042",
+        proposal_correlation_id: "proposal-order-42",
+        decision_correlation_id: "approval-order-42",
         proposed_changes: {
           originating_message_id: "console-order-origin",
         },
@@ -8181,6 +8188,9 @@ test("restores durable delegation milestones beside their originating controller
   const queued = within(transcript).getByText(
     "Orchestrator queued coding task ADHOC-000042 as session-ADHOC-000042 on gemma4-12b.",
   );
+  expect(within(proposal.closest("article")!).getByText("Receipt proposal-order-42 · proposal")).toBeVisible();
+  expect(within(decision.closest("article")!).getByText("Receipt approval-order-42 · decision")).toBeVisible();
+  expect(within(queued.closest("article")!).getByText("Receipt approval-order-42 · session-queued")).toBeVisible();
   const laterChat = within(transcript).getByText(
     "While that runs, explain the documentation layout.",
   );
@@ -8194,6 +8204,72 @@ test("restores durable delegation milestones beside their originating controller
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
   }
+});
+
+test("renders running evidence Review Decision and accepted completion as distinct receipt-bound milestones", async () => {
+  const lifecycleSnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 3,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ADHOC-000042",
+            issue_id: "ADHOC-000042",
+            assigned_agent: "gemma4-12b",
+            status: "reviewed",
+            runner_started_at: "2026-08-02T10:00:00Z",
+            launch_correlation_id: "approval-order-42",
+            evidence_correlation_id: "evidence:session-ADHOC-000042",
+            review_correlation_id: "review-order-42",
+            review_outcome: "Approved",
+            review_next_action: "complete",
+          },
+        ],
+        attention: [],
+      },
+    ],
+  };
+  const lifecycleClient: WorkspaceClient = {
+    loadSnapshot: async () => ({ kind: "ready", snapshot: lifecycleSnapshot }),
+    loadConsoleHistory: async () => ({
+      kind: "history",
+      history: { schema_version: 1, messages: [] },
+    }),
+  };
+
+  render(<App client={lifecycleClient} />);
+
+  const transcript = await screen.findByRole("region", { name: "Prompt Transcript" });
+  const running = await within(transcript).findByText(
+    "Orchestrator started canonical session session-ADHOC-000042 for ADHOC-000042 on gemma4-12b.",
+  );
+  const evidence = within(transcript).getByText(
+    "Local Agent gemma4-12b submitted validated evidence for session-ADHOC-000042.",
+  );
+  const decision = within(transcript).getByText(
+    "Review Decision: Approved for session-ADHOC-000042.",
+  );
+  const completion = within(transcript).getByText(
+    "Accepted completion: session-ADHOC-000042 is complete.",
+  );
+  expect(within(running.closest("article")!).getByText("Receipt approval-order-42 · running")).toBeVisible();
+  expect(within(evidence.closest("article")!).getByText("Receipt evidence:session-ADHOC-000042 · evidence")).toBeVisible();
+  expect(within(decision.closest("article")!).getByText("Receipt review-order-42 · review-decision")).toBeVisible();
+  expect(within(completion.closest("article")!).getByText("Receipt review-order-42 · accepted-completion")).toBeVisible();
+  const turns = [running, evidence, decision, completion].map((node) =>
+    node.closest("[data-timeline-key]"),
+  );
+  for (let index = 0; index < turns.length - 1; index += 1) {
+    expect(
+      turns[index]!.compareDocumentPosition(turns[index + 1]!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  }
+  expect(within(transcript).queryByText(/Workstation outcome:/)).not.toBeInTheDocument();
 });
 
 test("auto-follows near the transcript end without yanking a reader from older turns", async () => {
@@ -9300,6 +9376,9 @@ test("keeps discussion in controller chat instead of creating a coding proposal"
           scope: snapshot.conversation_scope,
           outcome: "model-commentary",
           source: "frontier-model",
+          action_outcome: "no-action",
+          action_message:
+            "No action taken. Controller prose is commentary and no correlated Orchestrator receipt exists.",
         },
         route: { intent: "discussion", task_request: "", acceptance_criteria: [] },
       };
@@ -9316,6 +9395,11 @@ test("keeps discussion in controller chat instead of creating a coding proposal"
 
   expect(await screen.findByText("Please explain how workspace restoration works.")).toBeVisible();
   expect(await screen.findByText("I can respond as the configured controller.")).toBeVisible();
+  const noAction = await screen.findByText(
+    "No action taken. Controller prose is commentary and no correlated Orchestrator receipt exists.",
+  );
+  expect(noAction).toBeVisible();
+  expect(noAction.closest('[data-authority="commentary"]')).not.toBeNull();
   expect(responseRequests).toEqual([
     {
       expected_revision: 4,
@@ -9329,6 +9413,55 @@ test("keeps discussion in controller chat instead of creating a coding proposal"
   ]);
   expect(messageRequests).toHaveLength(1);
   expect(submitAdHocDelegationProposal).not.toHaveBeenCalled();
+});
+
+test("renders exact receipt identity only on correlated canonical Agent Console events", async () => {
+  const receiptClient: WorkspaceClient = {
+    loadSnapshot: async () => ({ kind: "ready", snapshot }),
+    loadConsoleHistory: async () => ({
+      kind: "history",
+      history: {
+        schema_version: 1,
+        messages: [
+          {
+            message_id: "console-receipt-1",
+            sequence: 1,
+            role: "assistant",
+            content: "Orchestrator queued the exact acknowledged session.",
+            scope: snapshot.conversation_scope,
+            outcome: "acknowledged",
+            source: "orchestrator",
+            correlation_id: "queue-approval-42",
+            action_phase: "session-queued",
+          },
+          {
+            message_id: "console-commentary-2",
+            sequence: 2,
+            role: "assistant",
+            content: "This explanation remains controller commentary.",
+            scope: snapshot.conversation_scope,
+            outcome: "model-commentary",
+            source: "frontier-model",
+            action_outcome: "no-action",
+            action_message:
+              "No action taken. Controller prose is commentary and no correlated Orchestrator receipt exists.",
+          },
+        ],
+      },
+    }),
+  };
+
+  render(<App client={receiptClient} />);
+  const transcript = await screen.findByRole("region", { name: "Prompt Transcript" });
+
+  expect(
+    within(transcript).getByText("Receipt queue-approval-42 · session-queued"),
+  ).toBeVisible();
+  const commentary = within(transcript).getByText(
+    "This explanation remains controller commentary.",
+  ).closest("article");
+  expect(commentary).not.toBeNull();
+  expect(within(commentary!).queryByText(/^Receipt /)).not.toBeInTheDocument();
 });
 
 test("routes ambiguous check prompts through the controller instead of auto-authorizing work", async () => {
