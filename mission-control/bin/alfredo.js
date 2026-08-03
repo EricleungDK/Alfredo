@@ -10,8 +10,16 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
-import { basename, delimiter, dirname, resolve } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import {
+  basename,
+  delimiter,
+  dirname,
+  isAbsolute,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { DesktopAdapterError, resolveDesktopAdapter } from "./desktop-adapter.js";
@@ -69,6 +77,53 @@ function runtimeRoot() {
   return process.env.ALFREDO_RUNTIME_ROOT
     ? resolve(process.env.ALFREDO_RUNTIME_ROOT)
     : resolve(homedir(), ".alfredo", "runtime");
+}
+
+function pathIsInsideOrEqual(candidate, root) {
+  const relativePath = relative(resolve(root), resolve(candidate));
+  return (
+    relativePath === "" ||
+    (relativePath !== ".." &&
+      !relativePath.startsWith(`..${sep}`) &&
+      !isAbsolute(relativePath))
+  );
+}
+
+function protectedInstallRoots() {
+  return [
+    backendRoot,
+    projectRoot,
+    runtimeRoot(),
+    process.env.ALFREDO_INSTALL_ROOT?.trim(),
+  ]
+    .filter(Boolean)
+    .map((path) => resolve(path));
+}
+
+function startingLocationIsProtected(path) {
+  return protectedInstallRoots().some((root) => pathIsInsideOrEqual(path, root));
+}
+
+function safeStartingLocation() {
+  const configured = process.env.ALFREDO_STARTING_LOCATION?.trim()
+    ? resolve(process.env.ALFREDO_STARTING_LOCATION)
+    : resolve(process.cwd());
+  if (!startingLocationIsProtected(configured)) return configured;
+
+  let candidate = configured;
+  while (startingLocationIsProtected(candidate)) {
+    const parent = resolve(candidate, "..");
+    if (parent === candidate) break;
+    candidate = parent;
+  }
+  if (existsSync(candidate) && !startingLocationIsProtected(candidate)) {
+    return candidate;
+  }
+
+  return [dirname(backendRoot), dirname(runtimeRoot()), tmpdir()]
+    .map((path) => resolve(path))
+    .find((path) => existsSync(path) && !startingLocationIsProtected(path))
+    ?? configured;
 }
 
 function agentRegistry() {
@@ -561,6 +616,7 @@ function parseWorkstationLaunch(argv) {
     throw new Error(`Unsupported workstation option: ${arg}`);
   }
   const { selectedAgent, selectedAgentConfig } = resolveWorkstationAgent(explicitSelectedAgent);
+  const startingLocation = safeStartingLocation();
   const plan = {
     product: "Alfredo",
     launch: "workstation",
@@ -569,11 +625,11 @@ function parseWorkstationLaunch(argv) {
     runtime_root: runtimeRoot(),
     project_root: projectRoot,
     backend_root: backendRoot,
-    starting_location: process.cwd(),
+    starting_location: startingLocation,
     workspace_selection: {
       schema_version: 1,
       phase: "selection-required",
-      starting_location: process.cwd(),
+      starting_location: startingLocation,
       coding_workspace: null,
       active_mission: null,
     },

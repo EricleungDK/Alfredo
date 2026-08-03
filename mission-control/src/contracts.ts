@@ -44,6 +44,8 @@ export interface AlfredoLaunchContext {
   readonly selected_agent: string;
   readonly selected_model: string;
   readonly starting_location: string;
+  /** Backend-computed create target; null means no safe child target exists. */
+  readonly suggested_workspace_path?: string | null;
   readonly coding_workspace: string | null;
   readonly active_mission: string | null;
   readonly revision?: number;
