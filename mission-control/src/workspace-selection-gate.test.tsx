@@ -23,6 +23,28 @@ function snapshotMustRemainBlocked() {
   });
 }
 
+test("prefills a safe child path below the Starting Location", async () => {
+  render(
+    <App
+      client={{
+        loadLaunchContext: async () => ({
+          kind: "launch-context",
+          context: selectionRequiredContext,
+        }),
+        loadSnapshot: snapshotMustRemainBlocked(),
+      }}
+    />,
+  );
+
+  const workspacePath = await screen.findByRole("textbox", {
+    name: "Coding Workspace path",
+  });
+  await waitFor(() =>
+    expect(workspacePath).toHaveValue("/home/mission-commander/projects/workspace"),
+  );
+  expect(screen.getByRole("button", { name: "Create new repository" })).toBeEnabled();
+});
+
 test("keeps Coding Workspace selection pending until the Orchestrator acknowledges it", async () => {
   let acknowledgeSelection!: (
     value: Awaited<ReturnType<NonNullable<WorkspaceClient["selectCodingWorkspace"]>>>,
@@ -304,6 +326,7 @@ test("keeps selection required after a structured failure and permits an acknowl
 
   const failure = await screen.findByRole("alert");
   expect(failure).toHaveTextContent("workspace-unsafe");
+  expect(failure).toHaveTextContent("Choose a repository below Starting Location");
   expect(screen.getByText("Choose or create a repository")).toBeVisible();
   expect(screen.queryByText("Mission selection required")).not.toBeInTheDocument();
   expect(loadSnapshot).not.toHaveBeenCalled();
