@@ -11,7 +11,6 @@ from inspect import signature
 import json
 import os
 from pathlib import Path
-import re
 import shlex
 import shutil
 import subprocess
@@ -2801,16 +2800,13 @@ class AgentConsoleResponseService:
     _MALFORMED_RESPONSE_MESSAGE = (
         "The controller response was malformed and remains discussion. No action taken."
     )
-    _UNVERIFIED_EFFECT_CLAIM_MESSAGE = (
-        "The controller returned an unverified effect claim. No action claim was retained."
+    _NON_AUTHORITATIVE_DISCUSSION_MESSAGE = (
+        "Controller classified this prompt as discussion. Untrusted reply prose was "
+        "not retained. No action taken."
     )
-    _EFFECT_CLAIM_PATTERN = re.compile(
-        r"(?:\b(?:done|complete|completed|finished|successful|succeeded)\b|"
-        r"\b(?:proposed|approved|queued|launched|started|created|wrote|written|"
-        r"updated|changed|modified|deleted|removed|reviewed|accepted|implemented|"
-        r"fixed|ran|executed|applied|saved|submitted|recorded)\b|"
-        r"\b(?:now\s+exists|exists\s+now)\b)",
-        re.IGNORECASE,
+    _NON_AUTHORITATIVE_CODING_ROUTE_MESSAGE = (
+        "Controller classified this prompt as a coding task. Untrusted reply prose "
+        "was not retained; no action has occurred."
     )
 
     def __init__(self, snapshots: "WorkspaceSnapshotService"):
@@ -2851,9 +2847,13 @@ class AgentConsoleResponseService:
         if content is None:
             agent = self._select_agent(agent_id)
             controller_output = self._controller_response(agent, latest)
-            content, route = self._parse_controller_output(controller_output)
-            if self._EFFECT_CLAIM_PATTERN.search(content):
-                content = self._UNVERIFIED_EFFECT_CLAIM_MESSAGE
+            parsed_reply, route = self._parse_controller_output(controller_output)
+            if parsed_reply == self._MALFORMED_RESPONSE_MESSAGE:
+                content = parsed_reply
+            elif route.intent == "coding-task":
+                content = self._NON_AUTHORITATIVE_CODING_ROUTE_MESSAGE
+            else:
+                content = self._NON_AUTHORITATIVE_DISCUSSION_MESSAGE
         if latest.content.lstrip().startswith("/"):
             route = self._discussion_route()
         action_outcome: AgentConsoleActionOutcome = (
@@ -8901,6 +8901,7 @@ class ActivityJournalService:
             ),
             evidence_links=evidence_links,
             correlation_id=session.evidence_correlation_id,
+            replay_existing=True,
         )
 
     def _shell_command_entities(

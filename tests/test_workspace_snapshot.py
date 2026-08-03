@@ -9176,7 +9176,11 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(message["role"], "assistant")
         self.assertEqual(message["outcome"], "model-commentary")
         self.assertEqual(message["source"], "frontier-model")
-        self.assertEqual(message["content"], "assistant response; AGENTS=True")
+        self.assertEqual(
+            message["content"],
+            "Controller classified this prompt as discussion. Untrusted reply prose "
+            "was not retained. No action taken.",
+        )
         self.assertEqual(
             response["route"],
             {
@@ -9241,7 +9245,8 @@ class WorkspaceSnapshotTest(unittest.TestCase):
 
         self.assertEqual(
             response.message.content,
-            "I can route that as a bounded coding task.",
+            "Controller classified this prompt as a coding task. Untrusted reply "
+            "prose was not retained; no action has occurred.",
         )
         self.assertEqual(response.route.intent, "coding-task")
         self.assertEqual(response.route.task_request, "Make polling reliable.")
@@ -9321,7 +9326,7 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(response.route.intent, "discussion")
         self.assertEqual(response.message.outcome, "model-commentary")
         self.assertNotIn("created the requested folder", response.message.content)
-        self.assertIn("unverified effect claim", response.message.content.casefold())
+        self.assertIn("untrusted reply prose", response.message.content.casefold())
         self.assertEqual(response.message.action_outcome, "no-action")
         self.assertEqual(
             response.message.action_message,
@@ -9356,6 +9361,17 @@ class WorkspaceSnapshotTest(unittest.TestCase):
             "Your changes are complete.",
             "The requested work succeeded.",
             "The requested folder now exists.",
+            "All set — the requested folder is in place.",
+            "The folder has been added.",
+            "The review passed.",
+            "The patch is live.",
+            "I've made the requested changes.",
+            "Added the requested file.",
+            "I set up the folder.",
+            "The fix is now in place.",
+            "All set.",
+            "I built the feature.",
+            "I generated the file.",
         ]
         outputs = [
             subprocess.CompletedProcess(
@@ -9404,7 +9420,7 @@ class WorkspaceSnapshotTest(unittest.TestCase):
                     )
                     self.assertNotEqual(response.message.content, claim)
                     self.assertIn(
-                        "unverified effect claim",
+                        "untrusted reply prose",
                         response.message.content.casefold(),
                     )
                     self.assertEqual(response.message.action_outcome, "no-action")
@@ -9466,6 +9482,78 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(response.message.action_outcome, "no-action")
         self.assertEqual(WorkspaceQueueService(snapshots).inspect().items, ())
         self.assertEqual(snapshots._primary_mission.sessions, {})
+
+    def test_exact_evidence_replay_repairs_missing_activity_receipt_once(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        session = LocalAgentSession(
+            session_id="session-ISS-01-evidence-recovery",
+            issue_id="ISS-01",
+            assigned_agent="qwen-coder-local-1",
+            worktree_path=self.target_repo,
+            task_packet={"goal": "Recover the exact evidence receipt."},
+        )
+        mission.sessions[session.session_id] = session
+        mission._persist()
+        evidence = EvidencePackage(
+            changed_files=["docs/evidence-recovery.md"],
+            diff_summary="Recorded evidence before the Activity Journal write failed.",
+            commands_run=["python3 -m unittest tests.test_workspace_snapshot"],
+            test_results="Focused receipt recovery passed.",
+            known_risks="None.",
+            proposed_context_updates="Document exact evidence replay recovery.",
+            artifact_links=[f"app-local://evidence/{session.session_id}"],
+        )
+        journal_path = ActivityJournalService(snapshots).journal_path
+        original_write = WorkspaceSnapshotService._write_json_atomically
+
+        def fail_evidence_journal_write(
+            path: Path,
+            data: dict[str, object],
+        ) -> None:
+            if path == journal_path:
+                raise OSError("simulated evidence journal write failure")
+            original_write(path, data)
+
+        with patch.object(
+            WorkspaceSnapshotService,
+            "_write_json_atomically",
+            side_effect=fail_evidence_journal_write,
+        ):
+            with self.assertRaisesRegex(
+                WorkspacePersistenceError,
+                "Activity Journal persistence write failed",
+            ):
+                mission.record_evidence(session.session_id, evidence)
+
+        interrupted = self.load_service()
+        interrupted_session = interrupted._primary_mission.sessions[session.session_id]
+        self.assertEqual(interrupted_session.evidence, evidence)
+        self.assertEqual(
+            interrupted_session.evidence_correlation_id,
+            f"evidence:command-deck:{session.session_id}",
+        )
+        self.assertEqual(
+            [
+                entry
+                for entry in ActivityJournalService(interrupted).inspect().entries
+                if entry.action_type == "evidence-package-submitted"
+            ],
+            [],
+        )
+
+        interrupted._primary_mission.record_evidence(session.session_id, evidence)
+        self.load_service()._primary_mission.record_evidence(session.session_id, evidence)
+        evidence_entries = [
+            entry
+            for entry in ActivityJournalService(self.load_service()).inspect().entries
+            if entry.action_type == "evidence-package-submitted"
+        ]
+        self.assertEqual(len(evidence_entries), 1)
+        self.assertEqual(
+            evidence_entries[0].correlation_id,
+            interrupted_session.evidence_correlation_id,
+        )
 
     def test_controller_route_safely_falls_back_to_discussion(self) -> None:
         snapshots = self.load_service()
@@ -9969,7 +10057,11 @@ class WorkspaceSnapshotTest(unittest.TestCase):
                 agent_id="bounded-controller",
             )
 
-        self.assertEqual(response.message.content, "bounded controller response")
+        self.assertEqual(
+            response.message.content,
+            "The controller response was malformed and remains discussion. "
+            "No action taken.",
+        )
         self.assertFalse(marker.exists())
 
     def test_ollama_controller_response_disables_thinking_with_single_flag_token(self) -> None:
@@ -9998,7 +10090,16 @@ class WorkspaceSnapshotTest(unittest.TestCase):
             run.return_value = subprocess.CompletedProcess(
                 args=[],
                 returncode=0,
-                stdout="Controller reply\n",
+                stdout=json.dumps(
+                    {
+                        "reply": "Controller reply",
+                        "route": {
+                            "intent": "discussion",
+                            "task_request": "",
+                            "acceptance_criteria": [],
+                        },
+                    }
+                ),
                 stderr="",
             )
             message = AgentConsoleResponseService(snapshots).respond(
@@ -10012,7 +10113,7 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertIn("--think=false", command)
         self.assertNotIn("--think", command)
         self.assertNotIn("false", command)
-        self.assertEqual(message.message.content, "Controller reply")
+        self.assertIn("Untrusted reply prose was not retained", message.message.content)
 
     def test_agent_console_help_and_status_commands_do_not_require_model_inference(self) -> None:
         snapshots = self.load_service()
@@ -10155,7 +10256,19 @@ class WorkspaceSnapshotTest(unittest.TestCase):
                 )
             )
             return subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="Navigation-safe reply.\n", stderr=""
+                args=[],
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "reply": "Navigation-safe reply.",
+                        "route": {
+                            "intent": "discussion",
+                            "task_request": "",
+                            "acceptance_criteria": [],
+                        },
+                    }
+                ),
+                stderr="",
             )
 
         with patch(
@@ -10172,7 +10285,7 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(snapshots.snapshot().revision, 2)
         self.assertNotEqual(snapshots.snapshot().conversation_scope, original_scope)
         self.assertEqual(response.message.scope, original_scope)
-        self.assertEqual(response.message.content, "Navigation-safe reply.")
+        self.assertIn("Untrusted reply prose was not retained", response.message.content)
 
     def test_controller_response_uses_correlated_prompt_when_a_later_prompt_exists(
         self,
@@ -10209,7 +10322,19 @@ class WorkspaceSnapshotTest(unittest.TestCase):
 
         with patch("albert_mvp.workspace._run_bounded_process") as run:
             run.return_value = subprocess.CompletedProcess(
-                args=[], returncode=0, stdout="First request answered.\n", stderr=""
+                args=[],
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "reply": "First request answered.",
+                        "route": {
+                            "intent": "discussion",
+                            "task_request": "",
+                            "acceptance_criteria": [],
+                        },
+                    }
+                ),
+                stderr="",
             )
             response = AgentConsoleResponseService(snapshots).respond(
                 message_id=correlated.message_id,
@@ -10221,7 +10346,7 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         controller_prompt = run.call_args.kwargs["input_text"]
         self.assertIn("CORRELATED-PROMPT", controller_prompt)
         self.assertNotIn("LATER-PROMPT", controller_prompt)
-        self.assertEqual(response.message.content, "First request answered.")
+        self.assertIn("Untrusted reply prose was not retained", response.message.content)
 
     def test_controller_response_rejects_unknown_or_non_user_message_correlation(
         self,

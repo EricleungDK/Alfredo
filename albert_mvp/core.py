@@ -2527,6 +2527,12 @@ class AlbertMission:
                 and session.evidence == evidence
                 and session.evidence_valid
             ):
+                if self._evidence_activity_recorder is not None:
+                    self._evidence_activity_recorder(
+                        self.mission_id,
+                        session,
+                        evidence,
+                    )
                 return
             raise AlbertError(
                 f"Evidence correlation id was already used for a different package: "
