@@ -447,9 +447,36 @@ export interface AgentConsoleResponseRoute {
   readonly acceptance_criteria: readonly string[];
 }
 
+export type WayfinderMode = "outside" | "chart" | "work-through";
+export type WayfinderGateStatus = "not-applicable" | "pending" | "open";
+
+export interface WayfinderGate {
+  readonly status: WayfinderGateStatus;
+  readonly opened_by: string;
+  readonly receipt_id: string;
+}
+
+export interface WayfinderFlow {
+  readonly flow_id: string;
+  readonly mode: "chart" | "work-through";
+  readonly originating_message_id: string;
+  readonly scope: ConversationScope;
+  readonly reference: string;
+}
+
+export interface WayfinderProjection {
+  readonly mode: WayfinderMode;
+  readonly gate: WayfinderGate;
+  readonly flow: WayfinderFlow | null;
+  readonly continuing: boolean;
+  readonly turn_complete: boolean;
+}
+
 export interface AgentConsoleResponseProjection {
   readonly message: AgentConsoleMessage;
   readonly route: AgentConsoleResponseRoute;
+  /** Omitted only by a compatible pre-Wayfinder backend. */
+  readonly wayfinder?: WayfinderProjection;
 }
 
 export type AgentConsoleResponseResult =
@@ -457,6 +484,7 @@ export type AgentConsoleResponseResult =
       readonly kind: "message";
       readonly message: AgentConsoleMessage;
       readonly route: AgentConsoleResponseRoute;
+      readonly wayfinder?: WayfinderProjection;
     }
   | {
       readonly kind: "message-rejected";

@@ -15,6 +15,96 @@ from albert_mvp.server import serve
 
 
 class PersistentOrchestratorServerTests(unittest.TestCase):
+    def test_warm_transport_preserves_the_typed_wayfinder_chart_route(self) -> None:
+        with tempfile.TemporaryDirectory() as root_value:
+            root = Path(root_value)
+            target = root / "target"
+            tracker = root / "tracker"
+            issues = tracker / "issues"
+            target.mkdir()
+            issues.mkdir(parents=True)
+            (tracker / "PRD.md").write_text("# Wayfinder Mission\n", encoding="utf-8")
+            (issues / "01-wayfinder.md").write_text(
+                "# Wayfinder\n\nStatus: ready-for-agent\nType: AFK\n\n"
+                "## What to build\n\nRoute work through Wayfinder.\n\n"
+                "## Acceptance criteria\n\n- [ ] Wayfinder route is visible.\n\n"
+                "## Blocked by\n\nNone - can start immediately.\n",
+                encoding="utf-8",
+            )
+            common = [
+                "--target-repo",
+                str(target),
+                "--tracker-dir",
+                str(tracker),
+                "--runtime-root",
+                str(root / "runtime"),
+                "--mission-id",
+                "wayfinder",
+            ]
+            canonical_target = str(target.resolve())
+            requests = io.StringIO(
+                "\n".join(
+                    json.dumps(request)
+                    for request in [
+                        {
+                            "id": "prompt",
+                            "argv": [
+                                "agent-console-message",
+                                *common,
+                                "--role",
+                                "user",
+                                "--content",
+                                "Start a new project for governed release planning.",
+                                "--outcome",
+                                "proposed",
+                                "--source",
+                                "mission-commander",
+                                "--expected-revision",
+                                "1",
+                                "--scope-kind",
+                                "working-directory",
+                                "--scope-target",
+                                canonical_target,
+                                "--scope-label",
+                                "target",
+                            ],
+                        },
+                        {
+                            "id": "response",
+                            "argv": [
+                                "agent-console-response",
+                                *common,
+                                "--message-id",
+                                "console-000001",
+                                "--expected-revision",
+                                "1",
+                                "--scope-kind",
+                                "working-directory",
+                                "--scope-target",
+                                canonical_target,
+                                "--scope-label",
+                                "target",
+                            ],
+                        },
+                    ]
+                )
+                + "\n"
+            )
+            responses = io.StringIO()
+
+            serve(requests, responses)
+
+            payloads = [json.loads(line) for line in responses.getvalue().splitlines()]
+            self.assertEqual(
+                [(item["id"], item["success"]) for item in payloads],
+                [("prompt", True), ("response", True)],
+                payloads,
+            )
+            response = json.loads(payloads[1]["stdout"])
+            self.assertEqual(response["route"]["intent"], "discussion")
+            self.assertEqual(response["wayfinder"]["mode"], "chart")
+            self.assertEqual(response["wayfinder"]["gate"]["status"], "pending")
+
     def test_warm_transport_carries_workspace_selection_and_mission_choice(self) -> None:
         with tempfile.TemporaryDirectory() as root_value:
             root = Path(root_value)

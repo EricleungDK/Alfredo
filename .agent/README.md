@@ -66,6 +66,7 @@
 
 - [Alfredo install and Queue acceptance correction](Reports/2026-07-12-alfredo-install-queue-acceptance-correction.md) is the current release/acceptance report and explicitly supersedes the 2026-07-11 package-completion claim.
 - [Conversational action receipt binding](Reports/2026-08-02-conversational-action-receipts.md) records the Issue #59 implementation, public seams, and verification evidence.
+- [Wayfinder Shared Understanding Gate](Reports/2026-08-03-wayfinder-shared-understanding-gate.md) records the Issue #60 canonical entry, gate, and projection contract.
 - [Workspace selection and false-success diagnosis](Reports/2026-07-24-workspace-selection-false-success-diagnosis.md) records the defect and the receipt-truth blueprint resolved by Issue #59.
 - [Alfredo one-shot workstation correction](Reports/2026-07-11-alfredo-one-shot-workstation.md) remains the historical implementation report.
 - Historical implementation reports remain in [`Reports/`](Reports/) and are indexed from [project architecture](System/project_architecture.md#implementation-report-index).

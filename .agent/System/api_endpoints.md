@@ -1,6 +1,6 @@
 # API Endpoints and Command Boundaries
 
-**Last Updated:** 2026-08-02
+**Last Updated:** 2026-08-03
 
 Alfredo is a local desktop application, not an HTTP service. Its public application boundary is a versioned JSON command protocol shared by the React client, the Tauri bridge, the persistent Python server, and the one-process Python CLI fallback. Python remains authoritative; Tauri validates and transports typed payloads, while React renders acknowledged projections.
 
@@ -12,7 +12,7 @@ The endpoint families are:
 |---|---|---|
 | Launch and selection | Tauri `alfredo_launch_context`, `coding_workspace_select`, `mission_choice`; CLI/persistent `coding-workspace-select`, `mission-options`, `mission-choice`, `workspace-context` | Expose Starting Location with no implicit repository, acknowledge an exact Git repository, require explicit Mission choice, and restore the exact acknowledged journey |
 | Workspace projection | `workspace-snapshot`, `workspace-updates`, `workspace-action` | Load canonical state and apply expected-revision navigation/preferences |
-| Agent Console | `agent-capabilities`, `agent-console-message`, `agent-console-response`, `agent-console-history` | Discover commands/skills/models, append a prompt, generate typed controller commentary with an explicit action outcome, and restore chronology |
+| Agent Console | `agent-capabilities`, `agent-console-message`, `agent-console-response`, `agent-console-history` | Discover commands/skills/models, append a prompt, route a typed Wayfinder first contact when applicable or generate controller commentary, and restore chronology |
 | Working Context | `working-context`, `working-context-curate`, `workspace-scope` | Inspect bounded context and deliberately curate or qualify a prompt |
 | Governed work | `workspace-queue`, `workspace-queue-decision`, `ad-hoc-delegation-proposal`, `workstation-action` | Propose, approve, assign, launch, cancel, and inspect Mission-qualified work |
 | Deferred execution | `workstation-session-run` | Claim exactly one persisted queued session and run it outside the UI request path |
@@ -66,7 +66,7 @@ Local model prompts run with sanitized environments and minimal Bubblewrap mount
 
 The persistent envelope returns the same transport `id`, `success`, and captured `stdout`/`stderr`; successful stdout contains the typed JSON projection emitted by the selected CLI command. Canonical state projections carry the schema version and revision required by their own contract; response-only projections such as Agent Console routing or Session Artifact content intentionally omit an unrelated workspace revision. Mutations distinguish acknowledged, queued/pending, and rejected outcomes; a task acknowledgement is never presented as completed execution. Agent Console records preserve a single arrival-ordered chronology. Controller replies persist `action_outcome: no-action | awaiting-orchestrator` and the exact fixed `action_message` for that enum; append and read reject substituted copy. Neither value is an effect receipt, and commentary cannot carry `correlation_id`/`action_phase`. Canonical Console and Workstation acknowledgement events instead carry the exact returned correlation plus phase. Session projections expose launch only from one matching Queue/Workstation request and acknowledgement, evidence only from the persisted Mission-qualified Evidence Package identity, and review only from matching Review request, workspace event, and Journal decision.
 
-`agent-console-response` returns the persisted assistant message and a typed controller route:
+`agent-console-response` returns the persisted assistant message, a typed route, and an optional Wayfinder projection. The Python response boundary resolves Wayfinder before controller routing: a new project or consequential change enters `chart`; a fresh Wayfinder map/ticket reference enters `work-through`; a durable active flow continues without nesting. Read-only explanation, status, review, diagnosis, and inspection do not automatically enter Chart mode. The projection carries `mode`, `gate.status` (`pending | open`), optional active-flow identity, and `turn_complete`. Gate opening is limited to an explicit Mission Commander confirmation or visible structured agent acknowledgement; acknowledgement ends the turn and never auto-invokes a skill, creates an artifact, delegates, or launches production work.
 
 ```json
 {
@@ -82,11 +82,19 @@ The persistent envelope returns the same transport `id`, `success`, and captured
     "intent": "coding-task",
     "task_request": "Improve the polling reliability.",
     "acceptance_criteria": ["Polling recovers after a transient transport failure."]
+  },
+  "wayfinder": {
+    "mode": "outside",
+    "gate": {"status": "not-applicable"},
+    "active_flow": null,
+    "turn_complete": false
   }
 }
 ```
 
 The only route intents are `discussion` and `coding-task`. Invalid JSON, extra fields, blank or oversized values, invalid criteria, and unsupported intent values produce a fixed malformed-response discussion message and cannot preserve the model's prose. Valid model output also cannot make free-form reply prose authoritative: Alfredo discards the raw reply and persists a deterministic discussion or coding-route template while retaining only the bounded typed route fields. This structural boundary covers success idioms without maintaining an enumerable verb blacklist. Deterministic slash commands never become coding-task routes. Explicit delegation has narrow deterministic prefix and suffix forms—such as `Please ask a subagent to fix …` and `fix … with a subagent`—while questions, explanations, and ambiguous checks remain controller discussion. React renders commentary and its no-action/awaiting outcome separately from proposal, decision, queued, running, evidence, Review Decision, and accepted-completion events; each effect milestone displays its exact canonical correlation and phase. See the [false-success diagnosis](../Reports/2026-07-24-workspace-selection-false-success-diagnosis.md) and [Issue #59 implementation report](../Reports/2026-08-02-conversational-action-receipts.md).
+
+When a Wayfinder flow has a pending gate, `mission-draft-create`, `mission-draft-confirm`, `ad-hoc-delegation-proposal`, approval of an Ad Hoc Delegation, and `workstation-action` session launch commands reject with the recoverable stable error `shared-understanding-required` before they mutate canonical state. Read-only/discovery boundaries remain available.
 
 Illustrative response:
 

@@ -30,6 +30,7 @@ import type {
   ReviewWorkspaceProjection,
   SessionArtifactProjection,
   SessionArtifactReadRequest,
+  WayfinderProjection,
   WorkingContextProjection,
   WorkspaceQueueDecision,
   WorkspaceQueueItem,
@@ -408,6 +409,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   >(null);
   const messageSubmissionInFlightRef = useRef(false);
   const [messageFailure, setMessageFailure] = useState<string | null>(null);
+  const [wayfinder, setWayfinder] = useState<WayfinderProjection | null>(null);
   const [workingContext, setWorkingContext] = useState<WorkingContextProjection | null>(null);
   const [workingContextLoadFailure, setWorkingContextLoadFailure] = useState<string | null>(null);
   const [consoleHistoryLoadFailure, setConsoleHistoryLoadFailure] = useState<string | null>(null);
@@ -1691,6 +1693,11 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       if (response.kind === "message") {
         registerConsoleTimelineMessage(response.message);
         setConsoleHistory((messages) => [...messages, response.message]);
+        setWayfinder(
+          response.wayfinder && response.wayfinder.mode !== "outside"
+            ? response.wayfinder
+            : null,
+        );
         if (response.route.intent === "coding-task") {
           await delegateCodingTask({
             request: response.route.task_request,
@@ -2605,6 +2612,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       onSend={submitMessage}
       messageStatus={messageStatus}
       messageFailure={messageFailure}
+      wayfinder={wayfinder}
       workingContext={workingContext}
       workingContextLoadFailure={workingContextLoadFailure}
       onWorkingContextRetry={() => void refreshWorkingContext()}
@@ -3267,6 +3275,7 @@ function CommandDeck({
   onSend,
   messageStatus,
   messageFailure,
+  wayfinder,
   workingContext,
   workingContextLoadFailure,
   onWorkingContextRetry,
@@ -3343,6 +3352,7 @@ function CommandDeck({
   onSend: () => void;
   messageStatus: "saving" | "responding" | "rejected" | null;
   messageFailure: string | null;
+  wayfinder: WayfinderProjection | null;
   workingContext: WorkingContextProjection | null;
   workingContextLoadFailure: string | null;
   onWorkingContextRetry: () => void;
@@ -4021,6 +4031,22 @@ function CommandDeck({
                 <button type="button" onClick={onReconnect}>Reconnect</button>
               ) : null}
             </div>
+
+            {wayfinder ? (
+              <p
+                className="wayfinder-route"
+                role="status"
+                aria-label="Wayfinder route"
+                data-wayfinder-mode={wayfinder.mode}
+                data-wayfinder-gate={wayfinder.gate.status}
+              >
+                <strong>
+                  Wayfinder / {wayfinder.mode === "chart" ? "Chart" : "Work-through"} mode
+                </strong>
+                <span>Shared Understanding Gate {wayfinder.gate.status}</span>
+                {wayfinder.continuing ? <small>Continuing the durable active flow.</small> : null}
+              </p>
+            ) : null}
 
             <div className="console-stage">
             <div

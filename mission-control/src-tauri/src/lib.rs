@@ -1552,6 +1552,51 @@ pub enum AgentConsoleResponseIntent {
     CodingTask,
 }
 
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+pub enum WayfinderMode {
+    #[serde(rename = "outside")]
+    Outside,
+    #[serde(rename = "chart")]
+    Chart,
+    #[serde(rename = "work-through")]
+    WorkThrough,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Serialize)]
+pub enum WayfinderGateStatus {
+    #[serde(rename = "not-applicable")]
+    NotApplicable,
+    #[serde(rename = "pending")]
+    Pending,
+    #[serde(rename = "open")]
+    Open,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WayfinderGate {
+    pub status: WayfinderGateStatus,
+    pub opened_by: String,
+    pub receipt_id: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WayfinderFlow {
+    pub flow_id: String,
+    pub mode: WayfinderMode,
+    pub originating_message_id: String,
+    pub scope: ConversationScope,
+    pub reference: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct WayfinderProjection {
+    pub mode: WayfinderMode,
+    pub gate: WayfinderGate,
+    pub flow: Option<WayfinderFlow>,
+    pub continuing: bool,
+    pub turn_complete: bool,
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AgentConsoleResponseRoute {
     pub intent: AgentConsoleResponseIntent,
@@ -1563,6 +1608,8 @@ pub struct AgentConsoleResponseRoute {
 pub struct AgentConsoleResponseProjection {
     pub message: AgentConsoleMessage,
     pub route: AgentConsoleResponseRoute,
+    #[serde(default)]
+    pub wayfinder: Option<WayfinderProjection>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -4581,6 +4628,28 @@ mod tests {
                     "acceptance_criteria": [
                         "Polling recovers after a transient failure."
                     ]
+                },
+                "wayfinder": {
+                    "mode": "chart",
+                    "gate": {
+                        "status": "pending",
+                        "opened_by": "",
+                        "receipt_id": ""
+                    },
+                    "flow": {
+                        "flow_id": "wayfinder-console-000001",
+                        "mode": "chart",
+                        "originating_message_id": "console-000001",
+                        "scope": {
+                            "kind": "working-directory",
+                            "target_id": "/workspace/albert",
+                            "label": "albert",
+                            "mission_id": null
+                        },
+                        "reference": ""
+                    },
+                    "continuing": false,
+                    "turn_complete": true
                 }
             }"#
             .to_owned(),
@@ -4598,6 +4667,15 @@ mod tests {
         );
         assert_eq!(response.route.task_request, "Fix workspace polling.");
         assert_eq!(response.route.acceptance_criteria.len(), 1);
+        let wayfinder = response
+            .wayfinder
+            .expect("Wayfinder projection should decode");
+        assert_eq!(wayfinder.mode, WayfinderMode::Chart);
+        assert_eq!(wayfinder.gate.status, WayfinderGateStatus::Pending);
+        assert_eq!(
+            wayfinder.flow.expect("active flow").flow_id,
+            "wayfinder-console-000001"
+        );
     }
 
     #[test]
