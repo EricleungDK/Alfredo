@@ -12,6 +12,7 @@ const selectionRequiredContext = {
   starting_location: "/home/mission-commander/projects",
   coding_workspace: null,
   active_mission: null,
+  suggested_workspace_path: "/home/mission-commander/projects/workspace",
   phase: "selection-required" as const,
   runtime_root: "/home/mission-commander/.alfredo/runtime",
   recent_workspaces: [],
@@ -43,6 +44,67 @@ test("prefills a safe child path below the Starting Location", async () => {
     expect(workspacePath).toHaveValue("/home/mission-commander/projects/workspace"),
   );
   expect(screen.getByRole("button", { name: "Create new repository" })).toBeEnabled();
+});
+
+test("does not invent a repository path when the backend has no safe create suggestion", async () => {
+  render(
+    <App
+      client={{
+        loadLaunchContext: async () => ({
+          kind: "launch-context",
+          context: {
+            ...selectionRequiredContext,
+            starting_location: "/opt/alfredo",
+            suggested_workspace_path: null,
+          },
+        }),
+        loadSnapshot: snapshotMustRemainBlocked(),
+      }}
+    />,
+  );
+
+  const workspacePath = await screen.findByRole("textbox", {
+    name: "Coding Workspace path",
+  });
+  await waitFor(() => expect(workspacePath).toHaveValue(""));
+  expect(screen.getByRole("button", { name: "Create new repository" })).toBeDisabled();
+  expect(screen.getByText(/No safe new repository path is configured/i)).toBeVisible();
+});
+
+test("keeps an unsafe bridge response actionable without suggesting the protected child", async () => {
+  const selectCodingWorkspace = vi.fn(async (_request: SelectionRequest) => ({
+    kind: "selection-failure" as const,
+    code: "workspace-unsafe",
+    message: "The selected repository overlaps an Alfredo install, backend, or runtime root.",
+    recoverable: true,
+  }));
+
+  render(
+    <App
+      client={{
+        loadLaunchContext: async () => ({
+          kind: "launch-context",
+          context: {
+            ...selectionRequiredContext,
+            starting_location: "/opt/alfredo",
+            suggested_workspace_path: null,
+          },
+        }),
+        loadSnapshot: snapshotMustRemainBlocked(),
+        selectCodingWorkspace,
+      }}
+    />,
+  );
+
+  fireEvent.change(await screen.findByRole("textbox", { name: "Coding Workspace path" }), {
+    target: { value: "/opt/alfredo/workspace" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Choose existing repository" }));
+
+  const failure = await screen.findByRole("alert");
+  expect(failure).toHaveTextContent("workspace-unsafe");
+  expect(failure).toHaveTextContent("No safe new repository path is configured");
+  expect(failure).not.toHaveTextContent("such as /opt/alfredo/workspace");
 });
 
 test("keeps Coding Workspace selection pending until the Orchestrator acknowledges it", async () => {
@@ -326,7 +388,7 @@ test("keeps selection required after a structured failure and permits an acknowl
 
   const failure = await screen.findByRole("alert");
   expect(failure).toHaveTextContent("workspace-unsafe");
-  expect(failure).toHaveTextContent("Choose a repository below Starting Location");
+  expect(failure).toHaveTextContent("For a new repository");
   expect(screen.getByText("Choose or create a repository")).toBeVisible();
   expect(screen.queryByText("Mission selection required")).not.toBeInTheDocument();
   expect(loadSnapshot).not.toHaveBeenCalled();

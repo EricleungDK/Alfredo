@@ -409,6 +409,7 @@ pub struct AlfredoLaunchContext {
     pub selected_agent: String,
     pub selected_model: String,
     pub starting_location: String,
+    pub suggested_workspace_path: Option<String>,
     pub coding_workspace: Option<String>,
     pub active_mission: Option<String>,
     pub revision: u64,
@@ -609,21 +610,31 @@ impl WorkspaceBinding {
             _ => {
                 // A Starting Location can own several acknowledged workspaces.
                 // Once this process has selected one, use that exact boundary;
-                // otherwise leave the gate active rather than inferring one.
-                let Some(selected_workspace) = self.state().coding_workspace else {
-                    return Ok(());
-                };
-                let selected_sessions = matching_sessions
-                    .iter()
-                    .filter(|session| {
-                        canonical_or_original(Path::new(&session.coding_workspace))
-                            == selected_workspace
-                    })
-                    .collect::<Vec<_>>();
-                if selected_sessions.len() != 1 {
-                    return Ok(());
+                // otherwise restore the one durable session that already owns
+                // an Active Mission. If that evidence is ambiguous, leave the
+                // gate active rather than inferring one from recency.
+                if let Some(selected_workspace) = self.state().coding_workspace {
+                    let selected_sessions = matching_sessions
+                        .iter()
+                        .filter(|session| {
+                            canonical_or_original(Path::new(&session.coding_workspace))
+                                == selected_workspace
+                        })
+                        .collect::<Vec<_>>();
+                    if selected_sessions.len() != 1 {
+                        return Ok(());
+                    }
+                    *selected_sessions[0]
+                } else {
+                    let active_sessions = matching_sessions
+                        .iter()
+                        .filter(|session| session.active_mission.is_some())
+                        .collect::<Vec<_>>();
+                    if active_sessions.len() != 1 {
+                        return Ok(());
+                    }
+                    *active_sessions[0]
                 }
-                *selected_sessions[0]
             }
         };
         let coding_workspace = PathBuf::from(&session.coding_workspace)
@@ -1011,6 +1022,7 @@ pub fn build_launch_context_with_binding(
     binding: &WorkspaceBinding,
 ) -> AlfredoLaunchContext {
     let binding = binding.state();
+    let starting_location = bridge_starting_location(config);
     let coding_workspace = binding
         .coding_workspace
         .map(|workspace| workspace.to_string_lossy().into_owned());
@@ -1026,9 +1038,8 @@ pub fn build_launch_context_with_binding(
         schema_version: 1,
         selected_agent: std::env::var("ALFREDO_SELECTED_AGENT").unwrap_or_default(),
         selected_model: std::env::var("ALFREDO_SELECTED_MODEL").unwrap_or_default(),
-        starting_location: bridge_starting_location(config)
-            .to_string_lossy()
-            .into_owned(),
+        starting_location: starting_location.to_string_lossy().into_owned(),
+        suggested_workspace_path: suggested_workspace_path(config, &starting_location),
         coding_workspace,
         active_mission,
         revision: binding.revision,
@@ -1043,12 +1054,37 @@ fn canonical_or_original(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
+fn canonical_boundary_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+    let mut missing_components = Vec::new();
+    let mut ancestor = path;
+    while !ancestor.exists() {
+        let Some(name) = ancestor.file_name() else {
+            return canonical_or_original(path);
+        };
+        missing_components.push(name.to_owned());
+        let Some(parent) = ancestor.parent() else {
+            return canonical_or_original(path);
+        };
+        ancestor = parent;
+    }
+    let mut canonical = ancestor
+        .canonicalize()
+        .unwrap_or_else(|_| ancestor.to_path_buf());
+    for component in missing_components.iter().rev() {
+        canonical.push(component);
+    }
+    canonical
+}
+
 pub fn build_launch_context(config: &BridgeConfig) -> AlfredoLaunchContext {
     build_launch_context_with_binding(config, &WorkspaceBinding::from_environment())
 }
 
 fn bridge_starting_location(config: &BridgeConfig) -> PathBuf {
-    std::env::var_os("ALFREDO_STARTING_LOCATION")
+    let configured_starting_location = std::env::var_os("ALFREDO_STARTING_LOCATION")
         .filter(|path| !path.is_empty())
         .map(PathBuf::from)
         .or_else(|| {
@@ -1062,7 +1098,72 @@ fn bridge_starting_location(config: &BridgeConfig) -> PathBuf {
                 .parent()
                 .map(PathBuf::from)
                 .unwrap_or_else(std::env::temp_dir)
-        })
+        });
+    let starting_location = canonical_or_original(&configured_starting_location);
+    if !path_is_inside_protected_root(&starting_location, config) {
+        return starting_location;
+    }
+
+    let mut candidate = starting_location.clone();
+    while path_is_inside_protected_root(&candidate, config) {
+        let Some(parent) = candidate.parent() else {
+            break;
+        };
+        let parent = parent.to_path_buf();
+        if parent == candidate {
+            break;
+        }
+        candidate = parent;
+    }
+    if candidate.is_dir() && !path_is_inside_protected_root(&candidate, config) {
+        return canonical_or_original(&candidate);
+    }
+
+    let fallback_candidates = [
+        config.backend_root.parent().map(PathBuf::from),
+        config.runtime_root.parent().map(PathBuf::from),
+        Some(std::env::temp_dir()),
+    ];
+    fallback_candidates
+        .into_iter()
+        .flatten()
+        .map(|path| canonical_or_original(&path))
+        .find(|path| path.is_dir() && !path_is_inside_protected_root(path, config))
+        .unwrap_or(starting_location)
+}
+
+fn path_is_inside_or_equal(path: &Path, root: &Path) -> bool {
+    let path = canonical_boundary_path(path);
+    let root = canonical_boundary_path(root);
+    path == root || path.starts_with(root)
+}
+
+fn path_is_inside_protected_root(path: &Path, config: &BridgeConfig) -> bool {
+    if path_is_inside_or_equal(path, &config.backend_root)
+        || path_is_inside_or_equal(path, &config.runtime_root)
+    {
+        return true;
+    }
+    std::env::var_os("ALFREDO_INSTALL_ROOT")
+        .filter(|root| !root.is_empty())
+        .is_some_and(|root| path_is_inside_or_equal(path, Path::new(&root)))
+}
+
+fn paths_overlap(left: &Path, right: &Path) -> bool {
+    path_is_inside_or_equal(left, right) || path_is_inside_or_equal(right, left)
+}
+
+fn suggested_workspace_path(config: &BridgeConfig, starting_location: &Path) -> Option<String> {
+    let candidate = starting_location.join("workspace");
+    if paths_overlap(&candidate, &config.backend_root)
+        || paths_overlap(&candidate, &config.runtime_root)
+        || std::env::var_os("ALFREDO_INSTALL_ROOT")
+            .filter(|root| !root.is_empty())
+            .is_some_and(|root| paths_overlap(&candidate, Path::new(&root)))
+    {
+        return None;
+    }
+    Some(candidate.to_string_lossy().into_owned())
 }
 
 #[derive(Debug, Deserialize)]
@@ -4024,6 +4125,7 @@ mod tests {
             selected_agent: "qwen3-14b".to_owned(),
             selected_model: "qwen3:14b".to_owned(),
             starting_location: workspace.to_string_lossy().into_owned(),
+            suggested_workspace_path: None,
             coding_workspace: None,
             active_mission: None,
             phase: "selection-required".to_owned(),
@@ -4147,6 +4249,80 @@ mod tests {
         binding
             .reload_from_persistence_for_starting_location(&config, &starting_location)
             .expect("selected workspace should restore");
+        let context = build_launch_context_with_binding(&config, &binding);
+        assert_eq!(context.phase, "workspace-ready");
+        assert_eq!(
+            context.coding_workspace.as_deref(),
+            Some(workspace_b.to_string_lossy().as_ref())
+        );
+        assert_eq!(context.active_mission.as_deref(), Some("mission-b"));
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn workspace_binding_restores_the_unique_active_workspace_after_a_fresh_restart() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("alfredo-fresh-workspace-{unique}"));
+        let backend_root = root.join("backend");
+        let starting_location = root.join("projects");
+        let workspace_a = starting_location.join("workspace-a");
+        let workspace_b = starting_location.join("workspace-b");
+        let runtime_root = root.join("runtime");
+        fs::create_dir_all(&backend_root).expect("backend fixture");
+        fs::create_dir_all(&workspace_a).expect("first workspace fixture");
+        fs::create_dir_all(&workspace_b).expect("active workspace fixture");
+        fs::create_dir_all(&runtime_root).expect("runtime fixture");
+        let config = BridgeConfig {
+            runtime_root: runtime_root.clone(),
+            ..BridgeConfig::for_repository(backend_root)
+        };
+        let starting_location = starting_location.canonicalize().expect("starting location");
+        let workspace_a = workspace_a.canonicalize().expect("first workspace");
+        let workspace_b = workspace_b.canonicalize().expect("active workspace");
+        let journey = serde_json::json!({
+            "schema_version": 1,
+            "sessions": [
+                {
+                    "starting_location": starting_location,
+                    "coding_workspace": workspace_a,
+                    "revision": 1,
+                    "active_mission": null,
+                    "missions": [],
+                    "mission_catalog": runtime_root.join("catalog-a.json").to_string_lossy(),
+                    "selection": {"correlation_id": "selection-a", "selection_mode": "existing"},
+                    "receipts": {}
+                },
+                {
+                    "starting_location": starting_location,
+                    "coding_workspace": workspace_b,
+                    "revision": 2,
+                    "active_mission": "mission-b",
+                    "missions": [{
+                        "id": "mission-b",
+                        "title": "Mission B",
+                        "tracker_dir": runtime_root.join("tracker-b").to_string_lossy(),
+                        "issues_dir": runtime_root.join("issues-b").to_string_lossy()
+                    }],
+                    "mission_catalog": runtime_root.join("catalog-b.json").to_string_lossy(),
+                    "selection": {"correlation_id": "selection-b", "selection_mode": "existing"},
+                    "receipts": {}
+                }
+            ]
+        });
+        fs::write(
+            runtime_root.join("workspace-sessions.json"),
+            serde_json::to_vec(&journey).expect("journey should serialize"),
+        )
+        .expect("journey should be persisted");
+
+        let binding = WorkspaceBinding::default();
+        binding
+            .reload_from_persistence_for_starting_location(&config, &starting_location)
+            .expect("fresh bridge should restore the unique active workspace");
         let context = build_launch_context_with_binding(&config, &binding);
         assert_eq!(context.phase, "workspace-ready");
         assert_eq!(
@@ -5219,6 +5395,41 @@ None - can start immediately
             vec![selected_workspace.to_string_lossy().to_string()]
         );
         fs::remove_dir_all(root).expect("temporary launch context fixture should be removed");
+    }
+
+    #[test]
+    fn launch_context_exposes_only_a_protected_root_checked_workspace_target() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be after epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("alfredo-workspace-hint-{unique}"));
+        let backend_root = root.join("install");
+        let runtime_root = root.join("runtime");
+        let safe_starting_location = root.join("projects");
+        fs::create_dir_all(&backend_root).expect("backend root");
+        fs::create_dir_all(&runtime_root).expect("runtime root");
+        fs::create_dir_all(&safe_starting_location).expect("safe starting location");
+        let config = BridgeConfig {
+            runtime_root,
+            ..BridgeConfig::for_repository(backend_root.clone())
+        };
+
+        assert_eq!(
+            suggested_workspace_path(&config, &safe_starting_location),
+            Some(
+                safe_starting_location
+                    .join("workspace")
+                    .to_string_lossy()
+                    .into_owned()
+            )
+        );
+        assert_eq!(
+            suggested_workspace_path(&config, &backend_root),
+            None,
+            "a child of Alfredo's install must never be presented as a create target"
+        );
+        fs::remove_dir_all(root).expect("workspace hint fixture should be removed");
     }
 
     #[test]

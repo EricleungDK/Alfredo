@@ -488,22 +488,17 @@ function missionIdFromTitle(title: string): string {
     .slice(0, 64);
 }
 
-function suggestedWorkspacePath(startingLocation: string): string {
-  const trimmed = startingLocation.trim().replace(/[\\/]+$/, "");
-  const separator = startingLocation.includes("\\") ? "\\" : "/";
-  return `${trimmed}${separator}workspace`;
-}
-
 function workspaceSelectionFailureMessage(
   code: string,
   message: string,
-  startingLocation: string,
+  suggestedWorkspacePath: string | null | undefined,
 ): string {
   const detail = `${code}: ${message}`;
   if (code !== "workspace-unsafe") return detail;
-  return `${detail} Choose a repository below Starting Location, such as ${suggestedWorkspacePath(
-    startingLocation,
-  )}; do not select Alfredo's install or backend.`;
+  if (suggestedWorkspacePath) {
+    return `${detail} For a new repository, use ${suggestedWorkspacePath}; for an existing repository, enter its exact path. Do not select Alfredo's install, backend, or runtime.`;
+  }
+  return `${detail} No safe new repository path is configured. Choose an existing repository outside Alfredo's install, backend, or runtime roots, or relaunch with a separate Starting Location.`;
 }
 
 export function App({ client, syncIntervalMs = 1000 }: AppProps) {
@@ -606,9 +601,9 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   useEffect(() => {
     if (launchContext?.phase !== "selection-required") return;
     setCodingWorkspacePath((current) =>
-      current.trim() ? current : suggestedWorkspacePath(launchContext.starting_location),
+      current.trim() ? current : launchContext.suggested_workspace_path ?? "",
     );
-  }, [launchContext?.phase, launchContext?.starting_location]);
+  }, [launchContext?.phase, launchContext?.suggested_workspace_path]);
   const pendingWorkspaceSelectionRef = useRef<CodingWorkspaceSelectionRequest | null>(null);
   const pendingMissionChoiceRef = useRef<{
     readonly correlation_id: string;
@@ -2531,7 +2526,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
           message: workspaceSelectionFailureMessage(
             result.code,
             result.message,
-            launchContext.starting_location,
+            launchContext.suggested_workspace_path,
           ),
         });
         return;
@@ -2877,7 +2872,8 @@ function CodingWorkspaceGate({
                 {selectionRequired ? (
                   <p>
                     No Coding Workspace or Mission is bound. Choose an exact existing Git
-                    repository or create a new one below the Starting Location.
+                    repository outside Alfredo's protected roots, or create a new one at the
+                    backend-provided safe path.
                   </p>
                 ) : (
                   <p>
@@ -2920,8 +2916,15 @@ function CodingWorkspaceGate({
                   />
                 </label>
                 <p className="selection-guidance">
-                  Starting Location is only the parent directory. Use the suggested child path
-                  for a new repository, or replace it with an existing repository below it.
+                  {launchContext.suggested_workspace_path ? (
+                    <>
+                      For a new repository, use {launchContext.suggested_workspace_path}. For an
+                      existing repository, enter its exact path; it may be outside Starting
+                      Location but must not be Alfredo's install, backend, or runtime.
+                    </>
+                  ) : (
+                    "No safe new repository path is configured. Choose an existing repository outside Alfredo's protected roots, or relaunch with a separate Starting Location."
+                  )}
                 </p>
                 <div className="prompt-toolbar">
                   <button

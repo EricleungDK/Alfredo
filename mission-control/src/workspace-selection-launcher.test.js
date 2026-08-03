@@ -1,4 +1,4 @@
-import { readFileSync, mkdtempSync, rmSync } from "node:fs";
+import { readFileSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
@@ -11,6 +11,7 @@ const alfredoBinPath = resolve(projectRoot, packageJson.bin.alfredo);
 
 test("launcher treats the invocation directory only as a Starting Location", () => {
   const startingLocation = mkdtempSync(resolve(tmpdir(), "alfredo-starting-location-"));
+  const canonicalStartingLocation = realpathSync(startingLocation);
 
   try {
     const result = spawnSync(
@@ -31,11 +32,11 @@ test("launcher treats the invocation directory only as a Starting Location", () 
     const plan = JSON.parse(result.stdout);
     expect(plan.project_root).toBe(projectRoot);
     expect(plan.backend_root).toBe(repositoryRoot);
-    expect(plan.starting_location).toBe(startingLocation);
+    expect(plan.starting_location).toBe(canonicalStartingLocation);
     expect(plan.workspace_selection).toEqual({
       schema_version: 1,
       phase: "selection-required",
-      starting_location: startingLocation,
+      starting_location: canonicalStartingLocation,
       coding_workspace: null,
       active_mission: null,
     });
@@ -47,4 +48,26 @@ test("launcher treats the invocation directory only as a Starting Location", () 
   } finally {
     rmSync(startingLocation, { recursive: true, force: true });
   }
+});
+
+test("launcher relocates an Alfredo-root Starting Location before exposing workspace selection", () => {
+  const result = spawnSync(
+    process.execPath,
+    [alfredoBinPath, "--agent", "qwen3.6-27b"],
+    {
+      cwd: repositoryRoot,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        ALFREDO_DESKTOP_DRY_RUN: "1",
+        ALFREDO_STARTING_LOCATION: "",
+      },
+    },
+  );
+
+  expect(result.stderr).toBe("");
+  expect(result.status).toBe(0);
+  const plan = JSON.parse(result.stdout);
+  expect(plan.starting_location).toBe(dirname(repositoryRoot));
+  expect(plan.workspace_selection.starting_location).toBe(dirname(repositoryRoot));
 });
