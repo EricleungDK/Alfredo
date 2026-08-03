@@ -26,7 +26,7 @@ The Agent Console response contract now includes a typed Wayfinder projection. T
 
 ## Verification
 
-- Red-green Python coverage proves persisted Chart entry, existing-reference Work-through, active-flow continuation, explicit Commander opening, visible agent acknowledgement, pre-gate planning/delegation/session blocking (including existing Mission Draft mutation, direct CLI, another Mission’s direct production launch, legacy delegation, and headless execution), safe discovery command availability, malformed-state structured failure, and read-only outside-Chart behavior: **11 focused tests passed**.
+- Red-green Python coverage proves persisted Chart entry, existing-reference Work-through, active-flow continuation, explicit Commander opening, visible agent acknowledgement, pre-gate planning/delegation/session blocking (including existing Mission Draft mutation, direct CLI, another Mission’s direct production launch, legacy delegation, and headless execution), safe discovery command availability, malformed-state structured failure (including a missing `active_flow` key), and read-only outside-Chart behavior: **12 focused tests passed**.
 - Warm persistent transport preserves the typed Chart projection: **1 focused test passed**.
 - `python3 -m py_compile` over the changed Python implementation/tests: **passed**.
 - Rust typed projection decode assertion: **passed**.

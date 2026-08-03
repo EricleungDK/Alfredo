@@ -213,6 +213,8 @@ def load_wayfinder_state(path: Path) -> dict[str, Any]:
         state = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(state, dict) or state.get("schema_version") != 1:
             raise ValueError("unsupported Wayfinder state schema")
+        if "active_flow" not in state:
+            raise ValueError("Wayfinder state must contain active_flow")
         active = state.get("active_flow")
         if active is None:
             return state
