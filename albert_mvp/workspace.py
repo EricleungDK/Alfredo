@@ -28,12 +28,15 @@ from .core import (
     IssueSlice,
     LocalAgentSession,
     ReviewDecision,
+    SharedUnderstandingGateError,
     _process_identity,
     _process_identity_is_live,
     _run_bounded_process,
     _trusted_system_executable,
+    ensure_wayfinder_gate_open,
     sandboxed_process_argv,
     sanitized_process_environment,
+    wayfinder_state_path,
 )
 from .performance import measured_stage
 
@@ -2313,16 +2316,8 @@ class WayfinderDecision:
     content: str
     correlation_id: str = ""
     action_phase: str = ""
-
-
-class SharedUnderstandingGateError(AlbertError):
-    code = "shared-understanding-required"
-
-    def __init__(self) -> None:
-        super().__init__(
-            "Wayfinder Shared Understanding Gate is still pending; canonical planning "
-            "artifacts, delegation, and production implementation are not eligible."
-        )
+    requires_agent_acknowledgement: bool = False
+    allows_controller: bool = False
 
 
 class WayfinderService:
@@ -2356,7 +2351,10 @@ class WayfinderService:
 
     def __init__(self, snapshots: "WorkspaceSnapshotService"):
         self._snapshots = snapshots
-        self._path = snapshots.preferences_path.parent / "wayfinder-state.json"
+        self._path = wayfinder_state_path(
+            runtime_root=snapshots._primary_mission.runtime_root,
+            target_repo=snapshots._primary_mission.target_repo,
+        )
 
     @property
     def state_path(self) -> Path:
@@ -2371,10 +2369,10 @@ class WayfinderService:
             return self._enter_if_required(state, message)
 
     def ensure_gate_open(self) -> None:
-        state = self._load()
-        active = state["active_flow"]
-        if active is not None and active["gate"]["status"] != "open":
-            raise SharedUnderstandingGateError()
+        ensure_wayfinder_gate_open(
+            runtime_root=self._snapshots._primary_mission.runtime_root,
+            target_repo=self._snapshots._primary_mission.target_repo,
+        )
 
     def _enter_if_required(
         self,
@@ -2463,6 +2461,28 @@ class WayfinderService:
         if active["gate"]["status"] == "pending" and self._has_agent_acknowledgement(
             message.content
         ):
+            return WayfinderDecision(
+                projection=self._projection(active, continuing=True),
+                content="",
+                requires_agent_acknowledgement=True,
+            )
+        return WayfinderDecision(
+            projection=self._projection(active, continuing=True, turn_complete=False),
+            content="",
+            allows_controller=True,
+        )
+
+    def acknowledge_agent(self, message: AgentConsoleMessage) -> WayfinderDecision:
+        """Persist the visible Wayfinder-agent acknowledgement for one pending flow."""
+        with WorkspaceSnapshotService._json_store_lock(self._path):
+            state = self._load()
+            active = state["active_flow"]
+            if (
+                active is None
+                or active["gate"]["status"] != "pending"
+                or not self._has_agent_acknowledgement(message.content)
+            ):
+                raise AlbertError("Wayfinder agent acknowledgement is no longer eligible.")
             receipt_id = f"wayfinder-acknowledgement:{message.message_id}"
             active["gate"] = {
                 "status": "open",
@@ -2481,20 +2501,13 @@ class WayfinderService:
                 correlation_id=receipt_id,
                 action_phase="shared-understanding-agent-acknowledged",
             )
-        gate = active["gate"]["status"]
-        return WayfinderDecision(
-            projection=self._projection(active, continuing=True),
-            content=(
-                "Wayfinder continues the durable active flow without nesting or "
-                f"reinvocation. The Shared Understanding Gate is {gate}."
-            ),
-        )
 
     def _projection(
         self,
         flow: dict[str, Any],
         *,
         continuing: bool,
+        turn_complete: bool = True,
     ) -> WayfinderProjection:
         gate = flow["gate"]
         return WayfinderProjection(
@@ -2508,7 +2521,7 @@ class WayfinderService:
                 reference=flow["reference"],
             ),
             continuing=continuing,
-            turn_complete=True,
+            turn_complete=turn_complete,
         )
 
     def _has_agent_acknowledgement(self, content: str) -> bool:
@@ -3105,14 +3118,23 @@ class AgentConsoleResponseService:
                 current_scope=snapshot.conversation_scope,
             )
         latest = self._correlated_user_message(message_id)
-        wayfinder = WayfinderService(self._snapshots).route(latest)
-        if wayfinder is not None:
+        wayfinder_service = WayfinderService(self._snapshots)
+        wayfinder = wayfinder_service.route(latest)
+        if wayfinder is not None and wayfinder.requires_agent_acknowledgement:
+            wayfinder = wayfinder_service.acknowledge_agent(latest)
+        if wayfinder is not None and not wayfinder.allows_controller:
             acknowledged = bool(wayfinder.correlation_id)
             message = self._history.append(
                 role="assistant",
                 content=wayfinder.content,
                 outcome="acknowledged" if acknowledged else "model-commentary",
-                source="orchestrator" if acknowledged else "frontier-model",
+                source=(
+                    "wayfinder-agent"
+                    if wayfinder.action_phase == "shared-understanding-agent-acknowledged"
+                    else "orchestrator"
+                    if acknowledged
+                    else "frontier-model"
+                ),
                 recorded_scope=latest.scope,
                 correlation_id=wayfinder.correlation_id,
                 action_phase=wayfinder.action_phase,
@@ -3164,12 +3186,16 @@ class AgentConsoleResponseService:
         return AgentConsoleResponseProjection(
             message=message,
             route=route,
-            wayfinder=WayfinderProjection(
-                mode="outside",
-                gate=WayfinderGate(status="not-applicable"),
-                flow=None,
-                continuing=False,
-                turn_complete=False,
+            wayfinder=(
+                wayfinder.projection
+                if wayfinder is not None
+                else WayfinderProjection(
+                    mode="outside",
+                    gate=WayfinderGate(status="not-applicable"),
+                    flow=None,
+                    continuing=False,
+                    turn_complete=False,
+                )
             ),
         )
 

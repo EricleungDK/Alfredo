@@ -9346,6 +9346,33 @@ class WorkspaceSnapshotTest(unittest.TestCase):
             "shared-understanding-required",
         )
 
+        direct_output = io.StringIO()
+        direct_error = io.StringIO()
+        with redirect_stdout(direct_output), redirect_stderr(direct_error):
+            direct_exit_code = main(
+                [
+                    "launch",
+                    "--target-repo",
+                    str(self.target_repo),
+                    "--tracker-dir",
+                    str(self.tracker),
+                    "--runtime-root",
+                    str(self.runtime),
+                    "--mission-id",
+                    "command-deck",
+                    "ISS-01",
+                    "--allowed-path",
+                    "src",
+                ]
+            )
+
+        self.assertEqual(direct_exit_code, 1)
+        self.assertEqual(direct_output.getvalue(), "")
+        self.assertEqual(
+            json.loads(direct_error.getvalue())["error"]["code"],
+            "shared-understanding-required",
+        )
+
     def test_wayfinder_gate_blocks_existing_mission_draft_mutations(self) -> None:
         snapshots = self.load_service()
         drafts = MissionDraftService(snapshots)
@@ -9396,6 +9423,34 @@ class WorkspaceSnapshotTest(unittest.TestCase):
 
         self.assertEqual(drafts.inspect().drafts[0].status, "draft")
 
+    def test_wayfinder_gate_is_project_wide_and_blocks_direct_production_launches(self) -> None:
+        snapshots = self.load_service()
+        scope = snapshots.snapshot().conversation_scope
+        chart = AgentConsoleHistoryService(snapshots).append(
+            role="user",
+            content="Create a new project for governed release operations.",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        AgentConsoleResponseService(snapshots).respond(
+            message_id=chart.message_id,
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        another_mission = AlbertMission(
+            target_repo=self.target_repo,
+            tracker_dir=self.tracker,
+            runtime_root=self.runtime,
+            mission_id="another-mission",
+            allow_empty_tracker=True,
+        ).load()
+        another_mission.approve_issue("ISS-01")
+
+        with self.assertRaises(SharedUnderstandingGateError):
+            another_mission.launch_issue("ISS-01")
+
     def test_wayfinder_uses_work_through_for_existing_references_and_continues_one_flow(
         self,
     ) -> None:
@@ -9436,6 +9491,47 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(continued.wayfinder.flow, entered.wayfinder.flow)
         self.assertEqual(continued.route.intent, "discussion")
 
+    def test_wayfinder_keeps_safe_discovery_commands_available_while_gate_is_pending(
+        self,
+    ) -> None:
+        snapshots = self.load_service()
+        history = AgentConsoleHistoryService(snapshots)
+        scope = snapshots.snapshot().conversation_scope
+        chart = history.append(
+            role="user",
+            content="Create a new project for trusted release operations.",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        AgentConsoleResponseService(snapshots).respond(
+            message_id=chart.message_id,
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        help_prompt = history.append(
+            role="user",
+            content="/help",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        response = AgentConsoleResponseService(snapshots).respond(
+            message_id=help_prompt.message_id,
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        self.assertIn("Available Alfredo commands", response.message.content)
+        self.assertEqual(response.wayfinder.mode, "chart")
+        self.assertEqual(response.wayfinder.gate.status, "pending")
+        self.assertTrue(response.wayfinder.continuing)
+        self.assertFalse(response.wayfinder.turn_complete)
+        self.assertEqual(response.message.outcome, "model-commentary")
+
     def test_wayfinder_agent_acknowledgement_opens_the_gate_and_ends_the_turn(self) -> None:
         snapshots = self.load_service()
         history = AgentConsoleHistoryService(snapshots)
@@ -9474,6 +9570,7 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(response.wayfinder.gate.status, "open")
         self.assertEqual(response.wayfinder.gate.opened_by, "wayfinder-agent")
         self.assertTrue(response.wayfinder.turn_complete)
+        self.assertEqual(response.message.source, "wayfinder-agent")
         self.assertEqual(
             response.message.action_phase,
             "shared-understanding-agent-acknowledged",
