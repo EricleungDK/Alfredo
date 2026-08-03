@@ -9535,6 +9535,28 @@ class WorkspaceSnapshotTest(unittest.TestCase):
             "persistence-read-failure",
         )
 
+    def test_wayfinder_rejects_state_without_an_explicit_active_flow(self) -> None:
+        snapshots = self.load_service()
+        state_path = WayfinderService(snapshots).state_path
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text('{"schema_version": 1}', encoding="utf-8")
+        scope = snapshots.snapshot().conversation_scope
+        prompt = AgentConsoleHistoryService(snapshots).append(
+            role="user",
+            content="Explain the current status.",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        with self.assertRaises(WorkspacePersistenceError):
+            AgentConsoleResponseService(snapshots).respond(
+                message_id=prompt.message_id,
+                expected_revision=1,
+                expected_scope=scope,
+            )
+
     def test_wayfinder_uses_work_through_for_existing_references_and_continues_one_flow(
         self,
     ) -> None:
