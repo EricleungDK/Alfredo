@@ -90,6 +90,8 @@ interface WorkstationActionTurn {
   readonly content: string;
   readonly source: string;
   readonly outcome: string;
+  readonly receiptCorrelationId?: string;
+  readonly receiptPhase?: string;
 }
 
 interface FailedWorkstationActionContinuityState {
@@ -599,19 +601,26 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       targetId: string,
       result: "acknowledged" | "stale" | "rejected" | "failed",
       message: string,
+      acknowledgementCorrelationId = "",
     ) => {
+      const receiptMatches =
+        result !== "acknowledged" || acknowledgementCorrelationId === correlationId;
+      const visibleResult = receiptMatches ? result : "failed";
+      const visibleMessage = receiptMatches
+        ? message
+        : "Orchestrator acknowledgement correlation did not match the requested action.";
       const state =
-        result === "acknowledged"
+        visibleResult === "acknowledged"
           ? "accepted"
-          : result === "failed"
+          : visibleResult === "failed"
             ? "failed"
-            : result === "stale"
+            : visibleResult === "stale"
               ? "stale"
               : "rejected";
       const recovery =
-        result === "stale"
-          ? `${message} Refresh the canonical workspace state and retry the action.`
-          : message;
+        visibleResult === "stale"
+          ? `${visibleMessage} Refresh the canonical workspace state and retry the action.`
+          : visibleMessage;
       setWorkstationActionState({
         itemId: targetId,
         state,
@@ -619,13 +628,23 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       });
       appendWorkstationActionTurns([
         {
-          id: `${correlationId}:reaction:${result}`,
+          id: `${correlationId}:reaction:${visibleResult}`,
           content:
-            result === "acknowledged"
-              ? `Orchestrator accepted workstation action: ${message}`
-              : `Orchestrator ${result === "stale" ? "reported stale state" : "rejected workstation action"}: ${recovery}`,
+            visibleResult === "acknowledged"
+              ? `Orchestrator accepted workstation action: ${visibleMessage}`
+              : `Orchestrator ${
+                  visibleResult === "stale"
+                    ? "reported stale state"
+                    : "rejected workstation action"
+                }: ${recovery}`,
           source: "orchestrator",
-          outcome: result,
+          outcome: visibleResult,
+          receiptCorrelationId:
+            visibleResult === "acknowledged" ? acknowledgementCorrelationId : undefined,
+          receiptPhase:
+            visibleResult === "acknowledged"
+              ? "workstation-action-acknowledged"
+              : undefined,
         },
       ]);
     },
@@ -1315,6 +1334,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       `scope:${targetScope.kind}:${targetScope.target_id}`,
       "acknowledged",
       `Conversation Scope now targets ${targetScope.label}.`,
+      result.acknowledgement.correlation_id,
     );
     await refreshWorkingContext();
   }, [beginVisibleWorkstationAction, client, finishVisibleWorkstationAction, refreshWorkingContext, scopeDraft, state]);
@@ -1493,6 +1513,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         result.message.message_id,
         "acknowledged",
         proposal.acknowledgement.effect_summary,
+        proposal.acknowledgement.correlation_id,
       );
       if (
         !client.loadWorkspaceQueue ||
@@ -1588,6 +1609,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         queueItem.item_id,
         "acknowledged",
         decision.acknowledgement.effect_summary,
+        decision.acknowledgement.correlation_id,
       );
       if (decision.acknowledgement.session_id) {
         startQueuedSessionRef.current(
@@ -1807,6 +1829,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         actionStateId,
         "acknowledged",
         result.acknowledgement.effect_summary,
+        result.acknowledgement.correlation_id,
       );
       await refreshReviewWorkspace();
     },
@@ -2052,6 +2075,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         itemId,
         "acknowledged",
         result.acknowledgement.effect_summary,
+        result.acknowledgement.correlation_id,
       );
       void afterTwoAnimationFrames().then(() =>
         markFrontendPerformance(client, "R5", "end", {
@@ -2139,6 +2163,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         actionStateId,
         "acknowledged",
         result.acknowledgement.effect_summary,
+        result.acknowledgement.correlation_id,
       );
     },
     [
@@ -2198,6 +2223,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
           draftId,
           "acknowledged",
           result.acknowledgement.effect_summary,
+          result.acknowledgement.correlation_id,
         );
         return;
       }
@@ -2264,6 +2290,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
           "mission-draft:create",
           "acknowledged",
           result.acknowledgement.effect_summary,
+          result.acknowledgement.correlation_id,
         );
         return;
       }
@@ -2334,6 +2361,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         proposal.originatingMessageId,
         "acknowledged",
         result.acknowledgement.effect_summary,
+        result.acknowledgement.correlation_id,
       );
       await refreshWorkspaceQueue();
     },
@@ -2997,7 +3025,9 @@ function buildWorkspaceQueueTranscriptTurns(
 ): readonly WorkstationTranscriptTurn[] {
   if (!workspaceQueue) return [];
   return workspaceQueue.items.flatMap((item) => {
-    if (item.item_type !== "ad-hoc-delegation") return [];
+    if (item.item_type !== "ad-hoc-delegation" || !item.proposal_correlation_id) {
+      return [];
+    }
     const causalOriginMessageId =
       typeof item.proposed_changes.originating_message_id === "string" &&
       item.proposed_changes.originating_message_id
@@ -3017,7 +3047,7 @@ function buildWorkspaceQueueTranscriptTurns(
         receiptPhase: item.proposal_correlation_id ? "proposal" : undefined,
       },
     ];
-    if (item.status !== "pending") {
+    if (item.status !== "pending" && item.decision_correlation_id) {
       const decisionVerb =
         item.status === "approved"
           ? "approved"
@@ -3034,7 +3064,7 @@ function buildWorkspaceQueueTranscriptTurns(
         receiptPhase: item.decision_correlation_id ? "decision" : undefined,
       });
     }
-    if (item.status === "approved") {
+    if (item.status === "approved" && item.decision_correlation_id) {
       const session = snapshot.missions
         ?.find((mission) => mission.id === item.mission_id)
         ?.sessions.find((candidate) => candidate.issue_id === item.issue_id);

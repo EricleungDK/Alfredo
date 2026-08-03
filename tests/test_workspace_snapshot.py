@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from datetime import datetime, timezone
 import io
 import json
@@ -2447,6 +2447,34 @@ class WorkspaceSnapshotTest(unittest.TestCase):
                     "receipt identity",
                 ):
                     WorkspaceQueueService(self.load_service()).inspect()
+
+    def test_workspace_queue_backfills_legacy_projected_receipt_identities(self) -> None:
+        snapshots = self.load_service()
+        snapshots._primary_mission.approve_issue("ISS-01")
+        queue = WorkspaceQueueService(snapshots)
+        proposal = queue.propose_issue_contract_change(
+            correlation_id="legacy-projected-proposal-1",
+            expected_revision=1,
+            issue_id="ISS-01",
+            source="issue-slice-inspector",
+            risk="Backfill only from the exact canonical receipt chain.",
+        )
+        queue.decide(
+            correlation_id="legacy-projected-decision-1",
+            expected_revision=proposal.revision,
+            item_id=proposal.item_id,
+            decision="reject",
+            reason="Exercise a resolved legacy projection.",
+        )
+        persisted = json.loads(queue.queue_path.read_text(encoding="utf-8"))
+        persisted["items"][0].pop("proposal_correlation_id")
+        persisted["items"][0].pop("decision_correlation_id")
+        queue.queue_path.write_text(json.dumps(persisted), encoding="utf-8")
+
+        item = WorkspaceQueueService(self.load_service()).inspect().items[0]
+
+        self.assertEqual(item.proposal_correlation_id, "legacy-projected-proposal-1")
+        self.assertEqual(item.decision_correlation_id, "legacy-projected-decision-1")
 
     def test_queue_replay_rejects_forged_inner_acknowledgement_boundaries(
         self,
@@ -4953,18 +4981,22 @@ class WorkspaceSnapshotTest(unittest.TestCase):
             decision="approve",
             reason="Approved for evidence review.",
         )
-        mission.record_evidence(
-            "session-ADHOC-000001-1",
-            EvidencePackage(
-                changed_files=["docs/smoke-tests.md"],
-                diff_summary="Updated smoke-test notes.",
-                commands_run=["python3 -m unittest tests.test_workspace_snapshot"],
-                test_results="Focused workspace tests passed.",
-                known_risks="None.",
-                proposed_context_updates="Document ad hoc delegation evidence handling.",
-                artifact_links=["app-local://evidence/session-ADHOC-000001-1"],
-            ),
+        evidence = EvidencePackage(
+            changed_files=["docs/smoke-tests.md"],
+            diff_summary="Updated smoke-test notes.",
+            commands_run=["python3 -m unittest tests.test_workspace_snapshot"],
+            test_results="Focused workspace tests passed.",
+            known_risks="None.",
+            proposed_context_updates="Document ad hoc delegation evidence handling.",
+            artifact_links=["app-local://evidence/session-ADHOC-000001-1"],
         )
+        mission.record_evidence("session-ADHOC-000001-1", evidence)
+        mission.record_evidence("session-ADHOC-000001-1", evidence)
+        with self.assertRaisesRegex(AlbertError, "different package"):
+            mission.record_evidence(
+                "session-ADHOC-000001-1",
+                replace(evidence, diff_summary="A changed package must not replay."),
+            )
         review_service = ReviewWorkspaceService(snapshots)
         review_item = review_service.inspect().items[0]
 
@@ -4991,12 +5023,91 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         )
         self.assertEqual(
             session_summary.evidence_correlation_id,
-            "evidence:session-ADHOC-000001-1",
+            "evidence:command-deck:session-ADHOC-000001-1",
+        )
+        evidence_entries = [
+            entry
+            for entry in ActivityJournalService(snapshots).inspect().entries
+            if entry.action_type == "evidence-package-submitted"
+        ]
+        self.assertEqual(
+            [entry.correlation_id for entry in evidence_entries],
+            [session_summary.evidence_correlation_id],
         )
         self.assertEqual(
             session_summary.review_correlation_id,
             "ad-hoc-delegation-review-accept-1",
         )
+
+    def test_workspace_session_summary_suppresses_unvalidated_runtime_receipt_identities(
+        self,
+    ) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        origin = AgentConsoleHistoryService(snapshots).append(
+            role="user",
+            content="Run bounded work with canonical lifecycle receipts.",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=snapshots.snapshot().conversation_scope,
+        )
+        queue = WorkspaceQueueService(snapshots)
+        proposal = queue.propose_ad_hoc_delegation(
+            correlation_id="runtime-receipt-proposal-1",
+            expected_revision=1,
+            source="agent-console",
+            scope=snapshots.snapshot().conversation_scope,
+            acceptance_criteria=["Receipt identities remain canonical."],
+            allowed_paths=["docs/smoke-tests.md"],
+            command_policy={},
+            proposed_agent="qwen-coder-local-1",
+            originating_message_id=origin.message_id,
+        )
+        queue.decide(
+            correlation_id="runtime-receipt-decision-1",
+            expected_revision=proposal.revision,
+            item_id=proposal.item_id,
+            decision="approve",
+            reason="Approve bounded receipt validation.",
+        )
+        session_id = "session-ADHOC-000001-1"
+        mission.record_evidence(
+            session_id,
+            EvidencePackage(
+                changed_files=["docs/smoke-tests.md"],
+                diff_summary="Updated receipt notes.",
+                commands_run=["python3 -m unittest tests.test_workspace_snapshot"],
+                test_results="Focused tests passed.",
+                known_risks="None.",
+                proposed_context_updates="None.",
+                artifact_links=[f"app-local://evidence/{session_id}"],
+            ),
+        )
+        ReviewWorkspaceService(snapshots).decide(
+            correlation_id="runtime-receipt-review-1",
+            expected_revision=snapshots.snapshot().revision,
+            session_id=session_id,
+            decision="accept",
+            reason="Evidence accepted.",
+        )
+        runtime = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        runtime["sessions"][session_id]["task_packet"]["queue_approval"][
+            "correlation_id"
+        ] = "forged-launch-receipt"
+        runtime["sessions"][session_id][
+            "evidence_correlation_id"
+        ] = "forged-evidence-receipt"
+        runtime["reviews"][-1]["workspace_action"][
+            "correlation_id"
+        ] = "forged-review-receipt"
+        mission.runtime_path.write_text(json.dumps(runtime), encoding="utf-8")
+
+        summary = self.load_service().snapshot().missions[0].sessions[0]
+
+        self.assertEqual(summary.launch_correlation_id, "")
+        self.assertEqual(summary.evidence_correlation_id, "")
+        self.assertEqual(summary.review_correlation_id, "")
 
     def test_mission_draft_records_selected_excluded_and_new_work_without_accepting_state(self) -> None:
         snapshots = self.load_service()
@@ -8055,7 +8166,10 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         entry = projection.entries[0]
         self.assertEqual(entry.actor, "local-agent")
         self.assertEqual(entry.action_type, "evidence-package-submitted")
-        self.assertEqual(entry.correlation_id, f"evidence:{session.session_id}")
+        self.assertEqual(
+            entry.correlation_id,
+            f"evidence:{mission.mission_id}:{session.session_id}",
+        )
         self.assertIn(session.session_id, entry.summary)
         self.assertEqual(
             entry.evidence_links,
@@ -8864,7 +8978,10 @@ class WorkspaceSnapshotTest(unittest.TestCase):
             outcome="model-commentary",
             source="frontier-model",
             action_outcome="no-action",
-            action_message="No action taken.",
+            action_message=(
+                "No action taken. Controller prose is commentary and no correlated "
+                "Orchestrator receipt exists."
+            ),
         )
         persisted = json.loads(history.history_path.read_text(encoding="utf-8"))
         persisted["messages"][0]["correlation_id"] = "forged-receipt-2"
@@ -8874,6 +8991,43 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         with self.assertRaisesRegex(
             WorkspacePersistenceError,
             "model commentary cannot carry an Orchestrator receipt identity",
+        ):
+            AgentConsoleHistoryService(self.load_service()).history()
+
+    def test_agent_console_history_requires_exact_controller_action_message(self) -> None:
+        history = AgentConsoleHistoryService(self.load_service())
+
+        with self.assertRaisesRegex(
+            AlbertError,
+            "action message does not match its typed outcome",
+        ):
+            history.append(
+                role="assistant",
+                content="Controller commentary.",
+                outcome="model-commentary",
+                source="frontier-model",
+                action_outcome="no-action",
+                action_message="Action completed successfully.",
+            )
+
+        history.append(
+            role="assistant",
+            content="Controller commentary.",
+            outcome="model-commentary",
+            source="frontier-model",
+            action_outcome="no-action",
+            action_message=(
+                "No action taken. Controller prose is commentary and no correlated "
+                "Orchestrator receipt exists."
+            ),
+        )
+        persisted = json.loads(history.history_path.read_text(encoding="utf-8"))
+        persisted["messages"][0]["action_message"] = "Action completed successfully."
+        history.history_path.write_text(json.dumps(persisted), encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            WorkspacePersistenceError,
+            "action message does not match its typed outcome",
         ):
             AgentConsoleHistoryService(self.load_service()).history()
 
@@ -9179,6 +9333,88 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         restored = AgentConsoleHistoryService(self.load_service()).history()[-1]
         self.assertEqual(restored.action_outcome, "no-action")
         self.assertEqual(restored.action_message, response.message.action_message)
+
+    def test_passive_subjectless_and_implicit_effect_claims_are_replaced(self) -> None:
+        snapshots = self.load_service()
+        snapshots._primary_mission.agent_registry.agents.append(
+            workspace_module.AgentConfig(
+                id="adversarial-truth-controller",
+                role="frontier",
+                provider="command",
+                runner="command",
+                command="controller",
+                routing="controller",
+            )
+        )
+        history = AgentConsoleHistoryService(snapshots)
+        scope = snapshots.snapshot().conversation_scope
+        claims = [
+            "I've created the requested folder.",
+            "The requested folder was created successfully.",
+            "Created successfully.",
+            "Your files are now updated.",
+            "Your changes are complete.",
+            "The requested work succeeded.",
+            "The requested folder now exists.",
+        ]
+        outputs = [
+            subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "reply": claim,
+                        "route": {
+                            "intent": "discussion",
+                            "task_request": "",
+                            "acceptance_criteria": [],
+                        },
+                    }
+                ),
+                stderr="",
+            )
+            for claim in claims
+        ]
+
+        with (
+            patch(
+                "albert_mvp.workspace.sandboxed_process_argv",
+                return_value=(["controller"], True),
+            ),
+            patch(
+                "albert_mvp.workspace._run_bounded_process",
+                side_effect=outputs,
+            ),
+        ):
+            for index, claim in enumerate(claims, start=1):
+                with self.subTest(claim=claim):
+                    prompt = history.append(
+                        role="user",
+                        content=f"Effectful request {index}.",
+                        outcome="proposed",
+                        source="mission-commander",
+                        expected_revision=1,
+                        expected_scope=scope,
+                    )
+                    response = AgentConsoleResponseService(snapshots).respond(
+                        message_id=prompt.message_id,
+                        expected_revision=1,
+                        expected_scope=scope,
+                        agent_id="adversarial-truth-controller",
+                    )
+                    self.assertNotEqual(response.message.content, claim)
+                    self.assertIn(
+                        "unverified effect claim",
+                        response.message.content.casefold(),
+                    )
+                    self.assertEqual(response.message.action_outcome, "no-action")
+
+        restored_claims = [
+            message.content
+            for message in AgentConsoleHistoryService(self.load_service()).history()
+            if message.source == "frontier-model"
+        ]
+        self.assertNotEqual(restored_claims, claims)
 
     def test_malformed_success_sounding_controller_output_does_not_survive_as_primary_reply(
         self,
