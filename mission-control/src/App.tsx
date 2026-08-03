@@ -2953,15 +2953,6 @@ function promptTimelineVersion(entry: PromptTimelineEntry): string {
 function buildWorkstationTranscriptTurns(
   snapshot: WorkspaceSnapshot,
 ): readonly WorkstationTranscriptTurn[] {
-  const attentionTurns =
-    snapshot.missions?.flatMap((mission) =>
-      mission.attention.map((attention) => ({
-        id: `attention:${mission.id}:${attention.attention_id}`,
-        content: `Workstation action pending: ${attention.label}.`,
-        source: "orchestrator",
-        outcome: "waiting-approval",
-      })),
-    ) ?? [];
   const sessionTurns =
     snapshot.missions?.flatMap((mission) =>
       mission.sessions.flatMap((session) => {
@@ -3016,7 +3007,7 @@ function buildWorkstationTranscriptTurns(
         return turns;
       }),
     ) ?? [];
-  return [...attentionTurns, ...sessionTurns];
+  return sessionTurns;
 }
 
 function buildWorkspaceQueueTranscriptTurns(

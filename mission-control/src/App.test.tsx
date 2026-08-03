@@ -346,7 +346,11 @@ test("opens to a console-first workstation with persistent Mission Work beside i
   const transcript = screen.getByRole("region", { name: "Prompt Transcript" });
   expect(within(transcript).getByText("Implement the next Alfredo workstation slice.")).toBeVisible();
   expect(within(transcript).getByText(/durable and route execution/)).toBeVisible();
-  expect(within(transcript).getByText("Workstation action pending: ISS-02 delegation approval required.")).toBeVisible();
+  expect(
+    within(transcript).queryByText(
+      "Workstation action pending: ISS-02 delegation approval required.",
+    ),
+  ).not.toBeInTheDocument();
   expect(within(transcript).getByText("Orchestrator started canonical session session-ISS-01-1 for ISS-01 on qwen-coder-local.")).toBeVisible();
   expect(within(transcript).getByText("Receipt workstation-launch-ISS-01-1 · running")).toBeVisible();
   expect(screen.getByRole("complementary", { name: "Mission Work" })).toBeVisible();
@@ -8285,7 +8289,15 @@ test("suppresses legacy Queue effect claims until exact receipt identities are a
             status: "queued",
           },
         ],
-        attention: [],
+        attention: [
+          {
+            attention_id: "ad-hoc-delegation-command-deck-000043",
+            mission_id: "command-deck",
+            kind: "ad-hoc-delegation",
+            label: "ADHOC-000043 Ad Hoc Delegation pending",
+            queue_link: "workspace-queue#ad-hoc-delegation-command-deck-000043",
+          },
+        ],
       },
     ],
   };
@@ -8339,6 +8351,11 @@ test("suppresses legacy Queue effect claims until exact receipt identities are a
   expect(
     within(transcript).queryByText(
       "Orchestrator queued coding task ADHOC-000043 as session-ADHOC-000043 on gemma4-12b.",
+    ),
+  ).not.toBeInTheDocument();
+  expect(
+    within(transcript).queryByText(
+      "Workstation action pending: ADHOC-000043 Ad Hoc Delegation pending.",
     ),
   ).not.toBeInTheDocument();
 });

@@ -5925,7 +5925,7 @@ None - can start immediately
         assert!(response
             .message
             .content
-            .contains("No configured controller model is available"));
+            .contains("Untrusted reply prose was not retained"));
         assert_eq!(
             response.route.intent,
             AgentConsoleResponseIntent::Discussion
