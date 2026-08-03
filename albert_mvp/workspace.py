@@ -29,11 +29,13 @@ from .core import (
     LocalAgentSession,
     ReviewDecision,
     SharedUnderstandingGateError,
+    WayfinderStatePersistenceError,
     _process_identity,
     _process_identity_is_live,
     _run_bounded_process,
     _trusted_system_executable,
     ensure_wayfinder_gate_open,
+    load_wayfinder_state,
     sandboxed_process_argv,
     sanitized_process_environment,
     wayfinder_state_path,
@@ -2325,7 +2327,9 @@ class WayfinderService:
 
     _SCHEMA_VERSION = 1
     _READ_ONLY = re.compile(
-        r"^\s*(?:explain|what(?:'s| is)|why|how|status|review|diagnos(?:e|is)|inspect|show)\b",
+        r"^\s*(?:(?:please|could\s+you|can\s+you|would\s+you|"
+        r"i\s+(?:want|need)\s+to)\s+)?"
+        r"(?:explain|what(?:'s|\s+is)|why|how|status|review|diagnos(?:e|is)|inspect|show)\b",
         re.IGNORECASE,
     )
     _EXISTING_REFERENCE = re.compile(
@@ -2531,19 +2535,15 @@ class WayfinderService:
         )
 
     def _load(self) -> dict[str, Any]:
-        if not self._path.exists():
-            return {"schema_version": self._SCHEMA_VERSION, "active_flow": None}
         try:
-            state = json.loads(self._path.read_text(encoding="utf-8"))
-            if state.get("schema_version") != self._SCHEMA_VERSION:
-                raise ValueError("unsupported Wayfinder state schema")
+            state = load_wayfinder_state(self._path)
             active = state.get("active_flow")
             if active is None:
                 return state
-            if not isinstance(active, dict):
-                raise ValueError("Wayfinder active flow must be an object")
             self._projection(active, continuing=False)
             return state
+        except WayfinderStatePersistenceError as exc:
+            raise WorkspacePersistenceError(str(exc)) from exc
         except (json.JSONDecodeError, AttributeError, KeyError, TypeError, ValueError) as exc:
             raise WorkspacePersistenceError(
                 f"Wayfinder state persistence read failed: {exc}"

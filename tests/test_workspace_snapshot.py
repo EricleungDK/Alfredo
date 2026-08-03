@@ -46,6 +46,7 @@ from albert_mvp.workspace import (
     WorkspaceScopeMismatchError,
     WorkspaceStaleActionError,
     WorkspaceSyncService,
+    WayfinderService,
     WorkstationActionService,
     WorkingContextCurationError,
     WorkingContextService,
@@ -9450,6 +9451,89 @@ class WorkspaceSnapshotTest(unittest.TestCase):
 
         with self.assertRaises(SharedUnderstandingGateError):
             another_mission.launch_issue("ISS-01")
+        with self.assertRaises(SharedUnderstandingGateError):
+            another_mission.route_issue("ISS-01")
+        with self.assertRaises(SharedUnderstandingGateError):
+            another_mission.approve_delegation("ISS-01")
+        with self.assertRaises(SharedUnderstandingGateError):
+            another_mission.launch_headless_work(
+                work_kind="run",
+                agent_id="unconfigured-agent",
+                prompt="Production work must stay blocked.",
+            )
+
+    def test_wayfinder_rejects_malformed_state_with_structured_persistence_failures(
+        self,
+    ) -> None:
+        snapshots = self.load_service()
+        state_path = WayfinderService(snapshots).state_path
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "active_flow": {
+                        "flow_id": "wayfinder-console-000001",
+                        "mode": "outside",
+                        "originating_message_id": "console-000001",
+                        "scope": {
+                            "kind": "working-directory",
+                            "target_id": str(self.target_repo),
+                            "label": "target",
+                            "mission_id": None,
+                        },
+                        "reference": "",
+                        "gate": {
+                            "status": "bogus",
+                            "opened_by": "",
+                            "receipt_id": "",
+                        },
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        scope = snapshots.snapshot().conversation_scope
+        prompt = AgentConsoleHistoryService(snapshots).append(
+            role="user",
+            content="Explain the current status.",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        with self.assertRaises(WorkspacePersistenceError):
+            AgentConsoleResponseService(snapshots).respond(
+                message_id=prompt.message_id,
+                expected_revision=1,
+                expected_scope=scope,
+            )
+
+        output = io.StringIO()
+        error = io.StringIO()
+        with redirect_stdout(output), redirect_stderr(error):
+            exit_code = main(
+                [
+                    "launch",
+                    "--target-repo",
+                    str(self.target_repo),
+                    "--tracker-dir",
+                    str(self.tracker),
+                    "--runtime-root",
+                    str(self.runtime),
+                    "--mission-id",
+                    "command-deck",
+                    "ISS-01",
+                ]
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(output.getvalue(), "")
+        self.assertEqual(
+            json.loads(error.getvalue())["error"]["code"],
+            "persistence-read-failure",
+        )
 
     def test_wayfinder_uses_work_through_for_existing_references_and_continues_one_flow(
         self,
@@ -9578,27 +9662,33 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertIn("acknowledgement ends the turn", response.message.content)
         self.assertEqual(MissionDraftService(snapshots).inspect().drafts, ())
 
-    def test_read_only_explanation_stays_outside_automatic_wayfinder_chart_mode(self) -> None:
+    def test_read_only_requests_stay_outside_automatic_wayfinder_chart_mode(self) -> None:
         snapshots = self.load_service()
         scope = snapshots.snapshot().conversation_scope
-        prompt = AgentConsoleHistoryService(snapshots).append(
-            role="user",
-            content="Explain ticket #60 and the current Workspace Queue status.",
-            outcome="proposed",
-            source="mission-commander",
-            expected_revision=1,
-            expected_scope=scope,
-        )
+        history = AgentConsoleHistoryService(snapshots)
+        for content in (
+            "Explain ticket #60 and the current Workspace Queue status.",
+            "Please review the architecture before any work begins.",
+            "Could you diagnose this migration before we change anything?",
+        ):
+            with self.subTest(content=content):
+                prompt = history.append(
+                    role="user",
+                    content=content,
+                    outcome="proposed",
+                    source="mission-commander",
+                    expected_revision=1,
+                    expected_scope=scope,
+                )
+                response = AgentConsoleResponseService(snapshots).respond(
+                    message_id=prompt.message_id,
+                    expected_revision=1,
+                    expected_scope=scope,
+                )
 
-        response = AgentConsoleResponseService(snapshots).respond(
-            message_id=prompt.message_id,
-            expected_revision=1,
-            expected_scope=scope,
-        )
-
-        self.assertEqual(response.wayfinder.mode, "outside")
-        self.assertEqual(response.wayfinder.gate.status, "not-applicable")
-        self.assertIsNone(response.wayfinder.flow)
+                self.assertEqual(response.wayfinder.mode, "outside")
+                self.assertEqual(response.wayfinder.gate.status, "not-applicable")
+                self.assertIsNone(response.wayfinder.flow)
 
     def test_controller_model_routes_a_natural_coding_request_as_bounded_task(self) -> None:
         snapshots = self.load_service()

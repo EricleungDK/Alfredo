@@ -16,7 +16,14 @@ from .capabilities import (
     OllamaHealthProbe,
     OllamaHealthSnapshot,
 )
-from .core import AlbertError, AlbertMission, EvidencePackage, EvidenceValidationError
+from .core import (
+    AlbertError,
+    AlbertMission,
+    EvidencePackage,
+    EvidenceValidationError,
+    SharedUnderstandingGateError,
+    WayfinderStatePersistenceError,
+)
 from .tui import build_tui_state, perform_tui_action, render_tui_state
 from .workspace import (
     AgentConsoleHistoryService,
@@ -27,7 +34,6 @@ from .workspace import (
     ReviewWorkspaceService,
     SessionArtifactReadError,
     SessionArtifactService,
-    SharedUnderstandingGateError,
     ShellTerminalService,
     WorkspaceAction,
     WorkspaceQueueService,
@@ -758,6 +764,21 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 1
     except SharedUnderstandingGateError as exc:
+        print(
+            json.dumps(
+                {
+                    "error": {
+                        "code": exc.code,
+                        "message": str(exc),
+                        "recoverable": True,
+                    }
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 1
+    except WayfinderStatePersistenceError as exc:
         print(
             json.dumps(
                 {
