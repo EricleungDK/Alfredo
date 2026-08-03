@@ -417,6 +417,13 @@ h5 {
   background: #111413;
 }
 
+.selection-guidance {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
 .prompt-toolbar,
 .prompt-status-line,
 .mission-work-controls,

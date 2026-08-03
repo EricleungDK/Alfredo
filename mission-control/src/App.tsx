@@ -488,6 +488,24 @@ function missionIdFromTitle(title: string): string {
     .slice(0, 64);
 }
 
+function suggestedWorkspacePath(startingLocation: string): string {
+  const trimmed = startingLocation.trim().replace(/[\\/]+$/, "");
+  const separator = startingLocation.includes("\\") ? "\\" : "/";
+  return `${trimmed}${separator}workspace`;
+}
+
+function workspaceSelectionFailureMessage(
+  code: string,
+  message: string,
+  startingLocation: string,
+): string {
+  const detail = `${code}: ${message}`;
+  if (code !== "workspace-unsafe") return detail;
+  return `${detail} Choose a repository below Starting Location, such as ${suggestedWorkspacePath(
+    startingLocation,
+  )}; do not select Alfredo's install or backend.`;
+}
+
 export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   const [state, setState] = useState<WorkspaceLoadResult | "loading">("loading");
   const [connectionStatus, setConnectionStatus] = useState<
@@ -585,6 +603,12 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
     readonly message: string;
   } | null>(null);
   const [missionTitle, setMissionTitle] = useState("");
+  useEffect(() => {
+    if (launchContext?.phase !== "selection-required") return;
+    setCodingWorkspacePath((current) =>
+      current.trim() ? current : suggestedWorkspacePath(launchContext.starting_location),
+    );
+  }, [launchContext?.phase, launchContext?.starting_location]);
   const pendingWorkspaceSelectionRef = useRef<CodingWorkspaceSelectionRequest | null>(null);
   const pendingMissionChoiceRef = useRef<{
     readonly correlation_id: string;
@@ -2504,7 +2528,11 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         }
         setCodingWorkspaceStatus({
           state: "rejected",
-          message: `${result.code}: ${result.message}`,
+          message: workspaceSelectionFailureMessage(
+            result.code,
+            result.message,
+            launchContext.starting_location,
+          ),
         });
         return;
       }
@@ -2891,6 +2919,10 @@ function CodingWorkspaceGate({
                     onChange={(event) => onWorkspacePathChange(event.target.value)}
                   />
                 </label>
+                <p className="selection-guidance">
+                  Starting Location is only the parent directory. Use the suggested child path
+                  for a new repository, or replace it with an existing repository below it.
+                </p>
                 <div className="prompt-toolbar">
                   <button
                     type="button"

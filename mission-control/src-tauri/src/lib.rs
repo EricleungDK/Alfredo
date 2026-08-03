@@ -559,6 +559,17 @@ impl WorkspaceBinding {
     }
 
     fn reload_from_persistence(&self, config: &BridgeConfig) -> Result<(), BridgeFailure> {
+        self.reload_from_persistence_for_starting_location(
+            config,
+            &bridge_starting_location(config),
+        )
+    }
+
+    fn reload_from_persistence_for_starting_location(
+        &self,
+        config: &BridgeConfig,
+        starting_location: &Path,
+    ) -> Result<(), BridgeFailure> {
         let path = config.runtime_root.join("workspace-sessions.json");
         if !path.exists() {
             return Ok(());
@@ -584,7 +595,7 @@ impl WorkspaceBinding {
                 recoverable: false,
             });
         }
-        let starting_location = canonical_or_original(&bridge_starting_location(config));
+        let starting_location = canonical_or_original(starting_location);
         let matching_sessions = payload
             .sessions
             .iter()
@@ -592,14 +603,28 @@ impl WorkspaceBinding {
                 canonical_or_original(Path::new(&session.starting_location)) == starting_location
             })
             .collect::<Vec<_>>();
-        if matching_sessions.len() > 1 {
-            // A Starting Location can own several acknowledged workspaces. Do
-            // not infer one from recency; leave the gate active so the user
-            // can acknowledge the exact repository explicitly.
-            return Ok(());
-        }
-        let Some(session) = matching_sessions.first() else {
-            return Ok(());
+        let session = match matching_sessions.as_slice() {
+            [] => return Ok(()),
+            [session] => *session,
+            _ => {
+                // A Starting Location can own several acknowledged workspaces.
+                // Once this process has selected one, use that exact boundary;
+                // otherwise leave the gate active rather than inferring one.
+                let Some(selected_workspace) = self.state().coding_workspace else {
+                    return Ok(());
+                };
+                let selected_sessions = matching_sessions
+                    .iter()
+                    .filter(|session| {
+                        canonical_or_original(Path::new(&session.coding_workspace))
+                            == selected_workspace
+                    })
+                    .collect::<Vec<_>>();
+                if selected_sessions.len() != 1 {
+                    return Ok(());
+                }
+                *selected_sessions[0]
+            }
         };
         let coding_workspace = PathBuf::from(&session.coding_workspace)
             .canonicalize()
@@ -4030,6 +4055,106 @@ mod tests {
         );
         assert!(marker["process_id"].as_u64().is_some());
         fs::remove_dir_all(root).expect("GUI smoke fixture should be removed");
+    }
+
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn workspace_binding_reloads_the_selected_workspace_when_starting_location_has_many() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("alfredo-many-workspaces-{unique}"));
+        let backend_root = root.join("backend");
+        let starting_location = root.join("projects");
+        let workspace_a = starting_location.join("workspace-a");
+        let workspace_b = starting_location.join("workspace-b");
+        let runtime_root = root.join("runtime");
+        fs::create_dir_all(&backend_root).expect("backend fixture");
+        fs::create_dir_all(&workspace_a).expect("first workspace fixture");
+        fs::create_dir_all(&workspace_b).expect("selected workspace fixture");
+        fs::create_dir_all(&runtime_root).expect("runtime fixture");
+        let config = BridgeConfig {
+            runtime_root: runtime_root.clone(),
+            ..BridgeConfig::for_repository(backend_root)
+        };
+        let starting_location = starting_location.canonicalize().expect("starting location");
+        let workspace_b = workspace_b.canonicalize().expect("selected workspace");
+        let journey = serde_json::json!({
+            "schema_version": 1,
+            "sessions": [
+                {
+                    "starting_location": starting_location,
+                    "coding_workspace": workspace_a.to_string_lossy(),
+                    "revision": 1,
+                    "active_mission": null,
+                    "missions": [],
+                    "mission_catalog": runtime_root.join("catalog-a.json").to_string_lossy(),
+                    "selection": {"correlation_id": "selection-a", "selection_mode": "existing"},
+                    "receipts": {}
+                },
+                {
+                    "starting_location": starting_location,
+                    "coding_workspace": workspace_b,
+                    "revision": 2,
+                    "active_mission": "mission-b",
+                    "missions": [{
+                        "id": "mission-b",
+                        "title": "Mission B",
+                        "tracker_dir": runtime_root.join("tracker-b").to_string_lossy(),
+                        "issues_dir": runtime_root.join("issues-b").to_string_lossy()
+                    }],
+                    "mission_catalog": runtime_root.join("catalog-b.json").to_string_lossy(),
+                    "selection": {"correlation_id": "selection-b", "selection_mode": "existing"},
+                    "receipts": {}
+                }
+            ]
+        });
+        fs::write(
+            runtime_root.join("workspace-sessions.json"),
+            serde_json::to_vec(&journey).expect("journey should serialize"),
+        )
+        .expect("journey should be persisted");
+
+        let binding = WorkspaceBinding::default();
+        let request = CodingWorkspaceSelectionRequest {
+            correlation_id: "selection-b".to_owned(),
+            workspace_path: workspace_b.to_string_lossy().into_owned(),
+            selection_mode: "existing".to_owned(),
+        };
+        assert!(binding
+            .reserve_selection(&request)
+            .expect("selection should reserve")
+            .is_none());
+        binding
+            .acknowledge(
+                &request,
+                &CodingWorkspaceAcknowledgement {
+                    schema_version: 1,
+                    correlation_id: request.correlation_id.clone(),
+                    outcome: "acknowledged".to_owned(),
+                    starting_location: starting_location.to_string_lossy().into_owned(),
+                    coding_workspace: workspace_b.to_string_lossy().into_owned(),
+                    selection_mode: "existing".to_owned(),
+                    active_mission: None,
+                    replayed: false,
+                    message: "workspace selected".to_owned(),
+                    known_missions: vec![],
+                },
+            )
+            .expect("workspace should be acknowledged");
+
+        binding
+            .reload_from_persistence_for_starting_location(&config, &starting_location)
+            .expect("selected workspace should restore");
+        let context = build_launch_context_with_binding(&config, &binding);
+        assert_eq!(context.phase, "workspace-ready");
+        assert_eq!(
+            context.coding_workspace.as_deref(),
+            Some(workspace_b.to_string_lossy().as_ref())
+        );
+        assert_eq!(context.active_mission.as_deref(), Some("mission-b"));
+        fs::remove_dir_all(root).expect("fixture cleanup");
     }
 
     #[cfg(feature = "desktop")]
