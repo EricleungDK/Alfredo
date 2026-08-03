@@ -428,7 +428,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
       const response = await invoke<AgentConsoleResponseProjection>("agent_console_response", {
         request,
       });
-      return { kind: "message", message: response.message, route: response.route };
+      return { kind: "message", message: response.message, route: response.route, wayfinder: response.wayfinder };
     } catch (error) {
       if (isBridgeFailure(error)) {
         return { kind: "message-rejected", code: error.code, message: error.message };
