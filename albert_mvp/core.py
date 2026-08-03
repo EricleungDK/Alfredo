@@ -164,6 +164,18 @@ class AlbertError(Exception):
     """Base error for user-actionable MVP failures."""
 
 
+class SharedUnderstandingGateError(AlbertError):
+    """Raised before work can cross a pending Wayfinder authority boundary."""
+
+    code = "shared-understanding-required"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Wayfinder Shared Understanding Gate is still pending; canonical planning "
+            "artifacts, delegation, and production implementation are not eligible."
+        )
+
+
 class LockedFieldError(AlbertError):
     """Raised when an approved Issue Slice contract is edited while locked."""
 
@@ -178,6 +190,37 @@ class SessionCancelledError(AlbertError):
 
 class EvidenceValidationError(AlbertError):
     """Raised when an Evidence Package is incomplete."""
+
+
+def wayfinder_state_path(*, runtime_root: Path, target_repo: Path) -> Path:
+    """Return the mission-independent durable Wayfinder state path for one repository."""
+    canonical_target = str(target_repo.resolve())
+    project_key = sha1(canonical_target.encode("utf-8")).hexdigest()[:16]
+    return runtime_root.resolve() / "wayfinder" / project_key / "wayfinder-state.json"
+
+
+def ensure_wayfinder_gate_open(*, runtime_root: Path, target_repo: Path) -> None:
+    """Fail closed before a direct production launch crosses a pending Wayfinder gate."""
+    path = wayfinder_state_path(runtime_root=runtime_root, target_repo=target_repo)
+    if not path.exists():
+        return
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+        active = state["active_flow"]
+        if state["schema_version"] != 1 or active is None:
+            if state["schema_version"] != 1:
+                raise ValueError("unsupported Wayfinder state schema")
+            return
+        if not isinstance(active, dict) or not isinstance(active.get("gate"), dict):
+            raise ValueError("Wayfinder active flow must contain a gate")
+        if active["gate"].get("status") not in {"pending", "open"}:
+            raise ValueError("Wayfinder gate has an invalid status")
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+        raise AlbertError(
+            f"Wayfinder state cannot be verified before production launch: {exc}"
+        ) from exc
+    if active["gate"]["status"] != "open":
+        raise SharedUnderstandingGateError()
 
 
 def _read_bounded_bytes(path: Path, limit_bytes: int) -> bytes:
@@ -1840,12 +1883,19 @@ class AlbertMission:
     ) -> LocalAgentSession:
         with self._session_launch_lock():
             self._load_runtime()
+            self._ensure_wayfinder_gate_open()
             return self._launch_issue(
                 issue_id,
                 allowed_paths=allowed_paths,
                 command_policy=command_policy,
                 workstation_action=workstation_action,
             )
+
+    def _ensure_wayfinder_gate_open(self) -> None:
+        ensure_wayfinder_gate_open(
+            runtime_root=self.runtime_root,
+            target_repo=self.target_repo,
+        )
 
     def _launch_issue(
         self,
@@ -2007,6 +2057,7 @@ class AlbertMission:
     ) -> LocalAgentSession:
         with self._session_launch_lock():
             self._load_runtime()
+            self._ensure_wayfinder_gate_open()
             return self._launch_repair(
                 session_id,
                 agent_id=agent_id,
