@@ -383,6 +383,20 @@ h5 {
   font-size: 0.75rem;
 }
 
+.console-capability,
+.console-history article .console-attribution {
+  display: block;
+  color: var(--cyan) !important;
+  font-family: "Ubuntu Sans", Aptos, "Segoe UI", sans-serif;
+  font-size: 0.75rem;
+  font-weight: 650;
+  letter-spacing: 0.025em;
+}
+
+.console-attribution {
+  margin-bottom: 0.18rem;
+}
+
 .console-response-pending {
   animation: breathe 1.35s ease-in-out infinite alternate;
 }
@@ -484,6 +498,23 @@ h5 {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.capability-menu__groups [role="option"] {
+  border-radius: 5px;
+}
+
+.capability-menu__groups [role="option"][aria-selected="true"] {
+  background: #202b27;
+}
+
+.capability-menu__groups [role="option"]:focus-within {
+  outline: 2px solid var(--cyan);
+  outline-offset: -2px;
+}
+
+.capability-menu__groups [role="option"] > button {
+  width: 100%;
 }
 
 .capability-menu__empty {

@@ -169,7 +169,7 @@ test("renders the typed Wayfinder Chart route and pending Shared Understanding G
   );
 
   await screen.findByRole("heading", { name: "Command Deck Mission" });
-  fireEvent.change(screen.getByLabelText("Agent Console prompt"), {
+  fireEvent.change(screen.getByRole("textbox", { name: "Message Alfredo" }), {
     target: { value: "Start a new project for release planning." },
   });
   fireEvent.click(screen.getByRole("button", { name: "Send prompt" }));
@@ -3538,6 +3538,306 @@ test("manages keyboard focus when the commands and skills palette opens and clos
   const reopened = screen.getByRole("region", { name: "Commands and skills" });
   fireEvent.click(within(reopened).getByRole("button", { name: /\$diagnosing-bugs/ }));
   expect(screen.getByRole("textbox", { name: "Message Alfredo" })).toHaveFocus();
+});
+
+test("traverses submitted prompt history and restores the unsent draft", async () => {
+  let sequence = 0;
+  const appendConsoleMessage = vi.fn(async (request: AgentConsoleMessageRequest) => {
+    sequence += 1;
+    return {
+      kind: "message" as const,
+      message: {
+        message_id: `console-history-${sequence}`,
+        sequence,
+        role: "user" as const,
+        content: request.content,
+        scope: snapshot.conversation_scope,
+        outcome: "proposed" as const,
+        source: "mission-commander",
+      },
+    };
+  });
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => ({ kind: "ready", snapshot }),
+        appendConsoleMessage,
+      }}
+    />,
+  );
+
+  const composer = await screen.findByRole("textbox", { name: "Message Alfredo" });
+  for (const [index, prompt] of ["first prompt", "second prompt"].entries()) {
+    fireEvent.change(composer, { target: { value: prompt } });
+    fireEvent.keyDown(composer, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(appendConsoleMessage).toHaveBeenCalledTimes(index + 1));
+  }
+
+  fireEvent.change(composer, { target: { value: "unsent draft" } });
+  fireEvent.keyDown(composer, { key: "ArrowUp" });
+  expect(composer).toHaveValue("second prompt");
+  fireEvent.keyDown(composer, { key: "ArrowUp" });
+  expect(composer).toHaveValue("first prompt");
+  fireEvent.keyDown(composer, { key: "ArrowDown" });
+  expect(composer).toHaveValue("second prompt");
+  fireEvent.keyDown(composer, { key: "ArrowDown" });
+  expect(composer).toHaveValue("unsent draft");
+
+  fireEvent.keyDown(composer, { key: "ArrowUp" });
+  expect(composer).toHaveValue("second prompt");
+  fireEvent.keyDown(composer, { key: "Enter" });
+  await waitFor(() => expect(appendConsoleMessage).toHaveBeenCalledTimes(3));
+  fireEvent.keyDown(composer, { key: "ArrowDown" });
+  expect(composer).toHaveValue("");
+});
+
+test("supports keyboard slash and at-capability completion with predictable dismissal", async () => {
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => ({ kind: "ready", snapshot }),
+        loadAgentCapabilities: async () => ({
+          kind: "capabilities",
+          catalog: {
+            schema_version: 1,
+            default_agent_id: "",
+            commands: [
+              {
+                name: "/status",
+                usage: "/status",
+                description: "Show current execution status.",
+                category: "monitoring",
+              },
+            ],
+            skills: [],
+            agents: [],
+          },
+        }),
+      }}
+    />,
+  );
+
+  const composer = await screen.findByRole("textbox", { name: "Message Alfredo" });
+  fireEvent.change(composer, { target: { value: "/st" } });
+  expect(screen.getByRole("option", { name: /\/status/ })).toBeVisible();
+  fireEvent.keyDown(composer, { key: "Tab" });
+  expect(composer).toHaveValue("/status ");
+  expect(composer).toHaveFocus();
+
+  fireEvent.change(composer, { target: { value: "Ask @way" } });
+  expect(screen.getByRole("option", { name: /@wayfinder/ })).toBeVisible();
+  fireEvent.keyDown(composer, { key: "Escape" });
+  expect(screen.queryByRole("option", { name: /@wayfinder/ })).not.toBeInTheDocument();
+  expect(composer).not.toHaveAttribute("aria-controls");
+  expect(composer).not.toHaveAttribute("aria-activedescendant");
+  expect(composer).toHaveFocus();
+
+  fireEvent.change(composer, { target: { value: "Ask @wayf" } });
+  fireEvent.change(composer, { target: { value: "Ask @way" } });
+  fireEvent.keyDown(composer, { key: "Tab" });
+  expect(composer).toHaveValue("Ask @wayfinder ");
+  expect(composer).toHaveFocus();
+});
+
+test("labels Coding Workspace, Wayfinder, Orchestrator, and Mission outcomes", async () => {
+  const launchContext = {
+    schema_version: 1 as const,
+    selected_agent: "qwen3-14b",
+    selected_model: "qwen3:14b",
+    starting_location: "/workspace",
+    coding_workspace: null,
+    active_mission: null,
+    phase: "selection-required" as const,
+    runtime_root: "/tmp/alfredo-runtime",
+    recent_workspaces: [],
+  };
+  const selectionGate = render(
+    <App
+      client={{
+        loadLaunchContext: async () => ({ kind: "launch-context", context: launchContext }),
+        loadSnapshot: async () => ({ kind: "ready", snapshot }),
+      }}
+    />,
+  );
+  expect(await screen.findByText("Capability: Coding Workspace")).toBeVisible();
+  selectionGate.unmount();
+
+  const missionChoiceContext = {
+    ...launchContext,
+    coding_workspace: "/workspace/repository",
+    phase: "mission-choice-required" as const,
+    revision: 1,
+    known_missions: [{ id: "existing-mission", title: "Existing Mission" }],
+  };
+  const missionGate = render(
+    <App
+      client={{
+        loadLaunchContext: async () => ({
+          kind: "launch-context",
+          context: missionChoiceContext,
+        }),
+        loadSnapshot: async () => ({ kind: "ready", snapshot }),
+      }}
+    />,
+  );
+  expect(await screen.findByText("Capability: Mission")).toBeVisible();
+  missionGate.unmount();
+
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => ({ kind: "ready", snapshot }),
+        loadConsoleHistory: async () => ({
+          kind: "history",
+          history: {
+            schema_version: 1,
+            messages: [
+              {
+                message_id: "console-wayfinder-capability",
+                sequence: 1,
+                role: "assistant",
+                content: "Wayfinder held the gate open.",
+                scope: snapshot.conversation_scope,
+                outcome: "acknowledged",
+                source: "wayfinder-agent",
+                correlation_id: "wayfinder-receipt",
+                action_phase: "shared-understanding-agent-acknowledged",
+              },
+              {
+                message_id: "console-orchestrator-capability",
+                sequence: 2,
+                role: "assistant",
+                content: "Orchestrator recorded the Mission outcome.",
+                scope: snapshot.conversation_scope,
+                outcome: "acknowledged",
+                source: "orchestrator",
+                correlation_id: "orchestrator-receipt",
+                action_phase: "mission-formed",
+              },
+            ],
+          },
+        }),
+      }}
+    />,
+  );
+  expect(await screen.findByText("Capability: Wayfinder")).toBeVisible();
+  expect(screen.getByText("Capability: Orchestrator")).toBeVisible();
+  expect(screen.getByText("Capability: Mission")).toBeVisible();
+});
+
+test("completes the Coding Workspace to Wayfinder journey inside Agent Console", async () => {
+  const selectionContext = {
+    schema_version: 1 as const,
+    selected_agent: "qwen3-14b",
+    selected_model: "qwen3:14b",
+    starting_location: "/workspace",
+    coding_workspace: null,
+    active_mission: null,
+    phase: "selection-required" as const,
+    runtime_root: "/tmp/alfredo-runtime",
+    recent_workspaces: [],
+  };
+  const codingWorkspace = "/workspace/keyboard-journey";
+  const mission = { id: "keyboard-journey", title: "Keyboard Journey" };
+  const journeyClient: WorkspaceClient = {
+    loadLaunchContext: async () => ({ kind: "launch-context", context: selectionContext }),
+    loadSnapshot: async () => ({ kind: "ready", snapshot }),
+    loadConsoleHistory: async () => ({
+      kind: "history",
+      history: { schema_version: 1, messages: [] },
+    }),
+    selectCodingWorkspace: async (request) => ({
+      kind: "acknowledged",
+      acknowledgement: {
+        schema_version: 1,
+        correlation_id: request.correlation_id,
+        outcome: "acknowledged",
+        starting_location: selectionContext.starting_location,
+        coding_workspace: codingWorkspace,
+        selection_mode: request.selection_mode,
+        active_mission: null,
+        replayed: false,
+        known_missions: [mission],
+        message: "Coding Workspace acknowledged by the Orchestrator; no Mission has been selected.",
+      },
+    }),
+    chooseMission: async (request) => ({
+      kind: "acknowledged",
+      acknowledgement: {
+        schema_version: 1,
+        correlation_id: request.correlation_id,
+        outcome: "acknowledged",
+        coding_workspace: codingWorkspace,
+        choice: request.choice,
+        active_mission: request.mission_id,
+        revision: 2,
+        replayed: false,
+        missions: [mission],
+        message: "Keyboard Journey started.",
+      },
+    }),
+    appendConsoleMessage: async (request) => ({
+      kind: "message",
+      message: {
+        message_id: "console-keyboard-journey-user",
+        sequence: 1,
+        role: request.role,
+        content: request.content,
+        scope: snapshot.conversation_scope,
+        outcome: request.outcome,
+        source: request.source,
+      },
+    }),
+    generateConsoleResponse: async () => ({
+      kind: "message",
+      message: {
+        message_id: "console-keyboard-journey-wayfinder",
+        sequence: 2,
+        role: "assistant",
+        content: "Wayfinder Chart mode is active.",
+        scope: snapshot.conversation_scope,
+        outcome: "acknowledged",
+        source: "wayfinder-agent",
+      },
+      route: { intent: "discussion", task_request: "", acceptance_criteria: [] },
+      wayfinder: {
+        mode: "chart",
+        gate: { status: "pending", opened_by: "", receipt_id: "" },
+        flow: {
+          flow_id: "keyboard-journey-flow",
+          mode: "chart",
+          originating_message_id: "console-keyboard-journey-user",
+          scope: snapshot.conversation_scope,
+          reference: "",
+        },
+        continuing: false,
+        turn_complete: true,
+      },
+    }),
+  };
+
+  render(<App client={journeyClient} syncIntervalMs={100_000} />);
+  const workspacePath = await screen.findByRole("textbox", { name: "Coding Workspace path" });
+  fireEvent.change(workspacePath, { target: { value: codingWorkspace } });
+  fireEvent.click(screen.getByRole("button", { name: "Create new repository" }));
+  expect(await screen.findByText("Mission selection required")).toBeVisible();
+  expect(screen.getByText("Capability: Mission")).toBeVisible();
+
+  fireEvent.change(screen.getByRole("textbox", { name: "New Mission title" }), {
+    target: { value: mission.title },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Start New Mission" }));
+
+  expect(await screen.findByRole("heading", { name: "Command Deck Mission" })).toBeVisible();
+  const composer = screen.getByRole("textbox", { name: "Message Alfredo" });
+  fireEvent.change(composer, { target: { value: "Start a new project" } });
+  fireEvent.keyDown(composer, { key: "Enter", code: "Enter" });
+  expect(await screen.findByRole("status", { name: "Wayfinder route" })).toHaveTextContent(
+    "Chart mode",
+  );
+  const wayfinderRoute = screen.getByRole("status", { name: "Wayfinder route" });
+  expect(within(wayfinderRoute).getByText("Capability: Wayfinder")).toBeVisible();
+  expect(screen.getAllByText("Capability: Mission").length).toBeGreaterThan(0);
 });
 
 test("keeps commands and context mutually exclusive above the composer", async () => {

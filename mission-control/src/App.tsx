@@ -165,6 +165,102 @@ function parseSlashCommand(content: string): { name: string; argument: string } 
   return { name: match[1].toLowerCase(), argument: (match[2] ?? "").trim() };
 }
 
+type PromptCompletionKind = "command" | "capability";
+
+interface PromptCompletion {
+  readonly value: string;
+  readonly detail: string;
+  readonly kind: PromptCompletionKind;
+  readonly start: number;
+}
+
+interface PromptCompletionQuery {
+  readonly kind: PromptCompletionKind;
+  readonly start: number;
+  readonly value: string;
+}
+
+const CORE_CAPABILITY_COMPLETIONS: readonly Omit<PromptCompletion, "start">[] = [
+  { value: "@workspace", detail: "Coding Workspace context", kind: "capability" },
+  { value: "@wayfinder", detail: "Wayfinder planning capability", kind: "capability" },
+  { value: "@orchestrator", detail: "Orchestrator authority and execution", kind: "capability" },
+  { value: "@mission", detail: "Active Mission formation", kind: "capability" },
+];
+
+function promptCompletionQuery(draft: string): PromptCompletionQuery | null {
+  const commandMatch = draft.match(/^\/[^\s]*$/);
+  if (commandMatch) {
+    return { kind: "command", start: 0, value: commandMatch[0] };
+  }
+  const capabilityMatch = draft.match(/(?:^|\s)(@[^\s]*)$/);
+  const capability = capabilityMatch?.[1];
+  if (!capability || !capabilityMatch) return null;
+  return {
+    kind: "capability",
+    start: draft.length - capability.length,
+    value: capability,
+  };
+}
+
+function capabilityCompletionOptions(
+  query: PromptCompletionQuery | null,
+  catalog: AgentCapabilityCatalog,
+): readonly PromptCompletion[] {
+  if (!query) return [];
+  const candidates: readonly Omit<PromptCompletion, "start">[] =
+    query.kind === "command"
+      ? catalog.commands.map((command) => ({
+          value: command.name,
+          detail: command.description,
+          kind: "command" as const,
+        }))
+      : [
+          ...CORE_CAPABILITY_COMPLETIONS,
+          ...catalog.agents.map((agent) => ({
+            value: `@${agent.id}`,
+            detail: `${agent.role} · ${agent.model || agent.runner}`,
+            kind: "capability" as const,
+          })),
+          ...catalog.skills.map((skill) => ({
+            value: `@${skill.name}`,
+            detail: skill.description,
+            kind: "capability" as const,
+          })),
+        ];
+  const matches = candidates
+    .filter((candidate) => candidate.value.toLowerCase().startsWith(query.value.toLowerCase()))
+    .map((candidate) => ({ ...candidate, start: query.start }));
+  if (
+    matches.length === 1 &&
+    matches[0].value.toLowerCase() === query.value.toLowerCase()
+  ) {
+    return [];
+  }
+  return matches;
+}
+
+function capabilityBoundaryLabel(
+  source: string,
+  scope: ConversationScope,
+): "Coding Workspace" | "Wayfinder" | "Orchestrator" | "Mission" | "Frontier Model" | "Local Agent" {
+  const normalized = source.trim().toLowerCase();
+  if (normalized.includes("wayfinder")) return "Wayfinder";
+  if (normalized === "orchestrator") return "Orchestrator";
+  if (normalized.startsWith("frontier-model") || normalized.includes("controller")) {
+    return "Frontier Model";
+  }
+  if (normalized.includes("workspace") || normalized.includes("coding")) {
+    return "Coding Workspace";
+  }
+  if (normalized === "mission-commander") {
+    return scope.kind === "working-directory" ? "Coding Workspace" : "Mission";
+  }
+  if (normalized.includes("local-agent") || normalized.includes("local")) {
+    return "Local Agent";
+  }
+  return scope.kind === "working-directory" ? "Coding Workspace" : "Mission";
+}
+
 function missionSessionIdentity(missionId: string, sessionId: string): string {
   return JSON.stringify([missionId, sessionId]);
 }
@@ -2707,6 +2803,7 @@ function CodingWorkspaceGate({
   onChooseMission: (choice: "resume" | "new", option: MissionChoiceOption | null) => void;
 }) {
   const selectionRequired = launchContext.phase === "selection-required";
+  const capabilityLabel = selectionRequired ? "Coding Workspace" : "Mission";
   return (
     <div className="command-deck">
       <header className="topbar">
@@ -2722,10 +2819,19 @@ function CodingWorkspaceGate({
       </header>
       <div className="deck-grid">
         <main className="prompt-workspace" aria-label="Agent Console">
-          <section className="prompt-pane" aria-label="Coding Workspace selection">
+          <section
+            className="prompt-pane"
+            aria-label={`${capabilityLabel} selection`}
+          >
             <div className="panel-heading">
               <div>
-                <span className="eyebrow">Agent Console / Coding Workspace</span>
+                <span className="eyebrow">Agent Console / {capabilityLabel}</span>
+                <small
+                  className="console-capability"
+                  aria-label={`Responsible capability: ${capabilityLabel}`}
+                >
+                  Capability: {capabilityLabel}
+                </small>
                 <h1>
                   {selectionRequired
                     ? "Choose or create a repository"
@@ -2747,6 +2853,8 @@ function CodingWorkspaceGate({
                   </p>
                 ) : (
                   <p>
+                    Capability: Mission
+                    <br />
                     Coding Workspace
                     <br />
                     <strong>{launchContext.coding_workspace}</strong>
@@ -3436,7 +3544,9 @@ function CommandDeck({
   const [contextInspectorOpen, setContextInspectorOpen] = useState(false);
   const [detailViewsOpen, setDetailViewsOpen] = useState(false);
   const [capabilityMenuOpen, setCapabilityMenuOpen] = useState(false);
-  const [capabilityMenuDismissed, setCapabilityMenuDismissed] = useState(false);
+  const [historyIndex, setHistoryIndex] = useState<number | null>(null);
+  const [selectedCompletionIndex, setSelectedCompletionIndex] = useState(0);
+  const [dismissedCompletion, setDismissedCompletion] = useState<string | null>(null);
   const [relaunchWorkspace, setRelaunchWorkspace] = useState("");
   const [workspaceRelaunchStatus, setWorkspaceRelaunchStatus] = useState<{
     readonly command: string;
@@ -3449,6 +3559,7 @@ function CommandDeck({
   const capabilityMenuRef = useRef<HTMLElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const focusCapabilityOptionOnOpenRef = useRef(false);
+  const draftBeforeHistoryRef = useRef("");
   const missions = snapshot.missions?.length
     ? snapshot.missions
     : mission
@@ -3518,6 +3629,13 @@ function CommandDeck({
     sources: [],
     content_character_count: 0,
   };
+  const promptHistory = consoleHistory
+    .filter((message) => message.role === "user")
+    .map((message) => message.content);
+  const completionQuery = promptCompletionQuery(draft);
+  const completionSignature = completionQuery
+    ? `${completionQuery.kind}:${completionQuery.start}:${completionQuery.value}`
+    : null;
   const capabilityQuery = draft.trimStart().startsWith("/")
     ? draft.trimStart().slice(1).toLowerCase()
     : "";
@@ -3533,16 +3651,35 @@ function CommandDeck({
   const visibleSkills = capabilityCatalog?.skills.filter((skill) =>
     !skillQuery || `${skill.name} ${skill.description}`.toLowerCase().includes(skillQuery),
   ).slice(0, 8) ?? [];
+  const completionOptions = capabilityCatalog
+    ? capabilityCompletionOptions(completionQuery, capabilityCatalog)
+    : [];
+  const visibleCapabilities = completionQuery?.kind === "capability"
+    ? completionOptions
+    : capabilityCatalog
+      ? capabilityCompletionOptions(
+          { kind: "capability", start: 0, value: "@" },
+          capabilityCatalog,
+        ).slice(0, 12)
+      : [];
   const showCapabilityMenu =
     Boolean(capabilityCatalog) &&
-    !capabilityMenuDismissed &&
-    (capabilityMenuOpen || draft.trimStart().startsWith("/"));
+    (capabilityMenuOpen ||
+      Boolean(
+        completionOptions.length > 0 &&
+          completionSignature &&
+          completionSignature !== dismissedCompletion,
+      ));
+  const completionListVisible = showCapabilityMenu && completionOptions.length > 0;
   const closeCapabilityMenu = (focusTarget: "trigger" | "composer" | "none"): void => {
     setCapabilityMenuOpen(false);
-    setCapabilityMenuDismissed(true);
+    setDismissedCompletion(completionSignature);
     if (focusTarget === "trigger") capabilityTriggerRef.current?.focus();
     if (focusTarget === "composer") composerRef.current?.focus();
   };
+  useEffect(() => {
+    setSelectedCompletionIndex(0);
+  }, [completionSignature]);
   useEffect(() => {
     if (!showCapabilityMenu || !focusCapabilityOptionOnOpenRef.current) return;
     const firstOption = capabilityMenuRef.current?.querySelector<HTMLButtonElement>(
@@ -3553,7 +3690,7 @@ function CommandDeck({
     );
     (firstOption ?? fallback)?.focus();
     focusCapabilityOptionOnOpenRef.current = false;
-  }, [showCapabilityMenu, visibleCommands.length, visibleSkills.length]);
+  }, [showCapabilityMenu, visibleCommands.length, visibleSkills.length, visibleCapabilities.length]);
   const controllerAgents = capabilityCatalog?.agents.filter(isEligibleControllerCapability) ?? [];
   const selectedController = capabilityCatalog?.agents.find(
     (agent) => agent.id === selectedControllerId,
@@ -3964,6 +4101,95 @@ function CommandDeck({
   const optimisticTimelineKey = optimisticConsoleMessage
     ? consoleTimelineKey(optimisticConsoleMessage)
     : null;
+  const updateComposerDraft = (nextDraft: string): void => {
+    setHistoryIndex(null);
+    draftBeforeHistoryRef.current = "";
+    setDismissedCompletion(null);
+    onDraftChange(nextDraft);
+  };
+  const applyCompletion = (completion: PromptCompletion): void => {
+    const query = completionQuery;
+    if (!query) return;
+    const replacedUntil = query.start + query.value.length;
+    const nextCursor = query.start + completion.value.length + 1;
+    const nextDraft =
+      `${draft.slice(0, query.start)}${completion.value} ${draft.slice(replacedUntil)}`;
+    setHistoryIndex(null);
+    draftBeforeHistoryRef.current = "";
+    setDismissedCompletion(null);
+    setCapabilityMenuOpen(false);
+    onDraftChange(nextDraft);
+    const restoreComposerFocus = (): void => {
+      composerRef.current?.focus();
+      composerRef.current?.setSelectionRange(nextCursor, nextCursor);
+    };
+    restoreComposerFocus();
+    window.requestAnimationFrame?.(restoreComposerFocus);
+  };
+  const applyCommandFromCatalog = (command: AgentCapabilityCatalog["commands"][number]): void => {
+    if (completionQuery?.kind === "command") {
+      applyCompletion({
+        value: command.name,
+        detail: command.description,
+        kind: "command",
+        start: completionQuery.start,
+      });
+      return;
+    }
+    const takesArgument = /[<[]/.test(command.usage);
+    updateComposerDraft(takesArgument ? `${command.name} ` : command.name);
+    closeCapabilityMenu("composer");
+  };
+  const applySkillFromCatalog = (skill: AgentCapabilityCatalog["skills"][number]): void => {
+    updateComposerDraft(`${skill.invocation} `);
+    closeCapabilityMenu("composer");
+  };
+  const navigatePromptHistory = (direction: -1 | 1): void => {
+    if (promptHistory.length === 0) return;
+    if (direction === -1) {
+      const nextIndex = historyIndex === null
+        ? promptHistory.length - 1
+        : Math.max(0, historyIndex - 1);
+      if (historyIndex === null) draftBeforeHistoryRef.current = draft;
+      setHistoryIndex(nextIndex);
+      onDraftChange(promptHistory[nextIndex]);
+      setDismissedCompletion(null);
+      return;
+    }
+    if (historyIndex === null) return;
+    const nextIndex = historyIndex + 1;
+    if (nextIndex >= promptHistory.length) {
+      setHistoryIndex(null);
+      onDraftChange(draftBeforeHistoryRef.current);
+    } else {
+      setHistoryIndex(nextIndex);
+      onDraftChange(promptHistory[nextIndex]);
+    }
+    setDismissedCompletion(null);
+  };
+  const handleSend = (): void => {
+    setHistoryIndex(null);
+    draftBeforeHistoryRef.current = "";
+    onSend();
+  };
+  const renderPromptCompletion = (completion: PromptCompletion, index: number): ReactElement => (
+    <div
+      key={completion.value}
+      id={`capability-option-${index}`}
+      role="option"
+      aria-selected={selectedCompletionIndex === index}
+    >
+      <button
+        type="button"
+        data-capability-option
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={() => applyCompletion(completion)}
+      >
+        <code>{completion.value}</code>
+        <span>{completion.detail}</span>
+      </button>
+    </div>
+  );
   useLayoutEffect(() => {
     const transcript = transcriptRef.current;
     if (!transcript) return;
@@ -4025,6 +4251,12 @@ function CommandDeck({
             <div className="panel-heading">
               <div>
                 <span className="eyebrow">Agent Console / {mission?.id ?? "none"}</span>
+                <small
+                  className="console-capability"
+                  aria-label="Responsible capability: Mission"
+                >
+                  Capability: Mission
+                </small>
                 <h1>{mission?.title ?? "No active mission"}</h1>
               </div>
               {connectionStatus === "offline" ? (
@@ -4043,6 +4275,12 @@ function CommandDeck({
                 <strong>
                   Wayfinder / {wayfinder.mode === "chart" ? "Chart" : "Work-through"} mode
                 </strong>
+                <small
+                  className="console-capability"
+                  aria-label="Responsible capability: Wayfinder"
+                >
+                  Capability: Wayfinder
+                </small>
                 <span>Shared Understanding Gate {wayfinder.gate.status}</span>
                 {wayfinder.continuing ? <small>Continuing the durable active flow.</small> : null}
               </p>
@@ -4054,6 +4292,7 @@ function CommandDeck({
               className="console-history"
               role="region"
               aria-label="Prompt Transcript"
+              aria-live="polite"
               onScroll={(event) => {
                 const transcript = event.currentTarget;
                 const distanceFromBottom =
@@ -4066,6 +4305,10 @@ function CommandDeck({
               ) : null}
               {promptTimelineEntries.map((entry) => {
                 if (entry.kind === "console") {
+                  const capability = capabilityBoundaryLabel(
+                    entry.message.source,
+                    entry.message.scope,
+                  );
                   return (
                     <article
                       key={entry.key}
@@ -4087,6 +4330,12 @@ function CommandDeck({
                         </p>
                       ) : null}
                       <p>{entry.message.content}</p>
+                      <small
+                        className="console-attribution"
+                        aria-label={`Responsible capability: ${capability}`}
+                      >
+                        Capability: {capability}
+                      </small>
                       <small>{entry.message.source} / {entry.message.outcome}</small>
                       {entry.message.correlation_id && entry.message.action_phase ? (
                         <small className="console-receipt-identity">
@@ -4112,6 +4361,10 @@ function CommandDeck({
                   );
                 }
                 if (entry.kind === "workstation") {
+                  const capability = capabilityBoundaryLabel(
+                    entry.turn.source,
+                    snapshot.conversation_scope,
+                  );
                   return (
                     <article
                       key={entry.key}
@@ -4125,6 +4378,12 @@ function CommandDeck({
                       }
                     >
                       <p>{entry.turn.content}</p>
+                      <small
+                        className="console-attribution"
+                        aria-label={`Responsible capability: ${capability}`}
+                      >
+                        Capability: {capability}
+                      </small>
                       <small>{entry.turn.source} / {entry.turn.outcome}</small>
                       {entry.turn.receiptCorrelationId && entry.turn.receiptPhase ? (
                         <small className="console-receipt-identity">
@@ -4301,42 +4560,61 @@ function CommandDeck({
                       onClick={() => closeCapabilityMenu("trigger")}
                     >Close</button>
                   </div>
-                  <div className="capability-menu__groups">
-                    <div>
-                      <small>Commands</small>
-                      {visibleCommands.map((command) => (
-                        <button
-                          type="button"
-                          key={command.name}
-                          data-capability-option
-                          onClick={() => {
-                            const takesArgument = /[<[]/.test(command.usage);
-                            onDraftChange(takesArgument ? `${command.name} ` : command.name);
-                            closeCapabilityMenu("composer");
-                          }}
-                        >
-                          <code>{command.usage}</code>
-                          <span>{command.description}</span>
-                        </button>
-                      ))}
-                    </div>
-                    <div>
-                      <small>Installed skills</small>
-                      {visibleSkills.length > 0 ? visibleSkills.map((skill) => (
-                        <button
-                          type="button"
-                          key={skill.name}
-                          data-capability-option
-                          onClick={() => {
-                            onDraftChange(`${skill.invocation} `);
-                            closeCapabilityMenu("composer");
-                          }}
-                        >
-                          <code>${skill.name}</code>
-                          <span>{skill.description}</span>
-                        </button>
-                      )) : <span className="capability-menu__empty">No matching skills</span>}
-                    </div>
+                  <div
+                    className="capability-menu__groups"
+                    id="prompt-completions"
+                    role="listbox"
+                    aria-label="Prompt completions"
+                    aria-activedescendant={
+                      completionOptions.length > 0
+                        ? `capability-option-${selectedCompletionIndex}`
+                        : undefined
+                    }
+                  >
+                    {completionQuery?.kind === "capability" ? (
+                      <div>
+                        <small>Capabilities</small>
+                        {visibleCapabilities.map(renderPromptCompletion)}
+                      </div>
+                    ) : completionQuery?.kind === "command" ? (
+                      <div>
+                        <small>Commands</small>
+                        {completionOptions.map(renderPromptCompletion)}
+                      </div>
+                    ) : (
+                      <>
+                        <div>
+                          <small>Commands</small>
+                          {visibleCommands.map((command) => (
+                            <div key={command.name} role="option">
+                              <button
+                                type="button"
+                                data-capability-option
+                                onClick={() => applyCommandFromCatalog(command)}
+                              >
+                                <code>{command.usage}</code>
+                                <span>{command.description}</span>
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                        <div>
+                          <small>Installed skills</small>
+                          {visibleSkills.length > 0 ? visibleSkills.map((skill) => (
+                            <div key={skill.name} role="option">
+                              <button
+                                type="button"
+                                data-capability-option
+                                onClick={() => applySkillFromCatalog(skill)}
+                              >
+                                <code>${skill.name}</code>
+                                <span>{skill.description}</span>
+                              </button>
+                            </div>
+                          )) : <span className="capability-menu__empty">No matching skills</span>}
+                        </div>
+                      </>
+                    )}
                   </div>
                 </section>
               ) : null}
@@ -4375,7 +4653,7 @@ function CommandDeck({
                       setContextInspectorOpen(false);
                       focusCapabilityOptionOnOpenRef.current = true;
                       setCapabilityMenuOpen(true);
-                      setCapabilityMenuDismissed(false);
+                      setDismissedCompletion(null);
                     }
                   }}
                 >
@@ -4388,7 +4666,7 @@ function CommandDeck({
                   onClick={() => {
                     if (!contextInspectorOpen) {
                       setCapabilityMenuOpen(false);
-                      setCapabilityMenuDismissed(true);
+                      setDismissedCompletion(completionSignature);
                     }
                     setContextInspectorOpen((open) => !open);
                   }}
@@ -4495,6 +4773,14 @@ function CommandDeck({
                 <textarea
                   ref={composerRef}
                   aria-label="Message Alfredo"
+                  aria-autocomplete="list"
+                  aria-controls={completionListVisible ? "prompt-completions" : undefined}
+                  aria-expanded={completionListVisible ? showCapabilityMenu : undefined}
+                  aria-activedescendant={
+                    completionListVisible
+                      ? `capability-option-${selectedCompletionIndex}`
+                      : undefined
+                  }
                   placeholder="Ask about the project, type / for commands, or create a task…"
                   maxLength={AGENT_CONSOLE_USER_CONTENT_CHARACTER_LIMIT}
                   rows={3}
@@ -4504,16 +4790,44 @@ function CommandDeck({
                     const startsFreshSlash =
                       nextDraft.trimStart() === "/" ||
                       (!draft.trimStart().startsWith("/") && nextDraft.trimStart().startsWith("/"));
-                    if (!nextDraft.trimStart().startsWith("/") || startsFreshSlash) {
-                      setCapabilityMenuDismissed(false);
-                    }
+                    updateComposerDraft(nextDraft);
                     if (startsFreshSlash) setContextInspectorOpen(false);
-                    onDraftChange(nextDraft);
                   }}
                   onKeyDown={(event) => {
+                    const completionIsOpen = showCapabilityMenu && completionOptions.length > 0;
+                    if (completionIsOpen && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
+                      event.preventDefault();
+                      const offset = event.key === "ArrowDown" ? 1 : -1;
+                      setSelectedCompletionIndex((current) =>
+                        (current + offset + completionOptions.length) % completionOptions.length,
+                      );
+                      return;
+                    }
+                    if (
+                      completionIsOpen &&
+                      (event.key === "Tab" ||
+                        (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing))
+                    ) {
+                      event.preventDefault();
+                      applyCompletion(completionOptions[selectedCompletionIndex] ?? completionOptions[0]);
+                      return;
+                    }
                     if (event.key === "Escape" && showCapabilityMenu) {
                       event.preventDefault();
                       closeCapabilityMenu("composer");
+                      return;
+                    }
+                    if (
+                      (event.key === "ArrowUp" || event.key === "ArrowDown") &&
+                      !event.altKey &&
+                      !event.ctrlKey &&
+                      !event.metaKey &&
+                      !event.shiftKey &&
+                      !draft.includes("\n") &&
+                      (promptHistory.length > 0 || historyIndex !== null)
+                    ) {
+                      event.preventDefault();
+                      navigatePromptHistory(event.key === "ArrowUp" ? -1 : 1);
                       return;
                     }
                     if (
@@ -4522,7 +4836,7 @@ function CommandDeck({
                       !event.nativeEvent.isComposing
                     ) {
                       event.preventDefault();
-                      onSend();
+                      handleSend();
                     }
                   }}
                 />
@@ -4532,7 +4846,7 @@ function CommandDeck({
                   disabled={
                     !draft.trim() || messageStatus === "saving" || messageStatus === "responding"
                   }
-                  onClick={onSend}
+                  onClick={handleSend}
                 >
                   Send
                 </button>
@@ -5376,6 +5690,12 @@ function CommandConsoleCard({
       {expanded ? (
         <pre aria-label={`Full command output for ${turn.commandId}`}>{fullOutput}</pre>
       ) : null}
+      <small
+        className="console-attribution"
+        aria-label="Responsible capability: Orchestrator"
+      >
+        Capability: Orchestrator
+      </small>
       <small>{turn.requester} / {turn.commandId}</small>
     </article>
   );
