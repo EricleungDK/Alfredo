@@ -1015,6 +1015,7 @@ class LocalAgentSession:
     cleanup_eligible: bool = False
     evidence: EvidencePackage | None = None
     evidence_valid: bool = False
+    evidence_correlation_id: str = ""
     artifacts: dict[str, str] = field(default_factory=dict)
     runner_exit_status: int | None = None
     runner_started_at: str = ""
@@ -1038,6 +1039,7 @@ class LocalAgentSession:
             "cleanup_eligible": self.cleanup_eligible,
             "evidence": self.evidence.to_dict() if self.evidence else None,
             "evidence_valid": self.evidence_valid,
+            "evidence_correlation_id": self.evidence_correlation_id,
             "artifacts": self.artifacts,
             "runner_exit_status": self.runner_exit_status,
             "runner_started_at": self.runner_started_at,
@@ -1071,6 +1073,7 @@ class LocalAgentSession:
             cleanup_eligible=bool(data.get("cleanup_eligible", False)),
             evidence=EvidencePackage.from_dict(data.get("evidence")),
             evidence_valid=bool(data.get("evidence_valid", False)),
+            evidence_correlation_id=str(data.get("evidence_correlation_id", "")),
             artifacts=dict(data.get("artifacts", {})),
             runner_exit_status=data.get("runner_exit_status"),
             runner_started_at=data.get("runner_started_at", ""),
@@ -2517,8 +2520,21 @@ class AlbertMission:
                 "Evidence Package contains an unsafe artifact link: "
                 + ", ".join(unsafe_links)
             )
+        correlation_id = f"evidence:{self.mission_id}:{session_id}"
+        if session.evidence_correlation_id:
+            if (
+                session.evidence_correlation_id == correlation_id
+                and session.evidence == evidence
+                and session.evidence_valid
+            ):
+                return
+            raise AlbertError(
+                f"Evidence correlation id was already used for a different package: "
+                f"{correlation_id}"
+            )
         session.evidence = evidence
         session.evidence_valid = True
+        session.evidence_correlation_id = correlation_id
         session.status = "evidence-ready"
         self._record(f"{session.issue_id} evidence package validated for {session_id}.")
         self._persist()
@@ -5241,6 +5257,9 @@ class AlbertMission:
             artifact_links=self._automated_review_artifact_links(session),
         )
         session.evidence_valid = True
+        session.evidence_correlation_id = (
+            f"evidence:{self.mission_id}:{session.session_id}"
+        )
         session.status = "evidence-ready"
         self._record(f"{session.issue_id} fake runner produced evidence for {session.session_id}.")
 
@@ -6009,6 +6028,11 @@ class AlbertMission:
         )
         session.evidence_valid = bool(
             not session.evidence.missing_fields() and not unauthorized_changes
+        )
+        session.evidence_correlation_id = (
+            f"evidence:{self.mission_id}:{session.session_id}"
+            if session.evidence_valid
+            else ""
         )
         if (
             session.status != "failed"

@@ -2234,6 +2234,16 @@ AgentConsoleOutcome = Literal[
     "proposed", "pending", "acknowledged", "rejected", "model-commentary"
 ]
 AgentConsoleActionOutcome = Literal["no-action", "awaiting-orchestrator"]
+_AGENT_CONSOLE_ACTION_MESSAGES: dict[AgentConsoleActionOutcome, str] = {
+    "no-action": (
+        "No action taken. Controller prose is commentary and no correlated "
+        "Orchestrator receipt exists."
+    ),
+    "awaiting-orchestrator": (
+        "Coding task route selected. No action has occurred until a correlated "
+        "Orchestrator receipt is recorded."
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -2328,6 +2338,13 @@ class AgentConsoleHistoryService:
         if bool(action_outcome) != bool(action_message.strip()):
             raise AlbertError(
                 "Agent Console action outcome and message must be provided together"
+            )
+        if (
+            action_outcome
+            and action_message != _AGENT_CONSOLE_ACTION_MESSAGES[action_outcome]
+        ):
+            raise AlbertError(
+                "Agent Console action message does not match its typed outcome"
             )
         if action_outcome and (
             outcome != "model-commentary" or source != "frontier-model"
@@ -2716,6 +2733,13 @@ class AgentConsoleHistoryService:
             raise ValueError(
                 "Agent Console action outcome and message must be provided together"
             )
+        if (
+            action_outcome
+            and action_message != _AGENT_CONSOLE_ACTION_MESSAGES[action_outcome]
+        ):
+            raise ValueError(
+                "Agent Console action message does not match its typed outcome"
+            )
         if action_outcome and (
             outcome != "model-commentary" or item["source"] != "frontier-model"
         ):
@@ -2770,14 +2794,10 @@ class AgentConsoleResponseService:
     _ACCEPTANCE_CRITERION_CHARACTER_LIMIT = 2_000
     _ACCEPTANCE_CRITERIA_COUNT_LIMIT = 12
     _ACCEPTANCE_CRITERIA_CHARACTER_LIMIT = 12_000
-    _NO_ACTION_MESSAGE = (
-        "No action taken. Controller prose is commentary and no correlated "
-        "Orchestrator receipt exists."
-    )
-    _AWAITING_ORCHESTRATOR_MESSAGE = (
-        "Coding task route selected. No action has occurred until a correlated "
-        "Orchestrator receipt is recorded."
-    )
+    _NO_ACTION_MESSAGE = _AGENT_CONSOLE_ACTION_MESSAGES["no-action"]
+    _AWAITING_ORCHESTRATOR_MESSAGE = _AGENT_CONSOLE_ACTION_MESSAGES[
+        "awaiting-orchestrator"
+    ]
     _MALFORMED_RESPONSE_MESSAGE = (
         "The controller response was malformed and remains discussion. No action taken."
     )
@@ -2785,11 +2805,11 @@ class AgentConsoleResponseService:
         "The controller returned an unverified effect claim. No action claim was retained."
     )
     _EFFECT_CLAIM_PATTERN = re.compile(
-        r"(?:^\s*(?:done|completed|finished)\b|"
-        r"\b(?:i|we|alfredo|orchestrator)\s+(?:have\s+|has\s+)?"
-        r"(?:proposed|approved|queued|launched|started|created|wrote|updated|changed|"
-        r"modified|deleted|removed|reviewed|accepted|completed|finished|implemented|"
-        r"fixed|ran|executed)\b)",
+        r"(?:\b(?:done|complete|completed|finished|successful|succeeded)\b|"
+        r"\b(?:proposed|approved|queued|launched|started|created|wrote|written|"
+        r"updated|changed|modified|deleted|removed|reviewed|accepted|implemented|"
+        r"fixed|ran|executed|applied|saved|submitted|recorded)\b|"
+        r"\b(?:now\s+exists|exists\s+now)\b)",
         re.IGNORECASE,
     )
 
@@ -2972,7 +2992,8 @@ class AgentConsoleResponseService:
         if agent is None:
             return self._discussion_output(
                 "No configured controller model is available for this workspace. "
-                "I recorded the prompt, but cannot generate a model response until an agent registry is configured."
+                "The prompt remains in Agent Console, but no model response is available "
+                "until an agent registry is configured."
             )
         if agent.availability != "available":
             reason = agent.availability_reason or agent.availability
@@ -4899,12 +4920,70 @@ class WorkspaceQueueService:
                 "items": [self._parse_item(item) for item in data["items"]],
                 "receipts": receipts,
             }
+            queue["items"] = [
+                self._backfill_item_receipt_identities(queue, item)
+                for item in queue["items"]
+            ]
             self._validate_item_receipt_identities(queue)
             return queue
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
             raise WorkspacePersistenceError(
                 f"Workspace Queue persistence read failed: {exc}"
             ) from exc
+
+    @staticmethod
+    def _backfill_item_receipt_identities(
+        queue: dict[str, Any],
+        item: WorkspaceQueueItem,
+    ) -> WorkspaceQueueItem:
+        proposal_kinds = {
+            "issue-change-proposal": "issue-change-proposal",
+            "frontier-confirmation": "frontier-confirmation-proposal",
+            "ad-hoc-delegation": "ad-hoc-delegation-proposal",
+        }
+
+        def unique_correlation(
+            *,
+            request_kind: str,
+            item_status: str | None = None,
+        ) -> str:
+            matches = [
+                receipt
+                for receipt in queue["receipts"]
+                if receipt.get("request_kind") == request_kind
+                and isinstance(receipt.get("acknowledgement"), dict)
+                and receipt["acknowledgement"].get("item_id") == item.item_id
+                and (
+                    item_status is None
+                    or receipt["acknowledgement"].get("item_status") == item_status
+                )
+            ]
+            if len(matches) > 1:
+                raise WorkspacePersistenceError(
+                    f"Workspace Queue legacy receipt identity is ambiguous for "
+                    f"{item.item_id}."
+                )
+            return str(matches[0]["correlation_id"]) if matches else ""
+
+        proposal_correlation_id = item.proposal_correlation_id or unique_correlation(
+            request_kind=proposal_kinds[item.item_type],
+        )
+        decision_correlation_id = item.decision_correlation_id
+        if item.status != "pending" and not decision_correlation_id:
+            decision_correlation_id = unique_correlation(
+                request_kind="workspace-queue-decision",
+                item_status=item.status,
+            )
+        if (
+            proposal_correlation_id == item.proposal_correlation_id
+            and decision_correlation_id == item.decision_correlation_id
+        ):
+            return item
+        return replace(
+            item,
+            proposal_correlation_id=proposal_correlation_id,
+            decision_correlation_id=decision_correlation_id,
+        )
 
     @staticmethod
     def _validate_item_receipt_identities(queue: dict[str, Any]) -> None:
@@ -8821,7 +8900,7 @@ class ActivityJournalService:
                 ),
             ),
             evidence_links=evidence_links,
-            correlation_id=f"evidence:{session.session_id}",
+            correlation_id=session.evidence_correlation_id,
         )
 
     def _shell_command_entities(
@@ -9201,6 +9280,18 @@ class WorkspaceSnapshotService:
             ConversationScope(**preferences["conversation_scope"]),
             active_mission_id=active.mission_id,
         )
+        try:
+            queue = WorkspaceQueueService(self)._load_queue()
+        except WorkspacePersistenceError:
+            queue = None
+        try:
+            journal_entries = ActivityJournalService(self).inspect().entries
+        except WorkspacePersistenceError:
+            journal_entries = ()
+        try:
+            workspace_events = self.events()
+        except WorkspacePersistenceError:
+            workspace_events = ()
         return WorkspaceSnapshot(
             schema_version=1,
             revision=preferences["revision"],
@@ -9214,7 +9305,14 @@ class WorkspaceSnapshotService:
             operations_view=preferences["operations_view"],
             mission_board=board,
             missions=tuple(
-                self._mission_summary(item, is_active=item.mission_id == active.mission_id)
+                self._mission_summary(
+                    item,
+                    is_active=item.mission_id == active.mission_id,
+                    preferences=preferences,
+                    queue=queue,
+                    journal_entries=journal_entries,
+                    workspace_events=workspace_events,
+                )
                 for item in self._missions.values()
             ),
         )
@@ -9381,37 +9479,165 @@ class WorkspaceSnapshotService:
             mission_id=owner,
         )
 
+    def _canonical_session_launch_correlation(
+        self,
+        mission: AlbertMission,
+        session: LocalAgentSession,
+        *,
+        preferences: dict[str, Any],
+        queue: dict[str, Any] | None,
+    ) -> str:
+        queue_approval = session.task_packet.get("queue_approval")
+        if isinstance(queue_approval, dict) and queue is not None:
+            correlation_id = queue_approval.get("correlation_id")
+            request = queue_approval.get("request")
+            matches = [
+                receipt
+                for receipt in queue["receipts"]
+                if isinstance(correlation_id, str)
+                and receipt.get("correlation_id") == correlation_id
+                and receipt.get("request_kind") == "workspace-queue-decision"
+                and receipt.get("request") == request
+                and isinstance(receipt.get("acknowledgement"), dict)
+                and receipt["acknowledgement"].get("correlation_id") == correlation_id
+                and receipt["acknowledgement"].get("outcome") == "acknowledged"
+                and receipt["acknowledgement"].get("item_status") == "approved"
+                and receipt["acknowledgement"].get("session_id") == session.session_id
+            ]
+            if len(matches) != 1:
+                return ""
+            item_id = matches[0]["acknowledgement"].get("item_id")
+            items = [item for item in queue["items"] if item.item_id == item_id]
+            if (
+                len(items) != 1
+                or items[0].mission_id != mission.mission_id
+                or items[0].issue_id != session.issue_id
+                or items[0].decision_correlation_id != correlation_id
+            ):
+                return ""
+            return correlation_id.strip()
+
+        workstation_action = session.task_packet.get("workstation_action")
+        if not isinstance(workstation_action, dict):
+            return ""
+        correlation_id = workstation_action.get("correlation_id")
+        marker_request = workstation_action.get("request")
+        if not isinstance(correlation_id, str) or not isinstance(marker_request, dict):
+            return ""
+        expected_request = {
+            "action_type": workstation_action.get("action_type"),
+            "actor": "mission-commander",
+            "mission_id": mission.mission_id,
+            "target_kind": workstation_action.get("target_kind"),
+            "target_id": workstation_action.get("target_id"),
+            **marker_request,
+        }
+        matches = [
+            receipt
+            for receipt in preferences["workstation_receipts"]
+            if receipt.get("correlation_id") == correlation_id
+            and receipt.get("request") == expected_request
+            and isinstance(receipt.get("acknowledgement"), dict)
+            and receipt["acknowledgement"].get("correlation_id") == correlation_id
+            and receipt["acknowledgement"].get("outcome") == "acknowledged"
+            and receipt["acknowledgement"].get("action_type")
+            == workstation_action.get("action_type")
+            and receipt["acknowledgement"].get("session_id") == session.session_id
+            and isinstance(receipt["acknowledgement"].get("revision"), int)
+            and 1
+            <= receipt["acknowledgement"]["revision"]
+            <= preferences["revision"]
+            and isinstance(receipt["acknowledgement"].get("effect_summary"), str)
+            and bool(receipt["acknowledgement"]["effect_summary"].strip())
+        ]
+        return correlation_id.strip() if len(matches) == 1 else ""
+
+    def _canonical_session_review_correlation(
+        self,
+        mission: AlbertMission,
+        session: LocalAgentSession,
+        review: ReviewDecision | None,
+        *,
+        journal_entries: tuple[ActivityJournalEntry, ...],
+        workspace_events: tuple[WorkspaceEvent, ...],
+    ) -> str:
+        if review is None or not isinstance(review.workspace_action, dict):
+            return ""
+        correlation_id = review.workspace_action.get("correlation_id")
+        request = review.workspace_action.get("request")
+        if not isinstance(correlation_id, str) or not correlation_id.strip():
+            return ""
+        decision_outcomes = {
+            "accept": {"Approved", "Approved with limitations"},
+            "repair": {"Needs repair"},
+            "escalate-human": {"Needs human review"},
+        }
+        if (
+            not isinstance(request, dict)
+            or set(request)
+            != {"mission_id", "session_id", "decision", "reason", "failure_type"}
+            or request.get("mission_id") != mission.mission_id
+            or request.get("session_id") != session.session_id
+            or review.issue_id != session.issue_id
+            or review.outcome
+            not in decision_outcomes.get(str(request.get("decision")), set())
+        ):
+            return ""
+        matching_reviews = [
+            candidate
+            for candidate_mission in self._missions.values()
+            for candidate in candidate_mission.reviews
+            if candidate.workspace_action.get("correlation_id") == correlation_id
+        ]
+        matching_events = [
+            event
+            for event in workspace_events
+            if event.correlation_id == correlation_id
+        ]
+        matching_journal = [
+            entry
+            for entry in journal_entries
+            if entry.correlation_id == correlation_id
+            and entry.action_type == "review-decision"
+            and any(
+                entity.entity_type == "local-agent-session"
+                and entity.entity_id == session.session_id
+                for entity in entry.affected_entities
+            )
+        ]
+        if not (
+            len(matching_reviews) == len(matching_events) == len(matching_journal) == 1
+        ):
+            return ""
+        return correlation_id.strip()
+
     def _mission_summary(
-        self, mission: AlbertMission, *, is_active: bool
+        self,
+        mission: AlbertMission,
+        *,
+        is_active: bool,
+        preferences: dict[str, Any],
+        queue: dict[str, Any] | None,
+        journal_entries: tuple[ActivityJournalEntry, ...],
+        workspace_events: tuple[WorkspaceEvent, ...],
     ) -> WorkspaceMissionSummary:
         def summarize_session(session: Any) -> MissionSessionSummary:
             canonical = mission._session_summary(session)
             evidence = session.evidence
             issue = mission.issues.get(session.issue_id)
             latest_review = mission._latest_review_for_session(session.session_id)
-            launch_action = session.task_packet.get("queue_approval")
-            if not isinstance(launch_action, dict):
-                launch_action = session.task_packet.get("workstation_action")
-            launch_correlation = (
-                launch_action.get("correlation_id")
-                if isinstance(launch_action, dict)
-                else None
+            launch_correlation_id = self._canonical_session_launch_correlation(
+                mission,
+                session,
+                preferences=preferences,
+                queue=queue,
             )
-            launch_correlation_id = (
-                launch_correlation.strip()
-                if isinstance(launch_correlation, str)
-                else ""
-            )
-            review_correlation = (
-                latest_review.workspace_action.get("correlation_id")
-                if latest_review is not None
-                and isinstance(latest_review.workspace_action, dict)
-                else None
-            )
-            review_correlation_id = (
-                review_correlation.strip()
-                if isinstance(review_correlation, str)
-                else ""
+            review_correlation_id = self._canonical_session_review_correlation(
+                mission,
+                session,
+                latest_review,
+                journal_entries=journal_entries,
+                workspace_events=workspace_events,
             )
             review_workspace_repair = WorkstationActionService._review_workspace_repair(
                 mission,
@@ -9453,8 +9679,11 @@ class WorkspaceSnapshotService:
                 artifact_links=tuple(mission.review_artifact_links(session)),
                 launch_correlation_id=launch_correlation_id,
                 evidence_correlation_id=(
-                    f"evidence:{session.session_id}"
-                    if session.evidence_valid and evidence is not None
+                    session.evidence_correlation_id
+                    if session.evidence_valid
+                    and evidence is not None
+                    and session.evidence_correlation_id
+                    == f"evidence:{mission.mission_id}:{session.session_id}"
                     else ""
                 ),
                 review_correlation_id=review_correlation_id,

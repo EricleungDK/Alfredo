@@ -7385,7 +7385,13 @@ test("deliberately changes Conversation Scope to the active Mission", async () =
   closeContextInspector();
   expectPromptScope("Command Deck Mission");
   expect(await screen.findByText(/Workstation action: Mission Commander requested Change Conversation Scope to Command Deck Mission/)).toBeVisible();
-  expect(await screen.findByText(/Orchestrator accepted workstation action: Conversation Scope now targets Command Deck Mission/)).toBeVisible();
+  const acceptedScopeChange = await screen.findByText(/Orchestrator accepted workstation action: Conversation Scope now targets Command Deck Mission/);
+  expect(acceptedScopeChange).toBeVisible();
+  expect(
+    within(acceptedScopeChange.closest("article")!).getByText(
+      "Receipt conversation-scope-mission-command-deck-4 · workstation-action-acknowledged",
+    ),
+  ).toBeVisible();
   expect(scopeRequests).toEqual([
     {
       correlation_id: "conversation-scope-mission-command-deck-4",
@@ -7398,6 +7404,62 @@ test("deliberately changes Conversation Scope to the active Mission", async () =
       scope_label: "Command Deck Mission",
     },
   ]);
+});
+
+test("fails closed when a Workstation acknowledgement returns another correlation", async () => {
+  const mismatchedClient: WorkspaceClient = {
+    loadSnapshot: async () => ({ kind: "ready", snapshot }),
+    changeScope: async () => ({
+      kind: "acknowledged",
+      acknowledgement: {
+        correlation_id: "forged-scope-acknowledgement",
+        outcome: "acknowledged",
+        revision: 5,
+      },
+    }),
+    loadUpdates: async () => ({
+      kind: "updates",
+      batch: {
+        after_revision: 4,
+        current_revision: 5,
+        events: [
+          {
+            event_id: "workspace-5-scope-mismatch",
+            correlation_id: "conversation-scope-mission-command-deck-4",
+            revision: 5,
+            kind: "workspace-preferences-updated",
+            active_mission_id: "command-deck",
+            conversation_scope: {
+              kind: "mission",
+              target_id: "command-deck",
+              label: "Command Deck Mission",
+            },
+            operations_view: "mission-board",
+          },
+        ],
+      },
+    }),
+  };
+  render(<App client={mismatchedClient} />);
+  await screen.findByRole("heading", { name: "Command Deck Mission" });
+
+  await openContextInspector();
+  fireEvent.change(screen.getByRole("combobox", { name: "Conversation Scope" }), {
+    target: { value: "mission:command-deck" },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Apply target" }));
+
+  expect(
+    await screen.findByText(
+      /Orchestrator rejected workstation action: Orchestrator acknowledgement correlation did not match/,
+    ),
+  ).toBeVisible();
+  expect(
+    screen.queryByText(
+      /Orchestrator accepted workstation action: Conversation Scope now targets/,
+    ),
+  ).not.toBeInTheDocument();
+  expect(screen.queryByText(/^Receipt forged-scope/)).not.toBeInTheDocument();
 });
 
 test("shows bounded Working Context sources while retaining full Agent Console history", async () => {
@@ -8206,6 +8268,81 @@ test("restores durable delegation milestones beside their originating controller
   }
 });
 
+test("suppresses legacy Queue effect claims until exact receipt identities are available", async () => {
+  const legacySnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 3,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ADHOC-000043",
+            issue_id: "ADHOC-000043",
+            assigned_agent: "gemma4-12b",
+            status: "queued",
+          },
+        ],
+        attention: [],
+      },
+    ],
+  };
+  const legacyQueue: WorkspaceQueueProjection = {
+    schema_version: 1,
+    revision: 8,
+    items: [
+      {
+        item_id: "ad-hoc-delegation-command-deck-000043",
+        mission_id: "command-deck",
+        item_type: "ad-hoc-delegation",
+        status: "approved",
+        source: "agent-console",
+        requested_action: "Delegate legacy work",
+        affected_boundary: "ad-hoc-delegation",
+        consequence: "Approval queues one bounded Local Agent session.",
+        issue_id: "ADHOC-000043",
+        proposed_changes: {
+          originating_message_id: "console-legacy-origin",
+        },
+      },
+    ],
+    groups: [],
+  };
+  const legacyClient: WorkspaceClient = {
+    loadSnapshot: async () => ({ kind: "ready", snapshot: legacySnapshot }),
+    loadConsoleHistory: async () => ({
+      kind: "history",
+      history: { schema_version: 1, messages: [] },
+    }),
+    loadWorkspaceQueue: async () => ({
+      kind: "workspace-queue",
+      projection: legacyQueue,
+    }),
+  };
+
+  render(<App client={legacyClient} />);
+
+  const transcript = await screen.findByRole("region", { name: "Prompt Transcript" });
+  await waitFor(() => expect(screen.getByText("STATE / 0004")).toBeVisible());
+  expect(
+    within(transcript).queryByText(
+      "Coding task proposal ADHOC-000043 was recorded from Agent Console.",
+    ),
+  ).not.toBeInTheDocument();
+  expect(
+    within(transcript).queryByText(
+      "Mission Commander approved coding task ADHOC-000043.",
+    ),
+  ).not.toBeInTheDocument();
+  expect(
+    within(transcript).queryByText(
+      "Orchestrator queued coding task ADHOC-000043 as session-ADHOC-000043 on gemma4-12b.",
+    ),
+  ).not.toBeInTheDocument();
+});
+
 test("renders running evidence Review Decision and accepted completion as distinct receipt-bound milestones", async () => {
   const lifecycleSnapshot: WorkspaceSnapshot = {
     ...snapshot,
@@ -8223,7 +8360,7 @@ test("renders running evidence Review Decision and accepted completion as distin
             status: "reviewed",
             runner_started_at: "2026-08-02T10:00:00Z",
             launch_correlation_id: "approval-order-42",
-            evidence_correlation_id: "evidence:session-ADHOC-000042",
+            evidence_correlation_id: "evidence:command-deck:session-ADHOC-000042",
             review_correlation_id: "review-order-42",
             review_outcome: "Approved",
             review_next_action: "complete",
@@ -8257,7 +8394,7 @@ test("renders running evidence Review Decision and accepted completion as distin
     "Accepted completion: session-ADHOC-000042 is complete.",
   );
   expect(within(running.closest("article")!).getByText("Receipt approval-order-42 · running")).toBeVisible();
-  expect(within(evidence.closest("article")!).getByText("Receipt evidence:session-ADHOC-000042 · evidence")).toBeVisible();
+  expect(within(evidence.closest("article")!).getByText("Receipt evidence:command-deck:session-ADHOC-000042 · evidence")).toBeVisible();
   expect(within(decision.closest("article")!).getByText("Receipt review-order-42 · review-decision")).toBeVisible();
   expect(within(completion.closest("article")!).getByText("Receipt review-order-42 · accepted-completion")).toBeVisible();
   const turns = [running, evidence, decision, completion].map((node) =>
@@ -9158,6 +9295,9 @@ test("automatically approves and dispatches an exactly bounded subagent coding r
         items: [
           {
             ...queueItem,
+            proposal_correlation_id:
+              latestProposalRequest?.correlation_id ??
+              "chat-task-console-natural-task-000004-4",
             proposed_changes: {
               ...queueItem.proposed_changes,
               acceptance_criteria:
