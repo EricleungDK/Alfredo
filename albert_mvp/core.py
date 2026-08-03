@@ -176,6 +176,12 @@ class SharedUnderstandingGateError(AlbertError):
         )
 
 
+class WayfinderStatePersistenceError(AlbertError):
+    """Raised when the shared Wayfinder state cannot prove launch eligibility."""
+
+    code = "persistence-read-failure"
+
+
 class LockedFieldError(AlbertError):
     """Raised when an approved Issue Slice contract is edited while locked."""
 
@@ -199,26 +205,61 @@ def wayfinder_state_path(*, runtime_root: Path, target_repo: Path) -> Path:
     return runtime_root.resolve() / "wayfinder" / project_key / "wayfinder-state.json"
 
 
+def load_wayfinder_state(path: Path) -> dict[str, Any]:
+    """Load and validate the schema-versioned shared Wayfinder state."""
+    if not path.exists():
+        return {"schema_version": 1, "active_flow": None}
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(state, dict) or state.get("schema_version") != 1:
+            raise ValueError("unsupported Wayfinder state schema")
+        active = state.get("active_flow")
+        if active is None:
+            return state
+        if not isinstance(active, dict):
+            raise ValueError("Wayfinder active flow must be an object")
+        for field_name in ("flow_id", "originating_message_id", "reference"):
+            if not isinstance(active.get(field_name), str):
+                raise ValueError(f"Wayfinder active flow {field_name} must be a string")
+        if active.get("mode") not in {"chart", "work-through"}:
+            raise ValueError("Wayfinder active flow has an invalid mode")
+        scope = active.get("scope")
+        if not isinstance(scope, dict):
+            raise ValueError("Wayfinder active flow scope must be an object")
+        if scope.get("kind") not in {"working-directory", "mission", "issue-slice"}:
+            raise ValueError("Wayfinder active flow scope has an invalid kind")
+        if not isinstance(scope.get("target_id"), str) or not isinstance(scope.get("label"), str):
+            raise ValueError("Wayfinder active flow scope must name target and label")
+        if scope.get("mission_id") is not None and not isinstance(scope.get("mission_id"), str):
+            raise ValueError("Wayfinder active flow scope Mission must be a string or null")
+        gate = active.get("gate")
+        if not isinstance(gate, dict):
+            raise ValueError("Wayfinder active flow must contain a gate")
+        if gate.get("status") not in {"pending", "open"}:
+            raise ValueError("Wayfinder gate has an invalid status")
+        if not isinstance(gate.get("opened_by"), str) or not isinstance(
+            gate.get("receipt_id"), str
+        ):
+            raise ValueError("Wayfinder gate receipt fields must be strings")
+        if gate["status"] == "open" and (
+            gate["opened_by"] not in {"mission-commander", "wayfinder-agent"}
+            or not gate["receipt_id"].strip()
+        ):
+            raise ValueError("Open Wayfinder gate must have a valid opening receipt")
+        return state
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        raise WayfinderStatePersistenceError(
+            f"Wayfinder state persistence read failed: {exc}"
+        ) from exc
+
+
 def ensure_wayfinder_gate_open(*, runtime_root: Path, target_repo: Path) -> None:
     """Fail closed before a direct production launch crosses a pending Wayfinder gate."""
     path = wayfinder_state_path(runtime_root=runtime_root, target_repo=target_repo)
-    if not path.exists():
+    state = load_wayfinder_state(path)
+    active = state["active_flow"]
+    if active is None:
         return
-    try:
-        state = json.loads(path.read_text(encoding="utf-8"))
-        active = state["active_flow"]
-        if state["schema_version"] != 1 or active is None:
-            if state["schema_version"] != 1:
-                raise ValueError("unsupported Wayfinder state schema")
-            return
-        if not isinstance(active, dict) or not isinstance(active.get("gate"), dict):
-            raise ValueError("Wayfinder active flow must contain a gate")
-        if active["gate"].get("status") not in {"pending", "open"}:
-            raise ValueError("Wayfinder gate has an invalid status")
-    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
-        raise AlbertError(
-            f"Wayfinder state cannot be verified before production launch: {exc}"
-        ) from exc
     if active["gate"]["status"] != "open":
         raise SharedUnderstandingGateError()
 
@@ -1962,6 +2003,7 @@ class AlbertMission:
         return session
 
     def route_issue(self, issue_id: str) -> DelegationDecision:
+        self._ensure_wayfinder_gate_open()
         issue = self._issue(issue_id)
         if issue.review_state != "approved":
             raise LaunchBlockedError(f"{issue_id} must be approved before routing.")
@@ -2029,6 +2071,7 @@ class AlbertMission:
         return decision
 
     def approve_delegation(self, issue_id: str) -> DelegationDecision:
+        self._ensure_wayfinder_gate_open()
         issue = self._issue(issue_id)
         decision = self.delegations.get(issue.id)
         if not decision:
@@ -2384,6 +2427,7 @@ class AlbertMission:
     ) -> LocalAgentSession:
         if work_kind not in {"run", "review"}:
             raise AlbertError(f"Unknown headless work kind: {work_kind}")
+        self._ensure_wayfinder_gate_open()
         self._validate_target_repository_boundary()
         agent_config = self.agent_registry.require(agent_id)
         self._ensure_headless_agent_authorized(agent_config)

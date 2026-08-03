@@ -16,9 +16,9 @@ The project-level Shared Understanding Gate is persisted with the active flow. I
 
 ## Guarded authority
 
-While the gate is pending, the Python authority rejects every Mission Draft mutation, Ad Hoc Delegation proposal/approval, and production launch through Workstation, direct CLI, or TUI with the recoverable `shared-understanding-required` code before mutation. Conversation, read-only inspection, bounded research, Grilling, and throwaway prototypes continue through their ordinary command/controller paths and retain the active Wayfinder projection.
+While the gate is pending, the Python authority rejects every Mission Draft mutation, Ad Hoc Delegation proposal/approval, legacy delegation route/approval, and production launch through Workstation, direct CLI, TUI, or headless worker execution with the recoverable `shared-understanding-required` code before mutation. Conversation, read-only inspection, bounded research, Grilling, and throwaway prototypes continue through their ordinary command/controller paths and retain the active Wayfinder projection.
 
-`wayfinder-state.json` is a schema-versioned repository-runtime store under `runtime_root/wayfinder/<repository-hash>/`, independent of Mission runtime. It retains at most one flow with its mode, originating Agent Console message identity, gate status, and opening receipt across every Mission for that repository. Missing state means no active flow; malformed state fails closed before production launch rather than substituting controller memory.
+`wayfinder-state.json` is a schema-versioned repository-runtime store under `runtime_root/wayfinder/<repository-hash>/`, independent of Mission runtime. It retains at most one flow with its mode, originating Agent Console message identity, gate status, and opening receipt across every Mission for that repository. One shared typed loader validates it at response and production-launch boundaries. Missing state means no active flow; malformed state returns structured `persistence-read-failure` and fails closed before production launch rather than substituting controller memory.
 
 ## Projection
 
@@ -26,7 +26,7 @@ The Agent Console response contract now includes a typed Wayfinder projection. T
 
 ## Verification
 
-- Red-green Python coverage proves persisted Chart entry, existing-reference Work-through, active-flow continuation, explicit Commander opening, visible agent acknowledgement, pre-gate planning/delegation/session blocking (including existing Mission Draft mutation, direct CLI, and another Mission’s direct production launch), safe discovery command availability, and read-only outside-Chart behavior: **10 focused tests passed**.
+- Red-green Python coverage proves persisted Chart entry, existing-reference Work-through, active-flow continuation, explicit Commander opening, visible agent acknowledgement, pre-gate planning/delegation/session blocking (including existing Mission Draft mutation, direct CLI, another Mission’s direct production launch, legacy delegation, and headless execution), safe discovery command availability, malformed-state structured failure, and read-only outside-Chart behavior: **11 focused tests passed**.
 - Warm persistent transport preserves the typed Chart projection: **1 focused test passed**.
 - `python3 -m py_compile` over the changed Python implementation/tests: **passed**.
 - Rust typed projection decode assertion: **passed**.
