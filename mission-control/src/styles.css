@@ -284,6 +284,24 @@ h5 {
   font-weight: 650;
 }
 
+.wayfinder-route {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.7rem;
+  align-items: baseline;
+  margin: 0;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid #417c76;
+  border-radius: 8px;
+  background: #122522;
+  color: var(--ink);
+}
+
+.wayfinder-route span,
+.wayfinder-route small {
+  color: var(--ink-soft);
+}
+
 .eyebrow {
   text-transform: uppercase;
   letter-spacing: 0.055em;

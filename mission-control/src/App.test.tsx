@@ -117,6 +117,72 @@ function relativeLuminance(hex: string): number {
   return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
 }
 
+test("renders the typed Wayfinder Chart route and pending Shared Understanding Gate", async () => {
+  const submitAdHocDelegationProposal = vi.fn();
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => ({ kind: "ready", snapshot }),
+        appendConsoleMessage: async (request) => ({
+          kind: "message",
+          message: {
+            message_id: "console-wayfinder-000001",
+            sequence: 1,
+            role: "user",
+            content: request.content,
+            scope: snapshot.conversation_scope,
+            outcome: "proposed",
+            source: "mission-commander",
+          },
+        }),
+        generateConsoleResponse: async () => ({
+          kind: "message",
+          message: {
+            message_id: "console-wayfinder-000002",
+            sequence: 2,
+            role: "assistant",
+            content: "Wayfinder Chart mode is active.",
+            scope: snapshot.conversation_scope,
+            outcome: "acknowledged",
+            source: "orchestrator",
+            correlation_id: "wayfinder-entry:console-wayfinder-000001",
+            action_phase: "wayfinder-chart-entered",
+          },
+          route: { intent: "discussion", task_request: "", acceptance_criteria: [] },
+          wayfinder: {
+            mode: "chart",
+            gate: { status: "pending", opened_by: "", receipt_id: "" },
+            flow: {
+              flow_id: "wayfinder-console-wayfinder-000001",
+              mode: "chart",
+              originating_message_id: "console-wayfinder-000001",
+              scope: snapshot.conversation_scope,
+              reference: "",
+            },
+            continuing: false,
+            turn_complete: true,
+          },
+        }),
+        submitAdHocDelegationProposal,
+      }}
+    />,
+  );
+
+  await screen.findByRole("heading", { name: "Command Deck Mission" });
+  fireEvent.change(screen.getByLabelText("Agent Console prompt"), {
+    target: { value: "Start a new project for release planning." },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Send prompt" }));
+
+  expect(await screen.findByRole("status", { name: "Wayfinder route" })).toHaveTextContent(
+    "Chart mode",
+  );
+  expect(screen.getByRole("status", { name: "Wayfinder route" })).toHaveTextContent(
+    "Shared Understanding Gate pending",
+  );
+  expect(submitAdHocDelegationProposal).not.toHaveBeenCalled();
+});
+
 function appIssueSlice(
   overrides: Partial<WorkspaceIssueSliceSummary> & Pick<WorkspaceIssueSliceSummary, "issue_id" | "title">,
 ): WorkspaceIssueSliceSummary {

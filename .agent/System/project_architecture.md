@@ -1,6 +1,6 @@
 # Project Architecture — Alfredo Local Coding-Agent Workstation
 
-**Last Updated**: 2026-07-13
+**Last Updated**: 2026-08-03
 
 ## Overview
 
@@ -41,7 +41,7 @@ Workspace state mutations use cross-process coordinator/store locks. Preferences
 
 Review artifacts cross a separate bounded read boundary. Python `SessionArtifactService.read()` is exposed as CLI `session-artifact --artifact-mission-id --session-id --artifact-ref`, Tauri `session_artifact`, and `WorkspaceClient.loadSessionArtifact()`. The exact Mission/session/reference must identify a registered review-safe artifact. Files must be regular non-symlink UTF-8 text below that session's runtime directory; the service validates the entire file incrementally for UTF-8 and NUL bytes while retaining only the bounded display prefix. The response is capped at 128,000 UTF-8 bytes, uses opaque app-local references, redacts known host roots, and contains no path/reference field. Projection drops unregistered relative links rather than rendering controls the reader cannot open. React renders compatible results inline with loading, truncation, recoverable failure, retry, close, and managed focus/scroll behavior instead of navigating to a local file.
 
-Implementation and current release evidence are consolidated in [the 2026-07-12 install and Queue acceptance correction](../Reports/2026-07-12-alfredo-install-queue-acceptance-correction.md); [the 2026-07-11 workstation report](../Reports/2026-07-11-alfredo-one-shot-workstation.md) is retained as superseded history.
+Implementation and current release evidence are consolidated in [the 2026-07-12 install and Queue acceptance correction](../Reports/2026-07-12-alfredo-install-queue-acceptance-correction.md). The [2026-08-03 Wayfinder Shared Understanding Gate report](../Reports/2026-08-03-wayfinder-shared-understanding-gate.md) records Issue #60's first-contact and gate boundary; [the 2026-07-11 workstation report](../Reports/2026-07-11-alfredo-one-shot-workstation.md) is retained as superseded history.
 
 ## Acknowledged Coding Workspace Boundary
 
@@ -70,6 +70,8 @@ Tauri exposes typed `workspace_action` and `workspace_updates` commands. React a
 ## Agent Console and Conversation Scope Boundary
 
 Command Deck Issue 03 adds `AgentConsoleHistoryService`, an append-only, atomically persisted message history. Every record retains a stable sequence, role, content, source, one of five explicit outcomes, and a snapshot of the acknowledged Conversation Scope at submission. Public append commands require the current workspace revision and the exact displayed scope; a mismatch is rejected before history mutation.
+
+Issue 60 adds `WayfinderService` as the deterministic, project-level first-contact adapter in front of controller routing. It persists one active `chart | work-through` flow in `wayfinder-state.json`, keyed to the originating exact Agent Console prompt rather than controller memory. A new project or consequential change enters Chart; a fresh Wayfinder map/ticket reference enters Work-through; later turns continue that one durable flow without nesting/reinvocation. Read-only explanation, status, review, diagnosis, and inspection stay outside automatic Chart. A pending Shared Understanding Gate admits conversation, inspection, bounded research, Grilling, and throwaway prototypes, but guards canonical Mission Draft, Ad Hoc Delegation, and production session-launch authority before mutation. Only an explicit Mission Commander receipt or a visible structured acknowledgement of destination, scope, constraints, and uncertainty opens the gate. The acknowledgement ends its turn and does not invoke another skill or action. Tauri decodes the typed projection; React displays the mode/gate route without treating it as an action receipt.
 
 `workspace-scope` validates Working directory, Active Mission, and Issue Slice targets before submitting the existing expected-revision preference action. Scope changes update Working Context selection only: the command has no launch, approval, assignment, path-access, review, or locked-contract fields. Tauri exposes typed scope, append, and history commands. React keeps history, the composer draft, and the uncommitted scope selection above the Operations projection so navigation and Active Mission replacement cannot silently retarget a message.
 

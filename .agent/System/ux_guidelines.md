@@ -1,7 +1,7 @@
 # UX Guidelines — Alfredo Workstation
 
 **Last Updated:** 2026-07-30
-**Implementation reports:** [Alfredo one-shot workstation correction](../Reports/2026-07-11-alfredo-one-shot-workstation.md), [install and Queue acceptance correction](../Reports/2026-07-12-alfredo-install-queue-acceptance-correction.md)
+**Implementation reports:** [Alfredo one-shot workstation correction](../Reports/2026-07-11-alfredo-one-shot-workstation.md), [install and Queue acceptance correction](../Reports/2026-07-12-alfredo-install-queue-acceptance-correction.md), [Wayfinder Shared Understanding Gate](../Reports/2026-08-03-wayfinder-shared-understanding-gate.md)
 
 ## Design Philosophy
 
@@ -30,6 +30,7 @@ Mission Work is the persistent secondary lane. It provides operational awareness
 - Before Mission Work exists, Agent Console is the Coding Workspace selection surface. It names the exact Starting Location, explicitly states that no Coding Workspace or Mission is bound, and offers exact existing-repository selection or new-repository creation.
 - Pending selection says it is waiting for Orchestrator acknowledgement and must not display the candidate as accepted. Structured rejection displays the exact failure code and message, remains selection-required, and keeps retry available. Only an acknowledged receipt may show the canonical Coding Workspace; the next state says `Mission selection required` and must not fabricate or load a Workspace Session.
 - Render user prompts optimistically before persistence or model inference completes. On rejection, restore the submitted draft only if the composer is still empty; never overwrite a newer prompt typed while the earlier save was pending. Explain the failure inline.
+- When Python returns a non-`outside` Wayfinder projection, show a named status line with `Wayfinder / Chart mode` or `Wayfinder / Work-through`, the Shared Understanding Gate state, and whether the durable flow is continuing. That line conveys routing state only: it must not receive receipt styling or claim an artifact, delegation, skill invocation, or production action.
 - Merge canonical messages, command cards, and consequential workstation actions into one arrival-ordered chronology with stable type-qualified keys. After restart, causally anchor durable proposal/approval/queued milestones after their originating controller turn and before later chat. Receipt-bearing entries display the exact correlation id and phase; controller commentary never inherits that treatment.
 - Auto-follow only when the reader is already near the end. A newly submitted optimistic prompt always becomes visible; incoming background events must not pull a reader away from older history.
 - Enter submits and Shift+Enter inserts a newline. While persistence is in flight, another Enter must not begin a concurrent prompt mutation and must preserve newly typed text.

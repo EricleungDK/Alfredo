@@ -11,6 +11,7 @@ from inspect import signature
 import json
 import os
 from pathlib import Path
+import re
 import shlex
 import shutil
 import subprocess
@@ -2274,6 +2275,269 @@ class AgentConsoleResponseRoute:
 class AgentConsoleResponseProjection:
     message: AgentConsoleMessage
     route: AgentConsoleResponseRoute
+    wayfinder: "WayfinderProjection"
+
+
+WayfinderMode = Literal["outside", "chart", "work-through"]
+WayfinderGateStatus = Literal["not-applicable", "pending", "open"]
+
+
+@dataclass(frozen=True)
+class WayfinderGate:
+    status: WayfinderGateStatus
+    opened_by: str = ""
+    receipt_id: str = ""
+
+
+@dataclass(frozen=True)
+class WayfinderFlow:
+    flow_id: str
+    mode: Literal["chart", "work-through"]
+    originating_message_id: str
+    scope: ConversationScope
+    reference: str = ""
+
+
+@dataclass(frozen=True)
+class WayfinderProjection:
+    mode: WayfinderMode
+    gate: WayfinderGate
+    flow: WayfinderFlow | None
+    continuing: bool
+    turn_complete: bool
+
+
+@dataclass(frozen=True)
+class WayfinderDecision:
+    projection: WayfinderProjection
+    content: str
+    correlation_id: str = ""
+    action_phase: str = ""
+
+
+class SharedUnderstandingGateError(AlbertError):
+    code = "shared-understanding-required"
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Wayfinder Shared Understanding Gate is still pending; canonical planning "
+            "artifacts, delegation, and production implementation are not eligible."
+        )
+
+
+class WayfinderService:
+    """Owns deterministic Wayfinder entry, continuation, and gate eligibility."""
+
+    _SCHEMA_VERSION = 1
+    _READ_ONLY = re.compile(
+        r"^\s*(?:explain|what(?:'s| is)|why|how|status|review|diagnos(?:e|is)|inspect|show)\b",
+        re.IGNORECASE,
+    )
+    _EXISTING_REFERENCE = re.compile(
+        r"\b(?:wayfinder|wayfinding)\s+(?:(?:map|ticket|issue)(?:\s*#\d+)?|#\d+)\b",
+        re.IGNORECASE,
+    )
+    _NEW_PROJECT = re.compile(
+        r"\b(?:new\s+(?:project|app|application|service|repository|product)|"
+        r"(?:start|create|build|launch|plan|design)\s+(?:a\s+)?new\s+"
+        r"(?:project|app|application|service|repository|product))\b",
+        re.IGNORECASE,
+    )
+    _CONSEQUENTIAL_CHANGE = re.compile(
+        r"\b(?:consequential\s+change|architecture|architectural|redesign|migrat(?:e|ion)|"
+        r"cross[-\s]cutting|platform[-\s]wide|replace\s+the\s+(?:system|architecture))\b",
+        re.IGNORECASE,
+    )
+    _COMMANDER_CONFIRMATION = re.compile(
+        r"^\s*(?:/wayfinder\s+confirm|confirm\s+shared\s+understanding)\b",
+        re.IGNORECASE,
+    )
+    _ACKNOWLEDGEMENT_FIELDS = ("destination", "scope", "constraints", "uncertainty")
+
+    def __init__(self, snapshots: "WorkspaceSnapshotService"):
+        self._snapshots = snapshots
+        self._path = snapshots.preferences_path.parent / "wayfinder-state.json"
+
+    @property
+    def state_path(self) -> Path:
+        return self._path
+
+    def route(self, message: AgentConsoleMessage) -> WayfinderDecision | None:
+        with WorkspaceSnapshotService._json_store_lock(self._path):
+            state = self._load()
+            active = state["active_flow"]
+            if active is not None:
+                return self._continue_active(state, active, message)
+            return self._enter_if_required(state, message)
+
+    def ensure_gate_open(self) -> None:
+        state = self._load()
+        active = state["active_flow"]
+        if active is not None and active["gate"]["status"] != "open":
+            raise SharedUnderstandingGateError()
+
+    def _enter_if_required(
+        self,
+        state: dict[str, Any],
+        message: AgentConsoleMessage,
+    ) -> WayfinderDecision | None:
+        content = message.content.strip()
+        if self._EXISTING_REFERENCE.search(content):
+            return self._start_flow(
+                state,
+                message,
+                mode="work-through",
+                reference=content,
+                content=(
+                    "Wayfinder Work-through mode is active for the referenced planning work. "
+                    "The Shared Understanding Gate is pending; no canonical artifact, "
+                    "delegation, or production implementation was started."
+                ),
+            )
+        if self._READ_ONLY.search(content):
+            return None
+        if self._NEW_PROJECT.search(content) or self._CONSEQUENTIAL_CHANGE.search(content):
+            return self._start_flow(
+                state,
+                message,
+                mode="chart",
+                reference="",
+                content=(
+                    "Wayfinder Chart mode is active for this new or consequential effort. "
+                    "The Shared Understanding Gate is pending; no canonical artifact, "
+                    "delegation, or production implementation was started."
+                ),
+            )
+        return None
+
+    def _start_flow(
+        self,
+        state: dict[str, Any],
+        message: AgentConsoleMessage,
+        *,
+        mode: Literal["chart", "work-through"],
+        reference: str,
+        content: str,
+    ) -> WayfinderDecision:
+        flow = {
+            "flow_id": f"wayfinder-{message.message_id}",
+            "mode": mode,
+            "originating_message_id": message.message_id,
+            "scope": asdict(message.scope),
+            "reference": reference,
+            "gate": {"status": "pending", "opened_by": "", "receipt_id": ""},
+        }
+        state["active_flow"] = flow
+        self._write(state)
+        return WayfinderDecision(
+            projection=self._projection(flow, continuing=False),
+            content=content,
+            correlation_id=f"wayfinder-entry:{message.message_id}",
+            action_phase=f"wayfinder-{mode}-entered",
+        )
+
+    def _continue_active(
+        self,
+        state: dict[str, Any],
+        active: dict[str, Any],
+        message: AgentConsoleMessage,
+    ) -> WayfinderDecision:
+        if self._COMMANDER_CONFIRMATION.search(message.content):
+            receipt_id = f"wayfinder-gate:{message.message_id}"
+            active["gate"] = {
+                "status": "open",
+                "opened_by": "mission-commander",
+                "receipt_id": receipt_id,
+            }
+            self._write(state)
+            return WayfinderDecision(
+                projection=self._projection(active, continuing=True),
+                content=(
+                    "Mission Commander receipt opened the Shared Understanding Gate. "
+                    "Wayfinder did not automatically create an artifact, delegate work, "
+                    "or invoke another skill."
+                ),
+                correlation_id=receipt_id,
+                action_phase="shared-understanding-gate-opened",
+            )
+        if active["gate"]["status"] == "pending" and self._has_agent_acknowledgement(
+            message.content
+        ):
+            receipt_id = f"wayfinder-acknowledgement:{message.message_id}"
+            active["gate"] = {
+                "status": "open",
+                "opened_by": "wayfinder-agent",
+                "receipt_id": receipt_id,
+            }
+            self._write(state)
+            return WayfinderDecision(
+                projection=self._projection(active, continuing=True),
+                content=(
+                    "Wayfinder acknowledges the stated destination, scope, constraints, "
+                    "and uncertainty. The Shared Understanding Gate is open. This "
+                    "acknowledgement ends the turn; it did not create an artifact, "
+                    "delegate work, or invoke another skill."
+                ),
+                correlation_id=receipt_id,
+                action_phase="shared-understanding-agent-acknowledged",
+            )
+        gate = active["gate"]["status"]
+        return WayfinderDecision(
+            projection=self._projection(active, continuing=True),
+            content=(
+                "Wayfinder continues the durable active flow without nesting or "
+                f"reinvocation. The Shared Understanding Gate is {gate}."
+            ),
+        )
+
+    def _projection(
+        self,
+        flow: dict[str, Any],
+        *,
+        continuing: bool,
+    ) -> WayfinderProjection:
+        gate = flow["gate"]
+        return WayfinderProjection(
+            mode=flow["mode"],
+            gate=WayfinderGate(**gate),
+            flow=WayfinderFlow(
+                flow_id=flow["flow_id"],
+                mode=flow["mode"],
+                originating_message_id=flow["originating_message_id"],
+                scope=ConversationScope(**flow["scope"]),
+                reference=flow["reference"],
+            ),
+            continuing=continuing,
+            turn_complete=True,
+        )
+
+    def _has_agent_acknowledgement(self, content: str) -> bool:
+        return all(
+            re.search(rf"\b{field}\s*:\s*[^;\n]+", content, re.IGNORECASE)
+            for field in self._ACKNOWLEDGEMENT_FIELDS
+        )
+
+    def _load(self) -> dict[str, Any]:
+        if not self._path.exists():
+            return {"schema_version": self._SCHEMA_VERSION, "active_flow": None}
+        try:
+            state = json.loads(self._path.read_text(encoding="utf-8"))
+            if state.get("schema_version") != self._SCHEMA_VERSION:
+                raise ValueError("unsupported Wayfinder state schema")
+            active = state.get("active_flow")
+            if active is None:
+                return state
+            if not isinstance(active, dict):
+                raise ValueError("Wayfinder active flow must be an object")
+            self._projection(active, continuing=False)
+            return state
+        except (json.JSONDecodeError, AttributeError, KeyError, TypeError, ValueError) as exc:
+            raise WorkspacePersistenceError(
+                f"Wayfinder state persistence read failed: {exc}"
+            ) from exc
+
+    def _write(self, state: dict[str, Any]) -> None:
+        WorkspaceSnapshotService._write_json_atomically(self._path, state)
 
 
 class AgentConsoleHistoryService:
@@ -2841,6 +3105,29 @@ class AgentConsoleResponseService:
                 current_scope=snapshot.conversation_scope,
             )
         latest = self._correlated_user_message(message_id)
+        wayfinder = WayfinderService(self._snapshots).route(latest)
+        if wayfinder is not None:
+            acknowledged = bool(wayfinder.correlation_id)
+            message = self._history.append(
+                role="assistant",
+                content=wayfinder.content,
+                outcome="acknowledged" if acknowledged else "model-commentary",
+                source="orchestrator" if acknowledged else "frontier-model",
+                recorded_scope=latest.scope,
+                correlation_id=wayfinder.correlation_id,
+                action_phase=wayfinder.action_phase,
+                action_outcome="" if acknowledged else "no-action",
+                action_message=(
+                    ""
+                    if acknowledged
+                    else self._NO_ACTION_MESSAGE
+                ),
+            )
+            return AgentConsoleResponseProjection(
+                message=message,
+                route=self._discussion_route(),
+                wayfinder=wayfinder.projection,
+            )
         agent: AgentConfig | None = None
         content = self._command_response(latest, agent)
         route = self._discussion_route()
@@ -2874,7 +3161,17 @@ class AgentConsoleResponseService:
                 else self._NO_ACTION_MESSAGE
             ),
         )
-        return AgentConsoleResponseProjection(message=message, route=route)
+        return AgentConsoleResponseProjection(
+            message=message,
+            route=route,
+            wayfinder=WayfinderProjection(
+                mode="outside",
+                gate=WayfinderGate(status="not-applicable"),
+                flow=None,
+                continuing=False,
+                turn_complete=False,
+            ),
+        )
 
     @staticmethod
     def _discussion_route() -> AgentConsoleResponseRoute:
@@ -3834,6 +4131,7 @@ class WorkspaceQueueService:
                     f"Workspace Queue receipt disappeared during replay: {correlation_id}"
                 )
             return replay
+        WayfinderService(self._snapshots).ensure_gate_open()
         mission = self._mission_for_queue_action(snapshot, mission_id)
         scope = self._snapshots._qualify_scope(scope, active_mission_id=mission.mission_id)
         origin = next(
@@ -4332,6 +4630,12 @@ class WorkspaceQueueService:
             raise AlbertError(f"Workspace Queue item is already {item.status}: {item_id}")
 
         durable_effect = self._durable_queue_approval_effect(item)
+        if (
+            decision == "approve"
+            and item.item_type == "ad-hoc-delegation"
+            and durable_effect is None
+        ):
+            WayfinderService(self._snapshots).ensure_gate_open()
         if durable_effect is not None:
             effect_correlation, effect_request, recovered_session = durable_effect
             if (
@@ -5159,6 +5463,7 @@ class MissionDraftService:
                 draft=effect_draft,
             )
             return acknowledgement
+        WayfinderService(self._snapshots).ensure_gate_open()
         if expected_revision != snapshot.revision:
             raise WorkspaceStaleActionError(
                 expected_revision=expected_revision,
@@ -5253,6 +5558,7 @@ class MissionDraftService:
                 draft=effect_draft,
             )
             return acknowledgement
+        WayfinderService(self._snapshots).ensure_gate_open()
         if expected_revision != drafts["revision"]:
             raise WorkspaceStaleActionError(
                 expected_revision=expected_revision,
@@ -5351,6 +5657,7 @@ class MissionDraftService:
                 reason=reason.strip(),
             )
             return acknowledgement
+        WayfinderService(self._snapshots).ensure_gate_open()
         if expected_revision != drafts["revision"]:
             raise WorkspaceStaleActionError(
                 expected_revision=expected_revision,
@@ -5452,6 +5759,7 @@ class MissionDraftService:
                 draft=effect_draft,
             )
             return acknowledgement
+        WayfinderService(self._snapshots).ensure_gate_open()
         if expected_revision != drafts["revision"]:
             raise WorkspaceStaleActionError(
                 expected_revision=expected_revision,
@@ -7357,6 +7665,8 @@ class WorkstationActionService:
             request_boundary=request_boundary,
         )
         recovering_action = canonical_action is not None
+        if not recovering_action and action_type in {"issue-launch", "issue-retry"}:
+            WayfinderService(self._snapshots).ensure_gate_open()
         recovered_session = canonical_action[1] if canonical_action is not None else None
         if not recovering_action and expected_revision != snapshot.revision:
             raise WorkspaceStaleActionError(

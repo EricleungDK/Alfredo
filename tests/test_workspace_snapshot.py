@@ -36,6 +36,7 @@ from albert_mvp.workspace import (
     ReviewWorkspaceService,
     SessionArtifactReadError,
     SessionArtifactService,
+    SharedUnderstandingGateError,
     ShellTerminalService,
     WorkspaceAction,
     WorkspaceQueueService,
@@ -9189,6 +9190,318 @@ class WorkspaceSnapshotTest(unittest.TestCase):
                 "acceptance_criteria": [],
             },
         )
+
+    def test_wayfinder_enters_persisted_chart_mode_for_a_new_project_without_controller_memory(
+        self,
+    ) -> None:
+        snapshots = self.load_service()
+        scope = snapshots.snapshot().conversation_scope
+        prompt = AgentConsoleHistoryService(snapshots).append(
+            role="user",
+            content="I need a new project for a local-first release dashboard.",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        response = AgentConsoleResponseService(snapshots).respond(
+            message_id=prompt.message_id,
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        self.assertEqual(response.route.intent, "discussion")
+        self.assertEqual(response.wayfinder.mode, "chart")
+        self.assertEqual(response.wayfinder.gate.status, "pending")
+        self.assertEqual(response.wayfinder.flow.originating_message_id, prompt.message_id)
+        self.assertTrue(response.wayfinder.turn_complete)
+
+    def test_wayfinder_gate_blocks_canonical_planning_and_delegation_until_commander_receipt(
+        self,
+    ) -> None:
+        snapshots = self.load_service()
+        history = AgentConsoleHistoryService(snapshots)
+        scope = snapshots.snapshot().conversation_scope
+        chart_prompt = history.append(
+            role="user",
+            content="Design a new project for reliable release planning.",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        AgentConsoleResponseService(snapshots).respond(
+            message_id=chart_prompt.message_id,
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        delegation_prompt = history.append(
+            role="user",
+            content="Delegate the release planning implementation.",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        with self.assertRaises(SharedUnderstandingGateError):
+            WorkspaceQueueService(snapshots).propose_ad_hoc_delegation(
+                correlation_id="wayfinder-pre-gate-delegation",
+                expected_revision=1,
+                source="agent-console",
+                scope=scope,
+                acceptance_criteria=["Release planning has reviewed acceptance criteria."],
+                allowed_paths=["docs/release-plan.md"],
+                command_policy={},
+                proposed_agent="qwen-coder-local-1",
+                originating_message_id=delegation_prompt.message_id,
+            )
+        with self.assertRaises(SharedUnderstandingGateError):
+            MissionDraftService(snapshots).create_draft(
+                correlation_id="wayfinder-pre-gate-draft",
+                expected_revision=1,
+                proposed_goal="Create the release planning Mission.",
+                selected_ad_hoc_ids=[],
+                excluded_ad_hoc_ids=[],
+                new_work_items=["Publish the agreed release plan."],
+                dependencies=[],
+                unresolved_decisions=[],
+            )
+
+        confirmation = history.append(
+            role="user",
+            content="/wayfinder confirm",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        acknowledged = AgentConsoleResponseService(snapshots).respond(
+            message_id=confirmation.message_id,
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        self.assertEqual(acknowledged.wayfinder.gate.status, "open")
+        self.assertEqual(acknowledged.wayfinder.gate.opened_by, "mission-commander")
+        self.assertEqual(acknowledged.message.correlation_id, "wayfinder-gate:console-000004")
+        self.assertEqual(MissionDraftService(snapshots).inspect().drafts, ())
+
+    def test_cli_reports_a_pending_wayfinder_gate_as_a_structured_failure(self) -> None:
+        snapshots = self.load_service()
+        scope = snapshots.snapshot().conversation_scope
+        prompt = AgentConsoleHistoryService(snapshots).append(
+            role="user",
+            content="Create a new project for receipt-bound deployment work.",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        AgentConsoleResponseService(snapshots).respond(
+            message_id=prompt.message_id,
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        output = io.StringIO()
+        error = io.StringIO()
+
+        with redirect_stdout(output), redirect_stderr(error):
+            exit_code = main(
+                [
+                    "workstation-action",
+                    "--target-repo",
+                    str(self.target_repo),
+                    "--tracker-dir",
+                    str(self.tracker),
+                    "--runtime-root",
+                    str(self.runtime),
+                    "--mission-id",
+                    "command-deck",
+                    "--correlation-id",
+                    "wayfinder-pre-gate-launch",
+                    "--expected-revision",
+                    "1",
+                    "--action-type",
+                    "issue-launch",
+                    "--actor",
+                    "mission-commander",
+                    "--target-kind",
+                    "issue-slice",
+                    "--target-id",
+                    "ISS-01",
+                    "--issue-id",
+                    "ISS-01",
+                    "--allowed-path",
+                    "src",
+                ]
+            )
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(output.getvalue(), "")
+        self.assertTrue(error.getvalue().startswith("{"), error.getvalue())
+        self.assertEqual(
+            json.loads(error.getvalue())["error"]["code"],
+            "shared-understanding-required",
+        )
+
+    def test_wayfinder_gate_blocks_existing_mission_draft_mutations(self) -> None:
+        snapshots = self.load_service()
+        drafts = MissionDraftService(snapshots)
+        existing = drafts.create_draft(
+            correlation_id="existing-draft-before-wayfinder",
+            expected_revision=1,
+            proposed_goal="Keep the existing draft pending shared understanding.",
+            selected_ad_hoc_ids=[],
+            excluded_ad_hoc_ids=[],
+            new_work_items=["Do not mutate this draft before the gate opens."],
+            dependencies=[],
+            unresolved_decisions=[],
+        )
+        scope = snapshots.snapshot().conversation_scope
+        chart = AgentConsoleHistoryService(snapshots).append(
+            role="user",
+            content="Create a new project for planned release operations.",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        AgentConsoleResponseService(snapshots).respond(
+            message_id=chart.message_id,
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        with self.assertRaises(SharedUnderstandingGateError):
+            drafts.update_draft(
+                correlation_id="update-before-wayfinder-gate",
+                expected_revision=existing.revision,
+                draft_id=existing.draft_id,
+                proposed_goal="Changed draft scope must wait for the gate.",
+                selected_ad_hoc_ids=[],
+                excluded_ad_hoc_ids=[],
+                new_work_items=["Still pending."],
+                dependencies=[],
+                unresolved_decisions=[],
+            )
+        with self.assertRaises(SharedUnderstandingGateError):
+            drafts.abandon_draft(
+                correlation_id="abandon-before-wayfinder-gate",
+                expected_revision=existing.revision,
+                draft_id=existing.draft_id,
+                reason="Gate is pending.",
+            )
+
+        self.assertEqual(drafts.inspect().drafts[0].status, "draft")
+
+    def test_wayfinder_uses_work_through_for_existing_references_and_continues_one_flow(
+        self,
+    ) -> None:
+        snapshots = self.load_service()
+        history = AgentConsoleHistoryService(snapshots)
+        scope = snapshots.snapshot().conversation_scope
+        reference = history.append(
+            role="user",
+            content="Inspect Wayfinder map #60 before we continue.",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        entered = AgentConsoleResponseService(snapshots).respond(
+            message_id=reference.message_id,
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        later = history.append(
+            role="user",
+            content="Research the known risks before publishing a plan.",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        continued = AgentConsoleResponseService(snapshots).respond(
+            message_id=later.message_id,
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        self.assertEqual(entered.wayfinder.mode, "work-through")
+        self.assertEqual(entered.wayfinder.gate.status, "pending")
+        self.assertTrue(continued.wayfinder.continuing)
+        self.assertEqual(continued.wayfinder.mode, "work-through")
+        self.assertEqual(continued.wayfinder.flow, entered.wayfinder.flow)
+        self.assertEqual(continued.route.intent, "discussion")
+
+    def test_wayfinder_agent_acknowledgement_opens_the_gate_and_ends_the_turn(self) -> None:
+        snapshots = self.load_service()
+        history = AgentConsoleHistoryService(snapshots)
+        scope = snapshots.snapshot().conversation_scope
+        chart = history.append(
+            role="user",
+            content="Build a new project for governed deployment evidence.",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        AgentConsoleResponseService(snapshots).respond(
+            message_id=chart.message_id,
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        acknowledgement = history.append(
+            role="user",
+            content=(
+                "Destination: governed deployment evidence; Scope: release workflow; "
+                "Constraints: local-only runtime; Uncertainty: package provenance."
+            ),
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        response = AgentConsoleResponseService(snapshots).respond(
+            message_id=acknowledgement.message_id,
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        self.assertEqual(response.wayfinder.gate.status, "open")
+        self.assertEqual(response.wayfinder.gate.opened_by, "wayfinder-agent")
+        self.assertTrue(response.wayfinder.turn_complete)
+        self.assertEqual(
+            response.message.action_phase,
+            "shared-understanding-agent-acknowledged",
+        )
+        self.assertIn("acknowledgement ends the turn", response.message.content)
+        self.assertEqual(MissionDraftService(snapshots).inspect().drafts, ())
+
+    def test_read_only_explanation_stays_outside_automatic_wayfinder_chart_mode(self) -> None:
+        snapshots = self.load_service()
+        scope = snapshots.snapshot().conversation_scope
+        prompt = AgentConsoleHistoryService(snapshots).append(
+            role="user",
+            content="Explain ticket #60 and the current Workspace Queue status.",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        response = AgentConsoleResponseService(snapshots).respond(
+            message_id=prompt.message_id,
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        self.assertEqual(response.wayfinder.mode, "outside")
+        self.assertEqual(response.wayfinder.gate.status, "not-applicable")
+        self.assertIsNone(response.wayfinder.flow)
 
     def test_controller_model_routes_a_natural_coding_request_as_bounded_task(self) -> None:
         snapshots = self.load_service()
