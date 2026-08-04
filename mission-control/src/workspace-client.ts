@@ -1,4 +1,4 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke, isTauri } from "@tauri-apps/api/core";
 import type {
   AlfredoLaunchContext,
   AlfredoLaunchContextResult,
@@ -140,16 +140,37 @@ export interface WorkspaceClient {
 const DESKTOP_BRIDGE_UNAVAILABLE =
   "The browser preview has no Alfredo desktop bridge. Start the managed workstation from the repository root.";
 
+type WorkspaceInvoke = <T>(
+  command: string,
+  args?: Record<string, unknown>,
+) => Promise<T>;
+
+type FetchImplementation = (
+  input: RequestInfo | URL,
+  init?: RequestInit,
+) => Promise<Response>;
+
+export interface AlfredoLocalhostBridgeConfiguration {
+  readonly endpoint: string;
+  readonly token: string;
+}
+
 export class TauriWorkspaceClient implements WorkspaceClient {
+  constructor(
+    private readonly invokeCommand: WorkspaceInvoke = tauriInvoke,
+    private readonly bridgeAvailable: () => boolean = isTauri,
+    private readonly performanceMarksEnabled = true,
+  ) {}
+
   async recordPerformanceMark(
     request: PerformanceMarkRequest,
   ): Promise<PerformanceMarkAcknowledgement> {
-    if (!isTauri()) return { recorded: false };
-    return invoke<PerformanceMarkAcknowledgement>("performance_mark", { request });
+    if (!this.bridgeAvailable() || !this.performanceMarksEnabled) return { recorded: false };
+    return this.invokeCommand<PerformanceMarkAcknowledgement>("performance_mark", { request });
   }
 
   async loadLaunchContext(): Promise<AlfredoLaunchContextResult> {
-    if (!isTauri()) {
+    if (!this.bridgeAvailable()) {
       return {
         kind: "launch-context-failure",
         code: "backend-startup-failure",
@@ -158,7 +179,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
       };
     }
     try {
-      const context = await invoke<AlfredoLaunchContext>("alfredo_launch_context");
+      const context = await this.invokeCommand<AlfredoLaunchContext>("alfredo_launch_context");
       return { kind: "launch-context", context };
     } catch (error) {
       if (isBridgeFailure(error)) {
@@ -182,7 +203,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
     request: CodingWorkspaceSelectionRequest,
   ): Promise<CodingWorkspaceSelectionResult> {
     try {
-      const acknowledgement = await invoke<CodingWorkspaceAcknowledgement>(
+      const acknowledgement = await this.invokeCommand<CodingWorkspaceAcknowledgement>(
         "coding_workspace_select",
         { request },
       );
@@ -207,9 +228,10 @@ export class TauriWorkspaceClient implements WorkspaceClient {
 
   async chooseMission(request: MissionChoiceRequest): Promise<MissionChoiceResult> {
     try {
-      const acknowledgement = await invoke<MissionChoiceAcknowledgement>("mission_choice", {
-        request,
-      });
+      const acknowledgement = await this.invokeCommand<MissionChoiceAcknowledgement>(
+        "mission_choice",
+        { request },
+      );
       return { kind: "acknowledged", acknowledgement };
     } catch (error) {
       if (isBridgeFailure(error)) {
@@ -231,7 +253,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
 
   async loadAgentCapabilities(): Promise<AgentCapabilityCatalogResult> {
     try {
-      const catalog = await invoke<AgentCapabilityCatalog>("agent_capabilities");
+      const catalog = await this.invokeCommand<AgentCapabilityCatalog>("agent_capabilities");
       return { kind: "capabilities", catalog };
     } catch (error) {
       if (isBridgeFailure(error)) {
@@ -252,7 +274,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
   }
 
   async loadSnapshot(): Promise<WorkspaceLoadResult> {
-    if (!isTauri()) {
+    if (!this.bridgeAvailable()) {
       return {
         kind: "startup-failure",
         message: DESKTOP_BRIDGE_UNAVAILABLE,
@@ -260,7 +282,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
       };
     }
     try {
-      const snapshot = await invoke<WorkspaceSnapshot>("workspace_snapshot");
+      const snapshot = await this.invokeCommand<WorkspaceSnapshot>("workspace_snapshot");
       return {
         kind: snapshot.workspace_session.status === "empty" ? "empty" : "ready",
         snapshot,
@@ -286,7 +308,9 @@ export class TauriWorkspaceClient implements WorkspaceClient {
 
   async loadUpdates(afterRevision: number): Promise<WorkspaceUpdatesResult> {
     try {
-      const batch = await invoke<WorkspaceUpdateBatch>("workspace_updates", { afterRevision });
+      const batch = await this.invokeCommand<WorkspaceUpdateBatch>("workspace_updates", {
+        afterRevision,
+      });
       return { kind: "updates", batch };
     } catch (error) {
       if (isBridgeFailure(error)) {
@@ -308,7 +332,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
 
   async loadConsoleHistory(): Promise<AgentConsoleHistoryResult> {
     try {
-      const history = await invoke<AgentConsoleHistory>("agent_console_history");
+      const history = await this.invokeCommand<AgentConsoleHistory>("agent_console_history");
       return { kind: "history", history };
     } catch (error) {
       if (isBridgeFailure(error)) {
@@ -330,9 +354,10 @@ export class TauriWorkspaceClient implements WorkspaceClient {
 
   async submitAction(action: WorkspaceActionRequest): Promise<WorkspaceActionResult> {
     try {
-      const acknowledgement = await invoke<WorkspaceActionAcknowledgement>("workspace_action", {
-        action,
-      });
+      const acknowledgement = await this.invokeCommand<WorkspaceActionAcknowledgement>(
+        "workspace_action",
+        { action },
+      );
       return { kind: "acknowledged", acknowledgement };
     } catch (error) {
       if (isBridgeFailure(error)) {
@@ -356,9 +381,10 @@ export class TauriWorkspaceClient implements WorkspaceClient {
 
   async changeScope(scope: WorkspaceScopeRequest): Promise<WorkspaceActionResult> {
     try {
-      const acknowledgement = await invoke<WorkspaceActionAcknowledgement>("workspace_scope", {
-        scope,
-      });
+      const acknowledgement = await this.invokeCommand<WorkspaceActionAcknowledgement>(
+        "workspace_scope",
+        { scope },
+      );
       return { kind: "acknowledged", acknowledgement };
     } catch (error) {
       if (isBridgeFailure(error)) {
@@ -378,7 +404,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
 
   async switchMission(request: WorkspaceMissionSwitchRequest): Promise<WorkspaceActionResult> {
     try {
-      const acknowledgement = await invoke<WorkspaceActionAcknowledgement>(
+      const acknowledgement = await this.invokeCommand<WorkspaceActionAcknowledgement>(
         "workspace_mission_switch",
         { request },
       );
@@ -407,7 +433,9 @@ export class TauriWorkspaceClient implements WorkspaceClient {
     message: AgentConsoleMessageRequest,
   ): Promise<AgentConsoleMessageResult> {
     try {
-      const appended = await invoke<AgentConsoleMessage>("agent_console_message", { message });
+      const appended = await this.invokeCommand<AgentConsoleMessage>("agent_console_message", {
+        message,
+      });
       return { kind: "message", message: appended };
     } catch (error) {
       if (isBridgeFailure(error)) {
@@ -425,10 +453,16 @@ export class TauriWorkspaceClient implements WorkspaceClient {
     request: AgentConsoleResponseRequest,
   ): Promise<AgentConsoleResponseResult> {
     try {
-      const response = await invoke<AgentConsoleResponseProjection>("agent_console_response", {
-        request,
-      });
-      return { kind: "message", message: response.message, route: response.route, wayfinder: response.wayfinder };
+      const response = await this.invokeCommand<AgentConsoleResponseProjection>(
+        "agent_console_response",
+        { request },
+      );
+      return {
+        kind: "message",
+        message: response.message,
+        route: response.route,
+        wayfinder: response.wayfinder,
+      };
     } catch (error) {
       if (isBridgeFailure(error)) {
         return { kind: "message-rejected", code: error.code, message: error.message };
@@ -443,7 +477,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
 
   async loadWorkingContext(): Promise<WorkingContextLoadResult> {
     try {
-      const projection = await invoke<WorkingContextProjection>("working_context");
+      const projection = await this.invokeCommand<WorkingContextProjection>("working_context");
       return { kind: "working-context", projection };
     } catch (error) {
       if (isBridgeFailure(error)) {
@@ -467,7 +501,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
     request: WorkingContextCurationRequest,
   ): Promise<WorkingContextCurationResult> {
     try {
-      const acknowledgement = await invoke<WorkingContextAcknowledgement>(
+      const acknowledgement = await this.invokeCommand<WorkingContextAcknowledgement>(
         "working_context_curate",
         { request },
       );
@@ -490,7 +524,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
 
   async loadReviewWorkspace(): Promise<ReviewWorkspaceLoadResult> {
     try {
-      const projection = await invoke<ReviewWorkspaceProjection>("review_workspace");
+      const projection = await this.invokeCommand<ReviewWorkspaceProjection>("review_workspace");
       return { kind: "review-workspace", projection };
     } catch (error) {
       if (isBridgeFailure(error)) {
@@ -514,7 +548,9 @@ export class TauriWorkspaceClient implements WorkspaceClient {
     filters: ActivityJournalFilters = {},
   ): Promise<ActivityJournalLoadResult> {
     try {
-      const projection = await invoke<ActivityJournalProjection>("activity_journal", { filters });
+      const projection = await this.invokeCommand<ActivityJournalProjection>("activity_journal", {
+        filters,
+      });
       return { kind: "activity-journal", projection };
     } catch (error) {
       if (isBridgeFailure(error)) {
@@ -536,7 +572,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
 
   async loadShellTerminal(): Promise<ShellTerminalLoadResult> {
     try {
-      const projection = await invoke<ShellTerminalProjection>("shell_terminal");
+      const projection = await this.invokeCommand<ShellTerminalProjection>("shell_terminal");
       return { kind: "shell-terminal", projection };
     } catch (error) {
       if (isBridgeFailure(error)) {
@@ -560,7 +596,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
     request: ShellTerminalCommandRequest,
   ): Promise<ShellTerminalSubmitResult> {
     try {
-      const result = await invoke<ShellTerminalCommandResult>("shell_terminal_submit", {
+      const result = await this.invokeCommand<ShellTerminalCommandResult>("shell_terminal_submit", {
         request,
       });
       return { kind: "command-result", result };
@@ -580,9 +616,10 @@ export class TauriWorkspaceClient implements WorkspaceClient {
     request: ShellTerminalDecisionRequest,
   ): Promise<ShellTerminalDecisionResult> {
     try {
-      const result = await invoke<ShellTerminalCommandResult>("shell_terminal_decision", {
-        request,
-      });
+      const result = await this.invokeCommand<ShellTerminalCommandResult>(
+        "shell_terminal_decision",
+        { request },
+      );
       return { kind: "command-result", result };
     } catch (error) {
       if (isBridgeFailure(error)) {
@@ -600,7 +637,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
     request: AdditionalPathGrantRequest,
   ): Promise<AdditionalPathGrantCreateResult> {
     try {
-      const grant = await invoke<AdditionalPathGrant>("additional_path_grant_create", {
+      const grant = await this.invokeCommand<AdditionalPathGrant>("additional_path_grant_create", {
         request,
       });
       return { kind: "path-grant", grant };
@@ -620,9 +657,10 @@ export class TauriWorkspaceClient implements WorkspaceClient {
     request: AdditionalPathGrantDenialRequest,
   ): Promise<AdditionalPathGrantDenialResult> {
     try {
-      const denial = await invoke<AdditionalPathGrantDenial>("additional_path_grant_deny", {
-        request,
-      });
+      const denial = await this.invokeCommand<AdditionalPathGrantDenial>(
+        "additional_path_grant_deny",
+        { request },
+      );
       return { kind: "path-grant-denied", denial };
     } catch (error) {
       if (isBridgeFailure(error)) {
@@ -638,7 +676,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
 
   async submitReviewDecision(request: ReviewDecisionRequest): Promise<ReviewDecisionResult> {
     try {
-      const acknowledgement = await invoke<ReviewDecisionAcknowledgement>(
+      const acknowledgement = await this.invokeCommand<ReviewDecisionAcknowledgement>(
         "review_decision",
         { request },
       );
@@ -665,7 +703,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
 
   async loadWorkspaceQueue(): Promise<WorkspaceQueueLoadResult> {
     try {
-      const projection = await invoke<WorkspaceQueueProjection>("workspace_queue");
+      const projection = await this.invokeCommand<WorkspaceQueueProjection>("workspace_queue");
       return { kind: "workspace-queue", projection };
     } catch (error) {
       if (isBridgeFailure(error)) {
@@ -689,7 +727,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
     request: WorkspaceQueueDecisionRequest,
   ): Promise<WorkspaceQueueDecisionResult> {
     try {
-      const acknowledgement = await invoke<WorkspaceQueueAcknowledgement>(
+      const acknowledgement = await this.invokeCommand<WorkspaceQueueAcknowledgement>(
         "workspace_queue_decision",
         { request },
       );
@@ -718,7 +756,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
     request: WorkstationActionRequest,
   ): Promise<WorkstationActionResult> {
     try {
-      const acknowledgement = await invoke<WorkstationActionAcknowledgement>(
+      const acknowledgement = await this.invokeCommand<WorkstationActionAcknowledgement>(
         "workstation_action",
         { request },
       );
@@ -747,9 +785,10 @@ export class TauriWorkspaceClient implements WorkspaceClient {
     request: WorkstationSessionRunRequest,
   ): Promise<WorkstationSessionRunResult> {
     try {
-      const session = await invoke<WorkstationSessionRunProjection>("workstation_session_run", {
-        request,
-      });
+      const session = await this.invokeCommand<WorkstationSessionRunProjection>(
+        "workstation_session_run",
+        { request },
+      );
       return { kind: "session-finished", session };
     } catch (error) {
       if (isBridgeFailure(error)) {
@@ -767,7 +806,9 @@ export class TauriWorkspaceClient implements WorkspaceClient {
     request: SessionArtifactReadRequest,
   ): Promise<SessionArtifactReadResult> {
     try {
-      const artifact = await invoke<SessionArtifactProjection>("session_artifact", { request });
+      const artifact = await this.invokeCommand<SessionArtifactProjection>("session_artifact", {
+        request,
+      });
       return { kind: "session-artifact", artifact };
     } catch (error) {
       if (isBridgeFailure(error)) {
@@ -791,7 +832,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
     request: AdHocDelegationProposalRequest,
   ): Promise<AdHocDelegationProposalResult> {
     try {
-      const acknowledgement = await invoke<WorkspaceQueueAcknowledgement>(
+      const acknowledgement = await this.invokeCommand<WorkspaceQueueAcknowledgement>(
         "ad_hoc_delegation_proposal",
         { request },
       );
@@ -818,7 +859,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
 
   async loadMissionDrafts(): Promise<MissionDraftLoadResult> {
     try {
-      const projection = await invoke<MissionDraftProjection>("mission_drafts");
+      const projection = await this.invokeCommand<MissionDraftProjection>("mission_drafts");
       return { kind: "mission-drafts", projection };
     } catch (error) {
       if (isBridgeFailure(error)) {
@@ -842,7 +883,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
     request: MissionDraftCreateRequest,
   ): Promise<MissionDraftCreateResult> {
     try {
-      const acknowledgement = await invoke<MissionDraftAcknowledgement>(
+      const acknowledgement = await this.invokeCommand<MissionDraftAcknowledgement>(
         "mission_draft_create",
         { request },
       );
@@ -871,7 +912,7 @@ export class TauriWorkspaceClient implements WorkspaceClient {
     request: MissionDraftDecisionRequest,
   ): Promise<MissionDraftDecisionResult> {
     try {
-      const acknowledgement = await invoke<MissionDraftAcknowledgement>(
+      const acknowledgement = await this.invokeCommand<MissionDraftAcknowledgement>(
         "mission_draft_decision",
         { request },
       );
@@ -895,6 +936,169 @@ export class TauriWorkspaceClient implements WorkspaceClient {
       };
     }
   }
+}
+
+let localhostRequestSequence = 0;
+
+export function createWorkspaceClient(): WorkspaceClient {
+  if (isTauri()) return new TauriWorkspaceClient();
+  if (globalThis.__ALFREDO_LOCALHOST_BRIDGE__ !== undefined) {
+    return createLocalhostWorkspaceClient(globalThis.__ALFREDO_LOCALHOST_BRIDGE__);
+  }
+  return new TauriWorkspaceClient();
+}
+
+export function createLocalhostWorkspaceClient(
+  configuration: AlfredoLocalhostBridgeConfiguration | undefined =
+    globalThis.__ALFREDO_LOCALHOST_BRIDGE__,
+  fetchImplementation: FetchImplementation = globalThis.fetch,
+): TauriWorkspaceClient {
+  return new TauriWorkspaceClient(
+    createLocalhostInvoke(configuration, fetchImplementation),
+    () => true,
+    false,
+  );
+}
+
+function createLocalhostInvoke(
+  configuration: AlfredoLocalhostBridgeConfiguration | undefined,
+  fetchImplementation: FetchImplementation,
+): WorkspaceInvoke {
+  return async <T>(command: string, args?: Record<string, unknown>): Promise<T> => {
+    if (!isLocalhostBridgeConfiguration(configuration)) {
+      throw bridgeFailure(
+        "contract-failure",
+        "The injected localhost bridge configuration is malformed.",
+        false,
+      );
+    }
+    if (typeof fetchImplementation !== "function") {
+      throw bridgeFailure(
+        "backend-startup-failure",
+        "The localhost bridge fetch transport is unavailable.",
+        true,
+      );
+    }
+
+    const id = createLocalhostRequestId();
+    let response: Response;
+    try {
+      response = await fetchImplementation(configuration.endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Alfredo-Bridge-Token": configuration.token,
+        },
+        body: JSON.stringify({ id, command, args: args ?? {} }),
+      });
+    } catch (error) {
+      throw bridgeFailure(
+        "backend-startup-failure",
+        `The localhost bridge request failed: ${errorMessage(error)}`,
+        true,
+      );
+    }
+
+    if (!response.ok) {
+      throw bridgeFailure(
+        "backend-startup-failure",
+        `The localhost bridge request failed with HTTP ${response.status}.`,
+        true,
+      );
+    }
+
+    let envelope: unknown;
+    try {
+      envelope = await response.json();
+    } catch {
+      throw malformedLocalhostResponse();
+    }
+    if (
+      !isRecord(envelope) ||
+      typeof envelope.id !== "string" ||
+      typeof envelope.ok !== "boolean"
+    ) {
+      throw malformedLocalhostResponse();
+    }
+    const envelopeKeys = Object.keys(envelope).sort();
+    const resultKey = envelope.ok ? "value" : "error";
+    if (
+      envelopeKeys.length !== 3 ||
+      !envelopeKeys.includes("id") ||
+      !envelopeKeys.includes("ok") ||
+      !envelopeKeys.includes(resultKey)
+    ) {
+      throw malformedLocalhostResponse();
+    }
+    if (envelope.id !== id) {
+      throw bridgeFailure(
+        "contract-failure",
+        "The localhost bridge response correlation did not match the request.",
+        false,
+      );
+    }
+    if (envelope.ok) {
+      if (!Object.prototype.hasOwnProperty.call(envelope, "value")) {
+        throw malformedLocalhostResponse();
+      }
+      return envelope.value as T;
+    }
+    if (
+      !Object.prototype.hasOwnProperty.call(envelope, "error") ||
+      !isBridgeFailure(envelope.error)
+    ) {
+      throw malformedLocalhostResponse();
+    }
+    throw envelope.error;
+  };
+}
+
+function createLocalhostRequestId(): string {
+  if (typeof globalThis.crypto?.randomUUID === "function") {
+    return globalThis.crypto.randomUUID();
+  }
+  localhostRequestSequence += 1;
+  return `alfredo-localhost-${Date.now()}-${localhostRequestSequence}`;
+}
+
+function isLocalhostBridgeConfiguration(
+  value: unknown,
+): value is AlfredoLocalhostBridgeConfiguration {
+  return (
+    isRecord(value) &&
+    typeof value.endpoint === "string" &&
+    value.endpoint.length > 0 &&
+    typeof value.token === "string" &&
+    value.token.length > 0
+  );
+}
+
+function malformedLocalhostResponse(): {
+  code: string;
+  message: string;
+  recoverable: boolean;
+} {
+  return bridgeFailure(
+    "contract-failure",
+    "The localhost bridge returned a malformed response envelope.",
+    false,
+  );
+}
+
+function bridgeFailure(
+  code: string,
+  message: string,
+  recoverable: boolean,
+): { code: string; message: string; recoverable: boolean } {
+  return { code, message, recoverable };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function isBridgeFailure(

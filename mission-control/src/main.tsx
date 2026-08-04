@@ -5,9 +5,9 @@ import {
   markFrontendPerformance,
   markNativePerformance,
 } from "./performance-measurement";
-import { TauriWorkspaceClient } from "./workspace-client";
+import { createWorkspaceClient } from "./workspace-client";
 
-const client = new TauriWorkspaceClient();
+const client = createWorkspaceClient();
 void markNativePerformance(client, "S2", "end", { outcome: "pass" });
 void markFrontendPerformance(client, "S3", "start", { outcome: "pass" });
 

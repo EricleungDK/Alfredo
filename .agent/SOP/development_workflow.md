@@ -1,6 +1,6 @@
 # Development Workflow
 
-**Last Updated**: 2026-07-23
+**Last Updated**: 2026-08-03
 **For**: Alfredo/Albert contributors
 
 ## Related Docs
@@ -33,6 +33,7 @@ For the native Tauri window, install the operating-system prerequisites document
 4. If no active planning artifact exists, read the relevant GitHub `[PRD]` parent and its ordered Issue Slice sub-issues; use `.scratch/` only for migrated-history provenance.
 5. Record implementation ownership, active delegations, blockers, and material decisions in `.agent/Tasks/context.md` as they change.
 6. Preserve unrelated work already present in the worktree.
+7. On the macOS development host, run `./scripts/apple-container-dev status` before starting a browser workstation. Reuse or restart the named container instead of creating a competing host process on port 1420.
 
 Python is authoritative for mission state and policy. Tauri transports typed data; React renders acknowledged projections. A UI implementation must not fabricate accepted work, launch state, evidence, or review outcomes.
 
@@ -56,14 +57,40 @@ python3 -m albert_mvp agents \
   --agent-config .albert/agents.json
 ```
 
-### Browser UI
+### Persistent Apple container browser UI (preferred on macOS)
+
+This workflow uses Apple's [`container`](https://github.com/apple/container) CLI, not Docker or Compose. Apple documents both [bind mounts and loopback port forwarding](https://github.com/apple/container/blob/main/docs/how-to.md); Alfredo wraps those primitives in one repository helper so agents do not have to reconstruct the run command.
+
+One-time setup from the repository root:
+
+```bash
+./scripts/apple-container-dev setup
+```
+
+Daily lifecycle:
+
+```bash
+./scripts/apple-container-dev status
+./scripts/apple-container-dev start
+./scripts/apple-container-dev restart
+./scripts/apple-container-dev logs
+./scripts/apple-container-dev stop
+```
+
+Keep `http://127.0.0.1:1420` open in the host browser. `setup` starts Apple's service and recommended kernel when required, creates the named `alfredo-dev` container from `node:22-bookworm`, and bootstraps Python 3, Git, Bubblewrap, pinned Rust 1.88.0, and `npm ci` dependencies inside that container. Subsequent `start` and `restart` reuse its root filesystem. Named volumes isolate Linux `node_modules`, `src-tauri/target`, Rust toolchain, and `.alfredo` runtime state from the macOS checkout; the host projects directory is bind-mounted at `/workspace`, and polling-backed Vite watching makes saved source changes hot-reload while sibling test repositories remain visible.
+
+The helper publishes guest port 1420 only to host `127.0.0.1:1420`, waits until `alfredo_launch_context` succeeds through the typed Rust/Python bridge, and then returns while the container stays detached. `restart` is the normal response to a process-level change. Use `rebuild` only when the named container itself must be recreated; named dependency, Cargo, toolchain, and runtime volumes are preserved. Resource defaults are four CPUs and 4 GiB and may be overridden with `ALFREDO_DEV_CPUS` and `ALFREDO_DEV_MEMORY` before the container is first created.
+
+Future agents should use this persistent surface for user-led visual testing. They should still run focused automated tests appropriate to their code changes, but they should not launch a second host Vite or browser process merely to provide a manual preview that already exists here.
+
+### Host browser UI fallback
 
 ```bash
 cd mission-control
 npm run dev
 ```
 
-Vite prints the local URL. This is the quickest way to inspect the current GUI skeleton; backend-only actions require the desktop bridge or a test client.
+Use this only when Apple's container runtime is unavailable. Vite prints the local URL, binds only `127.0.0.1:1420`, and starts Alfredo's development-only localhost bridge. Do not run it while `alfredo-dev` is active. The rendered workstation uses the same typed Rust command dispatcher and authoritative Python Orchestrator as native development; it must not use prototype or fabricated Workspace data. The default Starting Location is the parent of the Alfredo source repository, keeping create-mode candidates outside the forbidden backend; `ALFREDO_STARTING_LOCATION=/path/to/projects npm run dev` overrides it. The first run may wait for Cargo to build the bridge. Stop the complete Vite/Rust/Python process tree with `Ctrl+C`; on Unix, owner-pipe loss also terminates the verified dedicated process group if Vite exits abnormally.
 
 ### Tauri desktop UI
 
@@ -71,6 +98,8 @@ Vite prints the local URL. This is the quickest way to inspect the current GUI s
 cd mission-control
 npm run desktop
 ```
+
+Tauri starts its gateway-free Vite mode on `127.0.0.1:1422`. It can run while the browser-development workstation owns `1420`; Tauri IPC remains the native transport and takes precedence over any browser capability.
 
 ### Managed workstation launcher
 
@@ -88,10 +117,14 @@ The launcher validates required tools, starts the persistent Python transport, a
 ```bash
 cd mission-control
 npm test -- --run src/App.test.tsx
+npm run test:gateway
+npm run test:browser
 npm run typecheck
 ```
 
 Prefer a focused red/green loop while implementing, then run every release gate below.
+
+`npm run test:browser` is the permanent functional-localhost regression. It uses fresh temporary runtime/Starting Location roots, proves there is no Tauri global, creates a real Git Coding Workspace, starts a Mission through Python authority, renders the canonical Agent Console, and rejects a return to `Alfredo workstation unavailable`.
 
 ## Release Gates
 
@@ -102,6 +135,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 
 cd mission-control
 npm test -- --run
+npm run test:gateway
+npm run test:browser
 npm run typecheck
 npm run build
 npm run test:layout
@@ -222,6 +257,11 @@ Before committing, inspect `git status`, review the scoped diff, and preserve un
 - Use a fresh `/tmp` runtime to distinguish corrupted local state from deterministic behavior.
 - If a persistent transport request fails, verify the one-process CLI path with the same arguments.
 - If the UI loses connection, preserve the last canonical state and reload a fresh snapshot; never infer completion from an interrupted request.
+- If localhost startup reports an occupied port, inspect `lsof -nP -iTCP:1420 -sTCP:LISTEN` and stop only the stale process you own. Do not move Tauri back to `1420`; the `1420` browser / `1422` native split is a regression boundary.
+- If the Apple container workstation is unavailable, run `./scripts/apple-container-dev status`, then `./scripts/apple-container-dev logs`. `start` installs the recommended Apple kernel only when the system service is absent; a first-ever kernel/init-image pull can take longer than later starts.
+- If `container build` stalls at `[resolver] fetching image` while `container run` can pull the same image, do not block development on BuildKit. Alfredo's supported helper intentionally creates a persistent named container directly from the verified Node base and bootstraps its toolchain inside that container.
+- If port 1420 is owned by a host `npm run dev`, stop that exact Alfredo process before starting the named container. Never stop an unrelated listener by pattern or move the service to a noncanonical port.
+- On macOS, compare canonical paths rather than display strings: `/var/folders/...` resolves to `/private/var/folders/...`. Rust must canonicalize Starting Location before emitting launch context so Python acknowledgements match the same boundary.
 - If a runner owner dies, use the bounded canonical recovery/requeue flow. Do not edit runtime JSON manually.
 - For a layout regression, add or tighten a rendered App assertion and the production Chromium geometry test.
 

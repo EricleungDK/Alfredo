@@ -1,6 +1,6 @@
 # Alfredo Local Coding-Agent Workstation
 
-**Last updated:** 2026-08-02
+**Last updated:** 2026-08-03
 
 Alfredo is a local-first coding-agent workstation with a prompt-dominant React/Tauri interface and an authoritative Python Orchestrator. Use it for fast project discussion, skills and slash commands, governed coding tasks, and visible Local Agent work. The secondary Mission Work lane shows real subagent sessions, workable Issue Slices, evidence, and typed review/retry/cancel actions.
 
@@ -43,14 +43,34 @@ node mission-control/bin/alfredo.js workstation --agent qwen3-14b
 
 The source launcher checks for the lockfile-installed local Tauri CLI and Cargo before spawning the desktop process. A missing prerequisite fails with an Alfredo preflight message and a copyable repair command instead of exposing a raw child-process error. These development requirements do not apply to the packaged native desktop.
 
-For a visual-only browser preview without the desktop bridge or authoritative workspace data:
+For the preferred persistent browser-development workstation on a Mac with Apple's `container` CLI (not Docker), run this once from the repository root:
+
+```bash
+./scripts/apple-container-dev setup
+```
+
+Then keep `http://127.0.0.1:1420` open. The named `alfredo-dev` container runs detached, keeps its Linux Node dependencies, Cargo output, Rust toolchain, and Alfredo runtime in named volumes, and bind-mounts the repository's parent so host code changes appear immediately and sibling repositories remain available below `/workspace`. Polling-backed Vite watching makes bind-mounted host edits reload reliably. The first setup installs Apple's recommended Linux kernel if needed, then bootstraps Python, Git, Bubblewrap, pinned Rust 1.88.0, and lockfile-exact npm dependencies inside the persistent container. It does not use Docker or Compose.
+
+Daily commands are:
+
+```bash
+./scripts/apple-container-dev status
+./scripts/apple-container-dev start
+./scripts/apple-container-dev restart
+./scripts/apple-container-dev logs
+./scripts/apple-container-dev stop
+```
+
+`start` and `restart` wait for a successful canonical Rust/Python bridge response, not only for an open HTTP port. Use `rebuild` only when you intentionally want to recreate the named container; the npm, Cargo, and runtime volumes remain preserved. The service is published only on the host loopback address.
+
+The host-process fallback remains available:
 
 ```bash
 cd mission-control
 npm run dev
 ```
 
-The preview reports that the desktop bridge is unavailable. Use the managed workstation launcher above to open the functional application.
+Open `http://127.0.0.1:1420`. Do not run this fallback while `alfredo-dev` owns the port. Both paths start a typed Rust bridge to the same authoritative Python Orchestrator used by Tauri, so repository selection, Mission choice, snapshots, and governed actions use canonical state rather than preview fixtures. By default, Alfredo's parent directory is the Starting Location, allowing a new sibling repository without overlapping the forbidden backend; set `ALFREDO_STARTING_LOCATION` explicitly when another projects directory is intended. The bridge is capability- and same-origin-guarded and exists only while its Vite process is running. Stop the host fallback with `Ctrl+C`.
 
 For the Tauri development window without the managed launcher:
 
@@ -58,6 +78,8 @@ For the Tauri development window without the managed launcher:
 cd mission-control
 npm run desktop
 ```
+
+Native development uses a separate loopback Vite port (`1422`), so a browser workstation on `1420` no longer blocks the Tauri launcher.
 
 ## What Works
 
@@ -81,6 +103,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
 
 cd mission-control
 npm test -- --run
+npm run test:gateway
+npm run test:browser
 npm run test:performance
 npm run typecheck
 npm run build

@@ -88,6 +88,12 @@ jobs:
       - name: Install the release layout browser
         run: npx playwright install --with-deps chromium
 
+      - name: Run the functional localhost workstation gate
+        run: |
+          cargo build --manifest-path src-tauri/Cargo.toml --no-default-features --bin alfredo-localhost-bridge
+          npm run test:gateway
+          npm run test:browser
+
       - name: Run the four-viewport production layout gate
         run: npm run test:layout
 

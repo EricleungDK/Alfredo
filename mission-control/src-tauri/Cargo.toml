@@ -3,11 +3,16 @@ name = "alfredo-desktop"
 version = "0.1.0"
 description = "Albert Command Deck desktop bridge"
 edition = "2021"
+default-run = "alfredo-desktop"
 
 [[bin]]
 name = "alfredo-desktop"
 path = "src/main.rs"
 required-features = ["desktop"]
+
+[[bin]]
+name = "alfredo-localhost-bridge"
+path = "src/bin/alfredo-localhost-bridge.rs"
 
 [features]
 default = ["desktop"]

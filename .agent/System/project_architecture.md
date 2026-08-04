@@ -19,7 +19,7 @@ The MVP now includes real runner paths: deterministic fake runner, command-backe
 - Local markdown tracker under `.scratch/`.
 - Local model execution through Ollama.
 - App-local runtime JSON and bulky artifacts stored outside the target repo.
-- Command Deck desktop work uses React 19 and TypeScript behind a Tauri 2 shell, while Python remains the authoritative Orchestrator.
+- Command Deck uses React 19 and TypeScript behind either the Tauri 2 native shell or a development-only loopback Vite bridge, while Python remains the authoritative Orchestrator.
 
 ## Alfredo Prompt Workstation and Governed Runtime (2026-07-11)
 
@@ -52,6 +52,20 @@ Python `CodingWorkspaceSelectionService` is the validation authority for both th
 Tauri retains a separate mutexed process binding only after Python returns the correlated acknowledgement; the hashable persistent-backend configuration is not mutated. That binding is immutable for the desktop process: exact in-process correlation replay returns the same receipt, while changed-boundary reuse or a second selection fails before another Python effect. Launch context then reports `mission-choice-required`, and every Mission-qualified Tauri command returns `mission-selection-required` until Mission choice. React renders this state in Agent Console, keeps pending/failure states unacknowledged, and never loads a Workspace Session snapshot before Mission choice.
 
 Issue 58 completes the post-selection boundary. Python `WorkspaceJourneyStore` persists the canonical Starting Location, Coding Workspace, discovered Mission options, exact Active Mission, revision, and correlated receipts in `workspace-sessions.json`. Resume accepts only the named known Mission; Start New allocates a distinct non-duplicating Mission identity. The one-process CLI, persistent transport, Tauri bridge, and React gate all use the same acknowledgement contract. On process or desktop restart Tauri restores only an unambiguous canonical journey, while recent-workspace entries remain explicit relaunch intents and cannot silently retarget a connected process.
+
+## Development Localhost Bridge Boundary
+
+`npm run dev` is a functional source-development surface on `127.0.0.1:1420`. Vite injects one immutable per-process capability into its own HTML and accepts `POST /__alfredo/invoke` only from an exact loopback peer, Host, and Origin with that capability. Requests and responses are bounded and correlated. The gateway accepts only `{id, command, args}`; it cannot receive raw Python argv or browser-selected backend, runtime, install, or agent-config authority. Its default Starting Location is the backend repository's parent, so create mode has a usable sibling boundary instead of requiring a forbidden backend descendant; an explicit environment override remains available.
+
+The preferred macOS manual-testing surface is a persistent Apple `container` named `alfredo-dev`, managed by `scripts/apple-container-dev`. It runs the dedicated `npm run dev:container` Vite mode in a Linux arm64 VM, publishes guest 1420 only to host `127.0.0.1:1420`, bind-mounts the host projects parent at `/workspace`, and isolates Linux `node_modules`, Cargo target output, Rust toolchain, and Orchestrator runtime state in four named volumes. Polling-backed Vite watching carries host edits across the bind mount. The named container's root filesystem retains its Python/Git/Bubblewrap bootstrap across stop/start, while a lockfile hash refreshes npm dependencies only when `package-lock.json` changes. The lifecycle helper does not return ready until a capability-authenticated, same-origin `alfredo_launch_context` succeeds through Rust and Python.
+
+Apple's port forward reaches the guest listener with a VM-network peer rather than a guest loopback peer. Only `apple-container` mode may omit the socket peer-address assertion, and it requires Vite to bind `0.0.0.0` inside the VM. The external Host and Origin must still be exactly `127.0.0.1:1420`, the per-process capability remains mandatory, and the host publisher is fixed to loopback. Host `localhost` mode retains the stricter socket-loopback check. This exception is a transport fact of the isolated Apple VM, not permission to expose the development endpoint on a LAN or in a production build.
+
+The gateway owns a no-desktop Rust JSONL process that reuses the exact typed execute/decode functions behind the Tauri commands. `WorkstationBridge` captures environment-derived authority and one mutexed Coding Workspace/Mission binding. Its closed command dispatcher must stay in exact parity with `TauriWorkspaceClient`; Python remains the mutation, persistence, path-validation, Mission, and runner authority. Ordinary built pages receive no localhost capability and remain fail-closed outside Tauri.
+
+Native development is deliberately separate: Tauri runs gateway-free Vite on `127.0.0.1:1422`, and native IPC wins client selection whenever `__TAURI_INTERNALS__` exists. This prevents a browser server on `1420` from blocking managed native startup. Rust canonicalizes Starting Location before its first projection, keeping macOS `/var/folders` aliases identical to Python's `/private/var/folders` acknowledgement boundary.
+
+The bridge starts only after Vite owns its strict port and stops its Cargo/Rust/Python process tree with the server. Normal gateway shutdown signals the complete owned Unix process group or Windows task tree. On Unix, including the macOS development host and Ubuntu publication baseline, the Rust bridge also captures only a verified dedicated process group and kills that group immediately when owner-pipe EOF proves Vite disappeared; unit transports remain graceful. A real subprocess regression isolates the group, starts a descendant, closes stdin, and proves neither survives. Dispatch is bounded but concurrent: at most one long Local Agent runner occupies the runner lane, while reserved control capacity keeps snapshot, update, and cancellation requests observable; correlated responses may complete out of order. See the [localhost launch regression report](../Reports/2026-08-03-functional-localhost-workstation.md) and its permanent gateway, JSONL, client, and real-browser regressions. The [persistent Apple container development report](../Reports/2026-08-03-apple-container-development-environment.md) records the lifecycle, volume, health-probe, and live restart evidence.
 
 ## Command Deck Workspace Snapshot Boundary
 
@@ -119,6 +133,8 @@ Command Deck Issue 14 hardens the React projection without changing Orchestrator
 - `tests/test_workspace_snapshot.py` - snapshot, restart, empty-state, and persistence-failure integration coverage.
 - `mission-control/src/` - React/TypeScript Command Deck projection and interaction tests.
 - `mission-control/src-tauri/` - Tauri 2 desktop shell, typed Python bridge, and desktop-to-backend integration tests.
+- `mission-control/dev/localhost-bridge-plugin.ts` - development-only loopback capability, request validation, bounded concurrency, and Rust bridge lifecycle.
+- `mission-control/src-tauri/src/bin/alfredo-localhost-bridge.rs` - no-desktop typed JSONL dispatcher used only by the localhost development gateway.
 - `mission-control/bin/alfredo.js` and `bin/desktop-adapter.js` - public npm grammar, preflight, workspace/controller selection, exact-version native-adapter validation, and direct installed AppImage launch; repository layout alone retains the development-shell path.
 - `mission-control/scripts/build-desktop-release.js` and `build-npm-release.js` - production AppImage build plus deterministic generation of the minimal `alfredo-agent` meta package and `alfredo-agent-linux-x64-gnu` platform package.
 - `mission-control/scripts/verify-installed-release.js` and `check-verified-release.js` - isolated-registry meta-only npm install, exact pack-manifest audit, fresh-prefix realpath containment, PATH resolution, installed AppImage integrity/version verification, bounded process-group frontend-plus-backend GUI readiness smoke, and staged same-job publish-input preservation/revalidation.
@@ -252,6 +268,8 @@ Historical slice gates follow for traceability:
 
 The architecture above incorporates the following dated implementation evidence:
 
+- [2026-08-03 functional localhost workstation and launch diagnosis](../Reports/2026-08-03-functional-localhost-workstation.md)
+- [2026-08-03 persistent Apple container development environment](../Reports/2026-08-03-apple-container-development-environment.md)
 - [2026-08-02 Mission choice, restart continuity, and source-launch diagnosis](../Reports/2026-08-02-mission-choice-restart-continuity.md)
 - [2026-06-15 local coding-agent MVP](../Reports/2026-06-15-local-coding-agent-mvp.md)
 - [2026-06-16 repair relaunch](../Reports/2026-06-16-albert-repair-relaunch.md)

@@ -74,6 +74,7 @@ struct PerformanceControl {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PerformanceMarkRequest {
     pub stage: String,
     pub boundary: String,
@@ -426,6 +427,7 @@ pub struct MissionChoiceOption {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CodingWorkspaceSelectionRequest {
     pub correlation_id: String,
     pub workspace_path: String,
@@ -448,6 +450,7 @@ pub struct CodingWorkspaceAcknowledgement {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct MissionChoiceRequest {
     pub correlation_id: String,
     pub expected_revision: u64,
@@ -1587,6 +1590,7 @@ pub struct WorkspaceUpdateBatch {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceActionRequest {
     pub correlation_id: String,
     pub expected_revision: u64,
@@ -1601,12 +1605,14 @@ pub struct WorkspaceActionAcknowledgement {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceScopeTarget {
     pub kind: String,
     pub id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceScopeRequest {
     pub correlation_id: String,
     pub action_type: String,
@@ -1619,6 +1625,7 @@ pub struct WorkspaceScopeRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceMissionSwitchRequest {
     pub correlation_id: String,
     pub expected_revision: u64,
@@ -1626,6 +1633,7 @@ pub struct WorkspaceMissionSwitchRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentConsoleMessageRequest {
     pub role: String,
     pub content: String,
@@ -1640,6 +1648,7 @@ pub struct AgentConsoleMessageRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AgentConsoleResponseRequest {
     pub expected_revision: u64,
     pub message_id: String,
@@ -1765,6 +1774,7 @@ pub struct WorkingContextProjection {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkingContextCurationRequest {
     pub source_id: String,
     pub disposition: String,
@@ -1820,12 +1830,14 @@ pub struct ReviewWorkspaceProjection {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReviewDecisionTarget {
     pub kind: String,
     pub id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReviewDecisionRequest {
     pub correlation_id: String,
     pub action_type: String,
@@ -1883,6 +1895,7 @@ pub struct ActivityJournalProjection {
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActivityJournalFilters {
     #[serde(default)]
     pub search: String,
@@ -1971,6 +1984,7 @@ pub struct ShellTerminalProjection {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShellTerminalCommandRequest {
     pub correlation_id: String,
     pub command: String,
@@ -1992,6 +2006,7 @@ pub struct ShellTerminalCommandResult {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShellTerminalDecisionRequest {
     pub command_id: String,
     pub decision: String,
@@ -2000,6 +2015,7 @@ pub struct ShellTerminalDecisionRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AdditionalPathGrantRequest {
     pub correlation_id: String,
     #[serde(default)]
@@ -2012,6 +2028,7 @@ pub struct AdditionalPathGrantRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AdditionalPathGrantDenialRequest {
     pub correlation_id: String,
     pub request_id: String,
@@ -2060,6 +2077,7 @@ pub struct WorkspaceQueueProjection {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceQueueDecisionRequest {
     pub correlation_id: String,
     #[serde(default)]
@@ -2075,12 +2093,14 @@ pub struct WorkspaceQueueDecisionRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkspaceQueueDecisionTarget {
     pub kind: String,
     pub id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AdHocDelegationProposalRequest {
     pub correlation_id: String,
     pub expected_revision: u64,
@@ -2111,12 +2131,14 @@ pub struct WorkspaceQueueAcknowledgement {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkstationActionTarget {
     pub kind: String,
     pub id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkstationActionRequest {
     pub correlation_id: String,
     pub action_type: String,
@@ -2151,6 +2173,7 @@ pub struct WorkstationActionAcknowledgement {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkstationSessionRunRequest {
     pub session_id: String,
     #[serde(default)]
@@ -2171,6 +2194,7 @@ pub struct WorkstationSessionRunProjection {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionArtifactRequest {
     pub mission_id: String,
     pub session_id: String,
@@ -2222,6 +2246,7 @@ pub struct MissionDraftProjection {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct MissionDraftCreateRequest {
     pub correlation_id: String,
     pub expected_revision: u64,
@@ -2236,6 +2261,7 @@ pub struct MissionDraftCreateRequest {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct MissionDraftDecisionRequest {
     pub correlation_id: String,
     pub expected_revision: u64,
@@ -3274,6 +3300,377 @@ pub fn execute_mission_draft_decision(
     decode_backend_json(process_output(output), "Mission Draft acknowledgement")
 }
 
+/// Exact command surface exposed by the development-only localhost transport.
+///
+/// Keep this list aligned with `TauriWorkspaceClient`. The dispatcher below is
+/// deliberately closed: adding a Python command or accepting argv is never an
+/// implicit extension of browser authority.
+pub const LOCALHOST_BRIDGE_COMMANDS: &[&str] = &[
+    "activity_journal",
+    "ad_hoc_delegation_proposal",
+    "additional_path_grant_create",
+    "additional_path_grant_deny",
+    "agent_capabilities",
+    "agent_console_history",
+    "agent_console_message",
+    "agent_console_response",
+    "alfredo_launch_context",
+    "coding_workspace_select",
+    "mission_choice",
+    "mission_draft_create",
+    "mission_draft_decision",
+    "mission_drafts",
+    "performance_mark",
+    "review_decision",
+    "review_workspace",
+    "session_artifact",
+    "shell_terminal",
+    "shell_terminal_decision",
+    "shell_terminal_submit",
+    "working_context",
+    "working_context_curate",
+    "workspace_action",
+    "workspace_mission_switch",
+    "workspace_queue",
+    "workspace_queue_decision",
+    "workspace_scope",
+    "workspace_snapshot",
+    "workspace_updates",
+    "workstation_action",
+    "workstation_session_run",
+];
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptyBridgeArgs {}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestBridgeArgs<T> {
+    request: T,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActionBridgeArgs {
+    action: WorkspaceActionRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ScopeBridgeArgs {
+    scope: WorkspaceScopeRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MessageBridgeArgs {
+    message: AgentConsoleMessageRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FiltersBridgeArgs {
+    filters: ActivityJournalFilters,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdatesBridgeArgs {
+    #[serde(rename = "afterRevision")]
+    after_revision: u64,
+}
+
+fn localhost_contract_failure(message: impl Into<String>) -> BridgeFailure {
+    BridgeFailure {
+        code: "contract-failure".to_owned(),
+        message: message.into(),
+        recoverable: false,
+    }
+}
+
+fn decode_localhost_args<T: DeserializeOwned>(
+    command: &str,
+    args: serde_json::Value,
+) -> Result<T, BridgeFailure> {
+    if !args.is_object() {
+        return Err(localhost_contract_failure(format!(
+            "Localhost bridge arguments for {command} must be a JSON object."
+        )));
+    }
+    serde_json::from_value(args).map_err(|error| {
+        localhost_contract_failure(format!(
+            "Invalid localhost bridge arguments for {command}: {error}"
+        ))
+    })
+}
+
+fn localhost_value<T: Serialize>(value: T) -> Result<serde_json::Value, BridgeFailure> {
+    serde_json::to_value(value).map_err(|error| {
+        localhost_contract_failure(format!(
+            "The localhost bridge could not encode its typed response: {error}"
+        ))
+    })
+}
+
+/// Transport-neutral workstation command dispatcher used by the localhost
+/// development bridge. Configuration and binding authority are captured from
+/// the process environment once; request data can only populate the typed
+/// arguments accepted by the desktop client command surface.
+#[derive(Debug)]
+pub struct WorkstationBridge {
+    config: BridgeConfig,
+    binding: WorkspaceBinding,
+    starting_location: PathBuf,
+}
+
+impl WorkstationBridge {
+    pub fn from_environment() -> Self {
+        let config = BridgeConfig::from_environment();
+        let starting_location = bridge_starting_location(&config);
+        Self::new(config, starting_location)
+    }
+
+    fn new(config: BridgeConfig, starting_location: PathBuf) -> Self {
+        let binding = WorkspaceBinding::from_config(&config);
+        Self {
+            config,
+            binding,
+            starting_location,
+        }
+    }
+
+    fn bound_config(&self) -> Result<BridgeConfig, BridgeFailure> {
+        self.binding.bound_config(&self.config)
+    }
+
+    pub fn dispatch(
+        &self,
+        command: &str,
+        args: serde_json::Value,
+    ) -> Result<serde_json::Value, BridgeFailure> {
+        match command {
+            "performance_mark" => {
+                let _: RequestBridgeArgs<PerformanceMarkRequest> =
+                    decode_localhost_args(command, args)?;
+                localhost_value(PerformanceMarkAcknowledgement { recorded: false })
+            }
+            "alfredo_launch_context" => {
+                let _: EmptyBridgeArgs = decode_localhost_args(command, args)?;
+                self.binding.reload_from_persistence_for_starting_location(
+                    &self.config,
+                    &self.starting_location,
+                )?;
+                localhost_value(build_launch_context_with_binding(
+                    &self.config,
+                    &self.binding,
+                ))
+            }
+            "coding_workspace_select" => {
+                let RequestBridgeArgs { request } = decode_localhost_args(command, args)?;
+                if let Some(acknowledgement) = self.binding.reserve_selection(&request)? {
+                    return localhost_value(acknowledgement);
+                }
+                let acknowledgement = match execute_coding_workspace_select(
+                    &self.config,
+                    &self.starting_location,
+                    &request,
+                ) {
+                    Ok(acknowledgement) => acknowledgement,
+                    Err(error) => {
+                        self.binding.release_selection(&request);
+                        return Err(error);
+                    }
+                };
+                match self.binding.acknowledge(&request, &acknowledgement) {
+                    Ok(()) => {
+                        self.binding.reload_from_persistence_for_starting_location(
+                            &self.config,
+                            &self.starting_location,
+                        )?;
+                        localhost_value(acknowledgement)
+                    }
+                    Err(error) => {
+                        self.binding.release_selection(&request);
+                        Err(error)
+                    }
+                }
+            }
+            "mission_choice" => {
+                let RequestBridgeArgs { request } = decode_localhost_args(command, args)?;
+                self.binding.require_workspace()?;
+                let coding_workspace =
+                    self.binding
+                        .state()
+                        .coding_workspace
+                        .ok_or_else(|| BridgeFailure {
+                            code: "coding-workspace-selection-required".to_owned(),
+                            message:
+                                "Choose or create a Coding Workspace before choosing a Mission."
+                                    .to_owned(),
+                            recoverable: true,
+                        })?;
+                let acknowledgement = execute_mission_choice(
+                    &self.config,
+                    &self.starting_location,
+                    &coding_workspace,
+                    &request,
+                )?;
+                self.binding.reload_from_persistence_for_starting_location(
+                    &self.config,
+                    &self.starting_location,
+                )?;
+                localhost_value(acknowledgement)
+            }
+            "agent_capabilities" => {
+                let _: EmptyBridgeArgs = decode_localhost_args(command, args)?;
+                localhost_value(execute_agent_capabilities(&self.config)?)
+            }
+            "workspace_snapshot" => {
+                let _: EmptyBridgeArgs = decode_localhost_args(command, args)?;
+                localhost_value(execute_snapshot(&self.bound_config()?)?)
+            }
+            "workspace_updates" => {
+                let UpdatesBridgeArgs { after_revision } = decode_localhost_args(command, args)?;
+                localhost_value(execute_updates(&self.bound_config()?, after_revision)?)
+            }
+            "workspace_action" => {
+                let ActionBridgeArgs { action } = decode_localhost_args(command, args)?;
+                localhost_value(execute_action(&self.bound_config()?, &action)?)
+            }
+            "workspace_scope" => {
+                let ScopeBridgeArgs { scope } = decode_localhost_args(command, args)?;
+                localhost_value(execute_scope(&self.bound_config()?, &scope)?)
+            }
+            "workspace_mission_switch" => {
+                let RequestBridgeArgs { request } = decode_localhost_args(command, args)?;
+                localhost_value(execute_mission_switch(&self.bound_config()?, &request)?)
+            }
+            "agent_console_message" => {
+                let MessageBridgeArgs { message } = decode_localhost_args(command, args)?;
+                localhost_value(execute_console_message(&self.bound_config()?, &message)?)
+            }
+            "agent_console_response" => {
+                let RequestBridgeArgs { request } = decode_localhost_args(command, args)?;
+                localhost_value(execute_console_response(&self.bound_config()?, &request)?)
+            }
+            "agent_console_history" => {
+                let _: EmptyBridgeArgs = decode_localhost_args(command, args)?;
+                localhost_value(execute_console_history(&self.bound_config()?)?)
+            }
+            "working_context" => {
+                let _: EmptyBridgeArgs = decode_localhost_args(command, args)?;
+                localhost_value(execute_working_context(&self.bound_config()?)?)
+            }
+            "working_context_curate" => {
+                let RequestBridgeArgs { request } = decode_localhost_args(command, args)?;
+                localhost_value(execute_working_context_curate(
+                    &self.bound_config()?,
+                    &request,
+                )?)
+            }
+            "review_workspace" => {
+                let _: EmptyBridgeArgs = decode_localhost_args(command, args)?;
+                localhost_value(execute_review_workspace(&self.bound_config()?)?)
+            }
+            "review_decision" => {
+                let RequestBridgeArgs { request } = decode_localhost_args(command, args)?;
+                localhost_value(execute_review_decision(&self.bound_config()?, &request)?)
+            }
+            "activity_journal" => {
+                let FiltersBridgeArgs { filters } = decode_localhost_args(command, args)?;
+                localhost_value(execute_activity_journal(&self.bound_config()?, &filters)?)
+            }
+            "shell_terminal" => {
+                let _: EmptyBridgeArgs = decode_localhost_args(command, args)?;
+                localhost_value(execute_shell_terminal(&self.bound_config()?)?)
+            }
+            "shell_terminal_submit" => {
+                let RequestBridgeArgs { request } = decode_localhost_args(command, args)?;
+                localhost_value(execute_shell_terminal_submit(
+                    &self.bound_config()?,
+                    &request,
+                )?)
+            }
+            "shell_terminal_decision" => {
+                let RequestBridgeArgs { request } = decode_localhost_args(command, args)?;
+                localhost_value(execute_shell_terminal_decision(
+                    &self.bound_config()?,
+                    &request,
+                )?)
+            }
+            "additional_path_grant_create" => {
+                let RequestBridgeArgs { request } = decode_localhost_args(command, args)?;
+                localhost_value(execute_additional_path_grant_create(
+                    &self.bound_config()?,
+                    &request,
+                )?)
+            }
+            "additional_path_grant_deny" => {
+                let RequestBridgeArgs { request } = decode_localhost_args(command, args)?;
+                localhost_value(execute_additional_path_grant_deny(
+                    &self.bound_config()?,
+                    &request,
+                )?)
+            }
+            "workspace_queue" => {
+                let _: EmptyBridgeArgs = decode_localhost_args(command, args)?;
+                localhost_value(execute_workspace_queue(&self.bound_config()?)?)
+            }
+            "ad_hoc_delegation_proposal" => {
+                let RequestBridgeArgs { request } = decode_localhost_args(command, args)?;
+                localhost_value(execute_ad_hoc_delegation_proposal(
+                    &self.bound_config()?,
+                    &request,
+                )?)
+            }
+            "workspace_queue_decision" => {
+                let RequestBridgeArgs { request } = decode_localhost_args(command, args)?;
+                localhost_value(execute_workspace_queue_decision(
+                    &self.bound_config()?,
+                    &request,
+                )?)
+            }
+            "workstation_action" => {
+                let RequestBridgeArgs { request } = decode_localhost_args(command, args)?;
+                localhost_value(execute_workstation_action(&self.bound_config()?, &request)?)
+            }
+            "workstation_session_run" => {
+                let RequestBridgeArgs { request } = decode_localhost_args(command, args)?;
+                localhost_value(execute_workstation_session_run(
+                    &self.bound_config()?,
+                    &request,
+                )?)
+            }
+            "session_artifact" => {
+                let RequestBridgeArgs { request } = decode_localhost_args(command, args)?;
+                localhost_value(execute_session_artifact(&self.bound_config()?, &request)?)
+            }
+            "mission_drafts" => {
+                let _: EmptyBridgeArgs = decode_localhost_args(command, args)?;
+                localhost_value(execute_mission_drafts(&self.bound_config()?)?)
+            }
+            "mission_draft_create" => {
+                let RequestBridgeArgs { request } = decode_localhost_args(command, args)?;
+                localhost_value(execute_mission_draft_create(
+                    &self.bound_config()?,
+                    &request,
+                )?)
+            }
+            "mission_draft_decision" => {
+                let RequestBridgeArgs { request } = decode_localhost_args(command, args)?;
+                localhost_value(execute_mission_draft_decision(
+                    &self.bound_config()?,
+                    &request,
+                )?)
+            }
+            _ => Err(localhost_contract_failure(format!(
+                "Unknown localhost bridge command: {command}"
+            ))),
+        }
+    }
+}
+
 #[cfg(feature = "desktop")]
 async fn run_blocking_bridge<T, F>(job: F) -> Result<T, BridgeFailure>
 where
@@ -3972,7 +4369,9 @@ pub fn run() {
 mod tests {
     use super::*;
     use std::fs;
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    #[cfg(feature = "desktop")]
+    use std::time::Duration;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn isolated_process_stream_rejects_invalid_utf8() {
@@ -4091,6 +4490,7 @@ mod tests {
         fs::remove_dir_all(root).expect("measurement fixture should be removed");
     }
 
+    #[cfg(feature = "desktop")]
     #[test]
     fn performance_command_is_an_explicit_noop_without_measurement_environment() {
         let acknowledgement = performance_mark(PerformanceMarkRequest {
@@ -7028,6 +7428,193 @@ None - can start immediately
         assert_eq!(
             history.messages[0].content,
             "Continuous mission conversation"
+        );
+        fs::remove_dir_all(root).expect("fixture cleanup");
+    }
+
+    #[test]
+    fn localhost_bridge_allowlist_matches_the_tauri_workspace_client() {
+        let workspace_client = include_str!("../../src/workspace-client.ts");
+        assert_eq!(
+            LOCALHOST_BRIDGE_COMMANDS,
+            &[
+                "activity_journal",
+                "ad_hoc_delegation_proposal",
+                "additional_path_grant_create",
+                "additional_path_grant_deny",
+                "agent_capabilities",
+                "agent_console_history",
+                "agent_console_message",
+                "agent_console_response",
+                "alfredo_launch_context",
+                "coding_workspace_select",
+                "mission_choice",
+                "mission_draft_create",
+                "mission_draft_decision",
+                "mission_drafts",
+                "performance_mark",
+                "review_decision",
+                "review_workspace",
+                "session_artifact",
+                "shell_terminal",
+                "shell_terminal_decision",
+                "shell_terminal_submit",
+                "working_context",
+                "working_context_curate",
+                "workspace_action",
+                "workspace_mission_switch",
+                "workspace_queue",
+                "workspace_queue_decision",
+                "workspace_scope",
+                "workspace_snapshot",
+                "workspace_updates",
+                "workstation_action",
+                "workstation_session_run",
+            ]
+        );
+        assert_eq!(
+            workspace_client.matches("this.invokeCommand<").count(),
+            LOCALHOST_BRIDGE_COMMANDS.len(),
+            "every typed TauriWorkspaceClient invoke must have one localhost dispatcher entry"
+        );
+        for command in LOCALHOST_BRIDGE_COMMANDS {
+            assert!(
+                workspace_client.contains(&format!("\"{command}\"")),
+                "TauriWorkspaceClient does not invoke allowlisted command {command}"
+            );
+        }
+    }
+
+    #[test]
+    fn localhost_bridge_rejects_unknown_malformed_and_authority_bearing_requests() {
+        let backend_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("backend root");
+        let bridge = WorkstationBridge::new(
+            BridgeConfig::for_repository(backend_root.clone()),
+            backend_root,
+        );
+
+        let acknowledgement = bridge
+            .dispatch(
+                "performance_mark",
+                serde_json::json!({
+                    "request": {
+                        "stage": "S3",
+                        "boundary": "start",
+                        "clock": "frontend",
+                        "monotonic_ns": "1",
+                        "clock_id": "frontend:test",
+                        "detail": {"outcome": "pass"}
+                    }
+                }),
+            )
+            .expect("localhost performance marks should be an explicit no-op");
+        assert_eq!(acknowledgement, serde_json::json!({"recorded": false}));
+
+        let unknown = bridge
+            .dispatch(
+                "python_argv",
+                serde_json::json!({"argv": ["workspace-snapshot"]}),
+            )
+            .expect_err("unknown commands must fail closed");
+        assert_eq!(unknown.code, "contract-failure");
+        assert!(!unknown.recoverable);
+
+        let missing = bridge
+            .dispatch("performance_mark", serde_json::json!({}))
+            .expect_err("missing typed arguments must fail closed");
+        assert_eq!(missing.code, "contract-failure");
+
+        let authority_bearing = bridge
+            .dispatch(
+                "performance_mark",
+                serde_json::json!({
+                    "request": {
+                        "stage": "S3",
+                        "boundary": "start",
+                        "clock": "frontend",
+                        "argv": ["workspace-snapshot"]
+                    }
+                }),
+            )
+            .expect_err("browser-supplied backend authority must be rejected");
+        assert_eq!(authority_bearing.code, "contract-failure");
+    }
+
+    #[test]
+    fn localhost_bridge_preserves_selection_mission_and_snapshot_authority() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("alfredo-localhost-bridge-{unique}"));
+        let starting_location = root.join("projects");
+        let coding_workspace = starting_location.join("project");
+        let tracker = coding_workspace.join(".agent/issues");
+        let runtime_root = root.join("runtime");
+        fs::create_dir_all(&tracker).expect("workspace fixture");
+        fs::write(tracker.join("PRD.md"), "# Existing Mission\n").expect("PRD fixture");
+        let git = Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&coding_workspace)
+            .output()
+            .expect("git should start");
+        assert!(
+            git.status.success(),
+            "{}",
+            String::from_utf8_lossy(&git.stderr)
+        );
+        let backend_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("backend root");
+        let mut config = BridgeConfig::for_repository(backend_root);
+        config.runtime_root = runtime_root;
+        let bridge = WorkstationBridge::new(config, starting_location.clone());
+
+        let selection = bridge
+            .dispatch(
+                "coding_workspace_select",
+                serde_json::json!({
+                    "request": {
+                        "correlation_id": "localhost-selection-1",
+                        "workspace_path": coding_workspace,
+                        "selection_mode": "existing"
+                    }
+                }),
+            )
+            .expect("selection should use Python authority");
+        assert_eq!(selection["outcome"], "acknowledged");
+
+        let mission = bridge
+            .dispatch(
+                "mission_choice",
+                serde_json::json!({
+                    "request": {
+                        "correlation_id": "localhost-mission-1",
+                        "expected_revision": 1,
+                        "choice": "resume",
+                        "mission_id": "agent-issues",
+                        "mission_title": ""
+                    }
+                }),
+            )
+            .expect("Mission choice should use Python authority");
+        assert_eq!(mission["active_mission"], "agent-issues");
+
+        let snapshot = bridge
+            .dispatch("workspace_snapshot", serde_json::json!({}))
+            .expect("snapshot should use the bound canonical Mission");
+        assert_eq!(snapshot["active_mission"]["id"], "agent-issues");
+        assert_eq!(
+            snapshot["workspace_session"]["workspace_path"],
+            coding_workspace
+                .canonicalize()
+                .expect("canonical workspace")
+                .to_string_lossy()
+                .as_ref()
         );
         fs::remove_dir_all(root).expect("fixture cleanup");
     }

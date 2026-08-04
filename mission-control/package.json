@@ -9,7 +9,9 @@
     "albert": "bin/alfredo.js"
   },
   "scripts": {
-    "dev": "vite",
+    "dev": "vite --mode localhost --host 127.0.0.1 --port 1420 --strictPort",
+    "dev:container": "vite --mode apple-container --host 0.0.0.0 --port 1420 --strictPort",
+    "dev:tauri": "vite --mode tauri --host 127.0.0.1 --port 1422 --strictPort",
     "prototype:journey": "vite --mode workspace-mission-journey --host 127.0.0.1 --port 14873 --strictPort",
     "prototype:tree": "vite --mode mission-execution-tree --host 127.0.0.1 --port 14874 --strictPort",
     "prototype:rust-orchestrator": "cargo run --release --manifest-path src-tauri/prototypes/rust-orchestrator-slice/Cargo.toml --",
@@ -29,6 +31,8 @@
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest",
+    "test:browser": "playwright test --config playwright.localhost.config.ts",
+    "test:gateway": "vitest run localhost-bridge-plugin.test.ts --environment node",
     "test:layout": "npm run build && playwright test",
     "test:prototype-journey": "playwright test --config playwright.prototype.config.ts"
   },

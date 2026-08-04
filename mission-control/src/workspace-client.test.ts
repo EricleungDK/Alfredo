@@ -1,5 +1,9 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { TauriWorkspaceClient } from "./workspace-client";
+import {
+  createLocalhostWorkspaceClient,
+  createWorkspaceClient,
+  TauriWorkspaceClient,
+} from "./workspace-client";
 import type { WorkspaceSnapshot } from "./contracts";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(), isTauri: vi.fn(() => true) }));
@@ -41,14 +45,17 @@ test("loads a ready canonical snapshot through the Tauri command", async () => {
   expect(result).toEqual({ kind: "ready", snapshot });
 });
 
-test("browser preview reports an actionable desktop bridge failure without invoking IPC", async () => {
+test("an ordinary browser remains fail-closed without invoking IPC or fetch", async () => {
   vi.mocked(isTauri).mockReturnValue(false);
   const invokeCallsBefore = vi.mocked(invoke).mock.calls.length;
+  const fetchMock = vi.fn();
+  vi.stubGlobal("fetch", fetchMock);
 
   try {
-    const result = await new TauriWorkspaceClient().loadSnapshot();
+    const result = await createWorkspaceClient().loadSnapshot();
 
     expect(vi.mocked(invoke).mock.calls).toHaveLength(invokeCallsBefore);
+    expect(fetchMock).not.toHaveBeenCalled();
     expect(result).toEqual({
       kind: "startup-failure",
       message:
@@ -56,8 +63,164 @@ test("browser preview reports an actionable desktop bridge failure without invok
       recoverable: false,
     });
   } finally {
+    vi.unstubAllGlobals();
     vi.mocked(isTauri).mockReturnValue(true);
   }
+});
+
+test("native IPC wins over an injected localhost bridge without fetching", async () => {
+  const fetchMock = vi.fn();
+  vi.stubGlobal("fetch", fetchMock);
+  vi.stubGlobal("__ALFREDO_LOCALHOST_BRIDGE__", {
+    endpoint: "/__alfredo/invoke",
+    token: "localhost-secret",
+  });
+  vi.mocked(isTauri).mockReturnValue(true);
+  vi.mocked(invoke).mockResolvedValueOnce(snapshot);
+
+  try {
+    const result = await createWorkspaceClient().loadSnapshot();
+
+    expect(result).toEqual({ kind: "ready", snapshot });
+    expect(invoke).toHaveBeenCalledWith("workspace_snapshot");
+    expect(fetchMock).not.toHaveBeenCalled();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+test("an explicit localhost bridge transports a typed successful response", async () => {
+  const invokeCallsBefore = vi.mocked(invoke).mock.calls.length;
+  const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const request = JSON.parse(String(init?.body)) as {
+      id: string;
+      command: string;
+      args?: Record<string, unknown>;
+    };
+    expect(request.command).toBe("workspace_snapshot");
+    expect(request.args).toEqual({});
+    return new Response(
+      JSON.stringify({ id: request.id, ok: true, value: snapshot }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  vi.stubGlobal("__ALFREDO_LOCALHOST_BRIDGE__", {
+    endpoint: "/__alfredo/invoke",
+    token: "localhost-secret",
+  });
+  vi.mocked(isTauri).mockReturnValue(false);
+
+  try {
+    const client = createWorkspaceClient();
+    const result = await client.loadSnapshot();
+
+    expect(result).toEqual({ kind: "ready", snapshot });
+    expect(vi.mocked(invoke).mock.calls).toHaveLength(invokeCallsBefore);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/__alfredo/invoke",
+      expect.objectContaining({
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Alfredo-Bridge-Token": "localhost-secret",
+        },
+      }),
+    );
+
+    const performanceResult = await client.recordPerformanceMark?.({
+      stage: "S2",
+      boundary: "end",
+      clock: "native",
+      monotonic_ns: "",
+      clock_id: "",
+      detail: { outcome: "pass" },
+    });
+    expect(performanceResult).toEqual({ recorded: false });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.unstubAllGlobals();
+    vi.mocked(isTauri).mockReturnValue(true);
+  }
+});
+
+test("the localhost bridge preserves a typed backend error", async () => {
+  const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const request = JSON.parse(String(init?.body)) as { id: string };
+    return new Response(
+      JSON.stringify({
+        id: request.id,
+        ok: false,
+        error: {
+          code: "persistence-read-failure",
+          message: "Workspace preferences are corrupt",
+          recoverable: true,
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  });
+
+  const result = await createLocalhostWorkspaceClient(
+    { endpoint: "/__alfredo/invoke", token: "localhost-secret" },
+    fetchMock,
+  ).loadSnapshot();
+
+  expect(result).toEqual({
+    kind: "persistence-read-failure",
+    message: "Workspace preferences are corrupt",
+    recoverable: true,
+  });
+});
+
+test("the localhost bridge rejects a mismatched response correlation", async () => {
+  const fetchMock = vi.fn(async () =>
+    new Response(
+      JSON.stringify({ id: "different-request", ok: true, value: snapshot }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    ),
+  );
+
+  const result = await createLocalhostWorkspaceClient(
+    { endpoint: "/__alfredo/invoke", token: "localhost-secret" },
+    fetchMock,
+  ).loadSnapshot();
+
+  expect(result).toEqual({
+    kind: "contract-failure",
+    message: "The localhost bridge response correlation did not match the request.",
+    recoverable: false,
+  });
+});
+
+test("the localhost bridge maps malformed responses and fetch failures structurally", async () => {
+  const malformedResult = await createLocalhostWorkspaceClient(
+    { endpoint: "/__alfredo/invoke", token: "localhost-secret" },
+    vi.fn(async () =>
+      new Response(JSON.stringify({ id: "missing-ok" }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    ),
+  ).loadSnapshot();
+  const startupResult = await createLocalhostWorkspaceClient(
+    { endpoint: "/__alfredo/invoke", token: "localhost-secret" },
+    vi.fn(async () => {
+      throw new TypeError("fetch failed");
+    }),
+  ).loadSnapshot();
+
+  expect(malformedResult).toEqual({
+    kind: "contract-failure",
+    message: "The localhost bridge returned a malformed response envelope.",
+    recoverable: false,
+  });
+  expect(startupResult).toEqual({
+    kind: "startup-failure",
+    message: "The localhost bridge request failed: fetch failed",
+    recoverable: true,
+  });
 });
 
 test("records a process-local performance boundary through the native bridge", async () => {

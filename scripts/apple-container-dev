@@ -1,0 +1,223 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_root="$(cd "$script_dir/.." && pwd)"
+project_parent="$(dirname "$project_root")"
+project_name="$(basename "$project_root")"
+
+container_name="${ALFREDO_DEV_CONTAINER_NAME:-alfredo-dev}"
+base_image="${ALFREDO_DEV_BASE_IMAGE:-docker.io/library/node:22-bookworm}"
+container_cpus="${ALFREDO_DEV_CPUS:-4}"
+container_memory="${ALFREDO_DEV_MEMORY:-4g}"
+rust_toolchain="${ALFREDO_DEV_RUST_TOOLCHAIN:-1.88.0}"
+container_source_root="/workspace/$project_name"
+container_mission_control="$container_source_root/mission-control"
+
+node_modules_volume="${container_name}-node-modules"
+cargo_target_volume="${container_name}-cargo-target"
+toolchain_volume="${container_name}-toolchain"
+runtime_volume="${container_name}-runtime"
+
+usage() {
+  cat <<'EOF'
+Usage: ./scripts/apple-container-dev <command>
+
+Commands:
+  setup      Create, bootstrap, and start the persistent development container
+  start      Start it, creating prerequisites when needed
+  restart    Restart it without reinstalling tools or dependency volumes
+  stop       Stop it while preserving the container and named volumes
+  status     Show container state and localhost reachability
+  logs       Follow Vite, Rust bridge, and Python logs
+  shell      Open a shell inside the running container
+  rebuild    Recreate the named container while preserving all named volumes
+  help       Show this message
+
+The workstation is published only at http://127.0.0.1:1420.
+EOF
+}
+
+require_apple_container() {
+  if ! command -v container >/dev/null 2>&1; then
+    echo "Apple container is not installed or is not on PATH." >&2
+    echo "Install it from https://github.com/apple/container, then rerun this command." >&2
+    exit 1
+  fi
+}
+
+ensure_system() {
+  if ! container system status >/dev/null 2>&1; then
+    echo "Starting Apple container services and installing the recommended kernel if needed..."
+    container system start --enable-kernel-install
+  fi
+}
+
+ensure_kernel_for_first_container() {
+  container system start --enable-kernel-install >/dev/null
+}
+
+container_exists() {
+  container list --all --quiet | grep -Fxq "$container_name"
+}
+
+container_is_running() {
+  container list --quiet | grep -Fxq "$container_name"
+}
+
+create_container() {
+  echo "Creating persistent container $container_name..."
+  container create \
+    --name "$container_name" \
+    --init \
+    --cpus "$container_cpus" \
+    --memory "$container_memory" \
+    --label "com.alfredo.purpose=development" \
+    --publish "127.0.0.1:1420:1420" \
+    --volume "$project_parent:/workspace" \
+    --volume "$node_modules_volume:$container_mission_control/node_modules" \
+    --volume "$cargo_target_volume:$container_mission_control/src-tauri/target" \
+    --volume "$toolchain_volume:/var/lib/alfredo/toolchain" \
+    --volume "$runtime_volume:/var/lib/alfredo/runtime" \
+    --env "ALFREDO_STARTING_LOCATION=/workspace" \
+    --env "ALFREDO_RUNTIME_ROOT=/var/lib/alfredo/runtime" \
+    --env "ALFREDO_DEV_RUST_TOOLCHAIN=$rust_toolchain" \
+    --env "CHOKIDAR_INTERVAL=500" \
+    --env "CHOKIDAR_USEPOLLING=true" \
+    --workdir "$container_mission_control" \
+    "$base_image" \
+    bash dev/apple-container-entrypoint.sh
+}
+
+wait_until_ready() {
+  local attempt
+  for attempt in $(seq 1 180); do
+    if bridge_is_ready; then
+      echo "Alfredo is ready at http://127.0.0.1:1420"
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "Alfredo did not become reachable within 180 seconds." >&2
+  echo "Inspect the failure with: ./scripts/apple-container-dev logs" >&2
+  return 1
+}
+
+bridge_is_ready() {
+  local html token response
+  html="$(curl --fail --silent http://127.0.0.1:1420)" || return 1
+  token="$(printf '%s' "$html" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' | head -n 1)"
+  [[ -n "$token" ]] || return 1
+  response="$(
+    curl --fail --silent \
+      --header "Content-Type: application/json" \
+      --header "Origin: http://127.0.0.1:1420" \
+      --header "x-alfredo-bridge-token: $token" \
+      --data '{"id":"container-health","command":"alfredo_launch_context","args":{}}' \
+      http://127.0.0.1:1420/__alfredo/invoke
+  )" || return 1
+  [[ "$response" == *'"id":"container-health"'* && "$response" == *'"ok":true'* ]]
+}
+
+start_container() {
+  if ! container_exists; then
+    ensure_kernel_for_first_container
+    create_container
+  fi
+  if ! container_is_running; then
+    echo "Starting $container_name..."
+    container start "$container_name"
+  fi
+  wait_until_ready
+}
+
+stop_container() {
+  if container_is_running; then
+    echo "Stopping $container_name..."
+    container stop --time 10 "$container_name"
+  else
+    echo "$container_name is already stopped."
+  fi
+}
+
+show_status() {
+  container list --all
+  if bridge_is_ready; then
+    echo "Canonical bridge ready: http://127.0.0.1:1420"
+  else
+    echo "Canonical bridge not ready: http://127.0.0.1:1420"
+  fi
+}
+
+main() {
+  local command="${1:-help}"
+  require_apple_container
+
+  case "$command" in
+    setup|start)
+      ensure_system
+      start_container
+      ;;
+    restart)
+      ensure_system
+      if container_is_running; then
+        stop_container
+      fi
+      start_container
+      ;;
+    stop)
+      ensure_system
+      if container_exists; then
+        stop_container
+      else
+        echo "$container_name has not been created."
+      fi
+      ;;
+    status)
+      ensure_system
+      show_status
+      ;;
+    logs)
+      ensure_system
+      if ! container_exists; then
+        echo "$container_name has not been created; run setup first." >&2
+        exit 1
+      fi
+      container logs --follow "$container_name"
+      ;;
+    shell)
+      ensure_system
+      if ! container_is_running; then
+        echo "$container_name is not running; run start first." >&2
+        exit 1
+      fi
+      container exec --interactive --tty "$container_name" bash
+      ;;
+    rebuild)
+      ensure_system
+      if container_is_running; then
+        stop_container
+      fi
+      if container_exists; then
+        echo "Recreating only the named container; dependency, Cargo, toolchain, and runtime volumes are preserved..."
+        container delete "$container_name"
+      fi
+      ensure_kernel_for_first_container
+      create_container
+      container start "$container_name"
+      wait_until_ready
+      ;;
+    help|-h|--help)
+      usage
+      ;;
+    *)
+      echo "Unknown command: $command" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+}
+
+main "$@"
