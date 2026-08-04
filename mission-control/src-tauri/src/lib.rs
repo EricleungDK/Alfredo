@@ -1453,6 +1453,10 @@ pub struct MissionSessionSummary {
     pub review_next_action: String,
     #[serde(default)]
     pub repair_action_available: bool,
+    #[serde(default)]
+    pub work_kind: String,
+    #[serde(default)]
+    pub parent_session_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

@@ -725,6 +725,324 @@ h5 {
   scrollbar-gutter: stable;
 }
 
+.mission-execution-tree {
+  min-width: 0;
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.9rem;
+  border-bottom: 1px solid var(--line);
+  background: #111614;
+}
+
+.mission-execution-tree__heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  align-items: flex-start;
+}
+
+.mission-execution-tree__heading h3 {
+  margin: 0.12rem 0 0;
+  font-size: 1.06rem;
+}
+
+.mission-execution-tree__heading p {
+  max-width: 60ch;
+  margin: 0.3rem 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.mission-execution-tree__counts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.35rem 0.55rem;
+  color: var(--muted);
+  font-family: "Ubuntu Mono", monospace;
+  font-size: 0.72rem;
+  text-align: right;
+}
+
+.mission-execution-tree__counts span {
+  padding: 0.22rem 0.42rem;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #0c100f;
+}
+
+.mission-execution-tree__outline {
+  min-width: 0;
+  display: grid;
+  gap: 0.35rem;
+}
+
+.mission-execution-node {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(8rem, auto) auto auto;
+  gap: 0.55rem;
+  align-items: center;
+  padding: 0.58rem 0.65rem;
+  border-color: var(--line);
+  border-left: 3px solid var(--line-strong);
+  border-radius: 8px;
+  background: #171c19;
+  color: var(--ink-soft);
+  text-align: left;
+}
+
+.mission-execution-node:hover:not(:disabled) {
+  border-color: var(--line-strong);
+  background: #202823;
+}
+
+.mission-execution-node[data-selected="true"] {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.mission-execution-node[data-state="working"],
+.mission-execution-node[data-state="queued"] {
+  border-left-color: var(--cyan);
+}
+
+.mission-execution-node[data-state="complete"] {
+  border-left-color: var(--lime);
+}
+
+.mission-execution-node[data-state="decision-needed"],
+.mission-execution-node[data-risk="attention"] {
+  border-left-color: var(--warning);
+}
+
+.mission-execution-node[data-state="blocked"],
+.mission-execution-node[data-state="failed"],
+.mission-execution-node[data-risk="blocked"],
+.mission-execution-node[data-risk="failed"] {
+  border-left-color: var(--danger);
+}
+
+.mission-execution-node__shape {
+  width: 0.72rem;
+  height: 0.72rem;
+  flex: 0 0 auto;
+  border: 1px solid var(--cyan);
+  background: #1d4d43;
+}
+
+.mission-execution-node__shape[data-shape="hexagon"] {
+  clip-path: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%);
+}
+
+.mission-execution-node__shape[data-shape="square"] {
+  border-color: var(--lime);
+  background: #3a4d25;
+}
+
+.mission-execution-node__shape[data-shape="diamond"] {
+  border-color: var(--warning);
+  background: #5b4722;
+  transform: rotate(45deg) scale(0.82);
+}
+
+.mission-execution-node__shape[data-shape="circle"] {
+  border-radius: 50%;
+}
+
+.mission-execution-node__copy,
+.mission-execution-node__status {
+  min-width: 0;
+  display: grid;
+  gap: 0.06rem;
+}
+
+.mission-execution-node__identity {
+  overflow-wrap: anywhere;
+  color: var(--cyan);
+  font-family: "Ubuntu Mono", monospace;
+  font-size: 0.74rem;
+}
+
+.mission-execution-node__copy strong,
+.mission-execution-node__copy small,
+.mission-execution-node__status span,
+.mission-execution-node__status small,
+.mission-execution-node__risk {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mission-execution-node__copy strong {
+  color: var(--ink);
+  font-size: 0.86rem;
+  font-weight: 650;
+}
+
+.mission-execution-node__copy small,
+.mission-execution-node__status small {
+  color: var(--muted);
+  font-size: 0.73rem;
+}
+
+.mission-execution-node__status {
+  color: var(--ink-soft);
+  font-size: 0.76rem;
+  text-align: right;
+}
+
+.mission-execution-node__risk {
+  color: var(--warning);
+  font-family: "Ubuntu Mono", monospace;
+  font-size: 0.72rem;
+}
+
+.mission-execution-node[data-risk="blocked"] .mission-execution-node__risk,
+.mission-execution-node[data-risk="failed"] .mission-execution-node__risk {
+  color: var(--danger);
+}
+
+.mission-execution-node__disclosure {
+  width: 1.2rem;
+  color: var(--cyan);
+  font-family: "Ubuntu Mono", monospace;
+  font-size: 1rem;
+  text-align: center;
+}
+
+.mission-execution-inspector {
+  min-width: 0;
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.8rem;
+  border: 1px solid var(--line-strong);
+  border-left: 3px solid var(--cyan);
+  border-radius: 9px;
+  background: #0d1412;
+}
+
+.mission-execution-inspector__heading,
+.mission-execution-inspector__section-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: flex-start;
+}
+
+.mission-execution-inspector__heading h4 {
+  margin: 0.1rem 0 0;
+  font-size: 1rem;
+}
+
+.mission-execution-inspector__heading p {
+  margin: 0.18rem 0 0;
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+}
+
+.mission-execution-inspector__heading-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 0.45rem;
+  align-items: center;
+}
+
+.mission-execution-inspector__heading-actions button,
+.mission-execution-inspector__links button,
+.mission-execution-inspector__section > button {
+  min-height: 1.9rem;
+  padding: 0.28rem 0.52rem;
+  font-size: 0.76rem;
+}
+
+.mission-execution-inspector__facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.55rem;
+  margin: 0;
+}
+
+.mission-execution-inspector__facts > div {
+  min-width: 0;
+  padding: 0.5rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #111816;
+}
+
+.mission-execution-inspector__section {
+  min-width: 0;
+  display: grid;
+  gap: 0.35rem;
+  padding-top: 0.65rem;
+  border-top: 1px solid var(--line);
+}
+
+.mission-execution-inspector__section h5 {
+  margin: 0;
+  color: var(--cyan);
+  font-size: 0.82rem;
+}
+
+.mission-execution-inspector__section p,
+.mission-execution-inspector__section li,
+.mission-execution-inspector__section-heading span {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
+.mission-execution-inspector__section ul,
+.mission-execution-inspector__section ol {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+  padding-left: 1.15rem;
+}
+
+.mission-execution-inspector__files {
+  padding-left: 0 !important;
+  list-style: none;
+}
+
+.mission-execution-inspector__files li {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.65rem;
+  padding: 0.3rem 0;
+  border-bottom: 1px solid #ffffff0d;
+}
+
+.mission-execution-inspector__files small {
+  color: var(--cyan);
+  white-space: nowrap;
+}
+
+.mission-execution-inspector__links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.mission-execution-inspector__output pre {
+  min-width: 0;
+  max-height: 18rem;
+  margin: 0;
+  padding: 0.65rem;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #070a09;
+  color: var(--ink-soft);
+  font-family: "Ubuntu Mono", monospace;
+  font-size: 0.76rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .workstation-cards,
 .issue-assignment-board,
 .workstation-panel,
@@ -1610,8 +1928,36 @@ dd {
   .agent-workstations__heading,
   .workstation-card header,
   .mission-heading,
-  .activity-journal__heading {
+  .activity-journal__heading,
+  .mission-execution-tree__heading,
+  .mission-execution-inspector__heading {
     flex-direction: column;
+  }
+
+  .mission-execution-tree__counts {
+    justify-content: flex-start;
+    text-align: left;
+  }
+
+  .mission-execution-node {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .mission-execution-node__status {
+    grid-column: 2 / -1;
+    text-align: left;
+  }
+
+  .mission-execution-node__risk {
+    grid-column: 2;
+  }
+
+  .mission-execution-inspector__heading-actions {
+    justify-content: flex-start;
+  }
+
+  .mission-execution-inspector__facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .mission-work-controls {
@@ -1656,5 +2002,22 @@ dd {
 
   .command-console-card header {
     flex-direction: column;
+  }
+
+  .mission-execution-tree,
+  .workstation-cards,
+  .issue-assignment-board,
+  .workstation-panel,
+  .command-audit {
+    padding: 0.75rem;
+  }
+
+  .mission-execution-node {
+    gap: 0.42rem;
+    padding: 0.55rem;
+  }
+
+  .mission-execution-inspector__facts {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

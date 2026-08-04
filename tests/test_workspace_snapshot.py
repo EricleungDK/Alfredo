@@ -4783,6 +4783,8 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(session_summary.role, "local-agent")
         self.assertEqual(session_summary.provider, "ollama")
         self.assertEqual(session_summary.model, "qwen2.5-coder:14b")
+        self.assertEqual(session_summary.work_kind, "ad-hoc-delegation")
+        self.assertEqual(session_summary.parent_session_id, "")
 
     def test_workspace_session_summary_exposes_timestamp_backed_last_activity(self) -> None:
         snapshots = self.load_service()

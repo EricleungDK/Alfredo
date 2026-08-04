@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type ReactElement,
@@ -41,6 +42,7 @@ import type {
   WorkstationActionRequest,
 } from "./contracts";
 import type { WorkspaceClient } from "./workspace-client";
+import { MissionExecutionTree, type MissionExecutionOutputState } from "./MissionExecutionTree";
 import {
   afterTwoAnimationFrames,
   markFrontendPerformance,
@@ -49,6 +51,7 @@ import {
 import { applyWorkspaceUpdates } from "./workspace-sync";
 import {
   projectIssueAssignmentBoard,
+  projectMissionExecutionTree,
   projectWorkstationCards,
   type IssueAssignmentBoardProjection,
   type IssueAssignmentBoardRow,
@@ -57,6 +60,7 @@ import {
   type WorkstationDiffLink,
   type WorkstationEvidenceLink,
   type WorkstationGovernedAction,
+  type MissionExecutionTreeProjection,
 } from "./workstation-projection";
 import { ShellTerminalPanel } from "./ShellTerminalPanel";
 import {
@@ -3777,6 +3781,11 @@ function CommandDeck({
   const [workstationSort, setWorkstationSort] = useState<"priority" | "name" | "status">("priority");
   const [selectedWorkstationSessionId, setSelectedWorkstationSessionId] = useState<string | null>(null);
   const [selectedWorkstationDiff, setSelectedWorkstationDiff] = useState<WorkstationDiffLink | null>(null);
+  const [selectedExecutionNodeId, setSelectedExecutionNodeId] = useState<string | null>(null);
+  const [executionOutputLines, setExecutionOutputLines] = useState<readonly string[]>([]);
+  const [executionOutputState, setExecutionOutputState] =
+    useState<MissionExecutionOutputState>("unavailable");
+  const [executionOutputTarget, setExecutionOutputTarget] = useState<string | null>(null);
   const [sessionArtifactViewer, setSessionArtifactViewer] =
     useState<SessionArtifactViewerState | null>(null);
   const artifactLoadSequenceRef = useRef(0);
@@ -3912,6 +3921,7 @@ function CommandDeck({
     setIssueFocusTarget(null);
     setSelectedSessionId(null);
     setSelectedSessionMissionId(null);
+    setSelectedExecutionNodeId(null);
   }, [activeMissionId]);
   const selectedIssue =
     (selectedIssueId && selectedIssueMissionId === activeMissionId
@@ -3930,6 +3940,10 @@ function CommandDeck({
           }
         : null,
   });
+  const executionTreeProjection: MissionExecutionTreeProjection = useMemo(
+    () => projectMissionExecutionTree(snapshot, { workspaceQueue }),
+    [snapshot, workspaceQueue],
+  );
   const workstationCards = workstationProjection.groups.flatMap((group) => group.cards);
   const visibleWorkstationGroups = filterAndSortWorkstationGroups(
     workstationProjection.groups,
@@ -3937,6 +3951,75 @@ function CommandDeck({
     workstationSort,
     pinnedWorkstationCardIds,
   );
+  const selectExecutionNode = useCallback(
+    (nodeId: string): void => {
+      const node = executionTreeProjection.nodes.find((candidate) => candidate.id === nodeId);
+      if (!node?.inspectable) return;
+      setSelectedExecutionNodeId(nodeId);
+      if (node.kind === "agent-session" && node.card?.sessionId) {
+        setSelectedWorkstationSessionId(node.card.id);
+      }
+    },
+    [executionTreeProjection.nodes],
+  );
+  const selectedExecutionNode = executionTreeProjection.nodes.find(
+    (node) => node.id === selectedExecutionNodeId,
+  ) ?? null;
+  const selectedExecutionOutputTarget =
+    selectedExecutionNode?.kind === "agent-session" && selectedExecutionNode.session
+      ? `${selectedExecutionNode.card?.missionId ?? activeMissionId}:${selectedExecutionNode.session.session_id}`
+      : null;
+  useEffect(() => {
+    const selectedNode = selectedExecutionNode;
+    if (!selectedNode || selectedNode.kind !== "agent-session" || !selectedNode.session) {
+      setExecutionOutputTarget(null);
+      setExecutionOutputLines([]);
+      setExecutionOutputState("unavailable");
+      return;
+    }
+    const missionId = selectedNode.card?.missionId ?? activeMissionId;
+    const sessionId = selectedNode.session.session_id;
+    if (!missionId || !client.subscribeToSessionOutput) {
+      setExecutionOutputTarget(null);
+      setExecutionOutputLines([]);
+      setExecutionOutputState("unavailable");
+      return;
+    }
+    let active = true;
+    let lastSequence = -1;
+    setExecutionOutputTarget(`${missionId}:${sessionId}`);
+    setExecutionOutputLines([]);
+    setExecutionOutputState("subscribing");
+    let unsubscribe: (() => void) | undefined;
+    try {
+      unsubscribe = client.subscribeToSessionOutput(
+        { mission_id: missionId, session_id: sessionId },
+        (event) => {
+          if (
+            !active ||
+            event.mission_id !== missionId ||
+            event.session_id !== sessionId ||
+            event.sequence <= lastSequence
+          ) {
+            return;
+          }
+          lastSequence = event.sequence;
+          setExecutionOutputState("subscribed");
+          if (event.content) {
+            const incomingLines = event.content.split(/\r?\n/);
+            setExecutionOutputLines((current) => [...current, ...incomingLines].slice(-256));
+          }
+        },
+      );
+      setExecutionOutputState("subscribed");
+    } catch {
+      setExecutionOutputState("unavailable");
+    }
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
+  }, [activeMissionId, client, executionTreeProjection.revision, selectedExecutionNode]);
   const hydratedWorkstationContinuityKey = useRef<string | null>(null);
   const skipWorkstationContinuityWrite = useRef(false);
   useEffect(() => {
@@ -4958,7 +5041,23 @@ function CommandDeck({
             </div>
           </div>
           <div className="mission-work-scroll">
-          <section className="workstation-cards" aria-label="Active Workstations">
+            <MissionExecutionTree
+              projection={executionTreeProjection}
+              selectedNodeId={selectedExecutionNodeId}
+              onSelectNode={selectExecutionNode}
+              onCloseInspector={() => setSelectedExecutionNodeId(null)}
+              outputLines={
+                executionOutputTarget === selectedExecutionOutputTarget ? executionOutputLines : []
+              }
+              outputState={
+                executionOutputTarget === selectedExecutionOutputTarget
+                  ? executionOutputState
+                  : "unavailable"
+              }
+              onOpenDiff={openWorkstationDiff}
+              onOpenEvidence={openWorkstationEvidence}
+            />
+            <section className="workstation-cards" aria-label="Active Workstations">
             <div className="mission-work-section-heading">
               <div>
                 <span className="eyebrow">Live supervision</span>

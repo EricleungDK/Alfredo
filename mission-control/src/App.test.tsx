@@ -18,6 +18,8 @@ import type {
   MissionDraftProjection,
   ReviewDecisionRequest,
   ReviewWorkspaceProjection,
+  SessionOutputEvent,
+  SessionOutputSubscriptionRequest,
   SessionArtifactReadRequest,
   SessionArtifactReadResult,
   WorkspaceActionResult,
@@ -236,6 +238,133 @@ function appIssueSlice(
     working_context_sources: overrides.working_context_sources ?? [],
   };
 }
+
+test("renders the canonical Mission Execution Tree and scopes detailed output to its exact inspector", async () => {
+  let outputHandler: ((event: SessionOutputEvent) => void) | undefined;
+  const unsubscribe = vi.fn();
+  const subscribeToSessionOutput = vi.fn(
+    (request: SessionOutputSubscriptionRequest, onEvent: (event: SessionOutputEvent) => void) => {
+      expect(request).toEqual({ mission_id: "command-deck", session_id: "session-ISS-TREE-1" });
+      outputHandler = onEvent;
+      return unsubscribe;
+    },
+  );
+  const treeSnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    revision: 17,
+    active_mission: { id: "command-deck", title: "Command Deck Mission", issue_count: 1 },
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_count: 1,
+      ordered_issue_ids: ["ISS-TREE"],
+      issue_slices: [
+        appIssueSlice({
+          issue_id: "ISS-TREE",
+          title: "Ship the inspectable execution tree",
+          lifecycle: "Running",
+          progress: "Local Agent is executing",
+          launch_eligible: false,
+        }),
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ISS-TREE-1",
+            issue_id: "ISS-TREE",
+            assigned_agent: "qwen-coder-local",
+            status: "running",
+            role: "implementer",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+            task_title: "Build the Mission Execution Tree",
+            operation_status: "streaming",
+            changed_files: ["mission-control/src/MissionExecutionTree.tsx"],
+            commands_run: ["npm test -- --run MissionExecutionTree"],
+            test_results: "Tree tests pass.",
+            evidence_correlation_id: "evidence:command-deck:session-ISS-TREE-1",
+          },
+        ],
+        attention: [],
+      },
+    ],
+  };
+
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => ({ kind: "ready", snapshot: treeSnapshot }),
+        subscribeToSessionOutput,
+      }}
+    />,
+  );
+
+  const tree = await screen.findByRole("region", { name: "Mission Execution Tree" });
+  expect(within(tree).getByText("1 Issue Slices")).toBeVisible();
+  expect(within(tree).getByText("1 Local Agent sessions")).toBeVisible();
+  const issueNode = within(tree).getByRole("treeitem", {
+    name: /Ship the inspectable execution tree/,
+  });
+  const sessionNode = within(tree).getByRole("treeitem", { name: /session-ISS-TREE-1/ });
+  act(() => {
+    sessionNode.focus();
+    fireEvent.keyDown(sessionNode, { key: "ArrowUp" });
+  });
+  expect(document.activeElement).toBe(issueNode);
+  act(() => {
+    fireEvent.keyDown(issueNode, { key: "ArrowDown" });
+  });
+  expect(document.activeElement).toBe(sessionNode);
+  fireEvent.click(sessionNode);
+
+  const inspector = await screen.findByRole("region", {
+    name: "session-ISS-TREE-1 execution inspector",
+  });
+  expect(inspector).toHaveFocus();
+  expect(within(inspector).getByText("Task").parentElement).toHaveTextContent(
+    "Build the Mission Execution Tree",
+  );
+  expect(within(inspector).getByText("Latest update").parentElement).toHaveTextContent(
+    "Tree tests pass.",
+  );
+  expect(within(inspector).getByText("mission-control/src/MissionExecutionTree.tsx")).toBeVisible();
+  expect(subscribeToSessionOutput).toHaveBeenCalledTimes(1);
+  expect(outputHandler).toBeDefined();
+
+  act(() => {
+    outputHandler?.({
+      schema_version: 1,
+      mission_id: "command-deck",
+      session_id: "session-ISS-TREE-1",
+      sequence: 1,
+      content: "pytest -q",
+      phase: "streaming",
+    });
+    outputHandler?.({
+      schema_version: 1,
+      mission_id: "other-mission",
+      session_id: "session-ISS-TREE-1",
+      sequence: 2,
+      content: "must not render",
+    });
+  });
+  const output = within(inspector).getByLabelText("Detailed Local Agent output content");
+  expect(output).toHaveTextContent("pytest -q");
+  expect(output).not.toHaveTextContent("must not render");
+
+  fireEvent.click(
+    within(inspector).getByRole("button", { name: "Close Mission Execution Tree inspector" }),
+  );
+  expect(unsubscribe).toHaveBeenCalledTimes(1);
+  expect(
+    screen.queryByRole("region", { name: "session-ISS-TREE-1 execution inspector" }),
+  ).not.toBeInTheDocument();
+});
 
 async function openCommandAudit() {
   fireEvent.click(screen.getByRole("button", { name: "Open command audit" }));

@@ -280,6 +280,8 @@ class MissionSessionSummary:
     review_outcome: str
     review_next_action: str
     repair_action_available: bool
+    work_kind: str = ""
+    parent_session_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -10033,6 +10035,19 @@ class WorkspaceSnapshotService:
                         session.session_id,
                     )
                     is None
+                ),
+                work_kind=str(
+                    session.task_packet.get(
+                        "work_kind",
+                        "issue-slice" if issue is not None else "ad-hoc-delegation",
+                    )
+                ),
+                parent_session_id=str(
+                    (
+                        session.task_packet.get("repair_context")
+                        if isinstance(session.task_packet.get("repair_context"), dict)
+                        else {}
+                    ).get("prior_session_id", "")
                 ),
             )
 

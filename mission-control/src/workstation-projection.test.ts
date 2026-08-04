@@ -1,5 +1,9 @@
 import type { WorkspaceIssueSliceSummary, WorkspaceSnapshot } from "./contracts";
-import { projectIssueAssignmentBoard, projectWorkstationCards } from "./workstation-projection";
+import {
+  projectIssueAssignmentBoard,
+  projectMissionExecutionTree,
+  projectWorkstationCards,
+} from "./workstation-projection";
 
 const baseSnapshot: WorkspaceSnapshot = {
   schema_version: 1,
@@ -265,6 +269,171 @@ test("projects compact live workstation cards from canonical snapshot state", ()
     status: "done",
     phase: "completed",
     latestCommandOrTest: "Review tests passed.",
+  });
+});
+
+test("projects a work-centered Mission Execution Tree from canonical work records", () => {
+  const treeSnapshot: WorkspaceSnapshot = {
+    ...baseSnapshot,
+    revision: 19,
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      ordered_issue_ids: ["ISS-01"],
+      issue_count: 1,
+      issue_slices: [
+        {
+          ...baseSnapshot.mission_board.issue_slices![0],
+          issue_id: "ISS-01",
+          title: "Build prompt shell",
+          lifecycle: "Blocked",
+          blockers: [
+            {
+              issue_id: "ISS-00",
+              title: "Choose the workspace",
+              lifecycle: "Ready",
+              satisfied: false,
+            },
+          ],
+          sessions: [
+            ...baseSnapshot.mission_board.issue_slices![0].sessions,
+            {
+              session_id: "session-ISS-01-2",
+              assigned_agent: "repair-agent",
+              role: "local-agent",
+              provider: "ollama",
+              model: "gemma4:12b",
+              status: "queued",
+              stale: false,
+              disconnected: false,
+              operation_status: "queued",
+              failure: "",
+            },
+          ],
+        },
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-ISS-01-1",
+            issue_id: "ISS-01",
+            assigned_agent: "qwen-coder-local",
+            status: "launched",
+            last_activity_at: "2026-07-12T08:31:45+00:00",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+            task_title: "Build prompt shell",
+            operation_status: "streaming",
+            failure: "",
+            changed_files: ["src/App.tsx"],
+            commands_run: ["npm test"],
+            test_results: "Tests are running.",
+            risks: "",
+            artifact_links: [],
+          },
+          {
+            session_id: "session-ISS-01-2",
+            issue_id: "ISS-01",
+            assigned_agent: "repair-agent",
+            status: "queued",
+            last_activity_at: "",
+            role: "local-agent",
+            provider: "ollama",
+            model: "gemma4:12b",
+            task_title: "Repair prompt shell",
+            operation_status: "queued",
+            failure: "",
+            changed_files: [],
+            commands_run: [],
+            test_results: "",
+            risks: "",
+            artifact_links: [],
+            work_kind: "issue-slice",
+            parent_session_id: "session-ISS-01-1",
+          },
+          {
+            session_id: "session-ADHOC-000001-1",
+            issue_id: "ADHOC-000001",
+            assigned_agent: "docs-agent",
+            status: "running",
+            last_activity_at: "2026-07-12T08:35:45+00:00",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen2.5-coder:14b",
+            task_title: "Inspect prompt accessibility",
+            operation_status: "streaming",
+            failure: "",
+            changed_files: ["docs/console.md"],
+            commands_run: ["npm test -- accessibility"],
+            test_results: "Accessibility checks are running.",
+            risks: "",
+            artifact_links: [],
+            work_kind: "ad-hoc-delegation",
+          },
+        ],
+        attention: [
+          {
+            attention_id: "ad-hoc-delegation-command-deck-000001",
+            mission_id: "command-deck",
+            kind: "ad-hoc-delegation",
+            label: "ADHOC-000001 Ad Hoc Delegation pending",
+            queue_link: "workspace-queue#ad-hoc-delegation-command-deck-000001",
+          },
+        ],
+      },
+    ],
+  };
+
+  const projection = projectMissionExecutionTree(treeSnapshot);
+  const node = (id: string) => projection.nodes.find((candidate) => candidate.id === id);
+
+  expect(projection.counts).toEqual({
+    issue_slices: 1,
+    ad_hoc_delegations: 1,
+    local_agent_sessions: 3,
+    repairs: 1,
+    blockers: 1,
+    evidence_packages: 0,
+  });
+  expect(projection.root_id).toBe("mission:command-deck");
+  expect(node("mission:command-deck")).toMatchObject({
+    kind: "mission",
+    title: "Command Deck Mission",
+    child_ids: ["issue:command-deck:ISS-01", "ad-hoc:command-deck:ADHOC-000001"],
+  });
+  expect(node("issue:command-deck:ISS-01")).toMatchObject({
+    kind: "issue-slice",
+    identity: "ISS-01",
+    title: "Build prompt shell",
+    state: "blocked",
+    child_ids: [
+      "session:command-deck:session-ISS-01-1",
+      "session:command-deck:session-ISS-01-2",
+    ],
+  });
+  expect(node("ad-hoc:command-deck:ADHOC-000001")).toMatchObject({
+    kind: "ad-hoc-delegation",
+    identity: "ADHOC-000001",
+    title: "Inspect prompt accessibility",
+    child_ids: ["session:command-deck:session-ADHOC-000001-1"],
+  });
+  expect(node("session:command-deck:session-ISS-01-2")).toMatchObject({
+    kind: "agent-session",
+    state: "repair",
+    parent_id: "issue:command-deck:ISS-01",
+    parent_session_id: "session-ISS-01-1",
+  });
+  expect(node("session:command-deck:session-ADHOC-000001-1")).toMatchObject({
+    kind: "agent-session",
+    state: "working",
+    parent_id: "ad-hoc:command-deck:ADHOC-000001",
+    identity: "session-ADHOC-000001-1",
   });
 });
 

@@ -78,6 +78,8 @@ import type {
   SessionArtifactProjection,
   SessionArtifactReadRequest,
   SessionArtifactReadResult,
+  SessionOutputEvent,
+  SessionOutputSubscriptionRequest,
 } from "./contracts";
 
 export interface WorkspaceClient {
@@ -130,6 +132,10 @@ export interface WorkspaceClient {
   submitWorkstationAction?(request: WorkstationActionRequest): Promise<WorkstationActionResult>;
   runWorkstationSession?(request: WorkstationSessionRunRequest): Promise<WorkstationSessionRunResult>;
   loadSessionArtifact?(request: SessionArtifactReadRequest): Promise<SessionArtifactReadResult>;
+  subscribeToSessionOutput?(
+    request: SessionOutputSubscriptionRequest,
+    onEvent: (event: SessionOutputEvent) => void,
+  ): () => void;
   loadMissionDrafts?(): Promise<MissionDraftLoadResult>;
   submitMissionDraftCreate?(request: MissionDraftCreateRequest): Promise<MissionDraftCreateResult>;
   submitMissionDraftDecision?(

@@ -804,6 +804,20 @@ export interface SessionArtifactReadRequest {
   readonly artifact_ref: string;
 }
 
+export interface SessionOutputSubscriptionRequest {
+  readonly mission_id: string;
+  readonly session_id: string;
+}
+
+export interface SessionOutputEvent {
+  readonly schema_version: 1;
+  readonly mission_id: string;
+  readonly session_id: string;
+  readonly sequence: number;
+  readonly content: string;
+  readonly phase?: "streaming" | "complete" | "failed";
+}
+
 export interface SessionArtifactProjection {
   readonly schema_version: 1;
   readonly mission_id: string;
@@ -1048,6 +1062,8 @@ export interface MissionSessionSummary {
   readonly review_outcome?: string;
   readonly review_next_action?: string;
   readonly repair_action_available?: boolean;
+  readonly work_kind?: "issue-slice" | "ad-hoc-delegation" | string;
+  readonly parent_session_id?: string;
 }
 
 export interface WorkspaceQueueAttention {
