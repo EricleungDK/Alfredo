@@ -1,5 +1,13 @@
 /// <reference types="node" />
-import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  createEvent,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { App, isExactAdHocDelegationBoundary } from "./App";
 import type {
@@ -3591,6 +3599,61 @@ test("traverses submitted prompt history and restores the unsent draft", async (
   expect(composer).toHaveValue("");
 });
 
+test("continues through multiline prompt history and preserves a multiline unsent draft", async () => {
+  let sequence = 0;
+  const appendConsoleMessage = vi.fn(async (request: AgentConsoleMessageRequest) => {
+    sequence += 1;
+    return {
+      kind: "message" as const,
+      message: {
+        message_id: `console-multiline-history-${sequence}`,
+        sequence,
+        role: "user" as const,
+        content: request.content,
+        scope: snapshot.conversation_scope,
+        outcome: "proposed" as const,
+        source: "mission-commander",
+      },
+    };
+  });
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => ({ kind: "ready", snapshot }),
+        appendConsoleMessage,
+      }}
+    />,
+  );
+
+  const composer =
+    (await screen.findByRole("textbox", { name: "Message Alfredo" })) as HTMLTextAreaElement;
+  for (const [index, prompt] of [
+    "first prompt\nwith details",
+    "second prompt\nwith details",
+  ].entries()) {
+    fireEvent.change(composer, { target: { value: prompt } });
+    fireEvent.keyDown(composer, { key: "Enter", code: "Enter" });
+    await waitFor(() => expect(appendConsoleMessage).toHaveBeenCalledTimes(index + 1));
+  }
+
+  const unsentDraft = "unsent draft\nwith more details";
+  fireEvent.change(composer, { target: { value: unsentDraft } });
+  composer.setSelectionRange(unsentDraft.indexOf("\n") + 1, unsentDraft.indexOf("\n") + 1);
+  const ordinaryArrowUp = createEvent.keyDown(composer, { key: "ArrowUp", code: "ArrowUp" });
+  fireEvent(composer, ordinaryArrowUp);
+  expect(ordinaryArrowUp.defaultPrevented).toBe(false);
+
+  composer.setSelectionRange(0, 0);
+  fireEvent.keyDown(composer, { key: "ArrowUp", code: "ArrowUp" });
+  expect(composer).toHaveValue("second prompt\nwith details");
+  fireEvent.keyDown(composer, { key: "ArrowUp", code: "ArrowUp" });
+  expect(composer).toHaveValue("first prompt\nwith details");
+  fireEvent.keyDown(composer, { key: "ArrowDown", code: "ArrowDown" });
+  expect(composer).toHaveValue("second prompt\nwith details");
+  fireEvent.keyDown(composer, { key: "ArrowDown", code: "ArrowDown" });
+  expect(composer).toHaveValue(unsentDraft);
+});
+
 test("supports keyboard slash and at-capability completion with predictable dismissal", async () => {
   render(
     <App
@@ -3725,7 +3788,7 @@ test("labels Coding Workspace, Wayfinder, Orchestrator, and Mission outcomes", a
   expect(screen.getByText("Capability: Mission")).toBeVisible();
 });
 
-test("completes the Coding Workspace to Wayfinder journey inside Agent Console", async () => {
+test("completes the Coding Workspace to Wayfinder journey by keyboard at constrained reduced motion", async () => {
   const selectionContext = {
     schema_version: 1 as const,
     selected_agent: "qwen3-14b",
@@ -3816,28 +3879,80 @@ test("completes the Coding Workspace to Wayfinder journey inside Agent Console",
     }),
   };
 
-  render(<App client={journeyClient} syncIntervalMs={100_000} />);
-  const workspacePath = await screen.findByRole("textbox", { name: "Coding Workspace path" });
-  fireEvent.change(workspacePath, { target: { value: codingWorkspace } });
-  fireEvent.click(screen.getByRole("button", { name: "Create new repository" }));
-  expect(await screen.findByText("Mission selection required")).toBeVisible();
-  expect(screen.getByText("Capability: Mission")).toBeVisible();
-
-  fireEvent.change(screen.getByRole("textbox", { name: "New Mission title" }), {
-    target: { value: mission.title },
+  const originalWidth = window.innerWidth;
+  const originalMatchMedia = window.matchMedia;
+  Object.defineProperty(window, "innerWidth", { configurable: true, value: 640 });
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: (query: string) => ({
+      matches: query === "(prefers-reduced-motion: reduce)",
+      media: query,
+      onchange: null,
+      addListener: () => undefined,
+      removeListener: () => undefined,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      dispatchEvent: () => false,
+    }),
   });
-  fireEvent.click(screen.getByRole("button", { name: "Start New Mission" }));
+  fireEvent(window, new Event("resize"));
 
-  expect(await screen.findByRole("heading", { name: "Command Deck Mission" })).toBeVisible();
-  const composer = screen.getByRole("textbox", { name: "Message Alfredo" });
-  fireEvent.change(composer, { target: { value: "Start a new project" } });
-  fireEvent.keyDown(composer, { key: "Enter", code: "Enter" });
-  expect(await screen.findByRole("status", { name: "Wayfinder route" })).toHaveTextContent(
-    "Chart mode",
-  );
-  const wayfinderRoute = screen.getByRole("status", { name: "Wayfinder route" });
-  expect(within(wayfinderRoute).getByText("Capability: Wayfinder")).toBeVisible();
-  expect(screen.getAllByText("Capability: Mission").length).toBeGreaterThan(0);
+  const activateFocusedButton = async (button: HTMLElement): Promise<void> => {
+    button.focus();
+    expect(button).toHaveFocus();
+    await act(async () => {
+      fireEvent.keyDown(button, { key: "Enter", code: "Enter" });
+      // jsdom does not synthesize a native button click from Enter; this is
+      // the browser's default activation for the already-focused control.
+      button.click();
+    });
+  };
+
+  try {
+    render(<App client={journeyClient} syncIntervalMs={100_000} />);
+    const workspacePath = await screen.findByRole("textbox", { name: "Coding Workspace path" });
+    expect(workspacePath).toHaveAccessibleName("Coding Workspace path");
+    fireEvent.change(workspacePath, { target: { value: codingWorkspace } });
+    const createRepository = screen.getByRole("button", { name: "Create new repository" });
+    expect(createRepository).toHaveAccessibleName("Create new repository");
+    await activateFocusedButton(createRepository);
+    expect(await screen.findByText("Mission selection required")).toBeVisible();
+    expect(screen.getByText("Capability: Mission")).toBeVisible();
+
+    const missionTitle = screen.getByRole("textbox", { name: "New Mission title" });
+    expect(missionTitle).toHaveAccessibleName("New Mission title");
+    fireEvent.change(missionTitle, { target: { value: mission.title } });
+    const startMission = screen.getByRole("button", { name: "Start New Mission" });
+    await activateFocusedButton(startMission);
+
+    expect(await screen.findByRole("heading", { name: "Command Deck Mission" })).toBeVisible();
+    const composer = screen.getByRole("textbox", { name: "Message Alfredo" });
+    expect(composer).toHaveAccessibleName("Message Alfredo");
+    composer.focus();
+    expect(composer).toHaveFocus();
+    fireEvent.change(composer, { target: { value: "Start a new project" } });
+    fireEvent.keyDown(composer, { key: "Enter", code: "Enter" });
+    expect(await screen.findByRole("status", { name: "Wayfinder route" })).toHaveTextContent(
+      "Chart mode",
+    );
+    const wayfinderRoute = screen.getByRole("status", { name: "Wayfinder route" });
+    expect(within(wayfinderRoute).getByText("Capability: Wayfinder")).toBeVisible();
+    expect(screen.getAllByText("Capability: Mission").length).toBeGreaterThan(0);
+    expect(window.innerWidth).toBeLessThan(680);
+    expect(window.matchMedia("(prefers-reduced-motion: reduce)").matches).toBe(true);
+    const reducedMotionRules = stylesSource.slice(
+      stylesSource.indexOf("@media (prefers-reduced-motion: reduce)"),
+    );
+    expect(reducedMotionRules).toMatch(/animation:\s*none\s*!important/);
+    expect(reducedMotionRules).toMatch(/transition:\s*none\s*!important/);
+  } finally {
+    Object.defineProperty(window, "innerWidth", { configurable: true, value: originalWidth });
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      value: originalMatchMedia,
+    });
+    fireEvent(window, new Event("resize"));
+  }
 });
 
 test("keeps commands and context mutually exclusive above the composer", async () => {
@@ -8776,6 +8891,8 @@ test("renders running evidence Review Decision and accepted completion as distin
   const completion = within(transcript).getByText(
     "Accepted completion: session-ADHOC-000042 is complete.",
   );
+  expect(within(running.closest("article")!).getByText("Capability: Orchestrator")).toBeVisible();
+  expect(within(evidence.closest("article")!).getByText("Capability: Local Agent")).toBeVisible();
   expect(within(running.closest("article")!).getByText("Receipt approval-order-42 · running")).toBeVisible();
   expect(within(evidence.closest("article")!).getByText("Receipt evidence:command-deck:session-ADHOC-000042 · evidence")).toBeVisible();
   expect(within(decision.closest("article")!).getByText("Receipt review-order-42 · review-decision")).toBeVisible();
