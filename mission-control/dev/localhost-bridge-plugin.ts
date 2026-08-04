@@ -18,6 +18,7 @@ const DEFAULT_RESPONSE_LINE_LIMIT_BYTES = 16 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS = 5 * 60 * 1000;
 const DEFAULT_WORKSTATION_SESSION_RUN_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const DEFAULT_MAX_IN_FLIGHT_REQUESTS = 32;
+const DEFAULT_MAX_RETIRED_CORRELATIONS = 1024;
 const MAX_IDENTIFIER_LENGTH = 128;
 const MAX_COMMAND_LENGTH = 128;
 const BRIDGE_COMMAND = "cargo";
@@ -65,6 +66,7 @@ export interface LocalhostBridgePluginOptions {
   readonly requestTimeoutMs?: number;
   readonly workstationSessionRunTimeoutMs?: number;
   readonly maxInFlightRequests?: number;
+  readonly maxRetiredCorrelations?: number;
   readonly spawnBridge?: (context: BridgeSpawnContext) => SpawnedBridge;
 }
 
@@ -279,11 +281,34 @@ function parseInvokeRequest(body: Buffer): InvokeRequest | undefined {
   };
 }
 
+function hasExactKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {
+  const actual = Object.keys(value).sort();
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index]);
+}
+
+function isBridgeEnvelope(value: Record<string, unknown>): boolean {
+  if (typeof value.id !== "string" || value.id.length === 0 || typeof value.ok !== "boolean") {
+    return false;
+  }
+  if (value.ok) {
+    return hasExactKeys(value, ["id", "ok", "value"]);
+  }
+  if (!hasExactKeys(value, ["error", "id", "ok"]) || !isRecord(value.error)) return false;
+  return (
+    hasExactKeys(value.error, ["code", "message", "recoverable"]) &&
+    typeof value.error.code === "string" &&
+    value.error.code.length > 0 &&
+    typeof value.error.message === "string" &&
+    typeof value.error.recoverable === "boolean"
+  );
+}
+
 class BridgeGateway {
   private readonly child: ChildProcess;
   private readonly stdin: Writable;
   private readonly stdout: Readable;
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly retiredCorrelationIds = new Set<string>();
   private outputBuffer = Buffer.alloc(0);
   private unavailable = false;
   private closing = false;
@@ -294,6 +319,7 @@ class BridgeGateway {
     private readonly requestTimeoutMs: number,
     private readonly workstationSessionRunTimeoutMs: number,
     private readonly maxInFlightRequests: number,
+    private readonly maxRetiredCorrelations: number,
   ) {
     this.child = spawned.child;
     if (this.child.stdin === null || this.child.stdout === null) {
@@ -317,8 +343,19 @@ class BridgeGateway {
       sendJsonError(response, 409, "duplicate-request-id");
       return;
     }
+    if (this.retiredCorrelationIds.has(payload.id)) {
+      sendJsonError(response, 409, "duplicate-request-id");
+      return;
+    }
     if (this.pending.size >= this.maxInFlightRequests) {
       sendJsonError(response, 429, "bridge-capacity-exceeded");
+      return;
+    }
+    // A pending request can become a retired correlation at any moment. Keep
+    // one bounded identity budget for both states so a timeout never forces
+    // unsafe tombstone eviction or correlation-id reuse.
+    if (this.pending.size + this.retiredCorrelationIds.size >= this.maxRetiredCorrelations) {
+      sendJsonError(response, 429, "bridge-correlation-capacity-exceeded");
       return;
     }
 
@@ -340,7 +377,8 @@ class BridgeGateway {
         if (
           error !== null &&
           error !== undefined &&
-          this.pending.get(payload.id) === pending
+          !this.unavailable &&
+          !this.closing
         ) {
           this.bridgeBecameUnavailable();
         }
@@ -354,6 +392,7 @@ class BridgeGateway {
     if (this.closing) return;
     this.closing = true;
     this.failPending(503, "bridge-stopping");
+    this.retiredCorrelationIds.clear();
     this.spawned.stop();
   }
 
@@ -391,12 +430,18 @@ class BridgeGateway {
       return;
     }
 
-    if (!isRecord(envelope) || typeof envelope.id !== "string") {
+    if (!isRecord(envelope) || !isBridgeEnvelope(envelope)) {
       this.protocolFailure("bridge-protocol-error");
       return;
     }
     const pending = this.pending.get(envelope.id);
     if (pending === undefined) {
+      if (this.retiredCorrelationIds.delete(envelope.id)) {
+        // The HTTP waiter already received its bounded timeout. The accepted
+        // backend work remains authoritative and its late response is
+        // deliberately discarded; canonical polling is the recovery path.
+        return;
+      }
       this.protocolFailure("bridge-correlation-mismatch");
       return;
     }
@@ -422,14 +467,15 @@ class BridgeGateway {
   private requestTimedOut(pending: PendingRequest): void {
     if (this.pending.get(pending.payload.id) !== pending) return;
     this.finishPending(pending);
+    this.retiredCorrelationIds.add(pending.payload.id);
     sendJsonError(pending.response, 504, "bridge-timeout");
-    this.bridgeBecameUnavailable();
   }
 
   private protocolFailure(code: string): void {
     if (this.unavailable) return;
     this.unavailable = true;
     this.failPending(502, code);
+    this.retiredCorrelationIds.clear();
     this.spawned.stop();
   }
 
@@ -437,6 +483,7 @@ class BridgeGateway {
     if (this.unavailable || this.closing) return;
     this.unavailable = true;
     this.failPending(503, "bridge-unavailable");
+    this.retiredCorrelationIds.clear();
     this.spawned.stop();
   }
 }
@@ -612,6 +659,12 @@ export function alfredoLocalhostBridgePlugin(
   if (!Number.isSafeInteger(maxInFlightRequests) || maxInFlightRequests < 1) {
     throw new Error("Alfredo localhost bridge concurrency must be a positive integer");
   }
+  const maxRetiredCorrelations =
+    options.maxRetiredCorrelations ??
+    Math.max(DEFAULT_MAX_RETIRED_CORRELATIONS, maxInFlightRequests);
+  if (!Number.isSafeInteger(maxRetiredCorrelations) || maxRetiredCorrelations < 1) {
+    throw new Error("Alfredo localhost bridge retired correlation capacity must be a positive integer");
+  }
   const spawnBridge = options.spawnBridge ?? spawnDefaultBridge;
   let expectedHost: string | undefined;
   let expectedOrigin: string | undefined;
@@ -671,6 +724,7 @@ export function alfredoLocalhostBridgePlugin(
             requestTimeoutMs,
             workstationSessionRunTimeoutMs,
             maxInFlightRequests,
+            maxRetiredCorrelations,
           );
         } catch {
           gateway = undefined;

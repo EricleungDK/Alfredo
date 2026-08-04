@@ -239,26 +239,48 @@ function capabilityCompletionOptions(
   return matches;
 }
 
+function canNavigatePromptHistory(
+  direction: -1 | 1,
+  historyIndex: number | null,
+  draft: string,
+  selectionStart: number,
+  selectionEnd: number,
+): boolean {
+  if (historyIndex !== null) return true;
+  if (direction === 1) return false;
+  if (!draft.includes("\n")) return true;
+  return selectionStart === 0 && selectionEnd === 0;
+}
+
+type CapabilityBoundary =
+  | "Coding Workspace"
+  | "Wayfinder"
+  | "Orchestrator"
+  | "Mission"
+  | "Frontier Model"
+  | "Local Agent"
+  | "Unattributed";
+
 function capabilityBoundaryLabel(
   source: string,
   scope: ConversationScope,
-): "Coding Workspace" | "Wayfinder" | "Orchestrator" | "Mission" | "Frontier Model" | "Local Agent" {
-  const normalized = source.trim().toLowerCase();
-  if (normalized.includes("wayfinder")) return "Wayfinder";
-  if (normalized === "orchestrator") return "Orchestrator";
-  if (normalized.startsWith("frontier-model") || normalized.includes("controller")) {
-    return "Frontier Model";
+): CapabilityBoundary {
+  switch (source.trim().toLowerCase()) {
+    case "wayfinder":
+    case "wayfinder-agent":
+      return "Wayfinder";
+    case "orchestrator":
+      return "Orchestrator";
+    case "frontier-model":
+      return "Frontier Model";
+    case "local-agent":
+      return "Local Agent";
+    case "agent-console":
+    case "mission-commander":
+      return scope.kind === "working-directory" ? "Coding Workspace" : "Mission";
+    default:
+      return "Unattributed";
   }
-  if (normalized.includes("workspace") || normalized.includes("coding")) {
-    return "Coding Workspace";
-  }
-  if (normalized === "mission-commander") {
-    return scope.kind === "working-directory" ? "Coding Workspace" : "Mission";
-  }
-  if (normalized.includes("local-agent") || normalized.includes("local")) {
-    return "Local Agent";
-  }
-  return scope.kind === "working-directory" ? "Coding Workspace" : "Mission";
 }
 
 function missionSessionIdentity(missionId: string, sessionId: string): string {
@@ -3009,6 +3031,7 @@ interface WorkstationTranscriptTurn {
   readonly content: string;
   readonly source: string;
   readonly outcome: string;
+  readonly capability?: CapabilityBoundary;
   readonly causalOriginMessageId?: string;
   readonly receiptCorrelationId?: string;
   readonly receiptPhase?: string;
@@ -3116,6 +3139,7 @@ function buildWorkstationTranscriptTurns(
               `${session.issue_id} on ${session.assigned_agent}.`,
             source: "orchestrator",
             outcome: "running",
+            capability: "Orchestrator",
             receiptCorrelationId: session.launch_correlation_id,
             receiptPhase: "running",
           });
@@ -3128,6 +3152,7 @@ function buildWorkstationTranscriptTurns(
               `${session.session_id}.`,
             source: session.assigned_agent,
             outcome: "evidence-ready",
+            capability: "Local Agent",
             receiptCorrelationId: session.evidence_correlation_id,
             receiptPhase: "evidence",
           });
@@ -3138,6 +3163,7 @@ function buildWorkstationTranscriptTurns(
             content: `Review Decision: ${session.review_outcome} for ${session.session_id}.`,
             source: "mission-commander",
             outcome: "review-decision",
+            capability: "Mission",
             receiptCorrelationId: session.review_correlation_id,
             receiptPhase: "review-decision",
           });
@@ -3150,6 +3176,7 @@ function buildWorkstationTranscriptTurns(
               content: `Accepted completion: ${session.session_id} is complete.`,
               source: "orchestrator",
               outcome: "accepted-completion",
+              capability: "Orchestrator",
               receiptCorrelationId: session.review_correlation_id,
               receiptPhase: "accepted-completion",
             });
@@ -3184,6 +3211,7 @@ function buildWorkspaceQueueTranscriptTurns(
             : `Coding task proposal ${item.issue_id} was recorded from ${item.source}.`,
         source: "orchestrator",
         outcome: "proposed",
+        capability: "Orchestrator",
         causalOriginMessageId,
         receiptCorrelationId: item.proposal_correlation_id || undefined,
         receiptPhase: item.proposal_correlation_id ? "proposal" : undefined,
@@ -3201,6 +3229,7 @@ function buildWorkspaceQueueTranscriptTurns(
         content: `Mission Commander ${decisionVerb} coding task ${item.issue_id}.`,
         source: "mission-commander",
         outcome: item.status,
+        capability: "Mission",
         causalOriginMessageId,
         receiptCorrelationId: item.decision_correlation_id || undefined,
         receiptPhase: item.decision_correlation_id ? "decision" : undefined,
@@ -3218,6 +3247,7 @@ function buildWorkspaceQueueTranscriptTurns(
             `on ${session.assigned_agent}.`,
           source: "orchestrator",
           outcome: "queued",
+          capability: "Orchestrator",
           causalOriginMessageId,
           receiptCorrelationId: item.decision_correlation_id || undefined,
           receiptPhase: item.decision_correlation_id ? "session-queued" : undefined,
@@ -4396,10 +4426,9 @@ function CommandDeck({
                   );
                 }
                 if (entry.kind === "workstation") {
-                  const capability = capabilityBoundaryLabel(
-                    entry.turn.source,
-                    snapshot.conversation_scope,
-                  );
+                  const capability =
+                    entry.turn.capability ??
+                    capabilityBoundaryLabel(entry.turn.source, snapshot.conversation_scope);
                   return (
                     <article
                       key={entry.key}
@@ -4852,17 +4881,25 @@ function CommandDeck({
                       closeCapabilityMenu("composer");
                       return;
                     }
+                    const historyDirection =
+                      event.key === "ArrowUp" ? -1 : event.key === "ArrowDown" ? 1 : null;
                     if (
-                      (event.key === "ArrowUp" || event.key === "ArrowDown") &&
+                      historyDirection !== null &&
                       !event.altKey &&
                       !event.ctrlKey &&
                       !event.metaKey &&
                       !event.shiftKey &&
-                      !draft.includes("\n") &&
-                      (promptHistory.length > 0 || historyIndex !== null)
+                      promptHistory.length > 0 &&
+                      canNavigatePromptHistory(
+                        historyDirection,
+                        historyIndex,
+                        draft,
+                        event.currentTarget.selectionStart,
+                        event.currentTarget.selectionEnd,
+                      )
                     ) {
                       event.preventDefault();
-                      navigatePromptHistory(event.key === "ArrowUp" ? -1 : 1);
+                      navigatePromptHistory(historyDirection);
                       return;
                     }
                     if (

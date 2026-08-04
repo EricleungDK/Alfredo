@@ -89,6 +89,7 @@ async function startHarness(options: {
   readonly appleContainerPortForwarding?: boolean;
   readonly bodyLimit?: number;
   readonly maxInFlightRequests?: number;
+  readonly maxRetiredCorrelations?: number;
   readonly onRequest?: (request: Record<string, unknown>, child: FakeBridgeChild) => void;
   readonly requestTimeoutMs?: number;
   readonly startListening?: boolean;
@@ -127,6 +128,7 @@ async function startHarness(options: {
     maxInFlightRequests: options.maxInFlightRequests,
     requestBodyLimitBytes: options.bodyLimit,
     requestTimeoutMs: options.requestTimeoutMs,
+    maxRetiredCorrelations: options.maxRetiredCorrelations,
     spawnBridge,
     token: TOKEN,
     workstationSessionRunTimeoutMs: options.workstationSessionRunTimeoutMs,
@@ -496,6 +498,201 @@ describe("Alfredo localhost bridge plugin", () => {
     const response = await runner;
     expect(response.status).toBe(200);
     expect(response.body).toBe(runnerEnvelope);
+    await closeHarness(harness);
+  });
+
+  test("times out one HTTP waiter without stopping the bridge or rejecting a late response", async () => {
+    vi.useFakeTimers();
+    const harness = await startHarness({
+      requestTimeoutMs: 100,
+      onRequest(request, child) {
+        if (request.id === "control-1") {
+          child.stdout.write('{"id":"control-1","ok":true,"value":{"ready":true}}\n');
+        }
+      },
+    });
+
+    const timedOut = sendRequest(harness, {
+      body: JSON.stringify({ id: "timed-out-1", command: "workspace_snapshot", args: {} }),
+    });
+    await vi.advanceTimersByTimeAsync(101);
+    await expect(timedOut).resolves.toMatchObject({
+      status: 504,
+      body: '{"error":"bridge-timeout"}',
+    });
+    expect(harness.stop).not.toHaveBeenCalled();
+
+    const control = await sendRequest(harness, {
+      body: JSON.stringify({ id: "control-1", command: "workspace_snapshot", args: {} }),
+    });
+    expect(control.status).toBe(200);
+    expect(control.body).toBe('{"id":"control-1","ok":true,"value":{"ready":true}}');
+    expect(harness.stop).not.toHaveBeenCalled();
+
+    harness.child.stdout.write(
+      '{"id":"timed-out-1","ok":true,"value":{"late":true}}\n',
+    );
+    expect(harness.stop).not.toHaveBeenCalled();
+
+    await closeHarness(harness);
+  });
+
+  test("fails closed when a retired correlation receives a malformed late envelope", async () => {
+    vi.useFakeTimers();
+    const harness = await startHarness({ requestTimeoutMs: 100 });
+
+    const timedOut = sendRequest(harness, {
+      body: JSON.stringify({ id: "malformed-late-1", command: "workspace_snapshot", args: {} }),
+    });
+    await vi.advanceTimersByTimeAsync(101);
+    await expect(timedOut).resolves.toMatchObject({
+      status: 504,
+      body: '{"error":"bridge-timeout"}',
+    });
+
+    harness.child.stdout.write('{"id":"malformed-late-1","ok":true}\n');
+    expect(harness.stop).toHaveBeenCalledTimes(1);
+
+    await closeHarness(harness);
+  });
+
+  test("fails closed when a write pipe reports an error after its waiter timed out", async () => {
+    vi.useFakeTimers();
+    const harness = await startHarness({ requestTimeoutMs: 100 });
+
+    const timedOut = sendRequest(harness, {
+      body: JSON.stringify({ id: "pipe-failure-1", command: "workspace_snapshot", args: {} }),
+    });
+    await vi.advanceTimersByTimeAsync(101);
+    await expect(timedOut).resolves.toMatchObject({
+      status: 504,
+      body: '{"error":"bridge-timeout"}',
+    });
+
+    harness.child.stdin.on("error", () => undefined);
+    harness.child.stdin.destroy(new Error("pipe closed"));
+    const afterPipeFailure = sendRequest(harness, {
+      body: JSON.stringify({ id: "pipe-failure-2", command: "workspace_snapshot", args: {} }),
+    });
+    await expect(afterPipeFailure).resolves.toMatchObject({
+      status: 503,
+      body: '{"error":"bridge-unavailable"}',
+    });
+    expect(harness.stop).toHaveBeenCalledTimes(1);
+
+    await closeHarness(harness);
+  });
+
+  test("keeps an accepted workstation run recoverable through canonical polling after its waiter times out", async () => {
+    vi.useFakeTimers();
+    const harness = await startHarness({
+      workstationSessionRunTimeoutMs: 100,
+      onRequest(request, child) {
+        if (request.id === "poll-running") {
+          child.stdout.write(
+            '{"id":"poll-running","ok":true,"value":{"status":"running","session_id":"session-1"}}\n',
+          );
+        }
+        if (request.id === "poll-complete") {
+          child.stdout.write(
+            '{"id":"poll-complete","ok":true,"value":{"status":"completed","session_id":"session-1"}}\n',
+          );
+        }
+      },
+    });
+
+    const run = sendRequest(harness, {
+      body: JSON.stringify({
+        id: "run-1",
+        command: "workstation_session_run",
+        args: { request: { sessionId: "session-1" } },
+      }),
+    });
+    await vi.advanceTimersByTimeAsync(101);
+    await expect(run).resolves.toMatchObject({
+      status: 504,
+      body: '{"error":"bridge-timeout"}',
+    });
+    expect(harness.stop).not.toHaveBeenCalled();
+
+    const running = await sendRequest(harness, {
+      body: JSON.stringify({
+        id: "poll-running",
+        command: "workspace_snapshot",
+        args: { session_id: "session-1" },
+      }),
+    });
+    expect(running.status).toBe(200);
+    expect(running.body).toContain('"status":"running"');
+
+    harness.child.stdout.write(
+      '{"id":"run-1","ok":true,"value":{"status":"completed","session_id":"session-1"}}\n',
+    );
+    expect(harness.stop).not.toHaveBeenCalled();
+
+    const complete = await sendRequest(harness, {
+      body: JSON.stringify({
+        id: "poll-complete",
+        command: "workspace_snapshot",
+        args: { session_id: "session-1" },
+      }),
+    });
+    expect(complete.status).toBe(200);
+    expect(complete.body).toContain('"status":"completed"');
+    expect(harness.stop).not.toHaveBeenCalled();
+
+    await closeHarness(harness);
+  });
+
+  test("bounds retired correlations and prevents unsafe duplicate request-id reuse", async () => {
+    vi.useFakeTimers();
+    const harness = await startHarness({
+      maxRetiredCorrelations: 1,
+      requestTimeoutMs: 100,
+      onRequest(request, child) {
+        if (request.id === "after-late-response") {
+          child.stdout.write(
+            '{"id":"after-late-response","ok":true,"value":{"accepted":true}}\n',
+          );
+        }
+      },
+    });
+
+    const timedOut = sendRequest(harness, {
+      body: JSON.stringify({ id: "retired-1", command: "workspace_snapshot", args: {} }),
+    });
+    await vi.advanceTimersByTimeAsync(101);
+    await expect(timedOut).resolves.toMatchObject({
+      status: 504,
+      body: '{"error":"bridge-timeout"}',
+    });
+
+    const duplicate = await sendRequest(harness, {
+      body: JSON.stringify({ id: "retired-1", command: "workspace_snapshot", args: {} }),
+    });
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.body).toContain("duplicate-request-id");
+
+    const atCapacity = await sendRequest(harness, {
+      body: JSON.stringify({ id: "retired-2", command: "workspace_snapshot", args: {} }),
+    });
+    expect(atCapacity.status).toBe(429);
+    expect(atCapacity.body).toContain("bridge-correlation-capacity-exceeded");
+    expect(harness.stop).not.toHaveBeenCalled();
+
+    harness.child.stdout.write(
+      '{"id":"retired-1","ok":true,"value":{"late":true}}\n',
+    );
+    const afterLateResponse = await sendRequest(harness, {
+      body: JSON.stringify({
+        id: "after-late-response",
+        command: "workspace_snapshot",
+        args: {},
+      }),
+    });
+    expect(afterLateResponse.status).toBe(200);
+    expect(harness.stop).not.toHaveBeenCalled();
+
     await closeHarness(harness);
   });
 
