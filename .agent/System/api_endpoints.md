@@ -2,7 +2,7 @@
 
 **Last Updated:** 2026-08-03
 
-Alfredo is a local desktop application, not an HTTP service. Its public application boundary is a versioned JSON command protocol shared by the React client, the Tauri bridge, the persistent Python server, and the one-process Python CLI fallback. Python remains authoritative; Tauri validates and transports typed payloads, while React renders acknowledged projections.
+Alfredo has no remote or production HTTP API. Its application boundary is a versioned JSON command protocol shared by the React client, the Tauri bridge, the development-only localhost gateway, the persistent Python server, and the one-process Python CLI fallback. Python remains authoritative; Rust validates and transports typed payloads, while React renders acknowledged projections.
 
 ## Endpoints
 
@@ -23,6 +23,12 @@ The endpoint families are:
 | Audit | `activity-journal` | Query meaningful acknowledged actions without raw model or terminal bytes |
 
 The desktop bridge starts a persistent `python3 -m albert_mvp.server` process and exchanges newline-delimited correlated CLI envelopes. It builds the same arguments as the one-process `python3 -m albert_mvp <command>` fallback. Transport persistence is an optimization, not an authority change.
+
+During `npm run dev` or the dedicated `npm run dev:container` mode only, Vite exposes `POST /__alfredo/invoke` on the exact host origin `http://127.0.0.1:1420`. The browser sends `{id, command, args}` plus an injected per-process capability header. The gateway requires exact Host, Origin, method, media type, capability, body limit, command/id grammar, and three-field request before it writes one JSONL line to `alfredo-localhost-bridge`. Host mode additionally requires an exact loopback socket peer. Apple container port forwarding replaces that peer with the VM network address, so only the explicitly configured `apple-container` mode omits the peer-address assertion; `scripts/apple-container-dev` compensates by publishing guest 1420 solely to host `127.0.0.1:1420`, while every application-layer check remains unchanged. The Rust response is exactly one correlated `{id, ok, value}` or `{id, ok, error}` envelope. Unknown commands, extra typed arguments, raw argv, and browser-supplied authority fail closed. This endpoint is absent from builds and from Tauri's `1422` development mode; it is not a remotely authenticated API.
+
+Gateway dispatch is bounded and correlation-based rather than response-order-based. One long `workstation_session_run` may execute beside control/status requests, so canonical polling and cancellation remain available while a Local Agent runs. The backend owns runner timeouts and cancellation; a browser transport deadline must not duplicate or silently terminate accepted work.
+
+The gateway owns the transport process lifecycle as well as its request boundary. Normal shutdown terminates its complete Unix process group or Windows task tree. On Unix, bridge stdin owner loss triggers immediate termination of the previously verified dedicated Cargo/Rust/Python group before worker joins, so an active runner cannot keep the development bridge orphaned after an abnormal Vite exit.
 
 Before a Mission exists, `alfredo_launch_context` returns schema version 1, Starting Location, nullable Coding Workspace and Active Mission, and one of `selection-required | mission-choice-required | workspace-ready`. `coding-workspace-select` accepts `correlation_id`, exact `workspace_path`, and `existing | create`; its acknowledgement includes the canonical Starting Location, canonical Coding Workspace, null Active Mission, replay status, and human-readable message. `mission-options` exposes known Missions for that exact acknowledged workspace. `mission-choice` requires the current journey revision and either resumes one exact known Mission or creates one distinct Mission identity; `workspace-context` restores the acknowledged canonical workspace/Mission state. Tauri binds the first acknowledged repository immutably for that process, permits only exact correlation replay, rejects retargeting before another Python effect, and blocks all Mission-qualified commands until a validated choice acknowledgement names the requested Mission. Structured failures remain typed and recoverable where appropriate. No `workspace-snapshot` exists in selection-required or mission-choice-required state.
 
@@ -152,4 +158,4 @@ Raw model streams, worker prompts/responses, terminal bytes, test logs, and diff
 
 ## Security and Authentication
 
-Alfredo has no remote authentication endpoint. Authority comes from the local Mission Commander action, exact expected revision, accepted Issue Slice or approved queue item, configured agent role, command policy, and explicit path grants. The Python Orchestrator enforces all of these constraints even when callers bypass React or Tauri.
+Alfredo has no remote authentication endpoint. The development localhost capability defends a loopback transport; it does not grant domain authority. Authority comes from the local Mission Commander action, exact expected revision, accepted Issue Slice or approved queue item, configured agent role, command policy, and explicit path grants. The Python Orchestrator enforces all of these constraints even when callers bypass React or Tauri.

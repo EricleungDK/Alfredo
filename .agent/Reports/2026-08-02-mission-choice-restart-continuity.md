@@ -82,11 +82,13 @@ cd ..
 node mission-control/bin/alfredo.js workstation --agent qwen3-14b
 ```
 
-The visual-only browser preview is available with:
+The browser behavior described below was superseded on 2026-08-03 by the [functional localhost workstation correction](2026-08-03-functional-localhost-workstation.md). It is retained here as the historical state that produced the reported regression.
+
+At the time of this report, the visual-only browser preview was available with:
 
 ```bash
 cd mission-control
 npm run dev
 ```
 
-It intentionally reports that the native desktop bridge is unavailable and does not provide authoritative workspace data.
+It intentionally reported that the native desktop bridge was unavailable and did not provide authoritative workspace data. Current `npm run dev` instead runs the development-only typed Rust/Python bridge on loopback; ordinary builds without that injected capability still fail closed.

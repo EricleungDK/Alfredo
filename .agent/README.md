@@ -1,12 +1,13 @@
 # Alfredo / Albert Project Documentation
 
-**Last Updated**: 2026-08-02
-**Status**: Prompt-first Alfredo workstation with explicit Coding Workspace/Mission continuity and receipt-bound conversational action truth; authenticated npm publication, registry-only install, and the documented human/release follow-up remain explicit
+**Last Updated**: 2026-08-03
+**Status**: Prompt-first Alfredo workstation with a persistent Apple-container canonical localhost environment, explicit Coding Workspace/Mission continuity, and receipt-bound conversational action truth; authenticated npm publication, registry-only install, and the documented human/release follow-up remain explicit
 
 ## Quick Start
 
 1. Read [Project Architecture](System/project_architecture.md) for the current workstation, Orchestrator, and runner boundaries.
 2. Follow [Development Workflow](SOP/development_workflow.md) for local development.
+   On macOS, reuse `./scripts/apple-container-dev start` and keep `http://127.0.0.1:1420` open instead of starting a competing host Vite process.
 3. Check [Current Tasks](Tasks/context.md) for the model registry, exact verified release state, publication boundary, and independent human follow-up.
 4. Read the [2026-07-12 install and Queue acceptance correction](Reports/2026-07-12-alfredo-install-queue-acceptance-correction.md) before relying on the superseded 2026-07-11 packaging evidence.
 5. Run every release gate recorded in the correction report and keep ticket 20 open until registry publication plus a registry-only smoke.
@@ -54,6 +55,7 @@
 ## Tasks
 
 - [Active orchestration context](Tasks/context.md) is the source of truth for the current mission, assignments, blockers, and release state.
+- [Consolidated project context](Tasks/consolidated_context.md) is a generated read-only snapshot of recent reports and System docs; `Tasks/context.md` remains authoritative.
 - [Roadmap](Tasks/README.md) summarizes completed work and explicitly separate human follow-up.
 - [Alfredo Agent Workstation PRD](issues/19-alfredo-agent-workstation-prd.md) and [Issue Slices 20–29](issues/) retain acceptance and current triage state.
 
@@ -67,6 +69,8 @@
 - [Alfredo install and Queue acceptance correction](Reports/2026-07-12-alfredo-install-queue-acceptance-correction.md) is the current release/acceptance report and explicitly supersedes the 2026-07-11 package-completion claim.
 - [Conversational action receipt binding](Reports/2026-08-02-conversational-action-receipts.md) records the Issue #59 implementation, public seams, and verification evidence.
 - [Wayfinder Shared Understanding Gate](Reports/2026-08-03-wayfinder-shared-understanding-gate.md) records the Issue #60 canonical entry, gate, and projection contract.
+- [Functional localhost workstation diagnosis](Reports/2026-08-03-functional-localhost-workstation.md) records the browser/native launch root causes, development bridge boundary, macOS path correction, lifecycle/concurrency prevention, and verification.
+- [Persistent Apple container development environment](Reports/2026-08-03-apple-container-development-environment.md) records the named-container lifecycle, isolated volumes, loopback forwarding boundary, canonical health check, restart evidence, and agent handoff.
 - [Workspace selection and false-success diagnosis](Reports/2026-07-24-workspace-selection-false-success-diagnosis.md) records the defect and the receipt-truth blueprint resolved by Issue #59.
 - [Alfredo one-shot workstation correction](Reports/2026-07-11-alfredo-one-shot-workstation.md) remains the historical implementation report.
 - Historical implementation reports remain in [`Reports/`](Reports/) and are indexed from [project architecture](System/project_architecture.md#implementation-report-index).
@@ -77,6 +81,7 @@
 |----------|----------|
 | Understand the architecture? | [project_architecture.md](System/project_architecture.md) |
 | Set up dev environment? | [development_workflow.md](SOP/development_workflow.md) |
+| Start or restart the persistent browser workstation? | [Apple container workflow](SOP/development_workflow.md#persistent-apple-container-browser-ui-preferred-on-macos) |
 | See current model assignments and pending work? | [context.md](Tasks/context.md) |
 | See the roadmap? | [README.md](Tasks/README.md) |
 | Review current implementation evidence? | [Install and Queue acceptance correction](Reports/2026-07-12-alfredo-install-queue-acceptance-correction.md), then the historical [one-shot workstation report](Reports/2026-07-11-alfredo-one-shot-workstation.md) |
