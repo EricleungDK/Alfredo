@@ -1,6 +1,3 @@
-You are in ubuntu environment
-
-## Agent skills
 
 ### Shared context and agent orchestration
 
@@ -24,6 +21,10 @@ After significant planning or implementation, update `.agent/Tasks/context.md` w
 ### Issue tracker
 
 GitHub Issues is the authoritative tracker. Each PRD is a `[PRD]` parent issue with ordered native Issue Slice sub-issues and native dependency edges. External PRs are not a triage surface. `.scratch/` is a read-only migration archive. See `docs/agents/issue-tracker.md`.
+
+### Github issue instruction
+
+GitHub is authoritative. For any live GitHub operation, request network escalation on the first command; do not probe with the default sandbox first. Use `gh` for issue/PR operations. A sandbox DNS/API failure is an environment restriction, not a product failure.
 
 ### Triage labels
 
