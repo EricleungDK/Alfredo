@@ -19,6 +19,7 @@ node_modules_volume="${container_name}-node-modules"
 cargo_target_volume="${container_name}-cargo-target"
 toolchain_volume="${container_name}-toolchain"
 runtime_volume="${container_name}-runtime"
+container_playwright_browsers="/var/lib/alfredo/toolchain/playwright-browsers"
 
 usage() {
   cat <<'EOF'
@@ -32,6 +33,7 @@ Commands:
   status     Show container state and localhost reachability
   logs       Follow Vite, Rust bridge, and Python logs
   shell      Open a shell inside the running container
+  test-layout Install/reuse guest Chromium and run the production Playwright layout suite
   rebuild    Recreate the named container while preserving all named volumes
   help       Show this message
 
@@ -83,6 +85,7 @@ create_container() {
     --env "ALFREDO_STARTING_LOCATION=/workspace" \
     --env "ALFREDO_RUNTIME_ROOT=/var/lib/alfredo/runtime" \
     --env "ALFREDO_DEV_RUST_TOOLCHAIN=$rust_toolchain" \
+    --env "PLAYWRIGHT_BROWSERS_PATH=$container_playwright_browsers" \
     --env "CHOKIDAR_INTERVAL=500" \
     --env "CHOKIDAR_USEPOLLING=true" \
     --workdir "$container_mission_control" \
@@ -151,6 +154,40 @@ show_status() {
   fi
 }
 
+container_exec() {
+  container exec \
+    --env "PLAYWRIGHT_BROWSERS_PATH=$container_playwright_browsers" \
+    --workdir "$container_mission_control" \
+    "$container_name" \
+    "$@"
+}
+
+ensure_container_chromium() {
+  container_exec bash -lc '
+    set -euo pipefail
+    playwright_version="$(node -p "require(\"playwright/package.json\").version")"
+    browser_marker="$PLAYWRIGHT_BROWSERS_PATH/.alfredo-chromium-${playwright_version}"
+    dependencies_marker="/var/lib/alfredo/.playwright-system-dependencies-${playwright_version}"
+
+    if [[ -f "$browser_marker" && -f "$dependencies_marker" ]]; then
+      echo "Reusing Chromium ${playwright_version} from $PLAYWRIGHT_BROWSERS_PATH"
+      exit 0
+    fi
+
+    echo "Installing Chromium ${playwright_version} and its Linux dependencies..."
+    ./node_modules/.bin/playwright install --with-deps chromium
+    mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
+    touch "$browser_marker" "$dependencies_marker"
+  '
+}
+
+run_layout_tests() {
+  start_container
+  ensure_container_chromium
+  echo "Running the production Playwright layout suite inside $container_name..."
+  container_exec npm run test:layout
+}
+
 main() {
   local command="${1:-help}"
   require_apple_container
@@ -194,6 +231,10 @@ main() {
         exit 1
       fi
       container exec --interactive --tty "$container_name" bash
+      ;;
+    test-layout)
+      ensure_system
+      run_layout_tests
       ;;
     rebuild)
       ensure_system

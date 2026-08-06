@@ -22,13 +22,13 @@ Apple's runtime required a one-time recommended Kata Linux kernel and VM init-im
 
 ## Implementation
 
-`scripts/apple-container-dev` owns `setup`, `start`, `restart`, `stop`, `status`, `logs`, `shell`, and `rebuild`. It creates a persistent named container directly from the Node image, bind-mounts the source repository's parent at `/workspace`, enables polling-backed Vite watching for reliable host edits, and preserves four named volumes:
+`scripts/apple-container-dev` owns `setup`, `start`, `restart`, `stop`, `status`, `logs`, `shell`, `test-layout`, and `rebuild`. It creates a persistent named container directly from the Node image, bind-mounts the source repository's parent at `/workspace`, enables polling-backed Vite watching for reliable host edits, and preserves four named volumes:
 
 | Volume | Guest mount | Purpose |
 |---|---|---|
 | `alfredo-dev-node-modules` | `/workspace/Alfredo/mission-control/node_modules` | Keep Linux npm dependencies separate from host macOS dependencies |
 | `alfredo-dev-cargo-target` | `/workspace/Alfredo/mission-control/src-tauri/target` | Reuse the Linux Rust bridge build across restarts |
-| `alfredo-dev-toolchain` | `/var/lib/alfredo/toolchain` | Preserve pinned Rustup/Cargo tools across container recreation |
+| `alfredo-dev-toolchain` | `/var/lib/alfredo/toolchain` | Preserve pinned Rustup/Cargo tools and Playwright browser cache across container recreation |
 | `alfredo-dev-runtime` | `/var/lib/alfredo/runtime` | Preserve canonical Alfredo development runtime state |
 
 The named container's own root filesystem retains system packages and Rust across normal stop/start. `mission-control/dev/apple-container-entrypoint.sh` hashes `package-lock.json` and reruns `npm ci` only when the Linux dependency volume is missing or stale.
@@ -72,9 +72,12 @@ Normal use:
 ./scripts/apple-container-dev start
 ./scripts/apple-container-dev restart
 ./scripts/apple-container-dev logs
+./scripts/apple-container-dev test-layout
 ```
 
 Open `http://127.0.0.1:1420` and leave the named container running for user-led visual testing. Future agents should use focused automated tests for implementation evidence but should not start a second host Vite or browser merely to provide the already-running manual preview.
+
+`test-layout` exists for macOS environments where a host Playwright Chromium process cannot register its Mach bootstrap service. It reuses the running guest, caches Chromium in the named toolchain volume, reinstalls OS dependencies after a guest rebuild when necessary, and runs the production layout suite inside Linux. It does not restart or stop the canonical workstation.
 
 ## Related documentation
 

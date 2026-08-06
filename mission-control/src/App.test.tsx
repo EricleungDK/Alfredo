@@ -10,6 +10,8 @@ import {
 } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { App, isExactAdHocDelegationBoundary } from "./App";
+import { MissionExecutionTree } from "./MissionExecutionTree";
+import type { MissionExecutionTreeProjection } from "./workstation-projection";
 import type {
   AdHocDelegationProposalRequest,
   AdditionalPathGrantDenialRequest,
@@ -35,7 +37,7 @@ import type {
   WorkingContextProjection,
   WorkstationActionRequest,
 } from "./contracts";
-import type { WorkspaceClient } from "./workspace-client";
+import type { SessionOutputSubscriptionState, WorkspaceClient } from "./workspace-client";
 
 const snapshot: WorkspaceSnapshot = {
       schema_version: 1,
@@ -239,13 +241,82 @@ function appIssueSlice(
   };
 }
 
+function reviewReadyTreeSnapshot(
+  sessionIds: readonly string[],
+  revision = 13,
+): WorkspaceSnapshot {
+  return {
+    ...snapshot,
+    revision,
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_count: 1,
+      ordered_issue_ids: ["ISS-REVIEW"],
+      ready_issue_ids: [],
+      approved_issue_ids: ["ISS-REVIEW"],
+      issue_slices: [
+        appIssueSlice({
+          issue_id: "ISS-REVIEW",
+          title: "Review tree evidence",
+          lifecycle: "Approved",
+          progress: "Evidence Package is ready for review",
+          sessions: sessionIds.map((session_id) => ({
+            session_id,
+            assigned_agent: "review-agent",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+            status: "evidence-ready",
+            stale: false,
+            disconnected: false,
+            operation_status: "awaiting-review",
+            failure: "",
+          })),
+          evidence: {
+            state: "complete",
+            changed_files: ["mission-control/src/App.tsx"],
+            commands_run: ["npm test -- --run App.test.tsx"],
+            test_results: "Focused App tests passed.",
+            risks: "None recorded.",
+            artifact_links: sessionIds.map((sessionId) => `app-local://evidence/${sessionId}`),
+          },
+        }),
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: sessionIds.map((session_id) => ({
+          session_id,
+          issue_id: "ISS-REVIEW",
+          assigned_agent: "review-agent",
+          status: "evidence-ready",
+          role: "local-agent",
+          provider: "ollama",
+          model: "qwen3.6:27b",
+        })),
+        attention: [],
+      },
+    ],
+  };
+}
+
 test("renders the canonical Mission Execution Tree and scopes detailed output to its exact inspector", async () => {
   let outputHandler: ((event: SessionOutputEvent) => void) | undefined;
+  let outputStateHandler: ((state: SessionOutputSubscriptionState) => void) | undefined;
   const unsubscribe = vi.fn();
   const subscribeToSessionOutput = vi.fn(
-    (request: SessionOutputSubscriptionRequest, onEvent: (event: SessionOutputEvent) => void) => {
+    (
+      request: SessionOutputSubscriptionRequest,
+      onEvent: (event: SessionOutputEvent) => void,
+      onState?: (state: SessionOutputSubscriptionState) => void,
+    ) => {
       expect(request).toEqual({ mission_id: "command-deck", session_id: "session-ISS-TREE-1" });
       outputHandler = onEvent;
+      outputStateHandler = onState;
       return unsubscribe;
     },
   );
@@ -337,6 +408,10 @@ test("renders the canonical Mission Execution Tree and scopes detailed output to
   expect(within(inspector).getByText("mission-control/src/MissionExecutionTree.tsx")).toBeVisible();
   expect(subscribeToSessionOutput).toHaveBeenCalledTimes(1);
   expect(outputHandler).toBeDefined();
+  expect(within(inspector).getByText("Subscribing…")).toBeVisible();
+
+  act(() => outputStateHandler?.({ kind: "subscribed" }));
+  expect(within(inspector).getByText("Subscribed while this inspector is open")).toBeVisible();
 
   act(() => {
     outputHandler?.({
@@ -344,7 +419,7 @@ test("renders the canonical Mission Execution Tree and scopes detailed output to
       mission_id: "command-deck",
       session_id: "session-ISS-TREE-1",
       sequence: 1,
-      content: "pytest -q",
+      content: "pytest -q\n",
       phase: "streaming",
     });
     outputHandler?.({
@@ -353,22 +428,220 @@ test("renders the canonical Mission Execution Tree and scopes detailed output to
       session_id: "session-ISS-TREE-1",
       sequence: 2,
       content: "must not render",
+      phase: "streaming",
     });
   });
   const output = within(inspector).getByLabelText("Detailed Local Agent output content");
-  expect(output).toHaveTextContent("pytest -q");
+  expect(output.textContent).toBe("pytest -q\n");
   expect(output).not.toHaveTextContent("must not render");
+
+  act(() => outputStateHandler?.({
+    kind: "failure",
+    code: "session-output-unavailable",
+    message: "The output reader temporarily lost the runner journal.",
+    recoverable: true,
+    retrying: false,
+  }));
+  expect(within(inspector).getByRole("alert")).toHaveTextContent(
+    "The output reader temporarily lost the runner journal.",
+  );
+  expect(output.textContent).toBe("pytest -q\n");
+  fireEvent.click(within(inspector).getByRole("button", { name: "Retry output" }));
+  await waitFor(() => expect(subscribeToSessionOutput).toHaveBeenCalledTimes(2));
+  act(() => outputHandler?.({
+    schema_version: 1,
+    mission_id: "command-deck",
+    session_id: "session-ISS-TREE-1",
+    sequence: 1,
+    content: "pytest -q\n",
+    phase: "streaming",
+  }));
+  expect(output.textContent).toBe("pytest -q\n");
+  act(() => {
+    for (let sequence = 2; sequence <= 257; sequence += 1) {
+      outputHandler?.({
+        schema_version: 1,
+        mission_id: "command-deck",
+        session_id: "session-ISS-TREE-1",
+        sequence,
+        content: `event ${sequence}${sequence === 257 ? "" : "\n"}`,
+        phase: "streaming",
+      });
+    }
+  });
+  expect(output.textContent).toBe(
+    ["pytest -q", ...Array.from({ length: 256 }, (_, index) => `event ${index + 2}`)].join("\n"),
+  );
 
   act(() => {
     fireEvent.click(
       within(inspector).getByRole("button", { name: "Close Mission Execution Tree inspector" }),
     );
   });
-  expect(unsubscribe).toHaveBeenCalledTimes(1);
+  expect(unsubscribe).toHaveBeenCalledTimes(2);
   expect(
     screen.queryByRole("region", { name: "session-ISS-TREE-1 execution inspector" }),
   ).not.toBeInTheDocument();
   await waitFor(() => expect(sessionNode).toHaveFocus());
+});
+
+test("keeps Issue Slice, Ad Hoc Delegation, and Repair disclosure separately operable", () => {
+  const projection: MissionExecutionTreeProjection = {
+    schema_version: 1,
+    revision: 1,
+    root_id: "mission:command-deck",
+    counts: {
+      issue_slices: 1,
+      ad_hoc_delegations: 1,
+      local_agent_sessions: 3,
+      repairs: 1,
+      blockers: 0,
+      evidence_packages: 0,
+    },
+    nodes: [
+      {
+        id: "mission:command-deck", kind: "mission", identity: "command-deck", title: "Command Deck",
+        parent_id: null, parent_session_id: null, lineage: "root", depth: 0,
+        child_ids: ["issue:ISS-01", "ad-hoc:ADHOC-1"], state: "working", status: "Active Mission",
+        shape: "circle", risk: "none", summary: "Mission", inspectable: false, attention: false,
+        issue: null, session: null, card: null,
+      },
+      {
+        id: "issue:ISS-01", kind: "issue-slice", identity: "ISS-01", title: "Issue work",
+        parent_id: "mission:command-deck", parent_session_id: null, lineage: "root", depth: 1,
+        child_ids: ["session:issue-parent"], state: "working", status: "Running", shape: "circle",
+        risk: "none", summary: "Issue", inspectable: true, attention: false, issue: null, session: null, card: null,
+      },
+      {
+        id: "session:issue-parent", kind: "agent-session", identity: "issue-parent", title: "Parent session",
+        parent_id: "issue:ISS-01", parent_session_id: null, lineage: "root", depth: 2,
+        child_ids: ["session:repair-child"], state: "working", status: "Running", shape: "circle",
+        risk: "none", summary: "Parent", inspectable: true, attention: false, issue: null, session: null, card: null,
+      },
+      {
+        id: "session:repair-child", kind: "agent-session", identity: "repair-child", title: "Repair session",
+        parent_id: "session:issue-parent", parent_session_id: "issue-parent", lineage: "repair", depth: 3,
+        child_ids: [], state: "queued", status: "Queued", shape: "repair",
+        risk: "none", summary: "Repair", inspectable: true, attention: false, issue: null, session: null, card: null,
+      },
+      {
+        id: "ad-hoc:ADHOC-1", kind: "ad-hoc-delegation", identity: "ADHOC-1", title: "Ad Hoc work",
+        parent_id: "mission:command-deck", parent_session_id: null, lineage: "root", depth: 1,
+        child_ids: ["session:ad-hoc"], state: "queued", status: "Queued", shape: "square",
+        risk: "none", summary: "Ad Hoc", inspectable: true, attention: false, issue: null, session: null, card: null,
+      },
+      {
+        id: "session:ad-hoc", kind: "agent-session", identity: "ad-hoc-session", title: "Ad Hoc session",
+        parent_id: "ad-hoc:ADHOC-1", parent_session_id: null, lineage: "root", depth: 2,
+        child_ids: [], state: "queued", status: "Queued", shape: "square",
+        risk: "none", summary: "Ad Hoc", inspectable: true, attention: false, issue: null, session: null, card: null,
+      },
+    ],
+  };
+  render(
+    <MissionExecutionTree
+      projection={projection}
+      selectedNodeId={null}
+      onSelectNode={vi.fn()}
+      onCloseInspector={vi.fn()}
+      outputLines={[]}
+      outputState="unavailable"
+    />,
+  );
+
+  const issue = screen.getByRole("treeitem", { name: /issue-slice ISS-01/ });
+  const adHoc = screen.getByRole("treeitem", { name: /ad-hoc-delegation ADHOC-1/ });
+  const parentSession = screen.getByRole("treeitem", { name: /Local Agent session issue-parent/ });
+  fireEvent.keyDown(issue, { key: "ArrowLeft" });
+  expect(screen.queryByRole("treeitem", { name: /Local Agent session issue-parent/ })).not.toBeInTheDocument();
+  fireEvent.keyDown(issue, { key: "ArrowRight" });
+  expect(screen.getByRole("treeitem", { name: /Local Agent session issue-parent/ })).toBeVisible();
+
+  fireEvent.click(screen.getByRole("button", { name: "Collapse Ad Hoc Delegation ADHOC-1" }));
+  expect(screen.queryByRole("treeitem", { name: /Local Agent session ad-hoc-session/ })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Expand Ad Hoc Delegation ADHOC-1" }));
+  expect(screen.getByRole("treeitem", { name: /Local Agent session ad-hoc-session/ })).toBeVisible();
+
+  fireEvent.click(screen.getByRole("button", { name: "Collapse Local Agent session issue-parent" }));
+  expect(screen.queryByRole("treeitem", { name: /Local Agent session repair-child/ })).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "Expand Local Agent session issue-parent" }));
+  expect(screen.getByRole("treeitem", { name: /Local Agent session repair-child/ })).toBeVisible();
+  expect(parentSession).toHaveAttribute("aria-expanded", "true");
+});
+
+test("uses a focus-contained dialog inspector at the documented constrained breakpoint", async () => {
+  const originalMatchMedia = Object.getOwnPropertyDescriptor(window, "matchMedia");
+  const media = {
+    matches: true,
+    media: "(max-width: 680px)",
+    onchange: null,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  };
+  Object.defineProperty(window, "matchMedia", { configurable: true, value: vi.fn(() => media) });
+  const dialogSnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_count: 1,
+      ordered_issue_ids: ["ISS-DIALOG"],
+      issue_slices: [
+        appIssueSlice({
+          issue_id: "ISS-DIALOG",
+          title: "Reach a constrained inspector",
+          lifecycle: "Running",
+          launch_eligible: false,
+          sessions: [
+            {
+              session_id: "session-ISS-DIALOG-1", assigned_agent: "local-agent", role: "local-agent",
+              provider: "ollama", model: "qwen", status: "running", stale: false, disconnected: false,
+              operation_status: "streaming", failure: "",
+            },
+          ],
+        }),
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck", title: "Command Deck Mission", issue_count: 1, is_active: true,
+        sessions: [
+          {
+            session_id: "session-ISS-DIALOG-1", issue_id: "ISS-DIALOG", assigned_agent: "local-agent",
+            status: "running", role: "local-agent", provider: "ollama", model: "qwen",
+          },
+        ],
+        attention: [],
+      },
+    ],
+  };
+  try {
+    render(<App client={{ loadSnapshot: async () => ({ kind: "ready", snapshot: dialogSnapshot }) }} />);
+    const node = await screen.findByRole("treeitem", { name: /Local Agent session session-ISS-DIALOG-1/ });
+    fireEvent.click(node);
+    const dialog = await screen.findByRole("dialog", {
+      name: "Local Agent session / session-ISS-DIALOG-1",
+    });
+    const close = within(dialog).getByRole("button", { name: "Close Mission Execution Tree inspector" });
+    expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(close).toHaveFocus();
+    const focusableButtons = within(dialog)
+      .getAllByRole("button")
+      .filter((button) => !button.hasAttribute("disabled"));
+    const lastFocusable = focusableButtons.at(-1)!;
+    fireEvent.keyDown(close, { key: "Tab", shiftKey: true });
+    expect(lastFocusable).toHaveFocus();
+    fireEvent.keyDown(lastFocusable, { key: "Tab" });
+    expect(close).toHaveFocus();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(node).toHaveFocus());
+    expect(screen.queryByRole("dialog", { name: "Local Agent session / session-ISS-DIALOG-1" })).not.toBeInTheDocument();
+  } finally {
+    if (originalMatchMedia) Object.defineProperty(window, "matchMedia", originalMatchMedia);
+    else Reflect.deleteProperty(window, "matchMedia");
+  }
 });
 
 async function openCommandAudit() {
@@ -403,9 +676,17 @@ async function openExecutionInspector(
       name: new RegExp(`${kind} ${escapedIdentity}`),
     }),
   );
-  return await screen.findByRole("region", {
-    name: `${identity} execution inspector`,
-  });
+  const name = `${identity} execution inspector`;
+  const dialogForInspector = (): HTMLElement | null =>
+    [...document.querySelectorAll<HTMLElement>('[role="dialog"]')].find(
+      (candidate) => candidate.getAttribute("aria-label") === name,
+    ) ?? null;
+  await waitFor(() =>
+    expect(
+      dialogForInspector() ?? screen.queryByRole("region", { name }),
+    ).not.toBeNull(),
+  );
+  return dialogForInspector() ?? screen.getByRole("region", { name });
 }
 
 async function openContextInspector() {
@@ -1712,6 +1993,173 @@ test("submits review-ready workstation card decisions through typed review valid
   );
   expect(screen.getByText("Orchestrator validating workstation action.")).toBeVisible();
   expect(await screen.findByText(/Orchestrator accepted workstation action: Issue Slice becomes Complete and PR-ready/)).toBeVisible();
+});
+
+test("scopes execution-tree Review Decision pending and acknowledged feedback to one decision and session", async () => {
+  const firstSessionId = "session-ISS-REVIEW-A";
+  const secondSessionId = "session-ISS-REVIEW-B";
+  const before = reviewReadyTreeSnapshot([firstSessionId, secondSessionId]);
+  const after = reviewReadyTreeSnapshot([firstSessionId, secondSessionId], 14);
+  type ReviewDecisionResult = Awaited<ReturnType<NonNullable<WorkspaceClient["submitReviewDecision"]>>>;
+  const decisionResolvers = new Map<string, (value: ReviewDecisionResult) => void>();
+  let snapshotLoads = 0;
+
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => {
+          snapshotLoads += 1;
+          return { kind: "ready", snapshot: snapshotLoads === 1 ? before : after };
+        },
+        submitReviewDecision: async (request) =>
+          new Promise<ReviewDecisionResult>((resolve) => {
+            decisionResolvers.set(request.session_id ?? "", resolve);
+          }),
+      }}
+    />,
+  );
+
+  const firstInspector = await openExecutionInspector(firstSessionId);
+  const firstAccept = within(firstInspector).getByRole("button", { name: "Accept evidence" });
+  const firstRepair = within(firstInspector).getByRole("button", { name: "Request repair" });
+  const firstEscalate = within(firstInspector).getByRole("button", { name: "Escalate human review" });
+  fireEvent.change(within(firstInspector).getByRole("textbox", { name: "Request repair reason" }), {
+    target: { value: "Repair remains available while acceptance is pending." },
+  });
+  fireEvent.click(firstAccept);
+  await waitFor(() => expect(firstAccept).toBeDisabled());
+  expect(firstRepair).toBeEnabled();
+  expect(firstEscalate).toBeEnabled();
+  expect(
+    within(firstInspector).getByText(
+      `Waiting for Orchestrator acknowledgement: Accept evidence for ${firstSessionId}.`,
+    ),
+  ).toBeVisible();
+
+  const secondInspector = await openExecutionInspector(secondSessionId);
+  const secondAccept = within(secondInspector).getByRole("button", { name: "Accept evidence" });
+  expect(secondAccept).toBeEnabled();
+  expect(within(secondInspector).getByRole("button", { name: "Escalate human review" })).toBeEnabled();
+  fireEvent.click(secondAccept);
+  await waitFor(() => expect(secondAccept).toBeDisabled());
+
+  const firstStillPendingInspector = await openExecutionInspector(firstSessionId);
+  expect(within(firstStillPendingInspector).getByRole("button", { name: "Accept evidence" })).toBeDisabled();
+
+  await act(async () => {
+    decisionResolvers.get(firstSessionId)?.({
+      kind: "acknowledged",
+      acknowledgement: {
+        correlation_id: `review-accept-command-deck-${firstSessionId}-13`,
+        outcome: "acknowledged",
+        revision: 14,
+        issue_id: "ISS-REVIEW",
+        session_id: firstSessionId,
+        review_outcome: "Approved",
+        next_action: "prepare-pr",
+        issue_lifecycle: "Complete",
+        effect_summary: "Acceptance is recorded for the first Local Agent session.",
+      },
+    });
+  });
+
+  const secondStillPendingInspector = await openExecutionInspector(secondSessionId);
+  expect(within(secondStillPendingInspector).getByRole("button", { name: "Accept evidence" })).toBeDisabled();
+  await act(async () => {
+    decisionResolvers.get(secondSessionId)?.({
+      kind: "acknowledged",
+      acknowledgement: {
+        correlation_id: `review-accept-command-deck-${secondSessionId}-13`,
+        outcome: "acknowledged",
+        revision: 14,
+        issue_id: "ISS-REVIEW",
+        session_id: secondSessionId,
+        review_outcome: "Approved",
+        next_action: "prepare-pr",
+        issue_lifecycle: "Complete",
+        effect_summary: "Acceptance is recorded for the second Local Agent session.",
+      },
+    });
+  });
+
+  const acknowledgedInspector = await openExecutionInspector(firstSessionId);
+  expect(
+    within(acknowledgedInspector).getByText("Acceptance is recorded for the first Local Agent session."),
+  ).toBeVisible();
+});
+
+test.each([
+  [
+    "stale",
+    "Accept evidence",
+    {
+      kind: "stale" as const,
+      code: "stale-action",
+      message: "The review snapshot changed before acceptance.",
+    },
+    "The review snapshot changed before acceptance.",
+  ],
+  [
+    "rejected",
+    "Escalate human review",
+    {
+      kind: "rejected" as const,
+      code: "evidence-incomplete",
+      message: "The evidence package is incomplete.",
+    },
+    "The evidence package is incomplete.",
+  ],
+  [
+    "reload failure",
+    "Accept evidence",
+    {
+      kind: "acknowledged" as const,
+      acknowledgement: {
+        correlation_id: "review-accept-command-deck-session-ISS-REVIEW-OUTCOME-13",
+        outcome: "acknowledged" as const,
+        revision: 14,
+        issue_id: "ISS-REVIEW",
+        session_id: "session-ISS-REVIEW-OUTCOME",
+        review_outcome: "Approved",
+        next_action: "prepare-pr",
+        issue_lifecycle: "Complete",
+        effect_summary: "The canonical reload must still succeed.",
+      },
+    },
+    "Review acknowledged but canonical snapshot reload failed.",
+  ],
+] as const)("shows %s Review Decision feedback beside the exact inspector action", async (
+  _name,
+  actionLabel,
+  result,
+  expectedMessage,
+) => {
+  const sessionId = "session-ISS-REVIEW-OUTCOME";
+  const before = reviewReadyTreeSnapshot([sessionId]);
+  let snapshotLoads = 0;
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => {
+          snapshotLoads += 1;
+          if (snapshotLoads === 1) return { kind: "ready", snapshot: before };
+          if (result.kind === "acknowledged") {
+            return {
+              kind: "persistence-read-failure",
+              message: "Canonical state could not be reread.",
+              recoverable: true,
+            };
+          }
+          return { kind: "ready", snapshot: before };
+        },
+        submitReviewDecision: async () => result,
+      }}
+    />,
+  );
+
+  const inspector = await openExecutionInspector(sessionId);
+  fireEvent.click(within(inspector).getByRole("button", { name: actionLabel }));
+  expect(await within(inspector).findByText(expectedMessage, { exact: false })).toBeVisible();
 });
 
 test("restores workstation card state and side-pane selection after desktop refresh", async () => {

@@ -284,6 +284,95 @@ test("polls exact Mission and session output through the native transport and cl
   }
 });
 
+test("drains every bounded session-output page before completing the subscription", async () => {
+  vi.useFakeTimers();
+  const initialPage = Array.from({ length: 256 }, (_, index) => ({
+    schema_version: 1 as const,
+    mission_id: "command-deck",
+    session_id: "session-output-pages",
+    sequence: index + 1,
+    content: `event ${index + 1}`,
+    phase: "complete" as const,
+  }));
+  vi.mocked(invoke)
+    .mockResolvedValueOnce({
+      schema_version: 1,
+      mission_id: "command-deck",
+      session_id: "session-output-pages",
+      events: initialPage,
+      complete: false,
+    })
+    .mockResolvedValueOnce({
+      schema_version: 1,
+      mission_id: "command-deck",
+      session_id: "session-output-pages",
+      events: [{ ...initialPage[0], sequence: 257, content: "event 257" }],
+      complete: true,
+    });
+  const onEvent = vi.fn();
+  const onState = vi.fn();
+
+  try {
+    new TauriWorkspaceClient().subscribeToSessionOutput(
+      { mission_id: "command-deck", session_id: "session-output-pages" },
+      onEvent,
+      onState,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(250);
+
+    expect(onEvent).toHaveBeenCalledTimes(257);
+    expect(onEvent.mock.calls.map(([event]) => event.sequence)).toEqual(
+      Array.from({ length: 257 }, (_, index) => index + 1),
+    );
+    expect(onState).toHaveBeenCalledTimes(1);
+    expect(onState).toHaveBeenCalledWith({ kind: "subscribed" });
+    expect(invoke).toHaveBeenLastCalledWith("session_output", {
+      request: {
+        mission_id: "command-deck",
+        session_id: "session-output-pages",
+        after_sequence: 256,
+      },
+    });
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("reports a terminal exact-session output failure instead of claiming subscription", async () => {
+  vi.useFakeTimers();
+  vi.mocked(invoke).mockClear();
+  vi.mocked(invoke).mockRejectedValueOnce({
+    code: "session-output-forbidden",
+    message: "The session output journal is outside its runtime boundary.",
+    recoverable: false,
+  });
+  const onEvent = vi.fn();
+  const onState = vi.fn();
+
+  try {
+    new TauriWorkspaceClient().subscribeToSessionOutput(
+      { mission_id: "command-deck", session_id: "session-output-failure" },
+      onEvent,
+      onState,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(onState).toHaveBeenCalledWith({
+      kind: "failure",
+      code: "session-output-forbidden",
+      message: "The session output journal is outside its runtime boundary.",
+      recoverable: false,
+      retrying: false,
+    });
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(invoke).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test("localhost output polling ignores a mismatched projection and sends the exact cursor", async () => {
   vi.useFakeTimers();
   const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {

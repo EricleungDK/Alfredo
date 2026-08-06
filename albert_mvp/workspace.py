@@ -46,7 +46,7 @@ from .performance import measured_stage
 _SESSION_ARTIFACT_CONTENT_BYTES_LIMIT = 128_000
 _SESSION_OUTPUT_JOURNAL_BYTES_LIMIT = 128_000
 _SESSION_OUTPUT_EVENT_CONTENT_BYTES_LIMIT = 16_000
-_SESSION_OUTPUT_EVENT_COUNT_LIMIT = 512
+_SESSION_OUTPUT_EVENT_COUNT_LIMIT = 256
 _AGENT_CONSOLE_USER_CONTENT_CHARACTER_LIMIT = 16_000
 _AGENT_CONSOLE_CONTENT_CHARACTER_LIMIT = 100_000
 _CONTROLLER_RECENT_CONVERSATION_CHARACTER_LIMIT = 24_000
@@ -7356,6 +7356,12 @@ class SessionOutputService:
 
         complete = self._is_complete(session)
         if not journal_path.exists():
+            if after_sequence:
+                raise SessionOutputReadError(
+                    "The output cursor is newer than the retained exact-session journal.",
+                    code="session-output-stale-cursor",
+                    recoverable=False,
+                )
             return SessionOutputProjection(
                 schema_version=1,
                 mission_id=mission.mission_id,
@@ -7383,6 +7389,7 @@ class SessionOutputService:
             )
 
         events: list[SessionOutputEvent] = []
+        has_unread_events = False
         expected_sequence = 1
         lines = payload.splitlines(keepends=True)
         for index, line in enumerate(lines):
@@ -7419,7 +7426,7 @@ class SessionOutputService:
                     recoverable=False,
                 )
             expected_sequence += 1
-            if len(events) < _SESSION_OUTPUT_EVENT_COUNT_LIMIT and raw["sequence"] > after_sequence:
+            if raw["sequence"] > after_sequence and len(events) < _SESSION_OUTPUT_EVENT_COUNT_LIMIT:
                 phase = self._phase(session, complete)
                 events.append(
                     SessionOutputEvent(
@@ -7431,12 +7438,23 @@ class SessionOutputService:
                         phase=phase,
                     )
                 )
+            elif raw["sequence"] > after_sequence:
+                has_unread_events = True
+        if after_sequence > expected_sequence - 1:
+            raise SessionOutputReadError(
+                "The output cursor is newer than the retained exact-session journal.",
+                code="session-output-stale-cursor",
+                recoverable=False,
+            )
         return SessionOutputProjection(
             schema_version=1,
             mission_id=mission.mission_id,
             session_id=session.session_id,
             events=tuple(events),
-            complete=complete,
+            # A terminal runner can still have a next bounded page. Completion
+            # means the exact cursor has drained the retained journal, never
+            # merely that the runner has ended.
+            complete=complete and not has_unread_events,
         )
 
     @staticmethod

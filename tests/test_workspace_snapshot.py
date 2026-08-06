@@ -25,6 +25,8 @@ from albert_mvp.core import (
     EvidencePackage,
     EvidenceValidationError,
     LocalAgentSession,
+    _BoundedProcessCapture,
+    _SessionOutputRecorder,
 )
 from albert_mvp.tui import perform_tui_action
 from albert_mvp.workspace import (
@@ -2123,6 +2125,160 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         )
         self.assertTrue(complete.complete)
         self.assertEqual(complete.events[0].phase, "complete")
+
+    def test_session_output_reader_pages_a_terminal_journal_before_completing(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        session = LocalAgentSession(
+            session_id="session-output-pagination",
+            issue_id="ISS-01",
+            assigned_agent="local-agent",
+            worktree_path=mission.runtime_dir / "worktrees" / "session-output-pagination",
+            task_packet={},
+            status="completed",
+            runner_ended_at="2026-08-06T10:01:00+00:00",
+        )
+        mission.sessions[session.session_id] = session
+        mission._persist()
+        journal = mission.runtime_dir / "sessions" / session.session_id / "output-events.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text(
+            "".join(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "mission_id": mission.mission_id,
+                        "session_id": session.session_id,
+                        "sequence": sequence,
+                        "content": f"event {sequence}",
+                    }
+                )
+                + "\n"
+                for sequence in range(1, 258)
+            ),
+            encoding="utf-8",
+        )
+
+        reader = SessionOutputService(snapshots)
+        first_page = reader.read(
+            mission_id=mission.mission_id,
+            session_id=session.session_id,
+            after_sequence=0,
+        )
+        self.assertEqual([event.sequence for event in first_page.events], list(range(1, 257)))
+        self.assertFalse(first_page.complete)
+
+        final_page = reader.read(
+            mission_id=mission.mission_id,
+            session_id=session.session_id,
+            after_sequence=256,
+        )
+        self.assertEqual([event.sequence for event in final_page.events], [257])
+        self.assertTrue(final_page.complete)
+
+        with self.assertRaises(SessionOutputReadError) as stale_cursor:
+            reader.read(
+                mission_id=mission.mission_id,
+                session_id=session.session_id,
+                after_sequence=258,
+            )
+        self.assertEqual(stale_cursor.exception.code, "session-output-stale-cursor")
+        self.assertFalse(stale_cursor.exception.recoverable)
+
+    def test_session_output_reader_rejects_a_cursor_when_no_journal_exists(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        session = LocalAgentSession(
+            session_id="session-output-empty-journal",
+            issue_id="ISS-01",
+            assigned_agent="local-agent",
+            worktree_path=mission.runtime_dir / "worktrees" / "session-output-empty-journal",
+            task_packet={},
+            status="completed",
+            runner_ended_at="2026-08-06T10:01:00+00:00",
+        )
+        mission.sessions[session.session_id] = session
+        mission._persist()
+
+        with self.assertRaises(SessionOutputReadError) as stale_cursor:
+            SessionOutputService(snapshots).read(
+                mission_id=mission.mission_id,
+                session_id=session.session_id,
+                after_sequence=1,
+            )
+        self.assertEqual(stale_cursor.exception.code, "session-output-stale-cursor")
+        self.assertFalse(stale_cursor.exception.recoverable)
+
+    def test_session_output_recorder_splits_large_utf8_payload_without_byte_loss(self) -> None:
+        journal = self.runtime / "recorder" / "output-events.jsonl"
+        recorder = _SessionOutputRecorder(journal, "command-deck", "session-output-recorder")
+        payload = ("å" * 8_001 + " complete").encode("utf-8")
+        recorder.record("stdout", payload)
+        recorder.close()
+
+        events = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+        self.assertGreater(len(events), 1)
+        self.assertEqual([event["sequence"] for event in events], list(range(1, len(events) + 1)))
+        self.assertTrue(all(len(event["content"].encode("utf-8")) <= 16_000 for event in events))
+        self.assertEqual("".join(event["content"] for event in events), payload.decode("utf-8"))
+
+    def test_bounded_process_capture_observes_a_short_flushed_record_before_child_exit(self) -> None:
+        observed = threading.Event()
+        received: list[bytes] = []
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import sys, time; sys.stdout.write('ready\\n'); sys.stdout.flush(); time.sleep(1.5)",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        capture = _BoundedProcessCapture(
+            128_000,
+            output_callback=lambda _stream, payload: (received.append(payload), observed.set()),
+        )
+        capture.start(process)
+        try:
+            self.assertTrue(observed.wait(timeout=0.75))
+            self.assertIsNone(process.poll())
+            self.assertEqual(b"ready\n", b"".join(received))
+        finally:
+            process.terminate()
+            process.wait(timeout=2)
+            capture.finish()
+
+    def test_session_output_start_failure_becomes_a_terminal_runner_failure(self) -> None:
+        (self.target_repo / ".albert").mkdir()
+        (self.target_repo / ".albert" / "agents.json").write_text(
+            json.dumps(
+                {
+                    "agents": [
+                        {
+                            "id": "qwen-coder-local-1",
+                            "role": "local-agent",
+                            "provider": "test-harness",
+                            "runner": "fake",
+                            "model": "deterministic-fake",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        mission = self.load_service()._primary_mission
+        mission.approve_issue("ISS-01")
+        with patch.object(mission, "_validate_target_repository_boundary"):
+            session = mission.launch_issue("ISS-01")
+            with patch.object(mission, "_start_session_output", side_effect=OSError("journal unavailable")):
+                with self.assertRaises(AlbertError):
+                    mission.run_session(session.session_id)
+
+        persisted = mission._refresh_persisted_session(session.session_id)
+        self.assertEqual(persisted.status, "failed")
+        self.assertIsNone(persisted.runner_pid)
+        self.assertEqual(persisted.runner_identity, "")
+        self.assertEqual(mission._session_output_recorders, {})
 
     def test_session_output_reader_rejects_cross_session_journal_records(self) -> None:
         snapshots = self.load_service()

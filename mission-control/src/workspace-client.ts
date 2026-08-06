@@ -137,6 +137,7 @@ export interface WorkspaceClient {
   subscribeToSessionOutput?(
     request: SessionOutputSubscriptionRequest,
     onEvent: (event: SessionOutputEvent) => void,
+    onState?: (state: SessionOutputSubscriptionState) => void,
   ): () => void;
   loadMissionDrafts?(): Promise<MissionDraftLoadResult>;
   submitMissionDraftCreate?(request: MissionDraftCreateRequest): Promise<MissionDraftCreateResult>;
@@ -148,6 +149,17 @@ export interface WorkspaceClient {
 const DESKTOP_BRIDGE_UNAVAILABLE =
   "The browser preview has no Alfredo desktop bridge. Start the managed workstation from the repository root.";
 const SESSION_OUTPUT_POLL_INTERVAL_MS = 250;
+const SESSION_OUTPUT_MAX_RECOVERABLE_FAILURES = 3;
+
+export type SessionOutputSubscriptionState =
+  | { readonly kind: "subscribed" }
+  | {
+      readonly kind: "failure";
+      readonly code: string;
+      readonly message: string;
+      readonly recoverable: boolean;
+      readonly retrying: boolean;
+    };
 
 type WorkspaceInvoke = <T>(
   command: string,
@@ -840,11 +852,40 @@ export class TauriWorkspaceClient implements WorkspaceClient {
   subscribeToSessionOutput(
     request: SessionOutputSubscriptionRequest,
     onEvent: (event: SessionOutputEvent) => void,
+    onState?: (state: SessionOutputSubscriptionState) => void,
   ): () => void {
-    if (!this.bridgeAvailable()) return () => undefined;
+    if (!this.bridgeAvailable()) {
+      onState?.({
+        kind: "failure",
+        code: "backend-startup-failure",
+        message: DESKTOP_BRIDGE_UNAVAILABLE,
+        recoverable: false,
+        retrying: false,
+      });
+      return () => undefined;
+    }
     let active = true;
     let afterSequence = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let acknowledged = false;
+    let recoverableFailures = 0;
+
+    const reportFailure = (error: unknown, retrying: boolean): void => {
+      const failure = isBridgeFailure(error)
+        ? error
+        : bridgeFailure(
+          "backend-startup-failure",
+          error instanceof Error ? error.message : String(error),
+          true,
+        );
+      onState?.({
+        kind: "failure",
+        code: failure.code,
+        message: failure.message,
+        recoverable: failure.recoverable,
+        retrying,
+      });
+    };
 
     const poll = async (): Promise<void> => {
       if (!active) return;
@@ -861,8 +902,24 @@ export class TauriWorkspaceClient implements WorkspaceClient {
           projection.mission_id !== request.mission_id ||
           projection.session_id !== request.session_id
         ) {
+          if (active) {
+            reportFailure(
+              bridgeFailure(
+                "contract-failure",
+                "The session output response did not match the selected Mission and Local Agent session.",
+                false,
+              ),
+              false,
+            );
+          }
+          active = false;
           return;
         }
+        if (!acknowledged) {
+          acknowledged = true;
+          onState?.({ kind: "subscribed" });
+        }
+        recoverableFailures = 0;
         for (const event of [...projection.events].sort(
           (left, right) => left.sequence - right.sequence,
         )) {
@@ -877,8 +934,15 @@ export class TauriWorkspaceClient implements WorkspaceClient {
           onEvent(event);
         }
         complete = projection.complete;
-      } catch {
-        // A transient backend failure is retried while the inspector remains open.
+      } catch (error) {
+        recoverableFailures += 1;
+        const recoverable = isBridgeFailure(error) ? error.recoverable : true;
+        const retrying = recoverable && recoverableFailures < SESSION_OUTPUT_MAX_RECOVERABLE_FAILURES;
+        reportFailure(error, retrying);
+        if (!retrying) {
+          active = false;
+          return;
+        }
       }
       if (active && !complete) timer = setTimeout(() => void poll(), SESSION_OUTPUT_POLL_INTERVAL_MS);
     };

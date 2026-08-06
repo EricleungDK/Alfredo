@@ -55,6 +55,7 @@ import {
   workstationActionKey,
   workstationActionStateId,
   workstationActionTargetId,
+  workstationReviewActionStateId,
   type IssueAssignmentBoardProjection,
   type IssueAssignmentBoardRow,
   type WorkstationCardProjection,
@@ -159,6 +160,8 @@ const WORKSTATION_CONTINUITY_SCHEMA_VERSION = 1;
 const FAILED_WORKSTATION_ACTION_CONTINUITY_SCHEMA_VERSION = 1;
 const FAILED_WORKSTATION_ACTION_TURN_LIMIT = 100;
 const FAILED_WORKSTATION_ACTION_CONTENT_LIMIT = 4_000;
+const SESSION_OUTPUT_RENDER_CONTENT_BYTES_LIMIT = 128_000;
+const sessionOutputTextEncoder = new TextEncoder();
 
 function parseSlashCommand(content: string): { name: string; argument: string } | null {
   const match = content.trim().match(/^(\/[a-z-]+)(?:\s+([\s\S]*))?$/i);
@@ -592,6 +595,9 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
   const workstationActionTurnsWorkspaceKeyRef = useRef("");
   const [workstationActionState, setWorkstationActionState] =
     useState<WorkstationActionState | null>(null);
+  const [workstationReviewActionStates, setWorkstationReviewActionStates] = useState<
+    Readonly<Record<string, WorkstationActionState>>
+  >({});
   const [workstationActionDrafts, setWorkstationActionDrafts] = useState<
     Record<string, WorkstationActionDraftState>
   >({});
@@ -712,12 +718,19 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
     [registerTimelineTurn],
   );
   const beginVisibleWorkstationAction = useCallback(
-    (correlationId: string, label: string, targetId: string) => {
-      setWorkstationActionState({
+    (
+      correlationId: string,
+      label: string,
+      targetId: string,
+      onState?: (next: WorkstationActionState) => void,
+    ) => {
+      const nextState: WorkstationActionState = {
         itemId: targetId,
         state: "pending",
         message: `Waiting for Orchestrator acknowledgement: ${label}.`,
-      });
+      };
+      if (onState) onState(nextState);
+      else setWorkstationActionState(nextState);
       appendWorkstationActionTurns([
         {
           id: `${correlationId}:intent`,
@@ -742,6 +755,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       result: "acknowledged" | "stale" | "rejected" | "failed",
       message: string,
       acknowledgementCorrelationId = "",
+      onState?: (next: WorkstationActionState) => void,
     ) => {
       const receiptMatches =
         result !== "acknowledged" || acknowledgementCorrelationId === correlationId;
@@ -761,11 +775,13 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         visibleResult === "stale"
           ? `${visibleMessage} Refresh the canonical workspace state and retry the action.`
           : visibleMessage;
-      setWorkstationActionState({
+      const nextState: WorkstationActionState = {
         itemId: targetId,
         state,
         message: recovery,
-      });
+      };
+      if (onState) onState(nextState);
+      else setWorkstationActionState(nextState);
       appendWorkstationActionTurns([
         {
           id: `${correlationId}:reaction:${visibleResult}`,
@@ -790,6 +806,9 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
     },
     [appendWorkstationActionTurns],
   );
+  const setVisibleReviewActionState = useCallback((next: WorkstationActionState) => {
+    setWorkstationReviewActionStates((current) => ({ ...current, [next.itemId]: next }));
+  }, []);
   const hydratedFailedWorkstationActionKeyRef = useRef("");
   const skipFailedWorkstationActionWriteRef = useRef(false);
   useEffect(() => {
@@ -1924,12 +1943,17 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       }
       const current = state;
       const targetMissionId = missionId ?? current.snapshot.active_mission?.id ?? "";
-      const actionStateId = missionSessionIdentity(targetMissionId, sessionId);
+      const actionStateId = workstationReviewActionStateId(
+        targetMissionId,
+        sessionId,
+        decision,
+      );
       const correlationId = `review-${decision}-${targetMissionId}-${sessionId}-${current.snapshot.revision}`;
       beginVisibleWorkstationAction(
         correlationId,
         `${reviewDecisionLabel(decision)} for ${sessionId}`,
         actionStateId,
+        setVisibleReviewActionState,
       );
       setReviewStatus({ state: "pending", message: "Review decision pending" });
       const result = await client.submitReviewDecision({
@@ -1948,7 +1972,14 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       });
       if (result.kind !== "acknowledged") {
         setReviewStatus({ state: result.kind, message: result.message });
-        finishVisibleWorkstationAction(correlationId, actionStateId, result.kind, result.message);
+        finishVisibleWorkstationAction(
+          correlationId,
+          actionStateId,
+          result.kind,
+          result.message,
+          "",
+          setVisibleReviewActionState,
+        );
         return;
       }
       const reloaded = await client.loadSnapshot();
@@ -1959,6 +1990,8 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
           actionStateId,
           "failed",
           "Review acknowledged but canonical snapshot reload failed.",
+          "",
+          setVisibleReviewActionState,
         );
         setConnectionStatus("offline");
         return;
@@ -1975,10 +2008,18 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         "acknowledged",
         result.acknowledgement.effect_summary,
         result.acknowledgement.correlation_id,
+        setVisibleReviewActionState,
       );
       await refreshReviewWorkspace();
     },
-    [beginVisibleWorkstationAction, client, finishVisibleWorkstationAction, refreshReviewWorkspace, state],
+    [
+      beginVisibleWorkstationAction,
+      client,
+      finishVisibleWorkstationAction,
+      refreshReviewWorkspace,
+      setVisibleReviewActionState,
+      state,
+    ],
   );
 
   useEffect(() => {
@@ -2803,6 +2844,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       onQueueDecision={submitWorkspaceQueueDecision}
       workstationActionTurns={workstationActionTurns}
       workstationActionState={workstationActionState}
+      workstationReviewActionStates={workstationReviewActionStates}
       workstationActionStatusRef={workstationActionStatusRef}
       workstationActionDrafts={workstationActionDrafts}
       onWorkstationActionDraftChange={(key, draft) =>
@@ -3403,6 +3445,22 @@ function countOutputLines(output: string): number {
   return output.split(/\r?\n/).filter((line) => line.trim()).length;
 }
 
+function appendBoundedSessionOutputChunks(
+  current: readonly string[],
+  incoming: readonly string[],
+): readonly string[] {
+  const combined = [...current, ...incoming];
+  let retainedBytes = 0;
+  let firstRetainedIndex = combined.length;
+  for (let index = combined.length - 1; index >= 0; index -= 1) {
+    const chunkBytes = sessionOutputTextEncoder.encode(combined[index]).byteLength;
+    if (retainedBytes + chunkBytes > SESSION_OUTPUT_RENDER_CONTENT_BYTES_LIMIT) break;
+    retainedBytes += chunkBytes;
+    firstRetainedIndex = index;
+  }
+  return combined.slice(firstRetainedIndex);
+}
+
 function reviewDecisionLabel(decision: ReviewDecision): string {
   if (decision === "accept") return "Accept evidence";
   if (decision === "repair") return "Request repair";
@@ -3494,6 +3552,7 @@ function CommandDeck({
   onQueueDecision,
   workstationActionTurns,
   workstationActionState,
+  workstationReviewActionStates,
   workstationActionStatusRef,
   workstationActionDrafts,
   onWorkstationActionDraftChange,
@@ -3588,6 +3647,7 @@ function CommandDeck({
   onQueueDecision: (itemId: string, decision: WorkspaceQueueDecision, reason: string) => void;
   workstationActionTurns: readonly WorkstationActionTurn[];
   workstationActionState: WorkstationActionState | null;
+  workstationReviewActionStates: Readonly<Record<string, WorkstationActionState>>;
   workstationActionStatusRef: RefObject<HTMLSpanElement | null>;
   workstationActionDrafts: Record<string, WorkstationActionDraftState>;
   onWorkstationActionDraftChange: (key: string, draft: WorkstationActionDraftState) => void;
@@ -3784,10 +3844,18 @@ function CommandDeck({
   const [selectedSessionMissionId, setSelectedSessionMissionId] = useState<string | null>(null);
   const [selectedWorkstationDiff, setSelectedWorkstationDiff] = useState<WorkstationDiffLink | null>(null);
   const [selectedExecutionNodeId, setSelectedExecutionNodeId] = useState<string | null>(null);
-  const [executionOutputLines, setExecutionOutputLines] = useState<readonly string[]>([]);
+  const [executionOutputChunks, setExecutionOutputChunks] = useState<readonly string[]>([]);
   const [executionOutputState, setExecutionOutputState] =
     useState<MissionExecutionOutputState>("unavailable");
   const [executionOutputTarget, setExecutionOutputTarget] = useState<string | null>(null);
+  const executionOutputTargetRef = useRef<string | null>(null);
+  const executionOutputSequenceByTargetRef = useRef(new Map<string, number>());
+  const [executionOutputFailure, setExecutionOutputFailure] = useState<{
+    readonly message: string;
+    readonly recoverable: boolean;
+    readonly retrying: boolean;
+  } | null>(null);
+  const [executionOutputRetry, setExecutionOutputRetry] = useState(0);
   const [sessionArtifactViewer, setSessionArtifactViewer] =
     useState<SessionArtifactViewerState | null>(null);
   const artifactLoadSequenceRef = useRef(0);
@@ -3960,23 +4028,36 @@ function CommandDeck({
   useEffect(() => {
     const selectedNode = selectedExecutionNode;
     if (!selectedNode || selectedNode.kind !== "agent-session" || !selectedNode.session) {
+      executionOutputTargetRef.current = null;
+      executionOutputSequenceByTargetRef.current.clear();
       setExecutionOutputTarget(null);
-      setExecutionOutputLines([]);
+      setExecutionOutputChunks([]);
       setExecutionOutputState("unavailable");
+      setExecutionOutputFailure(null);
       return;
     }
     const missionId = selectedNode.card?.missionId ?? activeMissionId;
     const sessionId = selectedNode.session.session_id;
     if (!missionId || !client.subscribeToSessionOutput) {
+      executionOutputTargetRef.current = null;
+      executionOutputSequenceByTargetRef.current.clear();
       setExecutionOutputTarget(null);
-      setExecutionOutputLines([]);
+      setExecutionOutputChunks([]);
       setExecutionOutputState("unavailable");
+      setExecutionOutputFailure(null);
       return;
     }
     let active = true;
-    let lastSequence = -1;
-    setExecutionOutputTarget(`${missionId}:${sessionId}`);
-    setExecutionOutputLines([]);
+    const target = `${missionId}:${sessionId}`;
+    const targetChanged = executionOutputTargetRef.current !== target;
+    executionOutputTargetRef.current = target;
+    setExecutionOutputTarget(target);
+    if (targetChanged) {
+      executionOutputSequenceByTargetRef.current.clear();
+      setExecutionOutputChunks([]);
+    }
+    let lastSequence = executionOutputSequenceByTargetRef.current.get(target) ?? -1;
+    setExecutionOutputFailure(null);
     setExecutionOutputState("subscribing");
     let unsubscribe: (() => void) | undefined;
     try {
@@ -3992,22 +4073,42 @@ function CommandDeck({
             return;
           }
           lastSequence = event.sequence;
-          setExecutionOutputState("subscribed");
+          executionOutputSequenceByTargetRef.current.set(target, lastSequence);
           if (event.content) {
-            const incomingLines = event.content.split(/\r?\n/);
-            setExecutionOutputLines((current) => [...current, ...incomingLines].slice(-256));
+            setExecutionOutputChunks((current) => appendBoundedSessionOutputChunks(current, [event.content]));
           }
         },
+        (subscriptionState) => {
+          if (!active) return;
+          if (subscriptionState.kind === "subscribed") {
+            setExecutionOutputFailure(null);
+            setExecutionOutputState("subscribed");
+            return;
+          }
+          setExecutionOutputFailure({
+            message: subscriptionState.message,
+            recoverable: subscriptionState.recoverable,
+            retrying: subscriptionState.retrying,
+          });
+          setExecutionOutputState("failed");
+        },
       );
-      setExecutionOutputState("subscribed");
-    } catch {
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setExecutionOutputFailure({ message, recoverable: true, retrying: false });
       setExecutionOutputState("unavailable");
     }
     return () => {
       active = false;
       unsubscribe?.();
     };
-  }, [activeMissionId, client, executionTreeProjection.revision, selectedExecutionNode]);
+  }, [
+    activeMissionId,
+    client,
+    executionOutputRetry,
+    executionTreeProjection.revision,
+    selectedExecutionNode,
+  ]);
   const hydratedWorkstationContinuityKey = useRef<string | null>(null);
   const skipWorkstationContinuityWrite = useRef(false);
   useEffect(() => {
@@ -5019,19 +5120,26 @@ function CommandDeck({
               onSelectNode={selectExecutionNode}
               onCloseInspector={() => setSelectedExecutionNodeId(null)}
               outputLines={
-                executionOutputTarget === selectedExecutionOutputTarget ? executionOutputLines : []
+                executionOutputTarget === selectedExecutionOutputTarget ? executionOutputChunks : []
               }
               outputState={
                 executionOutputTarget === selectedExecutionOutputTarget
                   ? executionOutputState
                   : "unavailable"
               }
+              outputFailure={
+                executionOutputTarget === selectedExecutionOutputTarget
+                  ? executionOutputFailure
+                  : null
+              }
+              onRetryOutput={() => setExecutionOutputRetry((current) => current + 1)}
               onOpenDiff={openWorkstationDiff}
               onOpenEvidence={openWorkstationEvidence}
               workstationActionDrafts={workstationActionDrafts}
               onWorkstationActionDraftChange={onWorkstationActionDraftChange}
               onWorkstationAction={onWorkstationAction}
               actionState={workstationActionState}
+              actionStates={workstationReviewActionStates}
               reviewReasons={reviewReasons}
               onReviewReasonChange={onReviewReasonChange}
               onReviewDecision={onReviewDecision}

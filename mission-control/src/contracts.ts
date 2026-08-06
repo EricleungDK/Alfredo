@@ -819,7 +819,7 @@ export interface SessionOutputEvent {
   readonly session_id: string;
   readonly sequence: number;
   readonly content: string;
-  readonly phase?: "streaming" | "complete" | "failed";
+  readonly phase: "streaming" | "complete" | "failed";
 }
 
 export interface SessionOutputProjection {

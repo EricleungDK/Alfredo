@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import codecs
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -352,7 +353,12 @@ class _BoundedProcessCapture:
     def _drain(self, name: str, stream: Any) -> None:
         try:
             while True:
-                chunk = stream.read(64 * 1024)
+                # BufferedReader.read(n) is allowed to wait for n bytes or EOF.
+                # A live inspector must see a flushed short record while its child
+                # is still running, so prefer the pipe's immediately-available
+                # read primitive and retain the same aggregate byte budget below.
+                read_available = getattr(stream, "read1", stream.read)
+                chunk = read_available(64 * 1024)
                 if not chunk:
                     break
                 retained_chunk = b""
@@ -421,6 +427,7 @@ class _SessionOutputRecorder:
         self._lock = threading.Lock()
         self._sequence = 0
         self._bytes_written = 0
+        self._decoders: dict[str, codecs.IncrementalDecoder] = {}
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.is_symlink():
             raise AlbertError("Session output journal must not be a symlink.")
@@ -431,33 +438,73 @@ class _SessionOutputRecorder:
     def record(self, _stream_name: str, payload: bytes) -> None:
         if not payload:
             return
-        content = payload.decode("utf-8", errors="replace")
-        encoded_content = content.encode("utf-8")[: self._EVENT_CONTENT_LIMIT_BYTES]
-        content = encoded_content.decode("utf-8", errors="ignore")
         with self._lock:
+            decoder = self._decoders.setdefault(
+                _stream_name,
+                codecs.getincrementaldecoder("utf-8")(errors="replace"),
+            )
+            self._record_content(decoder.decode(payload, final=False))
+
+    @classmethod
+    def _utf8_chunks(cls, content: str) -> list[str]:
+        """Split text into valid UTF-8 event payloads without dropping a suffix."""
+
+        chunks: list[str] = []
+        current: list[str] = []
+        current_size = 0
+        for character in content:
+            character_size = len(character.encode("utf-8"))
+            if current and current_size + character_size > cls._EVENT_CONTENT_LIMIT_BYTES:
+                chunks.append("".join(current))
+                current = []
+                current_size = 0
+            current.append(character)
+            current_size += character_size
+        if current:
+            chunks.append("".join(current))
+        return chunks
+
+    def _encoded_event(self, sequence: int, content: str) -> bytes:
+        return (
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "mission_id": self._mission_id,
+                    "session_id": self._session_id,
+                    "sequence": sequence,
+                    "content": content,
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            + "\n"
+        ).encode("utf-8")
+
+    def _record_content(self, content: str) -> None:
+        for chunk in self._utf8_chunks(content):
             if self._bytes_written >= self._JOURNAL_LIMIT_BYTES:
                 return
             sequence = self._sequence + 1
-            event = {
-                "schema_version": 1,
-                "mission_id": self._mission_id,
-                "session_id": self._session_id,
-                "sequence": sequence,
-                "content": content,
-            }
-            encoded = (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
-                "utf-8"
-            )
+            encoded = self._encoded_event(sequence, chunk)
             remaining = self._JOURNAL_LIMIT_BYTES - self._bytes_written
             if len(encoded) > remaining:
-                available = max(0, remaining - len(encoded) + len(encoded_content))
-                content = encoded_content[:available].decode("utf-8", errors="ignore")
-                event["content"] = content
-                encoded = (
-                    json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
-                ).encode("utf-8")
-            if len(encoded) > remaining:
-                return
+                # Keep the greatest code-point-safe prefix that still leaves a
+                # valid bounded JSONL event. The aggregate journal budget, not
+                # a per-callback truncation, is the authoritative boundary.
+                lower = 0
+                upper = len(chunk)
+                prefix = ""
+                while lower <= upper:
+                    midpoint = (lower + upper) // 2
+                    candidate = chunk[:midpoint]
+                    if len(self._encoded_event(sequence, candidate)) <= remaining:
+                        prefix = candidate
+                        lower = midpoint + 1
+                    else:
+                        upper = midpoint - 1
+                if not prefix:
+                    return
+                encoded = self._encoded_event(sequence, prefix)
             try:
                 self._stream.write(encoded)
                 self._stream.flush()
@@ -469,6 +516,8 @@ class _SessionOutputRecorder:
     def close(self) -> None:
         with self._lock:
             try:
+                for decoder in self._decoders.values():
+                    self._record_content(decoder.decode(b"", final=True))
                 self._stream.close()
             except OSError:
                 pass
@@ -2455,9 +2504,13 @@ class AlbertMission:
             expected_statuses={"queued"},
             timeline_message=started_message,
         )
-        self._start_session_output(session)
         try:
             try:
+                # Journal creation is part of runner start, not an optional UI
+                # enhancement. A failure after persisting `running` must enter
+                # this durable terminal-failure path with every other runner
+                # error.
+                self._start_session_output(session)
                 self._raise_if_cancelled(session)
                 self._ensure_session_worktree(session)
                 persisted = self._persist_session_update(session)

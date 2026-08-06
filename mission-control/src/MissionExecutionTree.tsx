@@ -24,7 +24,15 @@ import {
 } from "./workstation-projection";
 import type { ReviewDecision, WorkspaceQueueDecision } from "./contracts";
 
-export type MissionExecutionOutputState = "unavailable" | "subscribing" | "subscribed";
+export type MissionExecutionOutputState = "unavailable" | "subscribing" | "subscribed" | "failed";
+
+export const CONSTRAINED_INSPECTOR_MEDIA_QUERY = "(max-width: 680px)";
+
+interface MissionExecutionOutputFailure {
+  readonly message: string;
+  readonly recoverable: boolean;
+  readonly retrying: boolean;
+}
 
 interface MissionExecutionActionDraft {
   readonly reason: string;
@@ -44,6 +52,8 @@ export interface MissionExecutionTreeProps {
   readonly onCloseInspector: () => void;
   readonly outputLines: readonly string[];
   readonly outputState: MissionExecutionOutputState;
+  readonly outputFailure?: MissionExecutionOutputFailure | null;
+  readonly onRetryOutput?: () => void;
   readonly onOpenDiff?: (diff: WorkstationDiffLink, returnFocus?: HTMLElement | null) => void;
   readonly onOpenEvidence?: (
     missionId: string,
@@ -62,6 +72,7 @@ export interface MissionExecutionTreeProps {
     draft: MissionExecutionActionDraft,
   ) => void;
   readonly actionState?: MissionExecutionActionState | null;
+  readonly actionStates?: Readonly<Record<string, MissionExecutionActionState>>;
   readonly reviewReasons?: Readonly<Record<string, string>>;
   readonly onReviewReasonChange?: (sessionId: string, reason: string) => void;
   readonly onReviewDecision?: (
@@ -88,12 +99,15 @@ export function MissionExecutionTree({
   onCloseInspector,
   outputLines,
   outputState,
+  outputFailure,
+  onRetryOutput,
   onOpenDiff,
   onOpenEvidence,
   workstationActionDrafts,
   onWorkstationActionDraftChange,
   onWorkstationAction,
   actionState,
+  actionStates,
   reviewReasons,
   onReviewReasonChange,
   onReviewDecision,
@@ -103,6 +117,7 @@ export function MissionExecutionTree({
   onOpenView,
   agentOptions,
 }: MissionExecutionTreeProps): ReactElement {
+  const constrainedInspector = useConstrainedInspector();
   const parentIds = useMemo(
     () => projection.nodes.filter((node) => node.child_ids.length > 0).map((node) => node.id),
     [projection.nodes],
@@ -228,6 +243,15 @@ export function MissionExecutionTree({
   };
 
   const selectedNode = projection.nodes.find((node) => node.id === selectedNodeId) ?? null;
+  const dismissInspector = (restoreFocus: boolean): void => {
+    const returnFocus = originatingFocusRef.current;
+    onCloseInspector();
+    if (restoreFocus) {
+      requestAnimationFrame(() => {
+        if (returnFocus?.isConnected) returnFocus.focus();
+      });
+    }
+  };
 
   return (
     <section className="mission-execution-tree" aria-label="Mission Execution Tree">
@@ -255,76 +279,85 @@ export function MissionExecutionTree({
           aria-multiselectable="false"
         >
           {visibleNodes.map((node) => (
-            <button
+            <div
               key={node.id}
-              type="button"
-              role="treeitem"
-              className={`mission-execution-node mission-execution-node--${node.kind}`}
-              data-state={node.state}
-              data-risk={node.risk}
-              data-lineage={node.lineage}
-              data-execution-node-id={node.id}
-              data-selected={selectedNodeId === node.id}
-              aria-level={node.depth + 1}
-              aria-setsize={
-                node.parent_id ? nodesById.get(node.parent_id)?.child_ids.length ?? 1 : 1
-              }
-              aria-posinset={
-                node.parent_id
-                  ? (nodesById.get(node.parent_id)?.child_ids.indexOf(node.id) ?? 0) + 1
-                  : 1
-              }
-              aria-selected={selectedNodeId === node.id}
-              aria-label={`${node.kind === "agent-session" ? "Local Agent session" : node.kind} ${node.identity}; ${node.title}; ${nodeStateLabel(node.state)}; ${riskLabel(node.risk)}`}
-              aria-expanded={node.child_ids.length > 0 ? expandedNodeIds.has(node.id) : undefined}
-              tabIndex={
-                focusedNodeId === node.id || (!focusedNodeId && node.id === visibleNodes[0]?.id)
-                  ? 0
-                  : -1
-              }
+              role="presentation"
+              className="mission-execution-node-wrapper"
               style={{
                 marginInlineStart: `${Math.min(node.depth, 3) * 0.75}rem`,
                 width: `calc(100% - ${Math.min(node.depth, 3) * 0.75}rem)`,
               }}
-              onClick={() => {
-                setFocusedNodeId(node.id);
-                if (node.inspectable) {
-                  originatingFocusRef.current = document.activeElement instanceof HTMLElement
-                    ? document.activeElement
-                    : null;
-                  onSelectNode(node.id);
-                }
-                else toggleNode(node);
-              }}
-              onFocus={() => setFocusedNodeId(node.id)}
-              onKeyDown={(event) => handleNodeKeyDown(event, node)}
             >
-              <span
-                className="mission-execution-node__shape"
-                data-shape={node.shape}
-                aria-hidden="true"
-              />
-              <span className="mission-execution-node__copy">
-                <span className="mission-execution-node__identity">
-                  {node.kind === "agent-session" ? "Local Agent session / " : `${node.kind} / `}
-                  {node.identity}
+              <button
+                type="button"
+                role="treeitem"
+                className={`mission-execution-node mission-execution-node--${node.kind}`}
+                data-state={node.state}
+                data-risk={node.risk}
+                data-lineage={node.lineage}
+                data-execution-node-id={node.id}
+                data-selected={selectedNodeId === node.id}
+                aria-level={node.depth + 1}
+                aria-setsize={
+                  node.parent_id ? nodesById.get(node.parent_id)?.child_ids.length ?? 1 : 1
+                }
+                aria-posinset={
+                  node.parent_id
+                    ? (nodesById.get(node.parent_id)?.child_ids.indexOf(node.id) ?? 0) + 1
+                    : 1
+                }
+                aria-selected={selectedNodeId === node.id}
+                aria-label={`${node.kind === "agent-session" ? "Local Agent session" : node.kind} ${node.identity}; ${node.title}; ${nodeStateLabel(node.state)}; ${riskLabel(node.risk)}${node.lineage === "repair" ? "; Repair lineage" : ""}`}
+                aria-expanded={node.child_ids.length > 0 ? expandedNodeIds.has(node.id) : undefined}
+                tabIndex={
+                  focusedNodeId === node.id || (!focusedNodeId && node.id === visibleNodes[0]?.id)
+                    ? 0
+                    : -1
+                }
+                onClick={(event) => {
+                  setFocusedNodeId(node.id);
+                  if (node.inspectable) {
+                    originatingFocusRef.current = event.currentTarget;
+                    onSelectNode(node.id);
+                  }
+                  else toggleNode(node);
+                }}
+                onFocus={() => setFocusedNodeId(node.id)}
+                onKeyDown={(event) => handleNodeKeyDown(event, node)}
+              >
+                <span
+                  className="mission-execution-node__shape"
+                  data-shape={node.shape}
+                  aria-hidden="true"
+                />
+                <span className="mission-execution-node__copy">
+                  <span className="mission-execution-node__identity">
+                    {node.kind === "agent-session" ? "Local Agent session / " : `${node.kind} / `}
+                    {node.identity}
+                  </span>
+                  <strong>{node.title}</strong>
+                  {node.lineage === "repair" ? <small><span className="mission-execution-node__lineage">Repair</span> lineage · {node.summary}</small> : <small>{node.summary}</small>}
                 </span>
-                <strong>{node.title}</strong>
-                <small>{node.lineage === "repair" ? `Repair lineage · ${node.summary}` : node.summary}</small>
-              </span>
-              <span className="mission-execution-node__status">
-                <span>{node.status}</span>
-                <small>{nodeStateLabel(node.state)}</small>
-              </span>
-              {node.risk !== "none" ? (
-                <span className="mission-execution-node__risk">{riskLabel(node.risk)}</span>
-              ) : null}
+                <span className="mission-execution-node__status">
+                  <span>{node.status}</span>
+                  <small>{nodeStateLabel(node.state)}</small>
+                </span>
+                {node.risk !== "none" ? (
+                  <span className="mission-execution-node__risk">{riskLabel(node.risk)}</span>
+                ) : null}
+              </button>
               {node.child_ids.length > 0 ? (
-                <span className="mission-execution-node__disclosure" aria-hidden="true">
+                <button
+                  type="button"
+                  className="mission-execution-node__disclosure"
+                  aria-label={`${expandedNodeIds.has(node.id) ? "Collapse" : "Expand"} ${node.kind === "agent-session" ? "Local Agent session" : node.kind === "issue-slice" ? "Issue Slice" : node.kind === "ad-hoc-delegation" ? "Ad Hoc Delegation" : "Mission"} ${node.identity}`}
+                  aria-expanded={expandedNodeIds.has(node.id)}
+                  onClick={() => toggleNode(node)}
+                >
                   {expandedNodeIds.has(node.id) ? "−" : "+"}
-                </span>
+                </button>
               ) : null}
-            </button>
+            </div>
           ))}
         </div>
       ) : (
@@ -335,48 +368,84 @@ export function MissionExecutionTree({
       )}
 
       {selectedNode ? (
-        <MissionExecutionInspector
-          node={selectedNode}
-          outputLines={outputLines}
-          outputState={outputState}
-          onClose={() => {
-            const returnFocus = originatingFocusRef.current;
-            onCloseInspector();
-            requestAnimationFrame(() => {
-              if (returnFocus?.isConnected) returnFocus.focus();
-            });
-          }}
-          onOpenDiff={onOpenDiff}
-          onOpenEvidence={onOpenEvidence}
-          workstationActionDrafts={workstationActionDrafts}
-          onWorkstationActionDraftChange={onWorkstationActionDraftChange}
-          onWorkstationAction={onWorkstationAction}
-          actionState={actionState}
-          reviewReasons={reviewReasons}
-          onReviewReasonChange={onReviewReasonChange}
-          onReviewDecision={onReviewDecision}
-          queueReasons={queueReasons}
-          onQueueReasonChange={onQueueReasonChange}
-          onQueueDecision={onQueueDecision}
-          onOpenView={onOpenView}
-          agentOptions={agentOptions}
-        />
+        <div className={constrainedInspector ? "mission-execution-modal-layer" : undefined}>
+          <MissionExecutionInspector
+            node={selectedNode}
+            outputLines={outputLines}
+            outputState={outputState}
+            outputFailure={outputFailure}
+            onRetryOutput={onRetryOutput}
+            constrained={constrainedInspector}
+            onClose={() => dismissInspector(true)}
+            onBeforeOpenArtifact={constrainedInspector ? () => dismissInspector(false) : undefined}
+            onOpenDiff={(diff, returnFocus) =>
+              onOpenDiff?.(
+                diff,
+                constrainedInspector ? originatingFocusRef.current : returnFocus,
+              )
+            }
+            onOpenEvidence={(missionId, sessionId, artifactRef, label, returnFocus) =>
+              onOpenEvidence?.(
+                missionId,
+                sessionId,
+                artifactRef,
+                label,
+                constrainedInspector ? originatingFocusRef.current : returnFocus,
+              )
+            }
+            workstationActionDrafts={workstationActionDrafts}
+            onWorkstationActionDraftChange={onWorkstationActionDraftChange}
+            onWorkstationAction={onWorkstationAction}
+            actionState={actionState}
+            actionStates={actionStates}
+            reviewReasons={reviewReasons}
+            onReviewReasonChange={onReviewReasonChange}
+            onReviewDecision={onReviewDecision}
+            queueReasons={queueReasons}
+            onQueueReasonChange={onQueueReasonChange}
+            onQueueDecision={onQueueDecision}
+            onOpenView={onOpenView}
+            agentOptions={agentOptions}
+          />
+        </div>
       ) : null}
     </section>
   );
+}
+
+function useConstrainedInspector(): boolean {
+  const [constrained, setConstrained] = useState(() =>
+    typeof window !== "undefined" && typeof window.matchMedia === "function"
+      ? window.matchMedia(CONSTRAINED_INSPECTOR_MEDIA_QUERY).matches
+      : false,
+  );
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") return;
+    const media = window.matchMedia(CONSTRAINED_INSPECTOR_MEDIA_QUERY);
+    const update = (): void => setConstrained(media.matches);
+    update();
+    media.addEventListener?.("change", update);
+    return () => media.removeEventListener?.("change", update);
+  }, []);
+  return constrained;
 }
 
 function MissionExecutionInspector({
   node,
   outputLines,
   outputState,
+  outputFailure,
+  onRetryOutput,
+  constrained,
   onClose,
+  onBeforeOpenArtifact,
   onOpenDiff,
   onOpenEvidence,
   workstationActionDrafts,
   onWorkstationActionDraftChange,
   onWorkstationAction,
   actionState,
+  actionStates,
   reviewReasons,
   onReviewReasonChange,
   onReviewDecision,
@@ -389,7 +458,11 @@ function MissionExecutionInspector({
   readonly node: MissionExecutionTreeNode;
   readonly outputLines: readonly string[];
   readonly outputState: MissionExecutionOutputState;
+  readonly outputFailure?: MissionExecutionOutputFailure | null;
+  readonly onRetryOutput?: () => void;
+  readonly constrained: boolean;
   readonly onClose: () => void;
+  readonly onBeforeOpenArtifact?: () => void;
   readonly onOpenDiff?: (diff: WorkstationDiffLink, returnFocus?: HTMLElement | null) => void;
   readonly onOpenEvidence?: (
     missionId: string,
@@ -408,6 +481,7 @@ function MissionExecutionInspector({
     draft: MissionExecutionActionDraft,
   ) => void;
   readonly actionState?: MissionExecutionActionState | null;
+  readonly actionStates?: Readonly<Record<string, MissionExecutionActionState>>;
   readonly reviewReasons?: Readonly<Record<string, string>>;
   readonly onReviewReasonChange?: (sessionId: string, reason: string) => void;
   readonly onReviewDecision?: (
@@ -428,9 +502,36 @@ function MissionExecutionInspector({
 }): ReactElement {
   const headingId = `mission-execution-inspector-${node.id.replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
   const inspectorRef = useRef<HTMLElement>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
-    inspectorRef.current?.focus();
-  }, [node.id]);
+    (constrained ? closeButtonRef.current : inspectorRef.current)?.focus();
+  }, [constrained, node.id]);
+
+  const handleInspectorKeyDown = (event: KeyboardEvent<HTMLElement>): void => {
+    if (event.key === "Escape" && constrained) {
+      event.preventDefault();
+      onClose();
+      return;
+    }
+    if (event.key !== "Tab" || !constrained) return;
+    const focusable = [...(inspectorRef.current?.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ) ?? [])].filter((element) => !element.hasAttribute("disabled"));
+    if (focusable.length === 0) {
+      event.preventDefault();
+      inspectorRef.current?.focus();
+      return;
+    }
+    const first = focusable[0];
+    const last = focusable.at(-1)!;
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
 
   const issue = node.issue;
   const session = node.session;
@@ -469,9 +570,13 @@ function MissionExecutionInspector({
   return (
     <section
       ref={inspectorRef}
-      className="mission-execution-inspector"
+      className={`mission-execution-inspector${constrained ? " mission-execution-inspector--dialog" : ""}`}
+      role={constrained ? "dialog" : undefined}
+      aria-modal={constrained || undefined}
+      aria-labelledby={constrained ? headingId : undefined}
       aria-label={`${node.identity} execution inspector`}
       tabIndex={-1}
+      onKeyDown={handleInspectorKeyDown}
     >
       <header className="mission-execution-inspector__heading">
         <div>
@@ -484,7 +589,7 @@ function MissionExecutionInspector({
         </div>
         <div className="mission-execution-inspector__heading-actions">
           <span className={`status status--${node.state}`}>{node.status}</span>
-          <button type="button" aria-label="Close Mission Execution Tree inspector" onClick={onClose}>
+          <button ref={closeButtonRef} type="button" aria-label="Close Mission Execution Tree inspector" onClick={onClose}>
             Close inspector
           </button>
         </div>
@@ -532,7 +637,16 @@ function MissionExecutionInspector({
               <button
                 key={link.href}
                 type="button"
-                onClick={(event) => onOpenEvidence?.(card?.missionId ?? "", link.sessionId, link.href, link.label, event.currentTarget)}
+                onClick={(event) => {
+                  onBeforeOpenArtifact?.();
+                  onOpenEvidence?.(
+                    card?.missionId ?? "",
+                    link.sessionId,
+                    link.href,
+                    link.label,
+                    event.currentTarget,
+                  );
+                }}
               >
                 {link.label}
               </button>
@@ -540,7 +654,14 @@ function MissionExecutionInspector({
           </div>
         ) : null}
         {card?.detail.diffs.map((diff) => (
-          <button key={`${diff.href}:${diff.path}`} type="button" onClick={(event) => onOpenDiff?.(diff, event.currentTarget)}>
+          <button
+            key={`${diff.href}:${diff.path}`}
+            type="button"
+            onClick={(event) => {
+              onBeforeOpenArtifact?.();
+              onOpenDiff?.(diff, event.currentTarget);
+            }}
+          >
             {diff.label}
           </button>
         ))}
@@ -550,9 +671,19 @@ function MissionExecutionInspector({
         <section className="mission-execution-inspector__section mission-execution-inspector__output" aria-label={`${node.identity} detailed Local Agent output`}>
           <div className="mission-execution-inspector__section-heading">
             <h5>Detailed Local Agent output</h5>
-            <span>{outputState === "subscribed" ? "Subscribed while this inspector is open" : outputState === "subscribing" ? "Subscribing…" : "Output subscription unavailable"}</span>
+            <span>{outputState === "subscribed" ? "Subscribed while this inspector is open" : outputState === "subscribing" ? "Subscribing…" : outputState === "failed" ? "Output reader needs attention" : "Output subscription unavailable"}</span>
           </div>
-          <pre aria-label="Detailed Local Agent output content">{outputLines.length > 0 ? outputLines.join("\n") : "No detailed output received yet."}</pre>
+          <pre aria-label="Detailed Local Agent output content">{outputLines.length > 0 ? outputLines.join("") : "No detailed output received yet."}</pre>
+          {outputFailure ? (
+            <div className="mission-execution-inspector__output-error" role="alert">
+              <span>{outputFailure.message}</span>
+              {outputFailure.recoverable ? (
+                <button type="button" onClick={onRetryOutput}>
+                  {outputFailure.retrying ? "Retry now" : "Retry output"}
+                </button>
+              ) : null}
+            </div>
+          ) : null}
         </section>
       ) : null}
 
@@ -565,6 +696,7 @@ function MissionExecutionInspector({
                 key={`${action.label}:${action.actionType ?? "none"}`}
                 action={action}
                 actionState={actionState}
+                actionStates={actionStates}
                 workstationActionDrafts={workstationActionDrafts}
                 onWorkstationActionDraftChange={onWorkstationActionDraftChange}
                 onWorkstationAction={onWorkstationAction}
@@ -588,6 +720,7 @@ function MissionExecutionInspector({
 function MissionExecutionGovernedAction({
   action,
   actionState,
+  actionStates,
   workstationActionDrafts,
   onWorkstationActionDraftChange,
   onWorkstationAction,
@@ -602,6 +735,7 @@ function MissionExecutionGovernedAction({
 }: {
   readonly action: WorkstationGovernedAction;
   readonly actionState?: MissionExecutionActionState | null;
+  readonly actionStates?: Readonly<Record<string, MissionExecutionActionState>>;
   readonly workstationActionDrafts?: Readonly<Record<string, MissionExecutionActionDraft>>;
   readonly onWorkstationActionDraftChange?: (
     key: string,
@@ -641,9 +775,8 @@ function MissionExecutionGovernedAction({
       : draft.reason;
   const requiresAgent = action.actionType === "model-assignment-change";
   const actionIdentity = workstationActionStateId(action);
-  const actionStatusId = actionState?.itemId === actionIdentity
-    ? actionState
-    : null;
+  const actionStatusId = actionStates?.[actionIdentity] ??
+    (actionState?.itemId === actionIdentity ? actionState : null);
   const disabled = Boolean(action.disabledReason) ||
     Boolean(actionStatusId?.state === "pending") ||
     (action.requiresReason && !reason.trim()) ||

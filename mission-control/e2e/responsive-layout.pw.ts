@@ -249,7 +249,7 @@ const history = {
 
 async function installTauriFixture(page: Page): Promise<void> {
   await page.addInitScript(
-    ({ fixtureSnapshot, fixtureHistory }) => {
+    ({ fixtureSnapshot, fixtureHistory, fixtureReviewSessionId }) => {
       const responses: Record<string, unknown> = {
         performance_mark: { recorded: false },
         alfredo_launch_context: {
@@ -336,6 +336,13 @@ async function installTauriFixture(page: Page): Promise<void> {
           content_limit_bytes: 128000,
           truncated: false,
         },
+        session_output: {
+          schema_version: 1,
+          mission_id: fixtureSnapshot.active_mission.id,
+          session_id: fixtureReviewSessionId,
+          events: [],
+          complete: true,
+        },
       };
       Object.defineProperty(window, "__TAURI_INTERNALS__", {
         configurable: true,
@@ -358,7 +365,11 @@ async function installTauriFixture(page: Page): Promise<void> {
         value: true,
       });
     },
-    { fixtureSnapshot: snapshot, fixtureHistory: history },
+    {
+      fixtureSnapshot: snapshot,
+      fixtureHistory: history,
+      fixtureReviewSessionId: reviewSessionId,
+    },
   );
 }
 
@@ -516,6 +527,7 @@ for (const viewport of [
 ]) {
   test(`${viewport.name} has no panel or control overlap`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.emulateMedia({ reducedMotion: "reduce" });
     await serveProductionBundle(page);
     await installTauriFixture(page);
     await page.goto("http://alfredo.test/");
@@ -568,33 +580,47 @@ for (const viewport of [
     await page.getByRole("button", { name: "Close commands and skills" }).click();
     await expect(capabilityMenu).toBeHidden();
 
-    const reviewCard = page.getByRole("article", {
-      name: `${reviewAgentName} workstation card`,
+    const executionTree = page.getByRole("region", { name: "Mission Execution Tree" });
+    await expect(executionTree).toBeVisible();
+    const issueDisclosure = executionTree.getByRole("button", {
+      name: "Collapse Issue Slice ISS-RESPONSIVE-03",
     });
-    const acceptReview = reviewCard.getByRole("button", {
-      name: `Accept evidence ${reviewSessionId}`,
+    await issueDisclosure.click();
+    await expect(
+      executionTree.getByRole("treeitem", { name: new RegExp(`Local Agent session ${reviewSessionId}`) }),
+    ).toBeHidden();
+    await executionTree.getByRole("button", { name: "Expand Issue Slice ISS-RESPONSIVE-03" }).click();
+
+    const reviewNode = executionTree.getByRole("treeitem", {
+      name: new RegExp(`Local Agent session ${reviewSessionId}`),
     });
-    await acceptReview.scrollIntoViewIfNeeded();
+    await reviewNode.focus();
+    await reviewNode.click();
+    const inspector = viewport.width <= 680
+      ? page.getByRole("dialog", { name: `Local Agent session / ${reviewSessionId}` })
+      : page.getByRole("region", { name: `${reviewSessionId} execution inspector` });
+    await expect(inspector).toBeVisible();
+    if (viewport.width <= 680) {
+      const modalLayer = page.locator(".mission-execution-modal-layer");
+      await expect(inspector).toHaveAttribute("aria-modal", "true");
+      await expect(modalLayer).toHaveCSS("position", "fixed");
+      await expect(inspector.getByLabel("Detailed Local Agent output content")).toHaveCSS("overflow-y", "visible");
+    }
+    await expectHorizontalViewportContainment(inspector, viewport.width);
+    await expectVisibleControlsNotToOverlap(inspector);
+    const acceptReview = inspector.getByRole("button", { name: "Accept evidence" });
     await expect(acceptReview).toBeVisible();
     await expect(acceptReview).toBeEnabled();
-    await expectHorizontalViewportContainment(reviewCard, viewport.width);
-    await expectVisibleControlsNotToOverlap(reviewCard);
+    await expect(inspector.getByText(/Accepting evidence marks/)).toBeVisible();
     await expectNoHorizontalPageOverflow(page);
 
-    await reviewCard.getByRole("button", { name: `Expand ${reviewAgentName}` }).click();
-    const operationalDetail = reviewCard.getByRole("region", {
-      name: `${reviewAgentName} operational detail`,
-    });
-    await expect(operationalDetail).toBeVisible();
-    await expectHorizontalViewportContainment(operationalDetail, viewport.width);
-    await expectVisibleControlsNotToOverlap(operationalDetail);
-    await expectNoHorizontalPageOverflow(page);
-
-    await operationalDetail
-      .getByRole("button", { name: `Open evidence Evidence Package ${reviewSessionId}` })
-      .click();
+    await inspector.getByRole("button", { name: `Evidence Package ${reviewSessionId}` }).click();
     const evidenceViewer = page.getByRole("region", { name: "Session evidence viewer" });
     await expect(evidenceViewer).toBeVisible();
+    if (viewport.width <= 680) {
+      await expect(inspector).toBeHidden();
+      await expect(evidenceViewer).toBeFocused();
+    }
     await expect(evidenceViewer.getByLabel("Evidence Package content")).toContainText(
       '"evidence_valid":true',
     );
@@ -609,6 +635,14 @@ for (const viewport of [
     );
     await expectVisibleControlsNotToOverlap(evidenceViewer);
     await expectNoHorizontalPageOverflow(page);
+
+    await evidenceViewer.getByRole("button", { name: "Close session evidence viewer" }).click();
+    if (viewport.width > 680) {
+      await inspector.getByRole("button", { name: "Close Mission Execution Tree inspector" }).click();
+    }
+    await expect(reviewNode).toBeFocused();
+    await expect(page.getByRole("textbox", { name: "Message Alfredo" })).toBeVisible();
+    await expect(page.locator(".mission-execution-node").first()).toHaveCSS("transition-duration", "0s");
 
     const font = await page.locator("body").evaluate((element) => getComputedStyle(element).fontFamily);
     expect(font).toContain("Ubuntu Sans");

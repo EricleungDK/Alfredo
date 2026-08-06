@@ -190,7 +190,7 @@ export interface MissionExecutionTreeNode {
   readonly child_ids: readonly string[];
   readonly state: MissionExecutionNodeState;
   readonly status: string;
-  readonly shape: "hexagon" | "square" | "diamond" | "circle";
+  readonly shape: "hexagon" | "square" | "diamond" | "circle" | "repair";
   readonly risk: "none" | "attention" | "blocked" | "failed";
   readonly summary: string;
   readonly inspectable: boolean;
@@ -327,7 +327,7 @@ export function projectMissionExecutionTree(
     depth: 0,
     state: "working",
     status: "Active Mission",
-    shape: executionNodeShape("working", mission.attention.length > 0 ? "attention" : "none"),
+    shape: executionNodeShape("working", mission.attention.length > 0 ? "attention" : "none", "root"),
     risk: mission.attention.length > 0 ? "attention" : "none",
     summary: `${activeMission.issue_count} Issue Slices · ${mission.sessions.length} Local Agent sessions`,
     inspectable: false,
@@ -363,7 +363,7 @@ export function projectMissionExecutionTree(
       depth: 1,
       state,
       status: issue.lifecycle,
-      shape: executionNodeShape(state, issueRisk(issue)),
+      shape: executionNodeShape(state, issueRisk(issue), "root"),
       risk: executionNodeRisk(state, issueRisk(issue)),
       summary: `${issue.issue_id} · ${issueSessions.length} Local Agent ${issueSessions.length === 1 ? "session" : "sessions"} · ${issue.progress}`,
       inspectable: true,
@@ -418,6 +418,7 @@ export function projectMissionExecutionTree(
       shape: executionNodeShape(
         adHocState,
         attention ? "attention" : adHocState === "failed" ? "failed" : "none",
+        "root",
       ),
       risk: executionNodeRisk(
         adHocState,
@@ -537,7 +538,7 @@ function appendSessionNodes(
       depth: nodeDepth,
       state,
       status: card?.status ?? session.status,
-      shape: executionNodeShape(state, baseRisk),
+      shape: executionNodeShape(state, baseRisk, parentSession ? "repair" : "root"),
       risk: executionNodeRisk(state, baseRisk),
       summary: `${session.session_id} · ${session.assigned_agent} · ${session.role || "Local Agent"} · ${session.model || "model not recorded"}`,
       inspectable: true,
@@ -632,7 +633,9 @@ function executionNodeRisk(
 function executionNodeShape(
   state: MissionExecutionNodeState,
   risk: MissionExecutionTreeNode["risk"],
+  lineage: MissionExecutionTreeNode["lineage"],
 ): MissionExecutionTreeNode["shape"] {
+  if (lineage === "repair") return "repair";
   if (risk === "failed" || risk === "blocked" || state === "failed" || state === "blocked") return "hexagon";
   if (risk === "attention" || state === "decision-needed") return "diamond";
   if (state === "working") return "circle";
@@ -1542,6 +1545,28 @@ export function workstationActionStateId(action: WorkstationGovernedAction): str
     workstationActionTargetId(action),
     action.decision ?? action.reviewDecision ?? action.actionType ?? "",
   ]);
+}
+
+/**
+ * The shared pending/outcome identity for one exact Review Decision. Keep the
+ * decision in this key: the three decisions for one Local Agent session are
+ * independent governed actions and must never disable one another.
+ */
+export function workstationReviewActionStateId(
+  missionId: string,
+  sessionId: string,
+  decision: ReviewDecision,
+): string {
+  return workstationActionStateId({
+    label: "review-decision",
+    target: "review-workspace",
+    requiresReason: decision === "repair",
+    actionType: "review-decision",
+    missionId,
+    sessionId,
+    reviewDecision: decision,
+    targetIdentity: { kind: "agent-session", id: sessionId },
+  });
 }
 
 export function workstationActionKey(action: WorkstationGovernedAction): string {

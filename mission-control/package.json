@@ -33,7 +33,7 @@
     "test": "vitest",
     "test:browser": "playwright test --config playwright.localhost.config.ts",
     "test:gateway": "vitest run localhost-bridge-plugin.test.ts --environment node",
-    "test:layout": "npm run build && playwright test",
+    "test:layout": "npm run build && playwright test e2e/responsive-layout.pw.ts",
     "test:prototype-journey": "playwright test --config playwright.prototype.config.ts"
   },
   "devDependencies": {

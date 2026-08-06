@@ -74,12 +74,21 @@ Daily lifecycle:
 ./scripts/apple-container-dev start
 ./scripts/apple-container-dev restart
 ./scripts/apple-container-dev logs
+./scripts/apple-container-dev test-layout
 ./scripts/apple-container-dev stop
 ```
 
 Keep `http://127.0.0.1:1420` open in the host browser. `setup` starts Apple's service and recommended kernel when required, creates the named `alfredo-dev` container from `node:22-bookworm`, and bootstraps Python 3, Git, Bubblewrap, pinned Rust 1.88.0, and `npm ci` dependencies inside that container. Subsequent `start` and `restart` reuse its root filesystem. Named volumes isolate Linux `node_modules`, `src-tauri/target`, Rust toolchain, and `.alfredo` runtime state from the macOS checkout; the host projects directory is bind-mounted at `/workspace`, and polling-backed Vite watching makes saved source changes hot-reload while sibling test repositories remain visible.
 
 The helper publishes guest port 1420 only to host `127.0.0.1:1420`, waits until `alfredo_launch_context` succeeds through the typed Rust/Python bridge, and then returns while the container stays detached. `restart` is the normal response to a process-level change. Use `rebuild` only when the named container itself must be recreated; named dependency, Cargo, toolchain, and runtime volumes are preserved. Resource defaults are four CPUs and 4 GiB and may be overridden with `ALFREDO_DEV_CPUS` and `ALFREDO_DEV_MEMORY` before the container is first created.
+
+When macOS prevents host Chromium from registering its bootstrap service, run the production layout gate through the persistent guest instead:
+
+```bash
+./scripts/apple-container-dev test-layout
+```
+
+The command keeps `alfredo-dev` running. It installs Chromium plus its Debian dependencies only when the installed Playwright version is not already cached, then runs `npm run test:layout` inside the guest. Browser binaries share the isolated `alfredo-dev-toolchain` volume, while the dependency marker is guest-local so a later `rebuild` reinstalls required Linux libraries without redownloading a valid browser cache. This is the preferred macOS automated-browser path; retain Linux CI coverage as the independent release environment.
 
 Future agents should use this persistent surface for user-led visual testing. They should still run focused automated tests appropriate to their code changes, but they should not launch a second host Vite or browser process merely to provide a manual preview that already exists here.
 
@@ -148,7 +157,7 @@ cargo fmt -- --check
 cargo test
 ```
 
-The Playwright layout gate builds the production bundle and checks real Chromium geometry at desktop, compact-desktop, tablet, and phone viewports. It must remain free of page-level horizontal overflow and control/panel overlap. Test discovery or a successful production build is not a substitute for an actual browser run; if the execution environment blocks Chromium startup, record the gate as unverified and rerun it in an allowed environment.
+The Playwright layout gate builds the production bundle and checks real Chromium geometry at desktop, compact-desktop, tablet, and phone viewports. It must remain free of page-level horizontal overflow and control/panel overlap. Test discovery or a successful production build is not a substitute for an actual browser run; on macOS, use `./scripts/apple-container-dev test-layout` when host Chromium is blocked. If both the host and guest execution environments block Chromium startup, record the gate as unverified and rerun it in an allowed environment.
 
 `npm run release:verify` is the local public-distribution gate. It builds a production AppImage, generates and exact-manifest-audits the minimal `alfredo-agent` meta package plus exact-version native adapter package, serves both from an isolated local npm registry, and installs **only** `alfredo-agent@<version>` into a clean global prefix. The gate asserts that npm fetched the optional platform tarball, resolves plain `alfredo` through PATH with no developer overrides, validates package/native versions and the AppImage SHA-256 manifest, and opens the installed application until the frontend and backend have returned the versioned `selection-required` launch context. That readiness marker records Starting Location with null Coding Workspace/Mission; it must not fabricate a Workspace Session snapshot. Only after every assertion passes does the gate stage those same two packed tarballs and replace `release/out/verified/` with their publish-order/digest manifest. The replacement fails closed but is not a concurrent-reader transaction; do not run a checker or publisher concurrently with release generation. The currently verified artifact baseline is Ubuntu 24.04 x64 with glibc 2.39; do not infer broader Ubuntu or glibc compatibility from this gate. Tauri's first AppImage build downloads its official Linux packaging helpers and may require an unrestricted Linux packaging environment.
 
@@ -232,7 +241,7 @@ contract is in `mission-control/performance/README.md`.
 - Treat controller routing and worker assignment as different decisions. Controllers may classify/discuss; only eligible Local Agent roles may execute sessions.
 - Qualify mutable work by Mission and entity identity. An Active Mission switch must not redirect already-bound work.
 - Keep full Agent Console chronology durable while bounding only the Working Context assembled for a model turn.
-- Store bulky output and diffs as session artifacts. Expose only registered, review-safe, workspace-contained text through the bounded artifact reader.
+- Store bulky output and diffs as session artifacts. Expose only registered, review-safe, workspace-contained text through the bounded artifact reader. The separate `session-output` observer journal is transient exact-session output only: it is app-local, UTF-8 validated, capped at 128,000 aggregate bytes and 256 events per page, never returns a host path, and never becomes Agent Console or Activity Journal content.
 - Render failures inline while preserving the last acknowledged projection and offering a meaningful retry where safe.
 - Use `Ubuntu Sans` for interface copy and `Ubuntu Mono` only for code-like content; keep flexible children shrink-safe and long values wrappable.
 - Add regression tests at every changed boundary, including restart or replay behavior for persisted state.

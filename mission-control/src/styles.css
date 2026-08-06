@@ -777,10 +777,19 @@ h5 {
   gap: 0.35rem;
 }
 
-.mission-execution-node {
+.mission-execution-node-wrapper {
   min-width: 0;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) minmax(8rem, auto) auto auto;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.35rem;
+  align-items: stretch;
+}
+
+.mission-execution-node {
+  min-width: 0;
+  width: 100%;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(8rem, auto) auto;
   gap: 0.55rem;
   align-items: center;
   padding: 0.58rem 0.65rem;
@@ -850,6 +859,12 @@ h5 {
   border-radius: 50%;
 }
 
+.mission-execution-node__shape[data-shape="repair"] {
+  border: 2px double var(--warning);
+  background: repeating-linear-gradient(135deg, #5b4722 0 2px, #111816 2px 4px);
+  clip-path: polygon(50% 0, 100% 28%, 82% 100%, 18% 100%, 0 28%);
+}
+
 .mission-execution-node__copy,
 .mission-execution-node__status {
   min-width: 0;
@@ -862,6 +877,13 @@ h5 {
   color: var(--cyan);
   font-family: "Ubuntu Mono", monospace;
   font-size: 0.74rem;
+}
+
+.mission-execution-node__lineage {
+  color: var(--warning);
+  font-weight: 700;
+  text-decoration: underline;
+  text-decoration-style: double;
 }
 
 .mission-execution-node__copy strong,
@@ -903,7 +925,7 @@ h5 {
 }
 
 .mission-execution-node__disclosure {
-  width: 1.2rem;
+  min-width: 2rem;
   color: var(--cyan);
   font-family: "Ubuntu Mono", monospace;
   font-size: 1rem;
@@ -919,6 +941,22 @@ h5 {
   border-left: 3px solid var(--cyan);
   border-radius: 9px;
   background: #0d1412;
+}
+
+.mission-execution-modal-layer {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  padding: 0.5rem;
+  background: #000b;
+}
+
+.mission-execution-inspector--dialog {
+  position: relative;
+  min-height: 0;
+  max-height: calc(100dvh - 1rem);
+  overflow: auto;
 }
 
 .mission-execution-inspector__heading,
@@ -1091,6 +1129,34 @@ h5 {
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.mission-execution-inspector--dialog .mission-execution-inspector__output pre {
+  max-height: none;
+  overflow: visible;
+}
+
+.mission-execution-inspector__output-error {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  color: var(--ink-soft);
+  font-size: 0.76rem;
+}
+
+.mission-execution-inspector__output-error span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.mission-execution-inspector__output-error button {
+  min-height: 1.9rem;
+  padding: 0.28rem 0.52rem;
 }
 
 .workstation-cards,

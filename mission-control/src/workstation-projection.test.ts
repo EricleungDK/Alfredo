@@ -431,6 +431,7 @@ test("projects a work-centered Mission Execution Tree from canonical work record
     kind: "agent-session",
     state: "queued",
     lineage: "repair",
+    shape: "repair",
     parent_id: "session:command-deck:session-ISS-01-1",
     parent_session_id: "session-ISS-01-1",
   });

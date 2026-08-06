@@ -2232,7 +2232,11 @@ pub struct SessionOutputRequest {
     pub after_sequence: u64,
 }
 
+const SESSION_OUTPUT_EVENT_COUNT_LIMIT: usize = 256;
+const SESSION_OUTPUT_EVENT_CONTENT_BYTES_LIMIT: usize = 16_000;
+
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionOutputEvent {
     pub schema_version: u32,
     pub mission_id: String,
@@ -2243,6 +2247,7 @@ pub struct SessionOutputEvent {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SessionOutputProjection {
     pub schema_version: u32,
     pub mission_id: String,
@@ -3365,7 +3370,7 @@ fn validate_session_output_projection(
             recoverable: false,
         });
     }
-    if projection.events.len() > 256 {
+    if projection.events.len() > SESSION_OUTPUT_EVENT_COUNT_LIMIT {
         return Err(BridgeFailure {
             code: "contract-failure".to_owned(),
             message: "Session output exceeded its bounded event count.".to_owned(),
@@ -3379,7 +3384,7 @@ fn validate_session_output_projection(
             || event.session_id != request.session_id
             || event.sequence <= previous_sequence
             || !matches!(event.phase.as_str(), "streaming" | "complete" | "failed")
-            || event.content.as_bytes().len() > 16_000
+            || event.content.as_bytes().len() > SESSION_OUTPUT_EVENT_CONTENT_BYTES_LIMIT
         {
             return Err(BridgeFailure {
                 code: "contract-failure".to_owned(),
@@ -5542,6 +5547,79 @@ mod tests {
         };
         validate_session_output_projection(&valid_projection, &request)
             .expect("an exact, bounded event after the cursor should decode");
+    }
+
+    #[test]
+    fn rejects_invalid_or_oversize_session_output_events_and_pages() {
+        let request = SessionOutputRequest {
+            mission_id: "command-deck".to_owned(),
+            session_id: "session-ISS-01-1".to_owned(),
+            after_sequence: 0,
+        };
+        let invalid_phase = SessionOutputProjection {
+            schema_version: 1,
+            mission_id: request.mission_id.clone(),
+            session_id: request.session_id.clone(),
+            events: vec![SessionOutputEvent {
+                schema_version: 1,
+                mission_id: request.mission_id.clone(),
+                session_id: request.session_id.clone(),
+                sequence: 1,
+                content: "output".to_owned(),
+                phase: "pending".to_owned(),
+            }],
+            complete: false,
+        };
+        assert_eq!(
+            validate_session_output_projection(&invalid_phase, &request)
+                .expect_err("unknown output phases must fail closed")
+                .code,
+            "contract-failure"
+        );
+
+        let oversize = SessionOutputProjection {
+            schema_version: 1,
+            mission_id: request.mission_id.clone(),
+            session_id: request.session_id.clone(),
+            events: vec![SessionOutputEvent {
+                schema_version: 1,
+                mission_id: request.mission_id.clone(),
+                session_id: request.session_id.clone(),
+                sequence: 1,
+                content: "x".repeat(16_001),
+                phase: "streaming".to_owned(),
+            }],
+            complete: false,
+        };
+        assert_eq!(
+            validate_session_output_projection(&oversize, &request)
+                .expect_err("oversize events must fail closed")
+                .code,
+            "contract-failure"
+        );
+
+        let overflowing_page = SessionOutputProjection {
+            schema_version: 1,
+            mission_id: request.mission_id.clone(),
+            session_id: request.session_id.clone(),
+            events: (1..=257)
+                .map(|sequence| SessionOutputEvent {
+                    schema_version: 1,
+                    mission_id: request.mission_id.clone(),
+                    session_id: request.session_id.clone(),
+                    sequence,
+                    content: "output".to_owned(),
+                    phase: "streaming".to_owned(),
+                })
+                .collect(),
+            complete: false,
+        };
+        assert_eq!(
+            validate_session_output_projection(&overflowing_page, &request)
+                .expect_err("a response must be one bounded output page")
+                .code,
+            "contract-failure"
+        );
     }
 
     #[test]
