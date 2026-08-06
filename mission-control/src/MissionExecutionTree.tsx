@@ -10,11 +10,32 @@ import type {
   MissionExecutionNodeState,
   MissionExecutionTreeNode,
   MissionExecutionTreeProjection,
+  WorkstationGovernedAction,
   WorkstationDiffLink,
   WorkstationEvidenceLink,
 } from "./workstation-projection";
+import {
+  executionRiskLabel,
+  executionStateLabel,
+  workstationActionConsequence,
+  workstationActionKey,
+  workstationActionStateId,
+  workstationActionTargetId,
+} from "./workstation-projection";
+import type { ReviewDecision, WorkspaceQueueDecision } from "./contracts";
 
 export type MissionExecutionOutputState = "unavailable" | "subscribing" | "subscribed";
+
+interface MissionExecutionActionDraft {
+  readonly reason: string;
+  readonly agentId: string;
+}
+
+interface MissionExecutionActionState {
+  readonly itemId: string;
+  readonly state: string;
+  readonly message: string;
+}
 
 export interface MissionExecutionTreeProps {
   readonly projection: MissionExecutionTreeProjection;
@@ -31,6 +52,33 @@ export interface MissionExecutionTreeProps {
     label: string,
     returnFocus?: HTMLElement | null,
   ) => void;
+  readonly workstationActionDrafts?: Readonly<Record<string, MissionExecutionActionDraft>>;
+  readonly onWorkstationActionDraftChange?: (
+    key: string,
+    draft: MissionExecutionActionDraft,
+  ) => void;
+  readonly onWorkstationAction?: (
+    action: WorkstationGovernedAction,
+    draft: MissionExecutionActionDraft,
+  ) => void;
+  readonly actionState?: MissionExecutionActionState | null;
+  readonly reviewReasons?: Readonly<Record<string, string>>;
+  readonly onReviewReasonChange?: (sessionId: string, reason: string) => void;
+  readonly onReviewDecision?: (
+    sessionId: string,
+    decision: ReviewDecision,
+    reason: string,
+    missionId?: string,
+  ) => void;
+  readonly queueReasons?: Readonly<Record<string, string>>;
+  readonly onQueueReasonChange?: (itemId: string, reason: string) => void;
+  readonly onQueueDecision?: (
+    itemId: string,
+    decision: WorkspaceQueueDecision,
+    reason: string,
+  ) => void;
+  readonly onOpenView?: (view: string) => void;
+  readonly agentOptions?: readonly { readonly id: string; readonly model?: string }[];
 }
 
 export function MissionExecutionTree({
@@ -42,6 +90,18 @@ export function MissionExecutionTree({
   outputState,
   onOpenDiff,
   onOpenEvidence,
+  workstationActionDrafts,
+  onWorkstationActionDraftChange,
+  onWorkstationAction,
+  actionState,
+  reviewReasons,
+  onReviewReasonChange,
+  onReviewDecision,
+  queueReasons,
+  onQueueReasonChange,
+  onQueueDecision,
+  onOpenView,
+  agentOptions,
 }: MissionExecutionTreeProps): ReactElement {
   const parentIds = useMemo(
     () => projection.nodes.filter((node) => node.child_ids.length > 0).map((node) => node.id),
@@ -52,15 +112,22 @@ export function MissionExecutionTree({
   );
   const [focusedNodeId, setFocusedNodeId] = useState<string | null>(projection.root_id);
   const treeRef = useRef<HTMLDivElement>(null);
+  const originatingFocusRef = useRef<HTMLElement | null>(null);
   const previousRootIdRef = useRef(projection.root_id);
+  const previousParentIdsRef = useRef<ReadonlySet<string>>(new Set(parentIds));
 
   useEffect(() => {
     const rootChanged = previousRootIdRef.current !== projection.root_id;
     previousRootIdRef.current = projection.root_id;
+    const previousParentIds = previousParentIdsRef.current;
+    previousParentIdsRef.current = new Set(parentIds);
     setExpandedNodeIds((current) => {
       const known = new Set(projection.nodes.map((node) => node.id));
       const next = new Set([...current].filter((nodeId) => known.has(nodeId)));
       if (rootChanged || current.size === 0) parentIds.forEach((nodeId) => next.add(nodeId));
+      else parentIds.forEach((nodeId) => {
+        if (!previousParentIds.has(nodeId)) next.add(nodeId);
+      });
       return next;
     });
   }, [parentIds, projection.revision]);
@@ -114,7 +181,10 @@ export function MissionExecutionTree({
     const index = visibleNodes.findIndex((candidate) => candidate.id === node.id);
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      if (node.inspectable) onSelectNode(node.id);
+      if (node.inspectable) {
+        originatingFocusRef.current = event.currentTarget;
+        onSelectNode(node.id);
+      }
       else toggleNode(node);
       return;
     }
@@ -192,6 +262,7 @@ export function MissionExecutionTree({
               className={`mission-execution-node mission-execution-node--${node.kind}`}
               data-state={node.state}
               data-risk={node.risk}
+              data-lineage={node.lineage}
               data-execution-node-id={node.id}
               data-selected={selectedNodeId === node.id}
               aria-level={node.depth + 1}
@@ -204,6 +275,7 @@ export function MissionExecutionTree({
                   : 1
               }
               aria-selected={selectedNodeId === node.id}
+              aria-label={`${node.kind === "agent-session" ? "Local Agent session" : node.kind} ${node.identity}; ${node.title}; ${nodeStateLabel(node.state)}; ${riskLabel(node.risk)}`}
               aria-expanded={node.child_ids.length > 0 ? expandedNodeIds.has(node.id) : undefined}
               tabIndex={
                 focusedNodeId === node.id || (!focusedNodeId && node.id === visibleNodes[0]?.id)
@@ -216,7 +288,12 @@ export function MissionExecutionTree({
               }}
               onClick={() => {
                 setFocusedNodeId(node.id);
-                if (node.inspectable) onSelectNode(node.id);
+                if (node.inspectable) {
+                  originatingFocusRef.current = document.activeElement instanceof HTMLElement
+                    ? document.activeElement
+                    : null;
+                  onSelectNode(node.id);
+                }
                 else toggleNode(node);
               }}
               onFocus={() => setFocusedNodeId(node.id)}
@@ -233,7 +310,7 @@ export function MissionExecutionTree({
                   {node.identity}
                 </span>
                 <strong>{node.title}</strong>
-                <small>{node.summary}</small>
+                <small>{node.lineage === "repair" ? `Repair lineage · ${node.summary}` : node.summary}</small>
               </span>
               <span className="mission-execution-node__status">
                 <span>{node.status}</span>
@@ -262,9 +339,27 @@ export function MissionExecutionTree({
           node={selectedNode}
           outputLines={outputLines}
           outputState={outputState}
-          onClose={onCloseInspector}
+          onClose={() => {
+            const returnFocus = originatingFocusRef.current;
+            onCloseInspector();
+            requestAnimationFrame(() => {
+              if (returnFocus?.isConnected) returnFocus.focus();
+            });
+          }}
           onOpenDiff={onOpenDiff}
           onOpenEvidence={onOpenEvidence}
+          workstationActionDrafts={workstationActionDrafts}
+          onWorkstationActionDraftChange={onWorkstationActionDraftChange}
+          onWorkstationAction={onWorkstationAction}
+          actionState={actionState}
+          reviewReasons={reviewReasons}
+          onReviewReasonChange={onReviewReasonChange}
+          onReviewDecision={onReviewDecision}
+          queueReasons={queueReasons}
+          onQueueReasonChange={onQueueReasonChange}
+          onQueueDecision={onQueueDecision}
+          onOpenView={onOpenView}
+          agentOptions={agentOptions}
         />
       ) : null}
     </section>
@@ -278,6 +373,18 @@ function MissionExecutionInspector({
   onClose,
   onOpenDiff,
   onOpenEvidence,
+  workstationActionDrafts,
+  onWorkstationActionDraftChange,
+  onWorkstationAction,
+  actionState,
+  reviewReasons,
+  onReviewReasonChange,
+  onReviewDecision,
+  queueReasons,
+  onQueueReasonChange,
+  onQueueDecision,
+  onOpenView,
+  agentOptions,
 }: {
   readonly node: MissionExecutionTreeNode;
   readonly outputLines: readonly string[];
@@ -291,6 +398,33 @@ function MissionExecutionInspector({
     label: string,
     returnFocus?: HTMLElement | null,
   ) => void;
+  readonly workstationActionDrafts?: Readonly<Record<string, MissionExecutionActionDraft>>;
+  readonly onWorkstationActionDraftChange?: (
+    key: string,
+    draft: MissionExecutionActionDraft,
+  ) => void;
+  readonly onWorkstationAction?: (
+    action: WorkstationGovernedAction,
+    draft: MissionExecutionActionDraft,
+  ) => void;
+  readonly actionState?: MissionExecutionActionState | null;
+  readonly reviewReasons?: Readonly<Record<string, string>>;
+  readonly onReviewReasonChange?: (sessionId: string, reason: string) => void;
+  readonly onReviewDecision?: (
+    sessionId: string,
+    decision: ReviewDecision,
+    reason: string,
+    missionId?: string,
+  ) => void;
+  readonly queueReasons?: Readonly<Record<string, string>>;
+  readonly onQueueReasonChange?: (itemId: string, reason: string) => void;
+  readonly onQueueDecision?: (
+    itemId: string,
+    decision: WorkspaceQueueDecision,
+    reason: string,
+  ) => void;
+  readonly onOpenView?: (view: string) => void;
+  readonly agentOptions?: readonly { readonly id: string; readonly model?: string }[];
 }): ReactElement {
   const headingId = `mission-execution-inspector-${node.id.replace(/[^a-zA-Z0-9_-]+/g, "-")}`;
   const inspectorRef = useRef<HTMLElement>(null);
@@ -363,6 +497,7 @@ function MissionExecutionInspector({
         <div><dt>Current activity</dt><dd>{currentActivity}</dd></div>
         <div><dt>Latest update</dt><dd>{latestUpdate}</dd></div>
         <div><dt>Risk</dt><dd>{riskLabel(node.risk)}</dd></div>
+        <div><dt>Evidence risk</dt><dd>{issue?.evidence.risks.trim() || "None recorded."}</dd></div>
       </dl>
 
       {node.kind === "issue-slice" && issue ? (
@@ -426,10 +561,22 @@ function MissionExecutionInspector({
         {actions.length === 0 ? <p>No governed action is available from this canonical state.</p> : (
           <ul>
             {actions.map((action) => (
-              <li key={`${action.label}:${action.actionType ?? "none"}`}>
-                <strong>{action.label}</strong>
-                <span>{action.disabledReason || action.recoveryPath || "Submitted through the canonical Orchestrator boundary."}</span>
-              </li>
+              <MissionExecutionGovernedAction
+                key={`${action.label}:${action.actionType ?? "none"}`}
+                action={action}
+                actionState={actionState}
+                workstationActionDrafts={workstationActionDrafts}
+                onWorkstationActionDraftChange={onWorkstationActionDraftChange}
+                onWorkstationAction={onWorkstationAction}
+                reviewReasons={reviewReasons}
+                onReviewReasonChange={onReviewReasonChange}
+                onReviewDecision={onReviewDecision}
+                queueReasons={queueReasons}
+                onQueueReasonChange={onQueueReasonChange}
+                onQueueDecision={onQueueDecision}
+                onOpenView={onOpenView}
+                agentOptions={agentOptions}
+              />
             ))}
           </ul>
         )}
@@ -438,10 +585,165 @@ function MissionExecutionInspector({
   );
 }
 
+function MissionExecutionGovernedAction({
+  action,
+  actionState,
+  workstationActionDrafts,
+  onWorkstationActionDraftChange,
+  onWorkstationAction,
+  reviewReasons,
+  onReviewReasonChange,
+  onReviewDecision,
+  queueReasons,
+  onQueueReasonChange,
+  onQueueDecision,
+  onOpenView,
+  agentOptions,
+}: {
+  readonly action: WorkstationGovernedAction;
+  readonly actionState?: MissionExecutionActionState | null;
+  readonly workstationActionDrafts?: Readonly<Record<string, MissionExecutionActionDraft>>;
+  readonly onWorkstationActionDraftChange?: (
+    key: string,
+    draft: MissionExecutionActionDraft,
+  ) => void;
+  readonly onWorkstationAction?: (
+    action: WorkstationGovernedAction,
+    draft: MissionExecutionActionDraft,
+  ) => void;
+  readonly reviewReasons?: Readonly<Record<string, string>>;
+  readonly onReviewReasonChange?: (sessionId: string, reason: string) => void;
+  readonly onReviewDecision?: (
+    sessionId: string,
+    decision: ReviewDecision,
+    reason: string,
+    missionId?: string,
+  ) => void;
+  readonly queueReasons?: Readonly<Record<string, string>>;
+  readonly onQueueReasonChange?: (itemId: string, reason: string) => void;
+  readonly onQueueDecision?: (
+    itemId: string,
+    decision: WorkspaceQueueDecision,
+    reason: string,
+  ) => void;
+  readonly onOpenView?: (view: string) => void;
+  readonly agentOptions?: readonly { readonly id: string; readonly model?: string }[];
+}): ReactElement {
+  const targetId = workstationActionTargetId(action);
+  const actionKey = workstationActionKey(action);
+  const isReview = action.actionType === "review-decision" && Boolean(action.sessionId && action.reviewDecision);
+  const isQueue = action.actionType === "workspace-queue-decision" && Boolean(action.itemId && action.decision);
+  const draft = workstationActionDrafts?.[actionKey] ?? { reason: "", agentId: "" };
+  const reason = isReview && action.reviewDecision === "repair"
+    ? reviewReasons?.[action.sessionId ?? ""] ?? ""
+    : isQueue
+      ? queueReasons?.[action.itemId ?? ""] ?? ""
+      : draft.reason;
+  const requiresAgent = action.actionType === "model-assignment-change";
+  const actionIdentity = workstationActionStateId(action);
+  const actionStatusId = actionState?.itemId === actionIdentity
+    ? actionState
+    : null;
+  const disabled = Boolean(action.disabledReason) ||
+    Boolean(actionStatusId?.state === "pending") ||
+    (action.requiresReason && !reason.trim()) ||
+    (requiresAgent && !draft.agentId.trim());
+  const consequence = workstationActionConsequence(action);
+  const actionGuidance = action.disabledReason
+    ? `Unavailable: ${action.disabledReason}`
+    : action.requiresReason && !reason.trim()
+      ? `Enter a reason to enable ${action.label}${targetId ? ` for ${targetId}` : ""}.`
+      : requiresAgent && !draft.agentId.trim()
+        ? `Select an eligible local agent to enable ${action.label}${targetId ? ` for ${targetId}` : ""}.`
+        : action.recoveryPath
+          ? `Recovery: ${action.recoveryPath}`
+          : null;
+  const actionId = actionKey.replace(/[^a-zA-Z0-9_-]+/g, "-");
+  const consequenceId = `mission-execution-action-consequence-${actionId}`;
+  const guidanceId = `mission-execution-action-guidance-${actionId}`;
+
+  const submit = (): void => {
+    if (isQueue && action.itemId && action.decision) {
+      onQueueDecision?.(action.itemId, action.decision, reason.trim());
+      return;
+    }
+    if (isReview && action.sessionId && action.reviewDecision) {
+      onReviewDecision?.(action.sessionId, action.reviewDecision, reason.trim(), action.missionId);
+      return;
+    }
+    if (action.actionType) {
+      onWorkstationAction?.(action, draft);
+      return;
+    }
+    if (action.target !== "none") onOpenView?.(action.target);
+  };
+
+  return (
+    <li className="mission-execution-inspector__action">
+      <div className="mission-execution-inspector__action-heading">
+        <strong>{action.label}</strong>
+        {actionStatusId ? <span role="status">{actionStatusId.message}</span> : null}
+      </div>
+      <span id={consequenceId}>{consequence}</span>
+      {actionGuidance ? (
+        <small id={guidanceId} className="mission-execution-inspector__action-recovery">
+          {actionGuidance}
+        </small>
+      ) : null}
+      {requiresAgent ? (
+        <label>
+          <span>Agent</span>
+          <select
+            aria-label={`${action.label} agent`}
+            value={draft.agentId}
+            onChange={(event) =>
+              onWorkstationActionDraftChange?.(actionKey, {
+                ...draft,
+                agentId: event.target.value,
+              })
+            }
+          >
+            <option value="">Select a local agent</option>
+            {(agentOptions ?? []).map((agent) => (
+              <option key={agent.id} value={agent.id}>
+                {agent.id}{agent.model ? ` · ${agent.model}` : ""}
+              </option>
+            ))}
+          </select>
+        </label>
+      ) : null}
+      {action.requiresReason ? (
+        <label>
+          <span>Reason</span>
+          <textarea
+            rows={2}
+            aria-label={`${action.label} reason`}
+            value={reason}
+            onChange={(event) => {
+              if (isReview && action.sessionId) onReviewReasonChange?.(action.sessionId, event.target.value);
+              else if (isQueue && action.itemId) onQueueReasonChange?.(action.itemId, event.target.value);
+              else onWorkstationActionDraftChange?.(actionKey, { ...draft, reason: event.target.value });
+            }}
+          />
+        </label>
+      ) : null}
+      <button
+        type="button"
+        aria-label={action.label}
+        aria-describedby={[consequenceId, actionGuidance ? guidanceId : ""].filter(Boolean).join(" ")}
+        disabled={disabled}
+        onClick={submit}
+      >
+        {action.label}
+      </button>
+    </li>
+  );
+}
+
 function nodeStateLabel(state: MissionExecutionNodeState): string {
-  return state === "decision-needed" ? "Decision needed" : state[0].toUpperCase() + state.slice(1);
+  return executionStateLabel(state);
 }
 
 function riskLabel(risk: MissionExecutionTreeNode["risk"]): string {
-  return risk === "none" ? "No elevated risk" : risk === "attention" ? "Attention" : risk[0].toUpperCase() + risk.slice(1);
+  return executionRiskLabel(risk);
 }

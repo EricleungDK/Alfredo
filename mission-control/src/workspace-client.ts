@@ -79,6 +79,8 @@ import type {
   SessionArtifactReadRequest,
   SessionArtifactReadResult,
   SessionOutputEvent,
+  SessionOutputProjection,
+  SessionOutputReadRequest,
   SessionOutputSubscriptionRequest,
 } from "./contracts";
 
@@ -145,6 +147,7 @@ export interface WorkspaceClient {
 
 const DESKTOP_BRIDGE_UNAVAILABLE =
   "The browser preview has no Alfredo desktop bridge. Start the managed workstation from the repository root.";
+const SESSION_OUTPUT_POLL_INTERVAL_MS = 250;
 
 type WorkspaceInvoke = <T>(
   command: string,
@@ -832,6 +835,59 @@ export class TauriWorkspaceClient implements WorkspaceClient {
         recoverable: true,
       };
     }
+  }
+
+  subscribeToSessionOutput(
+    request: SessionOutputSubscriptionRequest,
+    onEvent: (event: SessionOutputEvent) => void,
+  ): () => void {
+    if (!this.bridgeAvailable()) return () => undefined;
+    let active = true;
+    let afterSequence = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const poll = async (): Promise<void> => {
+      if (!active) return;
+      let complete = false;
+      try {
+        const projection = await this.invokeCommand<SessionOutputProjection>("session_output", {
+          request: {
+            ...request,
+            after_sequence: afterSequence,
+          } satisfies SessionOutputReadRequest,
+        });
+        if (
+          !active ||
+          projection.mission_id !== request.mission_id ||
+          projection.session_id !== request.session_id
+        ) {
+          return;
+        }
+        for (const event of [...projection.events].sort(
+          (left, right) => left.sequence - right.sequence,
+        )) {
+          if (
+            event.mission_id !== request.mission_id ||
+            event.session_id !== request.session_id ||
+            event.sequence <= afterSequence
+          ) {
+            continue;
+          }
+          afterSequence = event.sequence;
+          onEvent(event);
+        }
+        complete = projection.complete;
+      } catch {
+        // A transient backend failure is retried while the inspector remains open.
+      }
+      if (active && !complete) timer = setTimeout(() => void poll(), SESSION_OUTPUT_POLL_INTERVAL_MS);
+    };
+
+    void poll();
+    return () => {
+      active = false;
+      if (timer !== undefined) clearTimeout(timer);
+    };
   }
 
   async submitAdHocDelegationProposal(

@@ -809,6 +809,10 @@ export interface SessionOutputSubscriptionRequest {
   readonly session_id: string;
 }
 
+export interface SessionOutputReadRequest extends SessionOutputSubscriptionRequest {
+  readonly after_sequence: number;
+}
+
 export interface SessionOutputEvent {
   readonly schema_version: 1;
   readonly mission_id: string;
@@ -816,6 +820,14 @@ export interface SessionOutputEvent {
   readonly sequence: number;
   readonly content: string;
   readonly phase?: "streaming" | "complete" | "failed";
+}
+
+export interface SessionOutputProjection {
+  readonly schema_version: 1;
+  readonly mission_id: string;
+  readonly session_id: string;
+  readonly events: readonly SessionOutputEvent[];
+  readonly complete: boolean;
 }
 
 export interface SessionArtifactProjection {
@@ -1077,6 +1089,10 @@ export interface WorkspaceQueueAttention {
     | "ad-hoc-delegation";
   readonly label: string;
   readonly queue_link: string;
+  /** Canonical work identity; presentation labels are never parsed for identity. */
+  readonly entity_id: string;
+  /** Canonical queue item identity, empty when this attention is not a queue item. */
+  readonly queue_item_id: string;
 }
 
 export interface WorkspaceMissionSummary {

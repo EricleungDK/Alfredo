@@ -36,6 +36,8 @@ from albert_mvp.workspace import (
     ReviewWorkspaceService,
     SessionArtifactReadError,
     SessionArtifactService,
+    SessionOutputReadError,
+    SessionOutputService,
     SharedUnderstandingGateError,
     ShellTerminalService,
     WorkspaceAction,
@@ -2050,6 +2052,157 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(payload["artifact_id"], "review_diff")
         self.assertIn("+fixed", payload["content"])
         self.assertNotIn(str(self.runtime), output.getvalue())
+
+    def test_session_output_reader_preserves_exact_identity_and_bounded_cursor(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        session = LocalAgentSession(
+            session_id="session-output-1",
+            issue_id="ISS-01",
+            assigned_agent="local-agent",
+            worktree_path=mission.runtime_dir / "worktrees" / "session-output-1",
+            task_packet={"work_kind": "issue-slice"},
+            status="running",
+            runner_started_at="2026-08-04T10:00:00+00:00",
+        )
+        mission.sessions[session.session_id] = session
+        mission._persist()
+        journal = mission.runtime_dir / "sessions" / session.session_id / "output-events.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text(
+            "\n".join(
+                [
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "mission_id": mission.mission_id,
+                            "session_id": session.session_id,
+                            "sequence": 1,
+                            "content": "stdout line",
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "mission_id": mission.mission_id,
+                            "session_id": session.session_id,
+                            "sequence": 2,
+                            "content": "stderr line",
+                        }
+                    ),
+                ]
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        reader = SessionOutputService(snapshots)
+        projection = reader.read(
+            mission_id=mission.mission_id,
+            session_id=session.session_id,
+            after_sequence=0,
+        )
+        self.assertFalse(projection.complete)
+        self.assertEqual([event.sequence for event in projection.events], [1, 2])
+        self.assertEqual(projection.events[0].phase, "streaming")
+        self.assertEqual(
+            [event.sequence for event in reader.read(
+                mission_id=mission.mission_id,
+                session_id=session.session_id,
+                after_sequence=1,
+            ).events],
+            [2],
+        )
+
+        session.status = "completed"
+        session.runner_ended_at = "2026-08-04T10:01:00+00:00"
+        complete = reader.read(
+            mission_id=mission.mission_id,
+            session_id=session.session_id,
+            after_sequence=1,
+        )
+        self.assertTrue(complete.complete)
+        self.assertEqual(complete.events[0].phase, "complete")
+
+    def test_session_output_reader_rejects_cross_session_journal_records(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        session = LocalAgentSession(
+            session_id="session-output-identity",
+            issue_id="ISS-01",
+            assigned_agent="local-agent",
+            worktree_path=mission.runtime_dir / "worktrees" / "session-output-identity",
+            task_packet={},
+        )
+        mission.sessions[session.session_id] = session
+        mission._persist()
+        journal = mission.runtime_dir / "sessions" / session.session_id / "output-events.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        journal.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "mission_id": mission.mission_id,
+                    "session_id": "another-session",
+                    "sequence": 1,
+                    "content": "must not cross the boundary",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(SessionOutputReadError) as failure:
+            SessionOutputService(snapshots).read(
+                mission_id=mission.mission_id,
+                session_id=session.session_id,
+            )
+        self.assertEqual(failure.exception.code, "session-output-contract-failure")
+        self.assertFalse(failure.exception.recoverable)
+
+    def test_session_output_recorder_is_closed_when_runner_raises_base_exception(self) -> None:
+        (self.target_repo / ".albert").mkdir()
+        (self.target_repo / ".albert" / "agents.json").write_text(
+            json.dumps(
+                {
+                    "agents": [
+                        {
+                            "id": "qwen-coder-local-1",
+                            "role": "local-agent",
+                            "provider": "test-harness",
+                            "runner": "fake",
+                            "model": "deterministic-fake",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        mission = self.load_service()._primary_mission
+        mission.approve_issue("ISS-01")
+        with (
+            patch.object(mission, "_validate_target_repository_boundary"),
+            patch.object(mission, "_ensure_session_worktree"),
+        ):
+            session = mission.launch_issue("ISS-01")
+
+            with patch.object(
+                mission,
+                "_run_fake_agent",
+                side_effect=KeyboardInterrupt("runner interrupted"),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    mission.run_session(session.session_id)
+
+        self.assertEqual(mission._session_output_recorders, {})
+        self.assertTrue(
+            (
+                mission.runtime_dir
+                / "sessions"
+                / session.session_id
+                / "output-events.jsonl"
+            ).is_file()
+        )
 
     def test_review_workspace_excludes_active_sessions_and_rejects_active_decisions(
         self,

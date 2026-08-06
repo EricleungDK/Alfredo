@@ -34,6 +34,8 @@ from .workspace import (
     ReviewWorkspaceService,
     SessionArtifactReadError,
     SessionArtifactService,
+    SessionOutputReadError,
+    SessionOutputService,
     ShellTerminalService,
     WorkspaceAction,
     WorkspaceQueueService,
@@ -315,6 +317,15 @@ def build_parser() -> argparse.ArgumentParser:
     session_artifact.add_argument("--artifact-mission-id", required=True)
     session_artifact.add_argument("--session-id", required=True)
     session_artifact.add_argument("--artifact-ref", required=True)
+
+    session_output = subparsers.add_parser(
+        "session-output",
+        help="Read bounded live output for one exact Local Agent session.",
+    )
+    _add_common_args(session_output)
+    session_output.add_argument("--output-mission-id", required=True)
+    session_output.add_argument("--session-id", required=True)
+    session_output.add_argument("--after-sequence", type=int, default=0)
 
     activity_journal = subparsers.add_parser(
         "activity-journal",
@@ -763,6 +774,21 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    except SessionOutputReadError as exc:
+        print(
+            json.dumps(
+                {
+                    "error": {
+                        "code": exc.code,
+                        "message": str(exc),
+                        "recoverable": exc.recoverable,
+                    }
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 1
     except SharedUnderstandingGateError as exc:
         print(
             json.dumps(
@@ -909,6 +935,7 @@ def _run(args: argparse.Namespace) -> int:
             "working-context-curate",
             "review-workspace",
             "session-artifact",
+            "session-output",
             "activity-journal",
             "shell-terminal",
             "shell-terminal-submit",
@@ -943,6 +970,7 @@ def _run(args: argparse.Namespace) -> int:
         "working-context-curate",
         "review-workspace",
         "session-artifact",
+        "session-output",
         "activity-journal",
         "shell-terminal",
         "shell-terminal-submit",
@@ -1124,6 +1152,14 @@ def _run(args: argparse.Namespace) -> int:
             mission_id=args.artifact_mission_id,
             session_id=args.session_id,
             artifact_ref=args.artifact_ref,
+        )
+        print(json.dumps(asdict(projection), sort_keys=True))
+        return 0
+    if args.command == "session-output":
+        projection = SessionOutputService(snapshots).read(
+            mission_id=args.output_mission_id,
+            session_id=args.session_id,
+            after_sequence=args.after_sequence,
         )
         print(json.dumps(asdict(projection), sort_keys=True))
         return 0

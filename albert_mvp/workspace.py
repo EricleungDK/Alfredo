@@ -44,6 +44,9 @@ from .performance import measured_stage
 
 
 _SESSION_ARTIFACT_CONTENT_BYTES_LIMIT = 128_000
+_SESSION_OUTPUT_JOURNAL_BYTES_LIMIT = 128_000
+_SESSION_OUTPUT_EVENT_CONTENT_BYTES_LIMIT = 16_000
+_SESSION_OUTPUT_EVENT_COUNT_LIMIT = 512
 _AGENT_CONSOLE_USER_CONTENT_CHARACTER_LIMIT = 16_000
 _AGENT_CONSOLE_CONTENT_CHARACTER_LIMIT = 100_000
 _CONTROLLER_RECENT_CONVERSATION_CHARACTER_LIMIT = 24_000
@@ -233,6 +236,21 @@ class SessionArtifactReadError(AlbertError):
         super().__init__(message)
 
 
+class SessionOutputReadError(AlbertError):
+    """A safe, structured failure from the live session-output boundary."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "session-output-unavailable",
+        recoverable: bool = True,
+    ):
+        self.code = code
+        self.recoverable = recoverable
+        super().__init__(message)
+
+
 @dataclass(frozen=True)
 class ConversationScope:
     kind: Literal["working-directory", "mission", "issue-slice"]
@@ -297,6 +315,8 @@ class WorkspaceQueueAttention:
     ]
     label: str
     queue_link: str
+    entity_id: str = ""
+    queue_item_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -3633,6 +3653,25 @@ class SessionArtifactProjection:
     byte_count: int
     content_limit_bytes: int
     truncated: bool
+
+
+@dataclass(frozen=True)
+class SessionOutputEvent:
+    schema_version: int
+    mission_id: str
+    session_id: str
+    sequence: int
+    content: str
+    phase: Literal["streaming", "complete", "failed"]
+
+
+@dataclass(frozen=True)
+class SessionOutputProjection:
+    schema_version: int
+    mission_id: str
+    session_id: str
+    events: tuple[SessionOutputEvent, ...]
+    complete: bool
 
 
 @dataclass(frozen=True)
@@ -7265,6 +7304,166 @@ class SessionArtifactService:
         return content, len(encoded), truncated
 
 
+class SessionOutputService:
+    """Reads the bounded, exact-session output journal for inspector polling."""
+
+    def __init__(self, snapshots: "WorkspaceSnapshotService"):
+        self._snapshots = snapshots
+
+    def read(
+        self,
+        *,
+        mission_id: str,
+        session_id: str,
+        after_sequence: int = 0,
+    ) -> SessionOutputProjection:
+        if after_sequence < 0:
+            raise SessionOutputReadError(
+                "The output cursor must not be negative.",
+                code="session-output-invalid-cursor",
+                recoverable=False,
+            )
+        mission = self._snapshots._missions.get(mission_id)
+        if mission is None:
+            raise SessionOutputReadError(
+                "The requested Mission output boundary is unavailable.",
+                code="session-output-not-found",
+            )
+        session = mission.sessions.get(session_id)
+        if session is None:
+            raise SessionOutputReadError(
+                "The requested Local Agent session is unavailable.",
+                code="session-output-not-found",
+            )
+
+        journal_root = (mission.runtime_dir / "sessions").resolve()
+        journal_path = mission.runtime_dir / "sessions" / session.session_id / "output-events.jsonl"
+        try:
+            resolved = journal_path.resolve(strict=False)
+            resolved.relative_to(journal_root)
+        except (OSError, ValueError):
+            raise SessionOutputReadError(
+                "The session output journal is outside its runtime boundary.",
+                code="session-output-forbidden",
+                recoverable=False,
+            ) from None
+        if journal_path.is_symlink():
+            raise SessionOutputReadError(
+                "The session output journal is not a regular session file.",
+                code="session-output-forbidden",
+                recoverable=False,
+            )
+
+        complete = self._is_complete(session)
+        if not journal_path.exists():
+            return SessionOutputProjection(
+                schema_version=1,
+                mission_id=mission.mission_id,
+                session_id=session.session_id,
+                events=(),
+                complete=complete,
+            )
+        if not journal_path.is_file():
+            raise SessionOutputReadError(
+                "The session output journal is not a regular file.",
+                code="session-output-forbidden",
+                recoverable=False,
+            )
+
+        try:
+            with journal_path.open("rb") as source:
+                payload = source.read(_SESSION_OUTPUT_JOURNAL_BYTES_LIMIT + 1)
+        except OSError:
+            raise SessionOutputReadError("The session output journal could not be read.") from None
+        if len(payload) > _SESSION_OUTPUT_JOURNAL_BYTES_LIMIT:
+            raise SessionOutputReadError(
+                "The session output journal exceeded its bounded read limit.",
+                code="session-output-too-large",
+                recoverable=False,
+            )
+
+        events: list[SessionOutputEvent] = []
+        expected_sequence = 1
+        lines = payload.splitlines(keepends=True)
+        for index, line in enumerate(lines):
+            if not line.endswith((b"\n", b"\r")) and index == len(lines) - 1:
+                # The runner may be appending this final JSONL record now.
+                break
+            try:
+                raw = json.loads(line.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+                raise SessionOutputReadError(
+                    "The session output journal contains malformed JSON.",
+                    code="session-output-contract-failure",
+                    recoverable=False,
+                ) from None
+            if not isinstance(raw, dict):
+                raise SessionOutputReadError(
+                    "The session output journal contains a non-object event.",
+                    code="session-output-contract-failure",
+                    recoverable=False,
+                )
+            if (
+                raw.get("schema_version") != 1
+                or raw.get("mission_id") != mission.mission_id
+                or raw.get("session_id") != session.session_id
+                or isinstance(raw.get("sequence"), bool)
+                or not isinstance(raw.get("sequence"), int)
+                or raw["sequence"] != expected_sequence
+                or not isinstance(raw.get("content"), str)
+                or len(raw["content"].encode("utf-8")) > _SESSION_OUTPUT_EVENT_CONTENT_BYTES_LIMIT
+            ):
+                raise SessionOutputReadError(
+                    "The session output journal crossed its exact-session contract.",
+                    code="session-output-contract-failure",
+                    recoverable=False,
+                )
+            expected_sequence += 1
+            if len(events) < _SESSION_OUTPUT_EVENT_COUNT_LIMIT and raw["sequence"] > after_sequence:
+                phase = self._phase(session, complete)
+                events.append(
+                    SessionOutputEvent(
+                        schema_version=1,
+                        mission_id=mission.mission_id,
+                        session_id=session.session_id,
+                        sequence=raw["sequence"],
+                        content=raw["content"],
+                        phase=phase,
+                    )
+                )
+        return SessionOutputProjection(
+            schema_version=1,
+            mission_id=mission.mission_id,
+            session_id=session.session_id,
+            events=tuple(events),
+            complete=complete,
+        )
+
+    @staticmethod
+    def _is_complete(session: LocalAgentSession) -> bool:
+        status = session.status.casefold()
+        return bool(session.runner_ended_at) or status in {
+            "completed",
+            "complete",
+            "done",
+            "evidence-ready",
+            "failed",
+            "cancelled",
+            "review-ready",
+            "reviewed",
+        }
+
+    @classmethod
+    def _phase(
+        cls,
+        session: LocalAgentSession,
+        complete: bool,
+    ) -> Literal["streaming", "complete", "failed"]:
+        if "fail" in session.status.casefold() or session.status.casefold() == "cancelled":
+            return "failed"
+        return "complete" if complete else "streaming"
+
+
 class ReviewWorkspaceService:
     """Builds the exclusive evidence-decision projection for the active Mission."""
 
@@ -9960,6 +10159,32 @@ class WorkspaceSnapshotService:
         journal_entries: tuple[ActivityJournalEntry, ...],
         workspace_events: tuple[WorkspaceEvent, ...],
     ) -> WorkspaceMissionSummary:
+        def validated_parent_session_id(session: LocalAgentSession) -> str:
+            repair_context = session.task_packet.get("repair_context")
+            if not isinstance(repair_context, dict):
+                return ""
+            candidate = repair_context.get("prior_session_id")
+            if not isinstance(candidate, str) or not candidate.strip():
+                return ""
+            current_id = session.session_id
+            visited = {current_id}
+            parent_id = candidate.strip()
+            while parent_id:
+                if parent_id in visited:
+                    return ""
+                visited.add(parent_id)
+                parent = mission.sessions.get(parent_id)
+                if parent is None or parent.issue_id != session.issue_id:
+                    return ""
+                parent_context = parent.task_packet.get("repair_context")
+                next_parent = (
+                    parent_context.get("prior_session_id")
+                    if isinstance(parent_context, dict)
+                    else ""
+                )
+                parent_id = next_parent.strip() if isinstance(next_parent, str) else ""
+            return candidate.strip()
+
         def summarize_session(session: Any) -> MissionSessionSummary:
             canonical = mission._session_summary(session)
             evidence = session.evidence
@@ -10042,13 +10267,7 @@ class WorkspaceSnapshotService:
                         "issue-slice" if issue is not None else "ad-hoc-delegation",
                     )
                 ),
-                parent_session_id=str(
-                    (
-                        session.task_packet.get("repair_context")
-                        if isinstance(session.task_packet.get("repair_context"), dict)
-                        else {}
-                    ).get("prior_session_id", "")
-                ),
+                parent_session_id=validated_parent_session_id(session),
             )
 
         sessions = tuple(
@@ -10067,6 +10286,7 @@ class WorkspaceSnapshotService:
                         queue_link=(
                             f"workspace-queue#delegation-{mission.mission_id}-{issue_id}"
                         ),
+                        entity_id=issue_id,
                     )
                 )
         for issue_id, issue in sorted(mission.issues.items()):
@@ -10080,6 +10300,7 @@ class WorkspaceSnapshotService:
                         queue_link=(
                             f"workspace-queue#clarification-{mission.mission_id}-{issue_id}"
                         ),
+                        entity_id=issue_id,
                     )
                 )
         for item in WorkspaceQueueService(self).inspect(mission_id=mission.mission_id).items:
@@ -10101,6 +10322,8 @@ class WorkspaceSnapshotService:
                     kind=item.item_type,
                     label=label,
                     queue_link=f"workspace-queue#{item.item_id}",
+                    entity_id=item.issue_id,
+                    queue_item_id=item.item_id,
                 )
             )
         board = mission.board_summary()

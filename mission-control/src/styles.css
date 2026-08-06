@@ -1002,6 +1002,56 @@ h5 {
   padding-left: 1.15rem;
 }
 
+.mission-execution-inspector__action {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #111816;
+  list-style: none;
+}
+
+.mission-execution-inspector__action-heading {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.mission-execution-inspector__action-heading strong {
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+}
+
+.mission-execution-inspector__action-heading span {
+  color: var(--cyan);
+  font-size: 0.72rem;
+}
+
+.mission-execution-inspector__action label {
+  display: grid;
+  gap: 0.25rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.mission-execution-inspector__action textarea,
+.mission-execution-inspector__action select {
+  min-width: 0;
+  width: 100%;
+  padding: 0.45rem 0.5rem;
+  background: #0b0e0d;
+}
+
+.mission-execution-inspector__action > button {
+  width: fit-content;
+  min-height: 1.9rem;
+  padding: 0.28rem 0.52rem;
+  font-size: 0.76rem;
+}
+
 .mission-execution-inspector__files {
   padding-left: 0 !important;
   list-style: none;

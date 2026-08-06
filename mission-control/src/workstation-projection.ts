@@ -175,7 +175,6 @@ export type MissionExecutionNodeState =
   | "decision-needed"
   | "complete"
   | "blocked"
-  | "repair"
   | "failed"
   | "idle";
 
@@ -186,6 +185,7 @@ export interface MissionExecutionTreeNode {
   readonly title: string;
   readonly parent_id: string | null;
   readonly parent_session_id: string | null;
+  readonly lineage: "root" | "repair";
   readonly depth: number;
   readonly child_ids: readonly string[];
   readonly state: MissionExecutionNodeState;
@@ -282,12 +282,14 @@ export function projectMissionExecutionTree(
 
   const adHocIds = new Set<string>();
   for (const session of mission.sessions) {
-    if (session.work_kind === "ad-hoc-delegation" || /^ADHOC[-_]/i.test(session.issue_id)) {
+    if (session.work_kind === "ad-hoc-delegation") {
       adHocIds.add(session.issue_id);
     }
   }
   for (const attention of mission.attention) {
-    if (attention.kind === "ad-hoc-delegation") adHocIds.add(attentionLabelIdentity(attention));
+    if (attention.kind === "ad-hoc-delegation" || attention.kind === "delegation-approval") {
+      adHocIds.add(attention.entity_id);
+    }
   }
   for (const item of options.workspaceQueue?.items ?? []) {
     if (item.mission_id === mission.id && item.item_type === "ad-hoc-delegation") {
@@ -321,10 +323,11 @@ export function projectMissionExecutionTree(
     title: mission.title,
     parent_id: null,
     parent_session_id: null,
+    lineage: "root",
     depth: 0,
     state: "working",
     status: "Active Mission",
-    shape: "hexagon",
+    shape: executionNodeShape("working", mission.attention.length > 0 ? "attention" : "none"),
     risk: mission.attention.length > 0 ? "attention" : "none",
     summary: `${activeMission.issue_count} Issue Slices · ${mission.sessions.length} Local Agent sessions`,
     inspectable: false,
@@ -356,11 +359,12 @@ export function projectMissionExecutionTree(
       title: issue.title,
       parent_id: rootId,
       parent_session_id: null,
+      lineage: "root",
       depth: 1,
       state,
       status: issue.lifecycle,
-      shape: "square",
-      risk: issueRisk(issue),
+      shape: executionNodeShape(state, issueRisk(issue)),
+      risk: executionNodeRisk(state, issueRisk(issue)),
       summary: `${issue.issue_id} · ${issueSessions.length} Local Agent ${issueSessions.length === 1 ? "session" : "sessions"} · ${issue.progress}`,
       inspectable: true,
       attention: state === "blocked" || state === "failed" || issue.blockers.some((blocker) => !blocker.satisfied),
@@ -375,18 +379,23 @@ export function projectMissionExecutionTree(
       issue,
       addNode,
       cardBySessionId,
+      mission.id,
     );
   }
 
   const sortedAdHocIds = [...adHocIds].sort((left, right) => left.localeCompare(right));
   for (const adHocId of sortedAdHocIds) {
     const adHocSessions = sessionsByIssue.get(adHocId) ?? [];
-    const attention = mission.attention.find(
-      (candidate) => candidate.kind === "ad-hoc-delegation" && attentionLabelIdentity(candidate) === adHocId,
-    );
     const queueItem = (options.workspaceQueue?.items ?? []).find(
       (candidate) => candidate.mission_id === mission.id &&
         candidate.item_type === "ad-hoc-delegation" && candidate.issue_id === adHocId,
+    );
+    const attention = mission.attention.find(
+      (candidate) =>
+        candidate.entity_id === adHocId &&
+        (candidate.kind === "ad-hoc-delegation" ||
+          candidate.kind === "delegation-approval" ||
+          candidate.queue_item_id === queueItem?.item_id),
     );
     const title =
       adHocSessions[0]?.task_title ||
@@ -402,11 +411,18 @@ export function projectMissionExecutionTree(
       title,
       parent_id: rootId,
       parent_session_id: null,
+      lineage: "root",
       depth: 1,
       state: adHocState,
       status: attention ? "Decision needed" : adHocStateLabel(adHocState),
-      shape: "diamond",
-      risk: attention ? "attention" : adHocState === "failed" ? "failed" : "none",
+      shape: executionNodeShape(
+        adHocState,
+        attention ? "attention" : adHocState === "failed" ? "failed" : "none",
+      ),
+      risk: executionNodeRisk(
+        adHocState,
+        attention ? "attention" : adHocState === "failed" ? "failed" : "none",
+      ),
       summary: `${adHocId} · ${adHocSessions.length} Local Agent ${adHocSessions.length === 1 ? "session" : "sessions"}${attention ? " · pending approval" : ""}`,
       inspectable: true,
       attention: Boolean(attention),
@@ -421,13 +437,14 @@ export function projectMissionExecutionTree(
       null,
       addNode,
       cardBySessionId,
+      mission.id,
     );
   }
 
   const unownedSessions = mission.sessions.filter(
     (session) => !issueById.has(session.issue_id) && !adHocIds.has(session.issue_id),
   );
-  appendSessionNodes(rootId, unownedSessions, 1, null, addNode, cardBySessionId);
+  appendSessionNodes(rootId, unownedSessions, 1, null, addNode, cardBySessionId, mission.id);
 
   const evidencePackages = mission.sessions.filter(
     (session) => Boolean(session.evidence_correlation_id || session.artifact_links?.length),
@@ -463,23 +480,65 @@ function appendSessionNodes(
   issue: WorkspaceIssueSliceSummary | null,
   addNode: (node: Omit<MissionExecutionTreeNode, "child_ids">) => MissionExecutionTreeNode,
   cardBySessionId: ReadonlyMap<string, WorkstationCardProjection>,
+  missionId: string,
 ): void {
+  const sessionsById = new Map(sessions.map((session) => [session.session_id, session] as const));
+  const cyclicSessionIds = new Set<string>();
   for (const session of sessions) {
+    const lineage = new Set<string>();
+    let current: MissionSessionSummary | undefined = session;
+    while (current?.parent_session_id?.trim()) {
+      if (lineage.has(current.session_id)) {
+        lineage.forEach((sessionId) => cyclicSessionIds.add(sessionId));
+        break;
+      }
+      lineage.add(current.session_id);
+      current = sessionsById.get(current.parent_session_id.trim());
+      if (!current) break;
+    }
+  }
+  const visited = new Set<string>();
+  const visit = (
+    session: MissionSessionSummary,
+    fallbackParentId: string,
+    fallbackDepth: number,
+  ): void => {
+    if (visited.has(session.session_id)) return;
+    visited.add(session.session_id);
     const card = cardBySessionId.get(session.session_id) ?? null;
     const state = sessionNodeState(session, card ?? null);
-    const parentSessionId = session.parent_session_id ?? null;
+    const parentSessionId = session.parent_session_id?.trim() || null;
+    const parentSession =
+      parentSessionId &&
+      !cyclicSessionIds.has(session.session_id) &&
+      !cyclicSessionIds.has(parentSessionId)
+        ? sessionsById.get(parentSessionId)
+        : undefined;
+    const nodeParentId = parentSession
+      ? `session:${missionId}:${parentSession.session_id}`
+      : fallbackParentId;
+    const nodeDepth = parentSession ? fallbackDepth + 1 : fallbackDepth;
+    const baseRisk =
+      state === "failed"
+        ? "failed"
+        : state === "blocked"
+          ? "blocked"
+          : card?.attention
+            ? "attention"
+            : "none";
     addNode({
-      id: `session:${sessionMissionId(card, parentId)}:${session.session_id}`,
+      id: `session:${missionId}:${session.session_id}`,
       kind: "agent-session",
       identity: session.session_id,
       title: session.task_title || `Session activity for ${session.session_id}`,
-      parent_id: parentId,
+      parent_id: nodeParentId,
       parent_session_id: parentSessionId,
-      depth,
+      lineage: parentSession ? "repair" : "root",
+      depth: nodeDepth,
       state,
       status: card?.status ?? session.status,
-      shape: "circle",
-      risk: state === "failed" ? "failed" : state === "blocked" ? "blocked" : card?.attention ? "attention" : "none",
+      shape: executionNodeShape(state, baseRisk),
+      risk: executionNodeRisk(state, baseRisk),
       summary: `${session.session_id} · ${session.assigned_agent} · ${session.role || "Local Agent"} · ${session.model || "model not recorded"}`,
       inspectable: true,
       attention: Boolean(card?.attention || session.failure || session.review_next_action),
@@ -487,19 +546,29 @@ function appendSessionNodes(
       session,
       card,
     });
+    if (!cyclicSessionIds.has(session.session_id)) {
+      for (const child of sessions) {
+        if (child.parent_session_id?.trim() === session.session_id) {
+          visit(child, `session:${missionId}:${session.session_id}`, nodeDepth);
+        }
+      }
+    }
+  };
+
+  for (const session of sessions) {
+    const parentSessionId = session.parent_session_id?.trim();
+    if (
+      cyclicSessionIds.has(session.session_id) ||
+      !parentSessionId ||
+      !sessionsById.has(parentSessionId) ||
+      cyclicSessionIds.has(parentSessionId)
+    ) {
+      visit(session, parentId, depth);
+    }
   }
-}
-
-function sessionMissionId(card: WorkstationCardProjection | null, parentId: string): string {
-  if (card?.missionId) return card.missionId;
-  const match = parentId.match(/^(?:issue|ad-hoc|mission):([^:]+)/);
-  return match?.[1] ?? "unknown";
-}
-
-function attentionLabelIdentity(attention: WorkspaceQueueAttention): string {
-  const match = attention.label.match(/\b(ADHOC[-_]\d+)\b/i);
-  if (match) return match[1].replace("_", "-");
-  return attention.queue_link.split("#").at(1) ?? attention.attention_id;
+  for (const session of sessions) {
+    if (!visited.has(session.session_id)) visit(session, parentId, depth);
+  }
 }
 
 function issueExecutionState(
@@ -533,7 +602,6 @@ function sessionNodeState(
   session: MissionSessionSummary,
   card: WorkstationCardProjection | null,
 ): MissionExecutionNodeState {
-  if (session.parent_session_id) return "repair";
   const status = card?.status ?? canonicalStatus(session.status, session.operation_status, session.failure);
   if (status === "failed") return "failed";
   if (status === "blocked") return "blocked";
@@ -544,8 +612,35 @@ function sessionNodeState(
   return "idle";
 }
 
-function adHocStateLabel(state: MissionExecutionNodeState): string {
+export function executionStateLabel(state: MissionExecutionNodeState): string {
   return state === "decision-needed" ? "Decision needed" : state[0].toUpperCase() + state.slice(1);
+}
+
+export function executionRiskLabel(risk: MissionExecutionTreeNode["risk"]): string {
+  return risk === "none" ? "No elevated risk" : risk === "attention" ? "Attention" : risk[0].toUpperCase() + risk.slice(1);
+}
+
+function executionNodeRisk(
+  state: MissionExecutionNodeState,
+  risk: MissionExecutionTreeNode["risk"],
+): MissionExecutionTreeNode["risk"] {
+  if (state === "failed") return "failed";
+  if (state === "blocked") return "blocked";
+  return risk;
+}
+
+function executionNodeShape(
+  state: MissionExecutionNodeState,
+  risk: MissionExecutionTreeNode["risk"],
+): MissionExecutionTreeNode["shape"] {
+  if (risk === "failed" || risk === "blocked" || state === "failed" || state === "blocked") return "hexagon";
+  if (risk === "attention" || state === "decision-needed") return "diamond";
+  if (state === "working") return "circle";
+  return "square";
+}
+
+function adHocStateLabel(state: MissionExecutionNodeState): string {
+  return executionStateLabel(state);
 }
 
 function issueRisk(issue: WorkspaceIssueSliceSummary): MissionExecutionTreeNode["risk"] {
@@ -986,7 +1081,7 @@ function pendingQueueItemForAttention(
   attention: WorkspaceQueueAttention,
 ): WorkspaceQueueItem | null {
   if (!workspaceQueue) return null;
-  const itemId = attention.queue_link.split("#").at(1);
+  const itemId = attention.queue_item_id;
   if (!itemId) return null;
   const item = workspaceQueue.items.find((candidate) => candidate.item_id === itemId);
   return item?.status === "pending" ? item : null;
@@ -1435,4 +1530,56 @@ function reviewAction(
     targetIdentity: { kind: "agent-session", id: sessionId },
     recoveryPath: "Refresh the Review Workspace and retry against the current evidence state.",
   };
+}
+
+export function workstationActionTargetId(action: WorkstationGovernedAction): string {
+  return action.targetIdentity?.id ?? action.sessionId ?? action.issueId ?? action.itemId ?? "";
+}
+
+export function workstationActionStateId(action: WorkstationGovernedAction): string {
+  return JSON.stringify([
+    action.missionId ?? "",
+    workstationActionTargetId(action),
+    action.decision ?? action.reviewDecision ?? action.actionType ?? "",
+  ]);
+}
+
+export function workstationActionKey(action: WorkstationGovernedAction): string {
+  return `${action.actionType ?? "workstation-action"}:${workstationActionStateId(action)}`;
+}
+
+export function workstationActionConsequence(action: WorkstationGovernedAction): string {
+  const targetId = workstationActionTargetId(action);
+  switch (action.actionType) {
+    case "workspace-queue-decision":
+      if (action.decision === "approve") {
+        return `Approving ${targetId || "this queue item"} records the decision and queues one bounded Local Agent session.`;
+      }
+      if (action.decision === "reject") {
+        return `Rejecting ${targetId || "this queue item"} records the Mission Commander's reason; no session is launched.`;
+      }
+      return `Deferring ${targetId || "this queue item"} retains the pending proposal without launching work.`;
+    case "issue-approve":
+      return `Approval records ${targetId || "this Issue Slice"} as launch-authorized; it does not launch a session.`;
+    case "issue-launch":
+      return `Acknowledgement queues one ${targetId || "Issue Slice"} Local Agent session; the runner starts only after canonical state is reloaded.`;
+    case "issue-retry":
+      return `Acknowledgement queues one canonical repair or retry session for ${targetId || "this work"}; it does not run the session inline.`;
+    case "session-cancel":
+      return `Acknowledgement records cancellation for ${targetId || "this session"}; the Orchestrator stops active work, and cancellation is not completion.`;
+    case "model-assignment-change":
+      return `Acknowledgement changes the assigned eligible worker for ${targetId || "this Issue Slice"}; it does not launch work.`;
+    case "review-decision":
+      if (action.reviewDecision === "accept") {
+        return `Accepting evidence marks ${targetId || "this Issue Slice"} complete and PR-ready; it does not merge changes.`;
+      }
+      if (action.reviewDecision === "repair") {
+        return `Requesting repair records the reason and exposes one canonical repair action for ${targetId || "this session"}; it does not launch immediately.`;
+      }
+      return `Escalating ${targetId || "this review"} records needs-human-review; it does not create a ticket or launch an agent.`;
+    default:
+      return action.target === "none"
+        ? "Monitoring only; no Mission state changes are available from this control."
+        : `${action.label} opens ${action.target} without changing canonical Mission state.`;
+  }
 }

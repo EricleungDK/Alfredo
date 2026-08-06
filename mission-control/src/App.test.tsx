@@ -320,7 +320,9 @@ test("renders the canonical Mission Execution Tree and scopes detailed output to
     fireEvent.keyDown(issueNode, { key: "ArrowDown" });
   });
   expect(document.activeElement).toBe(sessionNode);
-  fireEvent.click(sessionNode);
+  act(() => {
+    fireEvent.click(sessionNode);
+  });
 
   const inspector = await screen.findByRole("region", {
     name: "session-ISS-TREE-1 execution inspector",
@@ -357,13 +359,16 @@ test("renders the canonical Mission Execution Tree and scopes detailed output to
   expect(output).toHaveTextContent("pytest -q");
   expect(output).not.toHaveTextContent("must not render");
 
-  fireEvent.click(
-    within(inspector).getByRole("button", { name: "Close Mission Execution Tree inspector" }),
-  );
+  act(() => {
+    fireEvent.click(
+      within(inspector).getByRole("button", { name: "Close Mission Execution Tree inspector" }),
+    );
+  });
   expect(unsubscribe).toHaveBeenCalledTimes(1);
   expect(
     screen.queryByRole("region", { name: "session-ISS-TREE-1 execution inspector" }),
   ).not.toBeInTheDocument();
+  await waitFor(() => expect(sessionNode).toHaveFocus());
 });
 
 async function openCommandAudit() {
@@ -374,6 +379,33 @@ async function openCommandAudit() {
 async function openDetailViews() {
   fireEvent.click(await screen.findByRole("button", { name: "Open detail views" }));
   return await screen.findByRole("region", { name: "Workstation Detail Views" });
+}
+
+function executionTree(): HTMLElement {
+  return screen.getByRole("region", { name: "Mission Execution Tree" });
+}
+
+function executionTreeNode(identity: string, kind = "Local Agent session"): HTMLElement {
+  const escapedIdentity = identity.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return within(executionTree()).getByRole("treeitem", {
+    name: new RegExp(`${kind} ${escapedIdentity}`),
+  });
+}
+
+async function openExecutionInspector(
+  identity: string,
+  kind = "Local Agent session",
+): Promise<HTMLElement> {
+  const tree = await screen.findByRole("region", { name: "Mission Execution Tree" });
+  const escapedIdentity = identity.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  fireEvent.click(
+    within(tree).getByRole("treeitem", {
+      name: new RegExp(`${kind} ${escapedIdentity}`),
+    }),
+  );
+  return await screen.findByRole("region", {
+    name: `${identity} execution inspector`,
+  });
 }
 
 async function openContextInspector() {
@@ -486,6 +518,8 @@ test("opens to a console-first workstation with persistent Mission Work beside i
             kind: "delegation-approval",
             label: "ISS-02 delegation approval required",
             queue_link: "workspace-queue#queue-ISS-02",
+            entity_id: "ISS-02",
+            queue_item_id: "",
           },
         ],
       },
@@ -558,7 +592,9 @@ test("opens to a console-first workstation with persistent Mission Work beside i
   expect(within(transcript).getByText("Receipt workstation-launch-ISS-01-1 · running")).toBeVisible();
   expect(screen.getByRole("complementary", { name: "Mission Work" })).toBeVisible();
   expect(screen.getByRole("heading", { name: "Mission Work" })).toBeVisible();
-  expect(screen.getByRole("heading", { name: "Active Workstations" })).toBeVisible();
+  expect(executionTree()).toBeVisible();
+  expect(screen.queryByRole("heading", { name: "Active Workstations" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Workstation Cards" })).not.toBeInTheDocument();
   expect(screen.queryByRole("tablist", { name: "Agent Workstation views" })).not.toBeInTheDocument();
   expect(screen.queryByRole("tab", { name: "Workstations" })).not.toBeInTheDocument();
   expect(screen.queryByRole("tab", { name: "Shell Terminal" })).not.toBeInTheDocument();
@@ -567,17 +603,12 @@ test("opens to a console-first workstation with persistent Mission Work beside i
   expect(screen.queryByRole("textbox", { name: "Requested paths" })).not.toBeInTheDocument();
   expect(screen.queryByRole("combobox", { name: "Access level" })).not.toBeInTheDocument();
   expect(screen.queryByRole("textbox", { name: "Grant path" })).not.toBeInTheDocument();
-  const cards = screen.getByRole("region", { name: "Workstation Cards" });
-  expect(cards).toBeVisible();
-  expect(screen.getByText("session-ISS-01-1")).toBeVisible();
-  expect(screen.getByText("qwen3.6:27b")).toBeVisible();
-  expect(within(cards).getByText("ISS-02 delegation approval required")).toBeVisible();
-  const runningCard = within(cards).getByRole("article", { name: "qwen-coder-local workstation card" });
-  expect(within(runningCard).getByText("Issue Slice")).toBeVisible();
-  expect(within(runningCard).getAllByText("ISS-01").length).toBeGreaterThan(0);
-  const lastActivity = within(runningCard).getByText("2026-07-12 08:31:45 UTC");
-  expect(lastActivity.tagName).toBe("TIME");
-  expect(lastActivity).toHaveAttribute("datetime", "2026-07-12T08:31:45+00:00");
+  const runningNode = executionTreeNode("session-ISS-01-1");
+  expect(runningNode).toHaveAttribute("data-state", "working");
+  expect(runningNode).toHaveAttribute("data-lineage", "root");
+  const runningInspector = await openExecutionInspector("session-ISS-01-1");
+  expect(within(runningInspector).getByText("qwen3.6:27b")).toBeVisible();
+  expect(within(runningInspector).getByText("running", { selector: "dd" })).toBeVisible();
 
   const statusLine = screen.getByLabelText("Prompt status line");
   expect(within(statusLine).getByText("Connection Connected")).toBeVisible();
@@ -629,10 +660,11 @@ test("fails closed when a workstation last-activity timestamp is malformed", asy
     <App client={{ loadSnapshot: async () => ({ kind: "ready", snapshot: malformedActivitySnapshot }) }} />,
   );
 
-  const cards = await screen.findByRole("region", { name: "Workstation Cards" });
-  const card = within(cards).getByRole("article", { name: "timestamp-agent workstation card" });
-  expect(within(card).getByText("Not recorded")).toBeVisible();
-  expect(card.querySelector("time")).toBeNull();
+  expect(await screen.findByRole("region", { name: "Mission Execution Tree" })).toBeVisible();
+  const node = executionTreeNode("session-ISS-01-malformed");
+  expect(node).toBeVisible();
+  expect(node.querySelector("time")).toBeNull();
+  expect(screen.queryByText("1970-01-01")).not.toBeInTheDocument();
 });
 
 test("default workstation design keeps operations panels out of the terminal-first surface", async () => {
@@ -675,7 +707,8 @@ test("default workstation design keeps operations panels out of the terminal-fir
   expect(within(console).getByRole("region", { name: "Prompt Composer" })).toBeVisible();
   expect(within(console).queryByText(/Conversation Scope \//)).not.toBeInTheDocument();
   expect(within(console).queryByRole("region", { name: "Context Inspector" })).not.toBeInTheDocument();
-  expect(within(missionWork).getByRole("region", { name: "Active Workstations" })).toBeVisible();
+  expect(within(missionWork).getByRole("region", { name: "Mission Execution Tree" })).toBeVisible();
+  expect(within(missionWork).queryByRole("region", { name: "Workstation Cards" })).not.toBeInTheDocument();
   expect(within(missionWork).getByRole("table", { name: "Issue Assignment Board" })).toBeVisible();
   expect(within(missionWork).queryByRole("region", { name: "Workstation Detail Views" })).not.toBeInTheDocument();
   expect(within(missionWork).queryByRole("navigation", { name: "Workstation detail views" })).not.toBeInTheDocument();
@@ -700,7 +733,7 @@ test("keeps restored operations detail closed behind explicit Mission Work reque
   const missionWork = screen.getByRole("complementary", { name: "Mission Work" });
 
   expect(within(console).getByRole("region", { name: "Prompt Transcript" })).toBeVisible();
-  expect(within(missionWork).getByRole("region", { name: "Active Workstations" })).toBeVisible();
+  expect(within(missionWork).getByRole("region", { name: "Mission Execution Tree" })).toBeVisible();
   expect(within(missionWork).getByRole("table", { name: "Issue Assignment Board" })).toBeVisible();
   expect(within(missionWork).getByRole("button", { name: "Open detail views" })).toBeVisible();
   expect(within(missionWork).queryByRole("region", { name: "Workstation Detail Views" })).not.toBeInTheDocument();
@@ -716,6 +749,8 @@ test("keeps review-ready workstation evidence affordances visible beside the Age
     ...snapshot,
     mission_board: {
       ...snapshot.mission_board,
+      issue_count: 1,
+      ordered_issue_ids: ["ISS-04"],
       issue_slices: [
         {
           issue_id: "ISS-04",
@@ -797,28 +832,21 @@ test("keeps review-ready workstation evidence affordances visible beside the Age
   render(<App client={{ loadSnapshot: async () => ({ kind: "ready", snapshot: reviewReadySnapshot }) }} />);
 
   expect(await screen.findByRole("main", { name: "Prompt Workstation" })).toBeVisible();
-  const cards = screen.getByRole("region", { name: "Workstation Cards" });
-  const card = within(cards).getByRole("article", { name: "layout-subagent workstation card" });
-  expect(within(card).getByText("Issue Slice")).toBeVisible();
-  expect(within(card).getAllByText("ISS-04").length).toBeGreaterThan(0);
-  expect(within(card).getByText("review-ready")).toBeVisible();
-  expect(within(card).getAllByText("npm test -- --run App.test.tsx").length).toBeGreaterThan(0);
-
-  fireEvent.click(within(card).getByRole("button", { name: "Expand layout-subagent" }));
-
-  expect(within(card).getByRole("region", { name: "layout-subagent operational detail" })).toBeVisible();
-  expect(within(card).getByText("Evidence Packages")).toBeVisible();
+  const node = executionTreeNode("session-ISS-04-1");
+  expect(node).toHaveAttribute("data-state", "decision-needed");
+  const inspector = await openExecutionInspector("session-ISS-04-1");
+  expect(within(inspector).getByText("App tests passed.")).toBeVisible();
+  expect(within(inspector).getByText("mission-control/src/App.tsx")).toBeVisible();
+  expect(within(inspector).getByText("Evidence and touched files")).toBeVisible();
   expect(
-    within(card).getByRole("button", {
-      name: "Open evidence Evidence Package session-ISS-04-1",
+    within(inspector).getByRole("button", {
+      name: "Evidence Package session-ISS-04-1",
     }),
   ).toBeVisible();
-  expect(within(card).getByRole("button", { name: "Accept evidence session-ISS-04-1" })).toBeVisible();
-  expect(within(card).getByRole("button", { name: "Request repair session-ISS-04-1" })).toBeVisible();
-  expect(within(card).getByText("Reason required")).toBeVisible();
-  expect(
-    within(card).getAllByText("Card controls submit through Review Workspace validation").length,
-  ).toBeGreaterThan(0);
+  expect(within(inspector).getByRole("button", { name: "Accept evidence" })).toBeVisible();
+  expect(within(inspector).getByRole("button", { name: "Request repair" })).toBeVisible();
+  expect(within(inspector).getByRole("textbox", { name: "Request repair reason" })).toBeVisible();
+  expect(within(inspector).getByText(/marks session-ISS-04-1 complete and PR-ready/)).toBeVisible();
 });
 
 test("renders Issue Assignment Board rows with local detail and keeps scope controls out of tickets", async () => {
@@ -942,10 +970,10 @@ test("renders Issue Assignment Board rows with local detail and keeps scope cont
 
   const transcript = await screen.findByRole("region", { name: "Prompt Transcript" });
   const missionWork = screen.getByRole("complementary", { name: "Mission Work" });
-  const cards = within(missionWork).getByRole("region", { name: "Workstation Cards" });
+  const tree = within(missionWork).getByRole("region", { name: "Mission Execution Tree" });
   const board = within(missionWork).getByRole("table", { name: "Issue Assignment Board" });
 
-  expect(cards.compareDocumentPosition(board) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(tree.compareDocumentPosition(board) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   expect(within(board).getByRole("row", { name: /ISS-READY Unassigned ready work/ })).toHaveTextContent(
     "Unassigned",
   );
@@ -1125,7 +1153,7 @@ test("submits Issue Assignment Board launch through a typed workstation action",
   expect(screen.getByText(/session-ISS-READY-1 is queued and starting in the background/)).toBeVisible();
   expect(screen.getByText("Orchestrator validating workstation action.")).toBeVisible();
   expect(await screen.findByText(/Orchestrator accepted workstation action: Orchestrator launched ISS-READY/)).toBeVisible();
-  expect(screen.getAllByText("session-ISS-READY-1").length).toBeGreaterThan(0);
+  expect(screen.getAllByText(/session-ISS-READY-1/).length).toBeGreaterThan(0);
 });
 
 test("keeps Mission-qualified Issue Assignment actions pending until their result is visible", async () => {
@@ -1654,17 +1682,15 @@ test("submits review-ready workstation card decisions through typed review valid
     />,
   );
 
-  const cards = await screen.findByRole("region", { name: "Workstation Cards" });
-  const repair = await within(cards).findByRole("button", {
-    name: "Request repair session-ISS-REVIEW-1",
-  });
+  const inspector = await openExecutionInspector("session-ISS-REVIEW-1");
+  const repair = within(inspector).getByRole("button", { name: "Request repair" });
   expect(repair).toBeDisabled();
-  expect(within(cards).getByRole("button", { name: "Escalate human review session-ISS-REVIEW-1" })).toBeEnabled();
-  fireEvent.change(within(cards).getByRole("textbox", { name: "Workstation review reason session-ISS-REVIEW-1" }), {
+  expect(within(inspector).getByRole("button", { name: "Escalate human review" })).toBeEnabled();
+  fireEvent.change(within(inspector).getByRole("textbox", { name: "Request repair reason" }), {
     target: { value: "Repair acceptance copy." },
   });
   expect(repair).toBeEnabled();
-  fireEvent.click(within(cards).getByRole("button", { name: "Accept evidence session-ISS-REVIEW-1" }));
+  fireEvent.click(within(inspector).getByRole("button", { name: "Accept evidence" }));
 
   await waitFor(() =>
     expect(requests).toEqual([
@@ -1834,18 +1860,9 @@ test("restores workstation card state and side-pane selection after desktop refr
   };
 
   const first = render(<App client={continuityClient} />);
-  const cards = await screen.findByRole("region", { name: "Workstation Cards" });
-  fireEvent.change(within(cards).getByRole("searchbox", { name: "Filter workstation cards" }), {
-    target: { value: "qwen" },
-  });
-  fireEvent.change(within(cards).getByRole("combobox", { name: "Sort workstation cards" }), {
-    target: { value: "name" },
-  });
-  fireEvent.click(within(cards).getByRole("button", { name: "Expand qwen-coder-local" }));
-  fireEvent.click(within(cards).getByRole("button", { name: "Pin qwen-coder-local" }));
-  fireEvent.click(screen.getByRole("button", { name: "Inspect assignment ISS-02" }));
-  fireEvent.click(within(cards).getByRole("button", { name: "Select session session-ISS-01-1" }));
-  fireEvent.click(within(cards).getByRole("button", { name: "Open diff mission-control/src/App.tsx" }));
+  fireEvent.click(await screen.findByRole("button", { name: "Inspect assignment ISS-02" }));
+  const inspector = await openExecutionInspector("session-ISS-01-1");
+  fireEvent.click(within(inspector).getByRole("button", { name: "Diff mission-control/src/App.tsx" }));
   await openCommandAudit();
 
   await waitFor(() =>
@@ -1854,20 +1871,11 @@ test("restores workstation card state and side-pane selection after desktop refr
   first.unmount();
 
   render(<App client={continuityClient} />);
-  const restoredCards = await screen.findByRole("region", { name: "Workstation Cards" });
-
-  await waitFor(() =>
-    expect(within(restoredCards).getByRole("searchbox", { name: "Filter workstation cards" })).toHaveValue(
-      "qwen",
-    ),
-  );
-  expect(within(restoredCards).getByRole("combobox", { name: "Sort workstation cards" })).toHaveValue(
-    "name",
-  );
-  expect(within(restoredCards).getByRole("button", { name: "Unpin qwen-coder-local" })).toBeVisible();
-  expect(within(restoredCards).getByRole("region", { name: "qwen-coder-local operational detail" })).toBeVisible();
-  expect(within(restoredCards).getByText("Selected session session-ISS-01-1")).toBeVisible();
-  expect(within(restoredCards).getByText(/Saved review diff:\s*mission-control\/src\/App\.tsx/)).toBeVisible();
+  const restoredInspector = await screen.findByRole("region", {
+    name: "session-ISS-01-1 execution inspector",
+  });
+  expect(executionTreeNode("session-ISS-01-1")).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByText(/Saved review diff/)).toBeVisible();
   expect(screen.getByRole("button", { name: "Close command audit", expanded: true })).toBeVisible();
   closeCommandAudit();
   const restoredAssignmentDetail = screen.getByRole("region", { name: "Issue Assignment Detail" });
@@ -1913,6 +1921,8 @@ test("routes a waiting workstation card decision through typed queue acknowledge
             kind: "delegation-approval",
             label: "ISS-02 delegation approval required",
             queue_link: "workspace-queue#delegation-command-deck-ISS-02",
+            entity_id: "ADHOC-000001",
+            queue_item_id: "delegation-command-deck-ISS-02",
           },
         ],
       },
@@ -1981,22 +1991,16 @@ test("routes a waiting workstation card decision through typed queue acknowledge
 
   render(<App client={actionClient} />);
 
-  const cards = await screen.findByRole("region", { name: "Workstation Cards" });
-  expect(
-    await within(cards).findByRole("button", {
-      name: "Approve delegation-command-deck-ISS-02",
-    }),
-  ).toBeEnabled();
-  expect(within(cards).getByRole("button", { name: "Reject delegation-command-deck-ISS-02" })).toBeDisabled();
-  expect(within(cards).getByRole("button", { name: "Defer delegation-command-deck-ISS-02" })).toBeDisabled();
+  const inspector = await openExecutionInspector("ADHOC-000001", "ad-hoc-delegation");
+  expect(await within(inspector).findByRole("button", { name: "Approve" })).toBeEnabled();
+  expect(within(inspector).getByRole("button", { name: "Reject" })).toBeDisabled();
+  expect(within(inspector).getByRole("button", { name: "Defer" })).toBeDisabled();
 
-  fireEvent.click(within(cards).getByRole("button", { name: "Approve delegation-command-deck-ISS-02" }));
+  fireEvent.click(within(inspector).getByRole("button", { name: "Approve" }));
 
-  expect(
-    await within(cards).findByRole("status", {
-      name: "ISS-02 delegation approval required workstation action state",
-    }),
-  ).toHaveTextContent("pending");
+  expect(within(inspector).getByRole("status")).toHaveTextContent(
+    "Waiting for Orchestrator acknowledgement: Approve Approve ISS-02 delegation.",
+  );
   expect(screen.getByText("Orchestrator validating workstation action.")).toBeVisible();
 
   await waitFor(() =>
@@ -2017,7 +2021,7 @@ test("routes a waiting workstation card decision through typed queue acknowledge
     ]),
   );
   expect(await screen.findByText(/Orchestrator accepted workstation action/)).toBeVisible();
-  expect(screen.getByText("session-ADHOC-000001-1")).toBeVisible();
+  expect(executionTreeNode("session-ADHOC-000001-1")).toBeVisible();
 });
 
 test("records canonical Queue visibility at R5 before the direct runner claim at R6", async () => {
@@ -2049,6 +2053,8 @@ test("records canonical Queue visibility at R5 before the direct runner claim at
             kind: "delegation-approval",
             label: "Measured delegation approval required",
             queue_link: `workspace-queue#${queueItem.item_id}`,
+            entity_id: "ADHOC-PERF-001",
+            queue_item_id: queueItem.item_id,
           },
         ],
       },
@@ -2168,12 +2174,8 @@ test("records canonical Queue visibility at R5 before the direct runner claim at
     />,
   );
 
-  const cards = await screen.findByRole("region", { name: "Workstation Cards" });
-  fireEvent.click(
-    await within(cards).findByRole("button", {
-      name: "Approve delegation-performance-001",
-    }),
-  );
+  const inspector = await openExecutionInspector("ADHOC-PERF-001", "ad-hoc-delegation");
+  fireEvent.click(await within(inspector).findByRole("button", { name: "Approve" }));
   await waitFor(() =>
     expect(
       marks.some((mark) => mark.stage === "R5" && mark.boundary === "end"),
@@ -2182,7 +2184,7 @@ test("records canonical Queue visibility at R5 before the direct runner claim at
   expect(
     marks.some((mark) => mark.stage === "R6" && mark.boundary === "end"),
   ).toBe(false);
-  expect(screen.getByText("session-ADHOC-PERF-001-1")).toBeVisible();
+  expect(screen.getByText(/session-ADHOC-PERF-001-1 is queued and starting in the background/)).toBeVisible();
 
   releaseRunner();
   await waitFor(() =>
@@ -2317,9 +2319,10 @@ test("keeps assigned ready issue launch on the board instead of inventing a work
     />,
   );
 
-  const cards = await screen.findByRole("region", { name: "Workstation Cards" });
+  const tree = await screen.findByRole("region", { name: "Mission Execution Tree" });
   const board = screen.getByRole("table", { name: "Issue Assignment Board" });
-  expect(within(cards).queryByRole("button", { name: "Launch ISS-01" })).not.toBeInTheDocument();
+  expect(within(tree).queryByRole("treeitem", { name: /ISS-01/ })).toBeVisible();
+  expect(within(tree).queryByRole("button", { name: "Launch ISS-01" })).not.toBeInTheDocument();
   expect(within(board).getByRole("row", { name: /ISS-01 Restore workspace session/ })).toHaveTextContent(
     "qwen-coder-local",
   );
@@ -2345,7 +2348,11 @@ test("keeps assigned ready issue launch on the board instead of inventing a work
   );
   expect(screen.getByText("Orchestrator validating workstation action.")).toBeVisible();
   expect(await screen.findByText(/Orchestrator accepted workstation action/)).toBeVisible();
-  expect(screen.getByText("session-ISS-01-1")).toBeVisible();
+  const readyIssueNode = within(executionTree()).getByRole("treeitem", {
+    name: /issue-slice ISS-01/,
+  });
+  if (readyIssueNode.getAttribute("aria-expanded") !== "true") fireEvent.click(readyIssueNode);
+  expect(executionTreeNode("session-ISS-01-1")).toBeVisible();
 });
 
 test("changes a ready issue model assignment from the board with required agent and reason", async () => {
@@ -2447,10 +2454,10 @@ test("changes a ready issue model assignment from the board with required agent 
     />,
   );
 
-  const cards = await screen.findByRole("region", { name: "Workstation Cards" });
+  const tree = await screen.findByRole("region", { name: "Mission Execution Tree" });
   const board = screen.getByRole("table", { name: "Issue Assignment Board" });
   expect(
-    within(cards).queryByRole("button", { name: "Change model assignment ISS-01" }),
+    within(tree).queryByRole("button", { name: "Change model assignment ISS-01" }),
   ).not.toBeInTheDocument();
   const button = within(board).getByRole("button", {
     name: "Change model assignment ISS-01",
@@ -2622,30 +2629,18 @@ test("keeps expanded workstation navigation local to the side pane", async () =>
   );
 
   const transcript = await screen.findByRole("region", { name: "Prompt Transcript" });
-  const cards = screen.getByRole("region", { name: "Workstation Cards" });
-  fireEvent.change(screen.getByRole("searchbox", { name: "Filter workstation cards" }), {
-    target: { value: "qwen" },
-  });
-  fireEvent.change(screen.getByRole("combobox", { name: "Sort workstation cards" }), {
-    target: { value: "name" },
-  });
-  fireEvent.click(screen.getByRole("button", { name: "Pin qwen-coder-local" }));
-  fireEvent.click(screen.getByRole("button", { name: "Expand qwen-coder-local" }));
-
-  expect(within(cards).getByText("Tool Activity")).toBeVisible();
-  expect(within(cards).getAllByText("npm test -- App.test.tsx").length).toBeGreaterThan(0);
+  const inspector = await openExecutionInspector("session-ISS-01-1");
+  expect(within(inspector).getByText("Activity trail")).toBeVisible();
+  expect(within(inspector).getAllByText("npm test -- App.test.tsx").length).toBeGreaterThan(0);
   expect(
-    within(cards).getByRole("button", {
-      name: "Open evidence Evidence Package session-ISS-01-1",
+    within(inspector).getByRole("button", {
+      name: "Evidence Package session-ISS-01-1",
     }),
   ).toBeVisible();
-  expect(within(cards).getByText("Diff should be reviewed before acceptance.")).toBeVisible();
+  expect(within(inspector).getByText("Diff should be reviewed before acceptance.")).toBeVisible();
 
-  fireEvent.click(within(cards).getByRole("button", { name: "Select session session-ISS-01-1" }));
-  expect(within(cards).getByText("Selected session session-ISS-01-1")).toBeVisible();
-
-  fireEvent.click(within(cards).getByRole("button", { name: "Open diff mission-control/src/App.tsx" }));
-  const diffViewer = within(cards).getByRole("region", { name: "Session evidence viewer" });
+  fireEvent.click(within(inspector).getByRole("button", { name: "Diff mission-control/src/App.tsx" }));
+  const diffViewer = await screen.findByRole("region", { name: "Session evidence viewer" });
   expect(diffViewer).toHaveTextContent("mission-control/src/App.tsx");
   expect(await within(diffViewer).findByLabelText("Review diff content")).toHaveTextContent(
     "+bounded viewer",
@@ -2658,14 +2653,13 @@ test("keeps expanded workstation navigation local to the side pane", async () =>
       "app-local://missions/command-deck/sessions/session-ISS-01-1/artifacts/review_diff/review.diff",
   });
   fireEvent.click(
-    within(cards).getByRole("button", {
-      name: "Open evidence Evidence Package session-ISS-01-1",
+    within(inspector).getByRole("button", {
+      name: "Evidence Package session-ISS-01-1",
     }),
   );
   expect(
-    await within(cards).findByLabelText("Evidence Package content"),
+    await screen.findByLabelText("Evidence Package content"),
   ).toHaveTextContent('"evidence_valid": true');
-  fireEvent.click(screen.getByRole("button", { name: "Collapse qwen-coder-local" }));
 
   expect(appendConsoleMessage).not.toHaveBeenCalled();
   expect(within(transcript).getByText("Keep this transcript clean.")).toBeVisible();
@@ -2770,16 +2764,14 @@ test("shows bounded evidence loading, failure, retry, truncation, and inline con
       }}
     />,
   );
-  const cards = await screen.findByRole("region", { name: "Workstation Cards" });
-  const card = within(cards).getByRole("article", { name: "evidence-agent workstation card" });
-  fireEvent.click(within(card).getByRole("button", { name: "Expand evidence-agent" }));
-  const evidenceTrigger = within(card).getByRole("button", {
-    name: "Open evidence Evidence Package session-ISS-EVIDENCE-1",
+  const inspector = await openExecutionInspector("session-ISS-EVIDENCE-1");
+  const evidenceTrigger = within(inspector).getByRole("button", {
+    name: "Evidence Package session-ISS-EVIDENCE-1",
   });
   evidenceTrigger.focus();
   fireEvent.click(evidenceTrigger);
 
-  const viewer = within(cards).getByRole("region", { name: "Session evidence viewer" });
+  const viewer = await screen.findByRole("region", { name: "Session evidence viewer" });
   expect(within(viewer).getByRole("status")).toHaveTextContent("Loading bounded session evidence");
   await act(async () => {
     resolveFirst?.({
@@ -2800,7 +2792,7 @@ test("shows bounded evidence loading, failure, retry, truncation, and inline con
   expect(loadSessionArtifact).toHaveBeenCalledTimes(2);
   expect(screen.queryByRole("link", { name: /Evidence Package session-ISS-EVIDENCE-1/ })).not.toBeInTheDocument();
   fireEvent.click(within(viewer).getByRole("button", { name: "Close session evidence viewer" }));
-  expect(within(cards).queryByRole("region", { name: "Session evidence viewer" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "Session evidence viewer" })).not.toBeInTheDocument();
   await waitFor(() => expect(evidenceTrigger).toHaveFocus());
 });
 
@@ -2813,7 +2805,7 @@ test("opens command audit without mixing prompt and terminal drafts", async () =
   });
   await openCommandAudit();
 
-  expect(screen.getByRole("region", { name: "Workstation Cards" })).toBeVisible();
+  expect(screen.getByRole("region", { name: "Mission Execution Tree" })).toBeVisible();
   expect(screen.getByRole("region", { name: "Shell Terminal" })).toBeVisible();
 
   fireEvent.change(screen.getByRole("textbox", { name: "Command" }), {
@@ -2844,7 +2836,8 @@ test("returns from command audit to the console-first Mission Work layout", asyn
 
   expect(screen.getByRole("region", { name: "Agent Console" })).toBeVisible();
   expect(screen.getByRole("complementary", { name: "Mission Work" })).toBeVisible();
-  expect(screen.getByRole("region", { name: "Active Workstations" })).toBeVisible();
+  expect(screen.getByRole("region", { name: "Mission Execution Tree" })).toBeVisible();
+  expect(screen.queryByRole("region", { name: "Workstation Cards" })).not.toBeInTheDocument();
   expect(screen.getByRole("table", { name: "Issue Assignment Board" })).toBeVisible();
   expect(screen.queryByRole("region", { name: "Shell Terminal" })).not.toBeInTheDocument();
   expect(screen.queryByRole("region", { name: "Workstation Detail Views" })).not.toBeInTheDocument();
@@ -5284,7 +5277,7 @@ test("exposes named workstation hierarchy regions and compact assignment row lab
   render(<App client={{ loadSnapshot: async () => ({ kind: "ready", snapshot: accessibleSnapshot }) }} />);
 
   expect(await screen.findByRole("region", { name: "Agent Console" })).toBeVisible();
-  expect(screen.getByRole("region", { name: "Active Workstations" })).toBeVisible();
+  expect(screen.getByRole("region", { name: "Mission Execution Tree" })).toBeVisible();
   expect(screen.getByRole("region", { name: "Issue Assignment Board" })).toBeVisible();
 
   const board = screen.getByRole("table", { name: "Issue Assignment Board" });
@@ -5300,7 +5293,7 @@ test("exposes named workstation hierarchy regions and compact assignment row lab
   );
 });
 
-test("exposes workstation cards as keyboard-reachable accessible summaries", async () => {
+test("exposes execution tree sessions as keyboard-reachable accessible summaries", async () => {
   const workstationSnapshot: WorkspaceSnapshot = {
     ...snapshot,
     revision: 12,
@@ -5397,29 +5390,20 @@ test("exposes workstation cards as keyboard-reachable accessible summaries", asy
       "Execution Session running",
     );
 
-    const cards = screen.getByRole("region", { name: "Workstation Cards" });
-    const card = within(cards).getByRole("article", { name: "qwen-coder-local workstation card" });
-    card.focus();
-    expect(card).toHaveFocus();
-    expect(card).toHaveAccessibleDescription(
-      /running\. Validate Alfredo accessibility\. Next action: Agent is streaming responsive fixes\./,
-    );
-    expect(within(card).getByText("running")).toHaveAccessibleDescription(
-      "Running work is active. Monitor progress and preserve the prompt workflow.",
+    const sessionNode = executionTreeNode("session-ISS-01-1");
+    sessionNode.focus();
+    expect(sessionNode).toHaveFocus();
+    expect(sessionNode).toHaveAccessibleName(
+      /Local Agent session session-ISS-01-1; .*; Working; No elevated risk/,
     );
 
-    const expand = within(card).getByRole("button", { name: "Expand qwen-coder-local" });
-    expect(expand).toHaveAttribute("aria-expanded", "false");
-    fireEvent.click(expand);
-    expect(expand).toHaveAttribute("aria-expanded", "true");
-    expect(
-      within(card).getByRole("button", { name: "Open diff mission-control/src/App.tsx" }),
-    ).toBeVisible();
+    const inspector = await openExecutionInspector("session-ISS-01-1");
+    expect(within(inspector).getByRole("button", { name: "Diff mission-control/src/App.tsx" })).toBeVisible();
 
-    const cancel = within(card).getByRole("button", { name: "Cancel session session-ISS-01-1" });
+    const cancel = within(inspector).getByRole("button", { name: "Cancel session" });
     expect(cancel).toBeDisabled();
     expect(cancel).toHaveAccessibleDescription(
-      "Enter a reason to enable Cancel session for session-ISS-01-1.",
+      /Acknowledgement records cancellation for session-ISS-01-1;.*Enter a reason to enable Cancel session for session-ISS-01-1\./,
     );
   } finally {
     Object.defineProperty(window, "innerWidth", { configurable: true, value: originalWidth });
@@ -5586,6 +5570,8 @@ test("keeps critical workstation decisions reachable at 520px", async () => {
             kind: "delegation-approval",
             label: "ISS-02 delegation approval required",
             queue_link: "workspace-queue#delegation-command-deck-ISS-02",
+            entity_id: "ADHOC-000001",
+            queue_item_id: "delegation-command-deck-ISS-02",
           },
         ],
       },
@@ -5651,15 +5637,18 @@ test("keeps critical workstation decisions reachable at 520px", async () => {
     );
 
     const prompt = await screen.findByRole("main", { name: "Prompt Workstation" });
-    const cards = await screen.findByRole("region", { name: "Workstation Cards" });
-    expect(prompt.compareDocumentPosition(cards) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
+    const tree = await screen.findByRole("region", { name: "Mission Execution Tree" });
+    expect(prompt.compareDocumentPosition(tree) & Node.DOCUMENT_POSITION_FOLLOWING).not.toBe(0);
     expect(screen.getByRole("region", { name: "Prompt Composer" })).toBeVisible();
-    expect(within(cards).getByRole("button", { name: "Approve delegation-command-deck-ISS-02" })).toBeEnabled();
-
-    const failedCard = within(cards).getByRole("article", { name: "repair-agent workstation card" });
-    expect(failedCard).toHaveAccessibleDescription(/Stale state: workspace revision changed; refresh before retry\./);
-    expect(within(failedCard).getByText("failed", { selector: ".status" })).toHaveAccessibleDescription(
-      "Failed work needs review, repair, retry, or human escalation.",
+    const queueInspector = await openExecutionInspector("ADHOC-000001", "ad-hoc-delegation");
+    expect(within(queueInspector).getByRole("button", { name: "Approve" })).toBeEnabled();
+    const failedNode = executionTreeNode("session-ISS-03-1");
+    expect(failedNode).toHaveAttribute("data-risk", "failed");
+    const failedInspector = await openExecutionInspector("session-ISS-03-1");
+    expect(within(failedInspector).getByText("Failed", { selector: "dd" })).toBeVisible();
+    expect(within(failedInspector).getByRole("button", { name: "Retry" })).toBeDisabled();
+    expect(within(failedInspector).getByRole("button", { name: "Retry" })).toHaveAccessibleDescription(
+      /Acknowledgement queues one canonical repair or retry session for session-ISS-03-1;.*Enter a reason to enable Retry for session-ISS-03-1\./,
     );
 
     await openDetailViews();
@@ -6927,9 +6916,9 @@ test.each([
     });
     fireEvent.click(within(review).getByRole("button", { name: `Request repair ${priorSessionId}` }));
 
-    const cards = await screen.findByRole("region", { name: "Workstation Cards" });
-    const launch = await within(cards).findByRole("button", {
-      name: `Launch repair ${priorSessionId}`,
+    const repairInspector = await openExecutionInspector(priorSessionId);
+    const launch = await within(repairInspector).findByRole("button", {
+      name: "Launch repair",
     });
     expect(launch).toBeEnabled();
     fireEvent.click(launch);
@@ -7418,6 +7407,8 @@ test("switches Active Mission from the compact selector while preserving console
             kind: "delegation-approval",
             label: "ISS-01 delegation approval required",
             queue_link: "workspace-queue#delegation-command-deck-ISS-01",
+            entity_id: "ISS-01",
+            queue_item_id: "",
           },
         ],
       },
@@ -8906,6 +8897,8 @@ test("suppresses legacy Queue effect claims until exact receipt identities are a
             kind: "ad-hoc-delegation",
             label: "ADHOC-000043 Ad Hoc Delegation pending",
             queue_link: "workspace-queue#ad-hoc-delegation-command-deck-000043",
+            entity_id: "ADHOC-000043",
+            queue_item_id: "ad-hoc-delegation-command-deck-000043",
           },
         ],
       },

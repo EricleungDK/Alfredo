@@ -3,6 +3,7 @@ import {
   projectIssueAssignmentBoard,
   projectMissionExecutionTree,
   projectWorkstationCards,
+  workstationActionConsequence,
 } from "./workstation-projection";
 
 const baseSnapshot: WorkspaceSnapshot = {
@@ -175,6 +176,8 @@ const baseSnapshot: WorkspaceSnapshot = {
           kind: "delegation-approval",
           label: "ISS-03 delegation approval required",
           queue_link: "workspace-queue#delegation-command-deck-ISS-03",
+          entity_id: "ADHOC-000001",
+          queue_item_id: "delegation-command-deck-ISS-03",
         },
       ],
     },
@@ -384,6 +387,8 @@ test("projects a work-centered Mission Execution Tree from canonical work record
             kind: "ad-hoc-delegation",
             label: "ADHOC-000001 Ad Hoc Delegation pending",
             queue_link: "workspace-queue#ad-hoc-delegation-command-deck-000001",
+            entity_id: "ADHOC-000001",
+            queue_item_id: "ad-hoc-delegation-command-deck-000001",
           },
         ],
       },
@@ -414,7 +419,6 @@ test("projects a work-centered Mission Execution Tree from canonical work record
     state: "blocked",
     child_ids: [
       "session:command-deck:session-ISS-01-1",
-      "session:command-deck:session-ISS-01-2",
     ],
   });
   expect(node("ad-hoc:command-deck:ADHOC-000001")).toMatchObject({
@@ -425,9 +429,13 @@ test("projects a work-centered Mission Execution Tree from canonical work record
   });
   expect(node("session:command-deck:session-ISS-01-2")).toMatchObject({
     kind: "agent-session",
-    state: "repair",
-    parent_id: "issue:command-deck:ISS-01",
+    state: "queued",
+    lineage: "repair",
+    parent_id: "session:command-deck:session-ISS-01-1",
     parent_session_id: "session-ISS-01-1",
+  });
+  expect(node("session:command-deck:session-ISS-01-1")).toMatchObject({
+    child_ids: ["session:command-deck:session-ISS-01-2"],
   });
   expect(node("session:command-deck:session-ADHOC-000001-1")).toMatchObject({
     kind: "agent-session",
@@ -435,6 +443,131 @@ test("projects a work-centered Mission Execution Tree from canonical work record
     parent_id: "ad-hoc:command-deck:ADHOC-000001",
     identity: "session-ADHOC-000001-1",
   });
+});
+
+test("fails safe by surfacing cyclic repair sessions as root-owned nodes", () => {
+  const snapshot: WorkspaceSnapshot = {
+    ...baseSnapshot,
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      ordered_issue_ids: ["ISS-01"],
+      issue_count: 1,
+      issue_slices: [
+        {
+          ...baseSnapshot.mission_board.issue_slices![0],
+          sessions: [],
+        },
+      ],
+    },
+    missions: [
+      {
+        ...baseSnapshot.missions![0],
+        issue_count: 1,
+        sessions: [
+          {
+            session_id: "session-cycle-a",
+            issue_id: "ISS-01",
+            assigned_agent: "repair-a",
+            status: "queued",
+            parent_session_id: "session-cycle-b",
+          },
+          {
+            session_id: "session-cycle-b",
+            issue_id: "ISS-01",
+            assigned_agent: "repair-b",
+            status: "failed",
+            parent_session_id: "session-cycle-a",
+          },
+        ],
+        attention: [],
+      },
+    ],
+  };
+
+  const projection = projectMissionExecutionTree(snapshot);
+  const node = (id: string) => projection.nodes.find((candidate) => candidate.id === id);
+
+  expect(node("issue:command-deck:ISS-01")?.child_ids).toEqual([
+    "session:command-deck:session-cycle-a",
+    "session:command-deck:session-cycle-b",
+  ]);
+  expect(node("session:command-deck:session-cycle-a")).toMatchObject({
+    parent_id: "issue:command-deck:ISS-01",
+    lineage: "root",
+    state: "queued",
+  });
+  expect(node("session:command-deck:session-cycle-b")).toMatchObject({
+    parent_id: "issue:command-deck:ISS-01",
+    lineage: "root",
+    state: "failed",
+  });
+  expect(node("session:command-deck:session-cycle-a")?.child_ids).toEqual([]);
+  expect(node("session:command-deck:session-cycle-b")?.child_ids).toEqual([]);
+});
+
+test("uses typed Ad Hoc identity instead of display labels or issue-id patterns", () => {
+  const snapshot: WorkspaceSnapshot = {
+    ...baseSnapshot,
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      ordered_issue_ids: [],
+      issue_count: 0,
+      issue_slices: [],
+    },
+    missions: [
+      {
+        ...baseSnapshot.missions![0],
+        issue_count: 0,
+        sessions: [
+          {
+            session_id: "session-ADHOC-LOOKALIKE-1",
+            issue_id: "ADHOC-LOOKALIKE",
+            assigned_agent: "issue-worker",
+            status: "queued",
+            work_kind: "issue-slice",
+          },
+        ],
+        attention: [
+          {
+            attention_id: "attention-canonical-ad-hoc",
+            mission_id: "command-deck",
+            kind: "ad-hoc-delegation",
+            label: "A display label unrelated to identity",
+            queue_link: "workspace-queue#not-the-entity",
+            entity_id: "ADHOC-CANONICAL",
+            queue_item_id: "queue-canonical",
+          },
+        ],
+      },
+    ],
+  };
+
+  const projection = projectMissionExecutionTree(snapshot);
+
+  expect(projection.nodes.map((node) => node.id)).toContain(
+    "ad-hoc:command-deck:ADHOC-CANONICAL",
+  );
+  expect(projection.nodes.map((node) => node.id)).not.toContain(
+    "ad-hoc:command-deck:A display label unrelated to identity",
+  );
+  expect(projection.nodes.map((node) => node.id)).not.toContain(
+    "ad-hoc:command-deck:ADHOC-LOOKALIKE",
+  );
+  expect(projection.nodes.map((node) => node.id)).toContain(
+    "session:command-deck:session-ADHOC-LOOKALIKE-1",
+  );
+});
+
+test("describes governed action consequences independently of recovery guidance", () => {
+  const action = projectWorkstationCards(baseSnapshot)
+    .groups
+    .flatMap((group) => group.cards)
+    .find((card) => card.sessionId === "session-ISS-01-1")
+    ?.detail.governedActions.find((candidate) => candidate.actionType === "session-cancel");
+
+  expect(action).toBeDefined();
+  expect(workstationActionConsequence(action!)).toContain("records cancellation");
+  expect(workstationActionConsequence(action!)).not.toContain("recovery");
 });
 
 test("keeps frontend-only pending intent separate from accepted workstation state", () => {
@@ -2189,6 +2322,8 @@ test("sorts blocked and waiting approval cards above routine active work while p
             kind: "delegation-approval",
             label: "ISS-APPROVAL delegation approval required",
             queue_link: "workspace-queue#queue-ISS-APPROVAL",
+            entity_id: "ISS-APPROVAL",
+            queue_item_id: "",
           },
         ],
         sessions: statuses.map(([sessionId, issueId, agent, sessionStatus]) => ({

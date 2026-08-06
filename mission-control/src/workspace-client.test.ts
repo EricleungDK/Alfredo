@@ -240,6 +240,94 @@ test("records a process-local performance boundary through the native bridge", a
   expect(result).toEqual({ recorded: true });
 });
 
+test("polls exact Mission and session output through the native transport and cleans up", async () => {
+  vi.useFakeTimers();
+  vi.mocked(invoke).mockClear();
+  vi.mocked(invoke).mockResolvedValueOnce({
+    schema_version: 1,
+    mission_id: "command-deck",
+    session_id: "session-output-1",
+    events: [
+      {
+        schema_version: 1,
+        mission_id: "command-deck",
+        session_id: "session-output-1",
+        sequence: 1,
+        content: "stdout line",
+        phase: "streaming",
+      },
+    ],
+    complete: true,
+  });
+  const onEvent = vi.fn();
+
+  try {
+    const unsubscribe = new TauriWorkspaceClient().subscribeToSessionOutput(
+      { mission_id: "command-deck", session_id: "session-output-1" },
+      onEvent,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(invoke).toHaveBeenCalledWith("session_output", {
+      request: {
+        mission_id: "command-deck",
+        session_id: "session-output-1",
+        after_sequence: 0,
+      },
+    });
+    expect(onEvent).toHaveBeenCalledWith(expect.objectContaining({ sequence: 1 }));
+    unsubscribe();
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(invoke).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("localhost output polling ignores a mismatched projection and sends the exact cursor", async () => {
+  vi.useFakeTimers();
+  const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+    const request = JSON.parse(String(init?.body)) as { id: string; command: string; args: { request: Record<string, unknown> } };
+    expect(request.command).toBe("session_output");
+    expect(request.args.request).toEqual({
+      mission_id: "command-deck",
+      session_id: "session-output-2",
+      after_sequence: 0,
+    });
+    return new Response(
+      JSON.stringify({
+        id: request.id,
+        ok: true,
+        value: {
+          schema_version: 1,
+          mission_id: "other-mission",
+          session_id: "session-output-2",
+          events: [],
+          complete: true,
+        },
+      }),
+      { status: 200, headers: { "Content-Type": "application/json" } },
+    );
+  });
+  const onEvent = vi.fn();
+
+  try {
+    const unsubscribe = createLocalhostWorkspaceClient(
+      { endpoint: "/__alfredo/invoke", token: "localhost-secret" },
+      fetchMock,
+    ).subscribeToSessionOutput(
+      { mission_id: "command-deck", session_id: "session-output-2" },
+      onEvent,
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onEvent).not.toHaveBeenCalled();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
 test("preserves a structured Coding Workspace selection failure from Tauri", async () => {
   const request = {
     correlation_id: "workspace-select-unsafe-1",

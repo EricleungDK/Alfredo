@@ -1466,6 +1466,10 @@ pub struct WorkspaceQueueAttention {
     pub kind: String,
     pub label: String,
     pub queue_link: String,
+    #[serde(default)]
+    pub entity_id: String,
+    #[serde(default)]
+    pub queue_item_id: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -2220,6 +2224,34 @@ pub struct SessionArtifactProjection {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionOutputRequest {
+    pub mission_id: String,
+    pub session_id: String,
+    #[serde(default)]
+    pub after_sequence: u64,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SessionOutputEvent {
+    pub schema_version: u32,
+    pub mission_id: String,
+    pub session_id: String,
+    pub sequence: u64,
+    pub content: String,
+    pub phase: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct SessionOutputProjection {
+    pub schema_version: u32,
+    pub mission_id: String,
+    pub session_id: String,
+    pub events: Vec<SessionOutputEvent>,
+    pub complete: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 pub struct MissionDraftIncludedWork {
     pub work_id: String,
     pub source: String,
@@ -2414,7 +2446,86 @@ pub fn decode_snapshot_output(output: ProcessOutput) -> Result<WorkspaceSnapshot
             recoverable: false,
         });
     }
+    validate_snapshot_projection(&snapshot)?;
     Ok(snapshot)
+}
+
+fn validate_snapshot_projection(snapshot: &WorkspaceSnapshot) -> Result<(), BridgeFailure> {
+    for mission in &snapshot.missions {
+        let session_ids: std::collections::HashSet<&str> = mission
+            .sessions
+            .iter()
+            .map(|session| session.session_id.as_str())
+            .collect();
+        let sessions_by_id: HashMap<&str, &MissionSessionSummary> = mission
+            .sessions
+            .iter()
+            .map(|session| (session.session_id.as_str(), session))
+            .collect();
+        for session in &mission.sessions {
+            if session.parent_session_id.is_empty() {
+                continue;
+            }
+            let mut lineage = std::collections::HashSet::new();
+            let mut current = session;
+            loop {
+                if !lineage.insert(current.session_id.as_str()) {
+                    return Err(BridgeFailure {
+                        code: "contract-failure".to_owned(),
+                        message: format!(
+                            "Mission {} returned a cyclic repair lineage at session {}.",
+                            mission.id, current.session_id
+                        ),
+                        recoverable: false,
+                    });
+                }
+                let parent_id = current.parent_session_id.as_str();
+                if parent_id.is_empty() {
+                    break;
+                }
+                if parent_id == current.session_id || !session_ids.contains(parent_id) {
+                    return Err(BridgeFailure {
+                        code: "contract-failure".to_owned(),
+                        message: format!(
+                            "Mission {} returned an invalid repair parent for session {}.",
+                            mission.id, session.session_id
+                        ),
+                        recoverable: false,
+                    });
+                }
+                current = sessions_by_id
+                    .get(parent_id)
+                    .expect("session id was validated above");
+            }
+        }
+        for attention in &mission.attention {
+            if attention.entity_id.trim().is_empty() {
+                return Err(BridgeFailure {
+                    code: "contract-failure".to_owned(),
+                    message: format!(
+                        "Mission {} returned attention {} without a canonical entity identity.",
+                        mission.id, attention.attention_id
+                    ),
+                    recoverable: false,
+                });
+            }
+            if matches!(
+                attention.kind.as_str(),
+                "issue-change-proposal" | "frontier-confirmation" | "ad-hoc-delegation"
+            ) && attention.queue_item_id.trim().is_empty()
+            {
+                return Err(BridgeFailure {
+                    code: "contract-failure".to_owned(),
+                    message: format!(
+                        "Queue attention {} is missing its canonical queue item identity.",
+                        attention.attention_id
+                    ),
+                    recoverable: false,
+                });
+            }
+        }
+    }
+    Ok(())
 }
 
 pub fn decode_updates_output(output: ProcessOutput) -> Result<WorkspaceUpdateBatch, BridgeFailure> {
@@ -3218,6 +3329,69 @@ pub fn execute_session_artifact(
     decode_backend_json(process_output(output), "session artifact projection")
 }
 
+pub fn execute_session_output(
+    config: &BridgeConfig,
+    request: &SessionOutputRequest,
+) -> Result<SessionOutputProjection, BridgeFailure> {
+    let output = configured_python_command(config, "session-output")
+        .arg("--output-mission-id")
+        .arg(&request.mission_id)
+        .arg("--session-id")
+        .arg(&request.session_id)
+        .arg("--after-sequence")
+        .arg(request.after_sequence.to_string())
+        .output()
+        .map_err(|error| BridgeFailure {
+            code: "backend-startup-failure".to_owned(),
+            message: format!("Unable to start the bounded session output reader: {error}"),
+            recoverable: true,
+        })?;
+    let projection = decode_backend_json(process_output(output), "session output projection")?;
+    validate_session_output_projection(&projection, request)?;
+    Ok(projection)
+}
+
+fn validate_session_output_projection(
+    projection: &SessionOutputProjection,
+    request: &SessionOutputRequest,
+) -> Result<(), BridgeFailure> {
+    if projection.schema_version != 1
+        || projection.mission_id != request.mission_id
+        || projection.session_id != request.session_id
+    {
+        return Err(BridgeFailure {
+            code: "contract-failure".to_owned(),
+            message: "Session output crossed its exact mission/session boundary.".to_owned(),
+            recoverable: false,
+        });
+    }
+    if projection.events.len() > 256 {
+        return Err(BridgeFailure {
+            code: "contract-failure".to_owned(),
+            message: "Session output exceeded its bounded event count.".to_owned(),
+            recoverable: false,
+        });
+    }
+    let mut previous_sequence = request.after_sequence;
+    for event in &projection.events {
+        if event.schema_version != 1
+            || event.mission_id != request.mission_id
+            || event.session_id != request.session_id
+            || event.sequence <= previous_sequence
+            || !matches!(event.phase.as_str(), "streaming" | "complete" | "failed")
+            || event.content.as_bytes().len() > 16_000
+        {
+            return Err(BridgeFailure {
+                code: "contract-failure".to_owned(),
+                message: "Session output crossed its bounded event contract.".to_owned(),
+                recoverable: false,
+            });
+        }
+        previous_sequence = event.sequence;
+    }
+    Ok(())
+}
+
 pub fn execute_mission_drafts(
     config: &BridgeConfig,
 ) -> Result<MissionDraftProjection, BridgeFailure> {
@@ -3328,6 +3502,7 @@ pub const LOCALHOST_BRIDGE_COMMANDS: &[&str] = &[
     "review_decision",
     "review_workspace",
     "session_artifact",
+    "session_output",
     "shell_terminal",
     "shell_terminal_decision",
     "shell_terminal_submit",
@@ -3649,6 +3824,10 @@ impl WorkstationBridge {
             "session_artifact" => {
                 let RequestBridgeArgs { request } = decode_localhost_args(command, args)?;
                 localhost_value(execute_session_artifact(&self.bound_config()?, &request)?)
+            }
+            "session_output" => {
+                let RequestBridgeArgs { request } = decode_localhost_args(command, args)?;
+                localhost_value(execute_session_output(&self.bound_config()?, &request)?)
             }
             "mission_drafts" => {
                 let _: EmptyBridgeArgs = decode_localhost_args(command, args)?;
@@ -4171,6 +4350,17 @@ fn session_artifact(
     execute_session_artifact(&bound_config, &request)
 }
 
+#[cfg(feature = "desktop")]
+#[tauri::command]
+fn session_output(
+    config: tauri::State<'_, BridgeConfig>,
+    binding: tauri::State<'_, WorkspaceBinding>,
+    request: SessionOutputRequest,
+) -> Result<SessionOutputProjection, BridgeFailure> {
+    let bound_config = binding.bound_config(config.inner())?;
+    execute_session_output(&bound_config, &request)
+}
+
 /// PROTOTYPE ONLY: exercise a Rust-owned decision slice against a read-only
 /// import of the live Python snapshot. The command never writes canonical state.
 #[cfg(all(feature = "desktop", feature = "rust-orchestrator-prototype"))]
@@ -4319,6 +4509,7 @@ pub fn run() {
         workstation_action,
         workstation_session_run,
         session_artifact,
+        session_output,
         mission_drafts,
         mission_draft_create,
         mission_draft_decision
@@ -4354,6 +4545,7 @@ pub fn run() {
         workstation_action,
         workstation_session_run,
         session_artifact,
+        session_output,
         rust_orchestrator_prototype,
         mission_drafts,
         mission_draft_create,
@@ -5306,6 +5498,107 @@ mod tests {
         assert!(artifact.content.contains("+fixed"));
         assert_eq!(artifact.content_limit_bytes, 128_000);
         assert!(!artifact.truncated);
+    }
+
+    #[test]
+    fn rejects_session_output_that_crosses_the_requested_boundary() {
+        let request = SessionOutputRequest {
+            mission_id: "command-deck".to_owned(),
+            session_id: "session-ISS-01-1".to_owned(),
+            after_sequence: 1,
+        };
+        let stale_projection = SessionOutputProjection {
+            schema_version: 1,
+            mission_id: "command-deck".to_owned(),
+            session_id: "session-ISS-01-1".to_owned(),
+            events: vec![SessionOutputEvent {
+                schema_version: 1,
+                mission_id: "command-deck".to_owned(),
+                session_id: "session-ISS-01-1".to_owned(),
+                sequence: 1,
+                content: "stale event".to_owned(),
+                phase: "streaming".to_owned(),
+            }],
+            complete: false,
+        };
+
+        let failure = validate_session_output_projection(&stale_projection, &request)
+            .expect_err("the backend must not replay events before the requested cursor");
+        assert_eq!(failure.code, "contract-failure");
+
+        let valid_projection = SessionOutputProjection {
+            schema_version: 1,
+            mission_id: "command-deck".to_owned(),
+            session_id: "session-ISS-01-1".to_owned(),
+            events: vec![SessionOutputEvent {
+                schema_version: 1,
+                mission_id: "command-deck".to_owned(),
+                session_id: "session-ISS-01-1".to_owned(),
+                sequence: 2,
+                content: "next event".to_owned(),
+                phase: "streaming".to_owned(),
+            }],
+            complete: false,
+        };
+        validate_session_output_projection(&valid_projection, &request)
+            .expect("an exact, bounded event after the cursor should decode");
+    }
+
+    #[test]
+    fn rejects_cyclic_repair_lineage_at_the_snapshot_boundary() {
+        let snapshot: WorkspaceSnapshot = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "revision": 4,
+            "workspace_session": {
+                "id": "workspace-command-deck",
+                "workspace_path": "/workspace/albert",
+                "status": "ready"
+            },
+            "active_mission": null,
+            "conversation_scope": {
+                "kind": "mission",
+                "target_id": "command-deck",
+                "label": "Command Deck Mission"
+            },
+            "operations_view": "mission-board",
+            "mission_board": {
+                "prd_title": "Command Deck Mission",
+                "issue_count": 0,
+                "ordered_issue_ids": [],
+                "ready_issue_ids": [],
+                "approved_issue_ids": [],
+                "issue_slices": []
+            },
+            "missions": [{
+                "id": "command-deck",
+                "title": "Command Deck Mission",
+                "issue_count": 0,
+                "is_active": true,
+                "sessions": [
+                    {
+                        "session_id": "session-cycle-a",
+                        "issue_id": "ISS-01",
+                        "assigned_agent": "repair-a",
+                        "status": "queued",
+                        "parent_session_id": "session-cycle-b"
+                    },
+                    {
+                        "session_id": "session-cycle-b",
+                        "issue_id": "ISS-01",
+                        "assigned_agent": "repair-b",
+                        "status": "failed",
+                        "parent_session_id": "session-cycle-a"
+                    }
+                ],
+                "attention": []
+            }]
+        }))
+        .expect("cycle fixture should decode");
+
+        let failure = validate_snapshot_projection(&snapshot)
+            .expect_err("the Rust boundary must fail closed on cyclic repair lineage");
+        assert_eq!(failure.code, "contract-failure");
+        assert!(failure.message.contains("cyclic repair lineage"));
     }
 
     #[test]
@@ -7460,6 +7753,7 @@ None - can start immediately
                 "review_decision",
                 "review_workspace",
                 "session_artifact",
+                "session_output",
                 "shell_terminal",
                 "shell_terminal_decision",
                 "shell_terminal_submit",

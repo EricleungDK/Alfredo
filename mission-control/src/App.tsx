@@ -52,10 +52,11 @@ import { applyWorkspaceUpdates } from "./workspace-sync";
 import {
   projectIssueAssignmentBoard,
   projectMissionExecutionTree,
-  projectWorkstationCards,
+  workstationActionKey,
+  workstationActionStateId,
+  workstationActionTargetId,
   type IssueAssignmentBoardProjection,
   type IssueAssignmentBoardRow,
-  type WorkstationCardGroup,
   type WorkstationCardProjection,
   type WorkstationDiffLink,
   type WorkstationEvidenceLink,
@@ -143,12 +144,8 @@ interface WorkstationContinuityState {
   readonly issueFocusTarget: "assignment-board" | "mission-board" | null;
   readonly selectedSessionId: string | null;
   readonly selectedSessionMissionId: string | null;
-  readonly expandedWorkstationCardIds: readonly string[];
-  readonly pinnedWorkstationCardIds: readonly string[];
-  readonly workstationFilter: string;
-  readonly workstationSort: "priority" | "name" | "status";
-  readonly selectedWorkstationSessionId: string | null;
   readonly selectedWorkstationDiff: WorkstationDiffLink | null;
+  readonly selectedExecutionNodeId: string | null;
 }
 
 type PersistedWorkstationContinuityState = Partial<
@@ -2128,13 +2125,23 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       const item = workspaceQueue.items.find((candidate) => candidate.item_id === itemId);
       const actionLabel = `${decision[0].toUpperCase() + decision.slice(1)} ${item?.requested_action ?? itemId}`;
       const correlationId = `queue-${decision}-${itemId}-${workspaceQueue.revision}`;
+      const actionStateId = workstationActionStateId({
+        label: actionLabel,
+        target: "workspace-queue",
+        requiresReason: decision !== "approve",
+        actionType: "workspace-queue-decision",
+        missionId: item?.mission_id,
+        itemId,
+        decision,
+        targetIdentity: { kind: "workspace-queue-item", id: itemId },
+      });
       void markFrontendPerformance(client, "R0", "start", {
         outcome: "pass",
         correlation_id: correlationId,
         decision,
       });
       setQueueStatus({ state: "pending", message: "Workspace Queue decision pending" });
-      beginVisibleWorkstationAction(correlationId, actionLabel, itemId);
+      beginVisibleWorkstationAction(correlationId, actionLabel, actionStateId);
       void afterTwoAnimationFrames().then(() =>
         markFrontendPerformance(client, "R0", "end", {
           outcome: "pass",
@@ -2167,7 +2174,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       });
       if (result.kind !== "acknowledged") {
         setQueueStatus({ state: result.kind, message: result.message });
-        finishVisibleWorkstationAction(correlationId, itemId, result.kind, result.message);
+        finishVisibleWorkstationAction(correlationId, actionStateId, result.kind, result.message);
         return;
       }
       if (result.acknowledgement.session_id) {
@@ -2199,7 +2206,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         setQueueStatus({ state: "rejected", message: "Queue acknowledged but reload failed" });
         finishVisibleWorkstationAction(
           correlationId,
-          itemId,
+          actionStateId,
           "failed",
           "Orchestrator acknowledged the action, but Alfredo could not reload canonical state.",
         );
@@ -2220,7 +2227,7 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       });
       finishVisibleWorkstationAction(
         correlationId,
-        itemId,
+        actionStateId,
         "acknowledged",
         result.acknowledgement.effect_summary,
         result.acknowledgement.correlation_id,
@@ -3775,11 +3782,6 @@ function CommandDeck({
   const [issueFocusTarget, setIssueFocusTarget] = useState<"assignment-board" | "mission-board" | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [selectedSessionMissionId, setSelectedSessionMissionId] = useState<string | null>(null);
-  const [expandedWorkstationCardIds, setExpandedWorkstationCardIds] = useState<readonly string[]>([]);
-  const [pinnedWorkstationCardIds, setPinnedWorkstationCardIds] = useState<readonly string[]>([]);
-  const [workstationFilter, setWorkstationFilter] = useState("");
-  const [workstationSort, setWorkstationSort] = useState<"priority" | "name" | "status">("priority");
-  const [selectedWorkstationSessionId, setSelectedWorkstationSessionId] = useState<string | null>(null);
   const [selectedWorkstationDiff, setSelectedWorkstationDiff] = useState<WorkstationDiffLink | null>(null);
   const [selectedExecutionNodeId, setSelectedExecutionNodeId] = useState<string | null>(null);
   const [executionOutputLines, setExecutionOutputLines] = useState<readonly string[]>([]);
@@ -3929,36 +3931,22 @@ function CommandDeck({
       : null) ??
     snapshot.mission_board.issue_slices?.[0] ??
     null;
-  const workstationProjection = projectWorkstationCards(snapshot, {
-    workspaceQueue,
-    pendingIntent:
-      actionStatus === "pending"
-        ? {
-            id: `workspace-action-${snapshot.revision}`,
-            label: "Awaiting Orchestrator acknowledgement",
-            expectedRevision: snapshot.revision,
-          }
-        : null,
-  });
   const executionTreeProjection: MissionExecutionTreeProjection = useMemo(
     () => projectMissionExecutionTree(snapshot, { workspaceQueue }),
     [snapshot, workspaceQueue],
   );
-  const workstationCards = workstationProjection.groups.flatMap((group) => group.cards);
-  const visibleWorkstationGroups = filterAndSortWorkstationGroups(
-    workstationProjection.groups,
-    workstationFilter,
-    workstationSort,
-    pinnedWorkstationCardIds,
-  );
+  const pendingWorkstationIntent = actionStatus === "pending"
+    ? {
+        id: `workspace-action-${snapshot.revision}`,
+        label: "Awaiting Orchestrator acknowledgement",
+        expectedRevision: snapshot.revision,
+      }
+    : null;
   const selectExecutionNode = useCallback(
     (nodeId: string): void => {
       const node = executionTreeProjection.nodes.find((candidate) => candidate.id === nodeId);
       if (!node?.inspectable) return;
       setSelectedExecutionNodeId(nodeId);
-      if (node.kind === "agent-session" && node.card?.sessionId) {
-        setSelectedWorkstationSessionId(node.card.id);
-      }
     },
     [executionTreeProjection.nodes],
   );
@@ -4025,13 +4013,14 @@ function CommandDeck({
   useEffect(() => {
     if (hydratedWorkstationContinuityKey.current === workstationContinuityKey) return;
     const restored = readWorkstationContinuity(workstationContinuityKey);
-    const cardIds = new Set(workstationCards.map((card) => card.id));
     const sessionIds = new Set(
-      workstationCards.flatMap((card) => (card.sessionId ? [card.sessionId] : [])),
+      (snapshot.missions ?? []).flatMap((candidate) =>
+        candidate.id === activeMissionId
+          ? candidate.sessions.map((session) => session.session_id)
+          : [],
+      ),
     );
-    const sessionCardIds = new Set(
-      workstationCards.flatMap((card) => (card.sessionId ? [card.id] : [])),
-    );
+    const executionNodeIds = new Set(executionTreeProjection.nodes.map((node) => node.id));
     const issueIds = new Set(snapshot.mission_board.ordered_issue_ids);
     if (restored) {
       skipWorkstationContinuityWrite.current = true;
@@ -4071,29 +4060,27 @@ function CommandDeck({
           ? activeMissionId
           : null,
       );
-      setExpandedWorkstationCardIds(
-        restored.expandedWorkstationCardIds.filter((cardId) => cardIds.has(cardId)),
-      );
-      setPinnedWorkstationCardIds(
-        restored.pinnedWorkstationCardIds.filter((cardId) => cardIds.has(cardId)),
-      );
-      setWorkstationFilter(restored.workstationFilter);
-      setWorkstationSort(restored.workstationSort);
-      setSelectedWorkstationSessionId(
-        restored.selectedWorkstationSessionId &&
-          sessionCardIds.has(restored.selectedWorkstationSessionId)
-          ? restored.selectedWorkstationSessionId
-          : null,
-      );
       setSelectedWorkstationDiff(
         restored.selectedWorkstationDiff &&
-          sessionCardIds.has(restored.selectedWorkstationDiff.cardId)
+          sessionIds.has(restored.selectedWorkstationDiff.sessionId)
           ? restored.selectedWorkstationDiff
+          : null,
+      );
+      setSelectedExecutionNodeId(
+        restored.selectedExecutionNodeId && executionNodeIds.has(restored.selectedExecutionNodeId)
+          ? restored.selectedExecutionNodeId
           : null,
       );
     }
     hydratedWorkstationContinuityKey.current = workstationContinuityKey;
-  }, [activeMissionId, onCommandAuditOpenChange, snapshot.mission_board.ordered_issue_ids, workstationCards, workstationContinuityKey]);
+  }, [
+    activeMissionId,
+    executionTreeProjection.nodes,
+    onCommandAuditOpenChange,
+    snapshot.mission_board.ordered_issue_ids,
+    snapshot.missions,
+    workstationContinuityKey,
+  ]);
   useEffect(() => {
     if (hydratedWorkstationContinuityKey.current !== workstationContinuityKey) return;
     if (skipWorkstationContinuityWrite.current) {
@@ -4108,27 +4095,19 @@ function CommandDeck({
       issueFocusTarget,
       selectedSessionId,
       selectedSessionMissionId,
-      expandedWorkstationCardIds,
-      pinnedWorkstationCardIds,
-      workstationFilter,
-      workstationSort,
-      selectedWorkstationSessionId,
       selectedWorkstationDiff,
+      selectedExecutionNodeId,
     });
   }, [
-    expandedWorkstationCardIds,
     commandAuditOpen,
-    pinnedWorkstationCardIds,
     issueFocusTarget,
     selectedIssueId,
     selectedIssueMissionId,
     selectedSessionId,
     selectedSessionMissionId,
     selectedWorkstationDiff,
-    selectedWorkstationSessionId,
+    selectedExecutionNodeId,
     workstationContinuityKey,
-    workstationFilter,
-    workstationSort,
   ]);
   const snapshotTranscriptTurns = [
     ...buildWorkstationTranscriptTurns(snapshot),
@@ -4364,20 +4343,6 @@ function CommandDeck({
             : shellTerminal.actionStatus?.state === "pending"
               ? "Command pending"
               : snapshotExecutionState(snapshot);
-  const toggleExpandedWorkstationCard = (cardId: string) => {
-    setExpandedWorkstationCardIds((current) =>
-      current.includes(cardId)
-        ? current.filter((id) => id !== cardId)
-        : [...current, cardId],
-    );
-  };
-  const togglePinnedWorkstationCard = (cardId: string) => {
-    setPinnedWorkstationCardIds((current) =>
-      current.includes(cardId)
-        ? current.filter((id) => id !== cardId)
-        : [...current, cardId],
-    );
-  };
   return (
     <div className="command-deck">
       <header className="topbar">
@@ -5029,8 +4994,15 @@ function CommandDeck({
             </div>
             <div className="mission-work-controls">
               <span className="connection-pill">
-                {workstationCards.length} streams
+                {executionTreeProjection.counts.local_agent_sessions} Local Agent sessions
               </span>
+              <button
+                type="button"
+                aria-expanded={commandAuditOpen}
+                onClick={() => onCommandAuditOpenChange(!commandAuditOpen)}
+              >
+                {commandAuditOpen ? "Close command audit" : "Open command audit"}
+              </button>
               <button
                 type="button"
                 aria-expanded={detailViewsOpen}
@@ -5056,128 +5028,44 @@ function CommandDeck({
               }
               onOpenDiff={openWorkstationDiff}
               onOpenEvidence={openWorkstationEvidence}
+              workstationActionDrafts={workstationActionDrafts}
+              onWorkstationActionDraftChange={onWorkstationActionDraftChange}
+              onWorkstationAction={onWorkstationAction}
+              actionState={workstationActionState}
+              reviewReasons={reviewReasons}
+              onReviewReasonChange={onReviewReasonChange}
+              onReviewDecision={onReviewDecision}
+              queueReasons={queueReasons}
+              onQueueReasonChange={onQueueReasonChange}
+              onQueueDecision={onQueueDecision}
+              onOpenView={onSelectView}
+              agentOptions={capabilityCatalog?.agents.filter(isEligibleWorkerCapability) ?? []}
             />
-            <section className="workstation-cards" aria-label="Active Workstations">
-            <div className="mission-work-section-heading">
-              <div>
-                <span className="eyebrow">Live supervision</span>
-                <h3 aria-label="Active Workstations">Agents &amp; subagents</h3>
+            {sessionArtifactViewer ? (
+              <SessionArtifactViewer
+                viewerRef={sessionArtifactViewerRef}
+                state={sessionArtifactViewer}
+                onRetry={() => void loadSessionArtifact(sessionArtifactViewer.target)}
+                onClose={closeSessionArtifact}
+              />
+            ) : selectedWorkstationDiff ? (
+              <div className="workstation-local-selection">
+                <span>Saved review diff: {selectedWorkstationDiff.path}</span>
+                <small>{selectedWorkstationDiff.sessionId}</small>
+                <button
+                  type="button"
+                  onClick={(event) => openWorkstationDiff(selectedWorkstationDiff, event.currentTarget)}
+                >
+                  Load saved review diff
+                </button>
               </div>
-              <button
-                type="button"
-                aria-expanded={commandAuditOpen}
-                onClick={() => {
-                  const nextOpen = !commandAuditOpen;
-                  onCommandAuditOpenChange(nextOpen);
-                }}
-              >
-                {commandAuditOpen ? "Close command audit" : "Open command audit"}
-              </button>
-            </div>
-            <div className="workstation-cards__content" role="region" aria-label="Workstation Cards">
-              <div className="workstation-card-controls">
-                <label>
-                  <span>Filter</span>
-                  <input
-                    type="search"
-                    aria-label="Filter workstation cards"
-                    value={workstationFilter}
-                    onChange={(event) => setWorkstationFilter(event.target.value)}
-                  />
-                </label>
-                <label>
-                  <span>Sort</span>
-                  <select
-                    aria-label="Sort workstation cards"
-                    value={workstationSort}
-                    onChange={(event) =>
-                      setWorkstationSort(event.target.value as "priority" | "name" | "status")
-                    }
-                  >
-                    <option value="priority">Priority</option>
-                    <option value="name">Name</option>
-                    <option value="status">Status</option>
-                  </select>
-                </label>
+            ) : null}
+            {pendingWorkstationIntent ? (
+              <div className="workstation-pending" role="status" aria-label="Pending workstation intent">
+                <span>{pendingWorkstationIntent.label}</span>
+                <small>Expected revision {pendingWorkstationIntent.expectedRevision}</small>
               </div>
-              {sessionArtifactViewer ? (
-                <SessionArtifactViewer
-                  viewerRef={sessionArtifactViewerRef}
-                  state={sessionArtifactViewer}
-                  onRetry={() => void loadSessionArtifact(sessionArtifactViewer.target)}
-                  onClose={closeSessionArtifact}
-                />
-              ) : selectedWorkstationDiff ? (
-                <div className="workstation-local-selection">
-                  <span>Saved review diff: {selectedWorkstationDiff.path}</span>
-                  <small>{selectedWorkstationDiff.sessionId}</small>
-                  <button
-                    type="button"
-                    onClick={(event) =>
-                      openWorkstationDiff(selectedWorkstationDiff, event.currentTarget)
-                    }
-                  >
-                    Load saved review diff
-                  </button>
-                </div>
-              ) : null}
-              {workstationProjection.pendingIntent ? (
-                <div className="workstation-pending" role="status" aria-label="Pending workstation intent">
-                  <span>{workstationProjection.pendingIntent.label}</span>
-                  <small>
-                    Expected revision {workstationProjection.pendingIntent.expectedRevision}
-                  </small>
-                </div>
-              ) : null}
-              {visibleWorkstationGroups.map((group) => (
-                <div className="workstation-card-group" key={group.id}>
-                  <div className="workstation-card-group__heading">
-                    <span>{group.label}</span>
-                    <small>{group.cards.length}</small>
-                  </div>
-                  {group.cards.map((card) => (
-                    <WorkstationCard
-                      key={card.id}
-                      card={card}
-                      expanded={expandedWorkstationCardIds.includes(card.id)}
-                      pinned={pinnedWorkstationCardIds.includes(card.id)}
-                      selectedSessionId={selectedWorkstationSessionId}
-                      agentOptions={capabilityCatalog?.agents.filter(isEligibleWorkerCapability) ?? []}
-                      onToggleExpanded={() => toggleExpandedWorkstationCard(card.id)}
-                      onTogglePinned={() => togglePinnedWorkstationCard(card.id)}
-                      onSelectSession={setSelectedWorkstationSessionId}
-                      onOpenDiff={openWorkstationDiff}
-                      onOpenEvidence={(link, returnFocus) =>
-                        openWorkstationEvidence(
-                          card.missionId,
-                          link.sessionId,
-                          link.href,
-                          link.label,
-                          returnFocus,
-                        )
-                      }
-                      queueReasons={queueReasons}
-                      onQueueReasonChange={onQueueReasonChange}
-                      onQueueDecision={onQueueDecision}
-                      reviewReasons={reviewReasons}
-                      onReviewReasonChange={onReviewReasonChange}
-                      onReviewDecision={onReviewDecision}
-                      workstationActionDrafts={workstationActionDrafts}
-                      onWorkstationActionDraftChange={onWorkstationActionDraftChange}
-                      onWorkstationAction={onWorkstationAction}
-                      actionState={workstationActionState}
-                      actionStatusRef={workstationActionStatusRef}
-                    />
-                  ))}
-                </div>
-              ))}
-              {visibleWorkstationGroups.length === 0 ? (
-                <div className="workstation-local-selection">
-                  No workstation cards match the current filter.
-                </div>
-              ) : null}
-            </div>
-          </section>
+            ) : null}
           {detailViewsOpen && snapshot.operations_view === "workspace-queue" ? null : <IssueAssignmentBoard
             projection={issueAssignmentBoard}
             selectedIssueId={
@@ -5337,7 +5225,7 @@ function CommandDeck({
                                   {item.attention.map((attention) => (
                                     <a
                                       key={attention.attention_id}
-                                      href={`#${attention.queue_link.split("#").at(1) ?? ""}`}
+                                      href={`#${attention.queue_item_id || attention.attention_id}`}
                                     >
                                       {attention.label}
                                     </a>
@@ -6052,12 +5940,8 @@ function readWorkstationContinuity(key: string): WorkstationContinuityState | nu
       issueFocusTarget: issueFocusTargetOrNull(value.issueFocusTarget),
       selectedSessionId: stringOrNull(value.selectedSessionId),
       selectedSessionMissionId: stringOrNull(value.selectedSessionMissionId),
-      expandedWorkstationCardIds: stringArray(value.expandedWorkstationCardIds),
-      pinnedWorkstationCardIds: stringArray(value.pinnedWorkstationCardIds),
-      workstationFilter: typeof value.workstationFilter === "string" ? value.workstationFilter : "",
-      workstationSort: workstationSortValue(value.workstationSort),
-      selectedWorkstationSessionId: stringOrNull(value.selectedWorkstationSessionId),
       selectedWorkstationDiff: workstationDiffOrNull(value.selectedWorkstationDiff),
+      selectedExecutionNodeId: stringOrNull(value.selectedExecutionNodeId),
     };
   } catch {
     return null;
@@ -6077,16 +5961,6 @@ function writeWorkstationContinuity(
 
 function stringOrNull(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
-}
-
-function stringArray(value: unknown): readonly string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string" && item.length > 0)
-    : [];
-}
-
-function workstationSortValue(value: unknown): "priority" | "name" | "status" {
-  return value === "name" || value === "status" ? value : "priority";
 }
 
 function issueFocusTargetOrNull(value: unknown): "assignment-board" | "mission-board" | null {
@@ -6111,54 +5985,6 @@ function workstationDiffOrNull(value: unknown): WorkstationDiffLink | null {
         sessionId: diff.sessionId,
       }
     : null;
-}
-
-function filterAndSortWorkstationGroups(
-  groups: readonly WorkstationCardGroup[],
-  filter: string,
-  sort: "priority" | "name" | "status",
-  pinnedIds: readonly string[],
-): readonly WorkstationCardGroup[] {
-  const normalizedFilter = filter.trim().toLowerCase();
-  return groups
-    .map((group) => {
-      const cards = group.cards.filter((card) => {
-        if (!normalizedFilter) return true;
-        return workstationCardSearchText(card).includes(normalizedFilter);
-      });
-      return {
-        ...group,
-        cards: [...cards].sort((left, right) => {
-          const pinPriority =
-            Number(pinnedIds.includes(right.id)) - Number(pinnedIds.includes(left.id));
-          if (pinPriority !== 0) return pinPriority;
-          if (sort === "name") return left.name.localeCompare(right.name);
-          if (sort === "status") return left.status.localeCompare(right.status);
-          return 0;
-        }),
-      };
-    })
-    .filter((group) => group.cards.length > 0);
-}
-
-function workstationCardSearchText(card: WorkstationCardProjection): string {
-  return [
-    card.name,
-    card.sessionId ?? "",
-    card.issueId ?? "",
-    card.model,
-    card.role,
-    card.currentTask,
-    card.status,
-    card.phase,
-    card.progress,
-    card.latestCommandOrTest,
-    ...card.detail.filesTouched.map((file) => file.path),
-    ...card.detail.evidenceLinks.map((link) => link.href),
-    ...card.detail.terminalExcerpts.map((excerpt) => excerpt.excerpt),
-  ]
-    .join(" ")
-    .toLowerCase();
 }
 
 function SessionArtifactViewer({
@@ -6285,7 +6111,7 @@ function WorkstationCard({
   const reviewActionTargetIds = reviewActions.map(workstationActionStateId);
   const matchingActionState =
     actionState &&
-    ((queueItemId && actionState.itemId === queueItemId) ||
+    (queueActions.some((action) => workstationActionStateId(action) === actionState.itemId) ||
       workstationActionTargetIds.includes(actionState.itemId) ||
       reviewActionTargetIds.includes(actionState.itemId))
       ? actionState
@@ -6909,18 +6735,6 @@ function isReviewWorkstationAction(
   sessionId: string;
 } {
   return action.actionType === "review-decision" && Boolean(action.reviewDecision && action.sessionId);
-}
-
-function workstationActionTargetId(action: WorkstationGovernedAction): string {
-  return action.targetIdentity?.id ?? action.sessionId ?? action.issueId ?? action.label;
-}
-
-function workstationActionKey(action: WorkstationGovernedAction): string {
-  return `${action.actionType ?? "workstation-action"}:${workstationActionStateId(action)}`;
-}
-
-function workstationActionStateId(action: WorkstationGovernedAction): string {
-  return JSON.stringify([action.missionId ?? "", workstationActionTargetId(action)]);
 }
 
 function workstationActionRequestTarget(

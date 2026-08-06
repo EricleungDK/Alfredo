@@ -320,8 +320,13 @@ def _bounded_process_output(
 class _BoundedProcessCapture:
     """Drain child pipes while retaining at most one aggregate byte budget."""
 
-    def __init__(self, limit_bytes: int):
+    def __init__(
+        self,
+        limit_bytes: int,
+        output_callback: Callable[[str, bytes], None] | None = None,
+    ):
         self.limit_bytes = limit_bytes
+        self.output_callback = output_callback
         self._remaining = max(0, limit_bytes - _PROCESS_OUTPUT_MESSAGE_RESERVE)
         self._buffers = {"stdout": bytearray(), "stderr": bytearray()}
         self._lock = threading.Lock()
@@ -350,13 +355,20 @@ class _BoundedProcessCapture:
                 chunk = stream.read(64 * 1024)
                 if not chunk:
                     break
+                retained_chunk = b""
                 with self._lock:
                     retained = min(self._remaining, len(chunk))
                     if retained:
                         self._buffers[name].extend(chunk[:retained])
                         self._remaining -= retained
+                        retained_chunk = bytes(chunk[:retained])
                     if retained < len(chunk):
                         self.exceeded.set()
+                if retained_chunk and self.output_callback is not None:
+                    try:
+                        self.output_callback(name, retained_chunk)
+                    except Exception:
+                        pass
         except OSError:
             pass
         finally:
@@ -394,6 +406,72 @@ class _BoundedProcessCapture:
         if extra_stderr:
             stderr = f"{stderr.rstrip()}\n{extra_stderr}" if stderr else extra_stderr
         return stdout, stderr
+
+
+class _SessionOutputRecorder:
+    """Append bounded JSONL output without exposing a host path to clients."""
+
+    _JOURNAL_LIMIT_BYTES = 128_000
+    _EVENT_CONTENT_LIMIT_BYTES = 16_000
+
+    def __init__(self, path: Path, mission_id: str, session_id: str):
+        self._path = path
+        self._mission_id = mission_id
+        self._session_id = session_id
+        self._lock = threading.Lock()
+        self._sequence = 0
+        self._bytes_written = 0
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.is_symlink():
+            raise AlbertError("Session output journal must not be a symlink.")
+        with path.open("wb"):
+            pass
+        self._stream = path.open("ab", buffering=0)
+
+    def record(self, _stream_name: str, payload: bytes) -> None:
+        if not payload:
+            return
+        content = payload.decode("utf-8", errors="replace")
+        encoded_content = content.encode("utf-8")[: self._EVENT_CONTENT_LIMIT_BYTES]
+        content = encoded_content.decode("utf-8", errors="ignore")
+        with self._lock:
+            if self._bytes_written >= self._JOURNAL_LIMIT_BYTES:
+                return
+            sequence = self._sequence + 1
+            event = {
+                "schema_version": 1,
+                "mission_id": self._mission_id,
+                "session_id": self._session_id,
+                "sequence": sequence,
+                "content": content,
+            }
+            encoded = (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode(
+                "utf-8"
+            )
+            remaining = self._JOURNAL_LIMIT_BYTES - self._bytes_written
+            if len(encoded) > remaining:
+                available = max(0, remaining - len(encoded) + len(encoded_content))
+                content = encoded_content[:available].decode("utf-8", errors="ignore")
+                event["content"] = content
+                encoded = (
+                    json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n"
+                ).encode("utf-8")
+            if len(encoded) > remaining:
+                return
+            try:
+                self._stream.write(encoded)
+                self._stream.flush()
+            except OSError:
+                return
+            self._sequence = sequence
+            self._bytes_written += len(encoded)
+
+    def close(self) -> None:
+        with self._lock:
+            try:
+                self._stream.close()
+            except OSError:
+                pass
 
 
 def _process_token_pids(process_token: str) -> set[int]:
@@ -586,6 +664,7 @@ def _run_bounded_process(
     output_limit_bytes: int = _PROCESS_OUTPUT_BYTES_LIMIT,
     process_started: Callable[[subprocess.Popen[bytes]], None] | None = None,
     poll_callback: Callable[[], None] | None = None,
+    output_callback: Callable[[str, bytes], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run one child with bounded aggregate output and process-group termination."""
 
@@ -602,7 +681,7 @@ def _run_bounded_process(
         shell=False,
         start_new_session=True,
     )
-    capture = _BoundedProcessCapture(output_limit_bytes)
+    capture = _BoundedProcessCapture(output_limit_bytes, output_callback=output_callback)
     capture.start(process)
     input_thread: threading.Thread | None = None
 
@@ -1292,6 +1371,8 @@ class AlbertMission:
         self._evidence_activity_recorder: (
             Callable[[str, LocalAgentSession, EvidencePackage], None] | None
         ) = None
+        self._session_output_recorders: dict[str, _SessionOutputRecorder] = {}
+        self._session_output_recorders_lock = threading.Lock()
 
     @property
     def runtime_dir(self) -> Path:
@@ -1300,6 +1381,30 @@ class AlbertMission:
     @property
     def runtime_path(self) -> Path:
         return self.runtime_dir / "runtime.json"
+
+    def _start_session_output(self, session: LocalAgentSession) -> None:
+        recorder = _SessionOutputRecorder(
+            self.runtime_dir / "sessions" / session.session_id / "output-events.jsonl",
+            self.mission_id,
+            session.session_id,
+        )
+        with self._session_output_recorders_lock:
+            previous = self._session_output_recorders.pop(session.session_id, None)
+            if previous is not None:
+                previous.close()
+            self._session_output_recorders[session.session_id] = recorder
+
+    def _finish_session_output(self, session_id: str) -> None:
+        with self._session_output_recorders_lock:
+            recorder = self._session_output_recorders.pop(session_id, None)
+        if recorder is not None:
+            recorder.close()
+
+    def _record_session_output(self, session_id: str, stream_name: str, payload: bytes) -> None:
+        with self._session_output_recorders_lock:
+            recorder = self._session_output_recorders.get(session_id)
+        if recorder is not None:
+            recorder.record(stream_name, payload)
 
     def load(self) -> "AlbertMission":
         self.agent_registry = load_agent_registry(self.agent_config_path)
@@ -2350,72 +2455,78 @@ class AlbertMission:
             expected_statuses={"queued"},
             timeline_message=started_message,
         )
+        self._start_session_output(session)
         try:
-            self._raise_if_cancelled(session)
-            self._ensure_session_worktree(session)
-            persisted = self._persist_session_update(session)
-            if persisted.status == "cancelled":
-                raise SessionCancelledError(
-                    f"{session_id} cancelled while preparing its worktree"
-                )
-            self._raise_if_cancelled(session)
-            if agent_config.runner == "fake":
-                self._run_fake_agent(session)
-            elif agent_config.runner == "command":
-                self._run_command_agent(session, agent_config)
-            else:
-                self._run_ollama_agent(session, agent_config)
-            self._raise_if_cancelled(session)
-        except SessionCancelledError:
-            return self._refresh_persisted_session(session_id)
-        except Exception as exc:
             try:
+                self._raise_if_cancelled(session)
+                self._ensure_session_worktree(session)
+                persisted = self._persist_session_update(session)
+                if persisted.status == "cancelled":
+                    raise SessionCancelledError(
+                        f"{session_id} cancelled while preparing its worktree"
+                    )
+                self._raise_if_cancelled(session)
+                if agent_config.runner == "fake":
+                    self._run_fake_agent(session)
+                elif agent_config.runner == "command":
+                    self._run_command_agent(session, agent_config)
+                else:
+                    self._run_ollama_agent(session, agent_config)
                 self._raise_if_cancelled(session)
             except SessionCancelledError:
                 return self._refresh_persisted_session(session_id)
-            session.status = "failed"
-            session.runner_exit_status = (
-                session.runner_exit_status if session.runner_exit_status is not None else 1
-            )
+            except Exception as exc:
+                try:
+                    self._raise_if_cancelled(session)
+                except SessionCancelledError:
+                    return self._refresh_persisted_session(session_id)
+                session.status = "failed"
+                session.runner_exit_status = (
+                    session.runner_exit_status
+                    if session.runner_exit_status is not None
+                    else 1
+                )
+                session.runner_ended_at = session.runner_ended_at or _utc_now()
+                session.runner_pid = None
+                session.runner_identity = ""
+                session.runner_process_pid = None
+                session.task_packet["runner_failure"] = str(exc)
+                failure_message = f"{session.issue_id} runner failed for {session_id}: {exc}"
+                persisted = self._persist_session_update(
+                    session,
+                    timeline_message=failure_message,
+                )
+                if persisted.status == "cancelled":
+                    return persisted
+                raise AlbertError(f"{session_id} runner failed: {exc}") from exc
+
             session.runner_ended_at = session.runner_ended_at or _utc_now()
+            if session.status == "running":
+                session.status = "completed"
             session.runner_pid = None
             session.runner_identity = ""
             session.runner_process_pid = None
-            session.task_packet["runner_failure"] = str(exc)
-            failure_message = f"{session.issue_id} runner failed for {session_id}: {exc}"
+            finished_message = (
+                f"{session.issue_id} runner finished for {session_id} "
+                f"with status {session.status}."
+            )
             persisted = self._persist_session_update(
                 session,
-                timeline_message=failure_message,
+                timeline_message=finished_message,
             )
-            if persisted.status == "cancelled":
-                return persisted
-            raise AlbertError(f"{session_id} runner failed: {exc}") from exc
-
-        session.runner_ended_at = session.runner_ended_at or _utc_now()
-        if session.status == "running":
-            session.status = "completed"
-        session.runner_pid = None
-        session.runner_identity = ""
-        session.runner_process_pid = None
-        finished_message = (
-            f"{session.issue_id} runner finished for {session_id} "
-            f"with status {session.status}."
-        )
-        persisted = self._persist_session_update(
-            session,
-            timeline_message=finished_message,
-        )
-        if (
-            persisted.evidence is not None
-            and persisted.evidence_valid
-            and self._evidence_activity_recorder is not None
-        ):
-            self._evidence_activity_recorder(
-                self.mission_id,
-                persisted,
-                persisted.evidence,
-            )
-        return persisted
+            if (
+                persisted.evidence is not None
+                and persisted.evidence_valid
+                and self._evidence_activity_recorder is not None
+            ):
+                self._evidence_activity_recorder(
+                    self.mission_id,
+                    persisted,
+                    persisted.evidence,
+                )
+            return persisted
+        finally:
+            self._finish_session_output(session_id)
 
     def launch_headless_work(
         self,
@@ -5930,6 +6041,11 @@ class AlbertMission:
                 output_limit_bytes=output_limit_bytes,
                 process_started=record_process_start,
                 poll_callback=lambda: self._raise_if_cancelled(session),
+                output_callback=lambda stream_name, payload: self._record_session_output(
+                    session.session_id,
+                    stream_name,
+                    payload,
+                ),
             )
         finally:
             if process_started:

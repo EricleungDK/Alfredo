@@ -477,7 +477,12 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
       await screen.findByText("Please fix the release seam polling with a subagent"),
     ).toBeVisible();
     await waitFor(() => {
-      expect(screen.getAllByText("session-ADHOC-000001-1").length).toBeGreaterThan(0);
+      const tree = screen.getByRole("region", { name: "Mission Execution Tree" });
+      expect(
+        within(tree).getByRole("treeitem", {
+          name: /Local Agent session session-ADHOC-000001-1/,
+        }),
+      ).toBeVisible();
     }, { timeout: 10_000 });
     expect(
       await screen.findByText(
@@ -588,7 +593,12 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
     );
     expect(await screen.findByText(/Workstation action: Mission Commander requested Launch ISS-01/)).toBeVisible();
     expect(await screen.findByText(/Orchestrator accepted workstation action: Orchestrator queued ISS-01/)).toBeVisible();
-    expect(screen.getAllByText(trackedSessionId).length).toBeGreaterThan(0);
+    expect(
+      within(screen.getByRole("region", { name: "Mission Execution Tree" })).getByRole(
+        "treeitem",
+        { name: new RegExp(`Local Agent session ${trackedSessionId}`) },
+      ),
+    ).toBeVisible();
     fireEvent.click(screen.getByRole("button", { name: "Inspect assignment ISS-01" }));
     expect(screen.getByRole("region", { name: "Issue Assignment Detail" })).toHaveTextContent(
       "Release Seam",
@@ -665,7 +675,12 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
     const restoredAssignmentDetail = screen.getByRole("region", { name: "Issue Assignment Detail" });
     expect(restoredAssignmentDetail).toHaveTextContent("ISS-01");
     expect(restoredAssignmentDetail).toHaveTextContent("Release Seam");
-    expect(screen.getAllByText(trackedSessionId).length).toBeGreaterThan(0);
+    expect(
+      within(screen.getByRole("region", { name: "Mission Execution Tree" })).getByRole(
+        "treeitem",
+        { name: new RegExp(`Local Agent session ${trackedSessionId}`) },
+      ),
+    ).toBeVisible();
     expect(screen.getByLabelText("Prompt status line")).toHaveTextContent("Workspace workspace");
   } finally {
     rmSync(root, { recursive: true, force: true });
