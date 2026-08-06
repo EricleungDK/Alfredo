@@ -1,6 +1,6 @@
 # Alfredo / Albert Project Documentation
 
-**Last Updated**: 2026-08-03
+**Last Updated**: 2026-08-06
 **Status**: Prompt-first Alfredo workstation with a persistent Apple-container canonical localhost environment, explicit Coding Workspace/Mission continuity, and receipt-bound conversational action truth; authenticated npm publication, registry-only install, and the documented human/release follow-up remain explicit
 
 ## Quick Start
@@ -71,6 +71,7 @@
 - [Wayfinder Shared Understanding Gate](Reports/2026-08-03-wayfinder-shared-understanding-gate.md) records the Issue #60 canonical entry, gate, and projection contract.
 - [Functional localhost workstation diagnosis](Reports/2026-08-03-functional-localhost-workstation.md) records the browser/native launch root causes, development bridge boundary, macOS path correction, lifecycle/concurrency prevention, and verification.
 - [Persistent Apple container development environment](Reports/2026-08-03-apple-container-development-environment.md) records the named-container lifecycle, isolated volumes, loopback forwarding boundary, canonical health check, restart evidence, and agent handoff.
+- [Governed Mission Work actions](Reports/2026-08-06-issue-64-governed-mission-work-actions.md) records Issue #64's retained completed-history archive/restore, inherited repair preview, blocker truth, and validation evidence.
 - [Workspace selection and false-success diagnosis](Reports/2026-07-24-workspace-selection-false-success-diagnosis.md) records the defect and the receipt-truth blueprint resolved by Issue #59.
 - [Alfredo one-shot workstation correction](Reports/2026-07-11-alfredo-one-shot-workstation.md) remains the historical implementation report.
 - Historical implementation reports remain in [`Reports/`](Reports/) and are indexed from [project architecture](System/project_architecture.md#implementation-report-index).

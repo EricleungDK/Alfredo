@@ -172,11 +172,11 @@ The unified arrival-ordered prompt lane where the Mission Commander talks with A
 
 ### Mission Work
 
-The persistent secondary lane beside Agent Console. It projects the Mission Execution Tree and makes each Local Agent session inspectable for its assigned work, current activity, status, evidence, and next action.
+The persistent secondary lane beside Agent Console. It projects the Mission Execution Tree and makes each Local Agent session inspectable for its assigned work, current activity, status, evidence, and next action. Governed cancellation, review, repair, blocker explanation, and completed Issue Slice archive/restore actions state their consequence before submission and display accepted outcomes only after their exact canonical acknowledgement.
 
 ### Mission Execution Tree
 
-The work-centered supervision model for a Mission. It presents Issue Slices and Ad Hoc Delegations with directly inspectable Local Agent sessions, nested delegations, current activity, review or repair state, blockers, and next actions as one hierarchy.
+The work-centered supervision model for a Mission. It presents Issue Slices and Ad Hoc Delegations with directly inspectable Local Agent sessions, nested delegations, current activity, review or repair state, blockers, and next actions as one hierarchy. Completed archived Issue Slices appear under retained history without losing their canonical identity, evidence, Activity Journal links, or nested sessions.
 
 ### Operations Workspace
 

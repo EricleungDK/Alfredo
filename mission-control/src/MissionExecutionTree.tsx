@@ -307,7 +307,7 @@ export function MissionExecutionTree({
                     : 1
                 }
                 aria-selected={selectedNodeId === node.id}
-                aria-label={`${node.kind === "agent-session" ? "Local Agent session" : node.kind} ${node.identity}; ${node.title}; ${nodeStateLabel(node.state)}; ${riskLabel(node.risk)}${node.lineage === "repair" ? "; Repair lineage" : ""}`}
+                aria-label={`${node.kind === "agent-session" ? "Local Agent session" : node.kind === "archive" ? "Archived work" : node.kind} ${node.identity}; ${node.title}; ${nodeStateLabel(node.state)}; ${riskLabel(node.risk)}${node.lineage === "repair" ? "; Repair lineage" : ""}`}
                 aria-expanded={node.child_ids.length > 0 ? expandedNodeIds.has(node.id) : undefined}
                 tabIndex={
                   focusedNodeId === node.id || (!focusedNodeId && node.id === visibleNodes[0]?.id)
@@ -332,7 +332,7 @@ export function MissionExecutionTree({
                 />
                 <span className="mission-execution-node__copy">
                   <span className="mission-execution-node__identity">
-                    {node.kind === "agent-session" ? "Local Agent session / " : `${node.kind} / `}
+                    {node.kind === "agent-session" ? "Local Agent session / " : node.kind === "archive" ? "Archived work / " : `${node.kind} / `}
                     {node.identity}
                   </span>
                   <strong>{node.title}</strong>
@@ -350,7 +350,7 @@ export function MissionExecutionTree({
                 <button
                   type="button"
                   className="mission-execution-node__disclosure"
-                  aria-label={`${expandedNodeIds.has(node.id) ? "Collapse" : "Expand"} ${node.kind === "agent-session" ? "Local Agent session" : node.kind === "issue-slice" ? "Issue Slice" : node.kind === "ad-hoc-delegation" ? "Ad Hoc Delegation" : "Mission"} ${node.identity}`}
+                  aria-label={`${expandedNodeIds.has(node.id) ? "Collapse" : "Expand"} ${node.kind === "agent-session" ? "Local Agent session" : node.kind === "issue-slice" ? "Issue Slice" : node.kind === "ad-hoc-delegation" ? "Ad Hoc Delegation" : node.kind === "archive" ? "Archived work" : "Mission"} ${node.identity}`}
                   aria-expanded={expandedNodeIds.has(node.id)}
                   onClick={() => toggleNode(node)}
                 >
@@ -559,7 +559,7 @@ function MissionExecutionInspector({
         issue?.progress ? `Progress: ${issue.progress}` : "",
         evidence?.state ? `Evidence state: ${evidence.state}` : "",
       ].filter(Boolean);
-  const actions = card?.detail.governedActions ?? [];
+  const actions = node.governed_actions ?? card?.detail.governedActions ?? [];
   const evidenceLinks = card?.detail.evidenceLinks ?? [];
   const files = session?.changed_files !== undefined
     ? session.changed_files.map((path) => ({ path, status: "touched" }))
@@ -580,9 +580,9 @@ function MissionExecutionInspector({
     >
       <header className="mission-execution-inspector__heading">
         <div>
-          <span className="eyebrow">{node.kind === "agent-session" ? "Local Agent session" : node.kind === "ad-hoc-delegation" ? "Ad Hoc Delegation" : "Issue Slice"}</span>
+          <span className="eyebrow">{node.kind === "agent-session" ? "Local Agent session" : node.kind === "ad-hoc-delegation" ? "Ad Hoc Delegation" : node.kind === "archive" ? "Archived work" : "Issue Slice"}</span>
           <h4 id={headingId}>
-            {node.kind === "agent-session" ? "Local Agent session / " : `${node.kind} / `}
+            {node.kind === "agent-session" ? "Local Agent session / " : node.kind === "archive" ? "Archived work / " : `${node.kind} / `}
             {node.identity}
           </h4>
           <p>{node.title}</p>
@@ -615,6 +615,21 @@ function MissionExecutionInspector({
               ))}
             </ul>
           )}
+        </section>
+      ) : null}
+
+      {node.blocker_recommendations && node.blocker_recommendations.length > 0 ? (
+        <section className="mission-execution-inspector__section" aria-label="Blocker recommendations">
+          <h5>Blocker recommendations</h5>
+          {node.blocker_recommendations.map((recommendation) => (
+            <dl key={recommendation.blocker_id} className="mission-execution-inspector__blocker-recommendation">
+              <div><dt>Dependency</dt><dd>{recommendation.blocker_id} · {recommendation.title}</dd></div>
+              <div><dt>Rationale</dt><dd>{recommendation.rationale}</dd></div>
+              <div><dt>Proposed acceptance</dt><dd>{recommendation.proposed_acceptance}</dd></div>
+              <div><dt>Assigned actor</dt><dd>{recommendation.assigned_actor}</dd></div>
+              <div><dt>Dependency consequence</dt><dd>{recommendation.dependency_consequence}</dd></div>
+            </dl>
+          ))}
         </section>
       ) : null}
 
@@ -822,6 +837,20 @@ function MissionExecutionGovernedAction({
         <small id={guidanceId} className="mission-execution-inspector__action-recovery">
           {actionGuidance}
         </small>
+      ) : null}
+      {action.repairTaskPacket ? (
+        <section className="mission-execution-inspector__repair-preview" aria-label="Inherited repair task packet">
+          <strong>Inherited repair task packet</strong>
+          <dl>
+            <div><dt>Goal</dt><dd>{action.repairTaskPacket.goal}</dd></div>
+            <div><dt>Acceptance</dt><dd>{action.repairTaskPacket.acceptance_criteria.join(" · ") || "No acceptance criteria recorded."}</dd></div>
+            <div><dt>Allowed paths</dt><dd>{action.repairTaskPacket.allowed_paths.join(", ") || "No additional paths recorded."}</dd></div>
+            <div><dt>Command policy</dt><dd>{Object.entries(action.repairTaskPacket.command_policy).map(([command, policy]) => `${command}: ${policy}`).join(" · ") || "No command policy recorded."}</dd></div>
+            <div><dt>Evidence required</dt><dd>{action.repairTaskPacket.evidence_requirements.join(" · ") || "No evidence requirements recorded."}</dd></div>
+            <div><dt>Assigned Local Agent</dt><dd>{action.repairTaskPacket.assigned_agent}</dd></div>
+            <div><dt>Review reason</dt><dd>{action.repairTaskPacket.review_reason}</dd></div>
+          </dl>
+        </section>
       ) : null}
       {requiresAgent ? (
         <label>

@@ -505,6 +505,8 @@ def build_parser() -> argparse.ArgumentParser:
             "issue-retry",
             "session-cancel",
             "model-assignment-change",
+            "issue-archive",
+            "issue-restore",
         ],
     )
     workstation_action.add_argument(

@@ -748,7 +748,9 @@ export type WorkstationActionType =
   | "issue-launch"
   | "issue-retry"
   | "session-cancel"
-  | "model-assignment-change";
+  | "model-assignment-change"
+  | "issue-archive"
+  | "issue-restore";
 
 export interface WorkstationActionRequest {
   readonly correlation_id: string;
@@ -1074,6 +1076,16 @@ export interface MissionSessionSummary {
   readonly review_outcome?: string;
   readonly review_next_action?: string;
   readonly repair_action_available?: boolean;
+  readonly repair_task_packet?: {
+    readonly issue_id: string;
+    readonly goal: string;
+    readonly acceptance_criteria: readonly string[];
+    readonly allowed_paths: readonly string[];
+    readonly command_policy: Readonly<Record<string, string>>;
+    readonly evidence_requirements: readonly string[];
+    readonly assigned_agent: string;
+    readonly review_reason: string;
+  } | null;
   readonly work_kind?: "issue-slice" | "ad-hoc-delegation" | string;
   readonly parent_session_id?: string;
 }
@@ -1102,6 +1114,8 @@ export interface WorkspaceMissionSummary {
   readonly is_active: boolean;
   readonly sessions: readonly MissionSessionSummary[];
   readonly attention: readonly WorkspaceQueueAttention[];
+  /** Completed Issue Slice subtrees retained outside the active work frontier. */
+  readonly archived_issue_ids?: readonly string[];
 }
 
 export interface WorkspaceEvent {

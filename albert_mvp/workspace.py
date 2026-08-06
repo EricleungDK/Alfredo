@@ -274,6 +274,18 @@ class WorkspaceSessionSummary:
 
 
 @dataclass(frozen=True)
+class RepairTaskPacketPreview:
+    issue_id: str
+    goal: str
+    acceptance_criteria: tuple[str, ...]
+    allowed_paths: tuple[str, ...]
+    command_policy: dict[str, str]
+    evidence_requirements: tuple[str, ...]
+    assigned_agent: str
+    review_reason: str
+
+
+@dataclass(frozen=True)
 class MissionSessionSummary:
     session_id: str
     issue_id: str
@@ -298,6 +310,7 @@ class MissionSessionSummary:
     review_outcome: str
     review_next_action: str
     repair_action_available: bool
+    repair_task_packet: RepairTaskPacketPreview | None = None
     work_kind: str = ""
     parent_session_id: str = ""
 
@@ -327,6 +340,7 @@ class WorkspaceMissionSummary:
     is_active: bool
     sessions: tuple[MissionSessionSummary, ...]
     attention: tuple[WorkspaceQueueAttention, ...]
+    archived_issue_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -3787,6 +3801,8 @@ WorkstationActionType = Literal[
     "issue-retry",
     "session-cancel",
     "model-assignment-change",
+    "issue-archive",
+    "issue-restore",
 ]
 
 
@@ -7840,6 +7856,8 @@ class WorkstationActionService:
         "issue-retry",
         "session-cancel",
         "model-assignment-change",
+        "issue-archive",
+        "issue-restore",
     }
     _actors = {"mission-commander"}
 
@@ -8055,6 +8073,31 @@ class WorkstationActionService:
                 "the terminal cancelled state will be preserved."
             )
             journal_actor = "orchestrator"
+        elif action_type in {"issue-archive", "issue-restore"}:
+            self._validate_issue_target(
+                target_kind=target_kind,
+                target_id=target_id,
+                issue_id=issue_id,
+            )
+            if issue_id not in mission.issues:
+                raise AlbertError(f"Unknown Issue Slice: {issue_id}")
+            if not recovering_action:
+                if action_type == "issue-archive":
+                    mission.archive_issue(
+                        issue_id,
+                        workstation_action=workstation_action,
+                    )
+                else:
+                    mission.restore_archived_issue(
+                        issue_id,
+                        workstation_action=workstation_action,
+                    )
+            acknowledged_session_id = ""
+            effect_summary = (
+                f"Mission Commander archived {issue_id}; its sessions, evidence, and Activity Journal history remain inspectable."
+                if action_type == "issue-archive"
+                else f"Mission Commander restored {issue_id} to active Mission Work with its sessions, evidence, and Activity Journal history intact."
+            )
         else:
             self._validate_issue_target(
                 target_kind=target_kind,
@@ -10225,6 +10268,14 @@ class WorkspaceSnapshotService:
                 mission,
                 session.session_id,
             )
+            repair_action_available = (
+                review_workspace_repair is not None
+                and WorkstationActionService._repair_child_for_session(
+                    mission,
+                    session.session_id,
+                )
+                is None
+            )
             return MissionSessionSummary(
                 session_id=session.session_id,
                 issue_id=session.issue_id,
@@ -10271,13 +10322,15 @@ class WorkspaceSnapshotService:
                 review_correlation_id=review_correlation_id,
                 review_outcome=latest_review.outcome if latest_review else "",
                 review_next_action=latest_review.next_action if latest_review else "",
-                repair_action_available=(
-                    review_workspace_repair is not None
-                    and WorkstationActionService._repair_child_for_session(
+                repair_action_available=repair_action_available,
+                repair_task_packet=(
+                    self._repair_task_packet_preview(
                         mission,
-                        session.session_id,
+                        session,
+                        review_workspace_repair,
                     )
-                    is None
+                    if repair_action_available and review_workspace_repair is not None
+                    else None
                 ),
                 work_kind=str(
                     session.task_packet.get(
@@ -10352,6 +10405,53 @@ class WorkspaceSnapshotService:
             is_active=is_active,
             sessions=sessions,
             attention=tuple(attention),
+            archived_issue_ids=tuple(sorted(mission.archived_issue_ids)),
+        )
+
+    @staticmethod
+    def _repair_task_packet_preview(
+        mission: AlbertMission,
+        session: LocalAgentSession,
+        review: ReviewDecision,
+    ) -> RepairTaskPacketPreview:
+        issue = mission.issues.get(session.issue_id)
+        packet = session.task_packet
+        goal = issue.what_to_build if issue is not None else str(packet.get("goal", session.issue_id))
+        acceptance_criteria = (
+            issue.acceptance_criteria
+            if issue is not None
+            else [
+                item
+                for item in packet.get("acceptance_criteria", [])
+                if isinstance(item, str)
+            ]
+        )
+        evidence_requirements = (
+            issue.evidence_requirements or mission.default_evidence_requirements()
+            if issue is not None
+            else [
+                item
+                for item in packet.get("evidence_requirements", mission.default_evidence_requirements())
+                if isinstance(item, str)
+            ]
+        )
+        return RepairTaskPacketPreview(
+            issue_id=session.issue_id,
+            goal=goal,
+            acceptance_criteria=tuple(acceptance_criteria),
+            allowed_paths=tuple(
+                item for item in packet.get("allowed_paths", []) if isinstance(item, str)
+            ),
+            command_policy={
+                command: policy
+                for command, policy in packet.get("command_policy", {}).items()
+                if isinstance(command, str) and isinstance(policy, str)
+            }
+            if isinstance(packet.get("command_policy", {}), dict)
+            else {},
+            evidence_requirements=tuple(evidence_requirements),
+            assigned_agent=session.assigned_agent,
+            review_reason=review.reason,
         )
 
     @staticmethod

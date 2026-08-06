@@ -485,6 +485,167 @@ test("renders the canonical Mission Execution Tree and scopes detailed output to
   await waitFor(() => expect(sessionNode).toHaveFocus());
 });
 
+test("archives a completed Issue Slice only after an acknowledged Mission Work action", async () => {
+  const archiveSnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    revision: 18,
+    active_mission: { id: "command-deck", title: "Command Deck Mission", issue_count: 1 },
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_count: 1,
+      ordered_issue_ids: ["ISS-ARCHIVE"],
+      ready_issue_ids: [],
+      approved_issue_ids: [],
+      issue_slices: [
+        appIssueSlice({
+          issue_id: "ISS-ARCHIVE",
+          title: "Retain accepted execution history",
+          lifecycle: "Complete",
+          progress: "Evidence accepted and PR-ready",
+          evidence: {
+            state: "accepted",
+            changed_files: ["src/history.ts"],
+            commands_run: ["npm test -- archive"],
+            test_results: "Accepted evidence is retained.",
+            risks: "None recorded.",
+            artifact_links: [],
+          },
+        }),
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [],
+        attention: [],
+      },
+    ],
+  };
+  const submitWorkstationAction = vi.fn(async (request: WorkstationActionRequest) => ({
+    kind: "acknowledged" as const,
+    acknowledgement: {
+      correlation_id: request.correlation_id,
+      outcome: "acknowledged" as const,
+      revision: 19,
+      action_type: "issue-archive" as const,
+      issue_id: "ISS-ARCHIVE",
+      session_id: "",
+      effect_summary:
+        "Mission Commander archived ISS-ARCHIVE; its sessions, evidence, and Activity Journal history remain inspectable.",
+    },
+  }));
+
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => ({ kind: "ready", snapshot: archiveSnapshot }),
+        submitWorkstationAction,
+      }}
+    />,
+  );
+
+  const inspector = await openExecutionInspector("ISS-ARCHIVE", "issue-slice");
+  const archive = within(inspector).getByRole("button", { name: "Archive completed Issue Slice" });
+  expect(archive).toHaveAccessibleDescription(
+    /archives the completed ISS-ARCHIVE subtree from active Mission Work while retaining its identity, sessions, Evidence Packages, and Activity Journal history/,
+  );
+  expect(screen.queryByText(/Mission Commander archived ISS-ARCHIVE/)).not.toBeInTheDocument();
+
+  fireEvent.click(archive);
+
+  await waitFor(() =>
+    expect(submitWorkstationAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action_type: "issue-archive",
+        target: { kind: "issue-slice", id: "ISS-ARCHIVE" },
+        issue_id: "ISS-ARCHIVE",
+        expected_revision: 18,
+      }),
+    ),
+  );
+  expect(await within(inspector).findByText(/Mission Commander archived ISS-ARCHIVE/)).toBeVisible();
+});
+
+test("restores an archived Issue Slice only after an acknowledged Mission Work action", async () => {
+  const archivedSnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    revision: 21,
+    active_mission: { id: "command-deck", title: "Command Deck Mission", issue_count: 1 },
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_count: 1,
+      ordered_issue_ids: ["ISS-ARCHIVE"],
+      ready_issue_ids: [],
+      approved_issue_ids: [],
+      issue_slices: [
+        appIssueSlice({
+          issue_id: "ISS-ARCHIVE",
+          title: "Retained accepted execution history",
+          lifecycle: "Complete",
+          progress: "History retained outside active work",
+        }),
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [],
+        attention: [],
+        archived_issue_ids: ["ISS-ARCHIVE"],
+      },
+    ],
+  };
+  const submitWorkstationAction = vi.fn(async (request: WorkstationActionRequest) => ({
+    kind: "acknowledged" as const,
+    acknowledgement: {
+      correlation_id: request.correlation_id,
+      outcome: "acknowledged" as const,
+      revision: 22,
+      action_type: "issue-restore" as const,
+      issue_id: "ISS-ARCHIVE",
+      session_id: "",
+      effect_summary:
+        "Mission Commander restored ISS-ARCHIVE to active Mission Work with its sessions, evidence, and Activity Journal history intact.",
+    },
+  }));
+
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => ({ kind: "ready", snapshot: archivedSnapshot }),
+        submitWorkstationAction,
+      }}
+    />,
+  );
+
+  const inspector = await openExecutionInspector("ISS-ARCHIVE", "issue-slice");
+  const restore = within(inspector).getByRole("button", { name: "Restore Issue Slice" });
+  expect(restore).toHaveAccessibleDescription(
+    /restores the retained ISS-ARCHIVE subtree to active Mission Work with its identity, sessions, Evidence Packages, and Activity Journal history intact/,
+  );
+  expect(screen.queryByText(/Mission Commander restored ISS-ARCHIVE/)).not.toBeInTheDocument();
+
+  fireEvent.click(restore);
+
+  await waitFor(() =>
+    expect(submitWorkstationAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action_type: "issue-restore",
+        target: { kind: "issue-slice", id: "ISS-ARCHIVE" },
+        issue_id: "ISS-ARCHIVE",
+        expected_revision: 21,
+      }),
+    ),
+  );
+  expect(await within(inspector).findByText(/Mission Commander restored ISS-ARCHIVE/)).toBeVisible();
+});
+
 test("keeps Issue Slice, Ad Hoc Delegation, and Repair disclosure separately operable", () => {
   const projection: MissionExecutionTreeProjection = {
     schema_version: 1,
@@ -7238,6 +7399,18 @@ test.each([
       review_outcome: repairActionAvailable ? "Needs repair" : "",
       review_next_action: repairActionAvailable ? "same-local-agent-repair" : "",
       repair_action_available: repairActionAvailable,
+      repair_task_packet: repairActionAvailable
+        ? {
+            issue_id: issueId,
+            goal: `Repair ${issueId}`,
+            acceptance_criteria: ["The failed acceptance assertion passes."],
+            allowed_paths: ["src", "tests"],
+            command_policy: { npm: "auto-allowed" },
+            evidence_requirements: ["Record the repaired test result."],
+            assigned_agent: "repair-worker",
+            review_reason: "The reviewed result misses its acceptance assertion.",
+          }
+        : null,
     });
     const withSessions = (
       revision: number,
@@ -7369,6 +7542,21 @@ test.each([
       name: "Launch repair",
     });
     expect(launch).toBeEnabled();
+    expect(launch).toHaveAccessibleDescription(
+      /queues exactly one canonical repair session for .* from its inherited review task packet; it does not run inline or duplicate the prior session/,
+    );
+    const repairPreview = within(repairInspector).getByRole("region", {
+      name: "Inherited repair task packet",
+    });
+    expect(repairPreview).toHaveTextContent(`GoalRepair ${issueId}`);
+    expect(repairPreview).toHaveTextContent("AcceptanceThe failed acceptance assertion passes.");
+    expect(repairPreview).toHaveTextContent("Allowed pathssrc, tests");
+    expect(repairPreview).toHaveTextContent("Command policynpm: auto-allowed");
+    expect(repairPreview).toHaveTextContent("Evidence requiredRecord the repaired test result.");
+    expect(repairPreview).toHaveTextContent("Assigned Local Agentrepair-worker");
+    expect(repairPreview).toHaveTextContent(
+      "Review reasonThe reviewed result misses its acceptance assertion.",
+    );
     fireEvent.click(launch);
     fireEvent.click(launch);
 

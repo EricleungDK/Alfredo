@@ -1090,6 +1090,55 @@ h5 {
   font-size: 0.76rem;
 }
 
+.mission-execution-inspector__repair-preview,
+.mission-execution-inspector__blocker-recommendation {
+  display: grid;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0.55rem 0.65rem;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--warning);
+  border-radius: 7px;
+  background: #0b0e0d;
+}
+
+.mission-execution-inspector__repair-preview > strong {
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+}
+
+.mission-execution-inspector__repair-preview dl,
+.mission-execution-inspector__blocker-recommendation {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.mission-execution-inspector__repair-preview dl,
+.mission-execution-inspector__blocker-recommendation {
+  display: grid;
+  gap: 0.4rem 0.55rem;
+}
+
+.mission-execution-inspector__repair-preview dl > div,
+.mission-execution-inspector__blocker-recommendation > div {
+  min-width: 0;
+}
+
+.mission-execution-inspector__repair-preview dt,
+.mission-execution-inspector__blocker-recommendation dt {
+  color: var(--cyan);
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.mission-execution-inspector__repair-preview dd,
+.mission-execution-inspector__blocker-recommendation dd {
+  margin: 0.12rem 0 0;
+  color: var(--muted);
+  font-size: 0.74rem;
+  overflow-wrap: anywhere;
+}
+
 .mission-execution-inspector__files {
   padding-left: 0 !important;
   list-style: none;
@@ -2074,6 +2123,11 @@ dd {
 
   .mission-execution-inspector__facts {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .mission-execution-inspector__repair-preview dl,
+  .mission-execution-inspector__blocker-recommendation {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .mission-work-controls {

@@ -4,6 +4,7 @@ import {
   projectMissionExecutionTree,
   projectWorkstationCards,
   workstationActionConsequence,
+  type WorkstationGovernedAction,
 } from "./workstation-projection";
 
 const baseSnapshot: WorkspaceSnapshot = {
@@ -557,6 +558,145 @@ test("uses typed Ad Hoc identity instead of display labels or issue-id patterns"
   expect(projection.nodes.map((node) => node.id)).toContain(
     "session:command-deck:session-ADHOC-LOOKALIKE-1",
   );
+});
+
+test("retains archived completed Issue Slice subtrees under a restorable Mission Work archive", () => {
+  const archivedSnapshot = {
+    ...baseSnapshot,
+    missions: [
+      {
+        ...baseSnapshot.missions![0],
+        archived_issue_ids: ["ISS-02"],
+      },
+    ],
+  } as WorkspaceSnapshot;
+
+  const projection = projectMissionExecutionTree(archivedSnapshot);
+  const node = (id: string) => projection.nodes.find((candidate) => candidate.id === id);
+
+  expect(node("archive:command-deck")).toMatchObject({
+    kind: "archive",
+    identity: "archived-work",
+    parent_id: "mission:command-deck",
+    child_ids: ["issue:command-deck:ISS-02"],
+  });
+  expect(node("issue:command-deck:ISS-02")).toMatchObject({
+    parent_id: "archive:command-deck",
+    archived: true,
+    child_ids: ["session:command-deck:session-ISS-02-1"],
+  });
+  expect(node("issue:command-deck:ISS-02")?.governed_actions).toContainEqual(
+    expect.objectContaining({ actionType: "issue-restore", label: "Restore Issue Slice" }),
+  );
+});
+
+test("previews the inherited canonical repair task packet before the single repair launch", () => {
+  const repairPacket = {
+    issue_id: "ISS-01",
+    goal: "Build the prompt-dominant shell.",
+    acceptance_criteria: ["Prompt shell renders."],
+    allowed_paths: ["mission-control/src"],
+    command_policy: { npm: "auto-allowed" },
+    evidence_requirements: ["Tests pass."],
+    assigned_agent: "qwen-coder-local",
+    review_reason: "The accessibility assertion is missing.",
+  };
+  const repairSnapshot = {
+    ...baseSnapshot,
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      issue_slices: [
+        {
+          ...baseSnapshot.mission_board.issue_slices![0],
+          lifecycle: "Needs repair",
+        },
+      ],
+    },
+    missions: [
+      {
+        ...baseSnapshot.missions![0],
+        sessions: [
+          {
+            ...baseSnapshot.missions![0].sessions[0],
+            repair_action_available: true,
+            repair_task_packet: repairPacket,
+          },
+        ],
+      },
+    ],
+  } as WorkspaceSnapshot;
+
+  const action = projectWorkstationCards(repairSnapshot)
+    .groups
+    .flatMap((group) => group.cards)
+    .find((card) => card.sessionId === "session-ISS-01-1")
+    ?.detail.governedActions.find((candidate) => candidate.label === "Launch repair") as
+      | WorkstationGovernedAction
+      | undefined;
+
+  expect(action?.repairTaskPacket).toEqual(repairPacket);
+  expect(workstationActionConsequence(action!)).toBe(
+    "Acknowledgement queues exactly one canonical repair session for session-ISS-01-1 from its inherited review task packet; it does not run inline or duplicate the prior session.",
+  );
+});
+
+test("explains why a blocked Issue Slice stays blocked until its exact dependency is accepted", () => {
+  const dependencySnapshot = {
+    ...baseSnapshot,
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      ordered_issue_ids: ["ISS-BLOCKER", "ISS-BLOCKED"],
+      issue_slices: [
+        {
+          ...baseSnapshot.mission_board.issue_slices![0],
+          issue_id: "ISS-BLOCKER",
+          title: "Complete the prerequisite evidence",
+          lifecycle: "Needs repair",
+          accepted_boundary: {
+            ...baseSnapshot.mission_board.issue_slices![0].accepted_boundary,
+            acceptance_criteria: ["Accepted prerequisite evidence is recorded."],
+          },
+          model_assignment: {
+            ...baseSnapshot.mission_board.issue_slices![0].model_assignment,
+            agent_id: "dependency-worker",
+          },
+        },
+        {
+          ...baseSnapshot.mission_board.issue_slices![1],
+          issue_id: "ISS-BLOCKED",
+          title: "Start only after the prerequisite",
+          lifecycle: "Approved",
+          launch_eligible: false,
+          blockers: [
+            {
+              issue_id: "ISS-BLOCKER",
+              title: "Complete the prerequisite evidence",
+              lifecycle: "Needs repair",
+              satisfied: false,
+            },
+          ],
+        },
+      ],
+    },
+  } as WorkspaceSnapshot;
+
+  const blockedNode = projectMissionExecutionTree(dependencySnapshot).nodes.find(
+    (node) => node.id === "issue:command-deck:ISS-BLOCKED",
+  ) as
+    | { blocker_recommendations?: readonly unknown[] }
+    | undefined;
+
+  expect(blockedNode?.blocker_recommendations).toEqual([
+    {
+      blocker_id: "ISS-BLOCKER",
+      title: "Complete the prerequisite evidence",
+      rationale: "ISS-BLOCKED remains blocked because ISS-BLOCKER is Needs repair.",
+      proposed_acceptance: "Accepted prerequisite evidence is recorded.",
+      assigned_actor: "dependency-worker",
+      dependency_consequence:
+        "ISS-BLOCKED remains blocked until ISS-BLOCKER has an accepted reviewed outcome; creating or approving follow-up work does not unblock ISS-BLOCKED.",
+    },
+  ]);
 });
 
 test("describes governed action consequences independently of recovery guidance", () => {

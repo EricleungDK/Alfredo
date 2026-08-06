@@ -6824,14 +6824,18 @@ function isExecutableWorkstationAction(
     | "issue-launch"
     | "issue-retry"
     | "session-cancel"
-    | "model-assignment-change";
+    | "model-assignment-change"
+    | "issue-archive"
+    | "issue-restore";
 } {
   return (
     action.actionType === "issue-approve" ||
     action.actionType === "issue-launch" ||
     action.actionType === "issue-retry" ||
     action.actionType === "session-cancel" ||
-    action.actionType === "model-assignment-change"
+    action.actionType === "model-assignment-change" ||
+    action.actionType === "issue-archive" ||
+    action.actionType === "issue-restore"
   );
 }
 

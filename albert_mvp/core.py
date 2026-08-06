@@ -1415,6 +1415,7 @@ class AlbertMission:
         self.delegations: dict[str, DelegationDecision] = {}
         self.command_policy: dict[str, str] = {}
         self.workstation_actions: dict[str, dict[str, Any]] = {}
+        self.archived_issue_ids: set[str] = set()
         self.timeline: list[str] = []
         self.agent_registry = AgentRegistry(agents=[], source_path=self.agent_config_path)
         self._evidence_activity_recorder: (
@@ -2859,6 +2860,98 @@ class AlbertMission:
         self.timeline = timeline
         return session
 
+    def archive_issue(
+        self,
+        issue_id: str,
+        *,
+        workstation_action: dict[str, Any] | None = None,
+    ) -> IssueSlice:
+        """Archive one evidence-accepted Issue Slice without removing its history."""
+        return self._set_issue_archived(
+            issue_id,
+            archived=True,
+            workstation_action=workstation_action,
+        )
+
+    def restore_archived_issue(
+        self,
+        issue_id: str,
+        *,
+        workstation_action: dict[str, Any] | None = None,
+    ) -> IssueSlice:
+        """Restore one retained Issue Slice subtree to the active Mission Work tree."""
+        return self._set_issue_archived(
+            issue_id,
+            archived=False,
+            workstation_action=workstation_action,
+        )
+
+    def _set_issue_archived(
+        self,
+        issue_id: str,
+        *,
+        archived: bool,
+        workstation_action: dict[str, Any] | None,
+    ) -> IssueSlice:
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            for candidate_id, runtime in data.get("issues", {}).items():
+                if candidate_id in self.issues and isinstance(runtime, dict):
+                    self.issues[candidate_id].apply_runtime(runtime)
+            issue = self._issue(issue_id)
+            current_archived = data.get("archived_issue_ids", [])
+            if (
+                not isinstance(current_archived, list)
+                or not all(isinstance(candidate, str) and candidate.strip() for candidate in current_archived)
+                or len(current_archived) != len(set(current_archived))
+                or any(candidate not in self.issues for candidate in current_archived)
+            ):
+                raise AlbertError("Mission archive state is invalid")
+            archived_ids = set(current_archived)
+            if archived:
+                if (
+                    issue.review_state not in {"pr-ready", "complete"}
+                    and issue.tracker_status.lower() != "merged"
+                ):
+                    raise AlbertError(
+                        f"{issue_id} must have accepted evidence or be tracker-merged before it can be archived."
+                    )
+                if issue_id in archived_ids:
+                    raise AlbertError(f"{issue_id} is already archived.")
+            elif issue_id not in archived_ids:
+                raise AlbertError(f"{issue_id} is not archived.")
+
+            workstation_actions = self._merge_workstation_action_ledgers(
+                data.get("workstation_actions", {}),
+                {},
+            )
+            if workstation_action:
+                correlation_id = workstation_action.get("correlation_id")
+                if not isinstance(correlation_id, str) or not correlation_id.strip():
+                    raise AlbertError("Workstation action correlation id must not be empty")
+                workstation_actions = self._merge_workstation_action_ledgers(
+                    workstation_actions,
+                    {correlation_id: dict(workstation_action)},
+                )
+
+            if archived:
+                archived_ids.add(issue_id)
+                event = f"{issue_id} archived from Mission Work; history retained."
+            else:
+                archived_ids.remove(issue_id)
+                event = f"{issue_id} restored to Mission Work with history retained."
+            timeline = list(data.get("timeline", []))
+            timeline.append(event)
+            data["archived_issue_ids"] = sorted(archived_ids)
+            data["workstation_actions"] = workstation_actions
+            data["timeline"] = timeline
+            self._write_runtime_payload(data)
+
+        self.archived_issue_ids = archived_ids
+        self.workstation_actions = workstation_actions
+        self.timeline = timeline
+        return issue
+
     def record_frontier_review(
         self,
         session_id: str,
@@ -3190,6 +3283,15 @@ class AlbertMission:
             {},
             data.get("workstation_actions", {}),
         )
+        archived = data.get("archived_issue_ids", [])
+        if (
+            not isinstance(archived, list)
+            or not all(isinstance(issue_id, str) and issue_id.strip() for issue_id in archived)
+            or len(archived) != len(set(archived))
+            or any(issue_id not in self.issues for issue_id in archived)
+        ):
+            raise AlbertError("Mission archive state is invalid")
+        self.archived_issue_ids = set(archived)
         self.timeline = list(data.get("timeline", []))
 
     def _reconcile_abandoned_sessions(self) -> None:
@@ -3266,6 +3368,7 @@ class AlbertMission:
             "delegations": {issue_id: decision.to_dict() for issue_id, decision in self.delegations.items()},
             "command_policy": self.command_policy,
             "workstation_actions": self.workstation_actions,
+            "archived_issue_ids": sorted(self.archived_issue_ids),
             "timeline": self.timeline,
         }
 
@@ -3296,6 +3399,16 @@ class AlbertMission:
                     latest.get("workstation_actions", {}),
                     self.workstation_actions,
                 )
+                latest_archived = latest.get("archived_issue_ids", [])
+                if not isinstance(latest_archived, list) or not all(
+                    isinstance(issue_id, str) for issue_id in latest_archived
+                ):
+                    raise AlbertError("Mission archive state is invalid")
+                # Archive transitions are written through _set_issue_archived while
+                # holding this same lock.  A generic persist from a stale mission
+                # instance must not revive an Issue Slice another instance restored.
+                # Preserve the latest canonical archive state here instead.
+                data["archived_issue_ids"] = sorted(latest_archived)
             self._write_runtime_payload(data)
         reconciled_sessions: dict[str, LocalAgentSession] = {}
         for session_id, session_data in data["sessions"].items():
@@ -3313,6 +3426,7 @@ class AlbertMission:
             correlation_id: dict(marker)
             for correlation_id, marker in data["workstation_actions"].items()
         }
+        self.archived_issue_ids = set(data.get("archived_issue_ids", []))
 
     @staticmethod
     def _merge_workstation_action_ledgers(
@@ -6714,7 +6828,10 @@ class AlbertMission:
 
     @staticmethod
     def _lifecycle_satisfies_blocker(issue: IssueSlice) -> bool:
-        return issue.review_state in {"approved", "pr-ready", "complete"}
+        # Approval authorizes a Local Agent launch; it is not evidence that the
+        # dependency's work completed. Dependent work becomes eligible only
+        # after the blocker has an accepted reviewed outcome.
+        return issue.review_state in {"pr-ready", "complete"}
 
     def _next_actions_for_issue(self, issue: IssueSlice) -> list[str]:
         if issue.review_state == "complete":

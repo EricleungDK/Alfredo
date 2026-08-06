@@ -89,6 +89,8 @@ export interface WorkstationGovernedAction {
     | "path-grant-decision"
     | "review-decision"
     | "model-assignment-change"
+    | "issue-archive"
+    | "issue-restore"
     | "mission-draft-decision"
     | "conversation-scope-change";
   readonly actor?: "mission-commander";
@@ -101,6 +103,7 @@ export interface WorkstationGovernedAction {
   readonly expectedRevision?: number;
   readonly disabledReason?: string;
   readonly recoveryPath?: string;
+  readonly repairTaskPacket?: MissionSessionSummary["repair_task_packet"];
   readonly targetIdentity?: {
     readonly kind:
       | "workspace-queue-item"
@@ -165,6 +168,7 @@ export interface WorkstationProjection {
 
 export type MissionExecutionNodeKind =
   | "mission"
+  | "archive"
   | "issue-slice"
   | "ad-hoc-delegation"
   | "agent-session";
@@ -198,6 +202,19 @@ export interface MissionExecutionTreeNode {
   readonly issue: WorkspaceIssueSliceSummary | null;
   readonly session: MissionSessionSummary | null;
   readonly card: WorkstationCardProjection | null;
+  /** Only canonical Issue Slice archive/restore controls may be hosted by a tree node. */
+  readonly governed_actions?: readonly WorkstationGovernedAction[];
+  readonly blocker_recommendations?: readonly MissionExecutionBlockerRecommendation[];
+  readonly archived?: boolean;
+}
+
+export interface MissionExecutionBlockerRecommendation {
+  readonly blocker_id: string;
+  readonly title: string;
+  readonly rationale: string;
+  readonly proposed_acceptance: string;
+  readonly assigned_actor: string;
+  readonly dependency_consequence: string;
 }
 
 export interface MissionExecutionTreeProjection {
@@ -259,6 +276,11 @@ export function projectMissionExecutionTree(
     };
   const issueById = new Map(
     snapshot.mission_board.issue_slices?.map((issue) => [issue.issue_id, issue]) ?? [],
+  );
+  const archivedIssueIds = new Set(
+    (mission.archived_issue_ids ?? []).filter(
+      (issueId): issueId is string => typeof issueId === "string" && issueById.has(issueId),
+    ),
   );
   const cards = projectWorkstationCards(snapshot, {
     workspaceQueue: options.workspaceQueue ?? null,
@@ -337,11 +359,36 @@ export function projectMissionExecutionTree(
     card: null,
   });
 
+  const archiveNodeId = `archive:${mission.id}`;
+  if (archivedIssueIds.size > 0) {
+    addNode({
+      id: archiveNodeId,
+      kind: "archive",
+      identity: "archived-work",
+      title: "Archived completed work",
+      parent_id: rootId,
+      parent_session_id: null,
+      lineage: "root",
+      depth: 1,
+      state: "complete",
+      status: "History retained",
+      shape: "square",
+      risk: "none",
+      summary: `${archivedIssueIds.size} completed Issue Slice ${archivedIssueIds.size === 1 ? "subtree" : "subtrees"} retained outside active work`,
+      inspectable: false,
+      attention: false,
+      issue: null,
+      session: null,
+      card: null,
+    });
+  }
+
   const orderedIssueIds = snapshot.mission_board.ordered_issue_ids.filter((issueId) =>
     issueById.has(issueId),
   );
   for (const issueId of orderedIssueIds) {
     const issue = issueById.get(issueId)!;
+    const archived = archivedIssueIds.has(issueId);
     const issueSessions = sessionsByIssue.get(issueId) ?? [];
     const issueCardStatuses = issueSessions.map(
       (session) => cardBySessionId.get(session.session_id)?.status ?? canonicalStatus(
@@ -357,10 +404,10 @@ export function projectMissionExecutionTree(
       kind: "issue-slice",
       identity: issue.issue_id,
       title: issue.title,
-      parent_id: rootId,
+      parent_id: archived ? archiveNodeId : rootId,
       parent_session_id: null,
       lineage: "root",
-      depth: 1,
+      depth: archived ? 2 : 1,
       state,
       status: issue.lifecycle,
       shape: executionNodeShape(state, issueRisk(issue), "root"),
@@ -371,11 +418,19 @@ export function projectMissionExecutionTree(
       issue,
       session: null,
       card: null,
+      archived,
+      governed_actions: issueExecutionGovernedActions(
+        issue,
+        mission.id,
+        snapshot.revision,
+        archived,
+      ),
+      blocker_recommendations: blockerRecommendations(issue, issueById),
     });
     appendSessionNodes(
       issueNodeId,
       issueSessions,
-      2,
+      archived ? 3 : 2,
       issue,
       addNode,
       cardBySessionId,
@@ -1163,6 +1218,7 @@ function projectSessionCard(
       snapshot.revision,
       repairActionAvailable,
       session.review_outcome,
+      session.repair_task_packet,
     ),
   };
 }
@@ -1179,6 +1235,7 @@ function sessionDetail(
   acceptedRevision = 0,
   repairActionAvailable = false,
   reviewOutcome = "",
+  repairTaskPacket: MissionSessionSummary["repair_task_packet"] = null,
 ): WorkstationCardDetail {
   const commands = evidence.commands_run;
   const toolActivity: WorkstationToolActivity[] = [
@@ -1267,6 +1324,7 @@ function sessionDetail(
       acceptedRevision,
       missionId,
       repairActionAvailable,
+      repairTaskPacket,
     ),
   };
 }
@@ -1441,6 +1499,7 @@ function governedActions(
   expectedRevision: number,
   missionId: string,
   repairActionAvailable = false,
+  repairTaskPacket: MissionSessionSummary["repair_task_packet"] = null,
 ): readonly WorkstationGovernedAction[] {
   if (repairActionAvailable) {
     return [
@@ -1454,6 +1513,7 @@ function governedActions(
         sessionId,
         issueId,
         expectedRevision,
+        repairTaskPacket,
         recoveryPath: "Reload canonical Mission Work and launch the current Review Workspace repair action.",
         targetIdentity: { kind: "agent-session", id: sessionId },
       },
@@ -1508,6 +1568,68 @@ function governedActions(
     },
     { label: "Monitor active work", target: "none", requiresReason: false },
   ];
+}
+
+function issueExecutionGovernedActions(
+  issue: WorkspaceIssueSliceSummary,
+  missionId: string,
+  expectedRevision: number,
+  archived: boolean,
+): readonly WorkstationGovernedAction[] {
+  if (archived) {
+    return [
+      {
+        label: "Restore Issue Slice",
+        target: "mission-board",
+        requiresReason: false,
+        actionType: "issue-restore",
+        actor: "mission-commander",
+        missionId,
+        issueId: issue.issue_id,
+        expectedRevision,
+        targetIdentity: { kind: "issue-slice", id: issue.issue_id },
+        recoveryPath: "Reload canonical Mission Work and restore the retained completed subtree.",
+      },
+    ];
+  }
+  if (issue.lifecycle !== "Complete" && issue.lifecycle !== "Merged") return [];
+  return [
+    {
+      label: "Archive completed Issue Slice",
+      target: "mission-board",
+      requiresReason: false,
+      actionType: "issue-archive",
+      actor: "mission-commander",
+      missionId,
+      issueId: issue.issue_id,
+      expectedRevision,
+      targetIdentity: { kind: "issue-slice", id: issue.issue_id },
+      recoveryPath: "Reload canonical Mission Work and archive only the currently completed subtree.",
+    },
+  ];
+}
+
+function blockerRecommendations(
+  issue: WorkspaceIssueSliceSummary,
+  issueById: ReadonlyMap<string, WorkspaceIssueSliceSummary>,
+): readonly MissionExecutionBlockerRecommendation[] {
+  return issue.blockers
+    .filter((blocker) => !blocker.satisfied)
+    .map((blocker) => {
+      const dependency = issueById.get(blocker.issue_id);
+      const proposedAcceptance = dependency?.accepted_boundary.acceptance_criteria.join(" · ") ||
+        "The dependency must record an accepted reviewed outcome.";
+      const assignedActor = dependency?.model_assignment.agent_id || "No Local Agent assigned";
+      return {
+        blocker_id: blocker.issue_id,
+        title: blocker.title,
+        rationale: `${issue.issue_id} remains blocked because ${blocker.issue_id} is ${blocker.lifecycle}.`,
+        proposed_acceptance: proposedAcceptance,
+        assigned_actor: assignedActor,
+        dependency_consequence:
+          `${issue.issue_id} remains blocked until ${blocker.issue_id} has an accepted reviewed outcome; creating or approving follow-up work does not unblock ${issue.issue_id}.`,
+      };
+    });
 }
 
 function reviewAction(
@@ -1589,11 +1711,18 @@ export function workstationActionConsequence(action: WorkstationGovernedAction):
     case "issue-launch":
       return `Acknowledgement queues one ${targetId || "Issue Slice"} Local Agent session; the runner starts only after canonical state is reloaded.`;
     case "issue-retry":
+      if (action.repairTaskPacket) {
+        return `Acknowledgement queues exactly one canonical repair session for ${targetId || "this work"} from its inherited review task packet; it does not run inline or duplicate the prior session.`;
+      }
       return `Acknowledgement queues one canonical repair or retry session for ${targetId || "this work"}; it does not run the session inline.`;
     case "session-cancel":
       return `Acknowledgement records cancellation for ${targetId || "this session"}; the Orchestrator stops active work, and cancellation is not completion.`;
     case "model-assignment-change":
       return `Acknowledgement changes the assigned eligible worker for ${targetId || "this Issue Slice"}; it does not launch work.`;
+    case "issue-archive":
+      return `Acknowledgement archives the completed ${targetId || "Issue Slice"} subtree from active Mission Work while retaining its identity, sessions, Evidence Packages, and Activity Journal history for inspection.`;
+    case "issue-restore":
+      return `Acknowledgement restores the retained ${targetId || "Issue Slice"} subtree to active Mission Work with its identity, sessions, Evidence Packages, and Activity Journal history intact.`;
     case "review-decision":
       if (action.reviewDecision === "accept") {
         return `Accepting evidence marks ${targetId || "this Issue Slice"} complete and PR-ready; it does not merge changes.`;

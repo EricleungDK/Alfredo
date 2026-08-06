@@ -1,6 +1,6 @@
 # API Endpoints and Command Boundaries
 
-**Last Updated:** 2026-08-03
+**Last Updated:** 2026-08-06
 
 Alfredo has no remote or production HTTP API. Its application boundary is a versioned JSON command protocol shared by the React client, the Tauri bridge, the development-only localhost gateway, the persistent Python server, and the one-process Python CLI fallback. Python remains authoritative; Rust validates and transports typed payloads, while React renders acknowledged projections.
 
@@ -14,7 +14,7 @@ The endpoint families are:
 | Workspace projection | `workspace-snapshot`, `workspace-updates`, `workspace-action` | Load canonical state and apply expected-revision navigation/preferences |
 | Agent Console | `agent-capabilities`, `agent-console-message`, `agent-console-response`, `agent-console-history` | Discover commands/skills/models, append a prompt, route a typed Wayfinder first contact when applicable or generate controller commentary, and restore chronology |
 | Working Context | `working-context`, `working-context-curate`, `workspace-scope` | Inspect bounded context and deliberately curate or qualify a prompt |
-| Governed work | `workspace-queue`, `workspace-queue-decision`, `ad-hoc-delegation-proposal`, `workstation-action` | Propose, approve, assign, launch, cancel, and inspect Mission-qualified work |
+| Governed work | `workspace-queue`, `workspace-queue-decision`, `ad-hoc-delegation-proposal`, `workstation-action` | Propose, approve, assign, launch, cancel, archive/restore completed Issue Slices, and inspect Mission-qualified work |
 | Deferred execution | `workstation-session-run` | Claim exactly one persisted queued session and run it outside the UI request path |
 | Review | `review-workspace`, `review-decision` | Inspect validated Evidence Packages and accept, repair, or escalate work |
 | Session artifacts | `session-artifact` | Read one exact registered review-safe artifact as bounded inline text without exposing a host path |
@@ -136,6 +136,19 @@ Workstation request that reaches Python and is rejected persists durable Console
 `request`/`rejection` phases. A transport failure before Python receives the
 request cannot claim a backend audit event; React may retain only its bounded
 negative outcome for refresh continuity.
+
+`workstation-action` accepts `issue-archive` and `issue-restore` for an exact
+Mission-qualified Issue Slice, alongside cancellation, review, retry, repair,
+and assignment actions. Archive accepts `pr-ready`/complete work or a
+tracker-merged Issue Slice and
+returns a correlated acknowledgement that explicitly says history remains
+inspectable; restore returns the same retained identity and history to active
+Mission Work. React sends the typed action only after showing its exact
+consequence, and renders success only from the matching acknowledgement. A
+repair action projects a bounded inherited task-packet preview but still
+launches only the single canonical repair command. Blocker recommendations are
+read-only snapshot fields and state their rationale, proposed acceptance,
+assigned actor, and that no follow-up approval can unblock the original work.
 
 ## Performance measurement boundary
 

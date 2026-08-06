@@ -3051,6 +3051,82 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(entry.action_type, "issue-launch")
         self.assertEqual(entry.correlation_id, "workstation-launch-1")
 
+    def test_workstation_action_archives_and_restores_a_completed_issue_without_losing_history(
+        self,
+    ) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        mission.issues["ISS-01"].review_state = "pr-ready"
+        mission.issues["ISS-01"].locked = True
+        mission._persist()
+
+        archived = WorkstationActionService(snapshots).submit(
+            correlation_id="workstation-archive-ISS-01-1",
+            action_type="issue-archive",
+            actor="mission-commander",
+            expected_revision=1,
+            target_kind="issue-slice",
+            target_id="ISS-01",
+            issue_id="ISS-01",
+        )
+
+        self.assertEqual(archived.action_type, "issue-archive")
+        self.assertEqual(archived.issue_id, "ISS-01")
+        self.assertEqual(archived.revision, 2)
+        self.assertEqual(
+            self.load_service().snapshot().missions[0].archived_issue_ids,
+            ("ISS-01",),
+        )
+        self.assertIn("ISS-01", self.load_service()._primary_mission.issues)
+        stale_archived_mission = self.load_service()._primary_mission
+
+        restored = WorkstationActionService(self.load_service()).submit(
+            correlation_id="workstation-restore-ISS-01-2",
+            action_type="issue-restore",
+            actor="mission-commander",
+            expected_revision=archived.revision,
+            target_kind="issue-slice",
+            target_id="ISS-01",
+            issue_id="ISS-01",
+        )
+
+        self.assertEqual(restored.action_type, "issue-restore")
+        self.assertEqual(restored.revision, 3)
+        self.assertEqual(
+            self.load_service().snapshot().missions[0].archived_issue_ids,
+            (),
+        )
+        stale_archived_mission._persist()
+        self.assertEqual(
+            self.load_service().snapshot().missions[0].archived_issue_ids,
+            (),
+        )
+        self.assertEqual(
+            [entry.action_type for entry in ActivityJournalService(self.load_service()).inspect().entries],
+            ["issue-archive", "issue-restore"],
+        )
+
+    def test_workstation_action_archives_a_tracker_merged_issue(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        mission.issues["ISS-01"].tracker_status = "merged"
+
+        acknowledgement = WorkstationActionService(snapshots).submit(
+            correlation_id="workstation-archive-merged-ISS-01-1",
+            action_type="issue-archive",
+            actor="mission-commander",
+            expected_revision=1,
+            target_kind="issue-slice",
+            target_id="ISS-01",
+            issue_id="ISS-01",
+        )
+
+        self.assertEqual(acknowledgement.action_type, "issue-archive")
+        self.assertEqual(
+            self.load_service().snapshot().missions[0].archived_issue_ids,
+            ("ISS-01",),
+        )
+
     def test_live_agent_availability_snapshot_gates_projection_launch_and_runner_claim(
         self,
     ) -> None:
@@ -3167,6 +3243,38 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertIn("approved", acknowledgement.effect_summary)
         entry = ActivityJournalService(self.load_service()).inspect().entries[0]
         self.assertEqual(entry.action_type, "issue-approve")
+
+    def test_approved_follow_up_work_never_falsely_satisfies_a_blocking_dependency(self) -> None:
+        (self.tracker / "issues" / "02-dependent.md").write_text(
+            """Status: ready-for-agent
+Type: AFK
+
+## Parent
+
+PRD.md
+
+## What to build
+
+Wait for the accepted dependency.
+
+## Acceptance criteria
+
+- [ ] The original blocker remains canonical.
+
+## Blocked by
+
+- [ ] 01-restore.md
+""",
+            encoding="utf-8",
+        )
+        mission = self.load_service()._primary_mission
+        mission.approve_issue("ISS-01")
+        mission.approve_issue("ISS-02")
+
+        with self.assertRaisesRegex(AlbertError, "ISS-02 is blocked by ISS-01"):
+            mission.launch_issue("ISS-02")
+
+        self.assertFalse(mission.board_summary()["issue_slices"][1]["launch_eligible"])
 
     def test_workstation_action_rejects_stale_launch_without_mutating_sessions(self) -> None:
         snapshots = self.load_service()
@@ -3862,6 +3970,45 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         entries = ActivityJournalService(self.load_service()).inspect().entries
         self.assertEqual([entry.action_type for entry in entries[-2:]], ["issue-retry", "session-cancel"])
 
+    def test_snapshot_previews_the_exact_inherited_repair_task_packet(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        mission.approve_issue("ISS-01")
+        prior = LocalAgentSession(
+            session_id="session-ISS-01-preview",
+            issue_id="ISS-01",
+            assigned_agent="qwen-coder-local-1",
+            worktree_path=self.target_repo / ".alfredo" / "worktrees" / "preview",
+            task_packet={
+                "goal": "Restore the workspace session.",
+                "acceptance_criteria": ["The canonical snapshot is visible."],
+                "allowed_paths": ["src", "tests"],
+                "command_policy": {"npm": "auto-allowed"},
+                "evidence_requirements": ["Focused tests pass."],
+            },
+            status="failed",
+        )
+        mission.sessions[prior.session_id] = prior
+        mission._persist()
+        mission.record_frontier_review(
+            prior.session_id,
+            "Needs repair",
+            reason="The final accessibility assertion is missing.",
+        )
+
+        session = snapshots.snapshot().missions[0].sessions[0]
+
+        self.assertTrue(session.repair_action_available)
+        self.assertIsNotNone(session.repair_task_packet)
+        assert session.repair_task_packet is not None
+        self.assertEqual(session.repair_task_packet.issue_id, "ISS-01")
+        self.assertEqual(session.repair_task_packet.allowed_paths, ("src", "tests"))
+        self.assertEqual(session.repair_task_packet.command_policy, {"npm": "auto-allowed"})
+        self.assertEqual(
+            session.repair_task_packet.review_reason,
+            "The final accessibility assertion is missing.",
+        )
+
     def test_workstation_retry_inherits_paths_unless_explicit_governed_paths_are_sent(
         self,
     ) -> None:
@@ -4039,6 +4186,48 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(payload["action_type"], "issue-launch")
         self.assertEqual(payload["session_id"], "session-ISS-01-1")
         self.assertEqual(payload["revision"], 2)
+
+    def test_cli_archives_completed_issue_with_history_retained(self) -> None:
+        mission = self.load_service()._primary_mission
+        mission.issues["ISS-01"].review_state = "pr-ready"
+        mission.issues["ISS-01"].locked = True
+        mission._persist()
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "workstation-action",
+                    "--target-repo",
+                    str(self.target_repo),
+                    "--tracker-dir",
+                    str(self.tracker),
+                    "--runtime-root",
+                    str(self.runtime),
+                    "--mission-id",
+                    "command-deck",
+                    "--correlation-id",
+                    "workstation-cli-archive-1",
+                    "--expected-revision",
+                    "1",
+                    "--action-type",
+                    "issue-archive",
+                    "--actor",
+                    "mission-commander",
+                    "--target-kind",
+                    "issue-slice",
+                    "--target-id",
+                    "ISS-01",
+                    "--issue-id",
+                    "ISS-01",
+                ]
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["action_type"], "issue-archive")
+        self.assertEqual(payload["issue_id"], "ISS-01")
+        self.assertIn("history remain inspectable", payload["effect_summary"])
 
     def test_cli_reports_stale_workstation_action_as_structured_json(self) -> None:
         snapshots = self.load_service()
