@@ -6757,14 +6757,13 @@ class AlbertMission:
             if not (effect_path / ".git").exists():
                 if self._git_worktree_registration_present_at(effect_path):
                     self._restore_retirement_git_marker(effect_path)
-                    self._remove_retirement_git_registration(effect_path)
-                    return
-                if any(effect_path.iterdir()):
+                elif any(effect_path.iterdir()):
                     raise AlbertError(
                         "Partial Git worktree removal could not be proven safe."
                     )
-                effect_path.rmdir()
-                return
+                else:
+                    effect_path.rmdir()
+                    return
             snapshot_revision = int(
                 session.retirement["snapshot"].get(
                     "session_revision",

@@ -1307,7 +1307,9 @@ class RetirementPreservationTest(unittest.TestCase):
         self.assertEqual(recovered.retirement["phase"], "retired")
         self.assertEqual(recovered.retirement["retirement_attempts"], 2)
 
-    def test_restart_resumes_partial_git_removal_with_registration(self) -> None:
+    def test_restart_resumes_partial_git_removal_with_deleted_tracked_content(
+        self,
+    ) -> None:
         mission = self.load_mission()
         completed = self.completed_session(mission)
         prepare = RetirementSnapshotStore.prepare_git_non_force_removal
@@ -1325,6 +1327,7 @@ class RetirementPreservationTest(unittest.TestCase):
                 crashed = True
                 self.assertIsNotNone(worktree_path)
                 (worktree_path / ".git").unlink()
+                (worktree_path / "tracked.txt").unlink()
                 raise KeyboardInterrupt("crash during Git worktree removal")
 
         with patch.object(

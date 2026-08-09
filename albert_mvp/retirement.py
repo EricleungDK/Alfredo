@@ -391,6 +391,12 @@ class RetirementSnapshotStore:
                     worktree,
                     relative,
                 )
+                if current_state == ("absent",) and current_entry is not None:
+                    # A crashed non-force removal may have unlinked a tracked
+                    # working-tree entry while leaving the verified index and
+                    # registration intact. Git restore reconstructs that exact
+                    # indexed path before removal is retried.
+                    continue
                 if current_state not in {
                     self._filesystem_entry_state(preserved_repository, relative),
                     self._filesystem_entry_state(baseline_repository, relative),
