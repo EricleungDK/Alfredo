@@ -177,6 +177,8 @@ class RetirementSnapshotStore:
                 manifest,
                 destination_root,
             )
+        elif repository_kind == "managed-absence":
+            self._reconstruct_absence(destination_root)
         else:
             raise RetirementSnapshotError(
                 "Retirement Snapshot reconstruction kind is unsupported."
@@ -238,13 +240,53 @@ class RetirementSnapshotStore:
             self.payload_root,
             PurePosixPath("git/unstaged.patch"),
         ).read_text(encoding="utf-8")
-        if staged not in {expected_staged, ""} or unstaged not in {
-            expected_unstaged,
-            "",
-        }:
+        if (
+            staged not in {expected_staged, ""}
+            or unstaged not in {expected_unstaged, ""}
+        ) and not self._tracked_git_state_matches_preserved_or_baseline(manifest):
             raise RetirementSnapshotError(
                 "Retirement Unit changed after verified preservation."
             )
+        self._assert_git_untracked_subset_matches(manifest)
+        self._git(
+            worktree,
+            ["restore", "--source=HEAD", "--staged", "--worktree", "--", "."],
+        )
+        self._assert_git_untracked_subset_matches(manifest)
+        for relative_value in sorted(
+            git_state["untracked_paths"],
+            key=lambda value: (len(PurePosixPath(value).parts), value),
+            reverse=True,
+        ):
+            relative = self._safe_relative(relative_value)
+            candidate = worktree / Path(*relative.parts)
+            if not candidate.exists() and not candidate.is_symlink():
+                continue
+            if candidate.is_symlink() or candidate.is_file():
+                candidate.unlink()
+            else:
+                raise RetirementSnapshotError(
+                    f"Verified untracked removal path is unavailable: {relative_value!r}."
+                )
+            parent = candidate.parent
+            while parent != worktree:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+        if (
+            self._git(worktree, ["diff", "--cached", "--binary", "HEAD", "--"])
+            or self._git(worktree, ["diff", "--binary", "--"])
+            or self._git_untracked_paths(worktree)
+        ):
+            raise RetirementSnapshotError(
+                "Retirement Unit remained dirty after verified cleanup."
+            )
+
+    def _assert_git_untracked_subset_matches(self, manifest: dict[str, Any]) -> None:
+        worktree = self.request.worktree_path
+        git_state = manifest["git_state"]
         current_untracked = set(self._git_untracked_paths(worktree))
         expected_untracked = set(git_state["untracked_paths"])
         if not current_untracked.issubset(expected_untracked):
@@ -284,40 +326,94 @@ class RetirementSnapshotStore:
                 raise RetirementSnapshotError(
                     "Retirement Unit changed after verified preservation."
                 )
-        self._git(
-            worktree,
-            ["restore", "--source=HEAD", "--staged", "--worktree", "--", "."],
-        )
-        for relative_value in sorted(
-            git_state["untracked_paths"],
-            key=lambda value: (len(PurePosixPath(value).parts), value),
-            reverse=True,
+
+    def _tracked_git_state_matches_preserved_or_baseline(
+        self,
+        manifest: dict[str, Any],
+    ) -> bool:
+        verification_root = self.request.runtime_dir / "retirement" / "verification"
+        verification_root.mkdir(parents=True, exist_ok=True)
+        with (
+            tempfile.TemporaryDirectory(
+                dir=verification_root,
+                prefix="preserved-tracked.",
+            ) as preserved_name,
+            tempfile.TemporaryDirectory(
+                dir=verification_root,
+                prefix="baseline-tracked.",
+            ) as baseline_name,
         ):
-            relative = self._safe_relative(relative_value)
-            candidate = worktree / Path(*relative.parts)
-            if not candidate.exists() and not candidate.is_symlink():
-                continue
-            if candidate.is_symlink() or candidate.is_file():
-                candidate.unlink()
-            else:
-                raise RetirementSnapshotError(
-                    f"Verified untracked removal path is unavailable: {relative_value!r}."
-                )
-            parent = candidate.parent
-            while parent != worktree:
-                try:
-                    parent.rmdir()
-                except OSError:
-                    break
-                parent = parent.parent
-        if (
-            self._git(worktree, ["diff", "--cached", "--binary", "HEAD", "--"])
-            or self._git(worktree, ["diff", "--binary", "--"])
-            or self._git_untracked_paths(worktree)
-        ):
-            raise RetirementSnapshotError(
-                "Retirement Unit remained dirty after verified cleanup."
+            preserved_root = Path(preserved_name)
+            baseline_root = Path(baseline_name)
+            self._reconstruct_git(self.payload_root, manifest, preserved_root)
+            self._reconstruct_git(self.payload_root, manifest, baseline_root)
+            preserved_repository = preserved_root / "repository"
+            baseline_repository = baseline_root / "repository"
+            self._git(
+                baseline_repository,
+                ["restore", "--source=HEAD", "--staged", "--worktree", "--", "."],
             )
+            current_index = self._git_index_entries(self.request.worktree_path)
+            preserved_index = self._git_index_entries(preserved_repository)
+            baseline_index = self._git_index_entries(baseline_repository)
+            paths = set(current_index) | set(preserved_index) | set(baseline_index)
+            for relative_value in paths:
+                current_entry = current_index.get(relative_value)
+                if current_entry not in {
+                    preserved_index.get(relative_value),
+                    baseline_index.get(relative_value),
+                }:
+                    return False
+                relative = self._safe_relative(relative_value)
+                current_state = self._filesystem_entry_state(
+                    self.request.worktree_path,
+                    relative,
+                )
+                if current_state not in {
+                    self._filesystem_entry_state(preserved_repository, relative),
+                    self._filesystem_entry_state(baseline_repository, relative),
+                }:
+                    return False
+        return True
+
+    def _git_index_entries(self, repository: Path) -> dict[str, str]:
+        output = self._git(repository, ["ls-files", "--stage", "-z", "--"])
+        entries: dict[str, str] = {}
+        for record in output.split("\0"):
+            if not record:
+                continue
+            try:
+                metadata, relative_value = record.split("\t", 1)
+            except ValueError as exc:
+                raise RetirementSnapshotError(
+                    "Retirement Snapshot Git index state is invalid."
+                ) from exc
+            self._safe_relative(relative_value)
+            if relative_value in entries:
+                raise RetirementSnapshotError(
+                    "Retirement Snapshot cannot clean an unmerged Git index."
+                )
+            entries[relative_value] = metadata
+        return entries
+
+    def _filesystem_entry_state(
+        self,
+        root: Path,
+        relative: PurePosixPath,
+    ) -> tuple[Any, ...]:
+        path = root / Path(*relative.parts)
+        if path.is_symlink():
+            return ("symlink", os.readlink(os.fsencode(path)))
+        if not path.exists():
+            return ("absent",)
+        if not path.is_file():
+            return ("unsupported",)
+        return (
+            "file",
+            bool(path.stat(follow_symlinks=False).st_mode & 0o111),
+            path.stat().st_size,
+            self._file_digest(path),
+        )
 
     def prepare_managed_directory_removal(self, record: dict[str, Any]) -> None:
         """Prove the managed directory still equals its verified snapshot."""
@@ -384,6 +480,12 @@ class RetirementSnapshotStore:
             git_state = self._capture_git_state(root, entries)
         elif self.request.worktree_identity.startswith("managed-directory:"):
             git_state = self._capture_directory_state(root, entries)
+        elif (
+            self.request.worktree_identity.startswith("managed-absence:")
+            and not worktree.exists()
+            and not worktree.is_symlink()
+        ):
+            git_state = {"kind": "managed-absence"}
         else:
             raise RetirementSnapshotError(
                 "Retirement Snapshot requires an exact managed worktree."
@@ -416,7 +518,7 @@ class RetirementSnapshotStore:
             "identity": {
                 "stored_session_path": str(self.request.worktree_path),
                 "canonical_worktree_path": str(
-                    self.request.worktree_path.resolve(strict=True)
+                    self.request.worktree_path.resolve(strict=False)
                 ),
                 "worktree_identity": self.request.worktree_identity,
                 "baseline_sha256": sha256(baseline_payload).hexdigest(),
@@ -699,6 +801,8 @@ class RetirementSnapshotStore:
                 self._reconstruct_git(manifest_path.parent, manifest, clean)
             elif git_state["kind"] == "managed-directory":
                 self._reconstruct_directory(manifest_path.parent, manifest, clean)
+            elif git_state["kind"] == "managed-absence":
+                self._reconstruct_absence(clean)
             else:
                 raise RetirementSnapshotError(
                     "Retirement Snapshot manifest has an unsupported repository kind."
@@ -831,6 +935,15 @@ class RetirementSnapshotStore:
         ):
             raise RetirementSnapshotError(
                 "Retirement Snapshot clean-room directory reconstruction failed."
+            )
+
+    @staticmethod
+    def _reconstruct_absence(clean: Path) -> None:
+        repository = clean / "repository"
+        repository.mkdir()
+        if any(repository.iterdir()):
+            raise RetirementSnapshotError(
+                "Retirement Snapshot clean-room absence reconstruction failed."
             )
 
     def _validated_untracked_entries(

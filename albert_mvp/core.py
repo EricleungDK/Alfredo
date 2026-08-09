@@ -1053,7 +1053,7 @@ def _validated_retirement_unit(raw: Any) -> dict[str, Any]:
                 raise AlbertError("Retirement Unit grace boundary is invalid")
     if raw["phase"] in {"retiring", "retired"} and raw.get(
         "removal_kind", ""
-    ) not in {"git-worktree", "managed-directory"}:
+    ) not in {"git-worktree", "managed-directory", "managed-absence"}:
         raise AlbertError("Retirement Unit removal boundary is invalid")
     if raw["phase"] == "retired" and (
         not isinstance(raw.get("retired_at"), str) or not raw["retired_at"].strip()
@@ -5794,6 +5794,22 @@ class AlbertMission:
         correlation_id: str,
         defer_if_not_quiescent: bool = False,
     ) -> LocalAgentSession:
+        with self._retirement_effect_lock(session_id):
+            return self._preserve_retirement_unit_locked(
+                session_id,
+                expected_revision=expected_revision,
+                correlation_id=correlation_id,
+                defer_if_not_quiescent=defer_if_not_quiescent,
+            )
+
+    def _preserve_retirement_unit_locked(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int,
+        correlation_id: str,
+        defer_if_not_quiescent: bool,
+    ) -> LocalAgentSession:
         """Claim, capture, and prove one Retirement Snapshot without deleting work."""
 
         with self._runtime_lock(exclusive=True):
@@ -5852,9 +5868,12 @@ class AlbertMission:
             if (
                 not current_identity
                 or not current_identity.startswith(
-                    ("managed-git:", "managed-directory:")
+                    ("managed-git:", "managed-directory:", "managed-absence:")
                 )
-                or current_identity != session.worktree_identity
+                or (
+                    bool(session.worktree_identity)
+                    and current_identity != session.worktree_identity
+                )
             ):
                 self._block_retirement_preservation(
                     data,
@@ -5865,6 +5884,8 @@ class AlbertMission:
                 raise LaunchBlockedError(
                     f"{session_id} Worktree Identity is ambiguous; preservation is blocked."
                 )
+            if not session.worktree_identity:
+                session.worktree_identity = current_identity
             boundary = session.retirement.get("runner_boundary", {})
             owner_signal, process_group_signal = self._probe_retirement_quiescence(
                 boundary
@@ -6133,21 +6154,28 @@ class AlbertMission:
             path_absent = not (
                 session.worktree_path.exists() or session.worktree_path.is_symlink()
             )
-            registration_present = bool(
-                phase == "retiring"
-                and path_absent
-                and removal_kind == "git-worktree"
-                and self._git_worktree_registration_present(session)
-            )
+            try:
+                registration_present = bool(
+                    phase == "retiring"
+                    and path_absent
+                    and removal_kind == "git-worktree"
+                    and self._git_worktree_registration_present(session)
+                )
+            except (AlbertError, OSError) as exc:
+                self._block_retirement_removal(
+                    data,
+                    session,
+                    f"Git worktree registration inspection failed: {exc}",
+                    terminal=True,
+                )
+                return session
             effect_already_absent = (
                 phase == "retiring" and path_absent and not registration_present
             )
             registration_only = bool(
                 phase == "retiring" and path_absent and registration_present
             )
-            current_identity = (
-                "" if path_absent else self._worktree_identity_for_session(session)
-            )
+            current_identity = self._worktree_identity_for_session(session)
             if not path_absent and current_identity != session.worktree_identity:
                 self._block_retirement_removal(
                     data,
@@ -6156,7 +6184,12 @@ class AlbertMission:
                     terminal=True,
                 )
                 return session
-            if path_absent and phase != "retiring":
+            absence_only = bool(
+                path_absent
+                and session.worktree_identity.startswith("managed-absence:")
+                and current_identity == session.worktree_identity
+            )
+            if path_absent and phase != "retiring" and not absence_only:
                 self._block_retirement_removal(
                     data,
                     session,
@@ -6165,12 +6198,17 @@ class AlbertMission:
                 )
                 return session
             if not removal_kind:
-                removal_kind = (
-                    "git-worktree"
-                    if current_identity.startswith("managed-git:")
-                    else "managed-directory"
-                )
-            if removal_kind not in {"git-worktree", "managed-directory"}:
+                if current_identity.startswith("managed-git:"):
+                    removal_kind = "git-worktree"
+                elif current_identity.startswith("managed-directory:"):
+                    removal_kind = "managed-directory"
+                else:
+                    removal_kind = "managed-absence"
+            if removal_kind not in {
+                "git-worktree",
+                "managed-directory",
+                "managed-absence",
+            }:
                 self._block_retirement_removal(
                     data,
                     session,
@@ -6210,7 +6248,7 @@ class AlbertMission:
         try:
             if registration_only:
                 self._remove_retirement_git_registration(session)
-            elif not effect_already_absent:
+            elif not effect_already_absent and not absence_only:
                 self._remove_retirement_worktree(session, removal_kind)
             self._verify_retirement_removal(session, removal_kind)
         except (OSError, AlbertError, RetirementSnapshotError) as exc:
@@ -6513,6 +6551,19 @@ class AlbertMission:
     def _worktree_identity_for_session(self, session: LocalAgentSession) -> str:
         session_id = session.session_id
         expected_path = self._session_worktree_path(session_id)
+        if not session.worktree_path.exists() and not session.worktree_path.is_symlink():
+            canonical_absent = session.worktree_path.resolve(strict=False)
+            if (
+                session.status
+                in {"completed", "evidence-ready", "failed", "cancelled", "reviewed"}
+                and _runtime_identity_path(canonical_absent)
+                == _runtime_identity_path(expected_path)
+            ):
+                payload = (
+                    f"absence\n{self.mission_id}\n{session_id}\n{canonical_absent}"
+                )
+                return "managed-absence:" + sha256(payload.encode()).hexdigest()
+            return ""
         try:
             canonical_path = session.worktree_path.resolve(strict=True)
         except OSError:

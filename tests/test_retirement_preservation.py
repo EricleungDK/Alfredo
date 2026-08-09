@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 from albert_mvp.cli import main
 from albert_mvp.core import AlbertError, AlbertMission, LaunchBlockedError
-from albert_mvp.retirement import RetirementSnapshotStore
+from albert_mvp.retirement import RetirementSnapshotError, RetirementSnapshotStore
 from albert_mvp.server import serve
 
 ISSUE_BODY = """Status: ready-for-agent
@@ -263,6 +263,53 @@ class RetirementPreservationTest(unittest.TestCase):
                 expected_revision=expected_revision,
             )
         self.assertGreater(current.revision, expected_revision)
+
+    def test_concurrent_exact_preservation_recovery_publishes_once(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        first = self.load_mission()
+        second = self.load_mission()
+        capture = RetirementSnapshotStore.capture
+        active = 0
+        maximum_active = 0
+        capture_calls = 0
+        counter_lock = threading.Lock()
+
+        def observed_capture(store):
+            nonlocal active, maximum_active, capture_calls
+            with counter_lock:
+                active += 1
+                capture_calls += 1
+                maximum_active = max(maximum_active, active)
+            time.sleep(0.05)
+            try:
+                return capture(store)
+            finally:
+                with counter_lock:
+                    active -= 1
+
+        def preserve(candidate):
+            return candidate.preserve_retirement_unit(
+                completed.session_id,
+                expected_revision=completed.revision,
+                correlation_id="concurrent-exact-preservation",
+            )
+
+        with patch.object(
+            RetirementSnapshotStore,
+            "capture",
+            autospec=True,
+            side_effect=observed_capture,
+        ):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(executor.map(preserve, (first, second)))
+
+        self.assertEqual(
+            [result.retirement["phase"] for result in results],
+            ["preserved"] * 2,
+        )
+        self.assertEqual(capture_calls, 1)
+        self.assertEqual(maximum_active, 1)
 
     def test_worktree_identity_requires_stored_managed_canonical_and_git_registration_agreement(
         self,
@@ -628,6 +675,76 @@ class RetirementPreservationTest(unittest.TestCase):
             "",
         )
 
+    def test_git_cleanup_accepts_an_exact_partial_tracked_subset(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        (completed.worktree_path / "tracked.txt").write_text(
+            "preserved tracked state\n",
+            encoding="utf-8",
+        )
+        (completed.worktree_path / "unstaged.txt").write_text(
+            "preserved second state\n",
+            encoding="utf-8",
+        )
+        preserved = mission.preserve_retirement_unit(
+            completed.session_id,
+            expected_revision=completed.revision,
+            correlation_id="preserve-before-partial-tracked-cleanup",
+        )
+        snapshot_revision = preserved.retirement["snapshot"]["session_revision"]
+        store = mission._retirement_snapshot_store(preserved, snapshot_revision)
+        self._git(
+            "restore",
+            "--source=HEAD",
+            "--staged",
+            "--worktree",
+            "--",
+            "tracked.txt",
+            cwd=preserved.worktree_path,
+        )
+
+        store.prepare_git_non_force_removal(preserved.retirement["snapshot"])
+
+        self.assertEqual(
+            self._git("status", "--porcelain", cwd=preserved.worktree_path).stdout,
+            "",
+        )
+
+    def test_git_cleanup_rechecks_bytes_written_at_the_restore_boundary(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        untracked = completed.worktree_path / "FAKE_AGENT_RESULT.md"
+        preserved = mission.preserve_retirement_unit(
+            completed.session_id,
+            expected_revision=completed.revision,
+            correlation_id="preserve-before-late-cleanup-write",
+        )
+        snapshot_revision = preserved.retirement["snapshot"]["session_revision"]
+        store = mission._retirement_snapshot_store(preserved, snapshot_revision)
+        run_git = store._git
+        changed = False
+
+        def mutate_at_restore(cwd, arguments, **kwargs):
+            nonlocal changed
+            if arguments and arguments[0] == "restore" and not changed:
+                changed = True
+                untracked.write_text("late boundary bytes\n", encoding="utf-8")
+            return run_git(cwd, arguments, **kwargs)
+
+        with (
+            patch.object(store, "_git", side_effect=mutate_at_restore),
+            self.assertRaisesRegex(
+                RetirementSnapshotError,
+                "changed after verified preservation",
+            ),
+        ):
+            store.prepare_git_non_force_removal(preserved.retirement["snapshot"])
+
+        self.assertEqual(
+            untracked.read_text(encoding="utf-8"),
+            "late boundary bytes\n",
+        )
+
     def test_absent_git_path_with_registration_recovers_by_exact_removal(self) -> None:
         mission = self.load_mission()
         completed = self.completed_session(mission)
@@ -656,6 +773,39 @@ class RetirementPreservationTest(unittest.TestCase):
         self.assertEqual(recovered.retirement["retirement_attempts"], 2)
         registered = self._git("worktree", "list", "--porcelain").stdout
         self.assertNotIn(str(completed.worktree_path), registered)
+
+    def test_unavailable_registration_inspection_becomes_durably_blocked(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        moved_effect = self.root / "registration-inspection-unavailable"
+
+        def remove_path_before_registration(_session, _removal_kind):
+            shutil.move(completed.worktree_path, moved_effect)
+            raise KeyboardInterrupt("crash before registration inspection")
+
+        with patch.object(
+            mission,
+            "_remove_retirement_worktree",
+            side_effect=remove_path_before_registration,
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "registration inspection"):
+                mission.record_frontier_review(
+                    completed.session_id,
+                    "Approved",
+                    reason="Exercise unavailable registration inspection.",
+                    allowed_session_statuses={"evidence-ready"},
+                    expected_revision=completed.revision,
+                )
+
+        with patch.object(
+            mission,
+            "_git_worktree_registration_present",
+            side_effect=AlbertError("registration unavailable"),
+        ):
+            blocked = mission.reconcile_retirement_unit(completed.session_id)
+
+        self.assertEqual(blocked.retirement["phase"], "retirement-blocked")
+        self.assertIn("registration unavailable", blocked.retirement["blocked_reason"])
 
     def test_failed_work_enters_passive_default_retention_grace(self) -> None:
         failing_runner = self.root / "failing-runner.py"
@@ -822,6 +972,48 @@ class RetirementPreservationTest(unittest.TestCase):
         self.assertEqual(retired.status, "cancelled")
         self.assertEqual(retired.retirement["phase"], "retired")
         self.assertFalse(retired.worktree_path.exists())
+
+    def test_queued_cancellation_retires_a_verified_absent_worktree(self) -> None:
+        mission = self.load_mission()
+        mission.assign_issue("ISS-01", "fake-local")
+        mission.approve_issue("ISS-01")
+        queued = mission.launch_issue("ISS-01")
+        self.assertFalse(queued.worktree_path.exists())
+
+        cancelled = mission.cancel_session(
+            queued.session_id,
+            reason="Cancel before worktree materialization.",
+            expected_revision=queued.revision,
+        )
+        retired = self.load_mission().sessions[cancelled.session_id]
+
+        self.assertEqual(retired.retirement["phase"], "retired")
+        self.assertEqual(retired.retirement["removal_kind"], "managed-absence")
+        self.assertTrue(retired.worktree_identity.startswith("managed-absence:"))
+        self.assertTrue(mission.verify_retirement_snapshot(retired.session_id))
+
+    def test_pre_worktree_failure_enters_grace_with_verified_absence(self) -> None:
+        mission = self.load_mission()
+        mission.assign_issue("ISS-01", "fake-local")
+        mission.approve_issue("ISS-01")
+        queued = mission.launch_issue("ISS-01")
+
+        with (
+            patch.object(
+                mission,
+                "_ensure_session_worktree",
+                side_effect=AlbertError("injected pre-worktree failure"),
+            ),
+            self.assertRaisesRegex(AlbertError, "pre-worktree failure"),
+        ):
+            mission.run_session(queued.session_id)
+
+        grace = self.load_mission().sessions[queued.session_id]
+        self.assertEqual(grace.status, "failed")
+        self.assertEqual(grace.retirement["phase"], "grace")
+        self.assertTrue(grace.worktree_identity.startswith("managed-absence:"))
+        self.assertFalse(grace.worktree_path.exists())
+        self.assertTrue(mission.verify_retirement_snapshot(grace.session_id))
 
     def test_retirement_retries_are_bounded_and_exhaust_into_retirement_blocked(
         self,
