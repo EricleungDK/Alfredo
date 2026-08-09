@@ -103,6 +103,22 @@ class RetirementPreservationTest(unittest.TestCase):
             text=True,
         )
 
+    @staticmethod
+    def _stop_process(process: subprocess.Popen[str]) -> None:
+        try:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+            if process.stderr is not None:
+                process.stderr.close()
+
     def load_mission(
         self,
         *,
@@ -1039,12 +1055,11 @@ class RetirementPreservationTest(unittest.TestCase):
         mission.approve_issue("ISS-01")
         queued = mission.launch_issue("ISS-01")
 
-        cancelled = mission.cancel_session(
+        retired = mission.cancel_session(
             queued.session_id,
             reason="Cancel before any runner operation exists.",
             expected_revision=queued.revision,
         )
-        retired = mission.reconcile_retirement_unit(cancelled.session_id)
 
         self.assertEqual(retired.retirement["phase"], "retired")
         boundary = retired.retirement["runner_boundary"]
@@ -1096,7 +1111,7 @@ class RetirementPreservationTest(unittest.TestCase):
         ):
             mission.run_session(queued.session_id)
 
-        grace = self.load_mission().sessions[queued.session_id]
+        grace = mission._refresh_persisted_session(queued.session_id)
         self.assertEqual(grace.status, "failed")
         self.assertEqual(grace.retirement["phase"], "grace")
         self.assertTrue(grace.worktree_identity.startswith("managed-absence:"))
@@ -1335,6 +1350,52 @@ class RetirementPreservationTest(unittest.TestCase):
             "retired",
             recovered.retirement,
         )
+        self.assertEqual(recovered.retirement["retirement_attempts"], 2)
+
+    def test_restart_repairs_a_split_git_worktree_move_backpointer(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        crashed = False
+
+        def crash_once_after_isolation(
+            _store: RetirementSnapshotStore,
+            _record: dict[str, object],
+            *,
+            worktree_path: Path | None = None,
+        ) -> None:
+            nonlocal crashed
+            if not crashed:
+                crashed = True
+                raise KeyboardInterrupt("crash during Git worktree move")
+
+        with patch.object(
+            RetirementSnapshotStore,
+            "prepare_git_non_force_removal",
+            autospec=True,
+            side_effect=crash_once_after_isolation,
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "Git worktree move"):
+                mission.record_frontier_review(
+                    completed.session_id,
+                    "Approved",
+                    reason="Exercise a split Git move restart.",
+                    allowed_session_statuses={"evidence-ready"},
+                    expected_revision=completed.revision,
+                )
+
+        effect_path = mission._retirement_removal_effect_path(completed.session_id)
+        marker = (effect_path / ".git").read_text(encoding="utf-8").strip()
+        admin_path = Path(marker.removeprefix("gitdir: ")).resolve(strict=True)
+        (admin_path / "gitdir").write_text(
+            str(completed.worktree_path / ".git") + "\n",
+            encoding="utf-8",
+        )
+        self.assertTrue(mission._git_worktree_registration_present(completed))
+        self.assertFalse(mission._git_worktree_registration_present_at(effect_path))
+
+        recovered = mission.reconcile_retirement_unit(completed.session_id)
+
+        self.assertEqual(recovered.retirement["phase"], "retired")
         self.assertEqual(recovered.retirement["retirement_attempts"], 2)
 
     def test_restart_resumes_a_managed_directory_isolated_before_cleanup(self) -> None:
@@ -1603,6 +1664,69 @@ class RetirementPreservationTest(unittest.TestCase):
                 (effect_path / "tracked.txt").read_bytes(),
                 b"late open-handle bytes\n",
             )
+
+    def test_non_git_retirement_blocks_a_process_cwd_inside_the_effect(self) -> None:
+        shutil.move(self.target_repo / ".git", self.root / "detached-target-git")
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        holder = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import os,sys,time; os.chdir(sys.argv[1]); "
+                "print('ready', flush=True); time.sleep(30)",
+                str(completed.worktree_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(self._stop_process, holder)
+        self.assertEqual(holder.stdout.readline().strip(), "ready")
+
+        mission.record_frontier_review(
+            completed.session_id,
+            "Approved",
+            reason="Exercise a process cwd retirement boundary.",
+            allowed_session_statuses={"evidence-ready"},
+            expected_revision=completed.revision,
+        )
+
+        retained = mission._refresh_persisted_session(completed.session_id)
+        self.assertNotEqual(retained.retirement["phase"], "retired")
+        self.assertIn("process", retained.retirement["blocked_reason"])
+
+    def test_non_git_retirement_blocks_a_writable_shared_mapping(self) -> None:
+        shutil.move(self.target_repo / ".git", self.root / "detached-target-git")
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        holder = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import mmap,sys,time; f=open(sys.argv[1], 'r+b'); "
+                "m=mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_WRITE); f.close(); "
+                "print('ready', flush=True); time.sleep(30)",
+                str(completed.worktree_path / "tracked.txt"),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(self._stop_process, holder)
+        self.assertEqual(holder.stdout.readline().strip(), "ready")
+
+        mission.record_frontier_review(
+            completed.session_id,
+            "Approved",
+            reason="Exercise a writable mapping retirement boundary.",
+            allowed_session_statuses={"evidence-ready"},
+            expected_revision=completed.revision,
+        )
+
+        retained = mission._refresh_persisted_session(completed.session_id)
+        self.assertNotEqual(retained.retirement["phase"], "retired")
+        self.assertIn("process handle", retained.retirement["blocked_reason"])
 
     def test_non_git_cleanup_resumes_after_partial_directory_removal(self) -> None:
         shutil.move(self.target_repo / ".git", self.root / "detached-target-git")

@@ -3389,6 +3389,10 @@ class AlbertMission:
             session.status = "failed"
             session.runner_exit_status = 1
             session.runner_ended_at = _utc_now()
+            self._remember_never_started_runner_boundary(
+                session,
+                event_at=session.runner_ended_at,
+            )
             session.runner_pid = None
             session.runner_identity = ""
             session.runner_process_pid = None
@@ -3403,6 +3407,7 @@ class AlbertMission:
                 ),
             )
             self._record_typed_recovery_failure(persisted_failure)
+            self.reconcile_retirement_unit(persisted_failure.session_id)
             raise
 
         session.status = "running"
@@ -3506,6 +3511,7 @@ class AlbertMission:
                     cancelled = self._finalize_cancelled_runner_owner_release(session)
                     return self.reconcile_retirement_unit(cancelled.session_id)
                 self._record_typed_recovery_failure(persisted)
+                self.reconcile_retirement_unit(persisted.session_id)
                 raise AlbertError(f"{session_id} runner failed: {exc}") from exc
 
             session.runner_ended_at = session.runner_ended_at or _utc_now()
@@ -4537,23 +4543,10 @@ class AlbertMission:
             session.cancel_reason = reason.strip()
             session.runner_ended_at = session.runner_ended_at or session.cancel_requested_at
             if never_started:
-                operation_id = "never-started:" + sha256(
-                    f"{self.mission_id}\n{session.session_id}\n{session.revision}".encode(
-                        "utf-8"
-                    )
-                ).hexdigest()
-                session.retirement["runner_boundary"] = {
-                    "mission_id": self.mission_id,
-                    "session_id": session.session_id,
-                    "runner_operation_id": operation_id,
-                    "owner_pid": None,
-                    "owner_identity": "",
-                    "process_group_pid": None,
-                    "process_group_identity": "",
-                    "process_token": "",
-                    "owner_released_at": session.cancel_requested_at,
-                    "owner_release_operation_id": operation_id,
-                }
+                self._remember_never_started_runner_boundary(
+                    session,
+                    event_at=session.cancel_requested_at,
+                )
             session.runner_pid = None
             session.runner_identity = ""
             session.runner_process_pid = None
@@ -4571,7 +4564,15 @@ class AlbertMission:
         self.sessions[session_id] = session
         self.workstation_actions = workstation_actions
         self.timeline = timeline
-        return session
+        if not never_started:
+            return session
+        try:
+            return self.reconcile_retirement_unit(session_id)
+        except LaunchBlockedError:
+            latest = self._refresh_persisted_session(session_id)
+            if latest.retirement.get("phase") == "active":
+                return self.reconcile_retirement_unit(session_id)
+            return latest
 
     def _archive_issue_from_workstation(
         self,
@@ -5649,6 +5650,40 @@ class AlbertMission:
             "owner_lease_token": previous.get("owner_lease_token", ""),
         }
 
+    def _remember_never_started_runner_boundary(
+        self,
+        session: LocalAgentSession,
+        *,
+        event_at: str,
+    ) -> None:
+        if (
+            session.runner_started_at
+            or session.runner_operation_id
+            or session.runner_pid is not None
+            or session.runner_process_pid is not None
+            or session.runner_identity
+            or session.runner_process_identity
+            or session.runner_process_token
+        ):
+            return
+        operation_id = "never-started:" + sha256(
+            f"{self.mission_id}\n{session.session_id}\n{session.revision}".encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        session.retirement["runner_boundary"] = {
+            "mission_id": self.mission_id,
+            "session_id": session.session_id,
+            "runner_operation_id": operation_id,
+            "owner_pid": None,
+            "owner_identity": "",
+            "process_group_pid": None,
+            "process_group_identity": "",
+            "process_token": "",
+            "owner_released_at": event_at,
+            "owner_release_operation_id": operation_id,
+        }
+
     def _retirement_runner_owner_lease_path(self, session_id: str) -> Path:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", session_id):
             raise AlbertError(f"unsafe session id {session_id!r}")
@@ -6419,6 +6454,55 @@ class AlbertMission:
                 uid_values = uid_line.split()[1:]
                 if not uid_values or int(uid_values[0]) != current_uid:
                     continue
+                for boundary_name in ("cwd", "root"):
+                    try:
+                        boundary_target = os.readlink(process_root / boundary_name)
+                    except FileNotFoundError:
+                        continue
+                    except OSError as exc:
+                        raise AlbertError(
+                            "Open-handle inspection was unavailable before retirement."
+                        ) from exc
+                    boundary_path = Path(
+                        boundary_target.removesuffix(" (deleted)")
+                    ).resolve(strict=False)
+                    if boundary_path == canonical_effect or boundary_path.is_relative_to(
+                        canonical_effect
+                    ):
+                        raise AlbertError(
+                            "Retirement removal is blocked while an exact managed path "
+                            "is a process filesystem boundary."
+                        )
+                try:
+                    mappings = (process_root / "maps").read_text(
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise AlbertError(
+                        "Open-handle inspection was unavailable before retirement."
+                    ) from exc
+                for mapping in mappings.splitlines():
+                    fields = mapping.split(maxsplit=5)
+                    if len(fields) < 6 or len(fields[1]) != 4:
+                        continue
+                    permissions = fields[1]
+                    mapped_value = fields[5].removesuffix(" (deleted)")
+                    if permissions[1] != "w" or permissions[3] != "s":
+                        continue
+                    mapped_path = Path(mapped_value)
+                    if not mapped_path.is_absolute():
+                        continue
+                    canonical_mapping = mapped_path.resolve(strict=False)
+                    if canonical_mapping == canonical_effect or canonical_mapping.is_relative_to(
+                        canonical_effect
+                    ):
+                        raise AlbertError(
+                            "Retirement removal is blocked while an exact managed path "
+                            "has a writable shared mapping."
+                        )
                 try:
                     descriptors = list((process_root / "fd").iterdir())
                 except FileNotFoundError:
@@ -6572,6 +6656,36 @@ class AlbertMission:
         except OSError as exc:
             raise AlbertError("Git worktree marker recovery failed.") from exc
 
+    def _repair_retirement_git_backpointer(
+        self,
+        *,
+        original_path: Path,
+        effect_path: Path,
+    ) -> None:
+        completed = _run_bounded_process(
+            [
+                "git",
+                "-C",
+                str(self.target_repo),
+                "worktree",
+                "repair",
+                str(effect_path),
+            ],
+            timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+            output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
+        )
+        if completed.returncode != 0:
+            reason = (
+                self._subprocess_output_text(completed.stderr).strip()
+                or self._subprocess_output_text(completed.stdout).strip()
+                or f"exit {completed.returncode}"
+            )
+            raise AlbertError(f"exact Git worktree back-pointer repair failed: {reason}")
+        if self._git_worktree_registration_present_at(
+            original_path
+        ) or not self._git_worktree_registration_present_at(effect_path):
+            raise AlbertError("Exact Git worktree back-pointer repair was not verified.")
+
     def _remove_retirement_worktree(
         self,
         session: LocalAgentSession,
@@ -6630,6 +6744,15 @@ class AlbertMission:
             if path.exists() or path.is_symlink():
                 raise AlbertError(
                     "Retirement path changed after its isolated removal effect began."
+                )
+            original_registered = self._git_worktree_registration_present(session)
+            effect_registered = self._git_worktree_registration_present_at(effect_path)
+            if original_registered and effect_registered:
+                raise AlbertError("Git worktree retirement registration is ambiguous.")
+            if original_registered:
+                self._repair_retirement_git_backpointer(
+                    original_path=path,
+                    effect_path=effect_path,
                 )
             if not (effect_path / ".git").exists():
                 if self._git_worktree_registration_present_at(effect_path):
