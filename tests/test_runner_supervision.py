@@ -745,6 +745,17 @@ class RunnerSupervisionTest(unittest.TestCase):
         self.assertEqual(failed.supervision_receipt_id, receipt.receipt_id)
         self.assertIn("automatic recovery failed", failed.task_packet["runner_failure"])
         self.assertIsNone(failed.runner_pid)
+        failed.worktree_path.mkdir(parents=True, exist_ok=True)
+        (failed.worktree_path / "failed-run.txt").write_text(
+            "preserve before manual retry\n",
+            encoding="utf-8",
+        )
+        failed.worktree_identity = mission._worktree_identity_for_session(failed)
+        failed.repository_snapshot = {"kind": "directory"}
+        failed = mission._persist_session_update(
+            failed,
+            expected_statuses={"failed"},
+        )
 
         snapshots = WorkspaceSnapshotService(mission)
         projection = snapshots.snapshot()
@@ -762,9 +773,16 @@ class RunnerSupervisionTest(unittest.TestCase):
         self.assertEqual(messages[0].action_phase, "runner-decision-needed")
 
         projection = snapshots.snapshot()
-        with patch.object(
-            AlbertMission,
-            "_validate_target_repository_boundary",
+        with (
+            patch.object(
+                AlbertMission,
+                "_validate_target_repository_boundary",
+            ),
+            patch.object(
+                mission,
+                "_probe_retirement_quiescence",
+                return_value=("absent", "absent"),
+            ),
         ):
             acknowledgement = WorkstationActionService(snapshots).submit(
                 correlation_id="manual-retry-after-supervision-failure",
@@ -780,6 +798,9 @@ class RunnerSupervisionTest(unittest.TestCase):
             )
 
         self.assertEqual(acknowledgement.outcome, "acknowledged")
+        retired_prior = mission.sessions[failed.session_id]
+        self.assertEqual(retired_prior.retirement["phase"], "retired")
+        self.assertFalse(retired_prior.worktree_path.exists())
         retry = mission.sessions[acknowledgement.session_id]
         self.assertEqual(retry.status, "queued")
         self.assertEqual(

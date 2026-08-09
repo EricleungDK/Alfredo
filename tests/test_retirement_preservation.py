@@ -3,11 +3,16 @@ from __future__ import annotations
 import io
 import json
 import os
+import shutil
 import subprocess
+import sys
 import tempfile
+import threading
+import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -102,6 +107,7 @@ class RetirementPreservationTest(unittest.TestCase):
         self,
         *,
         quiescence: tuple[str, str] | None = ("absent", "absent"),
+        retention_grace_seconds: int = 72 * 60 * 60,
     ) -> AlbertMission:
         options = {}
         if quiescence is not None:
@@ -112,6 +118,7 @@ class RetirementPreservationTest(unittest.TestCase):
             runtime_root=self.runtime,
             mission_id="mission-retirement",
             agent_config_path=self.agent_config,
+            retention_grace_seconds=retention_grace_seconds,
             **options,
         ).load()
 
@@ -124,7 +131,7 @@ class RetirementPreservationTest(unittest.TestCase):
     def test_preservation_budget_is_reserved_before_execution_and_released_only_after_verification(
         self,
     ) -> None:
-        mission = self.load_mission(quiescence=None)
+        mission = self.load_mission()
         mission.assign_issue("ISS-01", "fake-local")
         mission.approve_issue("ISS-01")
 
@@ -349,6 +356,44 @@ class RetirementPreservationTest(unittest.TestCase):
             1,
         )
 
+    def test_startup_recovers_published_preserving_phase_idempotently(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        capture = RetirementSnapshotStore.capture
+
+        def crash_after_publication(store: RetirementSnapshotStore):
+            capture(store)
+            raise KeyboardInterrupt("simulated process loss before phase commit")
+
+        with (
+            patch.object(
+                RetirementSnapshotStore,
+                "capture",
+                autospec=True,
+                side_effect=crash_after_publication,
+            ),
+            self.assertRaisesRegex(KeyboardInterrupt, "phase commit"),
+        ):
+            mission.preserve_retirement_unit(
+                completed.session_id,
+                expected_revision=completed.revision,
+                correlation_id="preserve-crash-cut",
+            )
+
+        interrupted = mission._refresh_persisted_session(completed.session_id)
+        self.assertEqual(interrupted.retirement["phase"], "preserving")
+        self.assertTrue(
+            (mission.runtime_dir / "retirement" / "payloads" / completed.session_id).is_dir()
+        )
+
+        recovered = self.load_mission().sessions[completed.session_id]
+        self.assertEqual(recovered.retirement["phase"], "preserved")
+        self.assertEqual(
+            recovered.retirement["preservation_receipt"]["correlation_id"],
+            "preserve-crash-cut",
+        )
+        self.assertTrue(mission.verify_retirement_snapshot(completed.session_id))
+
     def test_snapshot_preserves_git_state_evidence_and_clean_room_reconstruction(
         self,
     ) -> None:
@@ -423,9 +468,11 @@ class RetirementPreservationTest(unittest.TestCase):
     def test_managed_directory_cannot_bypass_expected_git_registration(
         self,
     ) -> None:
-        (self.target_repo / ".git").rename(self.root / "detached-git-metadata")
         mission = self.load_mission()
         completed = self.completed_session(mission)
+        (completed.worktree_path / ".git").rename(
+            self.root / "detached-worktree-git-metadata"
+        )
 
         with self.assertRaisesRegex(AlbertError, "Worktree Identity"):
             mission.preserve_retirement_unit(
@@ -467,6 +514,435 @@ class RetirementPreservationTest(unittest.TestCase):
             {"kind": "symlink"},
         )
         self.assertTrue(mission.verify_retirement_snapshot(completed.session_id))
+
+    def test_accepted_evidence_is_preserved_and_retired_without_waiting_for_merge(
+        self,
+    ) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        worktree_path = completed.worktree_path.resolve()
+
+        mission.record_frontier_review(
+            completed.session_id,
+            "Approved",
+            reason="The verified evidence satisfies the Issue Slice.",
+            allowed_session_statuses={"evidence-ready"},
+            expected_revision=completed.revision,
+        )
+
+        retired = self.load_mission().sessions[completed.session_id]
+        self.assertEqual(retired.retirement["phase"], "retired")
+        self.assertFalse(worktree_path.exists())
+        registered_paths = {
+            Path(line.removeprefix("worktree ")).resolve(strict=False)
+            for line in self._git("worktree", "list", "--porcelain").stdout.splitlines()
+            if line.startswith("worktree ")
+        }
+        self.assertNotIn(worktree_path, registered_paths)
+        self.assertEqual(retired.retirement["removal_kind"], "git-worktree")
+        self.assertEqual(retired.retirement["retirement_attempts"], 1)
+        self.assertTrue(retired.retirement["retired_at"])
+        self.assertTrue(mission.verify_retirement_snapshot(completed.session_id))
+
+    def test_git_retirement_refuses_changes_after_verified_preservation(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        prepare = RetirementSnapshotStore.prepare_git_non_force_removal
+
+        def mutate_after_preservation(
+            store: RetirementSnapshotStore,
+            record: dict[str, object],
+        ) -> None:
+            (store.request.worktree_path / "late-change.txt").write_text(
+                "not present in the verified snapshot\n",
+                encoding="utf-8",
+            )
+            prepare(store, record)
+
+        with patch.object(
+            RetirementSnapshotStore,
+            "prepare_git_non_force_removal",
+            autospec=True,
+            side_effect=mutate_after_preservation,
+        ):
+            mission.record_frontier_review(
+                completed.session_id,
+                "Approved",
+                reason="The earlier evidence was accepted.",
+                allowed_session_statuses={"evidence-ready"},
+                expected_revision=completed.revision,
+            )
+
+        retained = mission._refresh_persisted_session(completed.session_id)
+        self.assertEqual(retained.retirement["phase"], "retiring")
+        self.assertEqual(retained.retirement["retirement_attempts"], 1)
+        self.assertIn(
+            "changed after verified preservation",
+            retained.retirement["blocked_reason"],
+        )
+        self.assertTrue(retained.worktree_path.is_dir())
+        self.assertTrue((retained.worktree_path / "late-change.txt").is_file())
+
+    def test_failed_work_enters_passive_default_retention_grace(self) -> None:
+        failing_runner = self.root / "failing-runner.py"
+        failing_runner.write_text("raise SystemExit(7)\n", encoding="utf-8")
+        command = f"python3 {failing_runner}"
+        self.agent_config.write_text(
+            json.dumps(
+                {
+                    "agents": [
+                        {
+                            "id": "failing-local",
+                            "role": "local-agent",
+                            "provider": "local",
+                            "runner": "command",
+                            "command": command,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        mission = self.load_mission()
+        mission.record_command_approval(command, "auto-allowed")
+        mission.assign_issue("ISS-01", "failing-local")
+        mission.approve_issue("ISS-01")
+        launched = mission.launch_issue("ISS-01")
+
+        result = mission.run_session(launched.session_id)
+        self.assertEqual(result.status, "failed")
+
+        failed = self.load_mission().sessions[launched.session_id]
+        self.assertEqual(failed.status, "failed")
+        self.assertEqual(failed.retirement["phase"], "grace")
+        self.assertTrue(failed.worktree_path.is_dir())
+        grace_started = datetime.fromisoformat(failed.retirement["grace_started_at"])
+        grace_expires = datetime.fromisoformat(failed.retirement["grace_expires_at"])
+        self.assertEqual((grace_expires - grace_started).total_seconds(), 72 * 60 * 60)
+        self.assertFalse(
+            any(
+                session.task_packet.get("repair_context")
+                for session in self.load_mission().sessions.values()
+            )
+        )
+
+    def test_human_review_remains_nonterminal_and_retains_its_worktree(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+
+        mission.record_frontier_review(
+            completed.session_id,
+            "Needs human review",
+            reason="A person must inspect the evidence.",
+            allowed_session_statuses={"evidence-ready"},
+            expected_revision=completed.revision,
+        )
+
+        retained = self.load_mission().sessions[completed.session_id]
+        self.assertEqual(retained.retirement["phase"], "active")
+        self.assertTrue(retained.worktree_path.is_dir())
+        self.assertEqual(
+            self.load_mission().issues["ISS-01"].review_state,
+            "needs-human-review",
+        )
+
+    def test_rejected_review_is_preserved_into_passive_grace(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+
+        mission.record_frontier_review(
+            completed.session_id,
+            "Rejected",
+            reason="The result is terminal but remains inspectable during grace.",
+            allowed_session_statuses={"evidence-ready"},
+            expected_revision=completed.revision,
+        )
+
+        rejected = mission._refresh_persisted_session(completed.session_id)
+        self.assertEqual(rejected.retirement["phase"], "grace")
+        self.assertTrue(rejected.worktree_path.is_dir())
+        self.assertEqual(self.load_mission().issues["ISS-01"].review_state, "rejected")
+
+    def test_completed_cancellation_retires_after_runner_quiescence(self) -> None:
+        command = (
+            f'{sys.executable} -c "import pathlib,time; '
+            "pathlib.Path('started-before-cancel.txt').write_text('started'); "
+            'time.sleep(30)"'
+        )
+        self.agent_config.write_text(
+            json.dumps(
+                {
+                    "agents": [
+                        {
+                            "id": "blocking-local",
+                            "role": "local-agent",
+                            "provider": "local",
+                            "runner": "command",
+                            "command": command,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        mission = self.load_mission(quiescence=None)
+        mission.record_command_approval(command, "auto-allowed")
+        mission.assign_issue("ISS-01", "blocking-local")
+        mission.approve_issue("ISS-01")
+        launched = mission.launch_issue("ISS-01")
+        runner = self.load_mission()
+        sandbox = patch(
+            "albert_mvp.core.sandboxed_process_argv",
+            side_effect=lambda argv, **_kwargs: (argv, True),
+        )
+        sandbox.start()
+        self.addCleanup(sandbox.stop)
+        outcomes: list[str] = []
+
+        def run() -> None:
+            try:
+                outcomes.append(
+                    runner.run_session(launched.session_id).retirement["phase"]
+                )
+            except Exception as exc:  # surfaced by the assertion below
+                outcomes.append(f"error:{type(exc).__name__}:{exc}")
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        deadline = time.monotonic() + 5
+        while (
+            time.monotonic() < deadline
+            and not (launched.worktree_path / "started-before-cancel.txt").exists()
+        ):
+            time.sleep(0.02)
+        if not (launched.worktree_path / "started-before-cancel.txt").exists():
+            latest = self.load_mission().sessions[launched.session_id]
+            stderr = (
+                Path(latest.artifacts["stderr"]).read_text(encoding="utf-8")
+                if latest.artifacts.get("stderr")
+                else ""
+            )
+            self.fail(
+                "blocking runner never reached its observable process boundary: "
+                f"{outcomes}; stderr={stderr!r}"
+            )
+        canceller = self.load_mission()
+        active = canceller.sessions[launched.session_id]
+        self.assertIsNotNone(active.runner_process_pid)
+
+        canceller.cancel_session(
+            launched.session_id,
+            reason="Cancellation retirement contract test.",
+            expected_revision=active.revision,
+        )
+        thread.join(timeout=10)
+
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(outcomes, ["retired"])
+        retired = self.load_mission().sessions[launched.session_id]
+        self.assertEqual(retired.status, "cancelled")
+        self.assertEqual(retired.retirement["phase"], "retired")
+        self.assertFalse(retired.worktree_path.exists())
+
+    def test_retirement_retries_are_bounded_and_exhaust_into_retirement_blocked(
+        self,
+    ) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+
+        with patch.object(
+            mission,
+            "_remove_retirement_worktree",
+            side_effect=AlbertError("injected exact removal failure"),
+        ) as removal:
+            mission.record_frontier_review(
+                completed.session_id,
+                "Approved",
+                reason="Evidence is accepted before bounded cleanup.",
+                allowed_session_statuses={"evidence-ready"},
+                expected_revision=completed.revision,
+            )
+            first = mission._refresh_persisted_session(completed.session_id)
+            self.assertEqual(first.retirement["phase"], "retiring")
+            self.assertEqual(first.retirement["retirement_attempts"], 1)
+
+            second = mission.reconcile_retirement_unit(completed.session_id)
+            self.assertEqual(second.retirement["phase"], "retiring")
+            self.assertEqual(second.retirement["retirement_attempts"], 2)
+
+            third = mission.reconcile_retirement_unit(completed.session_id)
+            self.assertEqual(third.retirement["phase"], "retirement-blocked")
+            self.assertEqual(third.retirement["retirement_attempts"], 3)
+            self.assertEqual(removal.call_count, 3)
+
+            replayed = mission.reconcile_retirement_unit(completed.session_id)
+            self.assertEqual(replayed.retirement["phase"], "retirement-blocked")
+            self.assertEqual(removal.call_count, 3)
+
+        self.assertTrue(completed.worktree_path.is_dir())
+
+    def test_restart_after_removal_effect_finalizes_without_repeating_deletion(
+        self,
+    ) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+
+        with patch.object(
+            mission,
+            "_verify_retirement_removal",
+            side_effect=AlbertError("simulated crash after removal effect"),
+        ):
+            mission.record_frontier_review(
+                completed.session_id,
+                "Approved",
+                reason="Evidence is accepted before crash-cut cleanup.",
+                allowed_session_statuses={"evidence-ready"},
+                expected_revision=completed.revision,
+            )
+
+        interrupted = mission._refresh_persisted_session(completed.session_id)
+        self.assertEqual(interrupted.retirement["phase"], "retiring")
+        self.assertEqual(interrupted.retirement["retirement_attempts"], 1)
+        self.assertFalse(completed.worktree_path.exists())
+
+        recovered = self.load_mission().sessions[completed.session_id]
+        self.assertEqual(recovered.retirement["phase"], "retired")
+        self.assertEqual(recovered.retirement["retirement_attempts"], 1)
+
+    def test_expired_configurable_grace_retires_on_startup_reconciliation(self) -> None:
+        failing_runner = self.root / "grace-expiry-runner.py"
+        failing_runner.write_text("raise SystemExit(9)\n", encoding="utf-8")
+        command = f"python3 {failing_runner}"
+        self.agent_config.write_text(
+            json.dumps(
+                {
+                    "agents": [
+                        {
+                            "id": "grace-local",
+                            "role": "local-agent",
+                            "provider": "local",
+                            "runner": "command",
+                            "command": command,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        mission = self.load_mission(retention_grace_seconds=0)
+        mission.record_command_approval(command, "auto-allowed")
+        mission.assign_issue("ISS-01", "grace-local")
+        mission.approve_issue("ISS-01")
+        launched = mission.launch_issue("ISS-01")
+        mission.run_session(launched.session_id)
+
+        grace = mission._refresh_persisted_session(launched.session_id)
+        self.assertEqual(grace.retirement["phase"], "grace")
+
+        retired = self.load_mission(retention_grace_seconds=0).sessions[
+            launched.session_id
+        ]
+        self.assertEqual(retired.retirement["phase"], "retired")
+        self.assertFalse(retired.worktree_path.exists())
+
+    def test_repair_reconstructs_verified_snapshot_as_a_separate_retirement_unit(
+        self,
+    ) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        (completed.worktree_path / "prior-only.txt").write_text(
+            "verified predecessor material\n",
+            encoding="utf-8",
+        )
+        mission.record_frontier_review(
+            completed.session_id,
+            "Needs repair",
+            reason="The prior result needs one separately authorized repair.",
+            allowed_session_statuses={"evidence-ready"},
+            expected_revision=completed.revision,
+        )
+
+        repair = mission.launch_repair(completed.session_id)
+
+        retired_prior = mission._refresh_persisted_session(completed.session_id)
+        self.assertEqual(retired_prior.retirement["phase"], "retired")
+        self.assertFalse(retired_prior.worktree_path.exists())
+        self.assertEqual(repair.status, "queued")
+        self.assertEqual(repair.retirement["phase"], "active")
+        self.assertTrue(repair.preservation_budget["bound"])
+        self.assertEqual(
+            repair.task_packet["repair_context"]["retirement_snapshot_sha256"],
+            retired_prior.retirement["snapshot"]["manifest_sha256"],
+        )
+
+        repaired = mission.run_session(repair.session_id)
+        self.assertEqual(
+            (repaired.worktree_path / "prior-only.txt").read_text(encoding="utf-8"),
+            "verified predecessor material\n",
+        )
+        self.assertEqual(
+            repaired.repository_snapshot["repair_overlay"]["source"],
+            "verified-retirement-snapshot",
+        )
+
+    def test_non_git_retirement_stays_inside_the_exact_managed_directory(self) -> None:
+        shutil.move(self.target_repo / ".git", self.root / "detached-target-git")
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        managed_path = completed.worktree_path.resolve()
+        self.assertTrue(completed.worktree_identity.startswith("managed-directory:"))
+
+        mission.record_frontier_review(
+            completed.session_id,
+            "Approved",
+            reason="Directory work is accepted for exact managed removal.",
+            allowed_session_statuses={"evidence-ready"},
+            expected_revision=completed.revision,
+        )
+
+        retired = mission._refresh_persisted_session(completed.session_id)
+        self.assertEqual(retired.retirement["phase"], "retired")
+        self.assertEqual(retired.retirement["removal_kind"], "managed-directory")
+        self.assertFalse(managed_path.exists())
+        self.assertTrue(self.target_repo.is_dir())
+        self.assertTrue((self.target_repo / "tracked.txt").is_file())
+
+    def test_non_git_retirement_blocks_when_the_directory_changes_after_preservation(
+        self,
+    ) -> None:
+        shutil.move(self.target_repo / ".git", self.root / "detached-target-git")
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        prepare = RetirementSnapshotStore.prepare_managed_directory_removal
+
+        def mutate_then_prepare(
+            store: RetirementSnapshotStore,
+            record: dict[str, object],
+        ) -> None:
+            (completed.worktree_path / "late-change.txt").write_text(
+                "not preserved\n",
+                encoding="utf-8",
+            )
+            prepare(store, record)
+
+        with patch.object(
+            RetirementSnapshotStore,
+            "prepare_managed_directory_removal",
+            autospec=True,
+            side_effect=mutate_then_prepare,
+        ):
+            mission.record_frontier_review(
+                completed.session_id,
+                "Approved",
+                reason="The preserved directory result is accepted.",
+                allowed_session_statuses={"evidence-ready"},
+                expected_revision=completed.revision,
+            )
+
+        retained = mission._refresh_persisted_session(completed.session_id)
+        self.assertEqual(retained.retirement["phase"], "retiring")
+        self.assertTrue(retained.worktree_path.is_dir())
+        self.assertEqual(retained.retirement["retirement_attempts"], 1)
 
     def test_cli_and_persistent_transport_share_retirement_snapshot_semantics(
         self,

@@ -85,6 +85,7 @@ _REVIEW_BASELINE_TOTAL_BYTES_LIMIT = 8_000_000
 _WORKTREE_PREPARATION_SCHEMA_VERSION = 1
 _RETIREMENT_UNIT_SCHEMA_VERSION = 1
 _PRESERVATION_BUDGET_BYTES = 32 * 1024 * 1024
+_DEFAULT_RETENTION_GRACE_SECONDS = 72 * 60 * 60
 _GIT_NOT_REPOSITORY_MESSAGE = (
     "fatal: not a git repository (or any of the parent directories): .git"
 )
@@ -964,19 +965,42 @@ def _validated_retirement_unit(raw: Any) -> dict[str, Any]:
             "phase": "active",
             "runner_boundary": {},
             "snapshot": {},
+            "preservation_intent": {},
             "preservation_receipt": {},
             "blocked_reason": "",
+            "retirement_attempts": 0,
+            "removal_kind": "",
+            "retired_at": "",
         }
     if not isinstance(raw, dict):
         raise AlbertError("Local Agent Retirement Unit state is invalid")
     if (
         raw.get("schema_version") != _RETIREMENT_UNIT_SCHEMA_VERSION
         or raw.get("phase")
-        not in {"active", "preserving", "preserved", "preservation-blocked"}
+        not in {
+            "active",
+            "preserving",
+            "preserved",
+            "grace",
+            "retiring",
+            "retired",
+            "preservation-blocked",
+            "retirement-blocked",
+        }
         or not isinstance(raw.get("runner_boundary"), dict)
         or not isinstance(raw.get("snapshot"), dict)
+        or not isinstance(raw.get("preservation_intent", {}), dict)
         or not isinstance(raw.get("preservation_receipt", {}), dict)
         or not isinstance(raw.get("blocked_reason"), str)
+    ):
+        raise AlbertError("Local Agent Retirement Unit state is invalid")
+    retirement_attempts = raw.get("retirement_attempts", 0)
+    if (
+        not isinstance(retirement_attempts, int)
+        or isinstance(retirement_attempts, bool)
+        or retirement_attempts < 0
+        or not isinstance(raw.get("removal_kind", ""), str)
+        or not isinstance(raw.get("retired_at", ""), str)
     ):
         raise AlbertError("Local Agent Retirement Unit state is invalid")
     runner_boundary = raw["runner_boundary"]
@@ -1003,9 +1027,44 @@ def _validated_retirement_unit(raw: Any) -> dict[str, Any]:
                 raise AlbertError(
                     "Local Agent Retirement Unit runner boundary is invalid"
                 )
-    if raw["phase"] == "preserved" and not raw["snapshot"]:
+    intent = raw.get("preservation_intent", {})
+    if raw["phase"] in {"preserved", "grace", "retiring", "retired"} and not raw[
+        "snapshot"
+    ]:
         raise AlbertError("Preserved Retirement Unit snapshot is missing")
+    if raw["phase"] == "preserving" and not intent:
+        raise AlbertError("Preserving Retirement Unit intent is missing")
+    if raw["phase"] == "grace":
+        for field_name in ("grace_started_at", "grace_expires_at"):
+            value = raw.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise AlbertError("Retirement Unit grace boundary is invalid")
+            try:
+                parsed = datetime.fromisoformat(value)
+            except ValueError as exc:
+                raise AlbertError("Retirement Unit grace boundary is invalid") from exc
+            if parsed.tzinfo is None:
+                raise AlbertError("Retirement Unit grace boundary is invalid")
+    if raw["phase"] in {"retiring", "retired"} and raw.get(
+        "removal_kind", ""
+    ) not in {"git-worktree", "managed-directory"}:
+        raise AlbertError("Retirement Unit removal boundary is invalid")
+    if raw["phase"] == "retired" and (
+        not isinstance(raw.get("retired_at"), str) or not raw["retired_at"].strip()
+    ):
+        raise AlbertError("Retirement Unit retired boundary is invalid")
     receipt = raw.get("preservation_receipt", {})
+    if intent and (
+        not isinstance(intent.get("correlation_id"), str)
+        or not intent["correlation_id"].strip()
+        or not isinstance(intent.get("expected_revision"), int)
+        or isinstance(intent.get("expected_revision"), bool)
+        or intent["expected_revision"] < 0
+        or not isinstance(intent.get("claim_revision"), int)
+        or isinstance(intent.get("claim_revision"), bool)
+        or intent["claim_revision"] < 0
+    ):
+        raise AlbertError("Retirement Unit preservation intent is invalid")
     if receipt and (
         not isinstance(receipt.get("correlation_id"), str)
         or not receipt["correlation_id"].strip()
@@ -1486,8 +1545,12 @@ class LocalAgentSession:
                 "phase": "active",
                 "runner_boundary": {},
                 "snapshot": {},
+                "preservation_intent": {},
                 "preservation_receipt": {},
                 "blocked_reason": "",
+                "retirement_attempts": 0,
+                "removal_kind": "",
+                "retired_at": "",
             }
 
     def to_dict(self) -> dict[str, Any]:
@@ -1588,9 +1651,14 @@ class LocalAgentSession:
         )
         receipt = session.retirement.get("preservation_receipt", {})
         snapshot = session.retirement.get("snapshot", {})
+        retirement_phase = session.retirement.get("phase")
         if receipt and (
-            session.retirement.get("phase") != "preserved"
-            or receipt.get("result_revision") != session.revision
+            retirement_phase
+            not in {"preserved", "grace", "retiring", "retired", "retirement-blocked"}
+            or (
+                retirement_phase == "preserved"
+                and receipt.get("result_revision") != session.revision
+            )
             or receipt.get("manifest_sha256") != snapshot.get("manifest_sha256")
         ):
             raise AlbertError(
@@ -1746,6 +1814,7 @@ class AlbertMission:
         retirement_quiescence_probe: (
             Callable[[dict[str, Any]], tuple[str, str]] | None
         ) = None,
+        retention_grace_seconds: int = _DEFAULT_RETENTION_GRACE_SECONDS,
     ):
         self.target_repo = target_repo.resolve()
         self.tracker_dir = tracker_dir.resolve()
@@ -1756,6 +1825,13 @@ class AlbertMission:
         self.allow_empty_tracker = allow_empty_tracker
         self.agent_availability_snapshot = agent_availability_snapshot
         self.retirement_quiescence_probe = retirement_quiescence_probe
+        if (
+            not isinstance(retention_grace_seconds, int)
+            or isinstance(retention_grace_seconds, bool)
+            or retention_grace_seconds < 0
+        ):
+            raise AlbertError("Retention Grace Period must be a non-negative integer.")
+        self.retention_grace_seconds = retention_grace_seconds
         identity_paths = [
             _runtime_identity_path(path)
             for path in (self.target_repo, self.tracker_dir, self.issues_dir)
@@ -2197,9 +2273,45 @@ class AlbertMission:
         self._load_runtime()
         if runtime_exists:
             self._reconcile_abandoned_sessions()
+            self._reconcile_retirement_units()
         else:
             self._persist()
         return self
+
+    def _reconcile_retirement_units(self) -> None:
+        """Resume deterministic retirement effects during Mission startup."""
+
+        for session_id in sorted(self.sessions):
+            session = self.sessions[session_id]
+            phase = session.retirement.get("phase", "active")
+            if phase in {
+                "preservation-blocked",
+                "retirement-blocked",
+                "retired",
+            }:
+                continue
+            review = self._latest_review_for_session(session_id)
+            eligible = (
+                phase in {"preserving", "preserved", "grace", "retiring"}
+                or session.status in {"failed", "cancelled"}
+                or bool(
+                    review
+                    and review.outcome
+                    in {"Approved", "Approved with limitations", "Rejected"}
+                )
+            )
+            if not eligible:
+                continue
+            try:
+                self.reconcile_retirement_unit(session_id)
+            except (AlbertError, OSError):
+                latest = self._refresh_persisted_session(session_id)
+                if latest.retirement.get("phase") not in {
+                    "preservation-blocked",
+                    "retirement-blocked",
+                    "retiring",
+                }:
+                    raise
 
     def board_summary(self) -> dict[str, Any]:
         ordered = self.ordered_issue_ids()
@@ -2988,7 +3100,14 @@ class AlbertMission:
         if expected_revision is None:
             expected_revision = prior_session.revision
         self._require_lifecycle_revision(prior_session, expected_revision)
-        self._require_active_retirement_unit(prior_session, "launch repair")
+        prior_retirement_phase = prior_session.retirement.get("phase", "active")
+        if prior_retirement_phase == "active":
+            self._require_active_retirement_unit(prior_session, "launch repair")
+        elif prior_retirement_phase not in {"preserved", "grace", "retired"}:
+            raise LaunchBlockedError(
+                f"{session_id} cannot launch repair while its Retirement Unit "
+                f"phase is {prior_retirement_phase}."
+            )
         issue = self.issues.get(prior_session.issue_id)
         is_ad_hoc = (
             issue is None
@@ -3158,7 +3277,50 @@ class AlbertMission:
             task_packet=task_packet,
             status="queued",
         )
-        prior_session.revision += 1
+        if prior_retirement_phase == "active":
+            preservation_correlation = (
+                "retirement-preserve:repair:"
+                + sha256(
+                    (
+                        f"{self.mission_id}\n{prior_session.session_id}\n"
+                        f"{prior_session.revision}\n{repair_session_id}"
+                    ).encode()
+                ).hexdigest()
+            )
+            prior_session = self.preserve_retirement_unit(
+                prior_session.session_id,
+                expected_revision=prior_session.revision,
+                correlation_id=preservation_correlation,
+            )
+        snapshot = prior_session.retirement.get("snapshot", {})
+        snapshot_revision = int(snapshot.get("session_revision", prior_session.revision))
+        snapshot_store = self._retirement_snapshot_store(
+            prior_session,
+            snapshot_revision,
+        )
+        reconstruction_root = self.runtime_dir / "retirement" / "repair-reconstruction"
+        reconstruction_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            dir=reconstruction_root,
+            prefix=f"{prior_session.session_id}.",
+        ) as temporary_name:
+            materialized = snapshot_store.materialize(snapshot, Path(temporary_name))
+            repair_overlay = self._stage_prior_session_state(
+                session,
+                prior_worktree=materialized,
+                source_kind="verified-retirement-snapshot",
+            )
+        session.repository_snapshot["repair_overlay"] = repair_overlay
+        repair_context["retirement_snapshot_sha256"] = snapshot["manifest_sha256"]
+        retired_prior = self._retire_preserved_unit(prior_session.session_id)
+        if retired_prior.retirement.get("phase") != "retired":
+            raise LaunchBlockedError(
+                f"{session_id} cannot launch repair until its prior Retirement Unit "
+                "is safely retired."
+            )
+        repair_context["retired_prior_revision"] = retired_prior.revision
+        retired_prior.revision += 1
+        self.sessions[retired_prior.session_id] = retired_prior
         self.sessions[repair_session_id] = session
         self._record(
             f"{prior_session.issue_id} repair queued as {repair_session_id} "
@@ -3300,12 +3462,14 @@ class AlbertMission:
                 self._raise_if_cancelled(session)
                 self._persist_runner_result_candidate(session)
             except SessionCancelledError:
-                return self._finalize_cancelled_runner_owner_release(session)
+                cancelled = self._finalize_cancelled_runner_owner_release(session)
+                return self.reconcile_retirement_unit(cancelled.session_id)
             except Exception as exc:
                 try:
                     self._raise_if_cancelled(session)
                 except SessionCancelledError:
-                    return self._finalize_cancelled_runner_owner_release(session)
+                    cancelled = self._finalize_cancelled_runner_owner_release(session)
+                    return self.reconcile_retirement_unit(cancelled.session_id)
                 session.status = "failed"
                 session.runner_exit_status = (
                     session.runner_exit_status
@@ -3326,7 +3490,8 @@ class AlbertMission:
                     timeline_message=failure_message,
                 )
                 if persisted.status == "cancelled":
-                    return persisted
+                    cancelled = self._finalize_cancelled_runner_owner_release(session)
+                    return self.reconcile_retirement_unit(cancelled.session_id)
                 self._record_typed_recovery_failure(persisted)
                 raise AlbertError(f"{session_id} runner failed: {exc}") from exc
 
@@ -3348,6 +3513,8 @@ class AlbertMission:
                 timeline_message=finished_message,
             )
             persisted = self._record_typed_recovery_failure(persisted)
+            if persisted.status == "failed":
+                persisted = self.reconcile_retirement_unit(persisted.session_id)
             if (
                 persisted.evidence is not None
                 and persisted.evidence_valid
@@ -4634,7 +4801,9 @@ class AlbertMission:
             data["command_policy"] = self.command_policy
             data["timeline"] = self.timeline
             self._write_runtime_payload(data)
-            return decision
+        if outcome in {"Approved", "Approved with limitations", "Rejected"}:
+            self.reconcile_retirement_unit(session_id)
+        return decision
 
     def generate_mission_records(self) -> Path:
         mission_dir = self.target_repo / "docs" / "missions" / self.mission_id
@@ -5634,8 +5803,21 @@ class AlbertMission:
                         "Retirement preservation correlation id was reused for a "
                         "different request."
                     )
-            self._require_lifecycle_revision(session, expected_revision)
-            self._require_active_retirement_unit(session, "begin preservation")
+            intent = session.retirement.get("preservation_intent", {})
+            recovering = session.retirement.get("phase") == "preserving"
+            if recovering:
+                if (
+                    intent.get("correlation_id") != correlation_id
+                    or intent.get("expected_revision") != expected_revision
+                    or intent.get("claim_revision") != session.revision
+                ):
+                    raise LaunchBlockedError(
+                        f"{session_id} has a different preservation effect in progress."
+                    )
+                claim_revision = session.revision
+            else:
+                self._require_lifecycle_revision(session, expected_revision)
+                self._require_active_retirement_unit(session, "begin preservation")
             if session.status not in {
                 "completed",
                 "evidence-ready",
@@ -5650,7 +5832,9 @@ class AlbertMission:
             current_identity = self._worktree_identity_for_session(session)
             if (
                 not current_identity
-                or not current_identity.startswith("managed-git:")
+                or not current_identity.startswith(
+                    ("managed-git:", "managed-directory:")
+                )
                 or current_identity != session.worktree_identity
             ):
                 self._block_retirement_preservation(
@@ -5676,22 +5860,32 @@ class AlbertMission:
                 raise LaunchBlockedError(
                     f"{session_id} Runner Quiescence is unproven; preservation is blocked."
                 )
-            session.retirement["phase"] = "preserving"
-            session.retirement["blocked_reason"] = ""
-            session.revision += 1
-            claim_revision = session.revision
-            data["sessions"][session_id] = session.to_dict()
-            data.setdefault("timeline", []).append(
-                f"{session.issue_id} preservation claimed for {session_id} at "
-                f"lifecycle revision {claim_revision}."
-            )
-            self._write_runtime_payload(data)
-            self.sessions[session_id] = session
-            self.timeline = list(data.get("timeline", []))
+            if not recovering:
+                session.retirement["phase"] = "preserving"
+                session.retirement["blocked_reason"] = ""
+                session.revision += 1
+                claim_revision = session.revision
+                session.retirement["preservation_intent"] = {
+                    "correlation_id": correlation_id,
+                    "expected_revision": expected_revision,
+                    "claim_revision": claim_revision,
+                }
+                data["sessions"][session_id] = session.to_dict()
+                data.setdefault("timeline", []).append(
+                    f"{session.issue_id} preservation claimed for {session_id} at "
+                    f"lifecycle revision {claim_revision}."
+                )
+                self._write_runtime_payload(data)
+                self.sessions[session_id] = session
+                self.timeline = list(data.get("timeline", []))
 
         store = self._retirement_snapshot_store(session, claim_revision)
         try:
-            snapshot = store.capture()
+            snapshot = (
+                store.recover_published()
+                if recovering and store.payload_root.exists()
+                else store.capture()
+            )
         except (OSError, RetirementSnapshotError) as exc:
             with self._runtime_lock(exclusive=True):
                 data = self._read_runtime_payload()
@@ -5743,6 +5937,7 @@ class AlbertMission:
                 "result_revision": latest.revision,
                 "manifest_sha256": snapshot["manifest_sha256"],
             }
+            latest.retirement["preservation_intent"] = {}
             data["sessions"][session_id] = latest.to_dict()
             data.setdefault("timeline", []).append(
                 f"{latest.issue_id} Retirement Snapshot verified for {session_id}."
@@ -5752,9 +5947,368 @@ class AlbertMission:
             self.timeline = list(data.get("timeline", []))
             return latest
 
+    def reconcile_retirement_unit(self, session_id: str) -> LocalAgentSession:
+        """Advance one eligible Retirement Unit without repeating proven effects."""
+
+        session = self._refresh_persisted_session(session_id)
+        phase = session.retirement.get("phase", "active")
+        if phase == "retired":
+            return session
+        if phase == "preserving":
+            intent = session.retirement.get("preservation_intent", {})
+            session = self.preserve_retirement_unit(
+                session_id,
+                expected_revision=int(intent.get("expected_revision", -1)),
+                correlation_id=str(intent.get("correlation_id", "")),
+            )
+            phase = session.retirement.get("phase", "active")
+        if phase == "active":
+            review = self._latest_review_for_session(session_id)
+            accepted = bool(
+                review
+                and review.outcome in {"Approved", "Approved with limitations"}
+            )
+            failed = session.status == "failed" or bool(
+                review and review.outcome == "Rejected"
+            )
+            if not accepted and session.status != "cancelled" and not failed:
+                return session
+            correlation_payload = (
+                f"{self.mission_id}\n{session_id}\n{session.revision}\n"
+                "automatic-retirement-preservation"
+            )
+            correlation_id = (
+                "retirement-preserve:auto:"
+                + sha256(correlation_payload.encode("utf-8")).hexdigest()
+            )
+            session = self.preserve_retirement_unit(
+                session_id,
+                expected_revision=session.revision,
+                correlation_id=correlation_id,
+            )
+            phase = session.retirement.get("phase", "active")
+        if phase == "preserved":
+            review = self._latest_review_for_session(session_id)
+            if session.status == "failed" or bool(
+                review and review.outcome == "Rejected"
+            ):
+                return self._enter_retention_grace(session_id)
+            if session.status == "cancelled" or bool(
+                review
+                and review.outcome in {"Approved", "Approved with limitations"}
+            ):
+                return self._retire_preserved_unit(session_id)
+            return session
+        if phase == "grace":
+            expires_at = session.retirement.get("grace_expires_at")
+            try:
+                expires = datetime.fromisoformat(str(expires_at))
+            except ValueError as exc:
+                raise AlbertError(
+                    f"{session_id} Retention Grace Period is invalid."
+                ) from exc
+            if expires.tzinfo is None:
+                raise AlbertError(
+                    f"{session_id} Retention Grace Period is invalid."
+                )
+            if datetime.now(timezone.utc) < expires.astimezone(timezone.utc):
+                return session
+            return self._retire_preserved_unit(session_id)
+        if phase == "retiring":
+            return self._retire_preserved_unit(session_id)
+        return session
+
+    def _enter_retention_grace(self, session_id: str) -> LocalAgentSession:
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_session = data.get("sessions", {}).get(session_id)
+            if not isinstance(raw_session, dict):
+                raise AlbertError(f"Unknown Local Agent session: {session_id}")
+            session = LocalAgentSession.from_dict(raw_session)
+            if session.retirement.get("phase") == "grace":
+                return session
+            if session.retirement.get("phase") != "preserved":
+                raise LaunchBlockedError(
+                    f"{session_id} requires verified preservation before grace."
+                )
+            started = datetime.now(timezone.utc)
+            expires = datetime.fromtimestamp(
+                started.timestamp() + self.retention_grace_seconds,
+                tz=timezone.utc,
+            )
+            session.retirement["phase"] = "grace"
+            session.retirement["grace_started_at"] = started.isoformat()
+            session.retirement["grace_expires_at"] = expires.isoformat()
+            session.retirement["blocked_reason"] = ""
+            session.revision += 1
+            data["sessions"][session_id] = session.to_dict()
+            data.setdefault("timeline", []).append(
+                f"{session.issue_id} Retention Grace Period began for {session_id}; "
+                f"expires {expires.isoformat()}."
+            )
+            self._write_runtime_payload(data)
+            self.sessions[session_id] = session
+            self.timeline = list(data.get("timeline", []))
+            return session
+
+    def _retire_preserved_unit(self, session_id: str) -> LocalAgentSession:
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_session = data.get("sessions", {}).get(session_id)
+            if not isinstance(raw_session, dict):
+                raise AlbertError(f"Unknown Local Agent session: {session_id}")
+            session = LocalAgentSession.from_dict(raw_session)
+            phase = session.retirement.get("phase")
+            if phase == "retired":
+                return session
+            if phase not in {"preserved", "grace", "retiring"}:
+                raise LaunchBlockedError(
+                    f"{session_id} requires a verified Retirement Snapshot before removal."
+                )
+            snapshot_revision = int(
+                session.retirement["snapshot"].get(
+                    "session_revision",
+                    session.revision,
+                )
+            )
+            store = self._retirement_snapshot_store(session, snapshot_revision)
+            try:
+                snapshot_verified = store.verify(session.retirement["snapshot"])
+            except (OSError, RetirementSnapshotError) as exc:
+                snapshot_verified = False
+                verification_reason = str(exc)
+            else:
+                verification_reason = ""
+            if not snapshot_verified:
+                raise LaunchBlockedError(
+                    f"{session_id} Retirement Snapshot verification failed before removal: "
+                    f"{verification_reason}"
+                )
+            removal_kind = str(session.retirement.get("removal_kind", ""))
+            effect_already_absent = phase == "retiring" and not (
+                session.worktree_path.exists() or session.worktree_path.is_symlink()
+            )
+            current_identity = (
+                "" if effect_already_absent else self._worktree_identity_for_session(session)
+            )
+            if not effect_already_absent and current_identity != session.worktree_identity:
+                self._block_retirement_removal(
+                    data,
+                    session,
+                    "Worktree Identity changed before physical retirement.",
+                    terminal=True,
+                )
+                return session
+            if not removal_kind:
+                removal_kind = (
+                    "git-worktree"
+                    if current_identity.startswith("managed-git:")
+                    else "managed-directory"
+                )
+            if removal_kind not in {"git-worktree", "managed-directory"}:
+                self._block_retirement_removal(
+                    data,
+                    session,
+                    "Physical retirement removal kind is invalid.",
+                    terminal=True,
+                )
+                return session
+            if effect_already_absent:
+                claim_revision = session.revision
+            else:
+                session.retirement["phase"] = "retiring"
+                session.retirement["retirement_attempts"] = int(
+                    session.retirement.get("retirement_attempts", 0)
+                ) + 1
+                session.retirement["removal_kind"] = removal_kind
+                session.retirement["blocked_reason"] = ""
+                session.revision += 1
+                claim_revision = session.revision
+                data["sessions"][session_id] = session.to_dict()
+                data.setdefault("timeline", []).append(
+                    f"{session.issue_id} physical retirement attempt "
+                    f"{session.retirement['retirement_attempts']}/3 claimed for "
+                    f"{session_id}."
+                )
+                self._write_runtime_payload(data)
+                self.sessions[session_id] = session
+                self.timeline = list(data.get("timeline", []))
+
+        try:
+            if not effect_already_absent:
+                self._remove_retirement_worktree(session, removal_kind)
+            self._verify_retirement_removal(session, removal_kind)
+        except (OSError, AlbertError, RetirementSnapshotError) as exc:
+            with self._runtime_lock(exclusive=True):
+                data = self._read_runtime_payload()
+                raw_latest = data.get("sessions", {}).get(session_id)
+                if not isinstance(raw_latest, dict):
+                    raise AlbertError(f"Unknown Local Agent session: {session_id}") from exc
+                latest = LocalAgentSession.from_dict(raw_latest)
+                if (
+                    latest.revision == claim_revision
+                    and latest.retirement.get("phase") == "retiring"
+                ):
+                    self._block_retirement_removal(data, latest, str(exc))
+                    return latest
+            raise
+
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_latest = data.get("sessions", {}).get(session_id)
+            if not isinstance(raw_latest, dict):
+                raise AlbertError(f"Unknown Local Agent session: {session_id}")
+            latest = LocalAgentSession.from_dict(raw_latest)
+            if (
+                latest.revision != claim_revision
+                or latest.retirement.get("phase") != "retiring"
+            ):
+                raise LaunchBlockedError(
+                    f"{session_id} lifecycle boundary changed during physical retirement."
+                )
+            latest.retirement["phase"] = "retired"
+            latest.retirement["retired_at"] = _utc_now()
+            latest.retirement["blocked_reason"] = ""
+            latest.revision += 1
+            data["sessions"][session_id] = latest.to_dict()
+            data.setdefault("timeline", []).append(
+                f"{latest.issue_id} Retirement Unit {session_id} retired."
+            )
+            self._write_runtime_payload(data)
+            self.sessions[session_id] = latest
+            self.timeline = list(data.get("timeline", []))
+            return latest
+
+    def _remove_retirement_worktree(
+        self,
+        session: LocalAgentSession,
+        removal_kind: str,
+    ) -> None:
+        path = session.worktree_path
+        if removal_kind == "git-worktree":
+            snapshot_revision = int(
+                session.retirement["snapshot"].get(
+                    "session_revision",
+                    session.revision,
+                )
+            )
+            self._retirement_snapshot_store(
+                session,
+                snapshot_revision,
+            ).prepare_git_non_force_removal(session.retirement["snapshot"])
+            completed = _run_bounded_process(
+                [
+                    "git",
+                    "-C",
+                    str(self.target_repo),
+                    "worktree",
+                    "remove",
+                    str(path),
+                ],
+                timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+                output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
+            )
+            if completed.returncode != 0:
+                reason = (
+                    self._subprocess_output_text(completed.stderr).strip()
+                    or self._subprocess_output_text(completed.stdout).strip()
+                    or f"exit {completed.returncode}"
+                )
+                raise AlbertError(
+                    f"exact non-force Git worktree removal failed: {reason}"
+                )
+            return
+        if removal_kind != "managed-directory":
+            raise AlbertError("Retirement removal kind is invalid.")
+        expected = self._session_worktree_path(session.session_id)
+        if (
+            path.is_symlink()
+            or _runtime_identity_path(path.resolve(strict=True))
+            != _runtime_identity_path(expected)
+            or _runtime_identity_path(path.resolve(strict=True))
+            == _runtime_identity_path(self.target_repo)
+        ):
+            raise AlbertError("Managed directory retirement boundary is invalid.")
+        snapshot_revision = int(
+            session.retirement["snapshot"].get(
+                "session_revision",
+                session.revision,
+            )
+        )
+        self._retirement_snapshot_store(
+            session,
+            snapshot_revision,
+        ).prepare_managed_directory_removal(session.retirement["snapshot"])
+        shutil.rmtree(path)
+
+    def _verify_retirement_removal(
+        self,
+        session: LocalAgentSession,
+        removal_kind: str,
+    ) -> None:
+        if session.worktree_path.exists() or session.worktree_path.is_symlink():
+            raise AlbertError("Retirement path remains after physical removal.")
+        if removal_kind != "git-worktree":
+            return
+        completed = _run_bounded_process(
+            [
+                "git",
+                "-C",
+                str(self.target_repo),
+                "worktree",
+                "list",
+                "--porcelain",
+                "-z",
+            ],
+            timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+            output_limit_bytes=_GIT_PATH_OUTPUT_BYTES_LIMIT,
+        )
+        if completed.returncode != 0:
+            raise AlbertError("Git worktree registration absence could not be verified.")
+        expected = _runtime_identity_path(session.worktree_path)
+        for block in completed.stdout.split("\0\0"):
+            for worktree_field in block.split("\0"):
+                if worktree_field.startswith("worktree ") and _runtime_identity_path(
+                    Path(worktree_field.removeprefix("worktree ")).resolve(strict=False)
+                ) == expected:
+                    raise AlbertError(
+                        "Git worktree registration remains after physical removal."
+                    )
+
+    def _block_retirement_removal(
+        self,
+        data: dict[str, Any],
+        session: LocalAgentSession,
+        reason: str,
+        *,
+        terminal: bool = False,
+    ) -> None:
+        attempts = int(session.retirement.get("retirement_attempts", 0))
+        exhausted = terminal or attempts >= 3
+        session.retirement["phase"] = (
+            "retirement-blocked" if exhausted else "retiring"
+        )
+        session.retirement["blocked_reason"] = reason
+        session.revision += 1
+        data["sessions"][session.session_id] = session.to_dict()
+        data.setdefault("timeline", []).append(
+            f"{session.issue_id} retirement "
+            f"{'blocked' if exhausted else 'attempt failed'} for "
+            f"{session.session_id}: {reason}"
+        )
+        self._write_runtime_payload(data)
+        self.sessions[session.session_id] = session
+        self.timeline = list(data.get("timeline", []))
+
     def verify_retirement_snapshot(self, session_id: str) -> bool:
         session = self._refresh_persisted_session(session_id)
-        if session.retirement.get("phase") != "preserved":
+        if session.retirement.get("phase") not in {
+            "preserved",
+            "grace",
+            "retiring",
+            "retired",
+            "retirement-blocked",
+        }:
             raise LaunchBlockedError(
                 f"{session_id} does not have a verified Retirement Snapshot."
             )
@@ -5984,6 +6538,9 @@ class AlbertMission:
                 "source_files_skipped_count": skipped_count,
                 "source_scan_limit": _DIRECTORY_SOURCE_SCAN_LIMIT,
             }
+            pre_staged_repair = session.repository_snapshot.get("repair_overlay")
+            if isinstance(pre_staged_repair, dict):
+                repository_snapshot["repair_overlay"] = dict(pre_staged_repair)
             self._capture_and_persist_worktree_baseline(
                 session,
                 repository_snapshot,
@@ -6226,6 +6783,9 @@ class AlbertMission:
                 },
                 **untracked_snapshot,
             }
+            pre_staged_repair = session.repository_snapshot.get("repair_overlay")
+            if isinstance(pre_staged_repair, dict):
+                repository_snapshot["repair_overlay"] = dict(pre_staged_repair)
             session.repository_snapshot = repository_snapshot
             self._persist_worktree_preparation(session)
 
@@ -6363,6 +6923,9 @@ class AlbertMission:
     def _stage_prior_session_state(
         self,
         session: LocalAgentSession,
+        *,
+        prior_worktree: Path | None = None,
+        source_kind: str = "retained-worktree",
     ) -> dict[str, Any]:
         repair_context = session.task_packet.get("repair_context")
         if not isinstance(repair_context, dict):
@@ -6380,7 +6943,7 @@ class AlbertMission:
                 f"{session.session_id} repair context references unknown session "
                 f"{prior_session_id}."
             )
-        prior_worktree = self._session_worktree_path(prior_session_id)
+        prior_worktree = prior_worktree or self._session_worktree_path(prior_session_id)
         if not prior_worktree.exists():
             raise AlbertError(
                 f"{session.session_id} cannot inherit missing prior session worktree "
@@ -6546,6 +7109,7 @@ class AlbertMission:
         return {
             "schema_version": 1,
             "state": "pending",
+            "source": source_kind,
             "prior_session_id": prior_session_id,
             "manifest_artifact": str(manifest_path),
             "manifest_sha256": sha256(manifest_payload).hexdigest(),

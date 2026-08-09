@@ -725,6 +725,11 @@ def _add_common_args(
     parser.add_argument("--mission-id", default="mission-001")
     parser.add_argument("--agent-config", default="")
     parser.add_argument("--mission-catalog", default="")
+    parser.add_argument(
+        "--retention-grace-seconds",
+        type=int,
+        default=72 * 60 * 60,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1011,6 +1016,7 @@ def _run(args: argparse.Namespace) -> int:
         },
         issues_dir=Path(args.issues_dir) if args.issues_dir else None,
         agent_availability_snapshot=availability_snapshot,
+        retention_grace_seconds=args.retention_grace_seconds,
     ).load()
     workspace_commands = {
         "workspace-snapshot",
@@ -1782,6 +1788,7 @@ def _load_workspace_service(
                     agent_config_path=primary.agent_config_path,
                     allow_empty_tracker=True,
                     agent_availability_snapshot=primary.agent_availability_snapshot,
+                    retention_grace_seconds=primary.retention_grace_seconds,
                 ).load()
             )
         return WorkspaceSnapshotService(primary, missions=tuple(missions))

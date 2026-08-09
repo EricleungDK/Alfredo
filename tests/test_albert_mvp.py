@@ -2122,9 +2122,10 @@ None - can start immediately
 
         self.assertNotEqual(first.worktree_path, repair.worktree_path)
         self.assertEqual(repair.task_packet["allowed_paths"], ["src/app.py"])
-        self.assertIn(
-            "PRIOR_AGENT_BROKEN = True",
-            (first.worktree_path / "src" / "app.py").read_text(encoding="utf-8"),
+        self.assertFalse(first.worktree_path.exists())
+        self.assertEqual(
+            mission.sessions[first.session_id].retirement["phase"],
+            "retired",
         )
         self.assertEqual(
             (repair.worktree_path / "src" / "app.py").read_text(encoding="utf-8"),
@@ -2383,7 +2384,7 @@ None - can start immediately
         ):
             mission.run_session(repair.session_id)
 
-        prior_change.write_text("STATE = 'newer-prior'\n", encoding="utf-8")
+        self.assertFalse(prior_change.exists())
         recovered_mission = self.load_mission_with_agent_config(config_path)
         recovered = recovered_mission.sessions[repair.session_id]
         self.assertEqual(recovered.status, "queued")
@@ -2535,6 +2536,11 @@ None - can start immediately
         mission.sessions[prior_id] = prior
         mission._persist()
         mission._ensure_session_worktree(prior)
+        prior.worktree_identity = mission._worktree_identity_for_session(prior)
+        mission.retirement_quiescence_probe = lambda _boundary: (
+            "absent",
+            "absent",
+        )
         (prior.worktree_path / "src" / "ad_hoc.py").write_text(
             "STATE = 'first-pass'\n", encoding="utf-8"
         )

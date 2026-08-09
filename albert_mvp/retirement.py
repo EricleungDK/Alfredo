@@ -151,6 +151,146 @@ class RetirementSnapshotStore:
         self._verify_clean_room(manifest_path, manifest)
         return True
 
+    def materialize(self, record: dict[str, Any], destination_root: Path) -> Path:
+        """Reconstruct verified preserved material below an explicit empty root."""
+
+        self.verify(record)
+        if (
+            destination_root.is_symlink()
+            or not destination_root.is_dir()
+            or any(destination_root.iterdir())
+        ):
+            raise RetirementSnapshotError(
+                "Retirement Snapshot reconstruction destination is not an empty directory."
+            )
+        manifest_path = self._contained_payload_file(
+            self.payload_root,
+            PurePosixPath("manifest.json"),
+        )
+        manifest = self._read_manifest(manifest_path)
+        repository_kind = manifest["git_state"]["kind"]
+        if repository_kind == "git-worktree":
+            self._reconstruct_git(self.payload_root, manifest, destination_root)
+        elif repository_kind == "managed-directory":
+            self._reconstruct_directory(
+                self.payload_root,
+                manifest,
+                destination_root,
+            )
+        else:
+            raise RetirementSnapshotError(
+                "Retirement Snapshot reconstruction kind is unsupported."
+            )
+        return destination_root / "repository"
+
+    def recover_published(self) -> dict[str, Any]:
+        """Recover an exact publication whose canonical phase commit was interrupted."""
+
+        manifest_path = self.payload_root / "manifest.json"
+        manifest = self._read_manifest(manifest_path)
+        record = {
+            "schema_version": self.schema_version,
+            "manifest_path": str(manifest_path),
+            "manifest_sha256": self._file_digest(manifest_path),
+            "payload_path": str(self.payload_root),
+            "payload_bytes": int(manifest["sizes"]["payload_bytes"]),
+            "manifest_bytes": int(manifest["sizes"]["manifest_bytes"]),
+            "snapshot_bytes": int(manifest["sizes"]["snapshot_bytes"]),
+            "worktree_identity": self.request.worktree_identity,
+            "session_revision": self.request.session_revision,
+            "verified": True,
+        }
+        self.verify(record)
+        return record
+
+    def prepare_git_non_force_removal(self, record: dict[str, Any]) -> None:
+        """Restore only the verified Git-visible state before non-force removal."""
+
+        self.verify(record)
+        manifest = self._read_manifest(self.payload_root / "manifest.json")
+        git_state = manifest["git_state"]
+        if git_state["kind"] != "git-worktree":
+            raise RetirementSnapshotError(
+                "Non-force Git preparation requires a Git-backed Retirement Unit."
+            )
+        current_status = self._git(
+            self.request.worktree_path,
+            ["status", "--porcelain=v2", "-z", "--"],
+        )
+        if (
+            sha256(current_status.encode("utf-8")).hexdigest()
+            != git_state["status_sha256"]
+        ):
+            raise RetirementSnapshotError(
+                "Retirement Unit changed after verified preservation."
+            )
+        self._git(
+            self.request.worktree_path,
+            ["restore", "--source=HEAD", "--staged", "--worktree", "--", "."],
+        )
+        for relative_value in sorted(
+            git_state["untracked_paths"],
+            key=lambda value: (len(PurePosixPath(value).parts), value),
+            reverse=True,
+        ):
+            relative = self._safe_relative(relative_value)
+            candidate = self.request.worktree_path / Path(*relative.parts)
+            if candidate.is_symlink() or candidate.is_file():
+                candidate.unlink()
+            else:
+                raise RetirementSnapshotError(
+                    f"Verified untracked removal path is unavailable: {relative_value!r}."
+                )
+            parent = candidate.parent
+            while parent != self.request.worktree_path:
+                try:
+                    parent.rmdir()
+                except OSError:
+                    break
+                parent = parent.parent
+        if self._git(
+            self.request.worktree_path,
+            ["status", "--porcelain=v2", "-z", "--"],
+        ):
+            raise RetirementSnapshotError(
+                "Retirement Unit remained dirty after verified cleanup."
+            )
+
+    def prepare_managed_directory_removal(self, record: dict[str, Any]) -> None:
+        """Prove the managed directory still equals its verified snapshot."""
+
+        self.verify(record)
+        manifest = self._read_manifest(self.payload_root / "manifest.json")
+        directory_state = manifest["git_state"]
+        if directory_state["kind"] != "managed-directory":
+            raise RetirementSnapshotError(
+                "Managed directory preparation requires a directory-backed Retirement Unit."
+            )
+        expected_paths = sorted(directory_state["paths"])
+        if self._filesystem_files(self.request.worktree_path) != expected_paths:
+            raise RetirementSnapshotError(
+                "Retirement Unit changed after verified preservation."
+            )
+        current: dict[str, dict[str, Any]] = {}
+        for relative_value in expected_paths:
+            relative = self._safe_relative(relative_value)
+            source = self.request.worktree_path / Path(*relative.parts)
+            if source.stat().st_mode & 0o777 != directory_state["modes"][relative_value]:
+                raise RetirementSnapshotError(
+                    "Retirement Unit changed after verified preservation."
+                )
+            current[f"directory/{relative.as_posix()}"] = {
+                "size": source.stat().st_size,
+                "sha256": self._file_digest(source),
+            }
+        if (
+            self._entries_digest(current, prefix="directory/")
+            != directory_state["tree_sha256"]
+        ):
+            raise RetirementSnapshotError(
+                "Retirement Unit changed after verified preservation."
+            )
+
     def quarantine_publication(self, record: dict[str, Any]) -> None:
         """Move an exact unpublished payload aside so its unit can fail closed."""
 
@@ -177,11 +317,14 @@ class RetirementSnapshotStore:
         git_marker = worktree / ".git"
         entries: dict[str, dict[str, Any]] = {}
         git_state: dict[str, Any]
-        if not git_marker.exists():
+        if git_marker.exists():
+            git_state = self._capture_git_state(root, entries)
+        elif self.request.worktree_identity.startswith("managed-directory:"):
+            git_state = self._capture_directory_state(root, entries)
+        else:
             raise RetirementSnapshotError(
-                "Retirement Snapshot requires an exact registered Git worktree."
+                "Retirement Snapshot requires an exact managed worktree."
             )
-        git_state = self._capture_git_state(root, entries)
         evidence = self._capture_evidence(root, entries)
         payload_bytes = sum(item["size"] for item in entries.values())
         if payload_bytes > self.request.reserved_bytes:
@@ -329,6 +472,30 @@ class RetirementSnapshotStore:
             },
         }
 
+    def _capture_directory_state(
+        self,
+        root: Path,
+        entries: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        paths = self._filesystem_files(self.request.worktree_path)
+        modes: dict[str, int] = {}
+        for relative_value in paths:
+            relative = self._safe_relative(relative_value)
+            source = self.request.worktree_path / Path(*relative.parts)
+            self._write_payload(
+                root / "directory" / Path(*relative.parts),
+                self._read_budgeted(source),
+                root,
+                entries,
+            )
+            modes[relative.as_posix()] = source.stat().st_mode & 0o777
+        return {
+            "kind": "managed-directory",
+            "paths": paths,
+            "modes": modes,
+            "tree_sha256": self._entries_digest(entries, prefix="directory/"),
+        }
+
     def _capture_evidence(
         self,
         root: Path,
@@ -448,6 +615,8 @@ class RetirementSnapshotStore:
             clean = Path(clean_name)
             if git_state["kind"] == "git-worktree":
                 self._reconstruct_git(manifest_path.parent, manifest, clean)
+            elif git_state["kind"] == "managed-directory":
+                self._reconstruct_directory(manifest_path.parent, manifest, clean)
             else:
                 raise RetirementSnapshotError(
                     "Retirement Snapshot manifest has an unsupported repository kind."
@@ -525,6 +694,61 @@ class RetirementSnapshotStore:
         ):
             raise RetirementSnapshotError(
                 "Retirement Snapshot clean-room Git reconstruction failed."
+            )
+
+    def _reconstruct_directory(
+        self,
+        payload_root: Path,
+        manifest: dict[str, Any],
+        clean: Path,
+    ) -> None:
+        repository = clean / "repository"
+        repository.mkdir()
+        directory_state = manifest["git_state"]
+        paths = directory_state.get("paths")
+        modes = directory_state.get("modes")
+        if (
+            not isinstance(paths, list)
+            or not all(isinstance(path, str) and path for path in paths)
+            or len(paths) != len(set(paths))
+            or not isinstance(modes, dict)
+            or set(modes) != set(paths)
+        ):
+            raise RetirementSnapshotError(
+                "Retirement Snapshot managed-directory state is invalid."
+            )
+        reconstructed: dict[str, dict[str, Any]] = {}
+        for relative_value in paths:
+            relative = self._safe_relative(relative_value)
+            mode = modes[relative_value]
+            if (
+                not isinstance(mode, int)
+                or isinstance(mode, bool)
+                or mode < 0
+                or mode > 0o777
+            ):
+                raise RetirementSnapshotError(
+                    "Retirement Snapshot managed-directory mode is invalid."
+                )
+            source = self._contained_payload_file(
+                payload_root,
+                PurePosixPath("directory", *relative.parts),
+            )
+            destination = repository / Path(*relative.parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(source, destination)
+            destination.chmod(mode)
+            reconstructed[f"directory/{relative.as_posix()}"] = {
+                "size": destination.stat().st_size,
+                "sha256": self._file_digest(destination),
+            }
+        if (
+            self._filesystem_files(repository) != sorted(paths)
+            or self._entries_digest(reconstructed, prefix="directory/")
+            != directory_state.get("tree_sha256")
+        ):
+            raise RetirementSnapshotError(
+                "Retirement Snapshot clean-room directory reconstruction failed."
             )
 
     def _validated_untracked_entries(
@@ -612,7 +836,7 @@ class RetirementSnapshotStore:
             or identity.get("worktree_identity") != self.request.worktree_identity
             or identity.get("stored_session_path") != str(self.request.worktree_path)
             or identity.get("canonical_worktree_path")
-            != str(self.request.worktree_path.resolve(strict=True))
+            != str(self.request.worktree_path.resolve(strict=False))
             or identity.get("baseline_sha256") != sha256(baseline_payload).hexdigest()
             or identity.get("baseline")
             != {
@@ -710,9 +934,12 @@ class RetirementSnapshotStore:
         result: list[str] = []
         scanned = 0
         for directory, names, filenames in os.walk(root, followlinks=False):
-            names[:] = sorted(
-                name for name in names if not (Path(directory) / name).is_symlink()
-            )
+            for name in names:
+                if (Path(directory) / name).is_symlink():
+                    raise RetirementSnapshotError(
+                        f"Retirement Snapshot contains an unsupported path: {name!r}."
+                    )
+            names[:] = sorted(names)
             for name in sorted(filenames):
                 scanned += 1
                 if scanned > 10_000:
