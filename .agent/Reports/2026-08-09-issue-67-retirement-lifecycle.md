@@ -14,9 +14,9 @@ Retirement is now a canonical, restart-safe lifecycle rather than a manual prese
 
 ## Durable Contract
 
-Retirement Units persist `preserving`, `preserved`, `grace`, `retiring`, `retired`, `preservation-blocked`, and `retirement-blocked` before their corresponding effects. Preservation intent makes an interrupted publication recoverable. Retirement records at most three token-free effect attempts; startup reconciliation resumes intermediate phases, and an effect-before-receipt crash finalizes from independently verified absence without repeating deletion.
+Retirement Units persist `preserving` and `retiring` as pre-effect intents. `preserved`, `grace`, `retired`, `preservation-blocked`, and `retirement-blocked` are durable receipts after verification, policy transition, completion, or terminal attention. Preservation intent makes an interrupted publication recoverable. Retirement records an initial token-free attempt, one automatic short-backoff retry, and one later reconciliation/startup retry. A per-unit lock serializes effects across processes.
 
-Git-backed worktrees must still match the verified snapshot, are restored only through exact tracked/untracked operations, and are removed with exact non-force `git worktree remove`. Completion proves both path and registration absence. Non-Git units must be the exact deterministic app-managed directory, must still match their snapshot bytes and modes, and are removed only at that validated boundary. The Coding Workspace is never a retirement target.
+Git-backed worktrees preserve ignored as well as ordinary untracked material. Exact patch bytes, file bytes, symlink targets, and modes must match the snapshot or its provably partial cleanup state before exact non-force `git worktree remove`; an absent path with lingering registration resumes the same command. Completion proves both path and registration absence. Non-Git units must be the exact deterministic app-managed directory and may resume only from an exact subset of its preserved bytes/modes. The Coding Workspace is never a retirement target, post-preservation new bytes block removal, corrupt snapshots become durable `retirement-blocked` attention, and overlapping reconcilers cannot execute concurrent deletion.
 
 ## Repair Lineage
 
@@ -24,7 +24,7 @@ A repair request verifies and materializes its predecessor's preserved snapshot 
 
 ## Verification
 
-Focused retirement coverage proves automatic accepted/cancelled retirement, failed and rejected grace, retained human review, configurable zero grace, publication recovery, startup recovery at retirement boundaries, three-attempt exhaustion, crash-after-removal finalization, post-preservation change blocking, verified repair lineage, exact Git registration absence, and contained non-Git deletion. The final repository-wide results and independent Standards/Spec review are recorded in `.agent/Tasks/context.md` after completion.
+Focused retirement coverage currently passes 30/30 and proves automatic accepted/cancelled retirement, live-cancellation deferral, failed/rejected grace, retained human review, CLI-configurable grace, publication recovery, exact ignored-file preservation, same-path edit blocking, partial Git/directory cleanup recovery, serialized reconcilers, three-attempt exhaustion across crash cuts, corrupt-snapshot attention, absent-path registration recovery, verified repair lineage, and contained deletion. Runner-supervision integration passes 17/17; Python compilation, focused Ruff fatal checks, diff checks, and TypeScript typecheck pass. The final repository-wide results and re-review are added before handoff.
 
 ## Scope Boundary
 

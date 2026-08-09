@@ -213,19 +213,79 @@ class RetirementSnapshotStore:
             raise RetirementSnapshotError(
                 "Non-force Git preparation requires a Git-backed Retirement Unit."
             )
-        current_status = self._git(
-            self.request.worktree_path,
-            ["status", "--porcelain=v2", "-z", "--"],
-        )
-        if (
-            sha256(current_status.encode("utf-8")).hexdigest()
-            != git_state["status_sha256"]
-        ):
+        worktree = self.request.worktree_path
+        if self._git(worktree, ["rev-parse", "HEAD"]).strip() != git_state[
+            "baseline_commit"
+        ]:
             raise RetirementSnapshotError(
                 "Retirement Unit changed after verified preservation."
             )
+        staged = self._git(
+            worktree,
+            ["diff", "--cached", "--binary", "--full-index", "HEAD", "--"],
+            limit=self.request.reserved_bytes + 1,
+        )
+        unstaged = self._git(
+            worktree,
+            ["diff", "--binary", "--full-index", "--"],
+            limit=self.request.reserved_bytes + 1,
+        )
+        expected_staged = self._contained_payload_file(
+            self.payload_root,
+            PurePosixPath("git/staged.patch"),
+        ).read_text(encoding="utf-8")
+        expected_unstaged = self._contained_payload_file(
+            self.payload_root,
+            PurePosixPath("git/unstaged.patch"),
+        ).read_text(encoding="utf-8")
+        if staged not in {expected_staged, ""} or unstaged not in {
+            expected_unstaged,
+            "",
+        }:
+            raise RetirementSnapshotError(
+                "Retirement Unit changed after verified preservation."
+            )
+        current_untracked = set(self._git_untracked_paths(worktree))
+        expected_untracked = set(git_state["untracked_paths"])
+        if not current_untracked.issubset(expected_untracked):
+            raise RetirementSnapshotError(
+                "Retirement Unit changed after verified preservation."
+            )
+        untracked_entries = self._validated_untracked_entries(git_state)
+        for relative_value in sorted(current_untracked):
+            relative = self._safe_relative(relative_value)
+            source = worktree / Path(*relative.parts)
+            payload = self._contained_payload_file(
+                self.payload_root,
+                PurePosixPath("untracked", *relative.parts),
+            ).read_bytes()
+            metadata = untracked_entries[relative_value]
+            if metadata["kind"] == "symlink":
+                try:
+                    current_payload = os.readlink(os.fsencode(source))
+                except OSError as exc:
+                    raise RetirementSnapshotError(
+                        "Retirement Unit changed after verified preservation."
+                    ) from exc
+            else:
+                if source.is_symlink() or not source.is_file():
+                    raise RetirementSnapshotError(
+                        "Retirement Unit changed after verified preservation."
+                    )
+                current_payload = self._read_budgeted(source)
+                if (
+                    source.stat(follow_symlinks=False).st_mode & 0o777
+                    != metadata["mode"]
+                ):
+                    raise RetirementSnapshotError(
+                        "Retirement Unit changed after verified preservation."
+                    )
+            if current_payload != payload:
+                raise RetirementSnapshotError(
+                    "Retirement Unit changed after verified preservation."
+                )
         self._git(
-            self.request.worktree_path,
+            worktree,
             ["restore", "--source=HEAD", "--staged", "--worktree", "--", "."],
         )
         for relative_value in sorted(
@@ -234,7 +294,9 @@ class RetirementSnapshotStore:
             reverse=True,
         ):
             relative = self._safe_relative(relative_value)
-            candidate = self.request.worktree_path / Path(*relative.parts)
+            candidate = worktree / Path(*relative.parts)
+            if not candidate.exists() and not candidate.is_symlink():
+                continue
             if candidate.is_symlink() or candidate.is_file():
                 candidate.unlink()
             else:
@@ -242,15 +304,16 @@ class RetirementSnapshotStore:
                     f"Verified untracked removal path is unavailable: {relative_value!r}."
                 )
             parent = candidate.parent
-            while parent != self.request.worktree_path:
+            while parent != worktree:
                 try:
                     parent.rmdir()
                 except OSError:
                     break
                 parent = parent.parent
-        if self._git(
-            self.request.worktree_path,
-            ["status", "--porcelain=v2", "-z", "--"],
+        if (
+            self._git(worktree, ["diff", "--cached", "--binary", "HEAD", "--"])
+            or self._git(worktree, ["diff", "--binary", "--"])
+            or self._git_untracked_paths(worktree)
         ):
             raise RetirementSnapshotError(
                 "Retirement Unit remained dirty after verified cleanup."
@@ -266,13 +329,14 @@ class RetirementSnapshotStore:
             raise RetirementSnapshotError(
                 "Managed directory preparation requires a directory-backed Retirement Unit."
             )
-        expected_paths = sorted(directory_state["paths"])
-        if self._filesystem_files(self.request.worktree_path) != expected_paths:
+        expected_paths = set(directory_state["paths"])
+        current_paths = set(self._filesystem_files(self.request.worktree_path))
+        if not current_paths.issubset(expected_paths):
             raise RetirementSnapshotError(
                 "Retirement Unit changed after verified preservation."
             )
         current: dict[str, dict[str, Any]] = {}
-        for relative_value in expected_paths:
+        for relative_value in sorted(current_paths):
             relative = self._safe_relative(relative_value)
             source = self.request.worktree_path / Path(*relative.parts)
             if source.stat().st_mode & 0o777 != directory_state["modes"][relative_value]:
@@ -283,13 +347,12 @@ class RetirementSnapshotStore:
                 "size": source.stat().st_size,
                 "sha256": self._file_digest(source),
             }
-        if (
-            self._entries_digest(current, prefix="directory/")
-            != directory_state["tree_sha256"]
-        ):
-            raise RetirementSnapshotError(
-                "Retirement Unit changed after verified preservation."
-            )
+            if current[f"directory/{relative.as_posix()}"] != manifest["files"][
+                f"directory/{relative.as_posix()}"
+            ]:
+                raise RetirementSnapshotError(
+                    "Retirement Unit changed after verified preservation."
+                )
 
     def quarantine_publication(self, record: dict[str, Any]) -> None:
         """Move an exact unpublished payload aside so its unit can fail closed."""
@@ -419,15 +482,9 @@ class RetirementSnapshotStore:
         self._write_payload(
             git_root / "status.porcelain-v2", status.encode("utf-8"), root, entries
         )
-        untracked_output = self._git(
-            worktree,
-            ["ls-files", "--others", "--exclude-standard", "-z", "--"],
-        )
         untracked: list[str] = []
         untracked_entries: dict[str, dict[str, Any]] = {}
-        for value in untracked_output.split("\0"):
-            if not value:
-                continue
+        for value in self._git_untracked_paths(worktree):
             relative = self._safe_relative(value)
             source = worktree / Path(*relative.parts)
             destination = root / "untracked" / Path(*relative.parts)
@@ -471,6 +528,31 @@ class RetirementSnapshotStore:
                 path: untracked_entries[path] for path in sorted(untracked_entries)
             },
         }
+
+    def _git_untracked_paths(self, worktree: Path) -> list[str]:
+        visible = self._git(
+            worktree,
+            ["ls-files", "--others", "--exclude-standard", "-z", "--"],
+        )
+        ignored = self._git(
+            worktree,
+            [
+                "ls-files",
+                "--others",
+                "--ignored",
+                "--exclude-standard",
+                "-z",
+                "--",
+            ],
+        )
+        return sorted(
+            {
+                value
+                for output in (visible, ignored)
+                for value in output.split("\0")
+                if value
+            }
+        )
 
     def _capture_directory_state(
         self,

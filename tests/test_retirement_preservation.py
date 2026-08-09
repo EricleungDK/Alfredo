@@ -547,16 +547,15 @@ class RetirementPreservationTest(unittest.TestCase):
     def test_git_retirement_refuses_changes_after_verified_preservation(self) -> None:
         mission = self.load_mission()
         completed = self.completed_session(mission)
+        tracked = completed.worktree_path / "tracked.txt"
+        tracked.write_text("preserved tracked state\n", encoding="utf-8")
         prepare = RetirementSnapshotStore.prepare_git_non_force_removal
 
         def mutate_after_preservation(
             store: RetirementSnapshotStore,
             record: dict[str, object],
         ) -> None:
-            (store.request.worktree_path / "late-change.txt").write_text(
-                "not present in the verified snapshot\n",
-                encoding="utf-8",
-            )
+            tracked.write_text("late human edit\n", encoding="utf-8")
             prepare(store, record)
 
         with patch.object(
@@ -575,13 +574,88 @@ class RetirementPreservationTest(unittest.TestCase):
 
         retained = mission._refresh_persisted_session(completed.session_id)
         self.assertEqual(retained.retirement["phase"], "retiring")
-        self.assertEqual(retained.retirement["retirement_attempts"], 1)
+        self.assertEqual(retained.retirement["retirement_attempts"], 2)
         self.assertIn(
             "changed after verified preservation",
             retained.retirement["blocked_reason"],
         )
         self.assertTrue(retained.worktree_path.is_dir())
-        self.assertTrue((retained.worktree_path / "late-change.txt").is_file())
+        self.assertEqual(tracked.read_text(encoding="utf-8"), "late human edit\n")
+
+    def test_ignored_files_are_preserved_before_git_retirement(self) -> None:
+        (self.target_repo / ".gitignore").write_text("ignored.log\n", encoding="utf-8")
+        self._git("add", ".gitignore")
+        self._git("commit", "-m", "ignore generated log")
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        ignored = completed.worktree_path / "ignored.log"
+        ignored.write_text("valuable ignored material\n", encoding="utf-8")
+
+        preserved = mission.preserve_retirement_unit(
+            completed.session_id,
+            expected_revision=completed.revision,
+            correlation_id="preserve-ignored-material",
+        )
+        manifest = json.loads(
+            Path(preserved.retirement["snapshot"]["manifest_path"]).read_text(
+                encoding="utf-8"
+            )
+        )
+
+        self.assertIn("ignored.log", manifest["git_state"]["untracked_paths"])
+        self.assertTrue(mission.verify_retirement_snapshot(completed.session_id))
+
+    def test_git_cleanup_preparation_is_idempotent_after_a_crash_cut(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        (completed.worktree_path / "tracked.txt").write_text(
+            "preserved tracked state\n",
+            encoding="utf-8",
+        )
+        preserved = mission.preserve_retirement_unit(
+            completed.session_id,
+            expected_revision=completed.revision,
+            correlation_id="preserve-before-cleanup-crash",
+        )
+        snapshot_revision = preserved.retirement["snapshot"]["session_revision"]
+        store = mission._retirement_snapshot_store(preserved, snapshot_revision)
+
+        store.prepare_git_non_force_removal(preserved.retirement["snapshot"])
+        store.prepare_git_non_force_removal(preserved.retirement["snapshot"])
+
+        self.assertEqual(
+            self._git("status", "--porcelain", cwd=preserved.worktree_path).stdout,
+            "",
+        )
+
+    def test_absent_git_path_with_registration_recovers_by_exact_removal(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        moved_effect = self.root / "interrupted-worktree-effect"
+
+        def remove_path_before_registration(_session, _removal_kind):
+            shutil.move(completed.worktree_path, moved_effect)
+            raise KeyboardInterrupt("crash before Git registration removal")
+
+        with patch.object(
+            mission,
+            "_remove_retirement_worktree",
+            side_effect=remove_path_before_registration,
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "registration removal"):
+                mission.record_frontier_review(
+                    completed.session_id,
+                    "Approved",
+                    reason="Exercise absent-path registration recovery.",
+                    allowed_session_statuses={"evidence-ready"},
+                    expected_revision=completed.revision,
+                )
+
+        recovered = mission.reconcile_retirement_unit(completed.session_id)
+        self.assertEqual(recovered.retirement["phase"], "retired")
+        self.assertEqual(recovered.retirement["retirement_attempts"], 2)
+        registered = self._git("worktree", "list", "--porcelain").stdout
+        self.assertNotIn(str(completed.worktree_path), registered)
 
     def test_failed_work_enters_passive_default_retention_grace(self) -> None:
         failing_runner = self.root / "failing-runner.py"
@@ -735,6 +809,11 @@ class RetirementPreservationTest(unittest.TestCase):
             reason="Cancellation retirement contract test.",
             expected_revision=active.revision,
         )
+        waiting = self.load_mission(quiescence=("live-exact", "live-exact"))
+        self.assertEqual(
+            waiting.sessions[launched.session_id].retirement["phase"],
+            "active",
+        )
         thread.join(timeout=10)
 
         self.assertFalse(thread.is_alive())
@@ -764,11 +843,7 @@ class RetirementPreservationTest(unittest.TestCase):
             )
             first = mission._refresh_persisted_session(completed.session_id)
             self.assertEqual(first.retirement["phase"], "retiring")
-            self.assertEqual(first.retirement["retirement_attempts"], 1)
-
-            second = mission.reconcile_retirement_unit(completed.session_id)
-            self.assertEqual(second.retirement["phase"], "retiring")
-            self.assertEqual(second.retirement["retirement_attempts"], 2)
+            self.assertEqual(first.retirement["retirement_attempts"], 2)
 
             third = mission.reconcile_retirement_unit(completed.session_id)
             self.assertEqual(third.retirement["phase"], "retirement-blocked")
@@ -780,6 +855,91 @@ class RetirementPreservationTest(unittest.TestCase):
             self.assertEqual(removal.call_count, 3)
 
         self.assertTrue(completed.worktree_path.is_dir())
+
+    def test_crash_after_third_attempt_never_executes_a_fourth_effect(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+
+        with patch.object(
+            mission,
+            "_remove_retirement_worktree",
+            side_effect=[
+                AlbertError("attempt one failed"),
+                AlbertError("attempt two failed"),
+                KeyboardInterrupt("attempt three crashed"),
+            ],
+        ) as removal:
+            mission.record_frontier_review(
+                completed.session_id,
+                "Approved",
+                reason="Exercise the exact retry ceiling.",
+                allowed_session_statuses={"evidence-ready"},
+                expected_revision=completed.revision,
+            )
+            with self.assertRaisesRegex(KeyboardInterrupt, "attempt three crashed"):
+                mission.reconcile_retirement_unit(completed.session_id)
+            crashed = mission._refresh_persisted_session(completed.session_id)
+            self.assertEqual(crashed.retirement["retirement_attempts"], 3)
+
+            blocked = mission.reconcile_retirement_unit(completed.session_id)
+            self.assertEqual(blocked.retirement["phase"], "retirement-blocked")
+            self.assertEqual(removal.call_count, 3)
+
+    def test_corrupt_snapshot_blocks_retirement_without_blocking_startup(self) -> None:
+        mission = self.load_mission(retention_grace_seconds=0)
+        completed = self.completed_session(mission)
+        completed.status = "failed"
+        completed = mission._persist_session_update(
+            completed,
+            expected_statuses={"evidence-ready"},
+        )
+        grace = mission.reconcile_retirement_unit(completed.session_id)
+        patch_path = Path(grace.retirement["snapshot"]["payload_path"]) / "git" / "unstaged.patch"
+        patch_path.write_text("corrupt\n", encoding="utf-8")
+
+        reloaded = self.load_mission(retention_grace_seconds=0)
+        blocked = reloaded.sessions[completed.session_id]
+        self.assertEqual(blocked.retirement["phase"], "retirement-blocked")
+        self.assertIn("verification failed", blocked.retirement["blocked_reason"])
+
+    def test_concurrent_reconciliation_executes_one_physical_removal(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        completed.status = "cancelled"
+        completed = mission._persist_session_update(completed)
+        preserved = mission.preserve_retirement_unit(
+            completed.session_id,
+            expected_revision=completed.revision,
+            correlation_id="preserve-before-concurrent-retirement",
+        )
+        first = mission
+        with patch.object(AlbertMission, "_reconcile_retirement_units"):
+            second = self.load_mission()
+        removal = AlbertMission._remove_retirement_worktree
+        calls: list[str] = []
+
+        def record_removal(candidate, session, removal_kind):
+            calls.append(session.session_id)
+            return removal(candidate, session, removal_kind)
+
+        with patch.object(
+            AlbertMission,
+            "_remove_retirement_worktree",
+            autospec=True,
+            side_effect=record_removal,
+        ):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results = list(
+                    executor.map(
+                        lambda candidate: candidate.reconcile_retirement_unit(
+                            completed.session_id
+                        ),
+                        (first, second),
+                    )
+                )
+
+        self.assertEqual([result.retirement["phase"] for result in results], ["retired"] * 2)
+        self.assertEqual(calls, [completed.session_id])
 
     def test_restart_after_removal_effect_finalizes_without_repeating_deletion(
         self,
@@ -942,7 +1102,65 @@ class RetirementPreservationTest(unittest.TestCase):
         retained = mission._refresh_persisted_session(completed.session_id)
         self.assertEqual(retained.retirement["phase"], "retiring")
         self.assertTrue(retained.worktree_path.is_dir())
-        self.assertEqual(retained.retirement["retirement_attempts"], 1)
+        self.assertEqual(retained.retirement["retirement_attempts"], 2)
+
+    def test_non_git_cleanup_resumes_after_partial_directory_removal(self) -> None:
+        shutil.move(self.target_repo / ".git", self.root / "detached-target-git")
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        preserved = mission.preserve_retirement_unit(
+            completed.session_id,
+            expected_revision=completed.revision,
+            correlation_id="preserve-before-directory-cleanup-crash",
+        )
+        snapshot_revision = preserved.retirement["snapshot"]["session_revision"]
+        store = mission._retirement_snapshot_store(preserved, snapshot_revision)
+        (preserved.worktree_path / "tracked.txt").unlink()
+
+        store.prepare_managed_directory_removal(preserved.retirement["snapshot"])
+
+        self.assertTrue(preserved.worktree_path.is_dir())
+
+    def test_cli_nondefault_retention_grace_governs_startup_reconciliation(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        completed.status = "failed"
+        mission._persist_session_update(
+            completed,
+            expected_statuses={"evidence-ready"},
+        )
+        output = io.StringIO()
+        with (
+            patch.object(
+                AlbertMission,
+                "_probe_retirement_quiescence",
+                return_value=("absent", "absent"),
+            ),
+            redirect_stdout(output),
+        ):
+            exit_code = main(
+                [
+                    "board",
+                    "--target-repo",
+                    str(self.target_repo),
+                    "--tracker-dir",
+                    str(self.tracker),
+                    "--runtime-root",
+                    str(self.runtime),
+                    "--mission-id",
+                    mission.mission_id,
+                    "--agent-config",
+                    str(self.agent_config),
+                    "--retention-grace-seconds",
+                    "17",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        grace = self.load_mission().sessions[completed.session_id].retirement
+        started = datetime.fromisoformat(grace["grace_started_at"])
+        expires = datetime.fromisoformat(grace["grace_expires_at"])
+        self.assertEqual((expires - started).total_seconds(), 17)
 
     def test_cli_and_persistent_transport_share_retirement_snapshot_semantics(
         self,

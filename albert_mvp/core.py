@@ -86,6 +86,7 @@ _WORKTREE_PREPARATION_SCHEMA_VERSION = 1
 _RETIREMENT_UNIT_SCHEMA_VERSION = 1
 _PRESERVATION_BUDGET_BYTES = 32 * 1024 * 1024
 _DEFAULT_RETENTION_GRACE_SECONDS = 72 * 60 * 60
+_RETIREMENT_RETRY_BACKOFF_SECONDS = 0.05
 _GIT_NOT_REPOSITORY_MESSAGE = (
     "fatal: not a git repository (or any of the parent directories): .git"
 )
@@ -999,6 +1000,7 @@ def _validated_retirement_unit(raw: Any) -> dict[str, Any]:
         not isinstance(retirement_attempts, int)
         or isinstance(retirement_attempts, bool)
         or retirement_attempts < 0
+        or retirement_attempts > 3
         or not isinstance(raw.get("removal_kind", ""), str)
         or not isinstance(raw.get("retired_at", ""), str)
     ):
@@ -1028,9 +1030,13 @@ def _validated_retirement_unit(raw: Any) -> dict[str, Any]:
                     "Local Agent Retirement Unit runner boundary is invalid"
                 )
     intent = raw.get("preservation_intent", {})
-    if raw["phase"] in {"preserved", "grace", "retiring", "retired"} and not raw[
-        "snapshot"
-    ]:
+    if raw["phase"] in {
+        "preserved",
+        "grace",
+        "retiring",
+        "retired",
+        "retirement-blocked",
+    } and not raw["snapshot"]:
         raise AlbertError("Preserved Retirement Unit snapshot is missing")
     if raw["phase"] == "preserving" and not intent:
         raise AlbertError("Preserving Retirement Unit intent is missing")
@@ -5312,6 +5318,18 @@ class AlbertMission:
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
+    @contextmanager
+    def _retirement_effect_lock(self, session_id: str):
+        lock_root = self.runtime_dir / "retirement" / "locks"
+        lock_root.mkdir(parents=True, exist_ok=True)
+        lock_name = sha256(session_id.encode()).hexdigest() + ".lock"
+        with (lock_root / lock_name).open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
     def _read_runtime_payload(self) -> dict[str, Any]:
         if not self.runtime_path.exists():
             raise AlbertError("mission runtime does not exist")
@@ -5774,6 +5792,7 @@ class AlbertMission:
         *,
         expected_revision: int,
         correlation_id: str,
+        defer_if_not_quiescent: bool = False,
     ) -> LocalAgentSession:
         """Claim, capture, and prove one Retirement Snapshot without deleting work."""
 
@@ -5851,6 +5870,11 @@ class AlbertMission:
                 boundary
             )
             if owner_signal != "absent" or process_group_signal != "absent":
+                if defer_if_not_quiescent and "live-exact" in {
+                    owner_signal,
+                    process_group_signal,
+                }:
+                    return session
                 self._block_retirement_preservation(
                     data,
                     session,
@@ -5985,6 +6009,7 @@ class AlbertMission:
                 session_id,
                 expected_revision=session.revision,
                 correlation_id=correlation_id,
+                defer_if_not_quiescent=True,
             )
             phase = session.retirement.get("phase", "active")
         if phase == "preserved":
@@ -5997,7 +6022,7 @@ class AlbertMission:
                 review
                 and review.outcome in {"Approved", "Approved with limitations"}
             ):
-                return self._retire_preserved_unit(session_id)
+                return self._retire_with_short_retry(session_id)
             return session
         if phase == "grace":
             expires_at = session.retirement.get("grace_expires_at")
@@ -6013,10 +6038,22 @@ class AlbertMission:
                 )
             if datetime.now(timezone.utc) < expires.astimezone(timezone.utc):
                 return session
-            return self._retire_preserved_unit(session_id)
+            return self._retire_with_short_retry(session_id)
         if phase == "retiring":
-            return self._retire_preserved_unit(session_id)
+            return self._retire_with_short_retry(session_id)
         return session
+
+    def _retire_with_short_retry(self, session_id: str) -> LocalAgentSession:
+        before = self._refresh_persisted_session(session_id)
+        result = self._retire_preserved_unit(session_id)
+        if (
+            int(before.retirement.get("retirement_attempts", 0)) == 0
+            and result.retirement.get("phase") == "retiring"
+            and result.retirement.get("retirement_attempts") == 1
+        ):
+            time.sleep(_RETIREMENT_RETRY_BACKOFF_SECONDS)
+            return self._retire_preserved_unit(session_id)
+        return result
 
     def _enter_retention_grace(self, session_id: str) -> LocalAgentSession:
         with self._runtime_lock(exclusive=True):
@@ -6052,6 +6089,10 @@ class AlbertMission:
             return session
 
     def _retire_preserved_unit(self, session_id: str) -> LocalAgentSession:
+        with self._retirement_effect_lock(session_id):
+            return self._retire_preserved_unit_locked(session_id)
+
+    def _retire_preserved_unit_locked(self, session_id: str) -> LocalAgentSession:
         with self._runtime_lock(exclusive=True):
             data = self._read_runtime_payload()
             raw_session = data.get("sessions", {}).get(session_id)
@@ -6080,22 +6121,46 @@ class AlbertMission:
             else:
                 verification_reason = ""
             if not snapshot_verified:
-                raise LaunchBlockedError(
-                    f"{session_id} Retirement Snapshot verification failed before removal: "
-                    f"{verification_reason}"
+                self._block_retirement_removal(
+                    data,
+                    session,
+                    "Retirement Snapshot verification failed before removal: "
+                    + verification_reason,
+                    terminal=True,
                 )
+                return session
             removal_kind = str(session.retirement.get("removal_kind", ""))
-            effect_already_absent = phase == "retiring" and not (
+            path_absent = not (
                 session.worktree_path.exists() or session.worktree_path.is_symlink()
             )
-            current_identity = (
-                "" if effect_already_absent else self._worktree_identity_for_session(session)
+            registration_present = bool(
+                phase == "retiring"
+                and path_absent
+                and removal_kind == "git-worktree"
+                and self._git_worktree_registration_present(session)
             )
-            if not effect_already_absent and current_identity != session.worktree_identity:
+            effect_already_absent = (
+                phase == "retiring" and path_absent and not registration_present
+            )
+            registration_only = bool(
+                phase == "retiring" and path_absent and registration_present
+            )
+            current_identity = (
+                "" if path_absent else self._worktree_identity_for_session(session)
+            )
+            if not path_absent and current_identity != session.worktree_identity:
                 self._block_retirement_removal(
                     data,
                     session,
                     "Worktree Identity changed before physical retirement.",
+                    terminal=True,
+                )
+                return session
+            if path_absent and phase != "retiring":
+                self._block_retirement_removal(
+                    data,
+                    session,
+                    "Retirement path disappeared before a removal effect was claimed.",
                     terminal=True,
                 )
                 return session
@@ -6116,6 +6181,14 @@ class AlbertMission:
             if effect_already_absent:
                 claim_revision = session.revision
             else:
+                if int(session.retirement.get("retirement_attempts", 0)) >= 3:
+                    self._block_retirement_removal(
+                        data,
+                        session,
+                        "Physical retirement exhausted its three-attempt boundary.",
+                        terminal=True,
+                    )
+                    return session
                 session.retirement["phase"] = "retiring"
                 session.retirement["retirement_attempts"] = int(
                     session.retirement.get("retirement_attempts", 0)
@@ -6135,7 +6208,9 @@ class AlbertMission:
                 self.timeline = list(data.get("timeline", []))
 
         try:
-            if not effect_already_absent:
+            if registration_only:
+                self._remove_retirement_git_registration(session)
+            elif not effect_already_absent:
                 self._remove_retirement_worktree(session, removal_kind)
             self._verify_retirement_removal(session, removal_kind)
         except (OSError, AlbertError, RetirementSnapshotError) as exc:
@@ -6178,6 +6253,62 @@ class AlbertMission:
             self.sessions[session_id] = latest
             self.timeline = list(data.get("timeline", []))
             return latest
+
+    def _git_worktree_registration_present(
+        self,
+        session: LocalAgentSession,
+    ) -> bool:
+        completed = _run_bounded_process(
+            [
+                "git",
+                "-C",
+                str(self.target_repo),
+                "worktree",
+                "list",
+                "--porcelain",
+                "-z",
+            ],
+            timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+            output_limit_bytes=_GIT_PATH_OUTPUT_BYTES_LIMIT,
+        )
+        if completed.returncode != 0:
+            raise AlbertError("Git worktree registration could not be inspected.")
+        expected = _runtime_identity_path(session.worktree_path)
+        return any(
+            field_value.startswith("worktree ")
+            and _runtime_identity_path(
+                Path(field_value.removeprefix("worktree ")).resolve(strict=False)
+            )
+            == expected
+            for block in completed.stdout.split("\0\0")
+            for field_value in block.split("\0")
+        )
+
+    def _remove_retirement_git_registration(
+        self,
+        session: LocalAgentSession,
+    ) -> None:
+        completed = _run_bounded_process(
+            [
+                "git",
+                "-C",
+                str(self.target_repo),
+                "worktree",
+                "remove",
+                str(session.worktree_path),
+            ],
+            timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+            output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
+        )
+        if completed.returncode != 0:
+            reason = (
+                self._subprocess_output_text(completed.stderr).strip()
+                or self._subprocess_output_text(completed.stdout).strip()
+                or f"exit {completed.returncode}"
+            )
+            raise AlbertError(
+                f"exact non-force Git worktree registration removal failed: {reason}"
+            )
 
     def _remove_retirement_worktree(
         self,
