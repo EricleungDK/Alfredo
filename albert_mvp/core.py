@@ -1053,7 +1053,12 @@ def _validated_retirement_unit(raw: Any) -> dict[str, Any]:
                 raise AlbertError("Retirement Unit grace boundary is invalid")
     if raw["phase"] in {"retiring", "retired"} and raw.get(
         "removal_kind", ""
-    ) not in {"git-worktree", "managed-directory", "managed-absence"}:
+    ) not in {
+        "git-worktree",
+        "git-registration",
+        "managed-directory",
+        "managed-absence",
+    }:
         raise AlbertError("Retirement Unit removal boundary is invalid")
     if raw["phase"] == "retired" and (
         not isinstance(raw.get("retired_at"), str) or not raw["retired_at"].strip()
@@ -3320,9 +3325,11 @@ class AlbertMission:
         repair_context["retirement_snapshot_sha256"] = snapshot["manifest_sha256"]
         retired_prior = self._retire_preserved_unit(prior_session.session_id)
         if retired_prior.retirement.get("phase") != "retired":
+            reason = str(retired_prior.retirement.get("blocked_reason", "")).strip()
             raise LaunchBlockedError(
                 f"{session_id} cannot launch repair until its prior Retirement Unit "
-                "is safely retired."
+                "is safely retired"
+                + (f": {reason}" if reason else ".")
             )
         repair_context["retired_prior_revision"] = retired_prior.revision
         retired_prior.revision += 1
@@ -4503,6 +4510,16 @@ class AlbertMission:
                 raise AlbertError(
                     f"{session_id} cannot be cancelled from {session.status}."
                 )
+            never_started = bool(
+                session.status in {"queued", "launched"}
+                and not session.runner_started_at
+                and not session.runner_operation_id
+                and session.runner_pid is None
+                and session.runner_process_pid is None
+                and not session.runner_identity
+                and not session.runner_process_identity
+                and not session.runner_process_token
+            )
             workstation_actions = self._merge_workstation_action_ledgers(
                 data.get("workstation_actions", {}),
                 {},
@@ -4519,6 +4536,24 @@ class AlbertMission:
             session.cancel_requested_at = _utc_now()
             session.cancel_reason = reason.strip()
             session.runner_ended_at = session.runner_ended_at or session.cancel_requested_at
+            if never_started:
+                operation_id = "never-started:" + sha256(
+                    f"{self.mission_id}\n{session.session_id}\n{session.revision}".encode(
+                        "utf-8"
+                    )
+                ).hexdigest()
+                session.retirement["runner_boundary"] = {
+                    "mission_id": self.mission_id,
+                    "session_id": session.session_id,
+                    "runner_operation_id": operation_id,
+                    "owner_pid": None,
+                    "owner_identity": "",
+                    "process_group_pid": None,
+                    "process_group_identity": "",
+                    "process_token": "",
+                    "owner_released_at": session.cancel_requested_at,
+                    "owner_release_operation_id": operation_id,
+                }
             session.runner_pid = None
             session.runner_identity = ""
             session.runner_process_pid = None
@@ -5779,6 +5814,13 @@ class AlbertMission:
             owner_signal = pid_owner_signal
         if (
             release_is_exact
+            and boundary.get("owner_pid") is None
+            and not boundary.get("owner_identity")
+            and not boundary.get("owner_lease_path")
+        ):
+            owner_signal = "absent"
+        if (
+            release_is_exact
             and boundary.get("process_group_pid") is None
             and not boundary.get("process_group_identity")
             and not boundary.get("process_token")
@@ -6166,8 +6208,12 @@ class AlbertMission:
                 return session
             try:
                 registration_present = bool(
-                    phase == "retiring"
-                    and removal_kind == "git-worktree"
+                    path_absent
+                    and (
+                        phase == "retiring"
+                        or session.worktree_identity.startswith("managed-absence:")
+                    )
+                    and removal_kind in {"", "git-worktree", "git-registration"}
                     and (
                         self._git_worktree_registration_present(session)
                         or self._git_worktree_registration_present_at(effect_path)
@@ -6200,8 +6246,14 @@ class AlbertMission:
                 path_absent
                 and session.worktree_identity.startswith("managed-absence:")
                 and current_identity == session.worktree_identity
+                and not registration_present
             )
-            if path_absent and phase != "retiring" and not absence_only:
+            if (
+                path_absent
+                and phase != "retiring"
+                and not absence_only
+                and not registration_present
+            ):
                 self._block_retirement_removal(
                     data,
                     session,
@@ -6214,10 +6266,13 @@ class AlbertMission:
                     removal_kind = "git-worktree"
                 elif current_identity.startswith("managed-directory:"):
                     removal_kind = "managed-directory"
+                elif registration_present:
+                    removal_kind = "git-registration"
                 else:
                     removal_kind = "managed-absence"
             if removal_kind not in {
                 "git-worktree",
+                "git-registration",
                 "managed-directory",
                 "managed-absence",
             }:
@@ -6339,6 +6394,104 @@ class AlbertMission:
         name = sha256(session_id.encode()).hexdigest() + ".worktree"
         return self.runtime_dir / "retirement" / "removal-effects" / name
 
+    def _assert_no_open_retirement_handles(self, effect_path: Path) -> None:
+        canonical_effect = effect_path.resolve(strict=True)
+        if sys.platform.startswith("linux"):
+            current_uid = os.getuid()
+            for process_root in Path("/proc").iterdir():
+                if not process_root.name.isdigit():
+                    continue
+                try:
+                    status = (process_root / "status").read_text(
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise AlbertError(
+                        "Open-handle inspection was unavailable before retirement."
+                    ) from exc
+                uid_line = next(
+                    (line for line in status.splitlines() if line.startswith("Uid:")),
+                    "",
+                )
+                uid_values = uid_line.split()[1:]
+                if not uid_values or int(uid_values[0]) != current_uid:
+                    continue
+                try:
+                    descriptors = list((process_root / "fd").iterdir())
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise AlbertError(
+                        "Open-handle inspection was unavailable before retirement."
+                    ) from exc
+                for descriptor in descriptors:
+                    try:
+                        target = os.readlink(descriptor)
+                    except FileNotFoundError:
+                        continue
+                    except OSError as exc:
+                        raise AlbertError(
+                            "Open-handle inspection was unavailable before retirement."
+                        ) from exc
+                    target_path = Path(target.removesuffix(" (deleted)"))
+                    if not target_path.is_absolute():
+                        continue
+                    canonical_target = target_path.resolve(strict=False)
+                    if canonical_target == canonical_effect or canonical_target.is_relative_to(
+                        canonical_effect
+                    ):
+                        raise AlbertError(
+                            "Retirement removal is blocked while an exact managed path "
+                            "has an open process handle."
+                        )
+            return
+        if sys.platform == "darwin":
+            lsof = shutil.which("lsof")
+            if not lsof:
+                raise AlbertError(
+                    "Open-handle inspection was unavailable before retirement."
+                )
+            candidates = [canonical_effect]
+            for directory, names, filenames in os.walk(
+                canonical_effect,
+                followlinks=False,
+            ):
+                candidates.extend(Path(directory) / name for name in names)
+                candidates.extend(Path(directory) / name for name in filenames)
+                if len(candidates) > 10_001:
+                    raise AlbertError(
+                        "Open-handle inspection exceeded its retirement path limit."
+                    )
+            for offset in range(0, len(candidates), 64):
+                completed = _run_bounded_process(
+                    [
+                        lsof,
+                        "-Fn",
+                        "--",
+                        *(str(path) for path in candidates[offset : offset + 64]),
+                    ],
+                    timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+                    output_limit_bytes=_GIT_PATH_OUTPUT_BYTES_LIMIT,
+                )
+                if any(
+                    line.startswith("n") for line in completed.stdout.splitlines()
+                ):
+                    raise AlbertError(
+                        "Retirement removal is blocked while an exact managed path "
+                        "has an open process handle."
+                    )
+                if completed.returncode == 1 and not completed.stderr.strip():
+                    continue
+                if completed.returncode != 0:
+                    raise AlbertError(
+                        "Open-handle inspection was unavailable before retirement."
+                    )
+            return
+        raise AlbertError("Open-handle inspection is unsupported on this host.")
+
     def _remove_retirement_git_registration(self, path: Path) -> None:
         completed = _run_bounded_process(
             [
@@ -6362,6 +6515,63 @@ class AlbertMission:
                 f"exact non-force Git worktree registration removal failed: {reason}"
             )
 
+    def _restore_retirement_git_marker(self, path: Path) -> None:
+        completed = _run_bounded_process(
+            [
+                "git",
+                "-C",
+                str(self.target_repo),
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ],
+            timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+            output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
+        )
+        if completed.returncode != 0:
+            reason = (
+                self._subprocess_output_text(completed.stderr).strip()
+                or self._subprocess_output_text(completed.stdout).strip()
+                or f"exit {completed.returncode}"
+            )
+            raise AlbertError(f"Git worktree administration lookup failed: {reason}")
+        common_dir = Path(self._subprocess_output_text(completed.stdout).strip())
+        try:
+            common_dir = common_dir.resolve(strict=True)
+        except OSError as exc:
+            raise AlbertError("Git worktree administration path is unavailable.") from exc
+        worktrees_dir = common_dir / "worktrees"
+        try:
+            candidates = list(worktrees_dir.iterdir())
+        except OSError as exc:
+            raise AlbertError("Git worktree administration path is unavailable.") from exc
+        if len(candidates) > 10_000:
+            raise AlbertError("Git worktree administration exceeded its path limit.")
+        expected_gitdir = _runtime_identity_path(path / ".git")
+        matches: list[Path] = []
+        for candidate in candidates:
+            gitdir = candidate / "gitdir"
+            if candidate.is_symlink() or not candidate.is_dir() or gitdir.is_symlink():
+                continue
+            try:
+                value = gitdir.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeError):
+                continue
+            if len(value.encode("utf-8")) > 4_096:
+                continue
+            registered = Path(value)
+            if not registered.is_absolute():
+                registered = candidate / registered
+            if _runtime_identity_path(registered.resolve(strict=False)) == expected_gitdir:
+                matches.append(candidate.resolve(strict=True))
+        if len(matches) != 1:
+            raise AlbertError("Exact Git worktree administration could not be proven.")
+        try:
+            with (path / ".git").open("x", encoding="utf-8") as marker:
+                marker.write(f"gitdir: {matches[0]}\n")
+        except OSError as exc:
+            raise AlbertError("Git worktree marker recovery failed.") from exc
+
     def _remove_retirement_worktree(
         self,
         session: LocalAgentSession,
@@ -6376,6 +6586,16 @@ class AlbertMission:
                 "Retirement path changed after its isolated removal effect began."
             )
         effect_path.parent.mkdir(parents=True, exist_ok=True)
+        if removal_kind == "git-registration":
+            if path_present or effect_present:
+                raise AlbertError(
+                    "Registration-only retirement requires both managed paths absent."
+                )
+            if self._git_worktree_registration_present_at(effect_path):
+                self._remove_retirement_git_registration(effect_path)
+            elif self._git_worktree_registration_present(session):
+                self._remove_retirement_git_registration(path)
+            return
         if removal_kind == "git-worktree":
             if path_present:
                 completed = _run_bounded_process(
@@ -6411,6 +6631,17 @@ class AlbertMission:
                 raise AlbertError(
                     "Retirement path changed after its isolated removal effect began."
                 )
+            if not (effect_path / ".git").exists():
+                if self._git_worktree_registration_present_at(effect_path):
+                    self._restore_retirement_git_marker(effect_path)
+                    self._remove_retirement_git_registration(effect_path)
+                    return
+                if any(effect_path.iterdir()):
+                    raise AlbertError(
+                        "Partial Git worktree removal could not be proven safe."
+                    )
+                effect_path.rmdir()
+                return
             snapshot_revision = int(
                 session.retirement["snapshot"].get(
                     "session_revision",
@@ -6428,6 +6659,7 @@ class AlbertMission:
                 raise AlbertError(
                     "Retirement path changed during its isolated removal effect."
                 )
+            self._assert_no_open_retirement_handles(effect_path)
             completed = _run_bounded_process(
                 [
                     "git",
@@ -6487,6 +6719,7 @@ class AlbertMission:
             raise AlbertError(
                 "Retirement path changed during its isolated removal effect."
             )
+        self._assert_no_open_retirement_handles(effect_path)
         shutil.rmtree(effect_path)
 
     def _verify_retirement_removal(
@@ -6499,7 +6732,7 @@ class AlbertMission:
         effect_path = self._retirement_removal_effect_path(session.session_id)
         if effect_path.exists() or effect_path.is_symlink():
             raise AlbertError("Retirement removal effect remains after physical removal.")
-        if removal_kind != "git-worktree":
+        if removal_kind not in {"git-worktree", "git-registration"}:
             return
         completed = _run_bounded_process(
             [

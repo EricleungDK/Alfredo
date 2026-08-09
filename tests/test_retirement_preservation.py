@@ -1031,6 +1031,55 @@ class RetirementPreservationTest(unittest.TestCase):
         self.assertTrue(retired.worktree_identity.startswith("managed-absence:"))
         self.assertTrue(mission.verify_retirement_snapshot(retired.session_id))
 
+    def test_queued_cancellation_proves_quiescence_without_an_injected_probe(
+        self,
+    ) -> None:
+        mission = self.load_mission(quiescence=None)
+        mission.assign_issue("ISS-01", "fake-local")
+        mission.approve_issue("ISS-01")
+        queued = mission.launch_issue("ISS-01")
+
+        cancelled = mission.cancel_session(
+            queued.session_id,
+            reason="Cancel before any runner operation exists.",
+            expected_revision=queued.revision,
+        )
+        retired = mission.reconcile_retirement_unit(cancelled.session_id)
+
+        self.assertEqual(retired.retirement["phase"], "retired")
+        boundary = retired.retirement["runner_boundary"]
+        self.assertTrue(boundary["runner_operation_id"].startswith("never-started:"))
+        self.assertEqual(
+            mission._probe_retirement_quiescence(boundary),
+            ("absent", "absent"),
+        )
+
+    def test_managed_absence_removes_an_exact_lingering_git_registration(self) -> None:
+        mission = self.load_mission()
+        mission.assign_issue("ISS-01", "fake-local")
+        mission.approve_issue("ISS-01")
+        queued = mission.launch_issue("ISS-01")
+        self._git("worktree", "add", "--detach", str(queued.worktree_path), "HEAD")
+        moved = self.root / "externally-moved-queued-worktree"
+        shutil.move(queued.worktree_path, moved)
+
+        mission.cancel_session(
+            queued.session_id,
+            reason="Cancel with a stale exact Git registration.",
+            expected_revision=queued.revision,
+        )
+        retired = mission.reconcile_retirement_unit(queued.session_id)
+
+        self.assertEqual(
+            retired.retirement["phase"],
+            "retired",
+            retired.retirement,
+        )
+        self.assertEqual(retired.retirement["removal_kind"], "git-registration")
+        registered = self._git("worktree", "list", "--porcelain").stdout
+        self.assertNotIn(str(queued.worktree_path), registered)
+        self.assertTrue(moved.is_dir())
+
     def test_pre_worktree_failure_enters_grace_with_verified_absence(self) -> None:
         mission = self.load_mission()
         mission.assign_issue("ISS-01", "fake-local")
@@ -1241,6 +1290,51 @@ class RetirementPreservationTest(unittest.TestCase):
         self.assertEqual(interrupted.retirement["retirement_attempts"], 1)
         recovered = mission.reconcile_retirement_unit(completed.session_id)
         self.assertEqual(recovered.retirement["phase"], "retired")
+        self.assertEqual(recovered.retirement["retirement_attempts"], 2)
+
+    def test_restart_resumes_partial_git_removal_with_registration(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        prepare = RetirementSnapshotStore.prepare_git_non_force_removal
+        crashed = False
+
+        def crash_after_git_marker_removal(
+            store: RetirementSnapshotStore,
+            record: dict[str, object],
+            *,
+            worktree_path: Path | None = None,
+        ) -> None:
+            nonlocal crashed
+            prepare(store, record, worktree_path=worktree_path)
+            if not crashed:
+                crashed = True
+                self.assertIsNotNone(worktree_path)
+                (worktree_path / ".git").unlink()
+                raise KeyboardInterrupt("crash during Git worktree removal")
+
+        with patch.object(
+            RetirementSnapshotStore,
+            "prepare_git_non_force_removal",
+            autospec=True,
+            side_effect=crash_after_git_marker_removal,
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "Git worktree removal"):
+                mission.record_frontier_review(
+                    completed.session_id,
+                    "Approved",
+                    reason="Exercise partial Git removal restart recovery.",
+                    allowed_session_statuses={"evidence-ready"},
+                    expected_revision=completed.revision,
+                )
+
+        interrupted = mission._refresh_persisted_session(completed.session_id)
+        self.assertEqual(interrupted.retirement["phase"], "retiring")
+        recovered = mission.reconcile_retirement_unit(completed.session_id)
+        self.assertEqual(
+            recovered.retirement["phase"],
+            "retired",
+            recovered.retirement,
+        )
         self.assertEqual(recovered.retirement["retirement_attempts"], 2)
 
     def test_restart_resumes_a_managed_directory_isolated_before_cleanup(self) -> None:
@@ -1462,6 +1556,53 @@ class RetirementPreservationTest(unittest.TestCase):
         late = completed.worktree_path / "late-boundary.txt"
         self.assertNotEqual(reviewed.retirement["phase"], "retired")
         self.assertEqual(late.read_text(encoding="utf-8"), "late unpreserved bytes\n")
+
+    def test_non_git_retirement_blocks_an_open_handle_write_after_validation(
+        self,
+    ) -> None:
+        shutil.move(self.target_repo / ".git", self.root / "detached-target-git")
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        prepare = RetirementSnapshotStore.prepare_managed_directory_removal
+        tracked = completed.worktree_path / "tracked.txt"
+
+        with tracked.open("r+b") as handle:
+
+            def mutate_through_open_handle(
+                store: RetirementSnapshotStore,
+                record: dict[str, object],
+                *,
+                worktree_path: Path | None = None,
+            ) -> None:
+                prepare(store, record, worktree_path=worktree_path)
+                handle.seek(0)
+                handle.write(b"late open-handle bytes\n")
+                handle.truncate()
+                handle.flush()
+                os.fsync(handle.fileno())
+                self.assertIsNotNone(worktree_path)
+
+            with patch.object(
+                RetirementSnapshotStore,
+                "prepare_managed_directory_removal",
+                autospec=True,
+                side_effect=mutate_through_open_handle,
+            ):
+                mission.record_frontier_review(
+                    completed.session_id,
+                    "Approved",
+                    reason="Exercise an open-handle removal-boundary write.",
+                    allowed_session_statuses={"evidence-ready"},
+                    expected_revision=completed.revision,
+                )
+
+            retained = mission._refresh_persisted_session(completed.session_id)
+            effect_path = mission._retirement_removal_effect_path(completed.session_id)
+            self.assertNotEqual(retained.retirement["phase"], "retired")
+            self.assertEqual(
+                (effect_path / "tracked.txt").read_bytes(),
+                b"late open-handle bytes\n",
+            )
 
     def test_non_git_cleanup_resumes_after_partial_directory_removal(self) -> None:
         shutil.move(self.target_repo / ".git", self.root / "detached-target-git")

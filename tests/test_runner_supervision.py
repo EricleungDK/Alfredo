@@ -783,6 +783,7 @@ class RunnerSupervisionTest(unittest.TestCase):
                 "_probe_retirement_quiescence",
                 return_value=("absent", "absent"),
             ),
+            patch.object(mission, "_assert_no_open_retirement_handles"),
         ):
             acknowledgement = WorkstationActionService(snapshots).submit(
                 correlation_id="manual-retry-after-supervision-failure",
