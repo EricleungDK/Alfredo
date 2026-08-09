@@ -10,6 +10,7 @@
 - Repair is still one canonical Python action. Its Mission Work control previews the inherited goal, acceptance, paths, command policy, evidence requirements, assigned Local Agent, and review reason before launch, without creating another task packet or session.
 - Blocker recommendations project a dependency's rationale, proposed accepted boundary, actor, and the exact fail-closed consequence. Core dependency truth now requires a `pr-ready` or complete reviewed blocker; approval or follow-up creation alone never unblocks the original Issue Slice.
 - Archive writes use the runtime lock, and generic persistence adopts the latest authoritative archive set. A stale mission instance therefore cannot recreate an archive entry after a separate restore.
+- Archive mutation is private to the Workstation transaction and fails closed unless the marker exactly binds the correlation, action, Mission Commander actor, Mission, expected revision, Issue Slice target, and normalized request. Every catalog Mission is bound to the primary Mission's canonical Workstation store, and the core mutation independently reads that shared revision, so caller-controlled or background-local revision values cannot bypass the transaction.
 
 ## Verification evidence
 

@@ -281,30 +281,52 @@ class RetirementSnapshotStore:
             ["ls-files", "--others", "--exclude-standard", "-z", "--"],
         )
         untracked: list[str] = []
+        untracked_entries: dict[str, dict[str, Any]] = {}
         for value in untracked_output.split("\0"):
             if not value:
                 continue
             relative = self._safe_relative(value)
             source = worktree / Path(*relative.parts)
-            try:
-                source.resolve(strict=True).relative_to(worktree.resolve(strict=True))
-            except (OSError, ValueError) as exc:
-                raise RetirementSnapshotError(
-                    f"Retirement Snapshot untracked path escaped its worktree: {value!r}."
-                ) from exc
-            if source.is_symlink() or not source.is_file():
-                raise RetirementSnapshotError(
-                    f"Retirement Snapshot untracked path is unsupported: {value!r}."
-                )
             destination = root / "untracked" / Path(*relative.parts)
-            self._write_payload(destination, self._read_budgeted(source), root, entries)
-            untracked.append(relative.as_posix())
+            relative_value = relative.as_posix()
+            if source.is_symlink():
+                try:
+                    payload = os.readlink(os.fsencode(source))
+                except OSError as exc:
+                    raise RetirementSnapshotError(
+                        f"Retirement Snapshot could not read untracked symlink: {value!r}."
+                    ) from exc
+                metadata: dict[str, Any] = {"kind": "symlink"}
+            else:
+                try:
+                    source.resolve(strict=True).relative_to(
+                        worktree.resolve(strict=True)
+                    )
+                except (OSError, ValueError) as exc:
+                    raise RetirementSnapshotError(
+                        f"Retirement Snapshot untracked path escaped its worktree: {value!r}."
+                    ) from exc
+                if not source.is_file():
+                    raise RetirementSnapshotError(
+                        f"Retirement Snapshot untracked path is unsupported: {value!r}."
+                    )
+                payload = self._read_budgeted(source)
+                metadata = {
+                    "kind": "file",
+                    "mode": source.stat(follow_symlinks=False).st_mode & 0o777,
+                }
+            self._write_payload(destination, payload, root, entries)
+            untracked.append(relative_value)
+            untracked_entries[relative_value] = metadata
         return {
             "kind": "git-worktree",
             "baseline_commit": baseline,
             "status_sha256": sha256(status.encode("utf-8")).hexdigest(),
             "status_bytes": len(status.encode("utf-8")),
             "untracked_paths": sorted(untracked),
+            "untracked_entries": {
+                path: untracked_entries[path] for path in sorted(untracked_entries)
+            },
         }
 
     def _capture_evidence(
@@ -466,12 +488,36 @@ class RetirementSnapshotStore:
         if unstaged:
             self._git(repository, ["apply", "--binary", "-"], input_text=unstaged)
         untracked_root = payload_root / "untracked"
-        for relative_value in manifest["git_state"]["untracked_paths"]:
+        untracked_entries = self._validated_untracked_entries(manifest["git_state"])
+        for relative_value, metadata in untracked_entries.items():
             relative = self._safe_relative(relative_value)
             source = untracked_root / Path(*relative.parts)
             destination = repository / Path(*relative.parts)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, destination)
+            if metadata["kind"] == "symlink":
+                try:
+                    target = source.read_bytes()
+                    os.symlink(target, os.fsencode(destination))
+                except OSError as exc:
+                    raise RetirementSnapshotError(
+                        f"Retirement Snapshot could not reconstruct untracked symlink: {relative_value!r}."
+                    ) from exc
+                if (
+                    not destination.is_symlink()
+                    or os.readlink(os.fsencode(destination)) != target
+                ):
+                    raise RetirementSnapshotError(
+                        f"Retirement Snapshot untracked symlink reconstruction failed: {relative_value!r}."
+                    )
+            else:
+                shutil.copyfile(source, destination)
+                mode = metadata.get("mode")
+                if mode is not None:
+                    destination.chmod(mode)
+                    if destination.stat(follow_symlinks=False).st_mode & 0o777 != mode:
+                        raise RetirementSnapshotError(
+                            f"Retirement Snapshot untracked file mode reconstruction failed: {relative_value!r}."
+                        )
         status = self._git(repository, ["status", "--porcelain=v2", "-z", "--"])
         if (
             sha256(status.encode("utf-8")).hexdigest()
@@ -480,6 +526,61 @@ class RetirementSnapshotStore:
             raise RetirementSnapshotError(
                 "Retirement Snapshot clean-room Git reconstruction failed."
             )
+
+    def _validated_untracked_entries(
+        self,
+        git_state: dict[str, Any],
+    ) -> dict[str, dict[str, Any]]:
+        paths = git_state.get("untracked_paths")
+        if (
+            not isinstance(paths, list)
+            or not all(isinstance(path, str) and path for path in paths)
+            or len(paths) != len(set(paths))
+        ):
+            raise RetirementSnapshotError(
+                "Retirement Snapshot untracked path manifest is invalid."
+            )
+        for path in paths:
+            self._safe_relative(path)
+        raw_entries = git_state.get("untracked_entries")
+        if raw_entries is None:
+            return {path: {"kind": "file", "mode": None} for path in sorted(paths)}
+        if not isinstance(raw_entries, dict) or set(raw_entries) != set(paths):
+            raise RetirementSnapshotError(
+                "Retirement Snapshot untracked entry manifest is invalid."
+            )
+        validated: dict[str, dict[str, Any]] = {}
+        symlink_paths: set[PurePosixPath] = set()
+        for path in sorted(paths):
+            record = raw_entries.get(path)
+            if not isinstance(record, dict):
+                raise RetirementSnapshotError(
+                    "Retirement Snapshot untracked entry manifest is invalid."
+                )
+            kind = record.get("kind")
+            if kind == "symlink" and set(record) == {"kind"}:
+                symlink_paths.add(self._safe_relative(path))
+                validated[path] = {"kind": "symlink"}
+                continue
+            mode = record.get("mode")
+            if (
+                kind != "file"
+                or set(record) != {"kind", "mode"}
+                or not isinstance(mode, int)
+                or isinstance(mode, bool)
+                or mode < 0
+                or mode > 0o777
+            ):
+                raise RetirementSnapshotError(
+                    "Retirement Snapshot untracked entry manifest is invalid."
+                )
+            validated[path] = {"kind": "file", "mode": mode}
+        for path in (self._safe_relative(value) for value in paths):
+            if any(parent in symlink_paths for parent in path.parents):
+                raise RetirementSnapshotError(
+                    "Retirement Snapshot untracked entries cannot descend through a symlink."
+                )
+        return validated
 
     def _validate_manifest_authority(self, manifest: dict[str, Any]) -> None:
         authority = manifest.get("authority")

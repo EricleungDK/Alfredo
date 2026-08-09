@@ -3127,6 +3127,157 @@ class WorkspaceSnapshotTest(unittest.TestCase):
             ("ISS-01",),
         )
 
+    def test_archive_state_changes_require_a_correlated_workstation_marker(
+        self,
+    ) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        mission.issues["ISS-01"].review_state = "pr-ready"
+        mission.issues["ISS-01"].locked = True
+        mission._persist()
+
+        self.assertFalse(hasattr(mission, "archive_issue"))
+        self.assertFalse(hasattr(mission, "restore_archived_issue"))
+
+        with self.assertRaisesRegex(AlbertError, "correlated Workstation marker"):
+            mission._archive_issue_from_workstation(
+                "ISS-01",
+                workstation_action=None,
+            )
+        self.assertEqual(self.load_service().snapshot().missions[0].archived_issue_ids, ())
+
+        with self.assertRaisesRegex(AlbertError, "complete Workstation action boundary"):
+            mission._archive_issue_from_workstation(
+                "ISS-01",
+                workstation_action={"correlation_id": "forged-archive-marker"},
+            )
+        self.assertEqual(self.load_service().snapshot().missions[0].archived_issue_ids, ())
+
+        complete_marker = {
+            "correlation_id": "forged-complete-archive-marker",
+            "action_type": "issue-archive",
+            "actor": "mission-commander",
+            "mission_id": mission.mission_id,
+            "expected_revision": 1,
+            "target_kind": "issue-slice",
+            "target_id": "ISS-01",
+            "request": {
+                "issue_id": "ISS-01",
+                "session_id": "",
+                "agent_id": "",
+                "reason": "",
+                "allowed_paths": [],
+                "command_policy": {},
+            },
+        }
+        for field_name, forged_value, expected_revision in (
+            ("action_type", "issue-restore", 1),
+            ("target_id", "ISS-02", 1),
+            ("expected_revision", 2, 1),
+        ):
+            with self.subTest(field_name=field_name):
+                forged_marker = {**complete_marker, field_name: forged_value}
+                with self.assertRaisesRegex(
+                    AlbertError,
+                    "complete Workstation action boundary",
+                ):
+                    mission._archive_issue_from_workstation(
+                        "ISS-01",
+                        workstation_action=forged_marker,
+                        expected_revision=expected_revision,
+                    )
+        self.assertEqual(self.load_service().snapshot().missions[0].archived_issue_ids, ())
+
+        current = snapshots.snapshot()
+        advanced = snapshots.update_preferences(
+            active_mission_id=current.active_mission.id,
+            conversation_scope=current.conversation_scope,
+            operations_view=current.operations_view,
+        )
+        self.assertEqual(advanced.revision, 2)
+        with self.assertRaisesRegex(
+            AlbertError,
+            "authoritative current Workstation revision 2",
+        ):
+            mission._archive_issue_from_workstation(
+                "ISS-01",
+                workstation_action=complete_marker,
+                expected_revision=1,
+            )
+
+        archived = WorkstationActionService(self.load_service()).submit(
+            correlation_id="workstation-archive-marker-required",
+            action_type="issue-archive",
+            actor="mission-commander",
+            expected_revision=2,
+            target_kind="issue-slice",
+            target_id="ISS-01",
+            issue_id="ISS-01",
+        )
+        self.assertEqual(archived.revision, 3)
+
+        reloaded = self.load_service()._primary_mission
+        with self.assertRaisesRegex(AlbertError, "correlated Workstation marker"):
+            reloaded._restore_archived_issue_from_workstation(
+                "ISS-01",
+                workstation_action=None,
+            )
+        self.assertEqual(
+            self.load_service().snapshot().missions[0].archived_issue_ids,
+            ("ISS-01",),
+        )
+
+    def test_background_mission_archive_uses_the_primary_workstation_revision(
+        self,
+    ) -> None:
+        primary = self.load_service()._primary_mission
+        background_tracker = self.root / "background-archive-tracker"
+        (background_tracker / "issues").mkdir(parents=True)
+        (background_tracker / "PRD.md").write_text(
+            "# Background Archive Mission\n",
+            encoding="utf-8",
+        )
+        (background_tracker / "issues" / "01-background.md").write_text(
+            ISSUE,
+            encoding="utf-8",
+        )
+        background = AlbertMission(
+            target_repo=self.target_repo,
+            tracker_dir=background_tracker,
+            runtime_root=self.runtime,
+            mission_id="background-archive",
+            allow_empty_tracker=True,
+        ).load()
+        background.issues["ISS-01"].review_state = "pr-ready"
+        background.issues["ISS-01"].locked = True
+        background._persist()
+        snapshots = WorkspaceSnapshotService(primary, missions=(background,))
+        current = snapshots.snapshot()
+        advanced = snapshots.update_preferences(
+            active_mission_id=current.active_mission.id,
+            conversation_scope=current.conversation_scope,
+            operations_view=current.operations_view,
+        )
+
+        archived = WorkstationActionService(snapshots).submit(
+            correlation_id="background-archive-shared-revision",
+            action_type="issue-archive",
+            actor="mission-commander",
+            expected_revision=advanced.revision,
+            target_kind="issue-slice",
+            target_id="ISS-01",
+            mission_id=background.mission_id,
+            issue_id="ISS-01",
+        )
+
+        self.assertEqual(archived.revision, 3)
+        background_summary = next(
+            mission
+            for mission in snapshots.snapshot().missions
+            if mission.id == background.mission_id
+        )
+        self.assertEqual(background_summary.archived_issue_ids, ("ISS-01",))
+
     def test_live_agent_availability_snapshot_gates_projection_launch_and_runner_claim(
         self,
     ) -> None:

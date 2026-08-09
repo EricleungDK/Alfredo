@@ -1773,6 +1773,7 @@ class AlbertMission:
         self.workstation_actions: dict[str, dict[str, Any]] = {}
         self.archived_issue_ids: set[str] = set()
         self.supervision: dict[str, Any] = self._empty_supervision_state()
+        self._workspace_preferences_path: Path | None = None
         self.timeline: list[str] = []
         self.agent_registry = AgentRegistry(agents=[], source_path=self.agent_config_path)
         self._evidence_activity_recorder: (
@@ -3872,6 +3873,24 @@ class AlbertMission:
             identity_boundary = exact_boundary
             effect = intent.get("effect")
             if effect == "recover-same-session":
+                runner_boundary = session.retirement.get("runner_boundary", {})
+                has_owner_lease = bool(
+                    runner_boundary.get("owner_lease_path")
+                    or runner_boundary.get("owner_lease_token")
+                )
+                if (
+                    identity_boundary
+                    and has_owner_lease
+                    and not self._release_retirement_runner_owner(session)
+                ):
+                    return self._fail_closed_supervision_intent(
+                        data,
+                        supervision,
+                        intent,
+                        receipt_payload,
+                        "The stopped runner's exact owner lease could not be released "
+                        "before recovery.",
+                    )
                 repeated_failed_recovery = (
                     identity_boundary
                     and session.automatic_recovery_count >= 1
@@ -4346,30 +4365,34 @@ class AlbertMission:
         self.timeline = timeline
         return session
 
-    def archive_issue(
+    def _archive_issue_from_workstation(
         self,
         issue_id: str,
         *,
         workstation_action: dict[str, Any] | None = None,
+        expected_revision: int | None = None,
     ) -> IssueSlice:
         """Archive one evidence-accepted Issue Slice without removing its history."""
         return self._set_issue_archived(
             issue_id,
             archived=True,
             workstation_action=workstation_action,
+            expected_revision=expected_revision,
         )
 
-    def restore_archived_issue(
+    def _restore_archived_issue_from_workstation(
         self,
         issue_id: str,
         *,
         workstation_action: dict[str, Any] | None = None,
+        expected_revision: int | None = None,
     ) -> IssueSlice:
         """Restore one retained Issue Slice subtree to the active Mission Work tree."""
         return self._set_issue_archived(
             issue_id,
             archived=False,
             workstation_action=workstation_action,
+            expected_revision=expected_revision,
         )
 
     def _set_issue_archived(
@@ -4378,6 +4401,7 @@ class AlbertMission:
         *,
         archived: bool,
         workstation_action: dict[str, Any] | None,
+        expected_revision: int | None,
     ) -> IssueSlice:
         with self._runtime_lock(exclusive=True):
             data = self._read_runtime_payload()
@@ -4411,14 +4435,58 @@ class AlbertMission:
                 data.get("workstation_actions", {}),
                 {},
             )
-            if workstation_action:
-                correlation_id = workstation_action.get("correlation_id")
-                if not isinstance(correlation_id, str) or not correlation_id.strip():
-                    raise AlbertError("Workstation action correlation id must not be empty")
-                workstation_actions = self._merge_workstation_action_ledgers(
-                    workstation_actions,
-                    {correlation_id: dict(workstation_action)},
+            if not isinstance(workstation_action, dict):
+                raise AlbertError(
+                    "Archive state changes require a correlated Workstation marker."
                 )
+            expected_action_type = "issue-archive" if archived else "issue-restore"
+            expected_request = {
+                "issue_id": issue_id,
+                "session_id": "",
+                "agent_id": "",
+                "reason": "",
+                "allowed_paths": [],
+                "command_policy": {},
+            }
+            if (
+                set(workstation_action)
+                != {
+                    "correlation_id",
+                    "action_type",
+                    "actor",
+                    "mission_id",
+                    "expected_revision",
+                    "target_kind",
+                    "target_id",
+                    "request",
+                }
+                or workstation_action.get("action_type") != expected_action_type
+                or workstation_action.get("actor") != "mission-commander"
+                or workstation_action.get("mission_id") != self.mission_id
+                or workstation_action.get("target_kind") != "issue-slice"
+                or workstation_action.get("target_id") != issue_id
+                or workstation_action.get("request") != expected_request
+                or not isinstance(expected_revision, int)
+                or isinstance(expected_revision, bool)
+                or expected_revision < 0
+                or workstation_action.get("expected_revision") != expected_revision
+            ):
+                raise AlbertError(
+                    "Archive state changes require a complete Workstation action boundary."
+                )
+            authoritative_revision = self._authoritative_workspace_revision()
+            if expected_revision != authoritative_revision:
+                raise AlbertError(
+                    "Archive state changes require the authoritative current "
+                    f"Workstation revision {authoritative_revision}."
+                )
+            correlation_id = workstation_action.get("correlation_id")
+            if not isinstance(correlation_id, str) or not correlation_id.strip():
+                raise AlbertError("Workstation action correlation id must not be empty")
+            workstation_actions = self._merge_workstation_action_ledgers(
+                workstation_actions,
+                {correlation_id: dict(workstation_action)},
+            )
 
             if archived:
                 archived_ids.add(issue_id)
@@ -4437,6 +4505,33 @@ class AlbertMission:
         self.workstation_actions = workstation_actions
         self.timeline = timeline
         return issue
+
+    def _authoritative_workspace_revision(self) -> int:
+        preferences_path = self._workspace_preferences_path
+        if not isinstance(preferences_path, Path):
+            raise AlbertError(
+                "Archive state changes require a bound authoritative Workstation store."
+            )
+        if not preferences_path.exists():
+            return 1
+        try:
+            preferences = json.loads(
+                preferences_path.read_text(encoding="utf-8")
+            )
+            revision = preferences.get("revision")
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise AlbertError(
+                "Archive state changes could not read authoritative Workstation state."
+            ) from exc
+        if (
+            not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 1
+        ):
+            raise AlbertError(
+                "Archive state changes found an invalid authoritative Workstation revision."
+            )
+        return revision
 
     def record_frontier_review(
         self,
@@ -5364,7 +5459,7 @@ class AlbertMission:
     def _release_retirement_runner_owner(
         self,
         session: LocalAgentSession,
-    ) -> None:
+    ) -> bool:
         """Record an exact per-operation owner release after runner effects stop."""
 
         boundary = session.retirement.get("runner_boundary", {})
@@ -5372,10 +5467,10 @@ class AlbertMission:
             not session.runner_operation_id
             or boundary.get("runner_operation_id") != session.runner_operation_id
         ):
-            return
+            return False
         lease_path = self._retirement_runner_owner_lease_path(session.session_id)
         if boundary.get("owner_lease_path") != str(lease_path):
-            return
+            return False
         try:
             lease_payload = json.loads(lease_path.read_text(encoding="utf-8"))
             if (
@@ -5387,13 +5482,14 @@ class AlbertMission:
                 or lease_payload.get("lease_token")
                 != boundary.get("owner_lease_token")
             ):
-                return
+                return False
             lease_path.unlink()
         except (OSError, UnicodeError, json.JSONDecodeError):
-            return
+            return False
         boundary["owner_released_at"] = _utc_now()
         boundary["owner_release_operation_id"] = session.runner_operation_id
         session.retirement["runner_boundary"] = boundary
+        return True
 
     def _finalize_cancelled_runner_owner_release(
         self,

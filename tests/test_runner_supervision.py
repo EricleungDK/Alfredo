@@ -467,6 +467,76 @@ class RunnerSupervisionTest(unittest.TestCase):
         ]
         self.assertEqual(receipt["outcome"], "recovered")
 
+    def test_exact_recovery_releases_the_crashed_owner_lease_before_restart(
+        self,
+    ) -> None:
+        mission = self.load_mission()
+        session = self.running_session(mission)
+        session.worktree_path.mkdir(parents=True)
+        session.worktree_identity = mission.current_worktree_identity(session.session_id)
+        lease_path = (
+            mission.runtime_dir / "runner-leases" / f"{session.session_id}.json"
+        )
+        lease_path.parent.mkdir(parents=True)
+        lease_token = "exact-crashed-owner-lease"
+        session.retirement["runner_boundary"] = {
+            "mission_id": mission.mission_id,
+            "session_id": session.session_id,
+            "runner_operation_id": session.runner_operation_id,
+            "owner_pid": session.runner_pid,
+            "owner_identity": session.runner_identity,
+            "process_group_pid": session.runner_process_pid,
+            "process_group_identity": session.runner_process_identity,
+            "process_token": session.runner_process_token,
+            "owner_lease_path": str(lease_path),
+            "owner_lease_token": lease_token,
+            "owner_released_at": "",
+            "owner_release_operation_id": "",
+        }
+        lease_path.write_text(
+            json.dumps(
+                {
+                    "mission_id": mission.mission_id,
+                    "session_id": session.session_id,
+                    "runner_operation_id": session.runner_operation_id,
+                    "lease_token": lease_token,
+                }
+            ),
+            encoding="utf-8",
+        )
+        mission._persist_session_update(session, expected_statuses={"running"})
+        session = mission.sessions[session.session_id]
+        observation = RunnerObservation(
+            source_id="runner-events",
+            source_incarnation="boot-a",
+            sequence=1,
+            mission_id=mission.mission_id,
+            session_id=session.session_id,
+            session_revision=session.revision,
+            runner_operation_id=session.runner_operation_id,
+            owner_signal="absent",
+            process_group_signal="absent",
+            worktree_identity=session.worktree_identity,
+            result_signal="absent",
+        )
+
+        with patch.object(
+            mission,
+            "_probe_runner_boundary",
+            return_value=("absent", "absent"),
+        ):
+            receipt = mission.observe_runner(observation)
+
+        self.assertEqual(receipt.outcome, "recovered")
+        self.assertFalse(lease_path.exists())
+        with patch(
+            "albert_mvp.core._process_isolated_argv",
+            side_effect=lambda argv: argv,
+        ):
+            restarted = mission.run_session(session.session_id)
+        self.assertEqual(restarted.status, "evidence-ready")
+        self.assertEqual(restarted.automatic_recovery_count, 1)
+
     def test_exact_late_result_is_reconciled_instead_of_rerun(self) -> None:
         mission = self.load_mission()
         session = self.running_session(mission)

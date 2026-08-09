@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -435,6 +436,37 @@ class RetirementPreservationTest(unittest.TestCase):
         blocked = self.load_mission().sessions[completed.session_id]
         self.assertEqual(blocked.retirement["phase"], "preservation-blocked")
         self.assertTrue(blocked.preservation_budget["bound"])
+
+    def test_snapshot_preserves_untracked_symlinks_and_executable_modes(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        executable = completed.worktree_path / "run-check.sh"
+        executable.write_text("#!/bin/sh\nprintf 'ready\\n'\n", encoding="utf-8")
+        executable.chmod(0o755)
+        link = completed.worktree_path / "tracked-link"
+        os.symlink(b"tracked-\xff", os.fsencode(link))
+
+        preserved = mission.preserve_retirement_unit(
+            completed.session_id,
+            expected_revision=completed.revision,
+            correlation_id="preserve-untracked-types",
+        )
+        manifest = json.loads(
+            Path(preserved.retirement["snapshot"]["manifest_path"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        untracked = manifest["git_state"]["untracked_entries"]
+
+        self.assertEqual(
+            untracked["run-check.sh"],
+            {"kind": "file", "mode": 0o755},
+        )
+        self.assertEqual(
+            untracked["tracked-link"],
+            {"kind": "symlink"},
+        )
+        self.assertTrue(mission.verify_retirement_snapshot(completed.session_id))
 
     def test_cli_and_persistent_transport_share_retirement_snapshot_semantics(
         self,

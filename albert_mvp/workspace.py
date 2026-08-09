@@ -8021,6 +8021,14 @@ class WorkstationActionService:
             "target_id": target_id,
             "request": request_payload,
         }
+        if action_type in {"issue-archive", "issue-restore"}:
+            workstation_action.update(
+                {
+                    "actor": actor,
+                    "mission_id": target_mission_id,
+                    "expected_revision": expected_revision,
+                }
+            )
 
         acknowledged_issue_id = issue_id
         acknowledged_session_id = session_id
@@ -8165,14 +8173,16 @@ class WorkstationActionService:
                 raise AlbertError(f"Unknown Issue Slice: {issue_id}")
             if not recovering_action:
                 if action_type == "issue-archive":
-                    mission.archive_issue(
+                    mission._archive_issue_from_workstation(
                         issue_id,
                         workstation_action=workstation_action,
+                        expected_revision=expected_revision,
                     )
                 else:
-                    mission.restore_archived_issue(
+                    mission._restore_archived_issue_from_workstation(
                         issue_id,
                         workstation_action=workstation_action,
+                        expected_revision=expected_revision,
                     )
             acknowledged_session_id = ""
             effect_summary = (
@@ -9935,6 +9945,7 @@ class WorkspaceSnapshotService:
         self._action_lock_target = mission.runtime_dir / "workspace-action-transaction"
         evidence_activity_recorder = ActivityJournalService(self).record_local_agent_evidence
         for item in all_missions:
+            item._workspace_preferences_path = self._preferences_path
             item._evidence_activity_recorder = evidence_activity_recorder
 
     @property
