@@ -205,7 +205,12 @@ class RetirementSnapshotStore:
         self.verify(record)
         return record
 
-    def prepare_git_non_force_removal(self, record: dict[str, Any]) -> None:
+    def prepare_git_non_force_removal(
+        self,
+        record: dict[str, Any],
+        *,
+        worktree_path: Path | None = None,
+    ) -> None:
         """Restore only the verified Git-visible state before non-force removal."""
 
         self.verify(record)
@@ -215,7 +220,7 @@ class RetirementSnapshotStore:
             raise RetirementSnapshotError(
                 "Non-force Git preparation requires a Git-backed Retirement Unit."
             )
-        worktree = self.request.worktree_path
+        worktree = worktree_path or self.request.worktree_path
         if self._git(worktree, ["rev-parse", "HEAD"]).strip() != git_state[
             "baseline_commit"
         ]:
@@ -243,16 +248,25 @@ class RetirementSnapshotStore:
         if (
             staged not in {expected_staged, ""}
             or unstaged not in {expected_unstaged, ""}
-        ) and not self._tracked_git_state_matches_preserved_or_baseline(manifest):
+        ) and not self._tracked_git_state_matches_preserved_or_baseline(
+            manifest,
+            worktree_path=worktree,
+        ):
             raise RetirementSnapshotError(
                 "Retirement Unit changed after verified preservation."
             )
-        self._assert_git_untracked_subset_matches(manifest)
+        self._assert_git_untracked_subset_matches(
+            manifest,
+            worktree_path=worktree,
+        )
         self._git(
             worktree,
             ["restore", "--source=HEAD", "--staged", "--worktree", "--", "."],
         )
-        self._assert_git_untracked_subset_matches(manifest)
+        self._assert_git_untracked_subset_matches(
+            manifest,
+            worktree_path=worktree,
+        )
         for relative_value in sorted(
             git_state["untracked_paths"],
             key=lambda value: (len(PurePosixPath(value).parts), value),
@@ -284,8 +298,13 @@ class RetirementSnapshotStore:
                 "Retirement Unit remained dirty after verified cleanup."
             )
 
-    def _assert_git_untracked_subset_matches(self, manifest: dict[str, Any]) -> None:
-        worktree = self.request.worktree_path
+    def _assert_git_untracked_subset_matches(
+        self,
+        manifest: dict[str, Any],
+        *,
+        worktree_path: Path | None = None,
+    ) -> None:
+        worktree = worktree_path or self.request.worktree_path
         git_state = manifest["git_state"]
         current_untracked = set(self._git_untracked_paths(worktree))
         expected_untracked = set(git_state["untracked_paths"])
@@ -330,7 +349,10 @@ class RetirementSnapshotStore:
     def _tracked_git_state_matches_preserved_or_baseline(
         self,
         manifest: dict[str, Any],
+        *,
+        worktree_path: Path | None = None,
     ) -> bool:
+        worktree = worktree_path or self.request.worktree_path
         verification_root = self.request.runtime_dir / "retirement" / "verification"
         verification_root.mkdir(parents=True, exist_ok=True)
         with (
@@ -353,7 +375,7 @@ class RetirementSnapshotStore:
                 baseline_repository,
                 ["restore", "--source=HEAD", "--staged", "--worktree", "--", "."],
             )
-            current_index = self._git_index_entries(self.request.worktree_path)
+            current_index = self._git_index_entries(worktree)
             preserved_index = self._git_index_entries(preserved_repository)
             baseline_index = self._git_index_entries(baseline_repository)
             paths = set(current_index) | set(preserved_index) | set(baseline_index)
@@ -366,7 +388,7 @@ class RetirementSnapshotStore:
                     return False
                 relative = self._safe_relative(relative_value)
                 current_state = self._filesystem_entry_state(
-                    self.request.worktree_path,
+                    worktree,
                     relative,
                 )
                 if current_state not in {
@@ -415,7 +437,12 @@ class RetirementSnapshotStore:
             self._file_digest(path),
         )
 
-    def prepare_managed_directory_removal(self, record: dict[str, Any]) -> None:
+    def prepare_managed_directory_removal(
+        self,
+        record: dict[str, Any],
+        *,
+        worktree_path: Path | None = None,
+    ) -> None:
         """Prove the managed directory still equals its verified snapshot."""
 
         self.verify(record)
@@ -425,8 +452,9 @@ class RetirementSnapshotStore:
             raise RetirementSnapshotError(
                 "Managed directory preparation requires a directory-backed Retirement Unit."
             )
+        worktree = worktree_path or self.request.worktree_path
         expected_paths = set(directory_state["paths"])
-        current_paths = set(self._filesystem_files(self.request.worktree_path))
+        current_paths = set(self._filesystem_files(worktree))
         if not current_paths.issubset(expected_paths):
             raise RetirementSnapshotError(
                 "Retirement Unit changed after verified preservation."
@@ -434,7 +462,7 @@ class RetirementSnapshotStore:
         current: dict[str, dict[str, Any]] = {}
         for relative_value in sorted(current_paths):
             relative = self._safe_relative(relative_value)
-            source = self.request.worktree_path / Path(*relative.parts)
+            source = worktree / Path(*relative.parts)
             if source.stat().st_mode & 0o777 != directory_state["modes"][relative_value]:
                 raise RetirementSnapshotError(
                     "Retirement Unit changed after verified preservation."

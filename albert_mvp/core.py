@@ -6154,12 +6154,24 @@ class AlbertMission:
             path_absent = not (
                 session.worktree_path.exists() or session.worktree_path.is_symlink()
             )
+            effect_path = self._retirement_removal_effect_path(session.session_id)
+            effect_path_present = effect_path.exists() or effect_path.is_symlink()
+            if not path_absent and effect_path_present:
+                self._block_retirement_removal(
+                    data,
+                    session,
+                    "Retirement path changed after its isolated removal effect began.",
+                    terminal=True,
+                )
+                return session
             try:
                 registration_present = bool(
                     phase == "retiring"
-                    and path_absent
                     and removal_kind == "git-worktree"
-                    and self._git_worktree_registration_present(session)
+                    and (
+                        self._git_worktree_registration_present(session)
+                        or self._git_worktree_registration_present_at(effect_path)
+                    )
                 )
             except (AlbertError, OSError) as exc:
                 self._block_retirement_removal(
@@ -6170,10 +6182,10 @@ class AlbertMission:
                 )
                 return session
             effect_already_absent = (
-                phase == "retiring" and path_absent and not registration_present
-            )
-            registration_only = bool(
-                phase == "retiring" and path_absent and registration_present
+                phase == "retiring"
+                and path_absent
+                and not effect_path_present
+                and not registration_present
             )
             current_identity = self._worktree_identity_for_session(session)
             if not path_absent and current_identity != session.worktree_identity:
@@ -6246,9 +6258,7 @@ class AlbertMission:
                 self.timeline = list(data.get("timeline", []))
 
         try:
-            if registration_only:
-                self._remove_retirement_git_registration(session)
-            elif not effect_already_absent and not absence_only:
+            if not effect_already_absent and not absence_only:
                 self._remove_retirement_worktree(session, removal_kind)
             self._verify_retirement_removal(session, removal_kind)
         except (OSError, AlbertError, RetirementSnapshotError) as exc:
@@ -6296,6 +6306,9 @@ class AlbertMission:
         self,
         session: LocalAgentSession,
     ) -> bool:
+        return self._git_worktree_registration_present_at(session.worktree_path)
+
+    def _git_worktree_registration_present_at(self, path: Path) -> bool:
         completed = _run_bounded_process(
             [
                 "git",
@@ -6311,7 +6324,7 @@ class AlbertMission:
         )
         if completed.returncode != 0:
             raise AlbertError("Git worktree registration could not be inspected.")
-        expected = _runtime_identity_path(session.worktree_path)
+        expected = _runtime_identity_path(path)
         return any(
             field_value.startswith("worktree ")
             and _runtime_identity_path(
@@ -6322,10 +6335,11 @@ class AlbertMission:
             for field_value in block.split("\0")
         )
 
-    def _remove_retirement_git_registration(
-        self,
-        session: LocalAgentSession,
-    ) -> None:
+    def _retirement_removal_effect_path(self, session_id: str) -> Path:
+        name = sha256(session_id.encode()).hexdigest() + ".worktree"
+        return self.runtime_dir / "retirement" / "removal-effects" / name
+
+    def _remove_retirement_git_registration(self, path: Path) -> None:
         completed = _run_bounded_process(
             [
                 "git",
@@ -6333,7 +6347,7 @@ class AlbertMission:
                 str(self.target_repo),
                 "worktree",
                 "remove",
-                str(session.worktree_path),
+                str(path),
             ],
             timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
             output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
@@ -6354,7 +6368,49 @@ class AlbertMission:
         removal_kind: str,
     ) -> None:
         path = session.worktree_path
+        effect_path = self._retirement_removal_effect_path(session.session_id)
+        path_present = path.exists() or path.is_symlink()
+        effect_present = effect_path.exists() or effect_path.is_symlink()
+        if path_present and effect_present:
+            raise AlbertError(
+                "Retirement path changed after its isolated removal effect began."
+            )
+        effect_path.parent.mkdir(parents=True, exist_ok=True)
         if removal_kind == "git-worktree":
+            if path_present:
+                completed = _run_bounded_process(
+                    [
+                        "git",
+                        "-C",
+                        str(self.target_repo),
+                        "worktree",
+                        "move",
+                        str(path),
+                        str(effect_path),
+                    ],
+                    timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+                    output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
+                )
+                if completed.returncode != 0:
+                    reason = (
+                        self._subprocess_output_text(completed.stderr).strip()
+                        or self._subprocess_output_text(completed.stdout).strip()
+                        or f"exit {completed.returncode}"
+                    )
+                    raise AlbertError(
+                        f"exact Git worktree isolation failed: {reason}"
+                    )
+                effect_present = True
+            elif not effect_present:
+                if self._git_worktree_registration_present_at(effect_path):
+                    self._remove_retirement_git_registration(effect_path)
+                elif self._git_worktree_registration_present(session):
+                    self._remove_retirement_git_registration(path)
+                return
+            if path.exists() or path.is_symlink():
+                raise AlbertError(
+                    "Retirement path changed after its isolated removal effect began."
+                )
             snapshot_revision = int(
                 session.retirement["snapshot"].get(
                     "session_revision",
@@ -6364,7 +6420,14 @@ class AlbertMission:
             self._retirement_snapshot_store(
                 session,
                 snapshot_revision,
-            ).prepare_git_non_force_removal(session.retirement["snapshot"])
+            ).prepare_git_non_force_removal(
+                session.retirement["snapshot"],
+                worktree_path=effect_path,
+            )
+            if path.exists() or path.is_symlink():
+                raise AlbertError(
+                    "Retirement path changed during its isolated removal effect."
+                )
             completed = _run_bounded_process(
                 [
                     "git",
@@ -6372,7 +6435,7 @@ class AlbertMission:
                     str(self.target_repo),
                     "worktree",
                     "remove",
-                    str(path),
+                    str(effect_path),
                 ],
                 timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
                 output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
@@ -6390,14 +6453,23 @@ class AlbertMission:
         if removal_kind != "managed-directory":
             raise AlbertError("Retirement removal kind is invalid.")
         expected = self._session_worktree_path(session.session_id)
-        if (
-            path.is_symlink()
-            or _runtime_identity_path(path.resolve(strict=True))
-            != _runtime_identity_path(expected)
-            or _runtime_identity_path(path.resolve(strict=True))
-            == _runtime_identity_path(self.target_repo)
-        ):
-            raise AlbertError("Managed directory retirement boundary is invalid.")
+        if path_present:
+            if (
+                path.is_symlink()
+                or _runtime_identity_path(path.resolve(strict=True))
+                != _runtime_identity_path(expected)
+                or _runtime_identity_path(path.resolve(strict=True))
+                == _runtime_identity_path(self.target_repo)
+            ):
+                raise AlbertError("Managed directory retirement boundary is invalid.")
+            path.replace(effect_path)
+            effect_present = True
+        elif not effect_present:
+            return
+        if path.exists() or path.is_symlink():
+            raise AlbertError(
+                "Retirement path changed after its isolated removal effect began."
+            )
         snapshot_revision = int(
             session.retirement["snapshot"].get(
                 "session_revision",
@@ -6407,8 +6479,15 @@ class AlbertMission:
         self._retirement_snapshot_store(
             session,
             snapshot_revision,
-        ).prepare_managed_directory_removal(session.retirement["snapshot"])
-        shutil.rmtree(path)
+        ).prepare_managed_directory_removal(
+            session.retirement["snapshot"],
+            worktree_path=effect_path,
+        )
+        if path.exists() or path.is_symlink():
+            raise AlbertError(
+                "Retirement path changed during its isolated removal effect."
+            )
+        shutil.rmtree(effect_path)
 
     def _verify_retirement_removal(
         self,
@@ -6417,6 +6496,9 @@ class AlbertMission:
     ) -> None:
         if session.worktree_path.exists() or session.worktree_path.is_symlink():
             raise AlbertError("Retirement path remains after physical removal.")
+        effect_path = self._retirement_removal_effect_path(session.session_id)
+        if effect_path.exists() or effect_path.is_symlink():
+            raise AlbertError("Retirement removal effect remains after physical removal.")
         if removal_kind != "git-worktree":
             return
         completed = _run_bounded_process(
@@ -6434,12 +6516,15 @@ class AlbertMission:
         )
         if completed.returncode != 0:
             raise AlbertError("Git worktree registration absence could not be verified.")
-        expected = _runtime_identity_path(session.worktree_path)
+        expected_paths = {
+            _runtime_identity_path(session.worktree_path),
+            _runtime_identity_path(effect_path),
+        }
         for block in completed.stdout.split("\0\0"):
             for worktree_field in block.split("\0"):
                 if worktree_field.startswith("worktree ") and _runtime_identity_path(
                     Path(worktree_field.removeprefix("worktree ")).resolve(strict=False)
-                ) == expected:
+                ) in expected_paths:
                     raise AlbertError(
                         "Git worktree registration remains after physical removal."
                     )
