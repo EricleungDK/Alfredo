@@ -76,7 +76,7 @@ The private, space-consuming content referenced by a Retirement Record that make
 
 ### Snapshot Storage Budget
 
-The configurable aggregate app-local capacity available for Snapshot Payloads. It reclaims eligible unpinned payloads oldest first and blocks new Retirement Units rather than silently deleting policy-protected payloads when exhausted.
+The configurable aggregate app-local capacity available for Snapshot Payloads and bound Preservation Budgets. It reclaims eligible expired unpinned payloads oldest first, exposes deterministic usage and blocker inspection, and blocks new Retirement Units rather than silently deleting policy-protected payloads when exhausted.
 
 ### Retention Grace Period
 
@@ -88,7 +88,7 @@ The terminal unsuccessful outcome of a Retirement Unit after a stop request has 
 
 ### Retirement Blocked
 
-The state of a quiesced Retirement Unit after bounded automatic retirement attempts cannot complete. Automatic retries stop, its worktree remains retained, and the Mission Commander may retry, inspect, export, or explicitly discard it.
+The state of a quiesced Retirement Unit after bounded automatic retirement attempts cannot complete. Automatic retries stop, its worktree remains retained, and the Mission Commander may use exact receipt-bound retry, inspection, verified export, or explicit discard actions.
 
 ### Retained Worktree Discard
 

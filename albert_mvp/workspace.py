@@ -3515,11 +3515,63 @@ class AgentConsoleResponseService:
                 ", ".join(f"{session.issue_id}: {session.status}" for session in sessions)
                 or "none"
             )
+            storage = snapshot.mission_board["retirement_storage"]
             return (
                 f"Controller: {controller}\n"
                 f"Workspace: {snapshot.workspace_session.status}\n"
                 f"Subagents: {session_summary}\n"
-                f"Ready work: {', '.join(ready) or 'none'}"
+                f"Ready work: {', '.join(ready) or 'none'}\n"
+                "Snapshot storage: "
+                f"{self._format_storage_bytes(storage['payload_bytes'])} payload + "
+                f"{self._format_storage_bytes(storage['reserved_bytes'])} reserved / "
+                f"{self._format_storage_bytes(storage['budget_bytes'])}; "
+                f"{storage['retained_payloads']} retained, "
+                f"{storage['pinned_payloads']} pinned, "
+                f"{storage['blocker_count']} blockers"
+            )
+        if command == "/storage":
+            inspection = self._snapshots._primary_mission.retirement_storage_inspection()
+            largest = inspection["largest_payloads"]
+            largest_rows = (
+                ", ".join(
+                    f"{item['session_id']} ({self._format_storage_bytes(item['snapshot_bytes'])})"
+                    for item in largest
+                )
+                or "none"
+            )
+            expiry = inspection["expiry"]
+            expiry_rows = (
+                ", ".join(
+                    f"{item['session_id']} at {item['expires_at']}" for item in expiry
+                )
+                or "none"
+            )
+            blockers = inspection["blockers"]
+            blocker_rows = (
+                "; ".join(str(item.get("message", item.get("code", "blocked"))) for item in blockers)
+                or "none"
+            )
+            retention_days = inspection["policy"]["retention_seconds"] / 86_400
+            retention_label = (
+                str(int(retention_days))
+                if retention_days.is_integer()
+                else f"{retention_days:.2f}"
+            )
+            return (
+                "Snapshot storage inspection\n"
+                f"Retention: {retention_label} days\n"
+                f"Budget: {self._format_storage_bytes(inspection['policy']['budget_bytes'])}\n"
+                f"Usage: {self._format_storage_bytes(inspection['usage']['payload_bytes'])} payload + "
+                f"{self._format_storage_bytes(inspection['usage']['reserved_bytes'])} reserved\n"
+                f"Records: {inspection['counts']['records']}; retained "
+                f"{inspection['counts']['retained_payloads']}; pinned "
+                f"{inspection['counts']['pinned_payloads']}; reclaimed "
+                f"{inspection['counts']['reclaimed_payloads']}\n"
+                f"Expiry: {expiry_rows}\n"
+                f"Largest payloads: {largest_rows}\n"
+                f"Reclamation: {inspection['reclamation']['count']} payloads, "
+                f"{self._format_storage_bytes(inspection['reclamation']['bytes'])}\n"
+                f"Blockers: {blocker_rows}"
             )
         if command == "/run":
             if not argument:
@@ -3554,6 +3606,16 @@ class AgentConsoleResponseService:
         if command not in known:
             return f"Unknown Alfredo command: {command}. Type /help to see available commands."
         return f"{command} is handled by Alfredo's deterministic command path."
+
+    @staticmethod
+    def _format_storage_bytes(value: int) -> str:
+        if value >= 1024**3:
+            return f"{value / 1024**3:.2f} GiB"
+        if value >= 1024**2:
+            return f"{value / 1024**2:.2f} MiB"
+        if value >= 1024:
+            return f"{value / 1024:.2f} KiB"
+        return f"{value} B"
 
     def _run_controller_command(self, command: str, prompt: str) -> str:
         command_argv = shlex.split(command)

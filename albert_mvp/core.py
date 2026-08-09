@@ -86,6 +86,8 @@ _WORKTREE_PREPARATION_SCHEMA_VERSION = 1
 _RETIREMENT_UNIT_SCHEMA_VERSION = 1
 _PRESERVATION_BUDGET_BYTES = 32 * 1024 * 1024
 _DEFAULT_RETENTION_GRACE_SECONDS = 72 * 60 * 60
+_DEFAULT_SNAPSHOT_STORAGE_RETENTION_SECONDS = 30 * 24 * 60 * 60
+_DEFAULT_SNAPSHOT_STORAGE_BUDGET_BYTES = 5 * 1024 * 1024 * 1024
 _RETIREMENT_RETRY_BACKOFF_SECONDS = 0.05
 _GIT_NOT_REPOSITORY_MESSAGE = (
     "fatal: not a git repository (or any of the parent directories): .git"
@@ -940,7 +942,7 @@ def _validated_preservation_budget(raw: Any) -> dict[str, Any]:
         raise AlbertError("Local Agent Preservation Budget is invalid")
     if (
         raw.get("schema_version") != _RETIREMENT_UNIT_SCHEMA_VERSION
-        or raw.get("state") not in {"reserved", "verified"}
+        or raw.get("state") not in {"reserved", "verified", "discarded"}
         or not isinstance(raw.get("bound"), bool)
         or not isinstance(raw.get("reserved_bytes"), int)
         or isinstance(raw.get("reserved_bytes"), bool)
@@ -948,7 +950,7 @@ def _validated_preservation_budget(raw: Any) -> dict[str, Any]:
         or not isinstance(raw.get("reserved_at"), str)
         or not raw["reserved_at"].strip()
         or (raw["state"] == "reserved" and raw["bound"] is not True)
-        or (raw["state"] == "verified" and raw["bound"] is not False)
+        or (raw["state"] in {"verified", "discarded"} and raw["bound"] is not False)
     ):
         raise AlbertError("Local Agent Preservation Budget is invalid")
     verified_at = raw.get("verified_at")
@@ -956,6 +958,117 @@ def _validated_preservation_budget(raw: Any) -> dict[str, Any]:
         not isinstance(verified_at, str) or not verified_at.strip()
     ):
         raise AlbertError("Local Agent Preservation Budget verification is invalid")
+    return dict(raw)
+
+
+def _validated_snapshot_payload_record(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise AlbertError("Snapshot Payload record is invalid")
+    if not raw:
+        return {}
+    if raw.get("schema_version") != _RETIREMENT_UNIT_SCHEMA_VERSION:
+        raise AlbertError(
+            "Snapshot Payload record is invalid: Retirement Snapshot unit boundary "
+            "schema does not match."
+        )
+    required_strings = (
+        "manifest_path",
+        "manifest_sha256",
+        "payload_path",
+        "worktree_identity",
+    )
+    required_sizes = ("payload_bytes", "manifest_bytes", "snapshot_bytes")
+    if (
+        raw.get("verified") is not True
+        or any(
+            not isinstance(raw.get(field_name), str)
+            or not raw[field_name].strip()
+            for field_name in required_strings
+        )
+        or not re.fullmatch(r"[0-9a-f]{64}", raw["manifest_sha256"])
+        or any(
+            not isinstance(raw.get(field_name), int)
+            or isinstance(raw.get(field_name), bool)
+            or raw[field_name] < 0
+            for field_name in required_sizes
+        )
+        or raw["snapshot_bytes"]
+        != raw["payload_bytes"] + raw["manifest_bytes"]
+        or not isinstance(raw.get("session_revision"), int)
+        or isinstance(raw.get("session_revision"), bool)
+        or raw["session_revision"] < 0
+    ):
+        raise AlbertError("Snapshot Payload record is invalid")
+    payload_path = Path(raw["payload_path"])
+    manifest_path = Path(raw["manifest_path"])
+    if (
+        not payload_path.is_absolute()
+        or not manifest_path.is_absolute()
+        or manifest_path != payload_path / "manifest.json"
+    ):
+        raise AlbertError("Snapshot Payload record is invalid")
+
+    storage_fields = {
+        "mission_id",
+        "session_id",
+        "terminal_status",
+        "created_at",
+        "expires_at",
+        "pinned",
+        "payload_disposition",
+        "reclaimed_at",
+        "reclamation_reason",
+    }
+    if storage_fields.intersection(raw):
+        if (
+            not storage_fields.issubset(raw)
+            or any(
+                not isinstance(raw.get(field_name), str)
+                or not raw[field_name].strip()
+                for field_name in (
+                    "mission_id",
+                    "session_id",
+                    "terminal_status",
+                    "created_at",
+                    "expires_at",
+                )
+            )
+            or not isinstance(raw.get("pinned"), bool)
+            or raw.get("payload_disposition") not in {"retained", "reclaimed"}
+            or not isinstance(raw.get("reclaimed_at"), str)
+            or not isinstance(raw.get("reclamation_reason"), str)
+        ):
+            raise AlbertError("Snapshot Payload record is invalid")
+        try:
+            created_at = datetime.fromisoformat(raw["created_at"])
+            expires_at = datetime.fromisoformat(raw["expires_at"])
+        except ValueError as exc:
+            raise AlbertError("Snapshot Payload record is invalid") from exc
+        if (
+            created_at.tzinfo is None
+            or expires_at.tzinfo is None
+            or expires_at < created_at
+            or (
+                raw["payload_disposition"] == "retained"
+                and (raw["reclaimed_at"] or raw["reclamation_reason"])
+            )
+            or (
+                raw["payload_disposition"] == "reclaimed"
+                and (
+                    raw["pinned"]
+                    or not raw["reclaimed_at"].strip()
+                    or not raw["reclamation_reason"].strip()
+                )
+            )
+        ):
+            raise AlbertError("Snapshot Payload record is invalid")
+        if raw["reclaimed_at"]:
+            try:
+                reclaimed_at = datetime.fromisoformat(raw["reclaimed_at"])
+            except ValueError as exc:
+                raise AlbertError("Snapshot Payload record is invalid") from exc
+            if reclaimed_at.tzinfo is None:
+                raise AlbertError("Snapshot Payload record is invalid")
     return dict(raw)
 
 
@@ -972,6 +1085,7 @@ def _validated_retirement_unit(raw: Any) -> dict[str, Any]:
             "retirement_attempts": 0,
             "removal_kind": "",
             "retired_at": "",
+            "action_receipts": {},
         }
     if not isinstance(raw, dict):
         raise AlbertError("Local Agent Retirement Unit state is invalid")
@@ -992,6 +1106,16 @@ def _validated_retirement_unit(raw: Any) -> dict[str, Any]:
         or not isinstance(raw.get("snapshot"), dict)
         or not isinstance(raw.get("preservation_intent", {}), dict)
         or not isinstance(raw.get("preservation_receipt", {}), dict)
+        or not isinstance(raw.get("action_receipts", {}), dict)
+        or not all(
+            isinstance(correlation_id, str)
+            and correlation_id.strip()
+            and isinstance(receipt, dict)
+            for correlation_id, receipt in raw.get("action_receipts", {}).items()
+        )
+        or not isinstance(raw.get("discard_intent", {}), dict)
+        or not isinstance(raw.get("export_intent", {}), dict)
+        or not isinstance(raw.get("retry_intent", {}), dict)
         or not isinstance(raw.get("blocked_reason"), str)
     ):
         raise AlbertError("Local Agent Retirement Unit state is invalid")
@@ -1030,13 +1154,13 @@ def _validated_retirement_unit(raw: Any) -> dict[str, Any]:
                     "Local Agent Retirement Unit runner boundary is invalid"
                 )
     intent = raw.get("preservation_intent", {})
+    snapshot = _validated_snapshot_payload_record(raw["snapshot"])
     if raw["phase"] in {
         "preserved",
         "grace",
         "retiring",
-        "retired",
         "retirement-blocked",
-    } and not raw["snapshot"]:
+    } and not snapshot:
         raise AlbertError("Preserved Retirement Unit snapshot is missing")
     if raw["phase"] == "preserving" and not intent:
         raise AlbertError("Preserving Retirement Unit intent is missing")
@@ -1058,6 +1182,7 @@ def _validated_retirement_unit(raw: Any) -> dict[str, Any]:
         "git-registration",
         "managed-directory",
         "managed-absence",
+        "retained-worktree-discard",
     }:
         raise AlbertError("Retirement Unit removal boundary is invalid")
     if raw["phase"] == "retired" and (
@@ -1089,7 +1214,59 @@ def _validated_retirement_unit(raw: Any) -> dict[str, Any]:
         or not receipt["manifest_sha256"]
     ):
         raise AlbertError("Retirement Unit preservation receipt is invalid")
-    return dict(raw)
+    discard_intent = raw.get("discard_intent", {})
+    if discard_intent and (
+        any(
+            not isinstance(discard_intent.get(field_name), str)
+            or not discard_intent[field_name].strip()
+            for field_name in ("correlation_id", "confirmation", "reason")
+        )
+        or not isinstance(discard_intent.get("expected_revision"), int)
+        or isinstance(discard_intent.get("expected_revision"), bool)
+        or discard_intent["expected_revision"] < 0
+        or not isinstance(discard_intent.get("claim_revision"), int)
+        or isinstance(discard_intent.get("claim_revision"), bool)
+        or discard_intent["claim_revision"] < 0
+    ):
+        raise AlbertError("Retained Worktree Discard intent is invalid")
+    export_intent = raw.get("export_intent", {})
+    if export_intent and (
+        any(
+            not isinstance(export_intent.get(field_name), str)
+            or not export_intent[field_name].strip()
+            for field_name in (
+                "correlation_id",
+                "destination",
+                "manifest_sha256",
+            )
+        )
+        or not Path(export_intent["destination"]).is_absolute()
+        or not re.fullmatch(r"[0-9a-f]{64}", export_intent["manifest_sha256"])
+        or not isinstance(export_intent.get("expected_revision"), int)
+        or isinstance(export_intent.get("expected_revision"), bool)
+        or export_intent["expected_revision"] < 0
+        or not isinstance(export_intent.get("claim_revision"), int)
+        or isinstance(export_intent.get("claim_revision"), bool)
+        or export_intent["claim_revision"] < 0
+    ):
+        raise AlbertError("Retirement export intent is invalid")
+    retry_intent = raw.get("retry_intent", {})
+    if retry_intent and (
+        not isinstance(retry_intent.get("correlation_id"), str)
+        or not retry_intent["correlation_id"].strip()
+        or retry_intent.get("origin_phase")
+        not in {"preservation-blocked", "retirement-blocked"}
+        or not isinstance(retry_intent.get("expected_revision"), int)
+        or isinstance(retry_intent.get("expected_revision"), bool)
+        or retry_intent["expected_revision"] < 0
+        or not isinstance(retry_intent.get("claim_revision"), int)
+        or isinstance(retry_intent.get("claim_revision"), bool)
+        or retry_intent["claim_revision"] < 0
+    ):
+        raise AlbertError("Retirement retry intent is invalid")
+    validated = dict(raw)
+    validated["snapshot"] = snapshot
+    return validated
 
 
 def _validated_runner_result(data: dict[str, Any]) -> dict[str, Any]:
@@ -1562,6 +1739,7 @@ class LocalAgentSession:
                 "retirement_attempts": 0,
                 "removal_kind": "",
                 "retired_at": "",
+                "action_receipts": {},
             }
 
     def to_dict(self) -> dict[str, Any]:
@@ -1668,7 +1846,10 @@ class LocalAgentSession:
             not in {"preserved", "grace", "retiring", "retired", "retirement-blocked"}
             or (
                 retirement_phase == "preserved"
-                and receipt.get("result_revision") != session.revision
+                and (
+                    not isinstance(receipt.get("result_revision"), int)
+                    or receipt.get("result_revision") > session.revision
+                )
             )
             or receipt.get("manifest_sha256") != snapshot.get("manifest_sha256")
         ):
@@ -1826,6 +2007,10 @@ class AlbertMission:
             Callable[[dict[str, Any]], tuple[str, str]] | None
         ) = None,
         retention_grace_seconds: int = _DEFAULT_RETENTION_GRACE_SECONDS,
+        snapshot_storage_retention_seconds: int = (
+            _DEFAULT_SNAPSHOT_STORAGE_RETENTION_SECONDS
+        ),
+        snapshot_storage_budget_bytes: int = _DEFAULT_SNAPSHOT_STORAGE_BUDGET_BYTES,
     ):
         self.target_repo = target_repo.resolve()
         self.tracker_dir = tracker_dir.resolve()
@@ -1843,6 +2028,22 @@ class AlbertMission:
         ):
             raise AlbertError("Retention Grace Period must be a non-negative integer.")
         self.retention_grace_seconds = retention_grace_seconds
+        if (
+            not isinstance(snapshot_storage_retention_seconds, int)
+            or isinstance(snapshot_storage_retention_seconds, bool)
+            or snapshot_storage_retention_seconds < 0
+        ):
+            raise AlbertError(
+                "Snapshot Payload retention must be a non-negative integer."
+            )
+        if (
+            not isinstance(snapshot_storage_budget_bytes, int)
+            or isinstance(snapshot_storage_budget_bytes, bool)
+            or snapshot_storage_budget_bytes <= 0
+        ):
+            raise AlbertError("Snapshot Storage Budget must be a positive integer.")
+        self.snapshot_storage_retention_seconds = snapshot_storage_retention_seconds
+        self.snapshot_storage_budget_bytes = snapshot_storage_budget_bytes
         identity_paths = [
             _runtime_identity_path(path)
             for path in (self.target_repo, self.tracker_dir, self.issues_dir)
@@ -1860,6 +2061,9 @@ class AlbertMission:
         self.workstation_actions: dict[str, dict[str, Any]] = {}
         self.archived_issue_ids: set[str] = set()
         self.supervision: dict[str, Any] = self._empty_supervision_state()
+        self.retirement_storage: dict[str, Any] = (
+            self._empty_retirement_storage_state()
+        )
         self._workspace_preferences_path: Path | None = None
         self.timeline: list[str] = []
         self.agent_registry = AgentRegistry(agents=[], source_path=self.agent_config_path)
@@ -1885,6 +2089,155 @@ class AlbertMission:
             "attentions": {},
             "intents": {},
             "receipts": {},
+        }
+
+    @staticmethod
+    def _empty_retirement_storage_state() -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "reclamation_count": 0,
+            "reclaimed_bytes": 0,
+            "recent_reclamations": [],
+            "reclamation_intents": {},
+            "attention": {},
+        }
+
+    def _ensure_snapshot_storage_metadata(
+        self,
+        session: LocalAgentSession,
+    ) -> bool:
+        """Upgrade one verified pre-storage-policy record without weakening retention."""
+
+        snapshot = session.retirement.get("snapshot", {})
+        if not snapshot:
+            return False
+        if "mission_id" in snapshot:
+            if (
+                snapshot.get("mission_id") != self.mission_id
+                or snapshot.get("session_id") != session.session_id
+            ):
+                raise AlbertError("Snapshot Payload record authority is invalid")
+            return False
+
+        created_at: datetime | None = None
+        for candidate in (
+            session.preservation_budget.get("verified_at"),
+            session.preservation_budget.get("reserved_at"),
+        ):
+            if not isinstance(candidate, str):
+                continue
+            try:
+                parsed = datetime.fromisoformat(candidate)
+            except ValueError:
+                continue
+            if parsed.tzinfo is not None:
+                created_at = parsed.astimezone(timezone.utc)
+                break
+        if created_at is None:
+            try:
+                modified_at = Path(snapshot["manifest_path"]).stat().st_mtime
+            except OSError as exc:
+                raise AlbertError(
+                    "Legacy Snapshot Payload retention time cannot be established."
+                ) from exc
+            created_at = datetime.fromtimestamp(modified_at, tz=timezone.utc)
+        expires_at = datetime.fromtimestamp(
+            created_at.timestamp() + self.snapshot_storage_retention_seconds,
+            tz=timezone.utc,
+        )
+        snapshot.update(
+            {
+                "mission_id": self.mission_id,
+                "session_id": session.session_id,
+                "terminal_status": session.status,
+                "created_at": created_at.isoformat(),
+                "expires_at": expires_at.isoformat(),
+                "pinned": False,
+                "payload_disposition": "retained",
+                "reclaimed_at": "",
+                "reclamation_reason": "",
+            }
+        )
+        return True
+
+    def _validate_snapshot_payload_authority(
+        self,
+        session: LocalAgentSession,
+    ) -> None:
+        snapshot = session.retirement.get("snapshot", {})
+        if not snapshot:
+            return
+        expected_payload = self.runtime_dir / "retirement" / "payloads" / session.session_id
+        if (
+            _runtime_identity_path(Path(snapshot["payload_path"]).resolve(strict=False))
+            != _runtime_identity_path(expected_payload.resolve(strict=False))
+            or _runtime_identity_path(
+                Path(snapshot["manifest_path"]).resolve(strict=False)
+            )
+            != _runtime_identity_path(
+                (expected_payload / "manifest.json").resolve(strict=False)
+            )
+            or (
+                "mission_id" in snapshot
+                and (
+                    snapshot.get("mission_id") != self.mission_id
+                    or snapshot.get("session_id") != session.session_id
+                )
+            )
+        ):
+            raise AlbertError("Snapshot Payload record authority is invalid")
+
+    @classmethod
+    def _retirement_storage_from_payload(cls, data: dict[str, Any]) -> dict[str, Any]:
+        raw = data.get("retirement_storage")
+        if raw is None:
+            return cls._empty_retirement_storage_state()
+        if (
+            not isinstance(raw, dict)
+            or raw.get("schema_version") != 1
+            or not isinstance(raw.get("reclamation_count"), int)
+            or isinstance(raw.get("reclamation_count"), bool)
+            or raw["reclamation_count"] < 0
+            or not isinstance(raw.get("reclaimed_bytes"), int)
+            or isinstance(raw.get("reclaimed_bytes"), bool)
+            or raw["reclaimed_bytes"] < 0
+            or not isinstance(raw.get("recent_reclamations"), list)
+            or len(raw["recent_reclamations"]) > 64
+            or not all(
+                isinstance(item, dict) for item in raw["recent_reclamations"]
+            )
+            or not isinstance(raw.get("reclamation_intents", {}), dict)
+            or not all(
+                isinstance(session_id, str)
+                and session_id.strip()
+                and isinstance(intent, dict)
+                and intent.get("session_id") == session_id
+                and isinstance(intent.get("manifest_sha256"), str)
+                and bool(re.fullmatch(r"[0-9a-f]{64}", intent["manifest_sha256"]))
+                and isinstance(intent.get("payload_path"), str)
+                and Path(intent["payload_path"]).is_absolute()
+                and isinstance(intent.get("snapshot_bytes"), int)
+                and not isinstance(intent.get("snapshot_bytes"), bool)
+                and intent["snapshot_bytes"] >= 0
+                and isinstance(intent.get("claimed_at"), str)
+                and bool(intent["claimed_at"].strip())
+                for session_id, intent in raw.get("reclamation_intents", {}).items()
+            )
+            or not isinstance(raw.get("attention"), dict)
+        ):
+            raise AlbertError("Snapshot storage state is invalid")
+        return {
+            "schema_version": 1,
+            "reclamation_count": raw["reclamation_count"],
+            "reclaimed_bytes": raw["reclaimed_bytes"],
+            "recent_reclamations": [
+                dict(item) for item in raw["recent_reclamations"]
+            ],
+            "reclamation_intents": {
+                session_id: dict(intent)
+                for session_id, intent in raw.get("reclamation_intents", {}).items()
+            },
+            "attention": dict(raw["attention"]),
         }
 
     @classmethod
@@ -2327,6 +2680,7 @@ class AlbertMission:
     def board_summary(self) -> dict[str, Any]:
         ordered = self.ordered_issue_ids()
         ready = [issue_id for issue_id in ordered if self._issue_launch_eligible(self.issues[issue_id])]
+        storage = self.retirement_storage_inspection()
         return {
             "prd_title": self.prd_title,
             "issue_count": len(self.issues),
@@ -2334,6 +2688,14 @@ class AlbertMission:
             "ready_issue_ids": ready,
             "approved_issue_ids": [issue_id for issue_id in ordered if self.issues[issue_id].review_state == "approved"],
             "issue_slices": [self._issue_summary(issue_id) for issue_id in ordered],
+            "retirement_storage": {
+                "payload_bytes": storage["usage"]["payload_bytes"],
+                "reserved_bytes": storage["usage"]["reserved_bytes"],
+                "budget_bytes": storage["policy"]["budget_bytes"],
+                "retained_payloads": storage["counts"]["retained_payloads"],
+                "pinned_payloads": storage["counts"]["pinned_payloads"],
+                "blocker_count": len(storage["blockers"]),
+            },
         }
 
     def _issue_summary(self, issue_id: str) -> dict[str, Any]:
@@ -2955,6 +3317,7 @@ class AlbertMission:
             policy = self.classify_command(runner_command)
             if policy != "auto-allowed":
                 raise LaunchBlockedError(f"{issue_id} command runner policy is {policy}; auto-allowed is required.")
+        self._admit_retirement_unit()
         session_id = f"session-{issue_id}-{len(self.sessions) + 1}"
         worktree_path = self._session_worktree_path(session_id)
         task_packet = {
@@ -3280,6 +3643,7 @@ class AlbertMission:
         ):
             if field_name in prior_session.task_packet:
                 task_packet[field_name] = prior_session.task_packet[field_name]
+        self._admit_retirement_unit()
         session = LocalAgentSession(
             session_id=repair_session_id,
             issue_id=prior_session.issue_id,
@@ -4316,6 +4680,7 @@ class AlbertMission:
         }
         if review_context is not None:
             task_packet["review_context"] = review_context
+        self._admit_retirement_unit()
         session = LocalAgentSession(
             session_id=session_id,
             issue_id=work_id,
@@ -5071,6 +5436,8 @@ class AlbertMission:
             session_id: LocalAgentSession.from_dict(session)
             for session_id, session in data.get("sessions", {}).items()
         }
+        for session in self.sessions.values():
+            self._validate_snapshot_payload_authority(session)
         self.reviews = [ReviewDecision.from_dict(item) for item in data.get("reviews", [])]
         self.delegations = {
             issue_id: DelegationDecision.from_dict(item)
@@ -5091,6 +5458,7 @@ class AlbertMission:
             raise AlbertError("Mission archive state is invalid")
         self.archived_issue_ids = set(archived)
         self.supervision = self._supervision_from_payload(data)
+        self.retirement_storage = self._retirement_storage_from_payload(data)
         self.timeline = list(data.get("timeline", []))
 
     def _reconcile_abandoned_sessions(self) -> None:
@@ -5169,6 +5537,7 @@ class AlbertMission:
             "workstation_actions": self.workstation_actions,
             "archived_issue_ids": sorted(self.archived_issue_ids),
             "supervision": self.supervision,
+            "retirement_storage": self.retirement_storage,
             "timeline": self.timeline,
         }
 
@@ -5210,6 +5579,9 @@ class AlbertMission:
                 # Preserve the latest canonical archive state here instead.
                 data["archived_issue_ids"] = sorted(latest_archived)
                 data["supervision"] = self._supervision_from_payload(latest)
+                data["retirement_storage"] = self._retirement_storage_from_payload(
+                    latest
+                )
             self._write_runtime_payload(data)
         reconciled_sessions: dict[str, LocalAgentSession] = {}
         for session_id, session_data in data["sessions"].items():
@@ -5221,6 +5593,8 @@ class AlbertMission:
                     session_data
                 )
         self.sessions = reconciled_sessions
+        for session in self.sessions.values():
+            self._validate_snapshot_payload_authority(session)
         self.timeline = list(data["timeline"])
         self.command_policy = dict(data["command_policy"])
         self.workstation_actions = {
@@ -5229,6 +5603,7 @@ class AlbertMission:
         }
         self.archived_issue_ids = set(data.get("archived_issue_ids", []))
         self.supervision = self._supervision_from_payload(data)
+        self.retirement_storage = self._retirement_storage_from_payload(data)
 
     @staticmethod
     def _merge_workstation_action_ledgers(
@@ -5366,6 +5741,18 @@ class AlbertMission:
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
+    @contextmanager
+    def _retirement_action_lock(self, session_id: str):
+        lock_root = self.runtime_dir / "retirement" / "action-locks"
+        lock_root.mkdir(parents=True, exist_ok=True)
+        lock_name = sha256(session_id.encode()).hexdigest() + ".lock"
+        with (lock_root / lock_name).open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
     def _read_runtime_payload(self) -> dict[str, Any]:
         if not self.runtime_path.exists():
             raise AlbertError("mission runtime does not exist")
@@ -5442,6 +5829,7 @@ class AlbertMission:
             if not isinstance(session_data, dict):
                 raise AlbertError(f"Unknown Local Agent session: {session_id}")
             session = LocalAgentSession.from_dict(session_data)
+            self._validate_snapshot_payload_authority(session)
         self.sessions[session_id] = session
         return session
 
@@ -6046,6 +6434,24 @@ class AlbertMission:
                 raise LaunchBlockedError(
                     f"{session_id} lifecycle boundary changed during preservation."
                 )
+            created_at = datetime.now(timezone.utc)
+            expires_at = datetime.fromtimestamp(
+                created_at.timestamp() + self.snapshot_storage_retention_seconds,
+                tz=timezone.utc,
+            )
+            snapshot.update(
+                {
+                    "mission_id": self.mission_id,
+                    "session_id": latest.session_id,
+                    "terminal_status": latest.status,
+                    "created_at": created_at.isoformat(),
+                    "expires_at": expires_at.isoformat(),
+                    "pinned": False,
+                    "payload_disposition": "retained",
+                    "reclaimed_at": "",
+                    "reclamation_reason": "",
+                }
+            )
             latest.retirement["phase"] = "preserved"
             latest.retirement["snapshot"] = snapshot
             latest.retirement["blocked_reason"] = ""
@@ -6068,6 +6474,999 @@ class AlbertMission:
             self.sessions[session_id] = latest
             self.timeline = list(data.get("timeline", []))
             return latest
+
+    def set_retirement_snapshot_pin(
+        self,
+        session_id: str,
+        *,
+        pinned: bool,
+        expected_revision: int,
+        correlation_id: str,
+    ) -> LocalAgentSession:
+        """Pin or unpin one retained Snapshot Payload through an exact receipt."""
+
+        if not isinstance(pinned, bool):
+            raise AlbertError("Snapshot Payload pin state must be boolean.")
+        if not correlation_id.strip():
+            raise AlbertError("Snapshot Payload pin correlation id is required.")
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_session = data.get("sessions", {}).get(session_id)
+            if not isinstance(raw_session, dict):
+                raise AlbertError(f"Unknown Local Agent session: {session_id}")
+            session = LocalAgentSession.from_dict(raw_session)
+            receipts = session.retirement.setdefault("action_receipts", {})
+            existing = receipts.get(correlation_id)
+            if existing:
+                if (
+                    existing.get("action") == "snapshot-pin"
+                    and existing.get("expected_revision") == expected_revision
+                    and existing.get("pinned") is pinned
+                    and isinstance(existing.get("result_revision"), int)
+                    and not isinstance(existing.get("result_revision"), bool)
+                    and existing["result_revision"] <= session.revision
+                ):
+                    return session
+                raise AlbertError(
+                    "Retirement action correlation id was reused for a different request."
+                )
+            self._require_lifecycle_revision(session, expected_revision)
+            self._ensure_snapshot_storage_metadata(session)
+            snapshot = session.retirement.get("snapshot", {})
+            if (
+                not snapshot
+                or snapshot.get("payload_disposition", "retained") != "retained"
+            ):
+                raise LaunchBlockedError(
+                    f"{session_id} does not have a retained Snapshot Payload to pin."
+                )
+            session.retirement["snapshot"]["pinned"] = pinned
+            session.revision += 1
+            receipts[correlation_id] = {
+                "action": "snapshot-pin",
+                "expected_revision": expected_revision,
+                "result_revision": session.revision,
+                "pinned": pinned,
+                "recorded_at": _utc_now(),
+            }
+            data["sessions"][session_id] = session.to_dict()
+            data.setdefault("timeline", []).append(
+                f"{session.issue_id} Snapshot Payload for {session_id} "
+                f"{'pinned' if pinned else 'unpinned'}."
+            )
+            self._write_runtime_payload(data)
+            self.sessions[session_id] = session
+            self.timeline = list(data.get("timeline", []))
+            return session
+
+    def retirement_storage_inspection(self) -> dict[str, Any]:
+        """Return deterministic, read-only Snapshot Payload storage details."""
+
+        with self._runtime_lock(exclusive=False):
+            data = self._read_runtime_payload()
+        sessions = {
+            session_id: LocalAgentSession.from_dict(raw)
+            for session_id, raw in data.get("sessions", {}).items()
+            if isinstance(raw, dict)
+        }
+        storage = self._retirement_storage_from_payload(data)
+        now = datetime.now(timezone.utc)
+        records: list[dict[str, Any]] = []
+        reserved_bytes = 0
+        for session in sessions.values():
+            if session.preservation_budget.get("bound") is True:
+                reserved_bytes += int(
+                    session.preservation_budget.get("reserved_bytes", 0)
+                )
+            self._ensure_snapshot_storage_metadata(session)
+            snapshot = session.retirement.get("snapshot", {})
+            if not snapshot:
+                continue
+            disposition = str(snapshot.get("payload_disposition", "retained"))
+            expires_at = str(snapshot.get("expires_at", ""))
+            try:
+                expires = datetime.fromisoformat(expires_at)
+                if expires.tzinfo is None:
+                    raise ValueError
+                expired = expires.astimezone(timezone.utc) <= now
+            except ValueError:
+                expired = False
+            records.append(
+                {
+                    "mission_id": self.mission_id,
+                    "session_id": session.session_id,
+                    "phase": session.retirement.get("phase", "active"),
+                    "worktree_identity": snapshot.get("worktree_identity", ""),
+                    "manifest_sha256": snapshot.get("manifest_sha256", ""),
+                    "snapshot_bytes": int(snapshot.get("snapshot_bytes", 0)),
+                    "created_at": str(snapshot.get("created_at", "")),
+                    "expires_at": expires_at,
+                    "expired": expired,
+                    "pinned": snapshot.get("pinned") is True,
+                    "payload_disposition": disposition,
+                    "reclaimed_at": str(snapshot.get("reclaimed_at", "")),
+                    "reclamation_reason": str(
+                        snapshot.get("reclamation_reason", "")
+                    ),
+                }
+            )
+        retained = [
+            record
+            for record in records
+            if record["payload_disposition"] == "retained"
+        ]
+        usage_bytes = sum(record["snapshot_bytes"] for record in retained)
+        largest = sorted(
+            retained,
+            key=lambda record: (-record["snapshot_bytes"], record["session_id"]),
+        )[:10]
+        expiry = sorted(
+            (
+                record
+                for record in retained
+                if record["expires_at"] and not record["pinned"]
+            ),
+            key=lambda record: (record["expires_at"], record["session_id"]),
+        )
+        attention = storage.get("attention", {})
+        return {
+            "schema_version": 1,
+            "policy": {
+                "retention_seconds": self.snapshot_storage_retention_seconds,
+                "budget_bytes": self.snapshot_storage_budget_bytes,
+            },
+            "usage": {
+                "payload_bytes": usage_bytes,
+                "reserved_bytes": reserved_bytes,
+                "committed_bytes": usage_bytes + reserved_bytes,
+                "available_bytes": max(
+                    0,
+                    self.snapshot_storage_budget_bytes
+                    - usage_bytes
+                    - reserved_bytes,
+                ),
+            },
+            "counts": {
+                "records": len(records),
+                "retained_payloads": len(retained),
+                "reclaimed_payloads": sum(
+                    record["payload_disposition"] == "reclaimed"
+                    for record in records
+                ),
+                "pinned_payloads": sum(record["pinned"] for record in retained),
+                "expired_eligible_payloads": sum(
+                    record["expired"]
+                    and not record["pinned"]
+                    and record["phase"] == "retired"
+                    for record in retained
+                ),
+            },
+            "expiry": expiry,
+            "largest_payloads": largest,
+            "reclamation": {
+                "count": storage["reclamation_count"],
+                "bytes": storage["reclaimed_bytes"],
+                "recent": list(storage["recent_reclamations"]),
+            },
+            "blockers": [dict(attention)] if attention.get("active") else [],
+        }
+
+    def inspect_retirement_unit(self, session_id: str) -> dict[str, Any]:
+        session = self._refresh_persisted_session(session_id)
+        phase = str(session.retirement.get("phase", "active"))
+        blocked = phase in {"preservation-blocked", "retirement-blocked"}
+        snapshot = dict(session.retirement.get("snapshot", {}))
+        return {
+            "schema_version": 1,
+            "mission_id": self.mission_id,
+            "session_id": session.session_id,
+            "session_revision": session.revision,
+            "phase": phase,
+            "terminal_status": session.status,
+            "blocked_reason": str(session.retirement.get("blocked_reason", "")),
+            "worktree_path": str(session.worktree_path),
+            "worktree_identity": session.worktree_identity,
+            "runner_boundary": dict(session.retirement.get("runner_boundary", {})),
+            "preservation_budget": dict(session.preservation_budget),
+            "retirement_record": snapshot,
+            "actions": {
+                "retry": blocked,
+                "inspect": True,
+                "export": blocked,
+                "discard": blocked,
+            },
+        }
+
+    def export_retirement_unit(
+        self,
+        session_id: str,
+        *,
+        destination: Path,
+        expected_revision: int,
+        correlation_id: str,
+    ) -> dict[str, Any]:
+        """Materialize one blocked unit from its verified retained payload."""
+
+        if not correlation_id.strip():
+            raise AlbertError("Retirement export correlation id is required.")
+        destination = destination.resolve(strict=False)
+        with self._retirement_effect_lock(session_id):
+            with self._runtime_lock(exclusive=True):
+                data = self._read_runtime_payload()
+                raw_session = data.get("sessions", {}).get(session_id)
+                if not isinstance(raw_session, dict):
+                    raise AlbertError(f"Unknown Local Agent session: {session_id}")
+                session = LocalAgentSession.from_dict(raw_session)
+                receipts = session.retirement.setdefault("action_receipts", {})
+                existing = receipts.get(correlation_id)
+                if existing:
+                    if (
+                        existing.get("action") == "export"
+                        and existing.get("expected_revision") == expected_revision
+                        and existing.get("destination") == str(destination / "repository")
+                        and isinstance(existing.get("result_revision"), int)
+                        and not isinstance(existing.get("result_revision"), bool)
+                        and existing["result_revision"] <= session.revision
+                    ):
+                        return dict(existing)
+                    raise AlbertError(
+                        "Retirement action correlation id was reused for a different request."
+                    )
+                export_intent = session.retirement.get("export_intent", {})
+                resuming_intent = bool(
+                    export_intent
+                    and export_intent.get("correlation_id") == correlation_id
+                    and export_intent.get("expected_revision") == expected_revision
+                    and export_intent.get("destination") == str(destination)
+                    and export_intent.get("claim_revision") == session.revision
+                )
+                if export_intent and not resuming_intent:
+                    raise AlbertError(
+                        "Retirement export already has a different durable intent."
+                    )
+                if not resuming_intent:
+                    self._require_lifecycle_revision(session, expected_revision)
+                if session.retirement.get("phase") not in {
+                    "preservation-blocked",
+                    "retirement-blocked",
+                }:
+                    raise LaunchBlockedError(
+                        f"{session_id} is not a blocked Retirement Unit."
+                    )
+                snapshot = session.retirement.get("snapshot", {})
+                if (
+                    not snapshot
+                    or snapshot.get("payload_disposition", "retained") != "retained"
+                ):
+                    raise LaunchBlockedError(
+                        f"{session_id} does not have a retained verified payload to export."
+                    )
+                if (
+                    not resuming_intent
+                    and (destination.exists() or destination.is_symlink())
+                ):
+                    raise AlbertError("Retirement export destination must not exist.")
+                snapshot_revision = int(
+                    snapshot.get("session_revision", session.revision)
+                )
+                store = self._retirement_snapshot_store(session, snapshot_revision)
+                if resuming_intent:
+                    if (
+                        export_intent.get("manifest_sha256")
+                        != snapshot.get("manifest_sha256")
+                    ):
+                        raise AlbertError(
+                            "Retirement export intent no longer matches its snapshot."
+                        )
+                    claim_revision = int(export_intent["claim_revision"])
+                else:
+                    session.retirement["export_intent"] = {
+                        "correlation_id": correlation_id,
+                        "expected_revision": expected_revision,
+                        "destination": str(destination),
+                        "manifest_sha256": snapshot["manifest_sha256"],
+                    }
+                    session.revision += 1
+                    claim_revision = session.revision
+                    session.retirement["export_intent"][
+                        "claim_revision"
+                    ] = claim_revision
+                    data["sessions"][session_id] = session.to_dict()
+                    self._write_runtime_payload(data)
+                    self.sessions[session_id] = session
+
+            marker_path = destination / "retirement-export.json"
+            recovered_materialization = False
+            created_destination = False
+            try:
+                if destination.exists() or destination.is_symlink():
+                    if destination.is_symlink() or not destination.is_dir():
+                        raise AlbertError(
+                            "Retirement export destination boundary changed."
+                        )
+                    if marker_path.is_file() and not marker_path.is_symlink():
+                        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+                        expected_marker = {
+                            "schema_version": 1,
+                            "mission_id": self.mission_id,
+                            "session_id": session_id,
+                            "correlation_id": correlation_id,
+                            "expected_revision": expected_revision,
+                            "manifest_sha256": snapshot["manifest_sha256"],
+                        }
+                        if any(
+                            marker.get(field_name) != value
+                            for field_name, value in expected_marker.items()
+                        ) or not (destination / "repository").is_dir():
+                            raise AlbertError(
+                                "Retirement export recovery marker is invalid."
+                            )
+                        recovered_materialization = True
+                    elif set(destination.iterdir()) == {destination / "repository"}:
+                        materialized = destination / "repository"
+                        store.verify_materialized_repository(snapshot, materialized)
+                        marker = {
+                            "schema_version": 1,
+                            "mission_id": self.mission_id,
+                            "session_id": session_id,
+                            "correlation_id": correlation_id,
+                            "expected_revision": expected_revision,
+                            "manifest_sha256": snapshot["manifest_sha256"],
+                            "exported_at": _utc_now(),
+                        }
+                        self._write(
+                            marker_path,
+                            json.dumps(marker, indent=2, sort_keys=True) + "\n",
+                        )
+                        recovered_materialization = True
+                    elif any(destination.iterdir()):
+                        raise AlbertError(
+                            "Retirement export destination changed before recovery."
+                        )
+                else:
+                    destination.mkdir(parents=True)
+                    created_destination = True
+                if recovered_materialization:
+                    materialized = destination / "repository"
+                else:
+                    materialized = store.materialize(snapshot, destination)
+                    marker = {
+                        "schema_version": 1,
+                        "mission_id": self.mission_id,
+                        "session_id": session_id,
+                        "correlation_id": correlation_id,
+                        "expected_revision": expected_revision,
+                        "manifest_sha256": snapshot["manifest_sha256"],
+                        "exported_at": _utc_now(),
+                    }
+                    self._write(
+                        marker_path,
+                        json.dumps(marker, indent=2, sort_keys=True) + "\n",
+                    )
+            except (OSError, RetirementSnapshotError) as exc:
+                if (
+                    created_destination
+                    and destination.is_dir()
+                    and not destination.is_symlink()
+                ):
+                    shutil.rmtree(destination)
+                raise AlbertError(
+                    f"{session_id} retirement export failed: {exc}"
+                ) from exc
+
+            with self._runtime_lock(exclusive=True):
+                data = self._read_runtime_payload()
+                raw_latest = data.get("sessions", {}).get(session_id)
+                if not isinstance(raw_latest, dict):
+                    raise AlbertError(f"Unknown Local Agent session: {session_id}")
+                latest = LocalAgentSession.from_dict(raw_latest)
+                if latest.revision != claim_revision:
+                    raise LaunchBlockedError(
+                        f"{session_id} lifecycle boundary changed during export."
+                    )
+                latest.revision += 1
+                latest.retirement["export_intent"] = {}
+                receipt = {
+                    "action": "export",
+                    "expected_revision": expected_revision,
+                    "result_revision": latest.revision,
+                    "destination": str(materialized),
+                    "manifest_sha256": snapshot["manifest_sha256"],
+                    "recorded_at": _utc_now(),
+                }
+                latest.retirement.setdefault("action_receipts", {})[
+                    correlation_id
+                ] = receipt
+                data["sessions"][session_id] = latest.to_dict()
+                data.setdefault("timeline", []).append(
+                    f"{latest.issue_id} blocked Retirement Unit {session_id} exported."
+                )
+                self._write_runtime_payload(data)
+                self.sessions[session_id] = latest
+                self.timeline = list(data.get("timeline", []))
+                return receipt
+
+    def retry_retirement_unit(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int,
+        correlation_id: str,
+    ) -> LocalAgentSession:
+        """Authorize one fresh bounded attempt for an exact blocked unit."""
+
+        if not correlation_id.strip():
+            raise AlbertError("Retirement retry correlation id is required.")
+        with self._retirement_action_lock(session_id):
+            with self._runtime_lock(exclusive=True):
+                data = self._read_runtime_payload()
+                raw_session = data.get("sessions", {}).get(session_id)
+                if not isinstance(raw_session, dict):
+                    raise AlbertError(f"Unknown Local Agent session: {session_id}")
+                session = LocalAgentSession.from_dict(raw_session)
+                receipts = session.retirement.setdefault("action_receipts", {})
+                existing = receipts.get(correlation_id)
+                if existing:
+                    if (
+                        existing.get("action") == "retry"
+                        and existing.get("expected_revision") == expected_revision
+                        and isinstance(existing.get("result_revision"), int)
+                        and not isinstance(existing.get("result_revision"), bool)
+                        and existing["result_revision"] <= session.revision
+                    ):
+                        return session
+                    raise AlbertError(
+                        "Retirement action correlation id was reused for a different request."
+                    )
+                retry_intent = session.retirement.get("retry_intent", {})
+                resuming_intent = bool(
+                    retry_intent
+                    and retry_intent.get("correlation_id") == correlation_id
+                    and retry_intent.get("expected_revision") == expected_revision
+                )
+                if retry_intent and not resuming_intent:
+                    raise AlbertError(
+                        "Retirement retry already has a different durable intent."
+                    )
+                if resuming_intent:
+                    origin_phase = str(retry_intent["origin_phase"])
+                else:
+                    self._require_lifecycle_revision(session, expected_revision)
+                    origin_phase = str(session.retirement.get("phase"))
+                    if origin_phase not in {
+                        "preservation-blocked",
+                        "retirement-blocked",
+                    }:
+                        raise LaunchBlockedError(
+                            f"{session_id} is not a blocked Retirement Unit."
+                        )
+                    if origin_phase == "retirement-blocked":
+                        snapshot = session.retirement.get("snapshot", {})
+                        if (
+                            snapshot.get("payload_disposition", "retained")
+                            != "retained"
+                        ):
+                            raise LaunchBlockedError(
+                                f"{session_id} Snapshot Payload is not retained for retry."
+                            )
+                        session.retirement["phase"] = "preserved"
+                    else:
+                        session.retirement["phase"] = "active"
+                        session.retirement["snapshot"] = {}
+                        session.retirement["preservation_intent"] = {}
+                    session.retirement["retirement_attempts"] = 0
+                    session.retirement["blocked_reason"] = ""
+                    session.retirement["retry_intent"] = {
+                        "correlation_id": correlation_id,
+                        "expected_revision": expected_revision,
+                        "origin_phase": origin_phase,
+                    }
+                    session.revision += 1
+                    session.retirement["retry_intent"][
+                        "claim_revision"
+                    ] = session.revision
+                    data["sessions"][session_id] = session.to_dict()
+                    data.setdefault("timeline", []).append(
+                        f"{session.issue_id} explicit retirement retry authorized "
+                        f"for {session_id}."
+                    )
+                    self._write_runtime_payload(data)
+                    self.sessions[session_id] = session
+                    self.timeline = list(data.get("timeline", []))
+
+            current_phase = self._refresh_persisted_session(session_id).retirement.get(
+                "phase"
+            )
+            if current_phase not in {
+                "retired",
+                "preservation-blocked",
+                "retirement-blocked",
+            }:
+                if origin_phase == "retirement-blocked":
+                    self._retire_with_short_retry(session_id)
+                else:
+                    self.reconcile_retirement_unit(session_id)
+
+            with self._runtime_lock(exclusive=True):
+                data = self._read_runtime_payload()
+                raw_result = data.get("sessions", {}).get(session_id)
+                if not isinstance(raw_result, dict):
+                    raise AlbertError(f"Unknown Local Agent session: {session_id}")
+                result = LocalAgentSession.from_dict(raw_result)
+                result.revision += 1
+                result.retirement["retry_intent"] = {}
+                result.retirement.setdefault("action_receipts", {})[
+                    correlation_id
+                ] = {
+                    "action": "retry",
+                    "expected_revision": expected_revision,
+                    "result_revision": result.revision,
+                    "result_phase": result.retirement.get("phase"),
+                    "recorded_at": _utc_now(),
+                }
+                data["sessions"][session_id] = result.to_dict()
+                self._write_runtime_payload(data)
+                self.sessions[session_id] = result
+                return result
+
+    def discard_retained_worktree(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int,
+        correlation_id: str,
+        confirmation: str,
+        reason: str,
+    ) -> LocalAgentSession:
+        """Irreversibly discard one exact blocked and independently quiesced worktree."""
+
+        if confirmation != session_id:
+            raise AlbertError(
+                "Retained Worktree Discard confirmation must equal the exact session id."
+            )
+        if not correlation_id.strip() or not reason.strip():
+            raise AlbertError(
+                "Retained Worktree Discard requires correlation and an explicit reason."
+            )
+        with self._retirement_effect_lock(session_id):
+            with self._runtime_lock(exclusive=True):
+                data = self._read_runtime_payload()
+                raw_session = data.get("sessions", {}).get(session_id)
+                if not isinstance(raw_session, dict):
+                    raise AlbertError(f"Unknown Local Agent session: {session_id}")
+                session = LocalAgentSession.from_dict(raw_session)
+                receipts = session.retirement.setdefault("action_receipts", {})
+                existing = receipts.get(correlation_id)
+                if existing:
+                    if (
+                        existing.get("action") == "discard"
+                        and existing.get("expected_revision") == expected_revision
+                        and existing.get("confirmation") == confirmation
+                        and existing.get("reason") == reason.strip()
+                        and isinstance(existing.get("result_revision"), int)
+                        and not isinstance(existing.get("result_revision"), bool)
+                        and existing["result_revision"] <= session.revision
+                    ):
+                        return session
+                    raise AlbertError(
+                        "Retirement action correlation id was reused for a different request."
+                    )
+                discard_intent = session.retirement.get("discard_intent", {})
+                resuming_intent = bool(
+                    discard_intent
+                    and discard_intent.get("correlation_id") == correlation_id
+                    and discard_intent.get("expected_revision") == expected_revision
+                    and discard_intent.get("confirmation") == confirmation
+                    and discard_intent.get("reason") == reason.strip()
+                    and discard_intent.get("claim_revision") == session.revision
+                )
+                if discard_intent and not resuming_intent:
+                    raise AlbertError(
+                        "Retained Worktree Discard already has a different durable intent."
+                    )
+                if not resuming_intent:
+                    self._require_lifecycle_revision(session, expected_revision)
+                if session.retirement.get("phase") not in {
+                    "preservation-blocked",
+                    "retirement-blocked",
+                }:
+                    raise LaunchBlockedError(
+                        f"{session_id} is not a blocked Retirement Unit."
+                    )
+                if session.status not in {
+                    "completed",
+                    "evidence-ready",
+                    "failed",
+                    "cancelled",
+                    "reviewed",
+                }:
+                    raise LaunchBlockedError(
+                        f"{session_id} is not terminal enough for discard."
+                    )
+                expected_path = self._session_worktree_path(session_id)
+                if (
+                    _runtime_identity_path(session.worktree_path.resolve(strict=False))
+                    != _runtime_identity_path(expected_path)
+                    or _runtime_identity_path(session.worktree_path.resolve(strict=False))
+                    == _runtime_identity_path(self.target_repo)
+                ):
+                    raise LaunchBlockedError(
+                        "Retained Worktree Discard requires the exact managed path and "
+                        "cannot target the Coding Workspace."
+                    )
+                owner_signal, process_group_signal = self._probe_retirement_quiescence(
+                    session.retirement.get("runner_boundary", {})
+                )
+                if owner_signal != "absent" or process_group_signal != "absent":
+                    raise LaunchBlockedError(
+                        "Runner Quiescence was not independently corroborated for "
+                        f"discard: owner={owner_signal}, "
+                        f"process-group={process_group_signal}."
+                    )
+                if resuming_intent:
+                    claim_revision = int(discard_intent["claim_revision"])
+                else:
+                    session.retirement["discard_intent"] = {
+                        "correlation_id": correlation_id,
+                        "expected_revision": expected_revision,
+                        "confirmation": confirmation,
+                        "reason": reason.strip(),
+                    }
+                    session.revision += 1
+                    claim_revision = session.revision
+                    session.retirement["discard_intent"][
+                        "claim_revision"
+                    ] = claim_revision
+                    data["sessions"][session_id] = session.to_dict()
+                    data.setdefault("timeline", []).append(
+                        f"{session.issue_id} irreversible Retained Worktree Discard "
+                        f"claimed for {session_id}."
+                    )
+                    self._write_runtime_payload(data)
+                    self.sessions[session_id] = session
+                    self.timeline = list(data.get("timeline", []))
+
+            path = session.worktree_path
+            effect_path = self._retirement_removal_effect_path(session_id)
+            try:
+                path_present = path.exists() or path.is_symlink()
+                effect_present = effect_path.exists() or effect_path.is_symlink()
+                if path_present and effect_present:
+                    raise AlbertError(
+                        "Retained Worktree Discard found both original and effect paths."
+                    )
+                git_supported = (self.target_repo / ".git").exists()
+                registration_present = bool(
+                    git_supported
+                    and (
+                        self._git_worktree_registration_present_at(path)
+                        or self._git_worktree_registration_present_at(effect_path)
+                    )
+                )
+                effect_path.parent.mkdir(parents=True, exist_ok=True)
+                if registration_present:
+                    if path_present:
+                        completed = _run_bounded_process(
+                            [
+                                "git",
+                                "-C",
+                                str(self.target_repo),
+                                "worktree",
+                                "move",
+                                str(path),
+                                str(effect_path),
+                            ],
+                            timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+                            output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
+                        )
+                        if completed.returncode != 0:
+                            raise AlbertError(
+                                "Exact Git worktree isolation failed before discard."
+                            )
+                        effect_present = True
+                    if effect_present:
+                        completed = _run_bounded_process(
+                            [
+                                "git",
+                                "-C",
+                                str(self.target_repo),
+                                "worktree",
+                                "remove",
+                                "--force",
+                                str(effect_path),
+                            ],
+                            timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+                            output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
+                        )
+                        if completed.returncode != 0:
+                            raise AlbertError(
+                                "Exact force Git worktree removal failed during discard."
+                            )
+                else:
+                    if path_present:
+                        path.replace(effect_path)
+                        effect_present = True
+                    if effect_present:
+                        if path.exists() or path.is_symlink():
+                            raise AlbertError(
+                                "Retained Worktree Discard path changed after isolation."
+                            )
+                        self._assert_no_open_retirement_handles(effect_path)
+                        if effect_path.is_symlink() or not effect_path.is_dir():
+                            raise AlbertError(
+                                "Retained Worktree Discard effect is not an exact directory."
+                            )
+                        shutil.rmtree(effect_path)
+                if (
+                    path.exists()
+                    or path.is_symlink()
+                    or effect_path.exists()
+                    or effect_path.is_symlink()
+                    or (
+                        git_supported
+                        and (
+                            self._git_worktree_registration_present_at(path)
+                            or self._git_worktree_registration_present_at(effect_path)
+                        )
+                    )
+                ):
+                    raise AlbertError(
+                        "Retained Worktree Discard did not prove exact path and "
+                        "registration absence."
+                    )
+            except (OSError, AlbertError) as exc:
+                with self._runtime_lock(exclusive=True):
+                    data = self._read_runtime_payload()
+                    raw_latest = data.get("sessions", {}).get(session_id)
+                    if isinstance(raw_latest, dict):
+                        latest = LocalAgentSession.from_dict(raw_latest)
+                        if latest.revision == claim_revision:
+                            latest.retirement["blocked_reason"] = str(exc)
+                            data["sessions"][session_id] = latest.to_dict()
+                            self._write_runtime_payload(data)
+                            self.sessions[session_id] = latest
+                raise
+
+            with self._runtime_lock(exclusive=True):
+                data = self._read_runtime_payload()
+                raw_latest = data.get("sessions", {}).get(session_id)
+                if not isinstance(raw_latest, dict):
+                    raise AlbertError(f"Unknown Local Agent session: {session_id}")
+                latest = LocalAgentSession.from_dict(raw_latest)
+                if latest.revision != claim_revision:
+                    raise LaunchBlockedError(
+                        f"{session_id} lifecycle boundary changed during discard."
+                    )
+                discarded_at = _utc_now()
+                latest.retirement["phase"] = "retired"
+                latest.retirement["retired_at"] = discarded_at
+                latest.retirement["discarded_at"] = discarded_at
+                latest.retirement["discard_reason"] = reason.strip()
+                latest.retirement["removal_kind"] = "retained-worktree-discard"
+                latest.retirement["blocked_reason"] = ""
+                latest.retirement["discard_intent"] = {}
+                if latest.preservation_budget.get("bound") is True:
+                    latest.preservation_budget["state"] = "discarded"
+                    latest.preservation_budget["bound"] = False
+                    latest.preservation_budget["discarded_at"] = discarded_at
+                latest.revision += 1
+                latest.retirement.setdefault("action_receipts", {})[
+                    correlation_id
+                ] = {
+                    "action": "discard",
+                    "expected_revision": expected_revision,
+                    "result_revision": latest.revision,
+                    "confirmation": confirmation,
+                    "reason": reason.strip(),
+                    "recorded_at": discarded_at,
+                }
+                data["sessions"][session_id] = latest.to_dict()
+                data.setdefault("timeline", []).append(
+                    f"{latest.issue_id} Retained Worktree {session_id} explicitly discarded."
+                )
+                self._write_runtime_payload(data)
+                self.sessions[session_id] = latest
+                self.timeline = list(data.get("timeline", []))
+                return latest
+
+    def _admit_retirement_unit(self) -> None:
+        self._reclaim_snapshot_payloads(required_bytes=_PRESERVATION_BUDGET_BYTES)
+
+    def _reclaim_snapshot_payloads(self, *, required_bytes: int) -> None:
+        """Reclaim expired unpinned retired payloads until one reservation fits."""
+
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_sessions = data.setdefault("sessions", {})
+            sessions = {
+                session_id: LocalAgentSession.from_dict(raw)
+                for session_id, raw in raw_sessions.items()
+                if isinstance(raw, dict)
+            }
+            storage = self._retirement_storage_from_payload(data)
+            changed = False
+            for session_id, session in sessions.items():
+                if self._ensure_snapshot_storage_metadata(session):
+                    raw_sessions[session_id] = session.to_dict()
+                    changed = True
+            retained_usage = sum(
+                int(session.retirement.get("snapshot", {}).get("snapshot_bytes", 0))
+                for session in sessions.values()
+                if session.retirement.get("snapshot", {}).get(
+                    "payload_disposition", "retained"
+                )
+                == "retained"
+            )
+            reserved_usage = sum(
+                int(session.preservation_budget.get("reserved_bytes", 0))
+                for session in sessions.values()
+                if session.preservation_budget.get("bound") is True
+            )
+            now = datetime.now(timezone.utc)
+            eligible: list[tuple[datetime, str, LocalAgentSession]] = []
+            for session in sessions.values():
+                snapshot = session.retirement.get("snapshot", {})
+                if (
+                    not snapshot
+                    or snapshot.get("payload_disposition", "retained") != "retained"
+                    or snapshot.get("pinned") is True
+                    or session.retirement.get("phase") != "retired"
+                ):
+                    continue
+                try:
+                    expires = datetime.fromisoformat(str(snapshot.get("expires_at", "")))
+                    created = datetime.fromisoformat(str(snapshot.get("created_at", "")))
+                    if expires.tzinfo is None or created.tzinfo is None:
+                        raise ValueError
+                except ValueError:
+                    continue
+                if expires.astimezone(timezone.utc) <= now:
+                    eligible.append(
+                        (created.astimezone(timezone.utc), session.session_id, session)
+                    )
+            eligible.sort(key=lambda item: (item[0], item[1]))
+            for _created, session_id, session in eligible:
+                pending_intent = storage["reclamation_intents"].get(session_id)
+                if (
+                    retained_usage + reserved_usage + required_bytes
+                    <= self.snapshot_storage_budget_bytes
+                    and pending_intent is None
+                ):
+                    break
+                snapshot = session.retirement["snapshot"]
+                snapshot_revision = int(
+                    snapshot.get("session_revision", session.revision)
+                )
+                store = self._retirement_snapshot_store(session, snapshot_revision)
+                expected_intent = {
+                    "session_id": session_id,
+                    "manifest_sha256": snapshot["manifest_sha256"],
+                    "payload_path": snapshot["payload_path"],
+                    "snapshot_bytes": int(snapshot["snapshot_bytes"]),
+                }
+                if pending_intent is None:
+                    pending_intent = {
+                        **expected_intent,
+                        "claimed_at": _utc_now(),
+                    }
+                    storage["reclamation_intents"][session_id] = pending_intent
+                    data["retirement_storage"] = storage
+                    self._write_runtime_payload(data)
+                elif any(
+                    pending_intent.get(field_name) != value
+                    for field_name, value in expected_intent.items()
+                ):
+                    storage["attention"] = {
+                        "active": True,
+                        "code": "snapshot-reclamation-failed",
+                        "session_id": session_id,
+                        "message": (
+                            "Snapshot Payload reclamation intent no longer matches "
+                            "the compact Retirement Record."
+                        ),
+                        "recorded_at": _utc_now(),
+                    }
+                    continue
+                try:
+                    expected_parent = (
+                        self.runtime_dir / "retirement" / "payloads"
+                    ).resolve(strict=False)
+                    if (
+                        store.payload_root.parent.resolve(strict=False)
+                        != expected_parent
+                    ):
+                        raise RetirementSnapshotError(
+                            "Snapshot Payload reclamation boundary is invalid."
+                        )
+                    payload_present = (
+                        store.payload_root.exists() or store.payload_root.is_symlink()
+                    )
+                    if payload_present:
+                        store.verify(snapshot)
+                    if (
+                        store.payload_root.is_symlink()
+                        or (payload_present and not store.payload_root.is_dir())
+                    ):
+                        raise RetirementSnapshotError(
+                            "Snapshot Payload reclamation boundary is invalid."
+                        )
+                    reclaimed_bytes = int(snapshot["snapshot_bytes"])
+                    if payload_present:
+                        shutil.rmtree(store.payload_root)
+                    if store.payload_root.exists() or store.payload_root.is_symlink():
+                        raise RetirementSnapshotError(
+                            "Snapshot Payload remained after reclamation."
+                        )
+                except (OSError, RetirementSnapshotError) as exc:
+                    storage["attention"] = {
+                        "active": True,
+                        "code": "snapshot-reclamation-failed",
+                        "session_id": session_id,
+                        "message": str(exc),
+                        "recorded_at": _utc_now(),
+                    }
+                    continue
+                reclaimed_at = _utc_now()
+                snapshot["payload_disposition"] = "reclaimed"
+                snapshot["reclaimed_at"] = reclaimed_at
+                snapshot["reclamation_reason"] = "retention-expired-capacity-reclamation"
+                session.revision += 1
+                raw_sessions[session_id] = session.to_dict()
+                retained_usage -= reclaimed_bytes
+                storage["reclamation_intents"].pop(session_id, None)
+                storage["reclamation_count"] += 1
+                storage["reclaimed_bytes"] += reclaimed_bytes
+                storage["recent_reclamations"] = [
+                    *storage["recent_reclamations"],
+                    {
+                        "session_id": session_id,
+                        "reclaimed_at": reclaimed_at,
+                        "snapshot_bytes": reclaimed_bytes,
+                        "reason": "retention-expired-capacity-reclamation",
+                    },
+                ][-64:]
+                data.setdefault("timeline", []).append(
+                    f"{session.issue_id} expired Snapshot Payload reclaimed for "
+                    f"{session_id}; compact Retirement Record retained."
+                )
+                data["retirement_storage"] = storage
+                self._write_runtime_payload(data)
+                changed = True
+            committed = retained_usage + reserved_usage + required_bytes
+            if committed > self.snapshot_storage_budget_bytes:
+                storage["attention"] = {
+                    "active": True,
+                    "code": "snapshot-storage-exhausted",
+                    "message": (
+                        "Snapshot Storage Budget is exhausted by protected or pinned "
+                        "payloads and bound Preservation Budgets."
+                    ),
+                    "required_bytes": required_bytes,
+                    "committed_bytes": retained_usage + reserved_usage,
+                    "budget_bytes": self.snapshot_storage_budget_bytes,
+                    "recorded_at": _utc_now(),
+                }
+                data["retirement_storage"] = storage
+                self._write_runtime_payload(data)
+                self.retirement_storage = storage
+                self.sessions = {
+                    session_id: LocalAgentSession.from_dict(raw)
+                    for session_id, raw in raw_sessions.items()
+                }
+                self.timeline = list(data.get("timeline", []))
+                raise LaunchBlockedError(storage["attention"]["message"])
+            if storage.get("attention", {}).get("code") == "snapshot-storage-exhausted":
+                storage["attention"] = {}
+                changed = True
+            if changed:
+                data["retirement_storage"] = storage
+                self._write_runtime_payload(data)
+            self.retirement_storage = storage
+            self.sessions = {
+                session_id: LocalAgentSession.from_dict(raw)
+                for session_id, raw in raw_sessions.items()
+            }
+            self.timeline = list(data.get("timeline", []))
 
     def reconcile_retirement_unit(self, session_id: str) -> LocalAgentSession:
         """Advance one eligible Retirement Unit without repeating proven effects."""

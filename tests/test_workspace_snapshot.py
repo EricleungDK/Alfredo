@@ -11314,6 +11314,7 @@ Wait for the accepted dependency.
         run.assert_not_called()
         self.assertIn("/skills [query]", help_message.message.content)
         self.assertIn("/run <command>", help_message.message.content)
+        self.assertIn("/storage", help_message.message.content)
         self.assertEqual(help_message.route.intent, "discussion")
         self.assertEqual(help_message.route.task_request, "")
         self.assertEqual(help_message.route.acceptance_criteria, ())
@@ -11333,7 +11334,26 @@ Wait for the accepted dependency.
         )
         self.assertIn("Workspace: ready", status_message.message.content)
         self.assertIn("Ready work:", status_message.message.content)
+        self.assertIn("Snapshot storage:", status_message.message.content)
         self.assertEqual(status_message.route.intent, "discussion")
+
+        storage_prompt = history.append(
+            role="user",
+            content="/storage",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        storage_message = AgentConsoleResponseService(snapshots).respond(
+            message_id=storage_prompt.message_id,
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        self.assertIn("Snapshot storage inspection", storage_message.message.content)
+        self.assertIn("Retention: 30 days", storage_message.message.content)
+        self.assertIn("Budget: 5.00 GiB", storage_message.message.content)
+        self.assertIn("Largest payloads: none", storage_message.message.content)
 
         snapshots._primary_mission.agent_registry.agents.append(
             workspace_module.AgentConfig(

@@ -581,6 +581,66 @@ def build_parser() -> argparse.ArgumentParser:
     retirement_verify.add_argument("--session-id", required=True)
     retirement_verify.add_argument("--session-mission-id", default="")
 
+    retirement_storage = subparsers.add_parser(
+        "retirement-storage",
+        help="Return deterministic Snapshot Payload usage and policy inspection as JSON.",
+    )
+    _add_common_args(retirement_storage)
+
+    retirement_inspect = subparsers.add_parser(
+        "retirement-inspect",
+        help="Inspect one Retirement Unit and its available governed actions as JSON.",
+    )
+    _add_common_args(retirement_inspect)
+    retirement_inspect.add_argument("--session-id", required=True)
+    retirement_inspect.add_argument("--session-mission-id", default="")
+
+    retirement_pin = subparsers.add_parser(
+        "retirement-pin",
+        help="Pin or unpin one retained Snapshot Payload.",
+    )
+    _add_common_args(retirement_pin)
+    retirement_pin.add_argument("--session-id", required=True)
+    retirement_pin.add_argument("--session-mission-id", default="")
+    retirement_pin.add_argument(
+        "--pin-state", required=True, choices=["pinned", "unpinned"]
+    )
+    retirement_pin.add_argument("--expected-revision", required=True, type=int)
+    retirement_pin.add_argument("--correlation-id", required=True)
+
+    retirement_retry = subparsers.add_parser(
+        "retirement-retry",
+        help="Authorize one fresh bounded attempt for a blocked Retirement Unit.",
+    )
+    _add_common_args(retirement_retry)
+    retirement_retry.add_argument("--session-id", required=True)
+    retirement_retry.add_argument("--session-mission-id", default="")
+    retirement_retry.add_argument("--expected-revision", required=True, type=int)
+    retirement_retry.add_argument("--correlation-id", required=True)
+
+    retirement_export = subparsers.add_parser(
+        "retirement-export",
+        help="Export one blocked Retirement Unit from verified preserved material.",
+    )
+    _add_common_args(retirement_export)
+    retirement_export.add_argument("--session-id", required=True)
+    retirement_export.add_argument("--session-mission-id", default="")
+    retirement_export.add_argument("--destination", required=True)
+    retirement_export.add_argument("--expected-revision", required=True, type=int)
+    retirement_export.add_argument("--correlation-id", required=True)
+
+    retirement_discard = subparsers.add_parser(
+        "retirement-discard",
+        help="Irreversibly discard one exact blocked and quiesced retained worktree.",
+    )
+    _add_common_args(retirement_discard)
+    retirement_discard.add_argument("--session-id", required=True)
+    retirement_discard.add_argument("--session-mission-id", default="")
+    retirement_discard.add_argument("--expected-revision", required=True, type=int)
+    retirement_discard.add_argument("--correlation-id", required=True)
+    retirement_discard.add_argument("--confirmation", required=True)
+    retirement_discard.add_argument("--reason", required=True)
+
     mission_drafts = subparsers.add_parser(
         "mission-drafts",
         help="Return the Mission Draft projection as JSON.",
@@ -729,6 +789,16 @@ def _add_common_args(
         "--retention-grace-seconds",
         type=int,
         default=72 * 60 * 60,
+    )
+    parser.add_argument(
+        "--snapshot-storage-retention-seconds",
+        type=int,
+        default=30 * 24 * 60 * 60,
+    )
+    parser.add_argument(
+        "--snapshot-storage-budget-bytes",
+        type=int,
+        default=5 * 1024 * 1024 * 1024,
     )
 
 
@@ -1017,6 +1087,8 @@ def _run(args: argparse.Namespace) -> int:
         issues_dir=Path(args.issues_dir) if args.issues_dir else None,
         agent_availability_snapshot=availability_snapshot,
         retention_grace_seconds=args.retention_grace_seconds,
+        snapshot_storage_retention_seconds=args.snapshot_storage_retention_seconds,
+        snapshot_storage_budget_bytes=args.snapshot_storage_budget_bytes,
     ).load()
     workspace_commands = {
         "workspace-snapshot",
@@ -1438,6 +1510,55 @@ def _run(args: argparse.Namespace) -> int:
             )
         )
         return 0
+    if args.command == "retirement-storage":
+        print(json.dumps(mission.retirement_storage_inspection(), sort_keys=True))
+        return 0
+    if args.command in {
+        "retirement-inspect",
+        "retirement-pin",
+        "retirement-retry",
+        "retirement-export",
+        "retirement-discard",
+    }:
+        if args.session_mission_id and args.session_mission_id != mission.mission_id:
+            raise AlbertError("Retirement Unit Mission identity does not match.")
+        if args.session_id not in mission.sessions:
+            raise AlbertError(f"Unknown Local Agent session: {args.session_id}")
+        if args.command == "retirement-inspect":
+            result = mission.inspect_retirement_unit(args.session_id)
+        elif args.command == "retirement-pin":
+            mission.set_retirement_snapshot_pin(
+                args.session_id,
+                pinned=args.pin_state == "pinned",
+                expected_revision=args.expected_revision,
+                correlation_id=args.correlation_id,
+            )
+            result = mission.inspect_retirement_unit(args.session_id)
+        elif args.command == "retirement-retry":
+            mission.retry_retirement_unit(
+                args.session_id,
+                expected_revision=args.expected_revision,
+                correlation_id=args.correlation_id,
+            )
+            result = mission.inspect_retirement_unit(args.session_id)
+        elif args.command == "retirement-export":
+            result = mission.export_retirement_unit(
+                args.session_id,
+                destination=Path(args.destination),
+                expected_revision=args.expected_revision,
+                correlation_id=args.correlation_id,
+            )
+        else:
+            mission.discard_retained_worktree(
+                args.session_id,
+                expected_revision=args.expected_revision,
+                correlation_id=args.correlation_id,
+                confirmation=args.confirmation,
+                reason=args.reason,
+            )
+            result = mission.inspect_retirement_unit(args.session_id)
+        print(json.dumps(result, sort_keys=True))
+        return 0
     if args.command == "mission-drafts":
         projection = MissionDraftService(snapshots).inspect(
             mission_id=args.draft_mission_id or None,
@@ -1789,6 +1910,12 @@ def _load_workspace_service(
                     allow_empty_tracker=True,
                     agent_availability_snapshot=primary.agent_availability_snapshot,
                     retention_grace_seconds=primary.retention_grace_seconds,
+                    snapshot_storage_retention_seconds=(
+                        primary.snapshot_storage_retention_seconds
+                    ),
+                    snapshot_storage_budget_bytes=(
+                        primary.snapshot_storage_budget_bytes
+                    ),
                 ).load()
             )
         return WorkspaceSnapshotService(primary, missions=tuple(missions))

@@ -189,7 +189,13 @@ BUILTIN_COMMANDS = (
     CommandCapability(
         name="/status",
         usage="/status",
-        description="Show controller, subagent, and ready-work status.",
+        description="Show controller, subagent, ready-work, and snapshot-storage status.",
+        category="monitoring",
+    ),
+    CommandCapability(
+        name="/storage",
+        usage="/storage",
+        description="Inspect Snapshot Payload usage, expiry, reclamation, and blockers.",
         category="monitoring",
     ),
 )

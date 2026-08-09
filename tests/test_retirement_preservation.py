@@ -12,7 +12,7 @@ import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -124,6 +124,8 @@ class RetirementPreservationTest(unittest.TestCase):
         *,
         quiescence: tuple[str, str] | None = ("absent", "absent"),
         retention_grace_seconds: int = 72 * 60 * 60,
+        snapshot_storage_retention_seconds: int = 30 * 24 * 60 * 60,
+        snapshot_storage_budget_bytes: int = 5 * 1024 * 1024 * 1024,
     ) -> AlbertMission:
         options = {}
         if quiescence is not None:
@@ -135,6 +137,8 @@ class RetirementPreservationTest(unittest.TestCase):
             mission_id="mission-retirement",
             agent_config_path=self.agent_config,
             retention_grace_seconds=retention_grace_seconds,
+            snapshot_storage_retention_seconds=snapshot_storage_retention_seconds,
+            snapshot_storage_budget_bytes=snapshot_storage_budget_bytes,
             **options,
         ).load()
 
@@ -143,6 +147,340 @@ class RetirementPreservationTest(unittest.TestCase):
         mission.approve_issue("ISS-01")
         launched = mission.launch_issue("ISS-01")
         return mission.run_session(launched.session_id)
+
+    def add_issue(self, sequence: int) -> str:
+        issue_id = f"ISS-{sequence:02d}"
+        (self.tracker / "issues" / f"{sequence:02d}-retirement.md").write_text(
+            ISSUE_BODY,
+            encoding="utf-8",
+        )
+        return issue_id
+
+    def completed_issue(self, mission: AlbertMission, issue_id: str):
+        mission.assign_issue(issue_id, "fake-local")
+        mission.approve_issue(issue_id)
+        launched = mission.launch_issue(issue_id)
+        return mission.run_session(launched.session_id)
+
+    def test_snapshot_payload_defaults_and_pinning_are_durable(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        preserved = mission.preserve_retirement_unit(
+            completed.session_id,
+            expected_revision=completed.revision,
+            correlation_id="preserve-for-storage-policy",
+        )
+
+        record = preserved.retirement["snapshot"]
+        created = datetime.fromisoformat(record["created_at"])
+        expires = datetime.fromisoformat(record["expires_at"])
+        self.assertEqual(expires - created, timedelta(days=30))
+        self.assertFalse(record["pinned"])
+        self.assertEqual(record["payload_disposition"], "retained")
+        self.assertEqual(record["mission_id"], mission.mission_id)
+        self.assertEqual(record["session_id"], completed.session_id)
+        self.assertEqual(record["terminal_status"], completed.status)
+
+        pinned = mission.set_retirement_snapshot_pin(
+            completed.session_id,
+            pinned=True,
+            expected_revision=preserved.revision,
+            correlation_id="pin-storage-payload",
+        )
+
+        self.assertTrue(pinned.retirement["snapshot"]["pinned"])
+        reloaded = self.load_mission().sessions[completed.session_id]
+        self.assertTrue(reloaded.retirement["snapshot"]["pinned"])
+        self.assertEqual(
+            reloaded.retirement["snapshot"]["manifest_sha256"],
+            record["manifest_sha256"],
+        )
+
+    def test_legacy_verified_snapshot_can_be_inspected_and_pinned(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        preserved = mission.preserve_retirement_unit(
+            completed.session_id,
+            expected_revision=completed.revision,
+            correlation_id="preserve-before-storage-schema",
+        )
+        runtime = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        legacy_snapshot = runtime["sessions"][preserved.session_id]["retirement"][
+            "snapshot"
+        ]
+        for field_name in (
+            "mission_id",
+            "session_id",
+            "terminal_status",
+            "created_at",
+            "expires_at",
+            "pinned",
+            "payload_disposition",
+            "reclaimed_at",
+            "reclamation_reason",
+        ):
+            legacy_snapshot.pop(field_name)
+        mission.runtime_path.write_text(
+            json.dumps(runtime, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+        compatible = self.load_mission()
+        inspection = compatible.retirement_storage_inspection()
+        self.assertEqual(inspection["counts"]["retained_payloads"], 1)
+        self.assertEqual(inspection["counts"]["pinned_payloads"], 0)
+        pinned = compatible.set_retirement_snapshot_pin(
+            completed.session_id,
+            pinned=True,
+            expected_revision=preserved.revision,
+            correlation_id="pin-legacy-storage-payload",
+        )
+
+        self.assertTrue(pinned.retirement["snapshot"]["pinned"])
+        reloaded = self.load_mission().sessions[completed.session_id]
+        self.assertTrue(reloaded.retirement["snapshot"]["pinned"])
+        self.assertEqual(reloaded.retirement["snapshot"]["mission_id"], mission.mission_id)
+        self.assertTrue(reloaded.retirement["snapshot"]["expires_at"])
+
+    def test_snapshot_pin_exact_replay_preserves_newer_pin_state(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        preserved = mission.preserve_retirement_unit(
+            completed.session_id,
+            expected_revision=completed.revision,
+            correlation_id="preserve-for-pin-replay",
+        )
+        pinned = mission.set_retirement_snapshot_pin(
+            completed.session_id,
+            pinned=True,
+            expected_revision=preserved.revision,
+            correlation_id="pin-replay-boundary",
+        )
+        unpinned = mission.set_retirement_snapshot_pin(
+            completed.session_id,
+            pinned=False,
+            expected_revision=pinned.revision,
+            correlation_id="newer-unpin-boundary",
+        )
+
+        replayed = mission.set_retirement_snapshot_pin(
+            completed.session_id,
+            pinned=True,
+            expected_revision=preserved.revision,
+            correlation_id="pin-replay-boundary",
+        )
+
+        self.assertEqual(replayed.revision, unpinned.revision)
+        self.assertFalse(replayed.retirement["snapshot"]["pinned"])
+
+    def test_expired_unpinned_payloads_reclaim_oldest_first_and_keep_records(self) -> None:
+        second_issue = self.add_issue(2)
+        third_issue = self.add_issue(3)
+        mission = self.load_mission(snapshot_storage_retention_seconds=0)
+        first = self.completed_issue(mission, "ISS-01")
+        mission.record_frontier_review(
+            first.session_id,
+            "Approved",
+            reason="Retire the first payload for storage testing.",
+            allowed_session_statuses={"evidence-ready"},
+            expected_revision=first.revision,
+        )
+        second = self.completed_issue(mission, second_issue)
+        mission.record_frontier_review(
+            second.session_id,
+            "Approved",
+            reason="Retire the second payload for storage testing.",
+            allowed_session_statuses={"evidence-ready"},
+            expected_revision=second.revision,
+        )
+        first_record = mission._refresh_persisted_session(first.session_id).retirement[
+            "snapshot"
+        ]
+        second_record = mission._refresh_persisted_session(second.session_id).retirement[
+            "snapshot"
+        ]
+        budget = 32 * 1024 * 1024 + max(
+            first_record["snapshot_bytes"], second_record["snapshot_bytes"]
+        )
+
+        constrained = self.load_mission(
+            snapshot_storage_retention_seconds=0,
+            snapshot_storage_budget_bytes=budget,
+        )
+        constrained.assign_issue(third_issue, "fake-local")
+        constrained.approve_issue(third_issue)
+        constrained.launch_issue(third_issue)
+
+        reclaimed_first = constrained._refresh_persisted_session(
+            first.session_id
+        ).retirement["snapshot"]
+        retained_second = constrained._refresh_persisted_session(
+            second.session_id
+        ).retirement["snapshot"]
+        self.assertEqual(reclaimed_first["payload_disposition"], "reclaimed")
+        self.assertTrue(reclaimed_first["reclaimed_at"])
+        self.assertFalse(Path(first_record["payload_path"]).exists())
+        self.assertEqual(retained_second["payload_disposition"], "retained")
+        self.assertTrue(Path(second_record["payload_path"]).is_dir())
+        self.assertEqual(
+            reclaimed_first["manifest_sha256"], first_record["manifest_sha256"]
+        )
+        self.assertEqual(reclaimed_first["worktree_identity"], first.worktree_identity)
+        inspection = constrained.retirement_storage_inspection()
+        self.assertEqual(inspection["reclamation"]["count"], 1)
+        self.assertEqual(
+            inspection["reclamation"]["recent"][0]["session_id"],
+            first.session_id,
+        )
+
+    def test_pinned_capacity_exhaustion_blocks_new_units_and_raises_attention(
+        self,
+    ) -> None:
+        second_issue = self.add_issue(2)
+        mission = self.load_mission()
+        first = self.completed_issue(mission, "ISS-01")
+        mission.record_frontier_review(
+            first.session_id,
+            "Approved",
+            reason="Retire the payload before pinning it.",
+            allowed_session_statuses={"evidence-ready"},
+            expected_revision=first.revision,
+        )
+        retired = mission._refresh_persisted_session(first.session_id)
+        pinned = mission.set_retirement_snapshot_pin(
+            first.session_id,
+            pinned=True,
+            expected_revision=retired.revision,
+            correlation_id="pin-protected-payload",
+        )
+        constrained = self.load_mission(
+            snapshot_storage_retention_seconds=0,
+            snapshot_storage_budget_bytes=32 * 1024 * 1024,
+        )
+        constrained.assign_issue(second_issue, "fake-local")
+        constrained.approve_issue(second_issue)
+
+        with self.assertRaisesRegex(LaunchBlockedError, "Storage Budget is exhausted"):
+            constrained.launch_issue(second_issue)
+
+        inspection = constrained.retirement_storage_inspection()
+        self.assertEqual(inspection["counts"]["pinned_payloads"], 1)
+        self.assertEqual(
+            inspection["blockers"][0]["code"], "snapshot-storage-exhausted"
+        )
+        self.assertEqual(
+            constrained._refresh_persisted_session(first.session_id).retirement[
+                "snapshot"
+            ]["manifest_sha256"],
+            pinned.retirement["snapshot"]["manifest_sha256"],
+        )
+
+    def test_snapshot_storage_schema_rejects_malformed_durable_records(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        preserved = mission.preserve_retirement_unit(
+            completed.session_id,
+            expected_revision=completed.revision,
+            correlation_id="preserve-for-schema-validation",
+        )
+        runtime = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        runtime["sessions"][preserved.session_id]["retirement"]["snapshot"][
+            "pinned"
+        ] = "yes"
+        mission.runtime_path.write_text(
+            json.dumps(runtime, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(AlbertError, "Snapshot Payload record is invalid"):
+            self.load_mission()
+
+    def test_snapshot_storage_schema_rejects_payload_authority_drift(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        preserved = mission.preserve_retirement_unit(
+            completed.session_id,
+            expected_revision=completed.revision,
+            correlation_id="preserve-for-storage-authority-validation",
+        )
+        runtime = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        snapshot = runtime["sessions"][preserved.session_id]["retirement"]["snapshot"]
+        outside_payload = self.root / "outside-retirement-payload"
+        snapshot["payload_path"] = str(outside_payload)
+        snapshot["manifest_path"] = str(outside_payload / "manifest.json")
+        mission.runtime_path.write_text(
+            json.dumps(runtime, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(AlbertError, "record authority is invalid"):
+            self.load_mission()
+
+    def test_reclamation_recovers_after_payload_deletion_before_record_commit(
+        self,
+    ) -> None:
+        second_issue = self.add_issue(2)
+        third_issue = self.add_issue(3)
+        mission = self.load_mission(snapshot_storage_retention_seconds=0)
+        first = self.completed_issue(mission, "ISS-01")
+        mission.record_frontier_review(
+            first.session_id,
+            "Approved",
+            reason="Retire the first payload for crash recovery.",
+            allowed_session_statuses={"evidence-ready"},
+            expected_revision=first.revision,
+        )
+        second = self.completed_issue(mission, second_issue)
+        mission.record_frontier_review(
+            second.session_id,
+            "Approved",
+            reason="Retire the second payload for crash recovery.",
+            allowed_session_statuses={"evidence-ready"},
+            expected_revision=second.revision,
+        )
+        first_record = mission._refresh_persisted_session(first.session_id).retirement[
+            "snapshot"
+        ]
+        second_record = mission._refresh_persisted_session(second.session_id).retirement[
+            "snapshot"
+        ]
+        constrained = self.load_mission(
+            snapshot_storage_retention_seconds=0,
+            snapshot_storage_budget_bytes=32 * 1024 * 1024
+            + max(first_record["snapshot_bytes"], second_record["snapshot_bytes"]),
+        )
+        constrained.assign_issue(third_issue, "fake-local")
+        constrained.approve_issue(third_issue)
+        remove_tree = shutil.rmtree
+        interrupted = False
+
+        def interrupt_after_payload_deletion(path: Path, *args, **kwargs) -> None:
+            nonlocal interrupted
+            remove_tree(path, *args, **kwargs)
+            if Path(path) == Path(first_record["payload_path"]) and not interrupted:
+                interrupted = True
+                raise KeyboardInterrupt("crash after payload deletion")
+
+        with patch(
+            "albert_mvp.core.shutil.rmtree",
+            side_effect=interrupt_after_payload_deletion,
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "payload deletion"):
+                constrained.launch_issue(third_issue)
+
+        self.assertFalse(Path(first_record["payload_path"]).exists())
+        recovered = self.load_mission(
+            snapshot_storage_retention_seconds=0,
+            snapshot_storage_budget_bytes=32 * 1024 * 1024
+            + max(first_record["snapshot_bytes"], second_record["snapshot_bytes"]),
+        )
+        launched = recovered.launch_issue(third_issue)
+        self.assertEqual(launched.issue_id, third_issue)
+        compact = recovered._refresh_persisted_session(first.session_id).retirement[
+            "snapshot"
+        ]
+        self.assertEqual(compact["payload_disposition"], "reclaimed")
+        self.assertEqual(compact["manifest_sha256"], first_record["manifest_sha256"])
 
     def test_preservation_budget_is_reserved_before_execution_and_released_only_after_verification(
         self,
@@ -1583,6 +1921,400 @@ class RetirementPreservationTest(unittest.TestCase):
         self.assertTrue(retained.worktree_path.is_dir())
         self.assertEqual(retained.retirement["retirement_attempts"], 1)
 
+    def test_retirement_blocked_inspect_export_and_retry_are_actionable(self) -> None:
+        shutil.move(self.target_repo / ".git", self.root / "detached-target-git")
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        with patch.object(
+            mission,
+            "_remove_retirement_worktree",
+            side_effect=AlbertError("simulated exact removal failure"),
+        ):
+            mission.record_frontier_review(
+                completed.session_id,
+                "Approved",
+                reason="Create one actionable blocked retirement.",
+                allowed_session_statuses={"evidence-ready"},
+                expected_revision=completed.revision,
+            )
+            mission.reconcile_retirement_unit(completed.session_id)
+
+        blocked = mission._refresh_persisted_session(completed.session_id)
+        inspection = mission.inspect_retirement_unit(completed.session_id)
+        self.assertEqual(inspection["phase"], "retirement-blocked")
+        self.assertEqual(
+            inspection["actions"],
+            {"retry": True, "inspect": True, "export": True, "discard": True},
+        )
+
+        destination = self.root / "retirement-export"
+        exported = mission.export_retirement_unit(
+            completed.session_id,
+            destination=destination,
+            expected_revision=blocked.revision,
+            correlation_id="export-blocked-retirement",
+        )
+        self.assertEqual(
+            exported["destination"],
+            str(destination.resolve() / "repository"),
+        )
+        self.assertEqual(
+            (destination / "repository" / "tracked.txt").read_text(encoding="utf-8"),
+            "baseline\n",
+        )
+
+        after_export = mission._refresh_persisted_session(completed.session_id)
+        retried = mission.retry_retirement_unit(
+            completed.session_id,
+            expected_revision=after_export.revision,
+            correlation_id="retry-blocked-retirement",
+        )
+        self.assertEqual(retried.retirement["phase"], "retired")
+        self.assertFalse(completed.worktree_path.exists())
+
+    def test_retirement_export_replays_after_materialization_before_receipt(self) -> None:
+        shutil.move(self.target_repo / ".git", self.root / "detached-target-git")
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        with patch.object(
+            mission,
+            "_remove_retirement_worktree",
+            side_effect=AlbertError("simulated exact removal failure"),
+        ):
+            mission.record_frontier_review(
+                completed.session_id,
+                "Approved",
+                reason="Create one blocked export crash cut.",
+                allowed_session_statuses={"evidence-ready"},
+                expected_revision=completed.revision,
+            )
+            mission.reconcile_retirement_unit(completed.session_id)
+        blocked = mission._refresh_persisted_session(completed.session_id)
+        destination = self.root / "crash-export"
+        write_payload = mission._write_runtime_payload
+
+        def interrupt_before_export_receipt(data: dict[str, object]) -> None:
+            raw_session = data.get("sessions", {}).get(completed.session_id, {})
+            receipt = raw_session.get("retirement", {}).get(
+                "action_receipts", {}
+            ).get("export-crash-cut")
+            if receipt:
+                raise KeyboardInterrupt("crash before export receipt")
+            write_payload(data)
+
+        with patch.object(
+            mission,
+            "_write_runtime_payload",
+            side_effect=interrupt_before_export_receipt,
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "export receipt"):
+                mission.export_retirement_unit(
+                    completed.session_id,
+                    destination=destination,
+                    expected_revision=blocked.revision,
+                    correlation_id="export-crash-cut",
+                )
+
+        self.assertEqual(
+            (destination / "repository" / "tracked.txt").read_text(encoding="utf-8"),
+            "baseline\n",
+        )
+        receipt = self.load_mission().export_retirement_unit(
+            completed.session_id,
+            destination=destination,
+            expected_revision=blocked.revision,
+            correlation_id="export-crash-cut",
+        )
+        self.assertEqual(
+            receipt["destination"], str(destination.resolve() / "repository")
+        )
+
+    def test_retirement_export_recovers_materialization_before_marker(self) -> None:
+        shutil.move(self.target_repo / ".git", self.root / "detached-target-git")
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        with patch.object(
+            mission,
+            "_remove_retirement_worktree",
+            side_effect=AlbertError("simulated exact removal failure"),
+        ):
+            mission.record_frontier_review(
+                completed.session_id,
+                "Approved",
+                reason="Create one blocked pre-marker export crash cut.",
+                allowed_session_statuses={"evidence-ready"},
+                expected_revision=completed.revision,
+            )
+            mission.reconcile_retirement_unit(completed.session_id)
+        blocked = mission._refresh_persisted_session(completed.session_id)
+        destination = self.root / "pre-marker-crash-export"
+        write_file = mission._write
+
+        def interrupt_before_export_marker(path: Path, content: str) -> None:
+            if path.resolve(strict=False) == (
+                destination / "retirement-export.json"
+            ).resolve(strict=False):
+                raise KeyboardInterrupt("crash before export marker")
+            write_file(path, content)
+
+        with patch.object(
+            mission,
+            "_write",
+            side_effect=interrupt_before_export_marker,
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "export marker"):
+                mission.export_retirement_unit(
+                    completed.session_id,
+                    destination=destination,
+                    expected_revision=blocked.revision,
+                    correlation_id="export-pre-marker-crash-cut",
+                )
+
+        self.assertTrue((destination / "repository").is_dir())
+        (destination / "repository" / "tracked.txt").write_text(
+            "changed after crash\n",
+            encoding="utf-8",
+        )
+        recovered = self.load_mission()
+        with self.assertRaisesRegex(AlbertError, "exported repository content"):
+            recovered.export_retirement_unit(
+                completed.session_id,
+                destination=destination,
+                expected_revision=blocked.revision,
+                correlation_id="export-pre-marker-crash-cut",
+            )
+        (destination / "repository" / "tracked.txt").write_text(
+            "baseline\n",
+            encoding="utf-8",
+        )
+        receipt = recovered.export_retirement_unit(
+            completed.session_id,
+            destination=destination,
+            expected_revision=blocked.revision,
+            correlation_id="export-pre-marker-crash-cut",
+        )
+        self.assertEqual(
+            receipt["destination"], str(destination.resolve() / "repository")
+        )
+
+    def test_retirement_retry_replays_after_effect_before_receipt(self) -> None:
+        shutil.move(self.target_repo / ".git", self.root / "detached-target-git")
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        with patch.object(
+            mission,
+            "_remove_retirement_worktree",
+            side_effect=AlbertError("simulated exact removal failure"),
+        ):
+            mission.record_frontier_review(
+                completed.session_id,
+                "Approved",
+                reason="Create one blocked retry crash cut.",
+                allowed_session_statuses={"evidence-ready"},
+                expected_revision=completed.revision,
+            )
+            mission.reconcile_retirement_unit(completed.session_id)
+        blocked = mission._refresh_persisted_session(completed.session_id)
+        write_payload = mission._write_runtime_payload
+
+        def interrupt_before_retry_receipt(data: dict[str, object]) -> None:
+            raw_session = data.get("sessions", {}).get(completed.session_id, {})
+            receipt = raw_session.get("retirement", {}).get(
+                "action_receipts", {}
+            ).get("retry-crash-cut")
+            if receipt:
+                raise KeyboardInterrupt("crash before retry receipt")
+            write_payload(data)
+
+        with patch.object(
+            mission,
+            "_write_runtime_payload",
+            side_effect=interrupt_before_retry_receipt,
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "retry receipt"):
+                mission.retry_retirement_unit(
+                    completed.session_id,
+                    expected_revision=blocked.revision,
+                    correlation_id="retry-crash-cut",
+                )
+
+        recovered = self.load_mission()
+        retried = recovered.retry_retirement_unit(
+            completed.session_id,
+            expected_revision=blocked.revision,
+            correlation_id="retry-crash-cut",
+        )
+        self.assertEqual(retried.retirement["phase"], "retired")
+        replayed = recovered.retry_retirement_unit(
+            completed.session_id,
+            expected_revision=blocked.revision,
+            correlation_id="retry-crash-cut",
+        )
+        self.assertEqual(replayed.revision, retried.revision)
+
+    def test_retained_worktree_discard_requires_quiescence_and_exact_containment(
+        self,
+    ) -> None:
+        shutil.move(self.target_repo / ".git", self.root / "detached-target-git")
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        with patch.object(
+            mission,
+            "_remove_retirement_worktree",
+            side_effect=AlbertError("simulated exact removal failure"),
+        ):
+            mission.record_frontier_review(
+                completed.session_id,
+                "Approved",
+                reason="Create a blocked unit for explicit discard.",
+                allowed_session_statuses={"evidence-ready"},
+                expected_revision=completed.revision,
+            )
+            mission.reconcile_retirement_unit(completed.session_id)
+
+        blocked = mission._refresh_persisted_session(completed.session_id)
+        live = self.load_mission(quiescence=("live-exact", "absent"))
+        with self.assertRaisesRegex(LaunchBlockedError, "Runner Quiescence"):
+            live.discard_retained_worktree(
+                completed.session_id,
+                expected_revision=blocked.revision,
+                correlation_id="discard-live-worktree",
+                confirmation=completed.session_id,
+                reason="Mission Commander explicitly accepts irreversible deletion.",
+            )
+        self.assertTrue(completed.worktree_path.is_dir())
+
+        safe = self.load_mission()
+        discarded = safe.discard_retained_worktree(
+            completed.session_id,
+            expected_revision=blocked.revision,
+            correlation_id="discard-quiesced-worktree",
+            confirmation=completed.session_id,
+            reason="Mission Commander explicitly accepts irreversible deletion.",
+        )
+        self.assertEqual(discarded.retirement["phase"], "retired")
+        self.assertTrue(discarded.retirement["discarded_at"])
+        self.assertEqual(
+            discarded.retirement["removal_kind"], "retained-worktree-discard"
+        )
+        self.assertFalse(completed.worktree_path.exists())
+        self.assertTrue(self.target_repo.is_dir())
+        self.assertTrue((self.target_repo / "tracked.txt").is_file())
+        reloaded = self.load_mission().sessions[completed.session_id]
+        self.assertEqual(reloaded.retirement["phase"], "retired")
+        self.assertEqual(
+            reloaded.retirement["removal_kind"], "retained-worktree-discard"
+        )
+
+    def test_retained_worktree_discard_never_targets_the_coding_workspace(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        with patch.object(
+            mission,
+            "_remove_retirement_worktree",
+            side_effect=AlbertError("simulated exact removal failure"),
+        ):
+            mission.record_frontier_review(
+                completed.session_id,
+                "Approved",
+                reason="Create a blocked unit for containment testing.",
+                allowed_session_statuses={"evidence-ready"},
+                expected_revision=completed.revision,
+            )
+            mission.reconcile_retirement_unit(completed.session_id)
+        runtime = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        runtime["sessions"][completed.session_id]["worktree_path"] = str(
+            self.target_repo
+        )
+        mission.runtime_path.write_text(
+            json.dumps(runtime, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        unsafe = self.load_mission()
+        poisoned = unsafe.sessions[completed.session_id]
+
+        with self.assertRaisesRegex(LaunchBlockedError, "Coding Workspace"):
+            unsafe.discard_retained_worktree(
+                completed.session_id,
+                expected_revision=poisoned.revision,
+                correlation_id="discard-coding-workspace",
+                confirmation=completed.session_id,
+                reason="This must still fail closed.",
+            )
+
+        self.assertTrue(self.target_repo.is_dir())
+        self.assertTrue((self.target_repo / "tracked.txt").is_file())
+
+    def test_retained_worktree_discard_replays_after_effect_before_receipt(self) -> None:
+        shutil.move(self.target_repo / ".git", self.root / "detached-target-git")
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        with patch.object(
+            mission,
+            "_remove_retirement_worktree",
+            side_effect=AlbertError("simulated exact removal failure"),
+        ):
+            mission.record_frontier_review(
+                completed.session_id,
+                "Approved",
+                reason="Create a blocked unit for discard replay.",
+                allowed_session_statuses={"evidence-ready"},
+                expected_revision=completed.revision,
+            )
+            mission.reconcile_retirement_unit(completed.session_id)
+        blocked = mission._refresh_persisted_session(completed.session_id)
+        write_payload = mission._write_runtime_payload
+
+        def interrupt_before_discard_receipt(data: dict[str, object]) -> None:
+            raw_session = data.get("sessions", {}).get(completed.session_id, {})
+            retirement = raw_session.get("retirement", {})
+            if (
+                retirement.get("phase") == "retired"
+                and retirement.get("action_receipts", {}).get("discard-crash-cut")
+            ):
+                raise KeyboardInterrupt("crash before discard receipt")
+            write_payload(data)
+
+        with patch.object(
+            mission,
+            "_write_runtime_payload",
+            side_effect=interrupt_before_discard_receipt,
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "discard receipt"):
+                mission.discard_retained_worktree(
+                    completed.session_id,
+                    expected_revision=blocked.revision,
+                    correlation_id="discard-crash-cut",
+                    confirmation=completed.session_id,
+                    reason="Mission Commander explicitly accepts irreversible deletion.",
+                )
+
+        self.assertFalse(completed.worktree_path.exists())
+        recovered = self.load_mission()
+        discarded = recovered.discard_retained_worktree(
+            completed.session_id,
+            expected_revision=blocked.revision,
+            correlation_id="discard-crash-cut",
+            confirmation=completed.session_id,
+            reason="Mission Commander explicitly accepts irreversible deletion.",
+        )
+        self.assertEqual(discarded.retirement["phase"], "retired")
+        self.assertEqual(
+            discarded.retirement["action_receipts"]["discard-crash-cut"][
+                "expected_revision"
+            ],
+            blocked.revision,
+        )
+        replayed = recovered.discard_retained_worktree(
+            completed.session_id,
+            expected_revision=blocked.revision,
+            correlation_id="discard-crash-cut",
+            confirmation=completed.session_id,
+            reason="Mission Commander explicitly accepts irreversible deletion.",
+        )
+        self.assertEqual(replayed.revision, discarded.revision)
+        self.assertTrue(self.target_repo.is_dir())
+
     def test_non_git_retirement_preserves_a_write_at_the_removal_boundary(self) -> None:
         shutil.move(self.target_repo / ".git", self.root / "detached-target-git")
         mission = self.load_mission()
@@ -1873,6 +2605,209 @@ class RetirementPreservationTest(unittest.TestCase):
             verified["retirement"]["snapshot"]["manifest_sha256"],
             preserved["retirement"]["snapshot"]["manifest_sha256"],
         )
+
+    def test_cli_and_persistent_transport_share_storage_inspection_configuration(
+        self,
+    ) -> None:
+        mission = self.load_mission()
+        common = [
+            "retirement-storage",
+            "--target-repo",
+            str(self.target_repo),
+            "--tracker-dir",
+            str(self.tracker),
+            "--runtime-root",
+            str(self.runtime),
+            "--mission-id",
+            mission.mission_id,
+            "--agent-config",
+            str(self.agent_config),
+            "--snapshot-storage-retention-seconds",
+            "123",
+            "--snapshot-storage-budget-bytes",
+            str(64 * 1024 * 1024),
+        ]
+        output = io.StringIO()
+        with redirect_stdout(output):
+            exit_code = main(common)
+        self.assertEqual(exit_code, 0)
+        inspection = json.loads(output.getvalue())
+        self.assertEqual(inspection["policy"]["retention_seconds"], 123)
+        self.assertEqual(inspection["policy"]["budget_bytes"], 64 * 1024 * 1024)
+
+        transport_output = io.StringIO()
+        serve(
+            io.StringIO(
+                json.dumps({"id": "storage-inspection", "argv": common}) + "\n"
+            ),
+            transport_output,
+        )
+        envelope = json.loads(transport_output.getvalue())
+        self.assertTrue(envelope["success"])
+        self.assertEqual(json.loads(envelope["stdout"]), inspection)
+
+    def test_cli_and_persistent_transport_expose_blocked_retirement_inspection(
+        self,
+    ) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        with patch.object(
+            mission,
+            "_remove_retirement_worktree",
+            side_effect=AlbertError("simulated exact removal failure"),
+        ):
+            mission.record_frontier_review(
+                completed.session_id,
+                "Approved",
+                reason="Create a blocked unit for transport inspection.",
+                allowed_session_statuses={"evidence-ready"},
+                expected_revision=completed.revision,
+            )
+            mission.reconcile_retirement_unit(completed.session_id)
+        common = [
+            "retirement-inspect",
+            "--target-repo",
+            str(self.target_repo),
+            "--tracker-dir",
+            str(self.tracker),
+            "--runtime-root",
+            str(self.runtime),
+            "--mission-id",
+            mission.mission_id,
+            "--agent-config",
+            str(self.agent_config),
+            "--session-id",
+            completed.session_id,
+            "--session-mission-id",
+            mission.mission_id,
+        ]
+        output = io.StringIO()
+        with redirect_stdout(output):
+            exit_code = main(common)
+        self.assertEqual(exit_code, 0)
+        inspection = json.loads(output.getvalue())
+        self.assertEqual(inspection["phase"], "retirement-blocked")
+        self.assertTrue(inspection["actions"]["discard"])
+
+        transport_output = io.StringIO()
+        serve(
+            io.StringIO(
+                json.dumps({"id": "retirement-inspect", "argv": common}) + "\n"
+            ),
+            transport_output,
+        )
+        envelope = json.loads(transport_output.getvalue())
+        self.assertTrue(envelope["success"])
+        self.assertEqual(json.loads(envelope["stdout"]), inspection)
+
+    def test_cli_and_persistent_transport_share_blocked_retirement_actions(
+        self,
+    ) -> None:
+        shutil.move(self.target_repo / ".git", self.root / "detached-target-git")
+        for sequence in (2, 3, 4):
+            self.add_issue(sequence)
+        mission = self.load_mission()
+
+        def blocked_session(issue_id: str):
+            completed = self.completed_issue(mission, issue_id)
+            with patch.object(
+                mission,
+                "_remove_retirement_worktree",
+                side_effect=AlbertError("simulated exact removal failure"),
+            ):
+                mission.record_frontier_review(
+                    completed.session_id,
+                    "Approved",
+                    reason="Create a blocked unit for CLI action coverage.",
+                    allowed_session_statuses={"evidence-ready"},
+                    expected_revision=completed.revision,
+                )
+                mission.reconcile_retirement_unit(completed.session_id)
+            return mission._refresh_persisted_session(completed.session_id)
+
+        pin_unit = blocked_session("ISS-01")
+        export_unit = blocked_session("ISS-02")
+        retry_unit = blocked_session("ISS-03")
+        discard_unit = blocked_session("ISS-04")
+        common = [
+            "--target-repo",
+            str(self.target_repo),
+            "--tracker-dir",
+            str(self.tracker),
+            "--runtime-root",
+            str(self.runtime),
+            "--mission-id",
+            mission.mission_id,
+            "--agent-config",
+            str(self.agent_config),
+        ]
+        commands = [
+            [
+                "retirement-pin",
+                *common,
+                "--session-id",
+                pin_unit.session_id,
+                "--expected-revision",
+                str(pin_unit.revision),
+                "--correlation-id",
+                "cli-pin-action",
+                "--pin-state",
+                "pinned",
+            ],
+            [
+                "retirement-export",
+                *common,
+                "--session-id",
+                export_unit.session_id,
+                "--expected-revision",
+                str(export_unit.revision),
+                "--correlation-id",
+                "cli-export-action",
+                "--destination",
+                str(self.root / "cli-export"),
+            ],
+            [
+                "retirement-retry",
+                *common,
+                "--session-id",
+                retry_unit.session_id,
+                "--expected-revision",
+                str(retry_unit.revision),
+                "--correlation-id",
+                "cli-retry-action",
+            ],
+            [
+                "retirement-discard",
+                *common,
+                "--session-id",
+                discard_unit.session_id,
+                "--expected-revision",
+                str(discard_unit.revision),
+                "--correlation-id",
+                "cli-discard-action",
+                "--confirmation",
+                discard_unit.session_id,
+                "--reason",
+                "Mission Commander accepts exact irreversible deletion.",
+            ],
+        ]
+        for index, argv in enumerate(commands, start=1):
+            with self.subTest(command=argv[0]):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    self.assertEqual(main(argv), 0)
+                one_process = json.loads(output.getvalue())
+                transport_output = io.StringIO()
+                serve(
+                    io.StringIO(
+                        json.dumps({"id": f"blocked-action-{index}", "argv": argv})
+                        + "\n"
+                    ),
+                    transport_output,
+                )
+                envelope = json.loads(transport_output.getvalue())
+                self.assertTrue(envelope["success"])
+                self.assertEqual(json.loads(envelope["stdout"]), one_process)
 
 
 if __name__ == "__main__":

@@ -185,6 +185,56 @@ class RetirementSnapshotStore:
             )
         return destination_root / "repository"
 
+    def verify_materialized_repository(
+        self,
+        record: dict[str, Any],
+        repository: Path,
+    ) -> bool:
+        """Prove a crash-left export is exactly the retained Snapshot Payload."""
+
+        self.verify(record)
+        if repository.is_symlink() or not repository.is_dir():
+            raise RetirementSnapshotError(
+                "Retirement Snapshot exported repository boundary is invalid."
+            )
+        manifest_path = self._contained_payload_file(
+            self.payload_root,
+            PurePosixPath("manifest.json"),
+        )
+        manifest = self._read_manifest(manifest_path)
+        git_state = manifest["git_state"]
+        if git_state["kind"] == "git-worktree":
+            head = self._git(repository, ["rev-parse", "HEAD"]).strip()
+            status = self._git(repository, ["status", "--porcelain=v2", "-z", "--"])
+            if (
+                head != git_state["baseline_commit"]
+                or sha256(status.encode("utf-8")).hexdigest()
+                != git_state["status_sha256"]
+            ):
+                raise RetirementSnapshotError(
+                    "Retirement Snapshot exported Git state is invalid."
+                )
+
+        verification_root = self.request.runtime_dir / "retirement" / "export-check"
+        verification_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            dir=verification_root,
+            prefix=f"{self.request.session_id}.",
+        ) as expected_name:
+            expected = self.materialize(record, Path(expected_name))
+            exclude_git_metadata = git_state["kind"] == "git-worktree"
+            if self._repository_tree_entries(
+                repository,
+                exclude_git_metadata=exclude_git_metadata,
+            ) != self._repository_tree_entries(
+                expected,
+                exclude_git_metadata=exclude_git_metadata,
+            ):
+                raise RetirementSnapshotError(
+                    "Retirement Snapshot exported repository content is invalid."
+                )
+        return True
+
     def recover_published(self) -> dict[str, Any]:
         """Recover an exact publication whose canonical phase commit was interrupted."""
 
@@ -1182,6 +1232,62 @@ class RetirementSnapshotStore:
                     )
                 result.append(path.relative_to(root).as_posix())
         return sorted(result)
+
+    def _repository_tree_entries(
+        self,
+        root: Path,
+        *,
+        exclude_git_metadata: bool,
+    ) -> dict[str, dict[str, Any]]:
+        entries: dict[str, dict[str, Any]] = {}
+        scanned = 0
+        for directory, names, filenames in os.walk(root, followlinks=False):
+            directory_path = Path(directory)
+            if exclude_git_metadata and directory_path == root and ".git" in names:
+                names.remove(".git")
+            for name in sorted(tuple(names)):
+                path = directory_path / name
+                if not path.is_symlink():
+                    continue
+                names.remove(name)
+                scanned += 1
+                entries[path.relative_to(root).as_posix()] = {
+                    "kind": "symlink",
+                    "target": os.readlink(os.fsencode(path)).hex(),
+                }
+                if scanned > 10_000:
+                    raise RetirementSnapshotError(
+                        "Retirement Snapshot export exceeds the 10000-entry limit."
+                    )
+            names[:] = sorted(names)
+            for name in sorted(filenames):
+                path = directory_path / name
+                if exclude_git_metadata and directory_path == root and name == ".git":
+                    continue
+                scanned += 1
+                relative = path.relative_to(root).as_posix()
+                if path.is_symlink():
+                    entries[relative] = {
+                        "kind": "symlink",
+                        "target": os.readlink(os.fsencode(path)).hex(),
+                    }
+                elif path.is_file():
+                    stat_result = path.stat(follow_symlinks=False)
+                    entries[relative] = {
+                        "kind": "file",
+                        "mode": stat_result.st_mode & 0o777,
+                        "size": stat_result.st_size,
+                        "sha256": self._file_digest(path),
+                    }
+                else:
+                    raise RetirementSnapshotError(
+                        "Retirement Snapshot export contains an unsupported entry."
+                    )
+                if scanned > 10_000:
+                    raise RetirementSnapshotError(
+                        "Retirement Snapshot export exceeds the 10000-entry limit."
+                    )
+        return entries
 
     @staticmethod
     def _entries_digest(entries: dict[str, dict[str, Any]], *, prefix: str) -> str:
