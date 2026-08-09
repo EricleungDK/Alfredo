@@ -1,6 +1,6 @@
 # API Endpoints and Command Boundaries
 
-**Last Updated:** 2026-08-06
+**Last Updated:** 2026-08-09
 
 Alfredo has no remote or production HTTP API. Its application boundary is a versioned JSON command protocol shared by the React client, the Tauri bridge, the development-only localhost gateway, the persistent Python server, and the one-process Python CLI fallback. Python remains authoritative; Rust validates and transports typed payloads, while React renders acknowledged projections.
 
@@ -16,6 +16,7 @@ The endpoint families are:
 | Working Context | `working-context`, `working-context-curate`, `workspace-scope` | Inspect bounded context and deliberately curate or qualify a prompt |
 | Governed work | `workspace-queue`, `workspace-queue-decision`, `ad-hoc-delegation-proposal`, `workstation-action` | Propose, approve, assign, launch, cancel, archive/restore completed Issue Slices, and inspect Mission-qualified work |
 | Deferred execution | `workstation-session-run` | Claim exactly one persisted queued session and run it outside the UI request path |
+| Runner supervision | `runner-observe` | Deliver or replay one ordered advisory runner observation and return its canonical semantic receipt |
 | Review | `review-workspace`, `review-decision` | Inspect validated Evidence Packages and accept, repair, or escalate work |
 | Session artifacts | `session-artifact` | Read one exact registered review-safe artifact as bounded inline text without exposing a host path |
 | Session output | `session-output` | Poll one exact Mission/Local Agent session's bounded, transient inspector-output page without exposing a host path or promoting raw bytes to canonical history |
@@ -24,6 +25,8 @@ The endpoint families are:
 | Audit | `activity-journal` | Query meaningful acknowledged actions without raw model or terminal bytes |
 
 The desktop bridge starts a persistent `python3 -m albert_mvp.server` process and exchanges newline-delimited correlated CLI envelopes. It builds the same arguments as the one-process `python3 -m albert_mvp <command>` fallback. Transport persistence is an optimization, not an authority change.
+
+`runner-observe` accepts an observer source/incarnation/positive sequence plus exact Mission, session revision, runner-operation, owner/process-group, Worktree Identity, and result boundaries. Signals use closed enums; exact-valid results require a digest, malformed values and cursor gaps fail before delivery, and reuse of one sequence for a different semantic boundary is rejected. An exact transport retry or semantic duplicate returns the same `SupervisionReceipt`. `no-change` is deliberately silent. Actionable delivery durably records attention, intent, receipt, and cursor before an independent canonical recheck can return `recovered`, `result-reconciled`, or `decision-needed`.
 
 During `npm run dev` or the dedicated `npm run dev:container` mode only, Vite exposes `POST /__alfredo/invoke` on the exact host origin `http://127.0.0.1:1420`. The browser sends `{id, command, args}` plus an injected per-process capability header. The gateway requires exact Host, Origin, method, media type, capability, body limit, command/id grammar, and three-field request before it writes one JSONL line to `alfredo-localhost-bridge`. Host mode additionally requires an exact loopback socket peer. Apple container port forwarding replaces that peer with the VM network address, so only the explicitly configured `apple-container` mode omits the peer-address assertion; `scripts/apple-container-dev` compensates by publishing guest 1420 solely to host `127.0.0.1:1420`, while every application-layer check remains unchanged. The Rust response is exactly one correlated `{id, ok, value}` or `{id, ok, error}` envelope. Unknown commands, extra typed arguments, raw argv, and browser-supplied authority fail closed. This endpoint is absent from builds and from Tauri's `1422` development mode; it is not a remotely authenticated API.
 

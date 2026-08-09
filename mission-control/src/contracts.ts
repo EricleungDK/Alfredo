@@ -1076,6 +1076,9 @@ export interface MissionSessionSummary {
   readonly review_outcome?: string;
   readonly review_next_action?: string;
   readonly repair_action_available?: boolean;
+  readonly supervision_receipt_id?: string;
+  readonly supervision_outcome?: "recovered" | "result-reconciled" | "decision-needed" | string;
+  readonly automatic_recovery_count?: number;
   readonly repair_task_packet?: {
     readonly issue_id: string;
     readonly goal: string;
@@ -1098,7 +1101,8 @@ export interface WorkspaceQueueAttention {
     | "clarification"
     | "issue-change-proposal"
     | "frontier-confirmation"
-    | "ad-hoc-delegation";
+    | "ad-hoc-delegation"
+    | "runner-supervision";
   readonly label: string;
   readonly queue_link: string;
   /** Canonical work identity; presentation labels are never parsed for identity. */

@@ -551,6 +551,15 @@ function MissionExecutionInspector({
         ...(session.commands_run ?? []).map((command) => `Command observed: ${command}`),
         session.changed_files?.length ? `${session.changed_files.length} touched file(s) observed` : "",
         session.evidence_correlation_id ? "Evidence Package acknowledged" : "",
+        session.supervision_receipt_id
+          ? `Supervision receipt: ${session.supervision_receipt_id} · ${session.supervision_outcome || "recorded"}`
+          : "",
+        session.automatic_recovery_count
+          ? `Automatic recovery: ${session.automatic_recovery_count} of 1 used`
+          : "",
+        session.supervision_outcome === "decision-needed"
+          ? "Mission Commander decision required; further automatic recovery is disabled"
+          : "",
         session.review_outcome ? `Review Decision: ${session.review_outcome}` : "",
         session.review_next_action ? `Next governed action: ${session.review_next_action}` : "",
       ].filter(Boolean)

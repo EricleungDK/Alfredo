@@ -733,6 +733,68 @@ test("keeps frontend-only pending intent separate from accepted workstation stat
   );
 });
 
+test("projects failed runner supervision as a Mission Work decision", () => {
+  const snapshot: WorkspaceSnapshot = {
+    ...baseSnapshot,
+    missions: [
+      {
+        ...baseSnapshot.missions![0],
+        sessions: [
+          {
+            ...baseSnapshot.missions![0].sessions[0],
+            status: "failed",
+            supervision_receipt_id: "supervision-receipt:failed-recovery",
+            supervision_outcome: "decision-needed",
+            automatic_recovery_count: 1,
+          },
+        ],
+        attention: [
+          {
+            attention_id: "runner-attention:failed-recovery",
+            mission_id: "command-deck",
+            kind: "runner-supervision",
+            label: "Automatic runner recovery failed; Mission Commander decision required",
+            queue_link: "mission-work#session-ISS-01-1",
+            entity_id: "session-ISS-01-1",
+            queue_item_id: "",
+          },
+        ],
+      },
+    ],
+  };
+
+  const cards = projectWorkstationCards(snapshot).groups.flatMap((group) => group.cards);
+  const attention = cards.find(
+    (card) => card.id === "attention:command-deck:runner-attention:failed-recovery",
+  );
+  const session = projectMissionExecutionTree(snapshot).nodes.find(
+    (node) => node.id === "session:command-deck:session-ISS-01-1",
+  );
+
+  expect(attention).toMatchObject({
+    sessionId: "session-ISS-01-1",
+    issueId: "ISS-01",
+    status: "failed",
+    phase: "Supervision",
+    approvalBlockers: [],
+    nextAction: "Choose manual Retry with a reason, or leave the session stopped",
+  });
+  expect(attention?.detail.reviewState).toMatchObject({
+    lifecycle: "Decision required",
+  });
+  expect(attention?.detail.governedActions).toEqual([
+    expect.objectContaining({
+      label: "Retry",
+      actionType: "issue-retry",
+      requiresReason: true,
+      missionId: "command-deck",
+      sessionId: "session-ISS-01-1",
+      issueId: "ISS-01",
+    }),
+  ]);
+  expect(session).toMatchObject({ attention: true });
+});
+
 test("projects canonical review repair launches for Issue Slice and Ad Hoc sessions", () => {
   const projection = projectWorkstationCards({
     ...baseSnapshot,

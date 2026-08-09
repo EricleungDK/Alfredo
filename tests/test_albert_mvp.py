@@ -1867,7 +1867,7 @@ None - can start immediately
         self.assertIsNone(persisted.runner_pid)
         self.assertIsNone(persisted.runner_process_pid)
 
-    def test_restart_requeues_abandoned_runner_and_caps_crash_recovery(self):
+    def test_restart_fails_closed_for_legacy_runner_without_exact_recovery_identity(self):
         config_path = self.write_agent_config(
             [
                 {
@@ -1881,35 +1881,27 @@ None - can start immediately
         mission = self.load_mission_with_agent_config(config_path)
         mission.assign_issue("ISS-01", "fake-local")
         mission.approve_issue("ISS-01")
-        recoverable = mission.launch_issue("ISS-01")
-        exhausted = mission.launch_issue("ISS-01")
-
-        for session, prior_recoveries in ((recoverable, 0), (exhausted, 3)):
-            session.status = "running"
-            session.runner_started_at = "2026-07-10T18:00:00Z"
-            session.runner_pid = 999_999_999
-            session.runner_identity = "linux:999999999:missing"
-            session.task_packet["abandoned_runner_recovery_count"] = prior_recoveries
-            mission._persist_session_update(
-                session,
-                expected_statuses={"queued"},
-            )
+        with patch.object(mission, "_validate_target_repository_boundary"):
+            legacy = mission.launch_issue("ISS-01")
+        legacy.status = "running"
+        legacy.runner_started_at = "2026-07-10T18:00:00Z"
+        legacy.runner_pid = 999_999_999
+        legacy.runner_identity = "linux:999999999:missing"
+        mission._persist_session_update(
+            legacy,
+            expected_statuses={"queued"},
+        )
 
         reloaded = self.load_mission_with_agent_config(config_path)
 
-        recovered = reloaded.sessions[recoverable.session_id]
-        self.assertEqual(recovered.status, "queued")
-        self.assertIsNone(recovered.runner_pid)
-        self.assertEqual(recovered.runner_identity, "")
-        self.assertEqual(
-            recovered.task_packet["abandoned_runner_recovery_count"],
-            1,
-        )
-        terminal = reloaded.sessions[exhausted.session_id]
-        self.assertEqual(terminal.status, "failed")
-        self.assertEqual(terminal.runner_exit_status, 1)
-        self.assertTrue(terminal.runner_ended_at)
-        self.assertIn("exceeded the automatic recovery limit", "\n".join(reloaded.timeline))
+        unchanged = reloaded.sessions[legacy.session_id]
+        self.assertEqual(unchanged.status, "running")
+        self.assertEqual(unchanged.runner_pid, 999_999_999)
+        attentions = reloaded.supervision_state()["attentions"]
+        self.assertEqual(len(attentions), 1)
+        attention = next(iter(attentions.values()))
+        self.assertEqual(attention["next_effect"], "mission-commander-decision")
+        self.assertEqual(attention["disposition"], "open")
 
     def test_cancel_terminates_active_command_process_before_post_cancel_write(self):
         script = self.root / "cancellable_runner.py"

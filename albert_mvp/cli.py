@@ -21,6 +21,7 @@ from .core import (
     AlbertMission,
     EvidencePackage,
     EvidenceValidationError,
+    RunnerObservation,
     SharedUnderstandingGateError,
     WayfinderStatePersistenceError,
 )
@@ -532,6 +533,36 @@ def build_parser() -> argparse.ArgumentParser:
     workstation_session_run.add_argument("--session-id", required=True)
     workstation_session_run.add_argument("--session-mission-id", default="")
 
+    runner_observe = subparsers.add_parser(
+        "runner-observe",
+        help="Reconcile one advisory Local Agent runner observation and return its receipt.",
+    )
+    _add_common_args(runner_observe)
+    runner_observe.add_argument("--source-id", required=True)
+    runner_observe.add_argument("--source-incarnation", required=True)
+    runner_observe.add_argument("--sequence", required=True, type=int)
+    runner_observe.add_argument("--observation-mission-id", required=True)
+    runner_observe.add_argument("--session-id", required=True)
+    runner_observe.add_argument("--session-revision", required=True, type=int)
+    runner_observe.add_argument("--runner-operation-id", required=True)
+    runner_observe.add_argument(
+        "--owner-signal",
+        required=True,
+        choices=["live-exact", "absent", "reused", "unavailable"],
+    )
+    runner_observe.add_argument(
+        "--process-group-signal",
+        required=True,
+        choices=["live-exact", "absent", "reused", "unavailable"],
+    )
+    runner_observe.add_argument("--worktree-identity", required=True)
+    runner_observe.add_argument(
+        "--result-signal",
+        required=True,
+        choices=["absent", "exact-valid", "invalid", "unavailable"],
+    )
+    runner_observe.add_argument("--result-digest", default="")
+
     mission_drafts = subparsers.add_parser(
         "mission-drafts",
         help="Return the Mission Draft projection as JSON.",
@@ -950,6 +981,7 @@ def _run(args: argparse.Namespace) -> int:
             "workspace-queue-decision",
             "workstation-action",
             "workstation-session-run",
+            "runner-observe",
             "mission-drafts",
             "mission-draft-create",
             "mission-draft-update",
@@ -1321,6 +1353,27 @@ def _run(args: argparse.Namespace) -> int:
                 sort_keys=True,
             )
         )
+        return 0
+    if args.command == "runner-observe":
+        if args.observation_mission_id != mission.mission_id:
+            raise AlbertError("Runner observation Mission identity does not match.")
+        receipt = mission.observe_runner(
+            RunnerObservation(
+                source_id=args.source_id,
+                source_incarnation=args.source_incarnation,
+                sequence=args.sequence,
+                mission_id=args.observation_mission_id,
+                session_id=args.session_id,
+                session_revision=args.session_revision,
+                runner_operation_id=args.runner_operation_id,
+                owner_signal=args.owner_signal,
+                process_group_signal=args.process_group_signal,
+                worktree_identity=args.worktree_identity,
+                result_signal=args.result_signal,
+                result_digest=args.result_digest,
+            )
+        )
+        print(json.dumps(asdict(receipt), sort_keys=True))
         return 0
     if args.command == "mission-drafts":
         projection = MissionDraftService(snapshots).inspect(

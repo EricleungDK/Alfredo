@@ -597,7 +597,12 @@ function appendSessionNodes(
       risk: executionNodeRisk(state, baseRisk),
       summary: `${session.session_id} · ${session.assigned_agent} · ${session.role || "Local Agent"} · ${session.model || "model not recorded"}`,
       inspectable: true,
-      attention: Boolean(card?.attention || session.failure || session.review_next_action),
+      attention: Boolean(
+        card?.attention ||
+          session.failure ||
+          session.review_next_action ||
+          session.supervision_outcome === "decision-needed",
+      ),
       issue,
       session,
       card,
@@ -1080,34 +1085,58 @@ function projectAttentionCard(
   workspaceQueue: WorkspaceQueueProjection | null,
 ): WorkstationCardProjection {
   const queueItem = pendingQueueItemForAttention(workspaceQueue, attention);
+  const runnerSupervision = attention.kind === "runner-supervision";
+  const supervisedSession = runnerSupervision
+    ? mission.sessions.find((session) => session.session_id === attention.entity_id) ?? null
+    : null;
+  const supervisionActions =
+    supervisedSession?.status === "failed"
+      ? governedActions(
+          "failed",
+          supervisedSession.session_id,
+          supervisedSession.issue_id,
+          snapshot.revision,
+          mission.id,
+        ).filter((action) => action.actionType === "issue-retry")
+      : [];
   return {
     id: `attention:${mission.id}:${attention.attention_id}`,
     missionId: mission.id,
     missionTitle: mission.title,
     name: attention.label,
-    sessionId: null,
-    issueId: null,
+    sessionId: runnerSupervision ? attention.entity_id : null,
+    issueId: supervisedSession?.issue_id ?? null,
     model: "orchestrator",
     role: "governance",
     currentTask: attention.kind,
-    status: "waiting-approval",
-    phase: "Approval",
-    progress: "Workspace Queue item pending",
+    status: runnerSupervision
+      ? supervisedSession?.status === "failed"
+        ? "failed"
+        : "blocked"
+      : "waiting-approval",
+    phase: runnerSupervision ? "Supervision" : "Approval",
+    progress: runnerSupervision
+      ? "Automatic recovery stopped; Mission Commander decision required"
+      : "Workspace Queue item pending",
     lastActivity: "",
-    approvalBlockers: [attention.label],
+    approvalBlockers: runnerSupervision ? [] : [attention.label],
     filesTouched: 0,
     latestCommandOrTest: "No command or test summary",
-    nextAction: "Open Workspace Queue",
+    nextAction: runnerSupervision
+      ? supervisionActions.length
+        ? "Choose manual Retry with a reason, or leave the session stopped"
+        : "Inspect the Local Agent session in Mission Work"
+      : "Open Workspace Queue",
     acceptedRevision: snapshot.revision,
     attention: true,
     tone: "attention",
     detail: {
       originatingSessionId: null,
-      issueId: null,
+      issueId: supervisedSession?.issue_id ?? null,
       toolActivity: [
         {
           kind: "queue-summary",
-          label: "Workspace Queue",
+          label: runnerSupervision ? "Runner supervision" : "Workspace Queue",
           summary: `${attention.kind}: ${attention.label}`,
         },
       ],
@@ -1117,11 +1146,15 @@ function projectAttentionCard(
       terminalExcerpts: [],
       reviewState: {
         evidenceState: "not-applicable",
-        lifecycle: "Waiting approval",
-        risks: "No evidence package attached to this queue item.",
+        lifecycle: runnerSupervision ? "Decision required" : "Waiting approval",
+        risks: runnerSupervision
+          ? "Automatic recovery is stopped until the Mission Commander chooses a manual next step."
+          : "No evidence package attached to this queue item.",
         reviewReady: false,
       },
-      governedActions: queueItem
+      governedActions: runnerSupervision
+        ? supervisionActions
+        : queueItem
         ? workspaceQueueDecisionActions(queueItem)
         : [
             {

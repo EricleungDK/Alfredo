@@ -87,7 +87,6 @@ _GIT_NOT_REPOSITORY_BOUNDARY_PATTERN = re.compile(
     r"\(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\."
 )
 _SKILL_INSTRUCTION_LIMIT = 12_000
-_ABANDONED_RUNNER_RECOVERY_LIMIT = 3
 _TEXT_SOURCE_SUFFIXES = {
     ".c",
     ".cc",
@@ -523,17 +522,17 @@ class _SessionOutputRecorder:
                 pass
 
 
-def _process_token_pids(process_token: str) -> set[int]:
-    """Return live Linux processes that inherited one bounded-run token."""
+def _probe_process_token_pids(process_token: str) -> tuple[set[int], bool]:
+    """Return token-bound processes and whether their absence was observable."""
 
     if os.name != "posix" or not process_token or not Path("/proc").is_dir():
-        return set()
+        return set(), False
     marker = f"ALFREDO_PROCESS_TOKEN={process_token}".encode("utf-8")
     matches: set[int] = set()
     try:
         entries = os.scandir("/proc")
     except OSError:
-        return matches
+        return matches, False
     with entries:
         for entry in entries:
             if not entry.name.isdigit():
@@ -544,10 +543,22 @@ def _process_token_pids(process_token: str) -> set[int]:
                     Path(entry.path) / "environ",
                     1_000_000,
                 )
-            except OSError:
+            except FileNotFoundError:
                 continue
+            except OSError:
+                # hidepid, sandbox, and transient I/O restrictions make an
+                # absence claim unavailable; supervision must not collapse
+                # that uncertainty into proof of quiescence.
+                return matches, False
             if marker in payload.split(b"\0"):
                 matches.add(pid)
+    return matches, True
+
+
+def _process_token_pids(process_token: str) -> set[int]:
+    """Return observable live processes that inherited one bounded-run token."""
+
+    matches, _absence_observable = _probe_process_token_pids(process_token)
     return matches
 
 
@@ -712,6 +723,9 @@ def _run_bounded_process(
     timeout_seconds: float,
     output_limit_bytes: int = _PROCESS_OUTPUT_BYTES_LIMIT,
     process_started: Callable[[subprocess.Popen[bytes]], None] | None = None,
+    process_binding_started: (
+        Callable[[subprocess.Popen[bytes], str], None] | None
+    ) = None,
     poll_callback: Callable[[], None] | None = None,
     output_callback: Callable[[str, bytes], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
@@ -749,6 +763,8 @@ def _run_bounded_process(
                 pass
 
     try:
+        if process_binding_started is not None:
+            process_binding_started(process, process_token)
         if process_started is not None:
             process_started(process)
         started = time.monotonic()
@@ -873,6 +889,105 @@ def _positive_pid(value: Any) -> int | None:
     if isinstance(value, int) and not isinstance(value, bool) and value > 0:
         return value
     return None
+
+
+def _optional_positive_pid(data: dict[str, Any], field_name: str) -> int | None:
+    if field_name not in data or data[field_name] is None:
+        return None
+    value = data[field_name]
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise AlbertError(f"Local Agent session {field_name} is invalid")
+    return value
+
+
+def _optional_session_string(data: dict[str, Any], field_name: str) -> str:
+    if field_name not in data:
+        return ""
+    value = data[field_name]
+    if not isinstance(value, str):
+        raise AlbertError(f"Local Agent session {field_name} is invalid")
+    return value
+
+
+def _optional_nonnegative_int(data: dict[str, Any], field_name: str) -> int:
+    if field_name not in data:
+        return 0
+    value = data[field_name]
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise AlbertError(f"Local Agent session {field_name} is invalid")
+    return value
+
+
+def _validated_runner_result(data: dict[str, Any]) -> dict[str, Any]:
+    raw = data.get("runner_result", {})
+    if not isinstance(raw, dict):
+        raise AlbertError("Local Agent session runner_result is invalid")
+    if not raw:
+        return {}
+    required_strings = (
+        "mission_id",
+        "session_id",
+        "runner_operation_id",
+        "worktree_identity",
+        "status",
+        "runner_ended_at",
+        "evidence_correlation_id",
+        "digest",
+    )
+    if any(
+        not isinstance(raw.get(field_name), str)
+        for field_name in required_strings
+    ):
+        raise AlbertError("Local Agent session runner_result boundary is invalid")
+    if not all(
+        raw[field_name].strip()
+        for field_name in (
+            "mission_id",
+            "session_id",
+            "runner_operation_id",
+            "worktree_identity",
+            "status",
+            "runner_ended_at",
+            "digest",
+        )
+    ):
+        raise AlbertError("Local Agent session runner_result identity is invalid")
+    exit_status = raw.get("runner_exit_status")
+    evidence = raw.get("evidence")
+    artifacts = raw.get("artifacts")
+    if (
+        (exit_status is not None and (
+            not isinstance(exit_status, int) or isinstance(exit_status, bool)
+        ))
+        or not isinstance(raw.get("evidence_valid"), bool)
+        or (evidence is not None and not isinstance(evidence, dict))
+        or not isinstance(artifacts, dict)
+        or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in artifacts.items()
+        )
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", raw["digest"])
+    ):
+        raise AlbertError("Local Agent session runner_result payload is invalid")
+    if raw["status"] not in {"completed", "evidence-ready", "failed"}:
+        raise AlbertError("Local Agent session runner_result status is invalid")
+    if (
+        raw["session_id"] != data.get("session_id")
+        or raw["runner_operation_id"] != data.get("runner_operation_id")
+        or raw["worktree_identity"] != data.get("worktree_identity")
+    ):
+        raise AlbertError("Local Agent session runner_result boundary is invalid")
+    digest_payload = {key: value for key, value in raw.items() if key != "digest"}
+    expected_digest = "sha256:" + sha256(
+        json.dumps(
+            digest_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if raw["digest"] != expected_digest:
+        raise AlbertError("Local Agent session runner_result digest is invalid")
+    return dict(raw)
 
 
 def _process_identity(pid: int) -> str:
@@ -1239,6 +1354,14 @@ class LocalAgentSession:
     runner_pid: int | None = None
     runner_identity: str = ""
     runner_process_pid: int | None = None
+    runner_process_identity: str = ""
+    runner_process_token: str = ""
+    runner_operation_id: str = ""
+    worktree_identity: str = ""
+    revision: int = 0
+    automatic_recovery_count: int = 0
+    supervision_receipt_id: str = ""
+    runner_result: dict[str, Any] = field(default_factory=dict)
     cancel_requested_at: str = ""
     cancel_reason: str = ""
 
@@ -1263,6 +1386,14 @@ class LocalAgentSession:
             "runner_pid": self.runner_pid,
             "runner_identity": self.runner_identity,
             "runner_process_pid": self.runner_process_pid,
+            "runner_process_identity": self.runner_process_identity,
+            "runner_process_token": self.runner_process_token,
+            "runner_operation_id": self.runner_operation_id,
+            "worktree_identity": self.worktree_identity,
+            "revision": self.revision,
+            "automatic_recovery_count": self.automatic_recovery_count,
+            "supervision_receipt_id": self.supervision_receipt_id,
+            "runner_result": self.runner_result,
             "cancel_requested_at": self.cancel_requested_at,
             "cancel_reason": self.cancel_reason,
         }
@@ -1277,6 +1408,7 @@ class LocalAgentSession:
             and not data.get("evidence")
         ):
             status = "queued"
+        runner_result = _validated_runner_result(data)
         return cls(
             session_id=data["session_id"],
             issue_id=data["issue_id"],
@@ -1294,11 +1426,89 @@ class LocalAgentSession:
             runner_ended_at=data.get("runner_ended_at", ""),
             repository_snapshot=dict(data.get("repository_snapshot", {})),
             baseline_fingerprints=dict(data.get("baseline_fingerprints", {})),
-            runner_pid=_positive_pid(data.get("runner_pid")),
-            runner_identity=str(data.get("runner_identity", "")),
-            runner_process_pid=_positive_pid(data.get("runner_process_pid")),
+            runner_pid=_optional_positive_pid(data, "runner_pid"),
+            runner_identity=_optional_session_string(data, "runner_identity"),
+            runner_process_pid=_optional_positive_pid(data, "runner_process_pid"),
+            runner_process_identity=_optional_session_string(
+                data,
+                "runner_process_identity",
+            ),
+            runner_process_token=_optional_session_string(
+                data,
+                "runner_process_token",
+            ),
+            runner_operation_id=_optional_session_string(
+                data,
+                "runner_operation_id",
+            ),
+            worktree_identity=_optional_session_string(data, "worktree_identity"),
+            revision=_optional_nonnegative_int(data, "revision"),
+            automatic_recovery_count=_optional_nonnegative_int(
+                data,
+                "automatic_recovery_count",
+            ),
+            supervision_receipt_id=_optional_session_string(
+                data,
+                "supervision_receipt_id",
+            ),
+            runner_result=runner_result,
             cancel_requested_at=str(data.get("cancel_requested_at", "")),
             cancel_reason=str(data.get("cancel_reason", "")),
+        )
+
+
+@dataclass(frozen=True)
+class RunnerObservation:
+    source_id: str
+    source_incarnation: str
+    sequence: int
+    mission_id: str
+    session_id: str
+    session_revision: int
+    runner_operation_id: str
+    owner_signal: str
+    process_group_signal: str
+    worktree_identity: str
+    result_signal: str
+    result_digest: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source_id": self.source_id,
+            "source_incarnation": self.source_incarnation,
+            "sequence": self.sequence,
+            "mission_id": self.mission_id,
+            "session_id": self.session_id,
+            "session_revision": self.session_revision,
+            "runner_operation_id": self.runner_operation_id,
+            "owner_signal": self.owner_signal,
+            "process_group_signal": self.process_group_signal,
+            "worktree_identity": self.worktree_identity,
+            "result_signal": self.result_signal,
+            "result_digest": self.result_digest,
+        }
+
+
+@dataclass(frozen=True)
+class SupervisionReceipt:
+    receipt_id: str
+    correlation_id: str
+    outcome: str
+    effect: str
+    mission_id: str
+    session_id: str
+    attention_id: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SupervisionReceipt":
+        return cls(
+            receipt_id=str(data["receipt_id"]),
+            correlation_id=str(data["correlation_id"]),
+            outcome=str(data["outcome"]),
+            effect=str(data["effect"]),
+            mission_id=str(data["mission_id"]),
+            session_id=str(data["session_id"]),
+            attention_id=str(data.get("attention_id", "")),
         )
 
 
@@ -1416,6 +1626,7 @@ class AlbertMission:
         self.command_policy: dict[str, str] = {}
         self.workstation_actions: dict[str, dict[str, Any]] = {}
         self.archived_issue_ids: set[str] = set()
+        self.supervision: dict[str, Any] = self._empty_supervision_state()
         self.timeline: list[str] = []
         self.agent_registry = AgentRegistry(agents=[], source_path=self.agent_config_path)
         self._evidence_activity_recorder: (
@@ -1431,6 +1642,351 @@ class AlbertMission:
     @property
     def runtime_path(self) -> Path:
         return self.runtime_dir / "runtime.json"
+
+    @staticmethod
+    def _empty_supervision_state() -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "observers": {},
+            "attentions": {},
+            "intents": {},
+            "receipts": {},
+        }
+
+    @classmethod
+    def _validated_supervision_state(cls, raw: Any) -> dict[str, Any]:
+        """Copy and validate the durable supervision ledger container."""
+
+        if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+            raise AlbertError("Mission supervision state is invalid")
+        for field_name in ("observers", "attentions", "intents", "receipts"):
+            collection = raw.get(field_name)
+            if not isinstance(collection, dict) or not all(
+                isinstance(key, str)
+                and key.strip()
+                and isinstance(value, dict)
+                for key, value in collection.items()
+            ):
+                raise AlbertError("Mission supervision state is invalid")
+        for source_id, observer in raw["observers"].items():
+            cursor = observer.get("cursor")
+            observer_receipts = observer.get("receipts")
+            if (
+                not isinstance(observer.get("incarnation"), str)
+                or not observer["incarnation"].strip()
+                or not isinstance(cursor, int)
+                or isinstance(cursor, bool)
+                or cursor < 0
+                or not isinstance(observer_receipts, dict)
+                or any(
+                    not isinstance(sequence, str)
+                    or not sequence.isdigit()
+                    or not isinstance(receipt_id, str)
+                    or not receipt_id.strip()
+                    for sequence, receipt_id in observer_receipts.items()
+                )
+            ):
+                raise AlbertError(
+                    f"Mission supervision observer state is invalid: {source_id}"
+                )
+        cls._validate_supervision_records(
+            raw["receipts"],
+            required_strings=(
+                "receipt_id",
+                "correlation_id",
+                "outcome",
+                "effect",
+                "mission_id",
+                "session_id",
+            ),
+            identity_field="receipt_id",
+        )
+        cls._validate_supervision_records(
+            raw["attentions"],
+            required_strings=(
+                "attention_id",
+                "incident_id",
+                "mission_id",
+                "session_id",
+                "kind",
+                "detail",
+                "next_effect",
+                "disposition",
+                "receipt_id",
+            ),
+            identity_field="attention_id",
+        )
+        cls._validate_supervision_records(
+            raw["intents"],
+            required_strings=(
+                "intent_id",
+                "attention_id",
+                "receipt_id",
+                "effect",
+                "status",
+                "mission_id",
+                "session_id",
+            ),
+            identity_field="intent_id",
+        )
+        if any(
+            receipt["outcome"]
+            not in {
+                "no-change",
+                "attention-recorded",
+                "recovered",
+                "result-reconciled",
+                "decision-needed",
+            }
+            or receipt["effect"]
+            not in {
+                "none",
+                "recover-same-session",
+                "reconcile-result",
+                "mission-commander-decision",
+            }
+            for receipt in raw["receipts"].values()
+        ):
+            raise AlbertError("Mission supervision receipt outcome is invalid")
+        if any(
+            attention["next_effect"]
+            not in {
+                "recover-same-session",
+                "reconcile-result",
+                "mission-commander-decision",
+            }
+            or attention["disposition"] not in {"open", "resolved"}
+            for attention in raw["attentions"].values()
+        ):
+            raise AlbertError("Mission supervision attention state is invalid")
+        if any(
+            intent["effect"]
+            not in {"recover-same-session", "reconcile-result"}
+            or intent["status"] not in {"pending", "applied", "blocked"}
+            for intent in raw["intents"].values()
+        ):
+            raise AlbertError("Mission supervision intent state is invalid")
+        receipts = raw["receipts"]
+        attentions = raw["attentions"]
+        for observer in raw["observers"].values():
+            cursor = observer["cursor"]
+            expected_sequences = {str(sequence) for sequence in range(1, cursor + 1)}
+            if set(observer["receipts"]) != expected_sequences or any(
+                receipt_id not in receipts
+                for receipt_id in observer["receipts"].values()
+            ):
+                raise AlbertError(
+                    "Mission supervision observer receipt chain is invalid"
+                )
+        for receipt_id, receipt in receipts.items():
+            attention_id = receipt.get("attention_id", "")
+            if not isinstance(attention_id, str) or (
+                receipt["effect"] == "none" and attention_id
+            ) or (
+                receipt["effect"] != "none"
+                and (
+                    not attention_id
+                    or attention_id not in attentions
+                    or attentions[attention_id]["receipt_id"] != receipt_id
+                )
+            ):
+                raise AlbertError(
+                    "Mission supervision receipt attention chain is invalid"
+                )
+        for intent in raw["intents"].values():
+            revision = intent.get("session_revision")
+            result_signal = intent.get("result_signal")
+            result_digest = intent.get("result_digest")
+            if (
+                intent["receipt_id"] not in receipts
+                or intent["attention_id"] not in attentions
+                or attentions[intent["attention_id"]]["receipt_id"]
+                != intent["receipt_id"]
+                or not isinstance(revision, int)
+                or isinstance(revision, bool)
+                or revision < 0
+                or any(
+                    not isinstance(intent.get(field_name), str)
+                    for field_name in (
+                        "runner_operation_id",
+                        "runner_identity",
+                        "runner_process_identity",
+                        "worktree_identity",
+                        "result_signal",
+                        "result_digest",
+                    )
+                )
+                or any(
+                    intent.get(field_name) is not None
+                    and (
+                        not isinstance(intent[field_name], int)
+                        or isinstance(intent[field_name], bool)
+                        or intent[field_name] <= 0
+                    )
+                    for field_name in ("runner_pid", "runner_process_pid")
+                )
+                or result_signal not in {"absent", "exact-valid"}
+                or (result_signal == "exact-valid" and not result_digest)
+                or (result_signal == "absent" and result_digest)
+            ):
+                raise AlbertError("Mission supervision intent boundary is invalid")
+        return json.loads(json.dumps(raw))
+
+    @staticmethod
+    def _validate_supervision_records(
+        records: dict[str, dict[str, Any]],
+        *,
+        required_strings: tuple[str, ...],
+        identity_field: str,
+    ) -> None:
+        for record_id, record in records.items():
+            if record.get(identity_field) != record_id or any(
+                not isinstance(record.get(field_name), str)
+                or not record[field_name].strip()
+                for field_name in required_strings
+            ):
+                raise AlbertError(
+                    f"Mission supervision {identity_field} record is invalid: {record_id}"
+                )
+
+    def _supervision_from_payload(self, data: dict[str, Any]) -> dict[str, Any]:
+        raw = data.get("supervision", self._empty_supervision_state())
+        supervision = self._validated_supervision_state(raw)
+        self._validate_supervision_semantics(
+            supervision,
+            data.get("sessions", {}),
+        )
+        return supervision
+
+    def _validate_supervision_semantics(
+        self,
+        supervision: dict[str, Any],
+        raw_sessions: Any,
+    ) -> None:
+        """Reject well-shaped records that contradict their causal boundary."""
+
+        if not isinstance(raw_sessions, dict) or any(
+            not isinstance(session_id, str)
+            or not session_id.strip()
+            or not isinstance(raw_session, dict)
+            for session_id, raw_session in raw_sessions.items()
+        ):
+            raise AlbertError("Mission supervision session boundary is invalid")
+        for session_id, raw_session in raw_sessions.items():
+            result = raw_session.get("runner_result", {})
+            if isinstance(result, dict) and result and (
+                result.get("mission_id") != self.mission_id
+                or result.get("session_id") != session_id
+            ):
+                raise AlbertError("Mission runner result identity is invalid")
+
+        receipts = supervision["receipts"]
+        attentions = supervision["attentions"]
+        intents = supervision["intents"]
+        allowed_receipt_outcomes = {
+            "none": {"no-change"},
+            "recover-same-session": {"attention-recorded", "recovered"},
+            "reconcile-result": {"attention-recorded", "result-reconciled"},
+            "mission-commander-decision": {"decision-needed"},
+        }
+        for receipt_id, receipt in receipts.items():
+            effect = receipt["effect"]
+            session_id = receipt["session_id"]
+            attention_id = receipt.get("attention_id", "")
+            if (
+                receipt["mission_id"] != self.mission_id
+                or session_id not in raw_sessions
+                or receipt["outcome"] not in allowed_receipt_outcomes[effect]
+            ):
+                raise AlbertError("Mission supervision receipt boundary is invalid")
+            if effect == "none":
+                continue
+            attention = attentions.get(attention_id)
+            if not isinstance(attention, dict) or (
+                attention["mission_id"] != self.mission_id
+                or attention["session_id"] != session_id
+                or attention["next_effect"] != effect
+            ):
+                raise AlbertError("Mission supervision attention boundary is invalid")
+
+        referenced_attention_ids = {
+            str(receipt.get("attention_id", ""))
+            for receipt in receipts.values()
+            if receipt.get("attention_id")
+        }
+        if set(attentions) != referenced_attention_ids:
+            raise AlbertError("Mission supervision attention ownership is invalid")
+
+        intents_by_receipt: dict[str, list[dict[str, Any]]] = {}
+        for intent in intents.values():
+            receipt = receipts[intent["receipt_id"]]
+            attention = attentions[intent["attention_id"]]
+            status = intent["status"]
+            effect = intent["effect"]
+            expected_projection_effect = (
+                "mission-commander-decision" if status == "blocked" else effect
+            )
+            if (
+                intent["mission_id"] != self.mission_id
+                or intent["session_id"] not in raw_sessions
+                or receipt["mission_id"] != intent["mission_id"]
+                or attention["mission_id"] != intent["mission_id"]
+                or receipt["session_id"] != intent["session_id"]
+                or attention["session_id"] != intent["session_id"]
+                or receipt["effect"] != expected_projection_effect
+                or attention["next_effect"] != expected_projection_effect
+                or (
+                    effect == "recover-same-session"
+                    and (
+                        intent["result_signal"] != "absent"
+                        or bool(intent["result_digest"])
+                    )
+                )
+                or (
+                    effect == "reconcile-result"
+                    and (
+                        intent["result_signal"] != "exact-valid"
+                        or not intent["result_digest"]
+                    )
+                )
+            ):
+                raise AlbertError("Mission supervision intent semantics are invalid")
+            if status == "pending":
+                raw_session = raw_sessions[intent["session_id"]]
+                boundary_fields = (
+                    ("revision", "session_revision"),
+                    ("runner_operation_id", "runner_operation_id"),
+                    ("runner_pid", "runner_pid"),
+                    ("runner_identity", "runner_identity"),
+                    ("runner_process_pid", "runner_process_pid"),
+                    ("runner_process_identity", "runner_process_identity"),
+                    ("worktree_identity", "worktree_identity"),
+                )
+                if any(
+                    raw_session.get(session_field) != intent.get(intent_field)
+                    for session_field, intent_field in boundary_fields
+                ):
+                    raise AlbertError(
+                        "Mission supervision pending intent boundary is invalid"
+                    )
+            intents_by_receipt.setdefault(intent["receipt_id"], []).append(intent)
+
+        for receipt_id, receipt in receipts.items():
+            intent_count = len(intents_by_receipt.get(receipt_id, []))
+            if receipt["effect"] in {"recover-same-session", "reconcile-result"}:
+                if intent_count != 1:
+                    raise AlbertError("Mission supervision receipt intent is invalid")
+            elif intent_count:
+                linked_intent = intents_by_receipt[receipt_id][0]
+                if not (
+                    receipt["effect"] == "mission-commander-decision"
+                    and intent_count == 1
+                    and linked_intent["status"] == "blocked"
+                ):
+                    raise AlbertError("Mission supervision receipt intent is invalid")
+
+    def supervision_state(self) -> dict[str, Any]:
+        return json.loads(json.dumps(self.supervision))
 
     def _start_session_output(self, session: LocalAgentSession) -> None:
         recorder = _SessionOutputRecorder(
@@ -2254,6 +2810,7 @@ class AlbertMission:
         allowed_paths: list[str] | None = None,
         command_policy: dict[str, str] | None = None,
         workstation_action: dict[str, str] | None = None,
+        manual_retry_reason: str = "",
     ) -> LocalAgentSession:
         with self._session_launch_lock():
             self._load_runtime()
@@ -2264,6 +2821,7 @@ class AlbertMission:
                 allowed_paths=allowed_paths,
                 command_policy=command_policy,
                 workstation_action=workstation_action,
+                manual_retry_reason=manual_retry_reason,
             )
 
     def _launch_repair(
@@ -2274,6 +2832,7 @@ class AlbertMission:
         allowed_paths: list[str] | None = None,
         command_policy: dict[str, str] | None = None,
         workstation_action: dict[str, str] | None = None,
+        manual_retry_reason: str = "",
     ) -> LocalAgentSession:
         prior_session = self._session(session_id)
         issue = self.issues.get(prior_session.issue_id)
@@ -2284,7 +2843,15 @@ class AlbertMission:
         if issue is None and not is_ad_hoc:
             raise AlbertError(f"Unknown Issue Slice: {prior_session.issue_id}")
         review = self._latest_review_for_session(session_id)
-        if not review or review.next_action not in {"same-local-agent-repair", "fresh-local-agent-repair"}:
+        repairable_review = bool(
+            review
+            and review.next_action
+            in {"same-local-agent-repair", "fresh-local-agent-repair"}
+        )
+        manual_retry = (
+            prior_session.status == "failed" and bool(manual_retry_reason.strip())
+        )
+        if not repairable_review and not manual_retry:
             raise LaunchBlockedError(f"{session_id} does not have a repairable Frontier review.")
         existing_repair = next(
             (
@@ -2371,9 +2938,15 @@ class AlbertMission:
             issue.assigned_agent = assigned_agent
         repair_context = {
             "prior_session_id": prior_session.session_id,
-            "review_outcome": review.outcome,
-            "review_reason": review.reason,
-            "next_action": review.next_action,
+            "review_outcome": review.outcome if review is not None else "",
+            "review_reason": (
+                review.reason if review is not None else manual_retry_reason.strip()
+            ),
+            "next_action": (
+                review.next_action
+                if review is not None
+                else "mission-commander-manual-retry"
+            ),
             "prior_evidence": prior_session.evidence.to_dict() if prior_session.evidence else None,
             "prior_artifacts": prior_session.artifacts,
         }
@@ -2480,14 +3053,17 @@ class AlbertMission:
             session.runner_pid = None
             session.runner_identity = ""
             session.runner_process_pid = None
+            session.runner_process_identity = ""
+            session.runner_process_token = ""
             session.task_packet["runner_failure"] = str(exc)
-            self._persist_session_update(
+            persisted_failure = self._persist_session_update(
                 session,
                 expected_statuses={"queued"},
                 timeline_message=(
                     f"{session.issue_id} runner preflight failed for {session_id}: {exc}"
                 ),
             )
+            self._record_typed_recovery_failure(persisted_failure)
             raise
 
         session.status = "running"
@@ -2495,7 +3071,24 @@ class AlbertMission:
         session.runner_ended_at = ""
         session.runner_pid = os.getpid()
         session.runner_identity = _process_identity(session.runner_pid)
-        session.runner_process_pid = None
+        raw_attempt = session.task_packet.get("runner_attempt_count", 0)
+        attempt = (
+            raw_attempt
+            if isinstance(raw_attempt, int) and not isinstance(raw_attempt, bool)
+            else 0
+        ) + 1
+        session.task_packet["runner_attempt_count"] = attempt
+        operation_payload = (
+            f"{self.mission_id}\n{session.session_id}\n{attempt}\n"
+            f"{session.runner_pid}\n{session.runner_identity}"
+        )
+        session.runner_operation_id = (
+            "runner-operation:" + sha256(operation_payload.encode("utf-8")).hexdigest()
+        )
+        session.runner_process_pid = session.runner_pid
+        session.runner_process_identity = session.runner_identity
+        session.runner_process_token = ""
+        session.runner_result = {}
         session.cancel_requested_at = ""
         session.cancel_reason = ""
         session.task_packet.pop("runner_failure", None)
@@ -2514,6 +3107,11 @@ class AlbertMission:
                 self._start_session_output(session)
                 self._raise_if_cancelled(session)
                 self._ensure_session_worktree(session)
+                session.worktree_identity = self._worktree_identity_for_session(session)
+                if not session.worktree_identity:
+                    raise AlbertError(
+                        f"{session_id} managed Worktree Identity could not be proven."
+                    )
                 persisted = self._persist_session_update(session)
                 if persisted.status == "cancelled":
                     raise SessionCancelledError(
@@ -2527,6 +3125,7 @@ class AlbertMission:
                 else:
                     self._run_ollama_agent(session, agent_config)
                 self._raise_if_cancelled(session)
+                self._persist_runner_result_candidate(session)
             except SessionCancelledError:
                 return self._refresh_persisted_session(session_id)
             except Exception as exc:
@@ -2544,6 +3143,8 @@ class AlbertMission:
                 session.runner_pid = None
                 session.runner_identity = ""
                 session.runner_process_pid = None
+                session.runner_process_identity = ""
+                session.runner_process_token = ""
                 session.task_packet["runner_failure"] = str(exc)
                 failure_message = f"{session.issue_id} runner failed for {session_id}: {exc}"
                 persisted = self._persist_session_update(
@@ -2552,6 +3153,7 @@ class AlbertMission:
                 )
                 if persisted.status == "cancelled":
                     return persisted
+                self._record_typed_recovery_failure(persisted)
                 raise AlbertError(f"{session_id} runner failed: {exc}") from exc
 
             session.runner_ended_at = session.runner_ended_at or _utc_now()
@@ -2560,6 +3162,8 @@ class AlbertMission:
             session.runner_pid = None
             session.runner_identity = ""
             session.runner_process_pid = None
+            session.runner_process_identity = ""
+            session.runner_process_token = ""
             finished_message = (
                 f"{session.issue_id} runner finished for {session_id} "
                 f"with status {session.status}."
@@ -2568,6 +3172,7 @@ class AlbertMission:
                 session,
                 timeline_message=finished_message,
             )
+            persisted = self._record_typed_recovery_failure(persisted)
             if (
                 persisted.evidence is not None
                 and persisted.evidence_valid
@@ -2581,6 +3186,679 @@ class AlbertMission:
             return persisted
         finally:
             self._finish_session_output(session_id)
+
+    @staticmethod
+    def _runner_result_digest(candidate: dict[str, Any]) -> str:
+        payload = json.dumps(
+            candidate,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return "sha256:" + sha256(payload).hexdigest()
+
+    def _record_typed_recovery_failure(
+        self,
+        failed_session: LocalAgentSession,
+    ) -> LocalAgentSession:
+        if (
+            failed_session.status != "failed"
+            or failed_session.automatic_recovery_count < 1
+        ):
+            return failed_session
+        incident_payload = (
+            f"{self.mission_id}\n{failed_session.session_id}\n"
+            f"{failed_session.runner_operation_id}\n{failed_session.revision}\n"
+            "automatic-recovery-failed"
+        )
+        incident_id = sha256(incident_payload.encode("utf-8")).hexdigest()
+        receipt_id = f"supervision-receipt:{incident_id[:24]}"
+        attention_id = f"runner-attention:{incident_id[:24]}"
+        correlation_id = f"supervise:{incident_id}"
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            supervision = self._supervision_from_payload(data)
+            existing = supervision.setdefault("receipts", {}).get(receipt_id)
+            raw_latest = data.get("sessions", {}).get(failed_session.session_id)
+            if not isinstance(raw_latest, dict):
+                raise AlbertError(
+                    f"Unknown Local Agent session: {failed_session.session_id}"
+                )
+            latest = LocalAgentSession.from_dict(raw_latest)
+            if isinstance(existing, dict):
+                self.sessions[latest.session_id] = latest
+                self.supervision = supervision
+                return latest
+            if (
+                latest.status != "failed"
+                or latest.automatic_recovery_count < 1
+                or latest.revision != failed_session.revision
+                or latest.runner_operation_id != failed_session.runner_operation_id
+            ):
+                return latest
+            detail = (
+                "The one automatic recovery returned a failed runner outcome; "
+                "further automation is disabled until the Mission Commander decides."
+            )
+            supervision.setdefault("attentions", {})[attention_id] = {
+                "attention_id": attention_id,
+                "incident_id": incident_id,
+                "mission_id": self.mission_id,
+                "session_id": latest.session_id,
+                "kind": "automatic-recovery-failed",
+                "detail": detail,
+                "next_effect": "mission-commander-decision",
+                "disposition": "open",
+                "receipt_id": receipt_id,
+            }
+            supervision["receipts"][receipt_id] = {
+                "receipt_id": receipt_id,
+                "correlation_id": correlation_id,
+                "outcome": "decision-needed",
+                "effect": "mission-commander-decision",
+                "mission_id": self.mission_id,
+                "session_id": latest.session_id,
+                "attention_id": attention_id,
+            }
+            latest.revision += 1
+            latest.supervision_receipt_id = receipt_id
+            data["sessions"][latest.session_id] = latest.to_dict()
+            data["supervision"] = supervision
+            data.setdefault("timeline", []).append(
+                f"{latest.issue_id} automatic recovery returned failure for "
+                f"{latest.session_id}; Mission Commander decision required under "
+                f"receipt {receipt_id}."
+            )
+            self._write_runtime_payload(data)
+            self.sessions[latest.session_id] = latest
+            self.timeline = list(data.get("timeline", []))
+            self.supervision = supervision
+            return latest
+
+    def _persist_runner_result_candidate(
+        self,
+        completed_session: LocalAgentSession,
+    ) -> LocalAgentSession:
+        """Persist one typed runner result before canonical terminal reconciliation."""
+
+        if completed_session.status not in {"completed", "evidence-ready", "failed"}:
+            raise AlbertError("Runner result candidate must be terminal.")
+        candidate = {
+            "mission_id": self.mission_id,
+            "session_id": completed_session.session_id,
+            "runner_operation_id": completed_session.runner_operation_id,
+            "worktree_identity": completed_session.worktree_identity,
+            "status": completed_session.status,
+            "runner_exit_status": completed_session.runner_exit_status,
+            "runner_ended_at": completed_session.runner_ended_at or _utc_now(),
+            "evidence": (
+                completed_session.evidence.to_dict()
+                if completed_session.evidence is not None
+                else None
+            ),
+            "evidence_valid": completed_session.evidence_valid,
+            "evidence_correlation_id": completed_session.evidence_correlation_id,
+            "artifacts": dict(completed_session.artifacts),
+        }
+        candidate["digest"] = self._runner_result_digest(candidate)
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_latest = data.get("sessions", {}).get(completed_session.session_id)
+            if not isinstance(raw_latest, dict):
+                raise AlbertError(
+                    f"Unknown Local Agent session: {completed_session.session_id}"
+                )
+            latest = LocalAgentSession.from_dict(raw_latest)
+            if (
+                latest.status != "running"
+                or latest.revision != completed_session.revision
+                or latest.runner_operation_id != completed_session.runner_operation_id
+                or latest.worktree_identity != completed_session.worktree_identity
+            ):
+                raise LaunchBlockedError(
+                    "Runner result no longer matches the canonical session boundary."
+                )
+            latest.runner_result = candidate
+            latest.revision += 1
+            data["sessions"][latest.session_id] = latest.to_dict()
+            self._write_runtime_payload(data)
+            self.sessions[latest.session_id] = latest
+            completed_session.runner_result = candidate
+            completed_session.revision = latest.revision
+            return latest
+
+    def observe_runner(self, observation: RunnerObservation) -> SupervisionReceipt:
+        """Reconcile one advisory runner event without granting it Mission authority."""
+
+        string_fields = {
+            "source identity": observation.source_id,
+            "source incarnation": observation.source_incarnation,
+            "Mission identity": observation.mission_id,
+            "session identity": observation.session_id,
+        }
+        for field_name, value in string_fields.items():
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value.encode("utf-8")) > 4_096
+            ):
+                raise AlbertError(
+                    f"Runner observation {field_name} must be a bounded non-empty string."
+                )
+        for value, boundary_name in (
+            (observation.runner_operation_id, "runner operation identity"),
+            (observation.worktree_identity, "Worktree Identity"),
+        ):
+            if not isinstance(value, str) or len(value.encode("utf-8")) > 4_096:
+                raise AlbertError(
+                    f"Runner observation {boundary_name} is invalid."
+                )
+        if (
+            not isinstance(observation.sequence, int)
+            or isinstance(observation.sequence, bool)
+            or observation.sequence <= 0
+        ):
+            raise AlbertError("Runner observation sequence must be positive.")
+        if (
+            not isinstance(observation.session_revision, int)
+            or isinstance(observation.session_revision, bool)
+            or observation.session_revision < 0
+        ):
+            raise AlbertError("Runner observation session revision is invalid.")
+        if observation.owner_signal not in {"live-exact", "absent", "reused", "unavailable"}:
+            raise AlbertError("Runner observation owner signal is invalid.")
+        if observation.process_group_signal not in {
+            "live-exact",
+            "absent",
+            "reused",
+            "unavailable",
+        }:
+            raise AlbertError("Runner observation process-group signal is invalid.")
+        if observation.result_signal not in {
+            "absent",
+            "exact-valid",
+            "invalid",
+            "unavailable",
+        }:
+            raise AlbertError("Runner observation result signal is invalid.")
+        if (
+            not isinstance(observation.result_digest, str)
+            or len(observation.result_digest.encode("utf-8")) > 4_096
+            or (observation.result_signal == "exact-valid" and not observation.result_digest)
+            or (observation.result_signal != "exact-valid" and observation.result_digest)
+        ):
+            raise AlbertError("Runner observation result boundary is invalid.")
+        if observation.mission_id != self.mission_id:
+            raise AlbertError("Runner observation Mission identity does not match.")
+
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_session = data.get("sessions", {}).get(observation.session_id)
+            if not isinstance(raw_session, dict):
+                raise AlbertError(
+                    f"Unknown Local Agent session: {observation.session_id}"
+                )
+            session = LocalAgentSession.from_dict(raw_session)
+            if (
+                observation.owner_signal == "live-exact"
+                and observation.process_group_signal == "live-exact"
+                and observation.result_signal == "absent"
+            ):
+                finding_kind = "healthy"
+            elif (
+                observation.owner_signal == "absent"
+                and observation.process_group_signal == "absent"
+                and observation.result_signal == "absent"
+            ):
+                finding_kind = "dead-owner"
+            elif (
+                observation.owner_signal == "absent"
+                and observation.process_group_signal == "absent"
+                and observation.result_signal == "exact-valid"
+                and bool(observation.result_digest)
+            ):
+                finding_kind = "result-unreconciled"
+            else:
+                finding_kind = "ambiguous-runner-state"
+            incident_payload = json.dumps(
+                {
+                    "mission_id": observation.mission_id,
+                    "session_id": observation.session_id,
+                    "session_revision": observation.session_revision,
+                    "runner_operation_id": observation.runner_operation_id,
+                    "worktree_identity": observation.worktree_identity,
+                    "finding_kind": finding_kind,
+                    "owner_signal": observation.owner_signal,
+                    "process_group_signal": observation.process_group_signal,
+                    "result_signal": observation.result_signal,
+                    "result_digest": observation.result_digest,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            incident_id = sha256(incident_payload.encode("utf-8")).hexdigest()
+            correlation_id = f"supervise:{incident_id}"
+            receipt_id = f"supervision-receipt:{incident_id[:24]}"
+            supervision = self._supervision_from_payload(data)
+            observers = supervision.setdefault("observers", {})
+            receipts = supervision.setdefault("receipts", {})
+            observer = observers.get(observation.source_id)
+            if observer is None:
+                observer = {
+                    "incarnation": observation.source_incarnation,
+                    "cursor": 0,
+                    "receipts": {},
+                }
+            if not isinstance(observer, dict):
+                raise AlbertError("Runner observer state is invalid.")
+            if observer.get("incarnation") != observation.source_incarnation:
+                if observation.sequence != 1:
+                    raise AlbertError(
+                        "A new runner observer incarnation must begin at sequence 1."
+                    )
+                observer = {
+                    "incarnation": observation.source_incarnation,
+                    "cursor": 0,
+                    "receipts": {},
+                }
+            cursor = observer.get("cursor", 0)
+            observer_receipts = observer.setdefault("receipts", {})
+            if not isinstance(cursor, int) or isinstance(cursor, bool) or cursor < 0:
+                raise AlbertError("Runner observer cursor is invalid.")
+            if observation.sequence <= cursor:
+                replay_id = observer_receipts.get(str(observation.sequence))
+                replay = receipts.get(replay_id) if isinstance(replay_id, str) else None
+                if not isinstance(replay, dict) or replay.get("correlation_id") != correlation_id:
+                    raise AlbertError(
+                        "Runner observation sequence was already used for a different boundary."
+                    )
+                self.supervision = supervision
+                return SupervisionReceipt.from_dict(replay)
+            if observation.sequence != cursor + 1:
+                raise AlbertError(
+                    f"Runner observer cursor gap: expected {cursor + 1}, "
+                    f"received {observation.sequence}."
+                )
+
+            exact_canonical_boundary = (
+                session.status == "running"
+                and session.revision == observation.session_revision
+                and session.runner_operation_id == observation.runner_operation_id
+                and session.worktree_identity == observation.worktree_identity
+            )
+            healthy = (
+                exact_canonical_boundary
+                and finding_kind == "healthy"
+            )
+            if healthy:
+                effect = "none"
+            elif (
+                exact_canonical_boundary
+                and finding_kind == "dead-owner"
+            ):
+                effect = "recover-same-session"
+            elif (
+                exact_canonical_boundary
+                and finding_kind == "result-unreconciled"
+            ):
+                effect = "reconcile-result"
+            else:
+                effect = "mission-commander-decision"
+            existing_receipt = receipts.get(receipt_id)
+            if isinstance(existing_receipt, dict):
+                observer["cursor"] = observation.sequence
+                observer_receipts[str(observation.sequence)] = receipt_id
+                observers[observation.source_id] = observer
+                data["supervision"] = supervision
+                self._write_runtime_payload(data)
+                self.supervision = supervision
+                return SupervisionReceipt.from_dict(existing_receipt)
+
+            receipt = SupervisionReceipt(
+                receipt_id=receipt_id,
+                correlation_id=correlation_id,
+                outcome=(
+                    "no-change"
+                    if healthy
+                    else "decision-needed"
+                    if effect == "mission-commander-decision"
+                    else "attention-recorded"
+                ),
+                effect=effect,
+                mission_id=self.mission_id,
+                session_id=session.session_id,
+                attention_id=(
+                    "" if healthy else f"runner-attention:{incident_id[:24]}"
+                ),
+            )
+            receipt_payload = {
+                "receipt_id": receipt.receipt_id,
+                "correlation_id": receipt.correlation_id,
+                "outcome": receipt.outcome,
+                "effect": receipt.effect,
+                "mission_id": receipt.mission_id,
+                "session_id": receipt.session_id,
+                "attention_id": receipt.attention_id,
+            }
+            receipts[receipt_id] = receipt_payload
+            if not healthy:
+                attention = {
+                    "attention_id": receipt.attention_id,
+                    "incident_id": incident_id,
+                    "mission_id": self.mission_id,
+                    "session_id": session.session_id,
+                    "kind": finding_kind,
+                    "detail": (
+                        "Exact runner and process group are absent with no result; "
+                        "one same-session recovery is pending exact proof."
+                        if effect == "recover-same-session"
+                        else "An exact durable runner result is pending canonical reconciliation."
+                        if effect == "reconcile-result"
+                        else "Runner evidence is ambiguous; automatic recovery is blocked."
+                    ),
+                    "next_effect": effect,
+                    "disposition": "open",
+                    "receipt_id": receipt_id,
+                }
+                supervision.setdefault("attentions", {})[receipt.attention_id] = attention
+                if effect in {"recover-same-session", "reconcile-result"}:
+                    intent_id = f"runner-intent:{incident_id[:24]}"
+                    supervision.setdefault("intents", {})[intent_id] = {
+                        "intent_id": intent_id,
+                        "attention_id": receipt.attention_id,
+                        "receipt_id": receipt_id,
+                        "effect": effect,
+                        "status": "pending",
+                        "mission_id": self.mission_id,
+                        "session_id": session.session_id,
+                        "session_revision": session.revision,
+                        "runner_operation_id": session.runner_operation_id,
+                        "runner_pid": session.runner_pid,
+                        "runner_identity": session.runner_identity,
+                        "runner_process_pid": session.runner_process_pid,
+                        "runner_process_identity": session.runner_process_identity,
+                        "worktree_identity": session.worktree_identity,
+                        "result_signal": observation.result_signal,
+                        "result_digest": observation.result_digest,
+                    }
+                else:
+                    session.revision += 1
+                    session.supervision_receipt_id = receipt_id
+                    data["sessions"][session.session_id] = session.to_dict()
+            observer["cursor"] = observation.sequence
+            observer_receipts[str(observation.sequence)] = receipt_id
+            observers[observation.source_id] = observer
+            data["supervision"] = supervision
+            self._write_runtime_payload(data)
+            if effect == "mission-commander-decision":
+                self.sessions[session.session_id] = session
+            self.supervision = supervision
+        if receipt.effect in {"recover-same-session", "reconcile-result"}:
+            return self._apply_supervision_intent(receipt.receipt_id)
+        return receipt
+
+    @staticmethod
+    def _probe_process_identity(pid: int | None, expected_identity: str) -> str:
+        if pid is None or not expected_identity:
+            return "unavailable"
+        if not Path("/proc").is_dir():
+            return "unavailable"
+        stat_path = Path(f"/proc/{pid}/stat")
+        if not stat_path.exists():
+            return "absent"
+        actual_identity = _process_identity(pid)
+        if not actual_identity:
+            return "unavailable"
+        return "live-exact" if actual_identity == expected_identity else "reused"
+
+    def _probe_runner_boundary(self, session: LocalAgentSession) -> tuple[str, str]:
+        owner = self._probe_process_identity(
+            session.runner_pid,
+            session.runner_identity,
+        )
+        process_group = self._probe_process_identity(
+            session.runner_process_pid,
+            session.runner_process_identity,
+        )
+        if process_group == "absent" and session.runner_process_token:
+            token_pids, absence_observable = _probe_process_token_pids(
+                session.runner_process_token
+            )
+            if token_pids:
+                process_group = "live-exact"
+            elif not absence_observable:
+                process_group = "unavailable"
+        if (
+            process_group == "absent"
+            and os.name == "posix"
+            and session.runner_process_pid is not None
+        ):
+            try:
+                os.killpg(session.runner_process_pid, 0)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                process_group = "unavailable"
+            else:
+                # A live group after its recorded leader identity disappeared is
+                # contradictory or reused, never exact quiescence proof.
+                process_group = "reused"
+        return owner, process_group
+
+    def _apply_supervision_intent(self, receipt_id: str) -> SupervisionReceipt:
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            supervision = self._supervision_from_payload(data)
+            receipts = supervision.get("receipts", {})
+            receipt_payload = receipts.get(receipt_id)
+            if not isinstance(receipt_payload, dict):
+                raise AlbertError(f"Unknown supervision receipt: {receipt_id}")
+            intents = supervision.get("intents", {})
+            intent = next(
+                (
+                    item
+                    for item in intents.values()
+                    if isinstance(item, dict) and item.get("receipt_id") == receipt_id
+                ),
+                None,
+            )
+            if intent is None or intent.get("status") == "applied":
+                self.supervision = supervision
+                return SupervisionReceipt.from_dict(receipt_payload)
+            raw_session = data.get("sessions", {}).get(intent.get("session_id"))
+            if not isinstance(raw_session, dict):
+                raise AlbertError("Supervision intent session is unavailable")
+            session = LocalAgentSession.from_dict(raw_session)
+            owner_signal, group_signal = self._probe_runner_boundary(session)
+            current_worktree_identity = self._worktree_identity_for_session(session)
+            exact_boundary = (
+                intent.get("mission_id") == self.mission_id
+                and session.session_id == intent.get("session_id")
+                and session.status == "running"
+                and session.revision == intent.get("session_revision")
+                and session.runner_operation_id == intent.get("runner_operation_id")
+                and session.runner_pid == intent.get("runner_pid")
+                and session.runner_identity == intent.get("runner_identity")
+                and session.runner_process_pid == intent.get("runner_process_pid")
+                and session.runner_process_identity
+                == intent.get("runner_process_identity")
+                and bool(session.worktree_identity)
+                and session.worktree_identity == intent.get("worktree_identity")
+                and current_worktree_identity == session.worktree_identity
+                and owner_signal == "absent"
+                and group_signal == "absent"
+            )
+            identity_boundary = exact_boundary
+            effect = intent.get("effect")
+            if effect == "recover-same-session":
+                repeated_failed_recovery = (
+                    identity_boundary
+                    and session.automatic_recovery_count >= 1
+                    and session.evidence is None
+                    and not session.evidence_correlation_id
+                    and not session.runner_result
+                    and intent.get("result_signal") == "absent"
+                )
+                if repeated_failed_recovery:
+                    session.status = "failed"
+                    session.revision += 1
+                    session.runner_ended_at = _utc_now()
+                    session.runner_exit_status = 1
+                    session.supervision_receipt_id = receipt_id
+                    session.runner_pid = None
+                    session.runner_identity = ""
+                    session.runner_process_pid = None
+                    session.runner_process_identity = ""
+                    session.runner_process_token = ""
+                    session.evidence_valid = False
+                    session.task_packet["runner_failure"] = (
+                        "The one automatic recovery failed; further automation is "
+                        "disabled until the Mission Commander decides the next action."
+                    )
+                    data["sessions"][session.session_id] = session.to_dict()
+                    intent["status"] = "blocked"
+                    attention = supervision.get("attentions", {}).get(
+                        intent.get("attention_id")
+                    )
+                    if isinstance(attention, dict):
+                        attention["kind"] = "automatic-recovery-failed"
+                        attention["detail"] = session.task_packet["runner_failure"]
+                        attention["next_effect"] = "mission-commander-decision"
+                    receipt_payload["outcome"] = "decision-needed"
+                    receipt_payload["effect"] = "mission-commander-decision"
+                    data.setdefault("timeline", []).append(
+                        f"{session.issue_id} automatic recovery failed for "
+                        f"{session.session_id}; Mission Commander decision required "
+                        f"under receipt {receipt_id}."
+                    )
+                    data["supervision"] = supervision
+                    self._write_runtime_payload(data)
+                    self.sessions[session.session_id] = session
+                    self.timeline = list(data.get("timeline", []))
+                    self.supervision = supervision
+                    return SupervisionReceipt.from_dict(receipt_payload)
+                exact_boundary = (
+                    exact_boundary
+                    and session.automatic_recovery_count == 0
+                    and session.evidence is None
+                    and not session.evidence_correlation_id
+                    and not session.runner_result
+                    and intent.get("result_signal") == "absent"
+                )
+            elif effect == "reconcile-result":
+                candidate = session.runner_result
+                candidate_without_digest = (
+                    {key: value for key, value in candidate.items() if key != "digest"}
+                    if isinstance(candidate, dict)
+                    else {}
+                )
+                candidate_digest = (
+                    candidate.get("digest") if isinstance(candidate, dict) else ""
+                )
+                exact_boundary = (
+                    exact_boundary
+                    and bool(candidate_without_digest)
+                    and candidate_digest == intent.get("result_digest")
+                    and candidate_digest
+                    == self._runner_result_digest(candidate_without_digest)
+                    and candidate.get("mission_id") == self.mission_id
+                    and candidate.get("session_id") == session.session_id
+                    and candidate.get("runner_operation_id")
+                    == session.runner_operation_id
+                    and candidate.get("worktree_identity")
+                    == session.worktree_identity
+                )
+            else:
+                exact_boundary = False
+            if not exact_boundary:
+                return self._fail_closed_supervision_intent(
+                    data,
+                    supervision,
+                    intent,
+                    receipt_payload,
+                    "Exact runner, process-group, Mission, session, revision, "
+                    "Worktree Identity, and result-absence proof did not all hold.",
+                )
+
+            if effect == "recover-same-session":
+                session.status = "queued"
+                session.automatic_recovery_count = 1
+                session.runner_started_at = ""
+                session.runner_ended_at = ""
+                session.runner_exit_status = None
+                session.task_packet["runner_failure"] = (
+                    "The prior runner and process group stopped without a valid result; "
+                    "one automatic same-session recovery was queued."
+                )
+                outcome = "recovered"
+                timeline_message = (
+                    f"{session.issue_id} automatic runner recovery queued for "
+                    f"{session.session_id}; receipt {receipt_id}."
+                )
+            else:
+                candidate = session.runner_result
+                session.status = str(candidate["status"])
+                session.runner_exit_status = candidate.get("runner_exit_status")
+                session.runner_ended_at = str(candidate.get("runner_ended_at", ""))
+                session.evidence = EvidencePackage.from_dict(candidate.get("evidence"))
+                session.evidence_valid = bool(candidate.get("evidence_valid", False))
+                session.evidence_correlation_id = str(
+                    candidate.get("evidence_correlation_id", "")
+                )
+                session.artifacts = dict(candidate.get("artifacts", {}))
+                outcome = "result-reconciled"
+                timeline_message = (
+                    f"{session.issue_id} late runner result reconciled for "
+                    f"{session.session_id}; receipt {receipt_id}."
+                )
+            session.revision += 1
+            session.supervision_receipt_id = receipt_id
+            session.runner_pid = None
+            session.runner_identity = ""
+            session.runner_process_pid = None
+            session.runner_process_identity = ""
+            session.runner_process_token = ""
+            data["sessions"][session.session_id] = session.to_dict()
+            intent["status"] = "applied"
+            attention = supervision.get("attentions", {}).get(intent.get("attention_id"))
+            if isinstance(attention, dict):
+                attention["disposition"] = "resolved"
+            receipt_payload["outcome"] = outcome
+            data.setdefault("timeline", []).append(timeline_message)
+            data["supervision"] = supervision
+            self._write_runtime_payload(data)
+            self.sessions[session.session_id] = session
+            self.timeline = list(data.get("timeline", []))
+            self.supervision = supervision
+            return SupervisionReceipt.from_dict(receipt_payload)
+
+    def _fail_closed_supervision_intent(
+        self,
+        data: dict[str, Any],
+        supervision: dict[str, Any],
+        intent: dict[str, Any],
+        receipt_payload: dict[str, Any],
+        detail: str,
+    ) -> SupervisionReceipt:
+        intent["status"] = "blocked"
+        attention = supervision.get("attentions", {}).get(intent.get("attention_id"))
+        if isinstance(attention, dict):
+            attention["kind"] = "recovery-blocked"
+            attention["detail"] = detail
+            attention["next_effect"] = "mission-commander-decision"
+        receipt_payload["outcome"] = "decision-needed"
+        receipt_payload["effect"] = "mission-commander-decision"
+        raw_session = data.get("sessions", {}).get(intent.get("session_id"))
+        if not isinstance(raw_session, dict):
+            raise AlbertError("Supervision intent session is unavailable")
+        session = LocalAgentSession.from_dict(raw_session)
+        session.revision += 1
+        session.supervision_receipt_id = str(receipt_payload["receipt_id"])
+        data["sessions"][session.session_id] = session.to_dict()
+        data["supervision"] = supervision
+        self._write_runtime_payload(data)
+        self.sessions[session.session_id] = session
+        self.supervision = supervision
+        return SupervisionReceipt.from_dict(receipt_payload)
 
     def launch_headless_work(
         self,
@@ -2847,6 +4125,8 @@ class AlbertMission:
             session.runner_pid = None
             session.runner_identity = ""
             session.runner_process_pid = None
+            session.runner_process_identity = ""
+            session.runner_process_token = ""
             data["sessions"][session_id] = session.to_dict()
             data["workstation_actions"] = workstation_actions
             timeline = list(data.get("timeline", []))
@@ -3292,70 +4572,71 @@ class AlbertMission:
         ):
             raise AlbertError("Mission archive state is invalid")
         self.archived_issue_ids = set(archived)
+        self.supervision = self._supervision_from_payload(data)
         self.timeline = list(data.get("timeline", []))
 
     def _reconcile_abandoned_sessions(self) -> None:
-        """Recover durable running sessions whose owning process no longer exists."""
-        with self._runtime_lock(exclusive=True):
-            data = self._read_runtime_payload()
-            sessions = data.get("sessions", {})
-            if not isinstance(sessions, dict):
-                return
-            changed = False
-            timeline = list(data.get("timeline", []))
-            for session_id, raw_session in sessions.items():
-                if not isinstance(raw_session, dict):
-                    continue
-                session = LocalAgentSession.from_dict(raw_session)
-                if session.status != "running" or _process_identity_is_live(
-                    session.runner_pid,
-                    session.runner_identity,
-                ):
-                    continue
-                raw_count = session.task_packet.get("abandoned_runner_recovery_count", 0)
-                recovery_count = (
-                    raw_count
-                    if isinstance(raw_count, int) and not isinstance(raw_count, bool)
-                    else 0
-                ) + 1
-                session.task_packet["abandoned_runner_recovery_count"] = recovery_count
-                session.task_packet["runner_failure"] = (
-                    "The prior runner process ended without recording a terminal state."
-                )
-                session.runner_pid = None
-                session.runner_identity = ""
-                session.runner_process_pid = None
-                if recovery_count <= _ABANDONED_RUNNER_RECOVERY_LIMIT:
-                    session.status = "queued"
-                    session.runner_started_at = ""
-                    session.runner_ended_at = ""
-                    session.runner_exit_status = None
-                    timeline.append(
-                        f"{session.issue_id} recovered abandoned runner for {session_id}; "
-                        f"requeued attempt {recovery_count} of "
-                        f"{_ABANDONED_RUNNER_RECOVERY_LIMIT}."
-                    )
-                else:
-                    session.status = "failed"
-                    session.runner_ended_at = _utc_now()
-                    session.runner_exit_status = 1
-                    session.evidence_valid = False
-                    timeline.append(
-                        f"{session.issue_id} abandoned runner for {session_id} exceeded "
-                        "the automatic recovery limit and was marked failed."
-                    )
-                sessions[session_id] = session.to_dict()
-                changed = True
-            if changed:
-                data["sessions"] = sessions
-                data["timeline"] = timeline
-                self._write_runtime_payload(data)
-                self.sessions = {
-                    session_id: LocalAgentSession.from_dict(raw_session)
-                    for session_id, raw_session in sessions.items()
-                    if isinstance(raw_session, dict)
+        """Run token-free startup reconciliation through the durable ledger."""
+
+        pending_receipts = [
+            str(intent.get("receipt_id"))
+            for intent in self.supervision.get("intents", {}).values()
+            if isinstance(intent, dict)
+            and intent.get("status") == "pending"
+            and isinstance(intent.get("receipt_id"), str)
+        ]
+        for receipt_id in pending_receipts:
+            self._apply_supervision_intent(receipt_id)
+
+        observer = self.supervision.get("observers", {}).get(
+            "startup-reconciliation",
+            {},
+        )
+        cursor = observer.get("cursor", 0) if isinstance(observer, dict) else 0
+        sequence = cursor + 1 if isinstance(cursor, int) and cursor >= 0 else 1
+        for session in sorted(self.sessions.values(), key=lambda item: item.session_id):
+            if session.status != "running":
+                continue
+            owner_signal, process_group_signal = self._probe_runner_boundary(session)
+            if (
+                owner_signal == "live-exact"
+                and process_group_signal == "live-exact"
+                and not session.runner_result
+            ):
+                # A healthy reconciliation sweep is deliberately silent and does
+                # not manufacture an observer event or durable user-facing record.
+                continue
+            result_signal = "absent"
+            result_digest = ""
+            if session.runner_result:
+                candidate = session.runner_result
+                candidate_without_digest = {
+                    key: value for key, value in candidate.items() if key != "digest"
                 }
-                self.timeline = timeline
+                result_digest = str(candidate.get("digest", ""))
+                result_signal = (
+                    "exact-valid"
+                    if result_digest
+                    and result_digest == self._runner_result_digest(candidate_without_digest)
+                    else "invalid"
+                )
+            self.observe_runner(
+                RunnerObservation(
+                    source_id="startup-reconciliation",
+                    source_incarnation="canonical-v1",
+                    sequence=sequence,
+                    mission_id=self.mission_id,
+                    session_id=session.session_id,
+                    session_revision=session.revision,
+                    runner_operation_id=session.runner_operation_id,
+                    owner_signal=owner_signal,
+                    process_group_signal=process_group_signal,
+                    worktree_identity=session.worktree_identity,
+                    result_signal=result_signal,
+                    result_digest=result_digest,
+                )
+            )
+            sequence += 1
 
     def _runtime_payload(self) -> dict[str, Any]:
         return {
@@ -3369,6 +4650,7 @@ class AlbertMission:
             "command_policy": self.command_policy,
             "workstation_actions": self.workstation_actions,
             "archived_issue_ids": sorted(self.archived_issue_ids),
+            "supervision": self.supervision,
             "timeline": self.timeline,
         }
 
@@ -3409,6 +4691,7 @@ class AlbertMission:
                 # instance must not revive an Issue Slice another instance restored.
                 # Preserve the latest canonical archive state here instead.
                 data["archived_issue_ids"] = sorted(latest_archived)
+                data["supervision"] = self._supervision_from_payload(latest)
             self._write_runtime_payload(data)
         reconciled_sessions: dict[str, LocalAgentSession] = {}
         for session_id, session_data in data["sessions"].items():
@@ -3427,6 +4710,7 @@ class AlbertMission:
             for correlation_id, marker in data["workstation_actions"].items()
         }
         self.archived_issue_ids = set(data.get("archived_issue_ids", []))
+        self.supervision = self._supervision_from_payload(data)
 
     @staticmethod
     def _merge_workstation_action_ledgers(
@@ -3501,12 +4785,18 @@ class AlbertMission:
         latest_data: dict[str, Any],
         proposed_data: dict[str, Any],
     ) -> dict[str, Any]:
-        latest_status = LocalAgentSession.from_dict(latest_data).status
-        proposed_status = LocalAgentSession.from_dict(proposed_data).status
+        latest_session = LocalAgentSession.from_dict(latest_data)
+        proposed_session = LocalAgentSession.from_dict(proposed_data)
+        latest_status = latest_session.status
+        proposed_status = proposed_session.status
         if latest_status == "cancelled":
             return latest_data
         if proposed_status == "cancelled":
             return proposed_data
+        if proposed_session.revision > latest_session.revision:
+            return proposed_data
+        if proposed_session.revision < latest_session.revision:
+            return latest_data
         lifecycle_rank = {
             "queued": 0,
             "launched": 0,
@@ -3599,6 +4889,7 @@ class AlbertMission:
                 self.sessions[session.session_id] = latest
                 self.timeline = list(data.get("timeline", []))
                 return latest
+            session.revision = latest.revision + 1
             sessions[session.session_id] = session.to_dict()
             timeline = list(data.get("timeline", []))
             if timeline_message:
@@ -3630,6 +4921,8 @@ class AlbertMission:
         session.runner_pid = None
         session.runner_identity = ""
         session.runner_process_pid = None
+        session.runner_process_identity = ""
+        session.runner_process_token = ""
         session.cancel_requested_at = latest.cancel_requested_at
         session.cancel_reason = latest.cancel_reason
         raise SessionCancelledError(
@@ -3760,6 +5053,64 @@ class AlbertMission:
         if worktree_path.parent != worktree_root:
             raise AlbertError(f"unsafe session worktree path for {session_id!r}")
         return worktree_path
+
+    def current_worktree_identity(self, session_id: str) -> str:
+        """Return an exact managed-path identity, or empty when ownership is unclear."""
+
+        return self._worktree_identity_for_session(self._session(session_id))
+
+    def _worktree_identity_for_session(self, session: LocalAgentSession) -> str:
+        session_id = session.session_id
+        expected_path = self._session_worktree_path(session_id)
+        try:
+            canonical_path = session.worktree_path.resolve(strict=True)
+        except OSError:
+            return ""
+        if (
+            session.worktree_path.is_symlink()
+            or not canonical_path.is_dir()
+            or _runtime_identity_path(canonical_path)
+            != _runtime_identity_path(expected_path)
+            or _runtime_identity_path(canonical_path)
+            == _runtime_identity_path(self.target_repo)
+        ):
+            return ""
+
+        git_pointer = canonical_path / ".git"
+        if not git_pointer.exists():
+            payload = f"directory\n{self.mission_id}\n{session_id}\n{canonical_path}"
+            return "managed-directory:" + sha256(payload.encode("utf-8")).hexdigest()
+        if git_pointer.is_symlink() or not git_pointer.is_file():
+            return ""
+        try:
+            pointer_text = git_pointer.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return ""
+        if len(pointer_text.encode("utf-8")) > 4_096 or not pointer_text.startswith(
+            "gitdir: "
+        ):
+            return ""
+        admin_value = pointer_text.removeprefix("gitdir: ").strip()
+        admin_path = Path(admin_value)
+        if not admin_path.is_absolute():
+            admin_path = git_pointer.parent / admin_path
+        try:
+            admin_path = admin_path.resolve(strict=True)
+            registration = (admin_path / "gitdir").read_text(encoding="utf-8").strip()
+            registered_pointer = Path(registration).resolve(strict=True)
+        except (OSError, UnicodeError):
+            return ""
+        if (
+            _runtime_identity_path(registered_pointer)
+            != _runtime_identity_path(git_pointer)
+            or admin_path.name != canonical_path.name
+        ):
+            return ""
+        payload = (
+            f"git-worktree\n{self.mission_id}\n{session_id}\n"
+            f"{canonical_path}\n{admin_path}"
+        )
+        return "managed-git:" + sha256(payload.encode("utf-8")).hexdigest()
 
     def _prepare_session_worktree(self, session_id: str) -> Path:
         worktree_path = self._session_worktree_path(session_id)
@@ -6187,10 +7538,15 @@ class AlbertMission:
         governed_session = session.runner_pid is not None
         process_started = False
 
-        def record_process_start(process: subprocess.Popen[bytes]) -> None:
+        def record_process_start(
+            process: subprocess.Popen[bytes],
+            process_token: str,
+        ) -> None:
             nonlocal process_started
             process_started = True
             session.runner_process_pid = process.pid
+            session.runner_process_identity = _process_identity(process.pid)
+            session.runner_process_token = process_token
             if governed_session:
                 persisted = self._persist_session_update(session)
                 if persisted.status == "cancelled":
@@ -6206,7 +7562,7 @@ class AlbertMission:
                 env=process_env,
                 timeout_seconds=timeout_seconds,
                 output_limit_bytes=output_limit_bytes,
-                process_started=record_process_start,
+                process_binding_started=record_process_start,
                 poll_callback=lambda: self._raise_if_cancelled(session),
                 output_callback=lambda stream_name, payload: self._record_session_output(
                     session.session_id,
@@ -6215,12 +7571,13 @@ class AlbertMission:
                 ),
             )
         finally:
-            if process_started:
-                session.runner_process_pid = None
-                if governed_session:
-                    persisted = self._persist_session_update(session)
-                    if persisted.status == "cancelled":
-                        session.status = "cancelled"
+            # Retain the last exact process-group binding until the canonical
+            # runner transition clears it. A late result or owner-loss probe
+            # needs that durable identity to prove quiescence independently.
+            if process_started and governed_session:
+                persisted = self._persist_session_update(session)
+                if persisted.status == "cancelled":
+                    session.status = "cancelled"
 
     def _ollama_prompt(self, session: LocalAgentSession, agent_config: AgentConfig) -> str:
         selected_skill = session.task_packet.get("selected_skill")

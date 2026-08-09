@@ -310,6 +310,9 @@ class MissionSessionSummary:
     review_outcome: str
     review_next_action: str
     repair_action_available: bool
+    supervision_receipt_id: str = ""
+    supervision_outcome: str = ""
+    automatic_recovery_count: int = 0
     repair_task_packet: RepairTaskPacketPreview | None = None
     work_kind: str = ""
     parent_session_id: str = ""
@@ -325,6 +328,7 @@ class WorkspaceQueueAttention:
         "issue-change-proposal",
         "frontier-confirmation",
         "ad-hoc-delegation",
+        "runner-supervision",
     ]
     label: str
     queue_link: str
@@ -2667,7 +2671,15 @@ class AgentConsoleHistoryService:
         self._reject_transient_source(source)
         if not action_phase.startswith("shell-"):
             ShellTerminalService(self._snapshots).reconcile_audit()
-        snapshot = self._snapshots.snapshot()
+        snapshot = (
+            self._snapshots.snapshot()
+            if recorded_scope is None
+            or expected_revision is not None
+            or expected_scope is not None
+            else None
+        )
+        if snapshot is None and recorded_scope is None:
+            raise AlbertError("Agent Console recorded scope is required.")
         if expected_revision is not None and expected_revision != snapshot.revision:
             raise WorkspaceStaleActionError(
                 expected_revision=expected_revision,
@@ -2732,6 +2744,70 @@ class AgentConsoleHistoryService:
                 {"schema_version": 1, "messages": [asdict(item) for item in messages]},
             )
         return message
+
+    def reconcile_supervision_receipts(self) -> None:
+        """Project canonical non-healthy supervision receipts exactly once."""
+
+        for mission in self._snapshots._missions.values():
+            for raw_receipt in mission.supervision.get("receipts", {}).values():
+                if not isinstance(raw_receipt, dict):
+                    raise WorkspacePersistenceError(
+                        "Mission supervision receipt projection is invalid."
+                    )
+                outcome = raw_receipt.get("outcome")
+                if outcome in {"no-change", "attention-recorded"}:
+                    continue
+                if outcome not in {
+                    "recovered",
+                    "result-reconciled",
+                    "decision-needed",
+                }:
+                    raise WorkspacePersistenceError(
+                        "Mission supervision receipt outcome is invalid."
+                    )
+                correlation_id = raw_receipt.get("correlation_id")
+                session_id = raw_receipt.get("session_id")
+                receipt_id = raw_receipt.get("receipt_id")
+                if not all(
+                    isinstance(value, str) and value.strip()
+                    for value in (correlation_id, session_id, receipt_id)
+                ):
+                    raise WorkspacePersistenceError(
+                        "Mission supervision receipt identity is invalid."
+                    )
+                if outcome == "recovered":
+                    content = (
+                        f"Deterministic supervision proved runner and process-group "
+                        f"loss for {session_id} and queued one same-session/worktree "
+                        f"recovery. Receipt {receipt_id}."
+                    )
+                    phase = "runner-recovered"
+                    console_outcome: AgentConsoleOutcome = "acknowledged"
+                elif outcome == "result-reconciled":
+                    content = (
+                        f"Deterministic supervision reconciled the exact late result "
+                        f"for {session_id} instead of rerunning it. Receipt {receipt_id}."
+                    )
+                    phase = "runner-result-reconciled"
+                    console_outcome = "acknowledged"
+                else:
+                    content = (
+                        f"Deterministic supervision stopped automation for {session_id}; "
+                        "a Mission Commander decision is required. Choose manual Retry "
+                        "with a reason from Mission Work, or leave the session stopped. "
+                        f"Receipt {receipt_id}."
+                    )
+                    phase = "runner-decision-needed"
+                    console_outcome = "pending"
+                self.append(
+                    role="system",
+                    content=content,
+                    outcome=console_outcome,
+                    source="orchestrator",
+                    recorded_scope=self._mission_scope(mission.mission_id),
+                    correlation_id=correlation_id,
+                    action_phase=phase,
+                )
 
     def record_workstation_action(
         self,
@@ -8036,6 +8112,9 @@ class WorkstationActionService:
                     allowed_paths=allowed_paths if allowed_paths else None,
                     command_policy=command_policy if command_policy else None,
                     workstation_action=workstation_action,
+                    manual_retry_reason=(
+                        reason if review_workspace_repair is None else ""
+                    ),
                 )
             acknowledged_session_id = session.session_id
             effect_summary = (
@@ -9861,6 +9940,7 @@ class WorkspaceSnapshotService:
 
     @measured_stage("S6", workflows={"startup"})
     def snapshot(self) -> WorkspaceSnapshot:
+        AgentConsoleHistoryService(self).reconcile_supervision_receipts()
         preferences = self._load_preferences()
         active = self._missions.get(preferences["active_mission_id"])
         if active is None:
@@ -10276,6 +10356,14 @@ class WorkspaceSnapshotService:
                 )
                 is None
             )
+            supervision_receipt = mission.supervision.get("receipts", {}).get(
+                session.supervision_receipt_id
+            )
+            supervision_outcome = (
+                str(supervision_receipt.get("outcome", ""))
+                if isinstance(supervision_receipt, dict)
+                else ""
+            )
             return MissionSessionSummary(
                 session_id=session.session_id,
                 issue_id=session.issue_id,
@@ -10323,6 +10411,9 @@ class WorkspaceSnapshotService:
                 review_outcome=latest_review.outcome if latest_review else "",
                 review_next_action=latest_review.next_action if latest_review else "",
                 repair_action_available=repair_action_available,
+                supervision_receipt_id=session.supervision_receipt_id,
+                supervision_outcome=supervision_outcome,
+                automatic_recovery_count=session.automatic_recovery_count,
                 repair_task_packet=(
                     self._repair_task_packet_preview(
                         mission,
@@ -10374,6 +10465,35 @@ class WorkspaceSnapshotService:
                         entity_id=issue_id,
                     )
                 )
+        for raw_attention in mission.supervision.get("attentions", {}).values():
+            if not isinstance(raw_attention, dict):
+                raise WorkspacePersistenceError(
+                    "Mission supervision attention projection is invalid."
+                )
+            if raw_attention.get("disposition") != "open" or raw_attention.get(
+                "next_effect"
+            ) != "mission-commander-decision":
+                continue
+            session_id = raw_attention.get("session_id")
+            attention_id = raw_attention.get("attention_id")
+            detail = raw_attention.get("detail")
+            if not all(
+                isinstance(value, str) and value.strip()
+                for value in (session_id, attention_id, detail)
+            ):
+                raise WorkspacePersistenceError(
+                    "Mission supervision attention identity is invalid."
+                )
+            attention.append(
+                WorkspaceQueueAttention(
+                    attention_id=attention_id,
+                    mission_id=mission.mission_id,
+                    kind="runner-supervision",
+                    label=f"{session_id} supervision decision required: {detail}",
+                    queue_link=f"mission-work#session-{session_id}",
+                    entity_id=session_id,
+                )
+            )
         for item in WorkspaceQueueService(self).inspect(mission_id=mission.mission_id).items:
             if item.status != "pending":
                 continue

@@ -38,6 +38,14 @@ A temporary scheduling claim on bounded local inference capacity for one control
 
 A coding worker powered primarily by a local model through Ollama or a governed local command. Local Agents receive task packets with acceptance criteria and allowed paths, work in isolated session worktrees, execute commands inside a minimal Bubblewrap filesystem view, and must return an Evidence Package. Controller/router identities are not manually assignable workers. Cancelled Local Agent work is terminal unsuccessful work, not completed work.
 
+### Runner Observation
+
+A bounded advisory statement from one identified observer incarnation and ordered cursor about an exact Mission, Local Agent session revision, runner operation, Worktree Identity, owner/process-group liveness, and result boundary. It has no authority by itself; the Orchestrator independently rechecks every recovery precondition before changing canonical state.
+
+### Local Agent Attention Record
+
+A durable, receipt-bound supervision incident written before observer cursor progress is acknowledged. It records the exact recovery or reconciliation intent, or a fail-closed Mission Commander decision when runner state is ambiguous. Semantic duplicate observations replay the same receipt.
+
 ### Retirement Unit
 
 An independently authorized Local Agent session that owns an isolated worktree and therefore has its own preservation and retirement outcome, including child delegations and repairs. Model turns and helper calls that do not own a worktree remain part of their owning session and are not Retirement Units.

@@ -359,6 +359,9 @@ test("renders the canonical Mission Execution Tree and scopes detailed output to
             commands_run: ["npm test -- --run MissionExecutionTree"],
             test_results: "Tree tests pass.",
             evidence_correlation_id: "evidence:command-deck:session-ISS-TREE-1",
+            supervision_receipt_id: "supervision-receipt:tree-recovery",
+            supervision_outcome: "recovered",
+            automatic_recovery_count: 1,
           },
         ],
         attention: [],
@@ -406,6 +409,12 @@ test("renders the canonical Mission Execution Tree and scopes detailed output to
     "Tree tests pass.",
   );
   expect(within(inspector).getByText("mission-control/src/MissionExecutionTree.tsx")).toBeVisible();
+  expect(
+    within(inspector).getByText(
+      "Supervision receipt: supervision-receipt:tree-recovery · recovered",
+    ),
+  ).toBeVisible();
+  expect(within(inspector).getByText("Automatic recovery: 1 of 1 used")).toBeVisible();
   expect(subscribeToSessionOutput).toHaveBeenCalledTimes(1);
   expect(outputHandler).toBeDefined();
   expect(within(inspector).getByText("Subscribing…")).toBeVisible();
