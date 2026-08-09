@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-09
 
-**Status:** Implemented locally; GitHub tracker unchanged
+**Status:** Implemented and verified locally within documented host constraints; GitHub tracker unchanged
 
 **Issue:** [GitHub #67](https://github.com/EricleungDK/Alfredo/issues/67)
 
@@ -24,7 +24,11 @@ A repair request verifies and materializes its predecessor's preserved snapshot 
 
 ## Verification
 
-Focused retirement coverage currently passes 47/47 and proves automatic accepted/cancelled retirement, same-process never-started cancellation and pre-worktree-failure policy, production no-runner proof, live-cancellation deferral without preservation races, failed/rejected grace, retained human review, CLI-configurable grace, serialized publication recovery, exact ignored-file preservation, original-path/open-descriptor/cwd/shared-mapping retention, partial Git/directory cleanup recovery, isolated-effect/split-move/partial-marker-and-tracked-content crash recovery, registration-only managed-absence cleanup, serialized reconcilers, three-attempt exhaustion across crash cuts, corrupt-snapshot blocking, fail-closed unavailable registration inspection, verified repair lineage, and contained deletion. Runner-supervision integration passes 17/17; Python compilation, focused Ruff fatal checks, diff checks, and TypeScript typecheck pass. The final repository-wide results and re-review are added before handoff.
+Focused retirement coverage passes 47/47 and proves automatic accepted/cancelled retirement, same-process never-started cancellation and pre-worktree-failure policy, production no-runner proof, live-cancellation deferral without preservation races, failed/rejected grace, retained human review, CLI-configurable grace, serialized publication recovery, exact ignored-file preservation, original-path/open-descriptor/cwd/shared-mapping retention, partial Git/directory cleanup recovery, isolated-effect/split-move/partial-marker-and-tracked-content crash recovery, registration-only managed-absence cleanup, serialized reconcilers, three-attempt exhaustion across crash cuts, corrupt-snapshot blocking, fail-closed unavailable registration inspection, verified repair lineage, and contained deletion. Runner-supervision integration passes 17/17; Python compilation, focused Ruff fatal checks, diff checks, Mission Control typecheck/build, localhost gateway 23/23, browser functional 1/1, responsive layout 4/4, Rust formatting, and the launcher dry-run pass.
+
+The one-time repository-wide host matrix also completed. Python discovery ran 550 tests with 33 failures, 172 errors, and 8 skips; the failures shown are dominated by unavailable Bubblewrap and Darwin `/var` versus `/private/var` assumptions. Vitest ran 313 tests across 15 files with 146 passing and 167 failing on the documented Node/Darwin-arm64 release-fixture constraints. Rust ran 54 tests with 43 passing and 11 failing on Bubblewrap, path-alias, and existing Conversation Scope fixtures. Production `release:verify` cannot build the required AppImage on Darwin (`app` and `dmg` are the available bundles), so `release:check` correctly finds no verified artifact set. The launcher dry-run exits successfully but records the sandbox-inaccessible parent Starting Location and intentionally skips live npm/backend/Ollama/model checks. Documentation audit reports five pre-existing missing-connection/orphan findings; standards validation remains Grade A at 98.5% with two low traceability findings.
+
+Independent Standards, Spec, and Correctness/Risk reviews are clean for product code through `7412e32`. The last supported correctness cut—recursive Git removal deleting tracked content before a crash—has deterministic regression coverage and now resumes through verified index reconstruction and exact non-force removal.
 
 ## Scope Boundary
 
