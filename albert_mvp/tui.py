@@ -172,6 +172,7 @@ def perform_tui_action(
     outcome: str = "",
     reason: str = "",
     failure_type: str = "",
+    expected_revision: int | None = None,
     gh_available: bool = False,
 ) -> TuiActionResult:
     if action == "assign":
@@ -193,10 +194,15 @@ def perform_tui_action(
     if action == "repair":
         if not session_id:
             raise AlbertError("TUI repair action requires --session.")
+        if expected_revision is None:
+            raise AlbertError(
+                "TUI repair action requires --expected-session-revision."
+            )
         session = mission.launch_repair(
             session_id,
             agent_id=agent_id,
             allowed_paths=allowed_paths if allowed_paths else None,
+            expected_revision=expected_revision,
         )
         return TuiActionResult(
             action=action,
@@ -211,11 +217,16 @@ def perform_tui_action(
             raise AlbertError("TUI review action requires --outcome.")
         if not reason:
             raise AlbertError("TUI review action requires --reason.")
+        if expected_revision is None:
+            raise AlbertError(
+                "TUI review action requires --expected-session-revision."
+            )
         decision = mission.record_frontier_review(
             session_id,
             outcome,
             reason=reason,
             failure_type=failure_type,
+            expected_revision=expected_revision,
         )
         return TuiActionResult(
             action=action,

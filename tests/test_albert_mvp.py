@@ -3864,6 +3864,7 @@ None - can start immediately
             session_id=session.session_id,
             outcome="Approved",
             reason="Evidence satisfies the slice.",
+            expected_revision=mission.sessions[session.session_id].revision,
         )
         reloaded = self.load_mission_with_agent_config(config_path)
 
@@ -3895,6 +3896,7 @@ None - can start immediately
             session_id=session.session_id,
             outcome="approved",
             reason="Evidence satisfies the slice.",
+            expected_revision=mission.sessions[session.session_id].revision,
         )
         reloaded = self.load_mission_with_agent_config(config_path)
 
@@ -3926,6 +3928,7 @@ None - can start immediately
                 session_id=session.session_id,
                 outcome="ship-it",
                 reason="Typo.",
+                expected_revision=mission.sessions[session.session_id].revision,
             )
 
     def test_tui_review_action_blocks_approval_without_valid_evidence(self):
@@ -3941,6 +3944,7 @@ None - can start immediately
                 session_id=session.session_id,
                 outcome="Approved",
                 reason="No evidence yet.",
+                expected_revision=mission.sessions[session.session_id].revision,
             )
 
     def test_tui_review_action_routes_needs_repair_and_rejections(self):
@@ -3967,6 +3971,7 @@ None - can start immediately
             session_id=session.session_id,
             outcome="Needs repair",
             reason="Acceptance detail missing.",
+            expected_revision=mission.sessions[session.session_id].revision,
         )
         first_reject = perform_tui_action(
             mission,
@@ -3975,6 +3980,7 @@ None - can start immediately
             session_id=session.session_id,
             outcome="Rejected",
             reason="Still incomplete.",
+            expected_revision=mission.sessions[session.session_id].revision,
         )
         second_reject = perform_tui_action(
             mission,
@@ -3983,6 +3989,7 @@ None - can start immediately
             session_id=session.session_id,
             outcome="Rejected",
             reason="Still incomplete.",
+            expected_revision=mission.sessions[session.session_id].revision,
         )
 
         self.assertEqual(repair.next_action, "same-local-agent-repair")
@@ -4053,6 +4060,7 @@ None - can start immediately
             "ISS-01",
             session_id=first_session.session_id,
             allowed_paths=["prototype"],
+            expected_revision=mission.sessions[first_session.session_id].revision,
         )
         reloaded = self.load_mission_with_agent_config(config_path)
 
@@ -4069,6 +4077,7 @@ None - can start immediately
                 "ISS-01",
                 session_id=first_session.session_id,
                 allowed_paths=["prototype"],
+                expected_revision=reloaded.sessions[first_session.session_id].revision,
             )
         self.assertEqual(
             list(self.load_mission_with_agent_config(config_path).sessions),
@@ -4114,6 +4123,9 @@ None - can start immediately
                         "ISS-01",
                         session_id=first_session.session_id,
                         allowed_paths=["prototype"],
+                        expected_revision=candidate.sessions[
+                            first_session.session_id
+                        ].revision,
                     )
                 )
             except BaseException as exc:  # pragma: no cover - asserted below
@@ -4130,9 +4142,9 @@ None - can start immediately
         self.assertEqual(results[0].session_id, "session-ISS-01-2")
         self.assertEqual(len(errors), 1)
         self.assertIsInstance(errors[0], LaunchBlockedError)
-        self.assertIn(
-            "Repair was already launched for session-ISS-01-1 as session-ISS-01-2",
+        self.assertRegex(
             str(errors[0]),
+            "Repair was already launched|lifecycle revision is stale",
         )
         reloaded = self.load_mission_with_agent_config(config_path)
         repair_children = [
@@ -4549,6 +4561,8 @@ None - can start immediately
                     "evidence",
                     *base_args,
                     session_id,
+                    "--expected-revision",
+                    str(self.load_mission().sessions[session_id].revision),
                     "--changed-file",
                     "src/app.py",
                     "--diff-summary",
@@ -4567,7 +4581,22 @@ None - can start immediately
             )[0],
             0,
         )
-        self.assertEqual(self.run_cli(["review", *base_args, session_id, "--outcome", "Approved", "--reason", "Meets criteria."])[0], 0)
+        self.assertEqual(
+            self.run_cli(
+                [
+                    "review",
+                    *base_args,
+                    session_id,
+                    "--expected-revision",
+                    str(self.load_mission().sessions[session_id].revision),
+                    "--outcome",
+                    "Approved",
+                    "--reason",
+                    "Meets criteria.",
+                ]
+            )[0],
+            0,
+        )
         self.assertEqual(self.run_cli(["records", *base_args])[0], 0)
 
         exit_code, output = self.run_cli(["pr", *base_args, "ISS-01"])

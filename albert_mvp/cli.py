@@ -563,6 +563,24 @@ def build_parser() -> argparse.ArgumentParser:
     )
     runner_observe.add_argument("--result-digest", default="")
 
+    retirement_preserve = subparsers.add_parser(
+        "retirement-preserve",
+        help="Capture and verify one terminal Retirement Unit without removing its worktree.",
+    )
+    _add_common_args(retirement_preserve)
+    retirement_preserve.add_argument("--session-id", required=True)
+    retirement_preserve.add_argument("--session-mission-id", default="")
+    retirement_preserve.add_argument("--expected-revision", required=True, type=int)
+    retirement_preserve.add_argument("--correlation-id", required=True)
+
+    retirement_verify = subparsers.add_parser(
+        "retirement-verify",
+        help="Re-read and reconstruct one verified Retirement Snapshot.",
+    )
+    _add_common_args(retirement_verify)
+    retirement_verify.add_argument("--session-id", required=True)
+    retirement_verify.add_argument("--session-mission-id", default="")
+
     mission_drafts = subparsers.add_parser(
         "mission-drafts",
         help="Return the Mission Draft projection as JSON.",
@@ -631,6 +649,7 @@ def build_parser() -> argparse.ArgumentParser:
     tui_action.add_argument("--outcome", default="")
     tui_action.add_argument("--reason", default="")
     tui_action.add_argument("--failure-type", default="")
+    tui_action.add_argument("--expected-session-revision", type=int)
     tui_action.add_argument("--gh-available", action="store_true")
 
     show = subparsers.add_parser("show", help="Show one Issue Slice lifecycle detail.")
@@ -668,6 +687,7 @@ def build_parser() -> argparse.ArgumentParser:
     evidence = subparsers.add_parser("evidence", help="Record an Evidence Package for a Local Agent session.")
     _add_common_args(evidence)
     evidence.add_argument("session_id")
+    evidence.add_argument("--expected-revision", required=True, type=int)
     evidence.add_argument("--changed-file", action="append", default=[])
     evidence.add_argument("--diff-summary", required=True)
     evidence.add_argument("--command-run", action="append", default=[])
@@ -679,6 +699,7 @@ def build_parser() -> argparse.ArgumentParser:
     review = subparsers.add_parser("review", help="Record a Frontier Reviewer decision.")
     _add_common_args(review)
     review.add_argument("session_id")
+    review.add_argument("--expected-revision", required=True, type=int)
     review.add_argument("--outcome", required=True)
     review.add_argument("--reason", required=True)
     review.add_argument("--failure-type", default="")
@@ -1346,7 +1367,10 @@ def _run(args: argparse.Namespace) -> int:
             session_id=args.session_id,
             mission_id=args.session_mission_id,
         )
-        session = mission_for_session.run_session(args.session_id)
+        session = mission_for_session.run_session(
+            args.session_id,
+            expected_revision=mission_for_session.sessions[args.session_id].revision,
+        )
         print(
             json.dumps(
                 _workstation_session_payload(mission_for_session, session),
@@ -1374,6 +1398,39 @@ def _run(args: argparse.Namespace) -> int:
             )
         )
         print(json.dumps(asdict(receipt), sort_keys=True))
+        return 0
+    if args.command in {"retirement-preserve", "retirement-verify"}:
+        if args.session_mission_id and args.session_mission_id != mission.mission_id:
+            raise AlbertError("Retirement Unit Mission identity does not match.")
+        mission_for_session = mission
+        if args.session_id not in mission_for_session.sessions:
+            raise AlbertError(f"Unknown Local Agent session: {args.session_id}")
+        if args.command == "retirement-preserve":
+            session = mission_for_session.preserve_retirement_unit(
+                args.session_id,
+                expected_revision=args.expected_revision,
+                correlation_id=args.correlation_id,
+            )
+            verified = True
+        else:
+            session = mission_for_session.sessions[args.session_id]
+            verified = mission_for_session.verify_retirement_snapshot(
+                args.session_id
+            )
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "mission_id": mission_for_session.mission_id,
+                    "session_id": session.session_id,
+                    "session_revision": session.revision,
+                    "preservation_budget": session.preservation_budget,
+                    "retirement": session.retirement,
+                    "verified": verified,
+                },
+                sort_keys=True,
+            )
+        )
         return 0
     if args.command == "mission-drafts":
         projection = MissionDraftService(snapshots).inspect(
@@ -1439,6 +1496,7 @@ def _run(args: argparse.Namespace) -> int:
             outcome=args.outcome,
             reason=args.reason,
             failure_type=args.failure_type,
+            expected_revision=args.expected_session_revision,
             gh_available=args.gh_available,
         )
         print(result.message)
@@ -1529,7 +1587,11 @@ def _run(args: argparse.Namespace) -> int:
             proposed_context_updates=args.context_updates,
             artifact_links=args.artifact_link,
         )
-        mission.record_evidence(args.session_id, evidence)
+        mission.record_evidence(
+            args.session_id,
+            evidence,
+            expected_revision=args.expected_revision,
+        )
         print(f"Evidence Package validated for {args.session_id}.")
         return 0
     if args.command == "review":
@@ -1538,6 +1600,7 @@ def _run(args: argparse.Namespace) -> int:
             args.outcome,
             reason=args.reason,
             failure_type=args.failure_type,
+            expected_revision=args.expected_revision,
         )
         print(f"{decision.issue_id} review: {decision.outcome}; next action {decision.next_action}.")
         return 0

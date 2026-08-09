@@ -7528,6 +7528,7 @@ Wait for the accepted dependency.
             session_id=prior.session_id,
             outcome="Needs repair",
             reason="The TUI review found an incomplete implementation.",
+            expected_revision=mission.sessions[prior.session_id].revision,
         )
 
         # Simulate a persisted review written before workspace-action metadata existed.
@@ -7611,6 +7612,8 @@ Wait for the accepted dependency.
                     "--mission-id",
                     "command-deck",
                     prior.session_id,
+                    "--expected-revision",
+                    str(prior.revision),
                     "--outcome",
                     "Needs repair",
                     "--reason",

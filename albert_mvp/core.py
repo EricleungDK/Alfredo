@@ -32,6 +32,11 @@ from .agents import (
     load_agent_registry,
 )
 from .capabilities import CapabilityCatalogService, SKILL_NAME_PATTERN
+from .retirement import (
+    RetirementSnapshotError,
+    RetirementSnapshotStore,
+    SnapshotRequest,
+)
 
 
 _REPOSITORY_CONTEXT_LIMIT = 24_000
@@ -78,6 +83,8 @@ _REVIEW_BASELINE_FILE_LIMIT = 256
 _REVIEW_BASELINE_FILE_BYTES_LIMIT = _REVIEW_DIFF_BYTES_LIMIT
 _REVIEW_BASELINE_TOTAL_BYTES_LIMIT = 8_000_000
 _WORKTREE_PREPARATION_SCHEMA_VERSION = 1
+_RETIREMENT_UNIT_SCHEMA_VERSION = 1
+_PRESERVATION_BUDGET_BYTES = 32 * 1024 * 1024
 _GIT_NOT_REPOSITORY_MESSAGE = (
     "fatal: not a git repository (or any of the parent directories): .git"
 )
@@ -918,6 +925,103 @@ def _optional_nonnegative_int(data: dict[str, Any], field_name: str) -> int:
     return value
 
 
+def _validated_preservation_budget(raw: Any) -> dict[str, Any]:
+    if raw is None:
+        return {
+            "schema_version": _RETIREMENT_UNIT_SCHEMA_VERSION,
+            "state": "reserved",
+            "bound": True,
+            "reserved_bytes": _PRESERVATION_BUDGET_BYTES,
+            "reserved_at": "legacy-migration",
+        }
+    if not isinstance(raw, dict):
+        raise AlbertError("Local Agent Preservation Budget is invalid")
+    if (
+        raw.get("schema_version") != _RETIREMENT_UNIT_SCHEMA_VERSION
+        or raw.get("state") not in {"reserved", "verified"}
+        or not isinstance(raw.get("bound"), bool)
+        or not isinstance(raw.get("reserved_bytes"), int)
+        or isinstance(raw.get("reserved_bytes"), bool)
+        or raw["reserved_bytes"] <= 0
+        or not isinstance(raw.get("reserved_at"), str)
+        or not raw["reserved_at"].strip()
+        or (raw["state"] == "reserved" and raw["bound"] is not True)
+        or (raw["state"] == "verified" and raw["bound"] is not False)
+    ):
+        raise AlbertError("Local Agent Preservation Budget is invalid")
+    verified_at = raw.get("verified_at")
+    if verified_at is not None and (
+        not isinstance(verified_at, str) or not verified_at.strip()
+    ):
+        raise AlbertError("Local Agent Preservation Budget verification is invalid")
+    return dict(raw)
+
+
+def _validated_retirement_unit(raw: Any) -> dict[str, Any]:
+    if raw is None:
+        return {
+            "schema_version": _RETIREMENT_UNIT_SCHEMA_VERSION,
+            "phase": "active",
+            "runner_boundary": {},
+            "snapshot": {},
+            "preservation_receipt": {},
+            "blocked_reason": "",
+        }
+    if not isinstance(raw, dict):
+        raise AlbertError("Local Agent Retirement Unit state is invalid")
+    if (
+        raw.get("schema_version") != _RETIREMENT_UNIT_SCHEMA_VERSION
+        or raw.get("phase")
+        not in {"active", "preserving", "preserved", "preservation-blocked"}
+        or not isinstance(raw.get("runner_boundary"), dict)
+        or not isinstance(raw.get("snapshot"), dict)
+        or not isinstance(raw.get("preservation_receipt", {}), dict)
+        or not isinstance(raw.get("blocked_reason"), str)
+    ):
+        raise AlbertError("Local Agent Retirement Unit state is invalid")
+    runner_boundary = raw["runner_boundary"]
+    for field_name in (
+        "runner_operation_id",
+        "owner_identity",
+        "process_group_identity",
+        "process_token",
+        "owner_released_at",
+        "owner_release_operation_id",
+        "owner_lease_path",
+        "owner_lease_token",
+        "mission_id",
+        "session_id",
+    ):
+        if field_name in runner_boundary and not isinstance(
+            runner_boundary[field_name], str
+        ):
+            raise AlbertError("Local Agent Retirement Unit runner boundary is invalid")
+    for field_name in ("owner_pid", "process_group_pid"):
+        if field_name in runner_boundary and runner_boundary[field_name] is not None:
+            value = runner_boundary[field_name]
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise AlbertError(
+                    "Local Agent Retirement Unit runner boundary is invalid"
+                )
+    if raw["phase"] == "preserved" and not raw["snapshot"]:
+        raise AlbertError("Preserved Retirement Unit snapshot is missing")
+    receipt = raw.get("preservation_receipt", {})
+    if receipt and (
+        not isinstance(receipt.get("correlation_id"), str)
+        or not receipt["correlation_id"].strip()
+        or not isinstance(receipt.get("expected_revision"), int)
+        or isinstance(receipt.get("expected_revision"), bool)
+        or receipt["expected_revision"] < 0
+        or not isinstance(receipt.get("result_revision"), int)
+        or isinstance(receipt.get("result_revision"), bool)
+        or receipt["result_revision"] < 0
+        or not isinstance(receipt.get("manifest_sha256"), str)
+        or not receipt["manifest_sha256"]
+    ):
+        raise AlbertError("Retirement Unit preservation receipt is invalid")
+    return dict(raw)
+
+
 def _validated_runner_result(data: dict[str, Any]) -> dict[str, Any]:
     raw = data.get("runner_result", {})
     if not isinstance(raw, dict):
@@ -1364,6 +1468,27 @@ class LocalAgentSession:
     runner_result: dict[str, Any] = field(default_factory=dict)
     cancel_requested_at: str = ""
     cancel_reason: str = ""
+    preservation_budget: dict[str, Any] = field(default_factory=dict)
+    retirement: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.preservation_budget:
+            self.preservation_budget = {
+                "schema_version": _RETIREMENT_UNIT_SCHEMA_VERSION,
+                "state": "reserved",
+                "bound": True,
+                "reserved_bytes": _PRESERVATION_BUDGET_BYTES,
+                "reserved_at": _utc_now(),
+            }
+        if not self.retirement:
+            self.retirement = {
+                "schema_version": _RETIREMENT_UNIT_SCHEMA_VERSION,
+                "phase": "active",
+                "runner_boundary": {},
+                "snapshot": {},
+                "preservation_receipt": {},
+                "blocked_reason": "",
+            }
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1396,6 +1521,8 @@ class LocalAgentSession:
             "runner_result": self.runner_result,
             "cancel_requested_at": self.cancel_requested_at,
             "cancel_reason": self.cancel_reason,
+            "preservation_budget": self.preservation_budget,
+            "retirement": self.retirement,
         }
 
     @classmethod
@@ -1409,7 +1536,7 @@ class LocalAgentSession:
         ):
             status = "queued"
         runner_result = _validated_runner_result(data)
-        return cls(
+        session = cls(
             session_id=data["session_id"],
             issue_id=data["issue_id"],
             assigned_agent=data["assigned_agent"],
@@ -1454,7 +1581,22 @@ class LocalAgentSession:
             runner_result=runner_result,
             cancel_requested_at=str(data.get("cancel_requested_at", "")),
             cancel_reason=str(data.get("cancel_reason", "")),
+            preservation_budget=_validated_preservation_budget(
+                data.get("preservation_budget")
+            ),
+            retirement=_validated_retirement_unit(data.get("retirement")),
         )
+        receipt = session.retirement.get("preservation_receipt", {})
+        snapshot = session.retirement.get("snapshot", {})
+        if receipt and (
+            session.retirement.get("phase") != "preserved"
+            or receipt.get("result_revision") != session.revision
+            or receipt.get("manifest_sha256") != snapshot.get("manifest_sha256")
+        ):
+            raise AlbertError(
+                "Retirement Unit preservation receipt does not match its exact result."
+            )
+        return session
 
 
 @dataclass(frozen=True)
@@ -1601,6 +1743,9 @@ class AlbertMission:
         allow_empty_tracker: bool = False,
         issues_dir: Path | None = None,
         agent_availability_snapshot: dict[str, tuple[str, str]] | None = None,
+        retirement_quiescence_probe: (
+            Callable[[dict[str, Any]], tuple[str, str]] | None
+        ) = None,
     ):
         self.target_repo = target_repo.resolve()
         self.tracker_dir = tracker_dir.resolve()
@@ -1610,6 +1755,7 @@ class AlbertMission:
         self.agent_config_path = (agent_config_path or (self.target_repo / ".albert" / "agents.json")).resolve()
         self.allow_empty_tracker = allow_empty_tracker
         self.agent_availability_snapshot = agent_availability_snapshot
+        self.retirement_quiescence_probe = retirement_quiescence_probe
         identity_paths = [
             _runtime_identity_path(path)
             for path in (self.target_repo, self.tracker_dir, self.issues_dir)
@@ -2811,6 +2957,7 @@ class AlbertMission:
         command_policy: dict[str, str] | None = None,
         workstation_action: dict[str, str] | None = None,
         manual_retry_reason: str = "",
+        expected_revision: int | None = None,
     ) -> LocalAgentSession:
         with self._session_launch_lock():
             self._load_runtime()
@@ -2822,6 +2969,7 @@ class AlbertMission:
                 command_policy=command_policy,
                 workstation_action=workstation_action,
                 manual_retry_reason=manual_retry_reason,
+                expected_revision=expected_revision,
             )
 
     def _launch_repair(
@@ -2833,8 +2981,13 @@ class AlbertMission:
         command_policy: dict[str, str] | None = None,
         workstation_action: dict[str, str] | None = None,
         manual_retry_reason: str = "",
+        expected_revision: int | None = None,
     ) -> LocalAgentSession:
         prior_session = self._session(session_id)
+        if expected_revision is None:
+            expected_revision = prior_session.revision
+        self._require_lifecycle_revision(prior_session, expected_revision)
+        self._require_active_retirement_unit(prior_session, "launch repair")
         issue = self.issues.get(prior_session.issue_id)
         is_ad_hoc = (
             issue is None
@@ -3004,6 +3157,7 @@ class AlbertMission:
             task_packet=task_packet,
             status="queued",
         )
+        prior_session.revision += 1
         self.sessions[repair_session_id] = session
         self._record(
             f"{prior_session.issue_id} repair queued as {repair_session_id} "
@@ -3012,9 +3166,18 @@ class AlbertMission:
         self._persist()
         return session
 
-    def run_session(self, session_id: str) -> LocalAgentSession:
+    def run_session(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int | None = None,
+    ) -> LocalAgentSession:
         """Claim and execute one persisted queued Local Agent session."""
         session = self._session(session_id)
+        if expected_revision is None:
+            expected_revision = session.revision
+        self._require_lifecycle_revision(session, expected_revision)
+        self._require_active_retirement_unit(session, "begin execution")
         if session.status != "queued":
             raise LaunchBlockedError(
                 f"{session_id} cannot run from {session.status}; queued is required."
@@ -3085,19 +3248,28 @@ class AlbertMission:
         session.runner_operation_id = (
             "runner-operation:" + sha256(operation_payload.encode("utf-8")).hexdigest()
         )
-        session.runner_process_pid = session.runner_pid
-        session.runner_process_identity = session.runner_identity
+        # The orchestrator process owns the lifecycle operation, but it is not
+        # itself the spawned runner process group. Keep the child boundary
+        # empty until the process-start callback records an exact binding.
+        session.runner_process_pid = None
+        session.runner_process_identity = ""
         session.runner_process_token = ""
         session.runner_result = {}
         session.cancel_requested_at = ""
         session.cancel_reason = ""
         session.task_packet.pop("runner_failure", None)
+        self._remember_retirement_runner_boundary(session)
+        self._acquire_retirement_runner_owner(session)
         started_message = f"{session.issue_id} runner started for {session_id}."
-        self._persist_session_update(
-            session,
-            expected_statuses={"queued"},
-            timeline_message=started_message,
-        )
+        try:
+            self._persist_session_update(
+                session,
+                expected_statuses={"queued"},
+                timeline_message=started_message,
+            )
+        except Exception:
+            self._release_retirement_runner_owner(session)
+            raise
         try:
             try:
                 # Journal creation is part of runner start, not an optional UI
@@ -3127,12 +3299,12 @@ class AlbertMission:
                 self._raise_if_cancelled(session)
                 self._persist_runner_result_candidate(session)
             except SessionCancelledError:
-                return self._refresh_persisted_session(session_id)
+                return self._finalize_cancelled_runner_owner_release(session)
             except Exception as exc:
                 try:
                     self._raise_if_cancelled(session)
                 except SessionCancelledError:
-                    return self._refresh_persisted_session(session_id)
+                    return self._finalize_cancelled_runner_owner_release(session)
                 session.status = "failed"
                 session.runner_exit_status = (
                     session.runner_exit_status
@@ -3140,6 +3312,7 @@ class AlbertMission:
                     else 1
                 )
                 session.runner_ended_at = session.runner_ended_at or _utc_now()
+                self._release_retirement_runner_owner(session)
                 session.runner_pid = None
                 session.runner_identity = ""
                 session.runner_process_pid = None
@@ -3159,6 +3332,7 @@ class AlbertMission:
             session.runner_ended_at = session.runner_ended_at or _utc_now()
             if session.status == "running":
                 session.status = "completed"
+            self._release_retirement_runner_owner(session)
             session.runner_pid = None
             session.runner_identity = ""
             session.runner_process_pid = None
@@ -3628,20 +3802,28 @@ class AlbertMission:
             elif not absence_observable:
                 process_group = "unavailable"
         if (
-            process_group == "absent"
+            (
+                process_group == "absent"
+                or (
+                    process_group == "unavailable"
+                    and not session.runner_process_token
+                )
+            )
             and os.name == "posix"
             and session.runner_process_pid is not None
         ):
             try:
                 os.killpg(session.runner_process_pid, 0)
             except ProcessLookupError:
-                pass
+                process_group = "absent"
             except PermissionError:
                 process_group = "unavailable"
             else:
                 # A live group after its recorded leader identity disappeared is
                 # contradictory or reused, never exact quiescence proof.
-                process_group = "reused"
+                process_group = (
+                    "live-exact" if process_group == "live-exact" else "reused"
+                )
         return owner, process_group
 
     def _apply_supervision_intent(self, receipt_id: str) -> SupervisionReceipt:
@@ -3935,19 +4117,15 @@ class AlbertMission:
             assigned_agent=agent_id,
             worktree_path=worktree_path,
             task_packet=task_packet,
+            status="queued",
         )
         self.sessions[session_id] = session
-        self._attach_selected_skill(session)
-        self._ensure_session_worktree(session)
-        if agent_config.runner == "fake":
-            self._run_fake_agent(session)
-        elif agent_config.runner == "command":
-            self._run_command_agent(session, agent_config)
-        elif agent_config.runner == "ollama":
-            self._run_ollama_agent(session, agent_config)
-        self._record(f"{work_id} launched as {session_id}.")
+        self._record(f"{work_id} queued as {session_id} with preservation reserved.")
         self._persist()
-        return session
+        return self.run_session(
+            session_id,
+            expected_revision=session.revision,
+        )
 
     def _ensure_headless_agent_authorized(self, agent_config: AgentConfig) -> None:
         if agent_config.delegate_only:
@@ -4045,45 +4223,67 @@ class AlbertMission:
             return f"ollama run {agent_config.model} --think=false --nowordwrap --format json"
         return ""
 
-    def record_evidence(self, session_id: str, evidence: EvidencePackage) -> None:
-        session = self._session(session_id)
+    def record_evidence(
+        self,
+        session_id: str,
+        evidence: EvidencePackage,
+        *,
+        expected_revision: int | None = None,
+    ) -> None:
         missing = evidence.missing_fields()
         if missing:
             raise EvidenceValidationError(f"Evidence Package is missing: {', '.join(missing)}")
-        unsafe_links = [
-            link
-            for link in evidence.artifact_links
-            if not self._artifact_link_is_safe_for_review(session, link)
-        ]
-        if unsafe_links:
-            raise EvidenceValidationError(
-                "Evidence Package contains an unsafe artifact link: "
-                + ", ".join(unsafe_links)
+        request_revision = (
+            self._session(session_id).revision
+            if expected_revision is None
+            else expected_revision
+        )
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_session = data.get("sessions", {}).get(session_id)
+            if not isinstance(raw_session, dict):
+                in_memory = self.sessions.get(session_id)
+                if in_memory is None:
+                    raise AlbertError(f"Unknown Local Agent session: {session_id}")
+                raw_session = in_memory.to_dict()
+            session = LocalAgentSession.from_dict(raw_session)
+            self._require_lifecycle_revision(session, request_revision)
+            self._require_active_retirement_unit(session, "record evidence")
+            unsafe_links = [
+                link
+                for link in evidence.artifact_links
+                if not self._artifact_link_is_safe_for_review(session, link)
+            ]
+            if unsafe_links:
+                raise EvidenceValidationError(
+                    "Evidence Package contains an unsafe artifact link: "
+                    + ", ".join(unsafe_links)
+                )
+            correlation_id = f"evidence:{self.mission_id}:{session_id}"
+            if session.evidence_correlation_id:
+                if (
+                    session.evidence_correlation_id == correlation_id
+                    and session.evidence == evidence
+                    and session.evidence_valid
+                ):
+                    self.sessions[session_id] = session
+                    return
+                raise AlbertError(
+                    "Evidence correlation id was already used for a different package: "
+                    f"{correlation_id}"
+                )
+            session.evidence = evidence
+            session.evidence_valid = True
+            session.evidence_correlation_id = correlation_id
+            session.status = "evidence-ready"
+            session.revision += 1
+            data["sessions"][session_id] = session.to_dict()
+            data.setdefault("timeline", []).append(
+                f"{session.issue_id} evidence package validated for {session_id}."
             )
-        correlation_id = f"evidence:{self.mission_id}:{session_id}"
-        if session.evidence_correlation_id:
-            if (
-                session.evidence_correlation_id == correlation_id
-                and session.evidence == evidence
-                and session.evidence_valid
-            ):
-                if self._evidence_activity_recorder is not None:
-                    self._evidence_activity_recorder(
-                        self.mission_id,
-                        session,
-                        evidence,
-                    )
-                return
-            raise AlbertError(
-                f"Evidence correlation id was already used for a different package: "
-                f"{correlation_id}"
-            )
-        session.evidence = evidence
-        session.evidence_valid = True
-        session.evidence_correlation_id = correlation_id
-        session.status = "evidence-ready"
-        self._record(f"{session.issue_id} evidence package validated for {session_id}.")
-        self._persist()
+            self._write_runtime_payload(data)
+            self.sessions[session_id] = session
+            self.timeline = list(data.get("timeline", []))
         if self._evidence_activity_recorder is not None:
             self._evidence_activity_recorder(self.mission_id, session, evidence)
 
@@ -4093,15 +4293,20 @@ class AlbertMission:
         *,
         reason: str,
         workstation_action: dict[str, Any] | None = None,
+        expected_revision: int | None = None,
     ) -> LocalAgentSession:
         if not reason.strip():
             raise AlbertError("Session cancellation requires a reason.")
+        if expected_revision is None:
+            expected_revision = self._session(session_id).revision
         with self._runtime_lock(exclusive=True):
             data = self._read_runtime_payload()
             session_data = data.get("sessions", {}).get(session_id)
             if not isinstance(session_data, dict):
                 raise AlbertError(f"Unknown Local Agent session: {session_id}")
             session = LocalAgentSession.from_dict(session_data)
+            self._require_lifecycle_revision(session, expected_revision)
+            self._require_active_retirement_unit(session, "cancel")
             if session.status not in {"queued", "launched", "running"}:
                 raise AlbertError(
                     f"{session_id} cannot be cancelled from {session.status}."
@@ -4127,6 +4332,7 @@ class AlbertMission:
             session.runner_process_pid = None
             session.runner_process_identity = ""
             session.runner_process_token = ""
+            session.revision += 1
             data["sessions"][session_id] = session.to_dict()
             data["workstation_actions"] = workstation_actions
             timeline = list(data.get("timeline", []))
@@ -4242,14 +4448,19 @@ class AlbertMission:
         limitations: list[str] | None = None,
         allowed_session_statuses: set[str] | None = None,
         workspace_action: dict[str, Any] | None = None,
+        expected_revision: int | None = None,
     ) -> ReviewDecision:
         outcome = _normalize_review_outcome(outcome)
+        if expected_revision is None:
+            expected_revision = self._session(session_id).revision
         with self._runtime_lock(exclusive=True):
             data = self._read_runtime_payload()
             raw_session = data.get("sessions", {}).get(session_id)
             if not isinstance(raw_session, dict):
                 raise AlbertError(f"Unknown Local Agent session: {session_id}")
             session = LocalAgentSession.from_dict(raw_session)
+            self._require_lifecycle_revision(session, expected_revision)
+            self._require_active_retirement_unit(session, "record review")
             self.sessions[session_id] = session
             for issue_id, runtime in data.get("issues", {}).items():
                 if issue_id in self.issues and isinstance(runtime, dict):
@@ -4297,6 +4508,7 @@ class AlbertMission:
             )
             self.reviews.append(decision)
             session.status = "reviewed"
+            session.revision += 1
             issue = self.issues.get(session.issue_id)
             if outcome in {"Approved", "Approved with limitations"}:
                 session.cleanup_eligible = True
@@ -4889,6 +5101,11 @@ class AlbertMission:
                 self.sessions[session.session_id] = latest
                 self.timeline = list(data.get("timeline", []))
                 return latest
+            if latest.revision != session.revision:
+                raise LaunchBlockedError(
+                    f"{session.session_id} lifecycle revision is stale; expected "
+                    f"{latest.revision}, received {session.revision}."
+                )
             session.revision = latest.revision + 1
             sessions[session.session_id] = session.to_dict()
             timeline = list(data.get("timeline", []))
@@ -5059,6 +5276,459 @@ class AlbertMission:
 
         return self._worktree_identity_for_session(self._session(session_id))
 
+    @staticmethod
+    def _require_lifecycle_revision(
+        session: LocalAgentSession,
+        expected_revision: int | None,
+    ) -> None:
+        if (
+            not isinstance(expected_revision, int)
+            or isinstance(expected_revision, bool)
+            or expected_revision < 0
+            or session.revision != expected_revision
+        ):
+            raise LaunchBlockedError(
+                f"{session.session_id} lifecycle revision is stale; expected "
+                f"{session.revision}, received {expected_revision}."
+            )
+
+    @staticmethod
+    def _require_active_retirement_unit(
+        session: LocalAgentSession,
+        action: str,
+    ) -> None:
+        phase = session.retirement.get("phase", "active")
+        if phase != "active":
+            raise LaunchBlockedError(
+                f"{session.session_id} cannot {action} while its Retirement Unit "
+                f"phase is {phase}."
+            )
+        budget = session.preservation_budget
+        if (
+            budget.get("state") != "reserved"
+            or budget.get("bound") is not True
+            or budget.get("reserved_bytes") != _PRESERVATION_BUDGET_BYTES
+        ):
+            raise LaunchBlockedError(
+                f"{session.session_id} cannot {action} without its bound "
+                "Preservation Budget."
+            )
+
+    def _remember_retirement_runner_boundary(
+        self,
+        session: LocalAgentSession,
+    ) -> None:
+        previous = session.retirement.get("runner_boundary", {})
+        session.retirement["runner_boundary"] = {
+            "mission_id": self.mission_id,
+            "session_id": session.session_id,
+            "runner_operation_id": session.runner_operation_id,
+            "owner_pid": session.runner_pid,
+            "owner_identity": session.runner_identity,
+            "process_group_pid": session.runner_process_pid,
+            "process_group_identity": session.runner_process_identity,
+            "process_token": session.runner_process_token,
+            "owner_lease_path": previous.get("owner_lease_path", ""),
+            "owner_lease_token": previous.get("owner_lease_token", ""),
+        }
+
+    def _retirement_runner_owner_lease_path(self, session_id: str) -> Path:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", session_id):
+            raise AlbertError(f"unsafe session id {session_id!r}")
+        lease_root = self.runtime_dir / "runner-leases"
+        return lease_root / f"{session_id}.json"
+
+    def _acquire_retirement_runner_owner(self, session: LocalAgentSession) -> None:
+        lease_path = self._retirement_runner_owner_lease_path(session.session_id)
+        lease_path.parent.mkdir(parents=True, exist_ok=True)
+        lease_token = sha256(
+            f"{session.runner_operation_id}\n{lease_path}".encode("utf-8")
+        ).hexdigest()
+        payload = {
+            "mission_id": self.mission_id,
+            "session_id": session.session_id,
+            "runner_operation_id": session.runner_operation_id,
+            "lease_token": lease_token,
+        }
+        try:
+            with lease_path.open("x", encoding="utf-8") as handle:
+                json.dump(payload, handle, sort_keys=True)
+        except FileExistsError as exc:
+            raise LaunchBlockedError(
+                f"{session.session_id} already has a supervising runner owner lease."
+            ) from exc
+        boundary = session.retirement["runner_boundary"]
+        boundary["owner_lease_path"] = str(lease_path)
+        boundary["owner_lease_token"] = lease_token
+
+    def _release_retirement_runner_owner(
+        self,
+        session: LocalAgentSession,
+    ) -> None:
+        """Record an exact per-operation owner release after runner effects stop."""
+
+        boundary = session.retirement.get("runner_boundary", {})
+        if (
+            not session.runner_operation_id
+            or boundary.get("runner_operation_id") != session.runner_operation_id
+        ):
+            return
+        lease_path = self._retirement_runner_owner_lease_path(session.session_id)
+        if boundary.get("owner_lease_path") != str(lease_path):
+            return
+        try:
+            lease_payload = json.loads(lease_path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(lease_payload, dict)
+                or lease_payload.get("mission_id") != self.mission_id
+                or lease_payload.get("session_id") != session.session_id
+                or lease_payload.get("runner_operation_id")
+                != session.runner_operation_id
+                or lease_payload.get("lease_token")
+                != boundary.get("owner_lease_token")
+            ):
+                return
+            lease_path.unlink()
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return
+        boundary["owner_released_at"] = _utc_now()
+        boundary["owner_release_operation_id"] = session.runner_operation_id
+        session.retirement["runner_boundary"] = boundary
+
+    def _finalize_cancelled_runner_owner_release(
+        self,
+        runner_session: LocalAgentSession,
+    ) -> LocalAgentSession:
+        self._release_retirement_runner_owner(runner_session)
+        released_boundary = runner_session.retirement.get("runner_boundary", {})
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_latest = data.get("sessions", {}).get(runner_session.session_id)
+            if not isinstance(raw_latest, dict):
+                raise AlbertError(
+                    f"Unknown Local Agent session: {runner_session.session_id}"
+                )
+            latest = LocalAgentSession.from_dict(raw_latest)
+            if (
+                latest.status == "cancelled"
+                and latest.runner_operation_id == runner_session.runner_operation_id
+                and released_boundary.get("owner_release_operation_id")
+                == runner_session.runner_operation_id
+            ):
+                latest.retirement["runner_boundary"] = dict(released_boundary)
+                latest.revision += 1
+                data["sessions"][latest.session_id] = latest.to_dict()
+                data.setdefault("timeline", []).append(
+                    f"{latest.issue_id} supervising runner released for cancelled "
+                    f"session {latest.session_id}."
+                )
+                self._write_runtime_payload(data)
+                self.timeline = list(data.get("timeline", []))
+            self.sessions[latest.session_id] = latest
+            return latest
+
+    def _probe_retirement_quiescence(
+        self,
+        boundary: dict[str, Any],
+    ) -> tuple[str, str]:
+        if self.retirement_quiescence_probe is not None:
+            result = self.retirement_quiescence_probe(dict(boundary))
+            if (
+                not isinstance(result, tuple)
+                or len(result) != 2
+                or result[0]
+                not in {"live-exact", "absent", "reused", "unavailable"}
+                or result[1]
+                not in {"live-exact", "absent", "reused", "unavailable"}
+            ):
+                raise AlbertError("Retirement quiescence probe returned invalid evidence.")
+            return result
+        release_is_exact = (
+            bool(boundary.get("owner_released_at"))
+            and boundary.get("owner_release_operation_id")
+            == boundary.get("runner_operation_id")
+        )
+        lease_path_value = boundary.get("owner_lease_path")
+        lease_token = boundary.get("owner_lease_token")
+        owner_signal = "unavailable"
+        if isinstance(lease_path_value, str) and isinstance(lease_token, str):
+            expected_lease = (
+                self._retirement_runner_owner_lease_path(boundary["session_id"])
+                if boundary.get("mission_id") == self.mission_id
+                and isinstance(boundary.get("session_id"), str)
+                and boundary.get("session_id")
+                else None
+            )
+            lease_path = Path(lease_path_value)
+            if expected_lease is None or lease_path != expected_lease:
+                owner_signal = "reused"
+            elif not lease_path.exists() and release_is_exact:
+                owner_signal = "absent"
+            elif lease_path.exists():
+                try:
+                    lease_payload = json.loads(lease_path.read_text(encoding="utf-8"))
+                    owner_signal = (
+                        "live-exact"
+                        if isinstance(lease_payload, dict)
+                        and lease_payload.get("lease_token") == lease_token
+                        and lease_payload.get("runner_operation_id")
+                        == boundary.get("runner_operation_id")
+                        else "reused"
+                    )
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    owner_signal = "unavailable"
+        probe_session = LocalAgentSession(
+            session_id="retirement-probe",
+            issue_id="retirement-probe",
+            assigned_agent="retirement-probe",
+            worktree_path=self.runtime_dir,
+            task_packet={},
+            runner_pid=boundary.get("owner_pid"),
+            runner_identity=str(boundary.get("owner_identity", "")),
+            runner_process_pid=boundary.get("process_group_pid"),
+            runner_process_identity=str(
+                boundary.get("process_group_identity", "")
+            ),
+            runner_process_token=str(boundary.get("process_token", "")),
+        )
+        pid_owner_signal, process_group_signal = self._probe_runner_boundary(probe_session)
+        if not boundary.get("owner_lease_path"):
+            owner_signal = pid_owner_signal
+        if (
+            release_is_exact
+            and boundary.get("process_group_pid") is None
+            and not boundary.get("process_group_identity")
+            and not boundary.get("process_token")
+        ):
+            process_group_signal = "absent"
+        return owner_signal, process_group_signal
+
+    def preserve_retirement_unit(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int,
+        correlation_id: str,
+    ) -> LocalAgentSession:
+        """Claim, capture, and prove one Retirement Snapshot without deleting work."""
+
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_session = data.get("sessions", {}).get(session_id)
+            if not isinstance(raw_session, dict):
+                raise AlbertError(f"Unknown Local Agent session: {session_id}")
+            session = LocalAgentSession.from_dict(raw_session)
+            if not correlation_id.strip():
+                raise AlbertError("Retirement preservation correlation id is required.")
+            receipt = session.retirement.get("preservation_receipt", {})
+            if receipt:
+                if (
+                    receipt.get("correlation_id") == correlation_id
+                    and receipt.get("expected_revision") == expected_revision
+                    and receipt.get("result_revision") == session.revision
+                    and receipt.get("manifest_sha256")
+                    == session.retirement.get("snapshot", {}).get(
+                        "manifest_sha256"
+                    )
+                    and session.retirement.get("phase") == "preserved"
+                ):
+                    return session
+                if receipt.get("correlation_id") == correlation_id:
+                    raise AlbertError(
+                        "Retirement preservation correlation id was reused for a "
+                        "different request."
+                    )
+            self._require_lifecycle_revision(session, expected_revision)
+            self._require_active_retirement_unit(session, "begin preservation")
+            if session.status not in {
+                "completed",
+                "evidence-ready",
+                "failed",
+                "cancelled",
+                "reviewed",
+            }:
+                raise LaunchBlockedError(
+                    f"{session_id} is not terminal enough for preservation: "
+                    f"{session.status}."
+                )
+            current_identity = self._worktree_identity_for_session(session)
+            if (
+                not current_identity
+                or not current_identity.startswith("managed-git:")
+                or current_identity != session.worktree_identity
+            ):
+                self._block_retirement_preservation(
+                    data,
+                    session,
+                    "Worktree Identity did not agree across stored, managed, canonical, "
+                    "and Git registration boundaries.",
+                )
+                raise LaunchBlockedError(
+                    f"{session_id} Worktree Identity is ambiguous; preservation is blocked."
+                )
+            boundary = session.retirement.get("runner_boundary", {})
+            owner_signal, process_group_signal = self._probe_retirement_quiescence(
+                boundary
+            )
+            if owner_signal != "absent" or process_group_signal != "absent":
+                self._block_retirement_preservation(
+                    data,
+                    session,
+                    "Runner Quiescence was not independently corroborated: "
+                    f"owner={owner_signal}, process-group={process_group_signal}.",
+                )
+                raise LaunchBlockedError(
+                    f"{session_id} Runner Quiescence is unproven; preservation is blocked."
+                )
+            session.retirement["phase"] = "preserving"
+            session.retirement["blocked_reason"] = ""
+            session.revision += 1
+            claim_revision = session.revision
+            data["sessions"][session_id] = session.to_dict()
+            data.setdefault("timeline", []).append(
+                f"{session.issue_id} preservation claimed for {session_id} at "
+                f"lifecycle revision {claim_revision}."
+            )
+            self._write_runtime_payload(data)
+            self.sessions[session_id] = session
+            self.timeline = list(data.get("timeline", []))
+
+        store = self._retirement_snapshot_store(session, claim_revision)
+        try:
+            snapshot = store.capture()
+        except (OSError, RetirementSnapshotError) as exc:
+            with self._runtime_lock(exclusive=True):
+                data = self._read_runtime_payload()
+                raw_latest = data.get("sessions", {}).get(session_id)
+                if not isinstance(raw_latest, dict):
+                    raise AlbertError(f"Unknown Local Agent session: {session_id}") from exc
+                latest = LocalAgentSession.from_dict(raw_latest)
+                if (
+                    latest.revision == claim_revision
+                    and latest.retirement.get("phase") == "preserving"
+                ):
+                    self._block_retirement_preservation(data, latest, str(exc))
+            raise AlbertError(f"{session_id} preservation failed: {exc}") from exc
+
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_latest = data.get("sessions", {}).get(session_id)
+            if not isinstance(raw_latest, dict):
+                raise AlbertError(f"Unknown Local Agent session: {session_id}")
+            latest = LocalAgentSession.from_dict(raw_latest)
+            if (
+                latest.revision != claim_revision
+                or latest.retirement.get("phase") != "preserving"
+                or self._worktree_identity_for_session(latest)
+                != latest.worktree_identity
+            ):
+                reason = (
+                    "Lifecycle or Worktree Identity boundary changed during "
+                    "preservation publication."
+                )
+                try:
+                    store.quarantine_publication(snapshot)
+                except (OSError, RetirementSnapshotError) as exc:
+                    reason += f" Snapshot quarantine also failed: {exc}"
+                self._block_retirement_preservation(data, latest, reason)
+                raise LaunchBlockedError(
+                    f"{session_id} lifecycle boundary changed during preservation."
+                )
+            latest.retirement["phase"] = "preserved"
+            latest.retirement["snapshot"] = snapshot
+            latest.retirement["blocked_reason"] = ""
+            latest.preservation_budget["state"] = "verified"
+            latest.preservation_budget["bound"] = False
+            latest.preservation_budget["verified_at"] = _utc_now()
+            latest.revision += 1
+            latest.retirement["preservation_receipt"] = {
+                "correlation_id": correlation_id,
+                "expected_revision": expected_revision,
+                "result_revision": latest.revision,
+                "manifest_sha256": snapshot["manifest_sha256"],
+            }
+            data["sessions"][session_id] = latest.to_dict()
+            data.setdefault("timeline", []).append(
+                f"{latest.issue_id} Retirement Snapshot verified for {session_id}."
+            )
+            self._write_runtime_payload(data)
+            self.sessions[session_id] = latest
+            self.timeline = list(data.get("timeline", []))
+            return latest
+
+    def verify_retirement_snapshot(self, session_id: str) -> bool:
+        session = self._refresh_persisted_session(session_id)
+        if session.retirement.get("phase") != "preserved":
+            raise LaunchBlockedError(
+                f"{session_id} does not have a verified Retirement Snapshot."
+            )
+        store = self._retirement_snapshot_store(
+            session,
+            int(session.retirement["snapshot"].get("session_revision", session.revision)),
+        )
+        try:
+            return store.verify(session.retirement["snapshot"])
+        except (OSError, RetirementSnapshotError) as exc:
+            raise AlbertError(
+                f"{session_id} Retirement Snapshot integrity verification failed: {exc}"
+            ) from exc
+
+    def _block_retirement_preservation(
+        self,
+        data: dict[str, Any],
+        session: LocalAgentSession,
+        reason: str,
+    ) -> None:
+        session.retirement["phase"] = "preservation-blocked"
+        session.retirement["blocked_reason"] = reason
+        session.retirement["snapshot"] = {}
+        session.revision += 1
+        data["sessions"][session.session_id] = session.to_dict()
+        data.setdefault("timeline", []).append(
+            f"{session.issue_id} preservation blocked for {session.session_id}: {reason}"
+        )
+        self._write_runtime_payload(data)
+        self.sessions[session.session_id] = session
+        self.timeline = list(data.get("timeline", []))
+
+    def _retirement_snapshot_store(
+        self,
+        session: LocalAgentSession,
+        snapshot_revision: int,
+    ) -> RetirementSnapshotStore:
+        request = SnapshotRequest(
+            mission_id=self.mission_id,
+            session_id=session.session_id,
+            session_revision=snapshot_revision,
+            worktree_path=session.worktree_path,
+            worktree_identity=session.worktree_identity,
+            runtime_dir=self.runtime_dir,
+            target_repo=self.target_repo,
+            repository_snapshot=dict(session.repository_snapshot),
+            baseline_fingerprints=dict(session.baseline_fingerprints),
+            evidence_correlation_id=session.evidence_correlation_id,
+            evidence_valid=session.evidence_valid,
+            artifacts=dict(session.artifacts),
+            terminal_status=session.status,
+            reserved_bytes=int(session.preservation_budget["reserved_bytes"]),
+        )
+
+        def run_git(
+            cwd: Path,
+            arguments: list[str],
+            input_text: str | None,
+            output_limit: int,
+        ) -> tuple[int, str, str]:
+            completed = _run_bounded_process(
+                ["git", "-C", str(cwd), *arguments],
+                input_text=input_text,
+                timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+                output_limit_bytes=output_limit,
+            )
+            return completed.returncode, completed.stdout, completed.stderr
+
+        return RetirementSnapshotStore(request, run_git)
+
     def _worktree_identity_for_session(self, session: LocalAgentSession) -> str:
         session_id = session.session_id
         expected_path = self._session_worktree_path(session_id)
@@ -5105,6 +5775,45 @@ class AlbertMission:
             != _runtime_identity_path(git_pointer)
             or admin_path.name != canonical_path.name
         ):
+            return ""
+        try:
+            registered = _run_bounded_process(
+                [
+                    "git",
+                    "-C",
+                    str(self.target_repo),
+                    "worktree",
+                    "list",
+                    "--porcelain",
+                    "-z",
+                ],
+                timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+                output_limit_bytes=_GIT_PATH_OUTPUT_BYTES_LIMIT,
+            )
+        except OSError:
+            return ""
+        if registered.returncode != 0:
+            return ""
+        registered_paths: list[str] = []
+        for block in registered.stdout.split("\0\0"):
+            fields = [field for field in block.split("\0") if field]
+            worktree_fields = [
+                field.removeprefix("worktree ")
+                for field in fields
+                if field.startswith("worktree ")
+            ]
+            if len(worktree_fields) != 1:
+                continue
+            try:
+                registered_path = Path(worktree_fields[0]).resolve(strict=True)
+            except OSError:
+                return ""
+            if (
+                _runtime_identity_path(registered_path)
+                == _runtime_identity_path(canonical_path)
+            ):
+                registered_paths.append(_runtime_identity_path(registered_path))
+        if registered_paths != [_runtime_identity_path(canonical_path)]:
             return ""
         payload = (
             f"git-worktree\n{self.mission_id}\n{session_id}\n"
@@ -7547,6 +8256,7 @@ class AlbertMission:
             session.runner_process_pid = process.pid
             session.runner_process_identity = _process_identity(process.pid)
             session.runner_process_token = process_token
+            self._remember_retirement_runner_boundary(session)
             if governed_session:
                 persisted = self._persist_session_update(session)
                 if persisted.status == "cancelled":

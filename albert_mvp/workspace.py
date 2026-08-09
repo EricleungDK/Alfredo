@@ -7716,6 +7716,7 @@ class ReviewWorkspaceService:
                 "correlation_id": correlation_id,
                 "request": request_payload,
             },
+            expected_revision=session.revision,
         )
         return self._acknowledge_review(
             correlation_id=correlation_id,
@@ -8115,6 +8116,7 @@ class WorkstationActionService:
                     manual_retry_reason=(
                         reason if review_workspace_repair is None else ""
                     ),
+                    expected_revision=prior_session.revision,
                 )
             acknowledged_session_id = session.session_id
             effect_summary = (
@@ -8143,6 +8145,7 @@ class WorkstationActionService:
                     session_id,
                     reason=reason,
                     workstation_action=workstation_action,
+                    expected_revision=session.revision,
                 )
             )
             acknowledged_session_id = cancelled.session_id

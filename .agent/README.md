@@ -73,6 +73,7 @@
 - [Persistent Apple container development environment](Reports/2026-08-03-apple-container-development-environment.md) records the named-container lifecycle, isolated volumes, loopback forwarding boundary, canonical health check, restart evidence, and agent handoff.
 - [Governed Mission Work actions](Reports/2026-08-06-issue-64-governed-mission-work-actions.md) records Issue #64's retained completed-history archive/restore, inherited repair preview, blocker truth, and validation evidence.
 - [Deterministic runner supervision](Reports/2026-08-09-issue-65-deterministic-runner-supervision.md) records Issue #65's advisory observation ledger, exact recovery boundary, receipt replay, healthy silence, and Mission Work decision projection.
+- [Retirement preservation proof](Reports/2026-08-09-issue-66-retirement-preservation.md) records Issue #66's pre-execution budget reservation, lifecycle lock, Worktree Identity and quiescence gates, manifest integrity, and clean-room reconstruction boundary.
 - [Workspace selection and false-success diagnosis](Reports/2026-07-24-workspace-selection-false-success-diagnosis.md) records the defect and the receipt-truth blueprint resolved by Issue #59.
 - [Alfredo one-shot workstation correction](Reports/2026-07-11-alfredo-one-shot-workstation.md) remains the historical implementation report.
 - Historical implementation reports remain in [`Reports/`](Reports/) and are indexed from [project architecture](System/project_architecture.md#implementation-report-index).
