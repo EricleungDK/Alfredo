@@ -135,6 +135,10 @@ export interface WorkstationCardDetail {
   readonly reviewState: WorkstationReviewState;
   readonly governedActions: readonly WorkstationGovernedAction[];
   readonly retirementRecord: MissionSessionSummary["retirement_record"] | null;
+  readonly retirementPhase?: string;
+  readonly retirementBlockedReason?: string;
+  readonly retirementRunnerBoundary?: Readonly<Record<string, unknown>>;
+  readonly preservationBudget?: Readonly<Record<string, unknown>>;
 }
 
 export interface WorkstationCardProjection {
@@ -1137,7 +1141,7 @@ function projectAttentionCard(
     filesTouched: 0,
     latestCommandOrTest: "No command or test summary",
     nextAction: retirementStorage
-      ? "Inspect /storage and unpin or export protected payloads before retrying admission"
+      ? "Inspect /storage, then unpin expired payloads or raise the configured budget before retrying admission"
       : runnerSupervision
       ? supervisionActions.length
         ? "Choose manual Retry with a reason, or leave the session stopped"
@@ -1170,13 +1174,7 @@ function projectAttentionCard(
       },
       retirementRecord: null,
       governedActions: retirementStorage
-        ? [
-            {
-              label: "Inspect Snapshot Storage",
-              target: "storage",
-              requiresReason: false,
-            },
-          ]
+        ? []
         : runnerSupervision
         ? supervisionActions
         : queueItem
@@ -1281,6 +1279,9 @@ function projectSessionCard(
       session.retirement_actions,
       session.retirement_record,
       session.session_revision,
+      session.retirement_blocked_reason,
+      session.retirement_runner_boundary,
+      session.preservation_budget,
     ),
   };
 }
@@ -1302,6 +1303,9 @@ function sessionDetail(
   retirementActions: MissionSessionSummary["retirement_actions"] = undefined,
   retirementRecord: MissionSessionSummary["retirement_record"] = undefined,
   retirementRevision = acceptedRevision,
+  retirementBlockedReason = "",
+  retirementRunnerBoundary: MissionSessionSummary["retirement_runner_boundary"] = undefined,
+  preservationBudget: MissionSessionSummary["preservation_budget"] = undefined,
 ): WorkstationCardDetail {
   const commands = evidence.commands_run;
   const toolActivity: WorkstationToolActivity[] = [
@@ -1384,6 +1388,10 @@ function sessionDetail(
       reviewReady: status === "review-ready",
     },
     retirementRecord: retirementRecord ?? null,
+    retirementPhase,
+    retirementBlockedReason,
+    retirementRunnerBoundary,
+    preservationBudget,
     governedActions: governedActions(
       status,
       sessionId,
@@ -1600,11 +1608,6 @@ function governedActions(
     (retirementPhase === "preservation-blocked" || retirementPhase === "retirement-blocked")
   ) {
     return [
-      {
-        label: "Inspect Retirement Record",
-        target: "storage",
-        requiresReason: false,
-      },
       {
         label: "Retry Retirement",
         target: "mission-board",
@@ -1876,11 +1879,11 @@ export function workstationActionConsequence(action: WorkstationGovernedAction):
     case "issue-restore":
       return `Acknowledgement restores the retained ${targetId || "Issue Slice"} subtree to active Mission Work with its identity, sessions, Evidence Packages, and Activity Journal history intact.`;
     case "retirement-pin":
-      return `${action.pinState ? "Pinning" : "Unpinning"} changes retention policy for ${targetId || "this Snapshot Payload"}; it does not alter the compact Retirement Record.`;
+      return `${action.pinState ? "Pinning" : "Unpinning"} changes retention policy for ${targetId || "this Snapshot Payload"}, records the new pin state, and advances the session revision.`;
     case "retirement-retry":
       return `Acknowledgement retries the exact blocked Retirement Unit ${targetId || "session"} without bypassing preservation, quiescence, or containment checks.`;
     case "retirement-export":
-      return `Acknowledgement reconstructs the verified retained Snapshot Payload for ${targetId || "this session"} at the exact empty destination; it does not change canonical work.`;
+      return `Acknowledgement copies the exact blocked retained material for ${targetId || "this session"} to the empty destination after quiescence and identity checks; it does not change canonical work.`;
     case "retirement-discard":
       return `Acknowledgement irreversibly deletes only the exact retained managed worktree for ${targetId || "this session"} after confirmation, reason, quiescence, identity, and containment proof.`;
     case "review-decision":

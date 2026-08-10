@@ -452,6 +452,38 @@ class RetirementPreservationTest(unittest.TestCase):
         self.assertEqual(compact["payload_disposition"], "reclaimed")
         self.assertFalse(Path(retired.retirement["snapshot"]["payload_path"]).exists())
 
+    def test_storage_inspection_is_read_only_for_newly_expired_payloads(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        mission.record_frontier_review(
+            completed.session_id,
+            "Approved",
+            reason="Retire one payload before checking the read-only storage view.",
+            allowed_session_statuses={"evidence-ready"},
+            expected_revision=completed.revision,
+        )
+        retired = mission._refresh_persisted_session(completed.session_id)
+        payload_path = Path(retired.retirement["snapshot"]["payload_path"])
+        runtime = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        runtime["sessions"][completed.session_id]["retirement"]["snapshot"]["created_at"] = (
+            datetime.now().astimezone() - timedelta(days=2)
+        ).isoformat()
+        runtime["sessions"][completed.session_id]["retirement"]["snapshot"]["expires_at"] = (
+            datetime.now().astimezone() - timedelta(seconds=1)
+        ).isoformat()
+        mission.runtime_path.write_text(
+            json.dumps(runtime, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        before = mission.runtime_path.read_bytes()
+
+        inspection = mission.retirement_storage_inspection()
+
+        self.assertEqual(mission.runtime_path.read_bytes(), before)
+        self.assertTrue(payload_path.is_dir())
+        self.assertEqual(inspection["counts"]["expired_eligible_payloads"], 1)
+        self.assertEqual(inspection["counts"]["retained_payloads"], 1)
+
     def test_snapshot_storage_schema_rejects_malformed_durable_records(self) -> None:
         mission = self.load_mission()
         completed = self.completed_session(mission)
@@ -491,6 +523,53 @@ class RetirementPreservationTest(unittest.TestCase):
             encoding="utf-8",
         )
 
+        with self.assertRaisesRegex(
+            AlbertError,
+            "Retirement Unit action receipt is invalid",
+        ):
+            self.load_mission()
+
+    def test_retirement_action_receipts_are_bound_to_the_owning_session(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        preserved = mission.preserve_retirement_unit(
+            completed.session_id,
+            expected_revision=completed.revision,
+            correlation_id="preserve-before-owner-bound-receipt",
+        )
+        baseline = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+
+        impossible_revision = json.loads(json.dumps(baseline))
+        impossible_revision["sessions"][preserved.session_id]["retirement"]["action_receipts"]["impossible-result"] = {
+            "action": "retry",
+            "expected_revision": preserved.revision,
+            "result_revision": preserved.revision + 2,
+            "result_phase": "retired",
+            "recorded_at": datetime.now().astimezone().isoformat(),
+        }
+        mission.runtime_path.write_text(
+            json.dumps(impossible_revision, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            AlbertError,
+            "Retirement Unit action receipt is invalid",
+        ):
+            self.load_mission()
+
+        wrong_confirmation = json.loads(json.dumps(baseline))
+        wrong_confirmation["sessions"][preserved.session_id]["retirement"]["action_receipts"]["wrong-confirmation"] = {
+            "action": "discard",
+            "expected_revision": completed.revision,
+            "result_revision": preserved.revision,
+            "confirmation": "some-other-session",
+            "reason": "This receipt must not authorize a different session.",
+            "recorded_at": datetime.now().astimezone().isoformat(),
+        }
+        mission.runtime_path.write_text(
+            json.dumps(wrong_confirmation, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
         with self.assertRaisesRegex(
             AlbertError,
             "Retirement Unit action receipt is invalid",
@@ -2086,9 +2165,13 @@ class RetirementPreservationTest(unittest.TestCase):
         self.assertEqual(retried.retirement["phase"], "retired")
         self.assertFalse(completed.worktree_path.exists())
 
-    def test_preservation_blocked_does_not_advertise_unavailable_export(self) -> None:
+    def test_preservation_blocked_exports_the_exact_retained_worktree(self) -> None:
         mission = self.load_mission(quiescence=("absent", "live-exact"))
         completed = self.completed_session(mission)
+        (completed.worktree_path / "retained-only.txt").write_text(
+            "recover this exact retained worktree\n",
+            encoding="utf-8",
+        )
         with self.assertRaisesRegex(LaunchBlockedError, "Runner Quiescence"):
             mission.preserve_retirement_unit(
                 completed.session_id,
@@ -2098,13 +2181,97 @@ class RetirementPreservationTest(unittest.TestCase):
 
         blocked = mission._refresh_persisted_session(completed.session_id)
         self.assertEqual(blocked.retirement["phase"], "preservation-blocked")
-        inspection = mission.inspect_retirement_unit(completed.session_id)
+        quiesced = self.load_mission()
+        inspection = quiesced.inspect_retirement_unit(completed.session_id)
         self.assertEqual(
             inspection["actions"],
-            {"retry": True, "inspect": True, "export": False, "discard": True},
+            {"retry": True, "inspect": True, "export": True, "discard": True},
         )
 
-    def test_concurrent_headless_admission_serializes_capacity_reservation(self) -> None:
+        destination = self.root / "preservation-blocked-export"
+        write_payload = quiesced._write_runtime_payload
+
+        def interrupt_before_direct_export_receipt(data: dict[str, object]) -> None:
+            raw_session = data.get("sessions", {}).get(completed.session_id, {})
+            receipt = raw_session.get("retirement", {}).get(
+                "action_receipts", {}
+            ).get("export-preservation-blocked-worktree")
+            if receipt:
+                raise KeyboardInterrupt("crash before direct export receipt")
+            write_payload(data)
+
+        with patch.object(
+            quiesced,
+            "_write_runtime_payload",
+            side_effect=interrupt_before_direct_export_receipt,
+        ):
+            with self.assertRaisesRegex(KeyboardInterrupt, "direct export receipt"):
+                quiesced.export_retirement_unit(
+                    completed.session_id,
+                    destination=destination,
+                    expected_revision=blocked.revision,
+                    correlation_id="export-preservation-blocked-worktree",
+                )
+
+        exported_file = destination / "repository" / "retained-only.txt"
+        exported_file.write_text("tampered direct export\n", encoding="utf-8")
+        recovered = self.load_mission()
+        with self.assertRaisesRegex(AlbertError, "exported repository content"):
+            recovered.export_retirement_unit(
+                completed.session_id,
+                destination=destination,
+                expected_revision=blocked.revision,
+                correlation_id="export-preservation-blocked-worktree",
+            )
+        exported_file.write_text(
+            "recover this exact retained worktree\n",
+            encoding="utf-8",
+        )
+        receipt = recovered.export_retirement_unit(
+            completed.session_id,
+            destination=destination,
+            expected_revision=blocked.revision,
+            correlation_id="export-preservation-blocked-worktree",
+        )
+
+        self.assertEqual(receipt["destination"], str(destination.resolve() / "repository"))
+        self.assertEqual(
+            (destination / "repository" / "retained-only.txt").read_text(encoding="utf-8"),
+            "recover this exact retained worktree\n",
+        )
+
+    def test_preservation_blocked_retry_runs_fresh_preservation_and_reloads(
+        self,
+    ) -> None:
+        blocked_mission = self.load_mission(quiescence=("absent", "live-exact"))
+        completed = self.completed_session(blocked_mission)
+        with self.assertRaisesRegex(LaunchBlockedError, "Runner Quiescence"):
+            blocked_mission.preserve_retirement_unit(
+                completed.session_id,
+                expected_revision=completed.revision,
+                correlation_id="preserve-before-explicit-retry",
+            )
+        blocked = blocked_mission._refresh_persisted_session(completed.session_id)
+
+        quiesced = self.load_mission()
+        retried = quiesced.retry_retirement_unit(
+            completed.session_id,
+            expected_revision=blocked.revision,
+            correlation_id="retry-preservation-blocked",
+        )
+
+        self.assertEqual(retried.retirement["phase"], "preserved")
+        self.assertTrue(retried.retirement["snapshot"]["verified"])
+        self.assertEqual(
+            retried.retirement["action_receipts"]["retry-preservation-blocked"]["result_phase"],
+            "preserved",
+        )
+        reloaded = self.load_mission().sessions[completed.session_id]
+        self.assertEqual(reloaded.retirement["phase"], "preserved")
+
+    def test_concurrent_headless_admission_serializes_capacity_reservation(
+        self,
+    ) -> None:
         mission_one = self.load_mission(
             snapshot_storage_budget_bytes=32 * 1024 * 1024,
         )
@@ -2523,6 +2690,61 @@ class RetirementPreservationTest(unittest.TestCase):
 
         self.assertEqual(discarded.retirement["phase"], "retired")
         self.assertFalse(completed.worktree_path.exists())
+
+    def test_retained_worktree_discard_serializes_retirement_retry(self) -> None:
+        shutil.move(self.target_repo / ".git", self.root / "detached-target-git")
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        with patch.object(
+            mission,
+            "_remove_retirement_worktree",
+            side_effect=AlbertError("simulated exact removal failure"),
+        ):
+            mission.record_frontier_review(
+                completed.session_id,
+                "Approved",
+                reason="Create a blocked unit for retry serialization.",
+                allowed_session_statuses={"evidence-ready"},
+                expected_revision=completed.revision,
+            )
+            mission.reconcile_retirement_unit(completed.session_id)
+        blocked = mission._refresh_persisted_session(completed.session_id)
+        deletion_started = threading.Event()
+        finish_deletion = threading.Event()
+        remove_tree = shutil.rmtree
+
+        def paused_remove(path: Path, *args, **kwargs) -> None:
+            deletion_started.set()
+            self.assertTrue(finish_deletion.wait(timeout=5))
+            remove_tree(path, *args, **kwargs)
+
+        with patch("albert_mvp.core.shutil.rmtree", side_effect=paused_remove):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                discard = executor.submit(
+                    mission.discard_retained_worktree,
+                    completed.session_id,
+                    expected_revision=blocked.revision,
+                    correlation_id="serialized-discard-before-retry",
+                    confirmation=completed.session_id,
+                    reason="Delete only after serializing every blocked action.",
+                )
+                self.assertTrue(deletion_started.wait(timeout=5))
+                retry = executor.submit(
+                    mission.retry_retirement_unit,
+                    completed.session_id,
+                    expected_revision=blocked.revision + 1,
+                    correlation_id="concurrent-retry",
+                )
+                time.sleep(0.1)
+                self.assertFalse(retry.done())
+                finish_deletion.set()
+                discarded = discard.result(timeout=5)
+                with self.assertRaises(LaunchBlockedError):
+                    retry.result(timeout=5)
+
+        self.assertEqual(discarded.retirement["phase"], "retired")
+        self.assertFalse(completed.worktree_path.exists())
+        self.assertEqual(discarded.retirement.get("discard_intent"), {})
 
     def test_git_retained_worktree_discard_blocks_a_process_cwd(self) -> None:
         mission = self.load_mission()

@@ -6716,6 +6716,19 @@ function WorkstationCard({
             </ul>
           </div>
 
+          {card.detail.retirementPhase === "preservation-blocked" ||
+          card.detail.retirementPhase === "retirement-blocked" ? (
+            <section className="workstation-card__detail-section">
+              <h5>Retirement Unit Inspection</h5>
+              <dl className="workstation-card__facts">
+                <div><dt>Phase</dt><dd>{card.detail.retirementPhase}</dd></div>
+                <div><dt>Blocked reason</dt><dd>{card.detail.retirementBlockedReason || "No reason recorded."}</dd></div>
+                <div><dt>Runner boundary</dt><dd>{JSON.stringify(card.detail.retirementRunnerBoundary ?? {})}</dd></div>
+                <div><dt>Preservation Budget</dt><dd>{JSON.stringify(card.detail.preservationBudget ?? {})}</dd></div>
+              </dl>
+            </section>
+          ) : null}
+
           {card.detail.retirementRecord ? (
             <div className="workstation-card-detail__section">
               <h4>Retirement Record</h4>

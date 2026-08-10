@@ -1101,6 +1101,8 @@ export interface MissionSessionSummary {
   readonly session_revision?: number;
   readonly retirement_phase?: string;
   readonly retirement_blocked_reason?: string;
+  readonly retirement_runner_boundary?: Readonly<Record<string, unknown>>;
+  readonly preservation_budget?: Readonly<Record<string, unknown>>;
   readonly retirement_record?: {
     readonly manifest_sha256?: string;
     readonly worktree_identity?: string;
@@ -1111,7 +1113,7 @@ export interface MissionSessionSummary {
     readonly payload_disposition?: string;
     readonly reclaimed_at?: string;
     readonly reclamation_reason?: string;
-  };
+  } | null;
   readonly retirement_actions?: Readonly<{
     retry: boolean;
     inspect: boolean;

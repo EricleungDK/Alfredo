@@ -72,11 +72,11 @@ The compact durable manifest of a Retirement Unit's identity, content hashes, au
 
 ### Snapshot Payload
 
-The private, space-consuming content referenced by a Retirement Record that makes a Retirement Snapshot reconstructable. It follows bounded retention and storage-budget policy and may be explicitly pinned without changing the record.
+The private, space-consuming content referenced by a Retirement Record that makes a Retirement Snapshot reconstructable. It follows bounded retention and storage-budget policy. Explicit pin and unpin actions update the compact record's policy state and advance the owning session revision without changing the immutable snapshot manifest.
 
 ### Snapshot Storage Budget
 
-The configurable aggregate app-local capacity available for Snapshot Payloads and bound Preservation Budgets. It reclaims eligible expired unpinned payloads oldest first during admission, startup, and storage inspection; exposes deterministic Active-Mission usage and blocker inspection; projects protected exhaustion as Mission Work attention; and blocks new Retirement Units rather than silently deleting policy-protected payloads when exhausted.
+The configurable aggregate app-local capacity available for Snapshot Payloads and bound Preservation Budgets. It reclaims eligible expired unpinned payloads oldest first during admission, startup, and an unpin policy mutation; exposes deterministic read-only Active-Mission usage and blocker inspection; projects protected exhaustion as Mission Work attention; and blocks new Retirement Units rather than silently deleting policy-protected payloads when exhausted.
 
 ### Retention Grace Period
 

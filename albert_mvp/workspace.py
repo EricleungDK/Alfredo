@@ -319,7 +319,9 @@ class MissionSessionSummary:
     session_revision: int = 0
     retirement_phase: str = "active"
     retirement_blocked_reason: str = ""
-    retirement_record: dict[str, Any] = field(default_factory=dict)
+    retirement_runner_boundary: dict[str, Any] = field(default_factory=dict)
+    preservation_budget: dict[str, Any] = field(default_factory=dict)
+    retirement_record: dict[str, Any] | None = None
     retirement_actions: dict[str, bool] = field(default_factory=dict)
 
 
@@ -10700,13 +10702,13 @@ class WorkspaceSnapshotService:
                 parent_session_id=validated_parent_session_id(session),
                 session_revision=session.revision,
                 retirement_phase=str(session.retirement.get("phase", "active")),
-                retirement_blocked_reason=str(
-                    session.retirement.get("blocked_reason", "")
+                retirement_blocked_reason=str(session.retirement.get("blocked_reason", "")),
+                retirement_runner_boundary=dict(session.retirement.get("runner_boundary", {})),
+                preservation_budget=dict(session.preservation_budget),
+                retirement_record=(
+                    dict(session.retirement["snapshot"]) if session.retirement.get("snapshot") else None
                 ),
-                retirement_record=dict(session.retirement.get("snapshot", {})),
-                retirement_actions=mission.inspect_retirement_unit(
-                    session.session_id
-                )["actions"],
+                retirement_actions=mission.inspect_retirement_unit(session.session_id)["actions"],
             )
 
         sessions = tuple(

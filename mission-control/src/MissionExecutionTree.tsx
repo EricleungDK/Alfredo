@@ -693,6 +693,19 @@ function MissionExecutionInspector({
         ))}
       </section>
 
+      {card?.detail.retirementPhase === "preservation-blocked" ||
+      card?.detail.retirementPhase === "retirement-blocked" ? (
+        <section className="mission-execution-inspector__section">
+          <h5>Retirement Unit Inspection</h5>
+          <dl className="mission-execution-inspector__facts">
+            <div><dt>Phase</dt><dd>{card.detail.retirementPhase}</dd></div>
+            <div><dt>Blocked reason</dt><dd>{card.detail.retirementBlockedReason || "No reason recorded."}</dd></div>
+            <div><dt>Runner boundary</dt><dd>{JSON.stringify(card.detail.retirementRunnerBoundary ?? {})}</dd></div>
+            <div><dt>Preservation Budget</dt><dd>{JSON.stringify(card.detail.preservationBudget ?? {})}</dd></div>
+          </dl>
+        </section>
+      ) : null}
+
       {card?.detail.retirementRecord ? (
         <section className="mission-execution-inspector__section">
           <h5>Retirement Record</h5>
@@ -974,6 +987,7 @@ function MissionExecutionGovernedAction({
         aria-label={action.label}
         aria-describedby={[consequenceId, actionGuidance ? guidanceId : ""].filter(Boolean).join(" ")}
         disabled={disabled}
+        className={action.actionType === "retirement-discard" ? "action--danger" : undefined}
         onClick={submit}
       >
         {action.label}

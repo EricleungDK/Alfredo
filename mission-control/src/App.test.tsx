@@ -631,6 +631,8 @@ test("requires exact-session confirmation before submitting a typed retirement d
             session_revision: 9,
             retirement_phase: "retirement-blocked",
             retirement_blocked_reason: "Retained worktree still has open handles.",
+            retirement_runner_boundary: { runner_operation_id: "retire-operation-9" },
+            preservation_budget: { state: "verified", reserved_bytes: 33554432 },
             retirement_record: {
               manifest_sha256: "b".repeat(64),
               snapshot_bytes: 4096,
@@ -672,8 +674,15 @@ test("requires exact-session confirmation before submitting a typed retirement d
   );
 
   const inspector = await openExecutionInspector(sessionId);
+  expect(
+    within(inspector).getByRole("heading", { name: "Retirement Unit Inspection" }),
+  ).toBeVisible();
+  expect(within(inspector).getByText("Retained worktree still has open handles.")).toBeVisible();
+  expect(within(inspector).getByText(/retire-operation-9/)).toBeVisible();
+  expect(within(inspector).getByText(/33554432/)).toBeVisible();
   expect(within(inspector).getByRole("heading", { name: "Retirement Record" })).toBeVisible();
   const discard = within(inspector).getByRole("button", { name: "Discard Retained Worktree" });
+  expect(discard).toHaveClass("action--danger");
   expect(discard).toBeDisabled();
 
   fireEvent.change(

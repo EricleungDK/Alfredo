@@ -3240,6 +3240,27 @@ class WorkspaceSnapshotTest(unittest.TestCase):
 
         self.assertEqual(inspection["policy"]["budget_bytes"], 64 * 1024 * 1024)
 
+    def test_active_session_projects_no_retirement_record(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        mission.assign_issue("ISS-01", "qwen-coder-local")
+        mission.approve_issue("ISS-01")
+        with patch(
+            "albert_mvp.core._process_isolated_argv",
+            side_effect=lambda argv: argv,
+        ):
+            launched = mission.launch_issue("ISS-01")
+
+        projected = next(
+            session
+            for summary in snapshots.snapshot().missions
+            for session in summary.sessions
+            if session.session_id == launched.session_id
+        )
+
+        self.assertEqual(projected.retirement_phase, "active")
+        self.assertIsNone(projected.retirement_record)
+
     def test_workstation_action_archives_and_restores_a_completed_issue_without_losing_history(
         self,
     ) -> None:

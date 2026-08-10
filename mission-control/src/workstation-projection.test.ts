@@ -2609,10 +2609,13 @@ test("projects blocked Retirement Records and snapshot-storage exhaustion as gov
             status: "reviewed",
             session_revision: 4,
             retirement_phase: "preservation-blocked",
+            retirement_blocked_reason: "Runner Quiescence is not yet proven.",
+            retirement_runner_boundary: { runner_operation_id: "operation-4" },
+            preservation_budget: { state: "reserved", reserved_bytes: 33554432 },
             retirement_actions: {
               retry: true,
               inspect: true,
-              export: false,
+              export: true,
               discard: true,
             },
           },
@@ -2644,7 +2647,6 @@ test("projects blocked Retirement Records and snapshot-storage exhaustion as gov
     payload_disposition: "retained",
   });
   expect(blocked?.detail.governedActions.map((action) => action.actionType)).toEqual([
-    undefined,
     "retirement-retry",
     "retirement-export",
     "retirement-discard",
@@ -2657,11 +2659,18 @@ test("projects blocked Retirement Records and snapshot-storage exhaustion as gov
     preservationBlocked?.detail.governedActions.some(
       (action) => action.actionType === "retirement-export",
     ),
-  ).toBe(false);
+  ).toBe(true);
+  expect(preservationBlocked?.detail).toMatchObject({
+    retirementPhase: "preservation-blocked",
+    retirementBlockedReason: "Runner Quiescence is not yet proven.",
+    retirementRunnerBoundary: { runner_operation_id: "operation-4" },
+    preservationBudget: { state: "reserved", reserved_bytes: 33554432 },
+  });
   expect(storage).toMatchObject({
     status: "blocked",
     phase: "Snapshot Storage",
     attention: true,
     nextAction: expect.stringContaining("Inspect /storage"),
   });
+  expect(storage?.detail.governedActions).toEqual([]);
 });

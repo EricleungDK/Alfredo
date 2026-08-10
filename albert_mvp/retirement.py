@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -234,6 +235,163 @@ class RetirementSnapshotStore:
                     "Retirement Snapshot exported repository content is invalid."
                 )
         return True
+
+    @classmethod
+    def retained_worktree_manifest(
+        cls,
+        worktree: Path,
+        *,
+        exclude_git_metadata: bool,
+    ) -> dict[str, Any]:
+        """Fingerprint an exact retained filesystem tree without following links."""
+
+        if worktree.is_symlink() or not worktree.is_dir():
+            raise RetirementSnapshotError("Retained Worktree export source boundary is invalid.")
+        entries: dict[str, dict[str, Any]] = {}
+        scanned = 0
+        for directory, names, filenames in os.walk(worktree, followlinks=False):
+            directory_path = Path(directory)
+            if exclude_git_metadata and directory_path == worktree:
+                names[:] = [name for name in names if name != ".git"]
+                filenames = [name for name in filenames if name != ".git"]
+            for name in sorted(tuple(names)):
+                path = directory_path / name
+                relative = path.relative_to(worktree).as_posix()
+                scanned += 1
+                if path.is_symlink():
+                    names.remove(name)
+                    entries[relative] = {
+                        "kind": "symlink",
+                        "target": os.readlink(os.fsencode(path)).hex(),
+                    }
+                else:
+                    mode = path.stat(follow_symlinks=False).st_mode
+                    if not stat.S_ISDIR(mode):
+                        raise RetirementSnapshotError("Retained Worktree export contains an unsupported entry.")
+                    entries[relative] = {
+                        "kind": "directory",
+                        "mode": mode & 0o777,
+                    }
+                if scanned > 10_000:
+                    raise RetirementSnapshotError("Retained Worktree export exceeds the 10000-entry limit.")
+            names[:] = sorted(names)
+            for name in sorted(filenames):
+                path = directory_path / name
+                relative = path.relative_to(worktree).as_posix()
+                scanned += 1
+                if path.is_symlink():
+                    entries[relative] = {
+                        "kind": "symlink",
+                        "target": os.readlink(os.fsencode(path)).hex(),
+                    }
+                else:
+                    status = path.stat(follow_symlinks=False)
+                    if not stat.S_ISREG(status.st_mode):
+                        raise RetirementSnapshotError("Retained Worktree export contains an unsupported entry.")
+                    entries[relative] = {
+                        "kind": "file",
+                        "mode": status.st_mode & 0o777,
+                        "size": status.st_size,
+                        "sha256": cls._file_digest(path),
+                    }
+                if scanned > 10_000:
+                    raise RetirementSnapshotError("Retained Worktree export exceeds the 10000-entry limit.")
+        tree_sha256 = sha256(json.dumps(entries, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+        return {
+            "schema_version": 1,
+            "entries": entries,
+            "tree_sha256": tree_sha256,
+        }
+
+    @classmethod
+    def materialize_retained_worktree(
+        cls,
+        worktree: Path,
+        destination_root: Path,
+        manifest: dict[str, Any],
+        *,
+        exclude_git_metadata: bool,
+    ) -> Path:
+        """Copy and re-prove one blocked retained tree below an empty root."""
+
+        if (
+            cls.retained_worktree_manifest(
+                worktree,
+                exclude_git_metadata=exclude_git_metadata,
+            )
+            != manifest
+        ):
+            raise RetirementSnapshotError("Retained Worktree changed before export materialization.")
+        if destination_root.is_symlink() or not destination_root.is_dir() or any(destination_root.iterdir()):
+            raise RetirementSnapshotError("Retained Worktree export destination is not an empty directory.")
+        entries = manifest.get("entries")
+        if not isinstance(entries, dict):
+            raise RetirementSnapshotError("Retained Worktree export manifest is invalid.")
+        repository = destination_root / "repository"
+        repository.mkdir()
+        directories = sorted(
+            (
+                (relative, record)
+                for relative, record in entries.items()
+                if isinstance(record, dict) and record.get("kind") == "directory"
+            ),
+            key=lambda item: (len(PurePosixPath(item[0]).parts), item[0]),
+        )
+        for relative_value, record in directories:
+            relative = cls._safe_relative(relative_value)
+            destination = repository / Path(*relative.parts)
+            destination.mkdir()
+            destination.chmod(record["mode"])
+        for relative_value, record in sorted(entries.items()):
+            if not isinstance(record, dict) or record.get("kind") == "directory":
+                continue
+            relative = cls._safe_relative(relative_value)
+            source = worktree / Path(*relative.parts)
+            destination = repository / Path(*relative.parts)
+            if record.get("kind") == "symlink":
+                target = bytes.fromhex(record["target"])
+                if not source.is_symlink() or os.readlink(os.fsencode(source)) != target:
+                    raise RetirementSnapshotError("Retained Worktree changed during export materialization.")
+                os.symlink(target, os.fsencode(destination))
+            elif record.get("kind") == "file":
+                source_fd = os.open(
+                    source,
+                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                )
+                try:
+                    source_status = os.fstat(source_fd)
+                    if not stat.S_ISREG(source_status.st_mode):
+                        raise RetirementSnapshotError("Retained Worktree changed during export materialization.")
+                    destination_fd = os.open(
+                        destination,
+                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                        record["mode"],
+                    )
+                    try:
+                        with os.fdopen(source_fd, "rb", closefd=False) as source_file:
+                            with os.fdopen(destination_fd, "wb", closefd=False) as destination_file:
+                                shutil.copyfileobj(source_file, destination_file)
+                    finally:
+                        os.close(destination_fd)
+                finally:
+                    os.close(source_fd)
+                destination.chmod(record["mode"])
+            else:
+                raise RetirementSnapshotError("Retained Worktree export manifest is invalid.")
+        if (
+            cls.retained_worktree_manifest(
+                worktree,
+                exclude_git_metadata=exclude_git_metadata,
+            )
+            != manifest
+            or cls.retained_worktree_manifest(
+                repository,
+                exclude_git_metadata=False,
+            )
+            != manifest
+        ):
+            raise RetirementSnapshotError("Retained Worktree export failed exact readback verification.")
+        return repository
 
     def recover_published(self) -> dict[str, Any]:
         """Recover an exact publication whose canonical phase commit was interrupted."""
