@@ -508,6 +508,10 @@ def build_parser() -> argparse.ArgumentParser:
             "model-assignment-change",
             "issue-archive",
             "issue-restore",
+            "retirement-pin",
+            "retirement-retry",
+            "retirement-export",
+            "retirement-discard",
         ],
     )
     workstation_action.add_argument(
@@ -524,6 +528,13 @@ def build_parser() -> argparse.ArgumentParser:
     workstation_action.add_argument("--reason", default="")
     workstation_action.add_argument("--allowed-path", action="append", default=[])
     workstation_action.add_argument("--command-policy", action="append", default=[])
+    workstation_action.add_argument(
+        "--pin-state",
+        choices=["pinned", "unpinned"],
+        default="",
+    )
+    workstation_action.add_argument("--destination", default="")
+    workstation_action.add_argument("--confirmation", default="")
 
     workstation_session_run = subparsers.add_parser(
         "workstation-session-run",
@@ -1116,6 +1127,10 @@ def _run(args: argparse.Namespace) -> int:
         "workspace-queue-decision",
         "workstation-action",
         "workstation-session-run",
+        "retirement-pin",
+        "retirement-retry",
+        "retirement-export",
+        "retirement-discard",
         "mission-drafts",
         "mission-draft-create",
         "mission-draft-update",
@@ -1436,6 +1451,9 @@ def _run(args: argparse.Namespace) -> int:
             reason=args.reason,
             allowed_paths=args.allowed_path,
             command_policy=_parse_command_policy(args.command_policy),
+            pin_state=(args.pin_state == "pinned" if args.pin_state else None),
+            destination=args.destination,
+            confirmation=args.confirmation,
         )
         print(json.dumps(asdict(acknowledgement), sort_keys=True))
         return 0
@@ -1526,37 +1544,41 @@ def _run(args: argparse.Namespace) -> int:
             raise AlbertError(f"Unknown Local Agent session: {args.session_id}")
         if args.command == "retirement-inspect":
             result = mission.inspect_retirement_unit(args.session_id)
-        elif args.command == "retirement-pin":
-            mission.set_retirement_snapshot_pin(
-                args.session_id,
-                pinned=args.pin_state == "pinned",
-                expected_revision=args.expected_revision,
-                correlation_id=args.correlation_id,
-            )
-            result = mission.inspect_retirement_unit(args.session_id)
-        elif args.command == "retirement-retry":
-            mission.retry_retirement_unit(
-                args.session_id,
-                expected_revision=args.expected_revision,
-                correlation_id=args.correlation_id,
-            )
-            result = mission.inspect_retirement_unit(args.session_id)
-        elif args.command == "retirement-export":
-            result = mission.export_retirement_unit(
-                args.session_id,
-                destination=Path(args.destination),
-                expected_revision=args.expected_revision,
-                correlation_id=args.correlation_id,
-            )
         else:
-            mission.discard_retained_worktree(
-                args.session_id,
-                expected_revision=args.expected_revision,
+            action_type = {
+                "retirement-pin": "retirement-pin",
+                "retirement-retry": "retirement-retry",
+                "retirement-export": "retirement-export",
+                "retirement-discard": "retirement-discard",
+            }[args.command]
+            WorkstationActionService(snapshots).submit(
                 correlation_id=args.correlation_id,
-                confirmation=args.confirmation,
-                reason=args.reason,
+                action_type=action_type,
+                actor="mission-commander",
+                expected_revision=args.expected_revision,
+                target_kind="agent-session",
+                target_id=args.session_id,
+                mission_id=mission.mission_id,
+                issue_id=mission.sessions[args.session_id].issue_id,
+                session_id=args.session_id,
+                reason=(args.reason if args.command == "retirement-discard" else ""),
+                pin_state=(
+                    args.pin_state == "pinned"
+                    if args.command == "retirement-pin"
+                    else None
+                ),
+                destination=(
+                    args.destination if args.command == "retirement-export" else ""
+                ),
+                confirmation=(
+                    args.confirmation if args.command == "retirement-discard" else ""
+                ),
             )
-            result = mission.inspect_retirement_unit(args.session_id)
+            if args.command == "retirement-export":
+                refreshed = mission._refresh_persisted_session(args.session_id)
+                result = refreshed.retirement["action_receipts"][args.correlation_id]
+            else:
+                result = mission.inspect_retirement_unit(args.session_id)
         print(json.dumps(result, sort_keys=True))
         return 0
     if args.command == "mission-drafts":

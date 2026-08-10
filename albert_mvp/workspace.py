@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import codecs
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 import datetime as datetime_module
 from datetime import datetime, timedelta, timezone
 import fcntl
@@ -316,6 +316,11 @@ class MissionSessionSummary:
     repair_task_packet: RepairTaskPacketPreview | None = None
     work_kind: str = ""
     parent_session_id: str = ""
+    session_revision: int = 0
+    retirement_phase: str = "active"
+    retirement_blocked_reason: str = ""
+    retirement_record: dict[str, Any] = field(default_factory=dict)
+    retirement_actions: dict[str, bool] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -329,6 +334,7 @@ class WorkspaceQueueAttention:
         "frontier-confirmation",
         "ad-hoc-delegation",
         "runner-supervision",
+        "retirement-storage",
     ]
     label: str
     queue_link: str
@@ -3530,7 +3536,7 @@ class AgentConsoleResponseService:
                 f"{storage['blocker_count']} blockers"
             )
         if command == "/storage":
-            inspection = self._snapshots._primary_mission.retirement_storage_inspection()
+            inspection = self._snapshots.active_retirement_storage_inspection()
             largest = inspection["largest_payloads"]
             largest_rows = (
                 ", ".join(
@@ -3941,6 +3947,10 @@ WorkstationActionType = Literal[
     "model-assignment-change",
     "issue-archive",
     "issue-restore",
+    "retirement-pin",
+    "retirement-retry",
+    "retirement-export",
+    "retirement-discard",
 ]
 
 
@@ -7997,6 +8007,10 @@ class WorkstationActionService:
         "model-assignment-change",
         "issue-archive",
         "issue-restore",
+        "retirement-pin",
+        "retirement-retry",
+        "retirement-export",
+        "retirement-discard",
     }
     _actors = {"mission-commander"}
 
@@ -8021,6 +8035,9 @@ class WorkstationActionService:
         reason: str = "",
         allowed_paths: list[str] | None = None,
         command_policy: dict[str, str] | None = None,
+        pin_state: bool | None = None,
+        destination: str = "",
+        confirmation: str = "",
     ) -> WorkstationActionAcknowledgement:
         snapshot = self._snapshots.snapshot()
         if not correlation_id.strip():
@@ -8048,6 +8065,25 @@ class WorkstationActionService:
             "allowed_paths": list(allowed_paths or []),
             "command_policy": dict(command_policy or {}),
         }
+        retirement_action = action_type in {
+            "retirement-pin",
+            "retirement-retry",
+            "retirement-export",
+            "retirement-discard",
+        }
+        if retirement_action:
+            request_payload.update(
+                {
+                    "expected_revision": expected_revision,
+                    "pin_state": pin_state,
+                    "destination": (
+                        str(Path(destination).resolve(strict=False))
+                        if destination
+                        else ""
+                    ),
+                    "confirmation": confirmation,
+                }
+            )
         request_boundary = {
             "action_type": action_type,
             "actor": actor,
@@ -8062,15 +8098,26 @@ class WorkstationActionService:
         )
         if replay is not None:
             return replay
-        canonical_action = self._canonical_action_for_correlation(
-            correlation_id=correlation_id,
-            request_boundary=request_boundary,
+        canonical_action = (
+            self._canonical_retirement_action_for_correlation(
+                correlation_id=correlation_id,
+                request_boundary=request_boundary,
+            )
+            if retirement_action
+            else self._canonical_action_for_correlation(
+                correlation_id=correlation_id,
+                request_boundary=request_boundary,
+            )
         )
         recovering_action = canonical_action is not None
         if not recovering_action and action_type in {"issue-launch", "issue-retry"}:
             WayfinderService(self._snapshots).ensure_gate_open()
         recovered_session = canonical_action[1] if canonical_action is not None else None
-        if not recovering_action and expected_revision != snapshot.revision:
+        if (
+            not recovering_action
+            and not retirement_action
+            and expected_revision != snapshot.revision
+        ):
             raise WorkspaceStaleActionError(
                 expected_revision=expected_revision,
                 current_revision=snapshot.revision,
@@ -8095,7 +8142,73 @@ class WorkstationActionService:
         acknowledged_issue_id = issue_id
         acknowledged_session_id = session_id
         journal_actor: ActivityActor = "mission-commander"
-        if action_type == "issue-approve":
+        if retirement_action:
+            self._validate_session_target(
+                target_kind=target_kind,
+                target_id=target_id,
+                session_id=session_id,
+            )
+            prior_session = mission.sessions.get(session_id)
+            if prior_session is None:
+                raise AlbertError(f"Unknown Workstation session: {session_id}")
+            acknowledged_issue_id = issue_id or prior_session.issue_id
+            if acknowledged_issue_id != prior_session.issue_id:
+                raise AlbertError("issue id must match session issue id")
+            if recovering_action:
+                result_session = recovered_session or prior_session
+            elif action_type == "retirement-pin":
+                if not isinstance(pin_state, bool):
+                    raise AlbertError("Retirement pin requires a boolean pin state.")
+                result_session = mission.set_retirement_snapshot_pin(
+                    session_id,
+                    pinned=pin_state,
+                    expected_revision=expected_revision,
+                    correlation_id=correlation_id,
+                )
+            elif action_type == "retirement-retry":
+                result_session = mission.retry_retirement_unit(
+                    session_id,
+                    expected_revision=expected_revision,
+                    correlation_id=correlation_id,
+                )
+            elif action_type == "retirement-export":
+                if not destination:
+                    raise AlbertError("Retirement export requires a destination.")
+                mission.export_retirement_unit(
+                    session_id,
+                    destination=Path(destination),
+                    expected_revision=expected_revision,
+                    correlation_id=correlation_id,
+                )
+                result_session = mission._refresh_persisted_session(session_id)
+            else:
+                result_session = mission.discard_retained_worktree(
+                    session_id,
+                    expected_revision=expected_revision,
+                    correlation_id=correlation_id,
+                    confirmation=confirmation,
+                    reason=reason,
+                )
+            acknowledged_session_id = result_session.session_id
+            effect_summary = {
+                "retirement-pin": (
+                    f"Mission Commander {'pinned' if pin_state else 'unpinned'} "
+                    f"the retained Snapshot Payload for {session_id}."
+                ),
+                "retirement-retry": (
+                    f"Mission Commander retried Retirement Unit {session_id}; "
+                    f"its canonical phase is {result_session.retirement.get('phase')}."
+                ),
+                "retirement-export": (
+                    f"Mission Commander exported verified Retirement Unit {session_id} "
+                    f"to {Path(destination).resolve(strict=False) / 'repository'}."
+                ),
+                "retirement-discard": (
+                    f"Mission Commander irreversibly discarded Retained Worktree "
+                    f"{session_id} after exact safety proof."
+                ),
+            }[action_type]
+        elif action_type == "issue-approve":
             self._validate_issue_target(
                 target_kind=target_kind,
                 target_id=target_id,
@@ -8516,6 +8629,74 @@ class WorkstationActionService:
         if persisted_boundary != request_boundary:
             raise AlbertError(
                 "Workstation action correlation id was already used for a different "
+                "request boundary."
+            )
+        return mission, session
+
+    def _canonical_retirement_action_for_correlation(
+        self,
+        *,
+        correlation_id: str,
+        request_boundary: dict[str, Any],
+    ) -> tuple[AlbertMission, LocalAgentSession | None] | None:
+        matches: list[tuple[AlbertMission, LocalAgentSession]] = []
+        for mission in self._snapshots._missions.values():
+            if mission.runtime_path.exists():
+                with mission._runtime_lock(exclusive=False):
+                    mission._load_runtime()
+            for session in mission.sessions.values():
+                receipt = session.retirement.get("action_receipts", {}).get(
+                    correlation_id
+                )
+                if receipt is not None:
+                    matches.append((mission, session))
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise WorkspacePersistenceError(
+                f"Retirement action correlation id is not unique: {correlation_id}"
+            )
+        mission, session = matches[0]
+        receipt = session.retirement["action_receipts"][correlation_id]
+        action_type = str(request_boundary.get("action_type", ""))
+        expected_action = {
+            "retirement-pin": "snapshot-pin",
+            "retirement-retry": "retry",
+            "retirement-export": "export",
+            "retirement-discard": "discard",
+        }.get(action_type)
+        boundary_matches = bool(
+            expected_action
+            and receipt.get("action") == expected_action
+            and request_boundary.get("actor") == "mission-commander"
+            and request_boundary.get("mission_id") == mission.mission_id
+            and request_boundary.get("target_kind") == "agent-session"
+            and request_boundary.get("target_id") == session.session_id
+            and request_boundary.get("session_id") == session.session_id
+            and request_boundary.get("issue_id") in {"", session.issue_id}
+            and request_boundary.get("expected_revision")
+            == receipt.get("expected_revision")
+        )
+        if action_type == "retirement-pin":
+            boundary_matches = boundary_matches and (
+                request_boundary.get("pin_state") is receipt.get("pinned")
+            )
+        elif action_type == "retirement-export":
+            destination = request_boundary.get("destination")
+            boundary_matches = boundary_matches and bool(
+                isinstance(destination, str)
+                and destination
+                and receipt.get("destination")
+                == str(Path(destination) / "repository")
+            )
+        elif action_type == "retirement-discard":
+            boundary_matches = boundary_matches and (
+                request_boundary.get("confirmation") == receipt.get("confirmation")
+                and request_boundary.get("reason") == receipt.get("reason")
+            )
+        if not boundary_matches:
+            raise AlbertError(
+                "Retirement action correlation id was already used for a different "
                 "request boundary."
             )
         return mission, session
@@ -10014,6 +10195,17 @@ class WorkspaceSnapshotService:
     def preferences_path(self) -> Path:
         return self._preferences_path
 
+    def active_retirement_storage_inspection(self) -> dict[str, Any]:
+        """Inspect storage for the Active Mission, never the primary fallback."""
+
+        preferences = self._load_preferences()
+        mission = self._missions.get(preferences["active_mission_id"])
+        if mission is None:
+            raise WorkspacePersistenceError(
+                "Workspace preferences reference an unknown Active Mission."
+            )
+        return mission.retirement_storage_inspection()
+
     @measured_stage("S6", workflows={"startup"})
     def snapshot(self) -> WorkspaceSnapshot:
         AgentConsoleHistoryService(self).reconcile_supervision_receipts()
@@ -10506,6 +10698,15 @@ class WorkspaceSnapshotService:
                     )
                 ),
                 parent_session_id=validated_parent_session_id(session),
+                session_revision=session.revision,
+                retirement_phase=str(session.retirement.get("phase", "active")),
+                retirement_blocked_reason=str(
+                    session.retirement.get("blocked_reason", "")
+                ),
+                retirement_record=dict(session.retirement.get("snapshot", {})),
+                retirement_actions=mission.inspect_retirement_unit(
+                    session.session_id
+                )["actions"],
             )
 
         sessions = tuple(
@@ -10594,6 +10795,26 @@ class WorkspaceSnapshotService:
                 )
             )
         board = mission.board_summary()
+        storage_attention = mission.retirement_storage.get("attention", {})
+        if storage_attention.get("active") is True:
+            attention.append(
+                WorkspaceQueueAttention(
+                    attention_id=(
+                        f"retirement-storage-{mission.mission_id}-"
+                        f"{storage_attention.get('code', 'attention')}"
+                    ),
+                    mission_id=mission.mission_id,
+                    kind="retirement-storage",
+                    label=str(
+                        storage_attention.get(
+                            "message",
+                            "Snapshot storage requires Mission Commander attention.",
+                        )
+                    ),
+                    queue_link="mission-work#retirement-storage",
+                    entity_id=mission.mission_id,
+                )
+            )
         return WorkspaceMissionSummary(
             id=mission.mission_id,
             title=mission.prd_title,

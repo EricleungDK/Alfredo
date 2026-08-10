@@ -78,6 +78,7 @@ export interface WorkstationGovernedAction {
     | "shell-terminal"
     | "agent-console"
     | "activity"
+    | "storage"
     | "none";
   readonly requiresReason: boolean;
   readonly actionType?:
@@ -91,6 +92,10 @@ export interface WorkstationGovernedAction {
     | "model-assignment-change"
     | "issue-archive"
     | "issue-restore"
+    | "retirement-pin"
+    | "retirement-retry"
+    | "retirement-export"
+    | "retirement-discard"
     | "mission-draft-decision"
     | "conversation-scope-change";
   readonly actor?: "mission-commander";
@@ -104,6 +109,9 @@ export interface WorkstationGovernedAction {
   readonly disabledReason?: string;
   readonly recoveryPath?: string;
   readonly repairTaskPacket?: MissionSessionSummary["repair_task_packet"];
+  readonly pinState?: boolean;
+  readonly requiresDestination?: boolean;
+  readonly requiresConfirmation?: boolean;
   readonly targetIdentity?: {
     readonly kind:
       | "workspace-queue-item"
@@ -126,6 +134,7 @@ export interface WorkstationCardDetail {
   readonly terminalExcerpts: readonly WorkstationTerminalExcerpt[];
   readonly reviewState: WorkstationReviewState;
   readonly governedActions: readonly WorkstationGovernedAction[];
+  readonly retirementRecord: MissionSessionSummary["retirement_record"] | null;
 }
 
 export interface WorkstationCardProjection {
@@ -1086,6 +1095,7 @@ function projectAttentionCard(
 ): WorkstationCardProjection {
   const queueItem = pendingQueueItemForAttention(workspaceQueue, attention);
   const runnerSupervision = attention.kind === "runner-supervision";
+  const retirementStorage = attention.kind === "retirement-storage";
   const supervisedSession = runnerSupervision
     ? mission.sessions.find((session) => session.session_id === attention.entity_id) ?? null
     : null;
@@ -1109,20 +1119,26 @@ function projectAttentionCard(
     model: "orchestrator",
     role: "governance",
     currentTask: attention.kind,
-    status: runnerSupervision
+    status: retirementStorage
+      ? "blocked"
+      : runnerSupervision
       ? supervisedSession?.status === "failed"
         ? "failed"
         : "blocked"
       : "waiting-approval",
-    phase: runnerSupervision ? "Supervision" : "Approval",
-    progress: runnerSupervision
+    phase: retirementStorage ? "Snapshot Storage" : runnerSupervision ? "Supervision" : "Approval",
+    progress: retirementStorage
+      ? "New Retirement Units are blocked until storage policy can reserve capacity"
+      : runnerSupervision
       ? "Automatic recovery stopped; Mission Commander decision required"
       : "Workspace Queue item pending",
     lastActivity: "",
     approvalBlockers: runnerSupervision ? [] : [attention.label],
     filesTouched: 0,
     latestCommandOrTest: "No command or test summary",
-    nextAction: runnerSupervision
+    nextAction: retirementStorage
+      ? "Inspect /storage and unpin or export protected payloads before retrying admission"
+      : runnerSupervision
       ? supervisionActions.length
         ? "Choose manual Retry with a reason, or leave the session stopped"
         : "Inspect the Local Agent session in Mission Work"
@@ -1152,7 +1168,16 @@ function projectAttentionCard(
           : "No evidence package attached to this queue item.",
         reviewReady: false,
       },
-      governedActions: runnerSupervision
+      retirementRecord: null,
+      governedActions: retirementStorage
+        ? [
+            {
+              label: "Inspect Snapshot Storage",
+              target: "storage",
+              requiresReason: false,
+            },
+          ]
+        : runnerSupervision
         ? supervisionActions
         : queueItem
         ? workspaceQueueDecisionActions(queueItem)
@@ -1252,6 +1277,10 @@ function projectSessionCard(
       repairActionAvailable,
       session.review_outcome,
       session.repair_task_packet,
+      session.retirement_phase,
+      session.retirement_actions,
+      session.retirement_record,
+      session.session_revision,
     ),
   };
 }
@@ -1269,6 +1298,10 @@ function sessionDetail(
   repairActionAvailable = false,
   reviewOutcome = "",
   repairTaskPacket: MissionSessionSummary["repair_task_packet"] = null,
+  retirementPhase = "active",
+  retirementActions: MissionSessionSummary["retirement_actions"] = undefined,
+  retirementRecord: MissionSessionSummary["retirement_record"] = undefined,
+  retirementRevision = acceptedRevision,
 ): WorkstationCardDetail {
   const commands = evidence.commands_run;
   const toolActivity: WorkstationToolActivity[] = [
@@ -1350,6 +1383,7 @@ function sessionDetail(
       risks: evidence.risks || "No risks recorded.",
       reviewReady: status === "review-ready",
     },
+    retirementRecord: retirementRecord ?? null,
     governedActions: governedActions(
       status,
       sessionId,
@@ -1358,6 +1392,10 @@ function sessionDetail(
       missionId,
       repairActionAvailable,
       repairTaskPacket,
+      retirementPhase,
+      retirementActions,
+      retirementRecord,
+      retirementRevision,
     ),
   };
 }
@@ -1533,7 +1571,85 @@ function governedActions(
   missionId: string,
   repairActionAvailable = false,
   repairTaskPacket: MissionSessionSummary["repair_task_packet"] = null,
+  retirementPhase = "active",
+  retirementActions: MissionSessionSummary["retirement_actions"] = undefined,
+  retirementRecord: MissionSessionSummary["retirement_record"] = undefined,
+  retirementRevision = expectedRevision,
 ): readonly WorkstationGovernedAction[] {
+  const retainedSnapshot = retirementRecord?.payload_disposition === "retained";
+  const snapshotPolicyAction: WorkstationGovernedAction[] = retainedSnapshot
+    ? [
+        {
+          label: retirementRecord?.pinned ? "Unpin Snapshot Payload" : "Pin Snapshot Payload",
+          target: "storage",
+          requiresReason: false,
+          actionType: "retirement-pin",
+          actor: "mission-commander",
+          missionId,
+          sessionId,
+          issueId,
+          expectedRevision: retirementRevision,
+          pinState: !retirementRecord?.pinned,
+          recoveryPath: "Reload canonical Mission Work and retry against the current Retirement Record revision.",
+          targetIdentity: { kind: "agent-session", id: sessionId },
+        },
+      ]
+    : [];
+  if (
+    retirementActions &&
+    (retirementPhase === "preservation-blocked" || retirementPhase === "retirement-blocked")
+  ) {
+    return [
+      {
+        label: "Inspect Retirement Record",
+        target: "storage",
+        requiresReason: false,
+      },
+      {
+        label: "Retry Retirement",
+        target: "mission-board",
+        requiresReason: false,
+        actionType: "retirement-retry",
+        actor: "mission-commander",
+        missionId,
+        sessionId,
+        issueId,
+        expectedRevision: retirementRevision,
+        targetIdentity: { kind: "agent-session", id: sessionId },
+      },
+      ...(retirementActions.export
+        ? [
+            {
+              label: "Export Retained Worktree",
+              target: "storage" as const,
+              requiresReason: false,
+              requiresDestination: true,
+              actionType: "retirement-export" as const,
+              actor: "mission-commander" as const,
+              missionId,
+              sessionId,
+              issueId,
+              expectedRevision: retirementRevision,
+              targetIdentity: { kind: "agent-session" as const, id: sessionId },
+            },
+          ]
+        : []),
+      {
+        label: "Discard Retained Worktree",
+        target: "storage",
+        requiresReason: true,
+        requiresConfirmation: true,
+        actionType: "retirement-discard",
+        actor: "mission-commander",
+        missionId,
+        sessionId,
+        issueId,
+        expectedRevision: retirementRevision,
+        targetIdentity: { kind: "agent-session", id: sessionId },
+      },
+      ...snapshotPolicyAction,
+    ];
+  }
   if (repairActionAvailable) {
     return [
       {
@@ -1583,7 +1699,10 @@ function governedActions(
     ];
   }
   if (status === "done") {
-    return [{ label: "Open Activity", target: "activity", requiresReason: false }];
+    return [
+      { label: "Open Activity", target: "activity", requiresReason: false },
+      ...snapshotPolicyAction,
+    ];
   }
   return [
     {
@@ -1756,6 +1875,14 @@ export function workstationActionConsequence(action: WorkstationGovernedAction):
       return `Acknowledgement archives the completed ${targetId || "Issue Slice"} subtree from active Mission Work while retaining its identity, sessions, Evidence Packages, and Activity Journal history for inspection.`;
     case "issue-restore":
       return `Acknowledgement restores the retained ${targetId || "Issue Slice"} subtree to active Mission Work with its identity, sessions, Evidence Packages, and Activity Journal history intact.`;
+    case "retirement-pin":
+      return `${action.pinState ? "Pinning" : "Unpinning"} changes retention policy for ${targetId || "this Snapshot Payload"}; it does not alter the compact Retirement Record.`;
+    case "retirement-retry":
+      return `Acknowledgement retries the exact blocked Retirement Unit ${targetId || "session"} without bypassing preservation, quiescence, or containment checks.`;
+    case "retirement-export":
+      return `Acknowledgement reconstructs the verified retained Snapshot Payload for ${targetId || "this session"} at the exact empty destination; it does not change canonical work.`;
+    case "retirement-discard":
+      return `Acknowledgement irreversibly deletes only the exact retained managed worktree for ${targetId || "this session"} after confirmation, reason, quiescence, identity, and containment proof.`;
     case "review-decision":
       if (action.reviewDecision === "accept") {
         return `Accepting evidence marks ${targetId || "this Issue Slice"} complete and PR-ready; it does not merge changes.`;

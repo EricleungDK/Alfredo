@@ -2167,6 +2167,12 @@ pub struct WorkstationActionRequest {
     pub allowed_paths: Vec<String>,
     #[serde(default)]
     pub command_policy: std::collections::BTreeMap<String, String>,
+    #[serde(default)]
+    pub pin_state: Option<bool>,
+    #[serde(default)]
+    pub destination: String,
+    #[serde(default)]
+    pub confirmation: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -3288,6 +3294,17 @@ pub fn execute_workstation_action(
         command
             .arg("--command-policy")
             .arg(format!("{backend_command}={policy}"));
+    }
+    if let Some(pin_state) = request.pin_state {
+        command
+            .arg("--pin-state")
+            .arg(if pin_state { "pinned" } else { "unpinned" });
+    }
+    if !request.destination.is_empty() {
+        command.arg("--destination").arg(&request.destination);
+    }
+    if !request.confirmation.is_empty() {
+        command.arg("--confirmation").arg(&request.confirmation);
     }
     let output = command.output().map_err(|error| BridgeFailure {
         code: "backend-startup-failure".to_owned(),
@@ -7290,6 +7307,9 @@ None - can start immediately
                 reason: String::new(),
                 allowed_paths: vec!["src".to_owned()],
                 command_policy: std::collections::BTreeMap::new(),
+                pin_state: None,
+                destination: String::new(),
+                confirmation: String::new(),
             },
         )
         .expect("workstation action should be acknowledged");
@@ -7358,6 +7378,9 @@ None - can start immediately
                 reason: String::new(),
                 allowed_paths: vec!["src".to_owned()],
                 command_policy: std::collections::BTreeMap::new(),
+                pin_state: None,
+                destination: String::new(),
+                confirmation: String::new(),
             },
         )
         .expect("launch should create a queued session");
@@ -7379,6 +7402,9 @@ None - can start immediately
                 reason: "Create terminal evidence for the bridge review.".to_owned(),
                 allowed_paths: Vec::new(),
                 command_policy: std::collections::BTreeMap::new(),
+                pin_state: None,
+                destination: String::new(),
+                confirmation: String::new(),
             },
         )
         .expect("cancel should make the session reviewable");

@@ -578,6 +578,137 @@ test("archives a completed Issue Slice only after an acknowledged Mission Work a
   expect(await within(inspector).findByText(/Mission Commander archived ISS-ARCHIVE/)).toBeVisible();
 });
 
+test("requires exact-session confirmation before submitting a typed retirement discard", async () => {
+  const sessionId = "session-ISS-RETIRE-1";
+  const retirementSnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    revision: 31,
+    active_mission: { id: "command-deck", title: "Command Deck Mission", issue_count: 1 },
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_count: 1,
+      ordered_issue_ids: ["ISS-RETIRE"],
+      ready_issue_ids: [],
+      approved_issue_ids: [],
+      issue_slices: [
+        appIssueSlice({
+          issue_id: "ISS-RETIRE",
+          title: "Retire retained worktree",
+          lifecycle: "Complete",
+          progress: "Retirement is blocked on retained worktree cleanup",
+          sessions: [
+            {
+              session_id: sessionId,
+              assigned_agent: "qwen-coder-local",
+              role: "local-agent",
+              provider: "ollama",
+              model: "qwen3.6:27b",
+              status: "reviewed",
+              stale: false,
+              disconnected: false,
+              operation_status: "completed",
+              failure: "",
+            },
+          ],
+        }),
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [
+          {
+            session_id: sessionId,
+            issue_id: "ISS-RETIRE",
+            assigned_agent: "qwen-coder-local",
+            status: "reviewed",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+            session_revision: 9,
+            retirement_phase: "retirement-blocked",
+            retirement_blocked_reason: "Retained worktree still has open handles.",
+            retirement_record: {
+              manifest_sha256: "b".repeat(64),
+              snapshot_bytes: 4096,
+              pinned: false,
+              payload_disposition: "retained",
+            },
+            retirement_actions: {
+              retry: true,
+              inspect: true,
+              export: true,
+              discard: true,
+            },
+          },
+        ],
+        attention: [],
+      },
+    ],
+  };
+  const submitWorkstationAction = vi.fn(async (request: WorkstationActionRequest) => ({
+    kind: "acknowledged" as const,
+    acknowledgement: {
+      correlation_id: request.correlation_id,
+      outcome: "acknowledged" as const,
+      revision: 32,
+      action_type: "retirement-discard" as const,
+      issue_id: "ISS-RETIRE",
+      session_id: sessionId,
+      effect_summary: `Mission Commander discarded retained worktree ${sessionId}.`,
+    },
+  }));
+
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => ({ kind: "ready", snapshot: retirementSnapshot }),
+        submitWorkstationAction,
+      }}
+    />,
+  );
+
+  const inspector = await openExecutionInspector(sessionId);
+  expect(within(inspector).getByRole("heading", { name: "Retirement Record" })).toBeVisible();
+  const discard = within(inspector).getByRole("button", { name: "Discard Retained Worktree" });
+  expect(discard).toBeDisabled();
+
+  fireEvent.change(
+    within(inspector).getByRole("textbox", { name: "Discard Retained Worktree reason" }),
+    { target: { value: "The retained payload was exported and reviewed." } },
+  );
+  fireEvent.change(
+    within(inspector).getByRole("textbox", { name: "Discard Retained Worktree confirmation" }),
+    { target: { value: "wrong-session" } },
+  );
+  expect(discard).toBeDisabled();
+  fireEvent.change(
+    within(inspector).getByRole("textbox", { name: "Discard Retained Worktree confirmation" }),
+    { target: { value: sessionId } },
+  );
+  expect(discard).toBeEnabled();
+  fireEvent.click(discard);
+
+  await waitFor(() =>
+    expect(submitWorkstationAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action_type: "retirement-discard",
+        actor: "mission-commander",
+        expected_revision: 9,
+        target: { kind: "agent-session", id: sessionId },
+        mission_id: "command-deck",
+        issue_id: "ISS-RETIRE",
+        session_id: sessionId,
+        reason: "The retained payload was exported and reviewed.",
+        confirmation: sessionId,
+      }),
+    ),
+  );
+});
+
 test("restores an archived Issue Slice only after an acknowledged Mission Work action", async () => {
   const archivedSnapshot: WorkspaceSnapshot = {
     ...snapshot,

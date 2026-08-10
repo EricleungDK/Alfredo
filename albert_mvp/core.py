@@ -1072,6 +1072,56 @@ def _validated_snapshot_payload_record(raw: Any) -> dict[str, Any]:
     return dict(raw)
 
 
+def _validated_retirement_action_receipt(
+    correlation_id: str,
+    raw: Any,
+) -> dict[str, Any]:
+    actions = {"snapshot-pin", "export", "retry", "discard"}
+    if (
+        not isinstance(correlation_id, str)
+        or not correlation_id.strip()
+        or not isinstance(raw, dict)
+        or raw.get("action") not in actions
+        or not isinstance(raw.get("expected_revision"), int)
+        or isinstance(raw.get("expected_revision"), bool)
+        or raw["expected_revision"] < 0
+        or not isinstance(raw.get("result_revision"), int)
+        or isinstance(raw.get("result_revision"), bool)
+        or raw["result_revision"] <= raw["expected_revision"]
+        or not isinstance(raw.get("recorded_at"), str)
+        or not raw["recorded_at"].strip()
+    ):
+        raise AlbertError("Retirement Unit action receipt is invalid")
+    try:
+        recorded_at = datetime.fromisoformat(raw["recorded_at"])
+    except ValueError as exc:
+        raise AlbertError("Retirement Unit action receipt is invalid") from exc
+    if recorded_at.tzinfo is None:
+        raise AlbertError("Retirement Unit action receipt is invalid")
+    action = raw["action"]
+    if action == "snapshot-pin" and not isinstance(raw.get("pinned"), bool):
+        raise AlbertError("Retirement Unit action receipt is invalid")
+    if action == "export" and (
+        not isinstance(raw.get("destination"), str)
+        or not Path(raw["destination"]).is_absolute()
+        or not isinstance(raw.get("manifest_sha256"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", raw["manifest_sha256"])
+    ):
+        raise AlbertError("Retirement Unit action receipt is invalid")
+    if action == "retry" and raw.get("result_phase") not in {
+        "preservation-blocked",
+        "retirement-blocked",
+        "retired",
+    }:
+        raise AlbertError("Retirement Unit action receipt is invalid")
+    if action == "discard" and any(
+        not isinstance(raw.get(field_name), str) or not raw[field_name].strip()
+        for field_name in ("confirmation", "reason")
+    ):
+        raise AlbertError("Retirement Unit action receipt is invalid")
+    return dict(raw)
+
+
 def _validated_retirement_unit(raw: Any) -> dict[str, Any]:
     if raw is None:
         return {
@@ -1264,8 +1314,16 @@ def _validated_retirement_unit(raw: Any) -> dict[str, Any]:
         or retry_intent["claim_revision"] < 0
     ):
         raise AlbertError("Retirement retry intent is invalid")
+    action_receipts = {
+        correlation_id: _validated_retirement_action_receipt(
+            correlation_id,
+            action_receipt,
+        )
+        for correlation_id, action_receipt in raw.get("action_receipts", {}).items()
+    }
     validated = dict(raw)
     validated["snapshot"] = snapshot
+    validated["action_receipts"] = action_receipts
     return validated
 
 
@@ -2638,6 +2696,11 @@ class AlbertMission:
         if runtime_exists:
             self._reconcile_abandoned_sessions()
             self._reconcile_retirement_units()
+            self._reclaim_snapshot_payloads(
+                required_bytes=_PRESERVATION_BUDGET_BYTES,
+                reclaim_all_expired=True,
+                raise_on_exhaustion=False,
+            )
         else:
             self._persist()
         return self
@@ -4621,6 +4684,31 @@ class AlbertMission:
         allowed_paths: list[str] | None = None,
         command_policy: dict[str, str] | None = None,
     ) -> LocalAgentSession:
+        with self._session_launch_lock():
+            self._load_runtime()
+            session = self._queue_headless_work(
+                work_kind=work_kind,
+                agent_id=agent_id,
+                prompt=prompt,
+                review_session_id=review_session_id,
+                allowed_paths=allowed_paths,
+                command_policy=command_policy,
+            )
+        return self.run_session(
+            session.session_id,
+            expected_revision=session.revision,
+        )
+
+    def _queue_headless_work(
+        self,
+        *,
+        work_kind: str,
+        agent_id: str,
+        prompt: str = "",
+        review_session_id: str = "",
+        allowed_paths: list[str] | None = None,
+        command_policy: dict[str, str] | None = None,
+    ) -> LocalAgentSession:
         if work_kind not in {"run", "review"}:
             raise AlbertError(f"Unknown headless work kind: {work_kind}")
         self._ensure_wayfinder_gate_open()
@@ -4692,10 +4780,7 @@ class AlbertMission:
         self.sessions[session_id] = session
         self._record(f"{work_id} queued as {session_id} with preservation reserved.")
         self._persist()
-        return self.run_session(
-            session_id,
-            expected_revision=session.revision,
-        )
+        return session
 
     def _ensure_headless_agent_authorized(self, agent_config: AgentConfig) -> None:
         if agent_config.delegate_only:
@@ -6489,7 +6574,10 @@ class AlbertMission:
             raise AlbertError("Snapshot Payload pin state must be boolean.")
         if not correlation_id.strip():
             raise AlbertError("Snapshot Payload pin correlation id is required.")
-        with self._runtime_lock(exclusive=True):
+        with (
+            self._retirement_effect_lock(session_id),
+            self._runtime_lock(exclusive=True),
+        ):
             data = self._read_runtime_payload()
             raw_session = data.get("sessions", {}).get(session_id)
             if not isinstance(raw_session, dict):
@@ -6497,7 +6585,7 @@ class AlbertMission:
             session = LocalAgentSession.from_dict(raw_session)
             receipts = session.retirement.setdefault("action_receipts", {})
             existing = receipts.get(correlation_id)
-            if existing:
+            if correlation_id in receipts:
                 if (
                     existing.get("action") == "snapshot-pin"
                     and existing.get("expected_revision") == expected_revision
@@ -6542,6 +6630,11 @@ class AlbertMission:
     def retirement_storage_inspection(self) -> dict[str, Any]:
         """Return deterministic, read-only Snapshot Payload storage details."""
 
+        self._reclaim_snapshot_payloads(
+            required_bytes=_PRESERVATION_BUDGET_BYTES,
+            reclaim_all_expired=True,
+            raise_on_exhaustion=False,
+        )
         with self._runtime_lock(exclusive=False):
             data = self._read_runtime_payload()
         sessions = {
@@ -6656,6 +6749,11 @@ class AlbertMission:
         phase = str(session.retirement.get("phase", "active"))
         blocked = phase in {"preservation-blocked", "retirement-blocked"}
         snapshot = dict(session.retirement.get("snapshot", {}))
+        retained_snapshot = bool(
+            snapshot
+            and snapshot.get("verified") is True
+            and snapshot.get("payload_disposition", "retained") == "retained"
+        )
         return {
             "schema_version": 1,
             "mission_id": self.mission_id,
@@ -6672,7 +6770,7 @@ class AlbertMission:
             "actions": {
                 "retry": blocked,
                 "inspect": True,
-                "export": blocked,
+                "export": blocked and retained_snapshot,
                 "discard": blocked,
             },
         }
@@ -6699,7 +6797,7 @@ class AlbertMission:
                 session = LocalAgentSession.from_dict(raw_session)
                 receipts = session.retirement.setdefault("action_receipts", {})
                 existing = receipts.get(correlation_id)
-                if existing:
+                if correlation_id in receipts:
                     if (
                         existing.get("action") == "export"
                         and existing.get("expected_revision") == expected_revision
@@ -6797,10 +6895,14 @@ class AlbertMission:
                         if any(
                             marker.get(field_name) != value
                             for field_name, value in expected_marker.items()
-                        ) or not (destination / "repository").is_dir():
+                        ):
                             raise AlbertError(
                                 "Retirement export recovery marker is invalid."
                             )
+                        store.verify_materialized_repository(
+                            snapshot,
+                            destination / "repository",
+                        )
                         recovered_materialization = True
                     elif set(destination.iterdir()) == {destination / "repository"}:
                         materialized = destination / "repository"
@@ -6843,7 +6945,7 @@ class AlbertMission:
                         marker_path,
                         json.dumps(marker, indent=2, sort_keys=True) + "\n",
                     )
-            except (OSError, RetirementSnapshotError) as exc:
+            except (OSError, UnicodeError, json.JSONDecodeError, RetirementSnapshotError) as exc:
                 if (
                     created_destination
                     and destination.is_dir()
@@ -6906,7 +7008,7 @@ class AlbertMission:
                 session = LocalAgentSession.from_dict(raw_session)
                 receipts = session.retirement.setdefault("action_receipts", {})
                 existing = receipts.get(correlation_id)
-                if existing:
+                if correlation_id in receipts:
                     if (
                         existing.get("action") == "retry"
                         and existing.get("expected_revision") == expected_revision
@@ -7037,7 +7139,7 @@ class AlbertMission:
                 session = LocalAgentSession.from_dict(raw_session)
                 receipts = session.retirement.setdefault("action_receipts", {})
                 existing = receipts.get(correlation_id)
-                if existing:
+                if correlation_id in receipts:
                     if (
                         existing.get("action") == "discard"
                         and existing.get("expected_revision") == expected_revision
@@ -7135,86 +7237,50 @@ class AlbertMission:
                     raise AlbertError(
                         "Retained Worktree Discard found both original and effect paths."
                     )
-                git_supported = (self.target_repo / ".git").exists()
-                registration_present = bool(
-                    git_supported
-                    and (
-                        self._git_worktree_registration_present_at(path)
-                        or self._git_worktree_registration_present_at(effect_path)
-                    )
-                )
-                effect_path.parent.mkdir(parents=True, exist_ok=True)
-                if registration_present:
-                    if path_present:
-                        completed = _run_bounded_process(
-                            [
-                                "git",
-                                "-C",
-                                str(self.target_repo),
-                                "worktree",
-                                "move",
-                                str(path),
-                                str(effect_path),
-                            ],
-                            timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
-                            output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
+                if path_present:
+                    current_identity = self._worktree_identity_for_session(session)
+                    if current_identity != session.worktree_identity:
+                        raise AlbertError(
+                            "Retained Worktree Discard identity changed before deletion."
                         )
-                        if completed.returncode != 0:
-                            raise AlbertError(
-                                "Exact Git worktree isolation failed before discard."
-                            )
-                        effect_present = True
-                    if effect_present:
-                        completed = _run_bounded_process(
-                            [
-                                "git",
-                                "-C",
-                                str(self.target_repo),
-                                "worktree",
-                                "remove",
-                                "--force",
-                                str(effect_path),
-                            ],
-                            timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
-                            output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
-                        )
-                        if completed.returncode != 0:
-                            raise AlbertError(
-                                "Exact force Git worktree removal failed during discard."
-                            )
-                else:
-                    if path_present:
-                        path.replace(effect_path)
-                        effect_present = True
-                    if effect_present:
-                        if path.exists() or path.is_symlink():
-                            raise AlbertError(
-                                "Retained Worktree Discard path changed after isolation."
-                            )
-                        self._assert_no_open_retirement_handles(effect_path)
-                        if effect_path.is_symlink() or not effect_path.is_dir():
-                            raise AlbertError(
-                                "Retained Worktree Discard effect is not an exact directory."
-                            )
-                        shutil.rmtree(effect_path)
-                if (
-                    path.exists()
-                    or path.is_symlink()
-                    or effect_path.exists()
-                    or effect_path.is_symlink()
-                    or (
-                        git_supported
-                        and (
-                            self._git_worktree_registration_present_at(path)
-                            or self._git_worktree_registration_present_at(effect_path)
+                removal_kind = str(session.retirement.get("removal_kind", ""))
+                if removal_kind not in {
+                    "git-worktree",
+                    "git-registration",
+                    "managed-directory",
+                    "managed-absence",
+                }:
+                    if session.worktree_identity.startswith("managed-git:"):
+                        removal_kind = "git-worktree"
+                    elif session.worktree_identity.startswith("managed-directory:"):
+                        removal_kind = "managed-directory"
+                    else:
+                        removal_kind = "managed-absence"
+                if removal_kind != "managed-absence":
+                    snapshot_revision = int(
+                        session.retirement["snapshot"].get(
+                            "session_revision",
+                            session.revision,
                         )
                     )
-                ):
-                    raise AlbertError(
-                        "Retained Worktree Discard did not prove exact path and "
-                        "registration absence."
+                    store = self._retirement_snapshot_store(
+                        session,
+                        snapshot_revision,
                     )
-            except (OSError, AlbertError) as exc:
+                    if removal_kind == "managed-directory" and path_present:
+                        store.prepare_managed_directory_removal(
+                            session.retirement["snapshot"],
+                            worktree_path=path,
+                        )
+                    elif removal_kind == "git-worktree" and path_present:
+                        self._assert_no_open_retirement_handles(path)
+                        store.prepare_git_non_force_removal(
+                            session.retirement["snapshot"],
+                            worktree_path=path,
+                        )
+                    self._remove_retirement_worktree(session, removal_kind)
+                self._verify_retirement_removal(session, removal_kind)
+            except (OSError, AlbertError, RetirementSnapshotError) as exc:
                 with self._runtime_lock(exclusive=True):
                     data = self._read_runtime_payload()
                     raw_latest = data.get("sessions", {}).get(session_id)
@@ -7272,7 +7338,13 @@ class AlbertMission:
     def _admit_retirement_unit(self) -> None:
         self._reclaim_snapshot_payloads(required_bytes=_PRESERVATION_BUDGET_BYTES)
 
-    def _reclaim_snapshot_payloads(self, *, required_bytes: int) -> None:
+    def _reclaim_snapshot_payloads(
+        self,
+        *,
+        required_bytes: int,
+        reclaim_all_expired: bool = False,
+        raise_on_exhaustion: bool = True,
+    ) -> None:
         """Reclaim expired unpinned retired payloads until one reservation fits."""
 
         with self._runtime_lock(exclusive=True):
@@ -7304,6 +7376,7 @@ class AlbertMission:
             )
             now = datetime.now(timezone.utc)
             eligible: list[tuple[datetime, str, LocalAgentSession]] = []
+            reclamation_failed = False
             for session in sessions.values():
                 snapshot = session.retirement.get("snapshot", {})
                 if (
@@ -7331,6 +7404,7 @@ class AlbertMission:
                     retained_usage + reserved_usage + required_bytes
                     <= self.snapshot_storage_budget_bytes
                     and pending_intent is None
+                    and not reclaim_all_expired
                 ):
                     break
                 snapshot = session.retirement["snapshot"]
@@ -7398,6 +7472,7 @@ class AlbertMission:
                             "Snapshot Payload remained after reclamation."
                         )
                 except (OSError, RetirementSnapshotError) as exc:
+                    reclamation_failed = True
                     storage["attention"] = {
                         "active": True,
                         "code": "snapshot-reclamation-failed",
@@ -7454,8 +7529,18 @@ class AlbertMission:
                     for session_id, raw in raw_sessions.items()
                 }
                 self.timeline = list(data.get("timeline", []))
-                raise LaunchBlockedError(storage["attention"]["message"])
+                if raise_on_exhaustion:
+                    raise LaunchBlockedError(storage["attention"]["message"])
+                return
             if storage.get("attention", {}).get("code") == "snapshot-storage-exhausted":
+                storage["attention"] = {}
+                changed = True
+            elif (
+                storage.get("attention", {}).get("code")
+                == "snapshot-reclamation-failed"
+                and not reclamation_failed
+                and not storage["reclamation_intents"]
+            ):
                 storage["attention"] = {}
                 changed = True
             if changed:

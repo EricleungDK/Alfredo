@@ -2563,3 +2563,105 @@ test("sorts blocked and waiting approval cards above routine active work while p
     ["review-ready", "active"],
   ]);
 });
+
+test("projects blocked Retirement Records and snapshot-storage exhaustion as governed Mission Work", () => {
+  const snapshot: WorkspaceSnapshot = {
+    ...baseSnapshot,
+    revision: 31,
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-retirement-blocked",
+            issue_id: "ISS-01",
+            assigned_agent: "qwen-coder-local",
+            status: "reviewed",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+            session_revision: 9,
+            retirement_phase: "retirement-blocked",
+            retirement_blocked_reason: "Retained worktree still has open handles.",
+            retirement_record: {
+              manifest_sha256: "a".repeat(64),
+              worktree_identity: "managed:session-retirement-blocked",
+              snapshot_bytes: 2048,
+              created_at: "2026-08-10T10:00:00+00:00",
+              expires_at: "2026-09-09T10:00:00+00:00",
+              pinned: false,
+              payload_disposition: "retained",
+            },
+            retirement_actions: {
+              retry: true,
+              inspect: true,
+              export: true,
+              discard: true,
+            },
+          },
+          {
+            session_id: "session-preservation-blocked",
+            issue_id: "ISS-02",
+            assigned_agent: "frontier-reviewer",
+            status: "reviewed",
+            session_revision: 4,
+            retirement_phase: "preservation-blocked",
+            retirement_actions: {
+              retry: true,
+              inspect: true,
+              export: false,
+              discard: true,
+            },
+          },
+        ],
+        attention: [
+          {
+            attention_id: "retirement-storage-command-deck",
+            mission_id: "command-deck",
+            kind: "retirement-storage",
+            label: "Storage Budget is exhausted by protected snapshot payloads",
+            queue_link: "mission-work#retirement-storage",
+            entity_id: "snapshot-storage",
+            queue_item_id: "",
+          },
+        ],
+      },
+    ],
+  };
+
+  const cards = projectWorkstationCards(snapshot).groups.flatMap((group) => group.cards);
+  const blocked = cards.find((card) => card.sessionId === "session-retirement-blocked");
+  const preservationBlocked = cards.find(
+    (card) => card.sessionId === "session-preservation-blocked",
+  );
+  const storage = cards.find((card) => card.currentTask === "retirement-storage");
+
+  expect(blocked?.detail.retirementRecord).toMatchObject({
+    manifest_sha256: "a".repeat(64),
+    payload_disposition: "retained",
+  });
+  expect(blocked?.detail.governedActions.map((action) => action.actionType)).toEqual([
+    undefined,
+    "retirement-retry",
+    "retirement-export",
+    "retirement-discard",
+    "retirement-pin",
+  ]);
+  expect(
+    blocked?.detail.governedActions.filter((action) => action.actionType).map((action) => action.expectedRevision),
+  ).toEqual([9, 9, 9, 9]);
+  expect(
+    preservationBlocked?.detail.governedActions.some(
+      (action) => action.actionType === "retirement-export",
+    ),
+  ).toBe(false);
+  expect(storage).toMatchObject({
+    status: "blocked",
+    phase: "Snapshot Storage",
+    attention: true,
+    nextAction: expect.stringContaining("Inspect /storage"),
+  });
+});

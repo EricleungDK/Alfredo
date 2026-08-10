@@ -750,7 +750,11 @@ export type WorkstationActionType =
   | "session-cancel"
   | "model-assignment-change"
   | "issue-archive"
-  | "issue-restore";
+  | "issue-restore"
+  | "retirement-pin"
+  | "retirement-retry"
+  | "retirement-export"
+  | "retirement-discard";
 
 export interface WorkstationActionRequest {
   readonly correlation_id: string;
@@ -767,6 +771,9 @@ export interface WorkstationActionRequest {
   readonly reason?: string;
   readonly allowed_paths?: readonly string[];
   readonly command_policy?: Readonly<Record<string, string>>;
+  readonly pin_state?: boolean;
+  readonly destination?: string;
+  readonly confirmation?: string;
 }
 
 export interface WorkstationActionAcknowledgement {
@@ -1091,6 +1098,26 @@ export interface MissionSessionSummary {
   } | null;
   readonly work_kind?: "issue-slice" | "ad-hoc-delegation" | string;
   readonly parent_session_id?: string;
+  readonly session_revision?: number;
+  readonly retirement_phase?: string;
+  readonly retirement_blocked_reason?: string;
+  readonly retirement_record?: {
+    readonly manifest_sha256?: string;
+    readonly worktree_identity?: string;
+    readonly snapshot_bytes?: number;
+    readonly created_at?: string;
+    readonly expires_at?: string;
+    readonly pinned?: boolean;
+    readonly payload_disposition?: string;
+    readonly reclaimed_at?: string;
+    readonly reclamation_reason?: string;
+  };
+  readonly retirement_actions?: Readonly<{
+    retry: boolean;
+    inspect: boolean;
+    export: boolean;
+    discard: boolean;
+  }>;
 }
 
 export interface WorkspaceQueueAttention {
@@ -1102,7 +1129,8 @@ export interface WorkspaceQueueAttention {
     | "issue-change-proposal"
     | "frontier-confirmation"
     | "ad-hoc-delegation"
-    | "runner-supervision";
+    | "runner-supervision"
+    | "retirement-storage";
   readonly label: string;
   readonly queue_link: string;
   /** Canonical work identity; presentation labels are never parsed for identity. */

@@ -76,7 +76,7 @@ The private, space-consuming content referenced by a Retirement Record that make
 
 ### Snapshot Storage Budget
 
-The configurable aggregate app-local capacity available for Snapshot Payloads and bound Preservation Budgets. It reclaims eligible expired unpinned payloads oldest first, exposes deterministic usage and blocker inspection, and blocks new Retirement Units rather than silently deleting policy-protected payloads when exhausted.
+The configurable aggregate app-local capacity available for Snapshot Payloads and bound Preservation Budgets. It reclaims eligible expired unpinned payloads oldest first during admission, startup, and storage inspection; exposes deterministic Active-Mission usage and blocker inspection; projects protected exhaustion as Mission Work attention; and blocks new Retirement Units rather than silently deleting policy-protected payloads when exhausted.
 
 ### Retention Grace Period
 

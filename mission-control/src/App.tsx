@@ -115,6 +115,8 @@ interface WorkstationActionState {
 interface WorkstationActionDraftState {
   readonly reason: string;
   readonly agentId: string;
+  readonly destination: string;
+  readonly confirmation: string;
 }
 
 interface SessionArtifactViewerTarget {
@@ -2325,6 +2327,9 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         reason: draft.reason.trim() || undefined,
         allowed_paths: [],
         command_policy: {},
+        pin_state: action.pinState,
+        destination: draft.destination.trim() || undefined,
+        confirmation: draft.confirmation.trim() || undefined,
       };
       beginVisibleWorkstationAction(correlationId, label, actionStateId);
       const result = await client.submitWorkstationAction(request);
@@ -5608,7 +5613,7 @@ function IssueAssignmentActions({
       {actions.map((action) => {
         const targetId = workstationActionTargetId(action);
         const key = workstationActionKey(action);
-        const draft = drafts[key] ?? { reason: "", agentId: "" };
+        const draft = drafts[key] ?? { reason: "", agentId: "", destination: "", confirmation: "" };
         const needsAgent = action.actionType === "model-assignment-change";
         const hasEligibleAgent = agentOptions.some((agent) => agent.id === draft.agentId);
         const disabledDescription = workstationActionDisabledDescription(
@@ -6462,7 +6467,7 @@ function WorkstationCard({
           {workstationActions.map((action) => {
             const targetId = workstationActionTargetId(action);
             const key = workstationActionKey(action);
-            const draft = workstationActionDrafts[key] ?? { reason: "", agentId: "" };
+            const draft = workstationActionDrafts[key] ?? { reason: "", agentId: "", destination: "", confirmation: "" };
             const pending = matchingActionState?.state === "pending";
             const needsAgent = action.actionType === "model-assignment-change";
             const hasEligibleAgent = agentOptions.some((agent) => agent.id === draft.agentId);
@@ -6478,6 +6483,8 @@ function WorkstationCard({
               Boolean(action.disabledReason) ||
               !targetId ||
               (action.requiresReason && !draft.reason.trim()) ||
+              (action.requiresDestination && !draft.destination.trim()) ||
+              (action.requiresConfirmation && draft.confirmation.trim() !== targetId) ||
               (needsAgent && !hasEligibleAgent);
             return (
               <div className="workstation-card__direct-action" key={key}>
@@ -6525,12 +6532,47 @@ function WorkstationCard({
                     />
                   </label>
                 ) : null}
+                {action.requiresDestination ? (
+                  <label className="composer">
+                    <span>Export destination</span>
+                    <input
+                      aria-label={`Workstation action destination ${targetId}`}
+                      value={draft.destination}
+                      onChange={(event) =>
+                        onWorkstationActionDraftChange(key, {
+                          ...draft,
+                          destination: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+                ) : null}
+                {action.requiresConfirmation ? (
+                  <label className="composer">
+                    <span>Confirm exact session id</span>
+                    <input
+                      aria-label={`Workstation action confirmation ${targetId}`}
+                      value={draft.confirmation}
+                      onChange={(event) =>
+                        onWorkstationActionDraftChange(key, {
+                          ...draft,
+                          confirmation: event.target.value,
+                        })
+                      }
+                    />
+                  </label>
+                ) : null}
                 <button
                   type="button"
                   aria-label={`${action.label} ${targetId}`}
                   aria-describedby={helpId}
                   disabled={disabled}
-                  className={action.actionType === "session-cancel" ? "action--danger" : undefined}
+                  className={
+                    action.actionType === "session-cancel" ||
+                    action.actionType === "retirement-discard"
+                      ? "action--danger"
+                      : undefined
+                  }
                   onClick={() => onWorkstationAction(action, draft)}
                 >
                   {action.label}
@@ -6674,6 +6716,34 @@ function WorkstationCard({
             </ul>
           </div>
 
+          {card.detail.retirementRecord ? (
+            <div className="workstation-card-detail__section">
+              <h4>Retirement Record</h4>
+              <dl>
+                <div>
+                  <dt>Disposition</dt>
+                  <dd>{card.detail.retirementRecord.payload_disposition || "unknown"}</dd>
+                </div>
+                <div>
+                  <dt>Manifest</dt>
+                  <dd>{card.detail.retirementRecord.manifest_sha256 || "not recorded"}</dd>
+                </div>
+                <div>
+                  <dt>Worktree Identity</dt>
+                  <dd>{card.detail.retirementRecord.worktree_identity || "not recorded"}</dd>
+                </div>
+                <div>
+                  <dt>Expires</dt>
+                  <dd>{card.detail.retirementRecord.expires_at || "not recorded"}</dd>
+                </div>
+                <div>
+                  <dt>Pinned</dt>
+                  <dd>{card.detail.retirementRecord.pinned ? "yes" : "no"}</dd>
+                </div>
+              </dl>
+            </div>
+          ) : null}
+
           {card.detail.originatingSessionId ? (
             <div className="workstation-card-detail__section">
               <h4>Originating Session</h4>
@@ -6779,6 +6849,12 @@ function workstationActionDisabledDescription(
   if (action.requiresReason && !draft.reason.trim()) {
     return workstationRequiredInputDescription(action.label, targetId, "a reason");
   }
+  if (action.requiresDestination && !draft.destination.trim()) {
+    return workstationRequiredInputDescription(action.label, targetId, "an export destination");
+  }
+  if (action.requiresConfirmation && draft.confirmation.trim() !== targetId) {
+    return `Enter the exact session id ${targetId} to enable ${action.label}.`;
+  }
   if (action.actionType === "model-assignment-change" && !draft.agentId.trim()) {
     return workstationRequiredInputDescription(action.label, targetId, "an agent id");
   }
@@ -6826,7 +6902,11 @@ function isExecutableWorkstationAction(
     | "session-cancel"
     | "model-assignment-change"
     | "issue-archive"
-    | "issue-restore";
+    | "issue-restore"
+    | "retirement-pin"
+    | "retirement-retry"
+    | "retirement-export"
+    | "retirement-discard";
 } {
   return (
     action.actionType === "issue-approve" ||
@@ -6835,7 +6915,11 @@ function isExecutableWorkstationAction(
     action.actionType === "session-cancel" ||
     action.actionType === "model-assignment-change" ||
     action.actionType === "issue-archive" ||
-    action.actionType === "issue-restore"
+    action.actionType === "issue-restore" ||
+    action.actionType === "retirement-pin" ||
+    action.actionType === "retirement-retry" ||
+    action.actionType === "retirement-export" ||
+    action.actionType === "retirement-discard"
   );
 }
 
@@ -6867,6 +6951,7 @@ function governedActionSurface(
   if (actionTarget === "workspace-queue") return "Use Workspace Queue governed controls";
   if (actionTarget === "review-workspace") return "Card controls submit through Review Workspace validation";
   if (actionTarget === "activity") return "Use Activity Journal review history";
+  if (actionTarget === "storage") return "Use the canonical Snapshot Storage and Retirement Record controls";
   return "Local monitoring only";
 }
 

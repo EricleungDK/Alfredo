@@ -20,6 +20,7 @@ from albert_mvp.cli import main
 from albert_mvp.core import AlbertError, AlbertMission, LaunchBlockedError
 from albert_mvp.retirement import RetirementSnapshotError, RetirementSnapshotStore
 from albert_mvp.server import serve
+from albert_mvp.workspace import WorkspaceSnapshotService
 
 ISSUE_BODY = """Status: ready-for-agent
 Type: AFK
@@ -276,7 +277,7 @@ class RetirementPreservationTest(unittest.TestCase):
     def test_expired_unpinned_payloads_reclaim_oldest_first_and_keep_records(self) -> None:
         second_issue = self.add_issue(2)
         third_issue = self.add_issue(3)
-        mission = self.load_mission(snapshot_storage_retention_seconds=0)
+        mission = self.load_mission()
         first = self.completed_issue(mission, "ISS-01")
         mission.record_frontier_review(
             first.session_id,
@@ -299,12 +300,25 @@ class RetirementPreservationTest(unittest.TestCase):
         second_record = mission._refresh_persisted_session(second.session_id).retirement[
             "snapshot"
         ]
+        runtime = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        first_snapshot = runtime["sessions"][first.session_id]["retirement"][
+            "snapshot"
+        ]
+        first_snapshot["created_at"] = (
+            datetime.now().astimezone() - timedelta(days=2)
+        ).isoformat()
+        first_snapshot["expires_at"] = (
+            datetime.now().astimezone() - timedelta(seconds=1)
+        ).isoformat()
+        mission.runtime_path.write_text(
+            json.dumps(runtime, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
         budget = 32 * 1024 * 1024 + max(
             first_record["snapshot_bytes"], second_record["snapshot_bytes"]
         )
 
         constrained = self.load_mission(
-            snapshot_storage_retention_seconds=0,
             snapshot_storage_budget_bytes=budget,
         )
         constrained.assign_issue(third_issue, "fake-local")
@@ -353,6 +367,20 @@ class RetirementPreservationTest(unittest.TestCase):
             expected_revision=retired.revision,
             correlation_id="pin-protected-payload",
         )
+        runtime = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        pinned_snapshot = runtime["sessions"][first.session_id]["retirement"][
+            "snapshot"
+        ]
+        pinned_snapshot["created_at"] = (
+            datetime.now().astimezone() - timedelta(days=2)
+        ).isoformat()
+        pinned_snapshot["expires_at"] = (
+            datetime.now().astimezone() - timedelta(seconds=1)
+        ).isoformat()
+        mission.runtime_path.write_text(
+            json.dumps(runtime, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
         constrained = self.load_mission(
             snapshot_storage_retention_seconds=0,
             snapshot_storage_budget_bytes=32 * 1024 * 1024,
@@ -374,6 +402,55 @@ class RetirementPreservationTest(unittest.TestCase):
             ]["manifest_sha256"],
             pinned.retirement["snapshot"]["manifest_sha256"],
         )
+        mission_summary = WorkspaceSnapshotService(constrained).snapshot().missions[0]
+        storage_attention = next(
+            item
+            for item in mission_summary.attention
+            if item.kind == "retirement-storage"
+        )
+        self.assertIn("Storage Budget is exhausted", storage_attention.label)
+
+        unpinned = constrained.set_retirement_snapshot_pin(
+            first.session_id,
+            pinned=False,
+            expected_revision=pinned.revision,
+            correlation_id="unpin-after-storage-exhaustion",
+        )
+        self.assertFalse(unpinned.retirement["snapshot"]["pinned"])
+        resolved = constrained.retirement_storage_inspection()
+        self.assertEqual(resolved["blockers"], [])
+        self.assertEqual(resolved["counts"]["retained_payloads"], 0)
+
+    def test_expired_unpinned_payload_reclaims_during_mission_startup(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        mission.record_frontier_review(
+            completed.session_id,
+            "Approved",
+            reason="Retire one payload before its retention deadline.",
+            allowed_session_statuses={"evidence-ready"},
+            expected_revision=completed.revision,
+        )
+        retired = mission._refresh_persisted_session(completed.session_id)
+        runtime = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        expired_snapshot = runtime["sessions"][completed.session_id]["retirement"][
+            "snapshot"
+        ]
+        expired_snapshot["created_at"] = (
+            datetime.now().astimezone() - timedelta(days=2)
+        ).isoformat()
+        expired_snapshot["expires_at"] = (
+            datetime.now().astimezone() - timedelta(seconds=1)
+        ).isoformat()
+        mission.runtime_path.write_text(
+            json.dumps(runtime, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+        reloaded = self.load_mission()
+        compact = reloaded.sessions[completed.session_id].retirement["snapshot"]
+        self.assertEqual(compact["payload_disposition"], "reclaimed")
+        self.assertFalse(Path(retired.retirement["snapshot"]["payload_path"]).exists())
 
     def test_snapshot_storage_schema_rejects_malformed_durable_records(self) -> None:
         mission = self.load_mission()
@@ -393,6 +470,31 @@ class RetirementPreservationTest(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(AlbertError, "Snapshot Payload record is invalid"):
+            self.load_mission()
+
+    def test_retirement_action_receipts_fail_closed_when_their_shape_is_malformed(
+        self,
+    ) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        preserved = mission.preserve_retirement_unit(
+            completed.session_id,
+            expected_revision=completed.revision,
+            correlation_id="preserve-before-malformed-action-receipt",
+        )
+        runtime = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        runtime["sessions"][preserved.session_id]["retirement"][
+            "action_receipts"
+        ]["reused-correlation"] = {}
+        mission.runtime_path.write_text(
+            json.dumps(runtime, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            AlbertError,
+            "Retirement Unit action receipt is invalid",
+        ):
             self.load_mission()
 
     def test_snapshot_storage_schema_rejects_payload_authority_drift(self) -> None:
@@ -421,7 +523,7 @@ class RetirementPreservationTest(unittest.TestCase):
     ) -> None:
         second_issue = self.add_issue(2)
         third_issue = self.add_issue(3)
-        mission = self.load_mission(snapshot_storage_retention_seconds=0)
+        mission = self.load_mission()
         first = self.completed_issue(mission, "ISS-01")
         mission.record_frontier_review(
             first.session_id,
@@ -445,12 +547,25 @@ class RetirementPreservationTest(unittest.TestCase):
             "snapshot"
         ]
         constrained = self.load_mission(
-            snapshot_storage_retention_seconds=0,
             snapshot_storage_budget_bytes=32 * 1024 * 1024
             + max(first_record["snapshot_bytes"], second_record["snapshot_bytes"]),
         )
         constrained.assign_issue(third_issue, "fake-local")
         constrained.approve_issue(third_issue)
+        runtime = json.loads(constrained.runtime_path.read_text(encoding="utf-8"))
+        first_snapshot = runtime["sessions"][first.session_id]["retirement"][
+            "snapshot"
+        ]
+        first_snapshot["created_at"] = (
+            datetime.now().astimezone() - timedelta(days=2)
+        ).isoformat()
+        first_snapshot["expires_at"] = (
+            datetime.now().astimezone() - timedelta(seconds=1)
+        ).isoformat()
+        constrained.runtime_path.write_text(
+            json.dumps(runtime, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
         remove_tree = shutil.rmtree
         interrupted = False
 
@@ -470,7 +585,6 @@ class RetirementPreservationTest(unittest.TestCase):
 
         self.assertFalse(Path(first_record["payload_path"]).exists())
         recovered = self.load_mission(
-            snapshot_storage_retention_seconds=0,
             snapshot_storage_budget_bytes=32 * 1024 * 1024
             + max(first_record["snapshot_bytes"], second_record["snapshot_bytes"]),
         )
@@ -1972,6 +2086,99 @@ class RetirementPreservationTest(unittest.TestCase):
         self.assertEqual(retried.retirement["phase"], "retired")
         self.assertFalse(completed.worktree_path.exists())
 
+    def test_preservation_blocked_does_not_advertise_unavailable_export(self) -> None:
+        mission = self.load_mission(quiescence=("absent", "live-exact"))
+        completed = self.completed_session(mission)
+        with self.assertRaisesRegex(LaunchBlockedError, "Runner Quiescence"):
+            mission.preserve_retirement_unit(
+                completed.session_id,
+                expected_revision=completed.revision,
+                correlation_id="preservation-blocked-actions",
+            )
+
+        blocked = mission._refresh_persisted_session(completed.session_id)
+        self.assertEqual(blocked.retirement["phase"], "preservation-blocked")
+        inspection = mission.inspect_retirement_unit(completed.session_id)
+        self.assertEqual(
+            inspection["actions"],
+            {"retry": True, "inspect": True, "export": False, "discard": True},
+        )
+
+    def test_concurrent_headless_admission_serializes_capacity_reservation(self) -> None:
+        mission_one = self.load_mission(
+            snapshot_storage_budget_bytes=32 * 1024 * 1024,
+        )
+        mission_two = self.load_mission(
+            snapshot_storage_budget_bytes=32 * 1024 * 1024,
+        )
+        first_admission = threading.Event()
+        release_first = threading.Event()
+        original_admit = AlbertMission._admit_retirement_unit
+        first_identity = id(mission_one)
+
+        def paused_admit(candidate: AlbertMission) -> None:
+            original_admit(candidate)
+            if id(candidate) == first_identity:
+                first_admission.set()
+                self.assertTrue(release_first.wait(timeout=5))
+
+        def queue_without_runner(
+            candidate: AlbertMission,
+            session_id: str,
+            *,
+            expected_revision: int | None = None,
+        ):
+            del expected_revision
+            return candidate.sessions[session_id]
+
+        with (
+            patch.object(
+                AlbertMission,
+                "_admit_retirement_unit",
+                autospec=True,
+                side_effect=paused_admit,
+            ),
+            patch.object(
+                AlbertMission,
+                "run_session",
+                autospec=True,
+                side_effect=queue_without_runner,
+            ),
+            ThreadPoolExecutor(max_workers=2) as executor,
+        ):
+            first = executor.submit(
+                mission_one.launch_headless_work,
+                work_kind="run",
+                agent_id="fake-local",
+                prompt="first bounded headless unit",
+            )
+            self.assertTrue(first_admission.wait(timeout=5))
+            second = executor.submit(
+                mission_two.launch_headless_work,
+                work_kind="run",
+                agent_id="fake-local",
+                prompt="second bounded headless unit",
+            )
+            time.sleep(0.1)
+            self.assertFalse(second.done())
+            release_first.set()
+            first_session = first.result(timeout=5)
+            with self.assertRaisesRegex(LaunchBlockedError, "Storage Budget is exhausted"):
+                second.result(timeout=5)
+
+        persisted = self.load_mission(
+            snapshot_storage_budget_bytes=32 * 1024 * 1024,
+        )
+        self.assertIn(first_session.session_id, persisted.sessions)
+        self.assertEqual(
+            sum(
+                session.preservation_budget["reserved_bytes"]
+                for session in persisted.sessions.values()
+                if session.preservation_budget["bound"]
+            ),
+            32 * 1024 * 1024,
+        )
+
     def test_retirement_export_replays_after_materialization_before_receipt(self) -> None:
         shutil.move(self.target_repo / ".git", self.root / "detached-target-git")
         mission = self.load_mission()
@@ -2019,7 +2226,23 @@ class RetirementPreservationTest(unittest.TestCase):
             (destination / "repository" / "tracked.txt").read_text(encoding="utf-8"),
             "baseline\n",
         )
-        receipt = self.load_mission().export_retirement_unit(
+        (destination / "repository" / "tracked.txt").write_text(
+            "tampered after marker\n",
+            encoding="utf-8",
+        )
+        recovered = self.load_mission()
+        with self.assertRaisesRegex(AlbertError, "exported repository content"):
+            recovered.export_retirement_unit(
+                completed.session_id,
+                destination=destination,
+                expected_revision=blocked.revision,
+                correlation_id="export-crash-cut",
+            )
+        (destination / "repository" / "tracked.txt").write_text(
+            "baseline\n",
+            encoding="utf-8",
+        )
+        receipt = recovered.export_retirement_unit(
             completed.session_id,
             destination=destination,
             expected_revision=blocked.revision,
@@ -2205,6 +2428,148 @@ class RetirementPreservationTest(unittest.TestCase):
         self.assertEqual(
             reloaded.retirement["removal_kind"], "retained-worktree-discard"
         )
+
+    def test_retained_worktree_discard_rejects_replacement_directory_data(self) -> None:
+        shutil.move(self.target_repo / ".git", self.root / "detached-target-git")
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        with patch.object(
+            mission,
+            "_remove_retirement_worktree",
+            side_effect=AlbertError("simulated exact removal failure"),
+        ):
+            mission.record_frontier_review(
+                completed.session_id,
+                "Approved",
+                reason="Create a blocked unit before path substitution.",
+                allowed_session_statuses={"evidence-ready"},
+                expected_revision=completed.revision,
+            )
+            mission.reconcile_retirement_unit(completed.session_id)
+        blocked = mission._refresh_persisted_session(completed.session_id)
+        shutil.rmtree(completed.worktree_path)
+        completed.worktree_path.mkdir()
+        sentinel = completed.worktree_path / "replacement-data.txt"
+        sentinel.write_text("unrelated replacement bytes\n", encoding="utf-8")
+
+        with self.assertRaisesRegex(
+            (AlbertError, RetirementSnapshotError),
+            "changed|invalid|snapshot|Snapshot|preserved",
+        ):
+            mission.discard_retained_worktree(
+                completed.session_id,
+                expected_revision=blocked.revision,
+                correlation_id="discard-replacement-directory",
+                confirmation=completed.session_id,
+                reason="This must not authorize replacement data deletion.",
+            )
+
+        self.assertEqual(
+            sentinel.read_text(encoding="utf-8"),
+            "unrelated replacement bytes\n",
+        )
+
+    def test_retained_worktree_discard_serializes_snapshot_pin_mutation(self) -> None:
+        shutil.move(self.target_repo / ".git", self.root / "detached-target-git")
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        with patch.object(
+            mission,
+            "_remove_retirement_worktree",
+            side_effect=AlbertError("simulated exact removal failure"),
+        ):
+            mission.record_frontier_review(
+                completed.session_id,
+                "Approved",
+                reason="Create a blocked unit for action serialization.",
+                allowed_session_statuses={"evidence-ready"},
+                expected_revision=completed.revision,
+            )
+            mission.reconcile_retirement_unit(completed.session_id)
+        blocked = mission._refresh_persisted_session(completed.session_id)
+        deletion_started = threading.Event()
+        finish_deletion = threading.Event()
+        remove_tree = shutil.rmtree
+
+        def paused_remove(path: Path, *args, **kwargs) -> None:
+            deletion_started.set()
+            self.assertTrue(finish_deletion.wait(timeout=5))
+            remove_tree(path, *args, **kwargs)
+
+        with patch("albert_mvp.core.shutil.rmtree", side_effect=paused_remove):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                discard = executor.submit(
+                    mission.discard_retained_worktree,
+                    completed.session_id,
+                    expected_revision=blocked.revision,
+                    correlation_id="serialized-discard",
+                    confirmation=completed.session_id,
+                    reason="Delete only after serializing policy mutation.",
+                )
+                self.assertTrue(deletion_started.wait(timeout=5))
+                pin = executor.submit(
+                    mission.set_retirement_snapshot_pin,
+                    completed.session_id,
+                    pinned=True,
+                    expected_revision=blocked.revision + 1,
+                    correlation_id="concurrent-pin",
+                )
+                time.sleep(0.1)
+                self.assertFalse(pin.done())
+                finish_deletion.set()
+                discarded = discard.result(timeout=5)
+                with self.assertRaises(LaunchBlockedError):
+                    pin.result(timeout=5)
+
+        self.assertEqual(discarded.retirement["phase"], "retired")
+        self.assertFalse(completed.worktree_path.exists())
+
+    def test_git_retained_worktree_discard_blocks_a_process_cwd(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        with patch.object(
+            mission,
+            "_remove_retirement_worktree",
+            side_effect=AlbertError("simulated exact removal failure"),
+        ):
+            mission.record_frontier_review(
+                completed.session_id,
+                "Approved",
+                reason="Create a blocked Git unit for handle inspection.",
+                allowed_session_statuses={"evidence-ready"},
+                expected_revision=completed.revision,
+            )
+            mission.reconcile_retirement_unit(completed.session_id)
+        blocked = mission._refresh_persisted_session(completed.session_id)
+        holder = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                "import os,sys,time; os.chdir(sys.argv[1]); "
+                "print('ready', flush=True); time.sleep(30)",
+                str(completed.worktree_path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(self._stop_process, holder)
+        self.assertEqual(holder.stdout.readline().strip(), "ready")
+
+        with self.assertRaisesRegex(AlbertError, "process|handle"):
+            mission.discard_retained_worktree(
+                completed.session_id,
+                expected_revision=blocked.revision,
+                correlation_id="discard-git-live-cwd",
+                confirmation=completed.session_id,
+                reason="Open handles must still block explicit discard.",
+            )
+
+        self.assertTrue(
+            completed.worktree_path.is_dir()
+            or mission._retirement_removal_effect_path(completed.session_id).is_dir()
+        )
+        self.assertIsNone(holder.poll())
 
     def test_retained_worktree_discard_never_targets_the_coding_workspace(self) -> None:
         mission = self.load_mission()
@@ -2808,6 +3173,38 @@ class RetirementPreservationTest(unittest.TestCase):
                 envelope = json.loads(transport_output.getvalue())
                 self.assertTrue(envelope["success"])
                 self.assertEqual(json.loads(envelope["stdout"]), one_process)
+
+        pinned_unit = self.load_mission().sessions[pin_unit.session_id]
+        workstation_argv = [
+            "workstation-action",
+            *common,
+            "--correlation-id",
+            "cli-workstation-unpin-action",
+            "--expected-revision",
+            str(pinned_unit.revision),
+            "--action-type",
+            "retirement-pin",
+            "--actor",
+            "mission-commander",
+            "--target-kind",
+            "agent-session",
+            "--target-id",
+            pinned_unit.session_id,
+            "--action-mission-id",
+            mission.mission_id,
+            "--issue-id",
+            pinned_unit.issue_id,
+            "--session-id",
+            pinned_unit.session_id,
+            "--pin-state",
+            "unpinned",
+        ]
+        output = io.StringIO()
+        with redirect_stdout(output):
+            self.assertEqual(main(workstation_argv), 0)
+        acknowledgement = json.loads(output.getvalue())
+        self.assertEqual(acknowledgement["action_type"], "retirement-pin")
+        self.assertIn("unpinned", acknowledgement["effect_summary"])
 
 
 if __name__ == "__main__":

@@ -37,6 +37,8 @@ interface MissionExecutionOutputFailure {
 interface MissionExecutionActionDraft {
   readonly reason: string;
   readonly agentId: string;
+  readonly destination: string;
+  readonly confirmation: string;
 }
 
 interface MissionExecutionActionState {
@@ -691,6 +693,34 @@ function MissionExecutionInspector({
         ))}
       </section>
 
+      {card?.detail.retirementRecord ? (
+        <section className="mission-execution-inspector__section">
+          <h5>Retirement Record</h5>
+          <dl className="mission-execution-inspector__facts">
+            <div>
+              <dt>Disposition</dt>
+              <dd>{card.detail.retirementRecord.payload_disposition || "unknown"}</dd>
+            </div>
+            <div>
+              <dt>Manifest</dt>
+              <dd>{card.detail.retirementRecord.manifest_sha256 || "not recorded"}</dd>
+            </div>
+            <div>
+              <dt>Worktree Identity</dt>
+              <dd>{card.detail.retirementRecord.worktree_identity || "not recorded"}</dd>
+            </div>
+            <div>
+              <dt>Expires</dt>
+              <dd>{card.detail.retirementRecord.expires_at || "not recorded"}</dd>
+            </div>
+            <div>
+              <dt>Pinned</dt>
+              <dd>{card.detail.retirementRecord.pinned ? "yes" : "no"}</dd>
+            </div>
+          </dl>
+        </section>
+      ) : null}
+
       {node.kind === "agent-session" ? (
         <section className="mission-execution-inspector__section mission-execution-inspector__output" aria-label={`${node.identity} detailed Local Agent output`}>
           <div className="mission-execution-inspector__section-heading">
@@ -791,7 +821,12 @@ function MissionExecutionGovernedAction({
   const actionKey = workstationActionKey(action);
   const isReview = action.actionType === "review-decision" && Boolean(action.sessionId && action.reviewDecision);
   const isQueue = action.actionType === "workspace-queue-decision" && Boolean(action.itemId && action.decision);
-  const draft = workstationActionDrafts?.[actionKey] ?? { reason: "", agentId: "" };
+  const draft = workstationActionDrafts?.[actionKey] ?? {
+    reason: "",
+    agentId: "",
+    destination: "",
+    confirmation: "",
+  };
   const reason = isReview && action.reviewDecision === "repair"
     ? reviewReasons?.[action.sessionId ?? ""] ?? ""
     : isQueue
@@ -804,12 +839,18 @@ function MissionExecutionGovernedAction({
   const disabled = Boolean(action.disabledReason) ||
     Boolean(actionStatusId?.state === "pending") ||
     (action.requiresReason && !reason.trim()) ||
+    (action.requiresDestination && !draft.destination.trim()) ||
+    (action.requiresConfirmation && draft.confirmation.trim() !== targetId) ||
     (requiresAgent && !draft.agentId.trim());
   const consequence = workstationActionConsequence(action);
   const actionGuidance = action.disabledReason
     ? `Unavailable: ${action.disabledReason}`
     : action.requiresReason && !reason.trim()
       ? `Enter a reason to enable ${action.label}${targetId ? ` for ${targetId}` : ""}.`
+      : action.requiresDestination && !draft.destination.trim()
+        ? `Enter an export destination to enable ${action.label}${targetId ? ` for ${targetId}` : ""}.`
+        : action.requiresConfirmation && draft.confirmation.trim() !== targetId
+          ? `Enter the exact session id ${targetId} to enable ${action.label}.`
       : requiresAgent && !draft.agentId.trim()
         ? `Select an eligible local agent to enable ${action.label}${targetId ? ` for ${targetId}` : ""}.`
         : action.recoveryPath
@@ -895,6 +936,36 @@ function MissionExecutionGovernedAction({
               else if (isQueue && action.itemId) onQueueReasonChange?.(action.itemId, event.target.value);
               else onWorkstationActionDraftChange?.(actionKey, { ...draft, reason: event.target.value });
             }}
+          />
+        </label>
+      ) : null}
+      {action.requiresDestination ? (
+        <label>
+          <span>Export destination</span>
+          <input
+            aria-label={`${action.label} destination`}
+            value={draft.destination}
+            onChange={(event) =>
+              onWorkstationActionDraftChange?.(actionKey, {
+                ...draft,
+                destination: event.target.value,
+              })
+            }
+          />
+        </label>
+      ) : null}
+      {action.requiresConfirmation ? (
+        <label>
+          <span>Confirm exact session id</span>
+          <input
+            aria-label={`${action.label} confirmation`}
+            value={draft.confirmation}
+            onChange={(event) =>
+              onWorkstationActionDraftChange?.(actionKey, {
+                ...draft,
+                confirmation: event.target.value,
+              })
+            }
           />
         </label>
       ) : null}
