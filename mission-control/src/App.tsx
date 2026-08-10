@@ -43,6 +43,7 @@ import type {
 } from "./contracts";
 import type { WorkspaceClient } from "./workspace-client";
 import { MissionExecutionTree, type MissionExecutionOutputState } from "./MissionExecutionTree";
+import { RetirementInspectionDetails } from "./RetirementInspectionDetails";
 import {
   afterTwoAnimationFrames,
   markFrontendPerformance,
@@ -6716,46 +6717,11 @@ function WorkstationCard({
             </ul>
           </div>
 
-          {card.detail.retirementPhase === "preservation-blocked" ||
-          card.detail.retirementPhase === "retirement-blocked" ? (
-            <section className="workstation-card__detail-section">
-              <h5>Retirement Unit Inspection</h5>
-              <dl className="workstation-card__facts">
-                <div><dt>Phase</dt><dd>{card.detail.retirementPhase}</dd></div>
-                <div><dt>Blocked reason</dt><dd>{card.detail.retirementBlockedReason || "No reason recorded."}</dd></div>
-                <div><dt>Runner boundary</dt><dd>{JSON.stringify(card.detail.retirementRunnerBoundary ?? {})}</dd></div>
-                <div><dt>Preservation Budget</dt><dd>{JSON.stringify(card.detail.preservationBudget ?? {})}</dd></div>
-              </dl>
-            </section>
-          ) : null}
-
-          {card.detail.retirementRecord ? (
-            <div className="workstation-card-detail__section">
-              <h4>Retirement Record</h4>
-              <dl>
-                <div>
-                  <dt>Disposition</dt>
-                  <dd>{card.detail.retirementRecord.payload_disposition || "unknown"}</dd>
-                </div>
-                <div>
-                  <dt>Manifest</dt>
-                  <dd>{card.detail.retirementRecord.manifest_sha256 || "not recorded"}</dd>
-                </div>
-                <div>
-                  <dt>Worktree Identity</dt>
-                  <dd>{card.detail.retirementRecord.worktree_identity || "not recorded"}</dd>
-                </div>
-                <div>
-                  <dt>Expires</dt>
-                  <dd>{card.detail.retirementRecord.expires_at || "not recorded"}</dd>
-                </div>
-                <div>
-                  <dt>Pinned</dt>
-                  <dd>{card.detail.retirementRecord.pinned ? "yes" : "no"}</dd>
-                </div>
-              </dl>
-            </div>
-          ) : null}
+          <RetirementInspectionDetails
+            detail={card.detail}
+            sectionClassName="workstation-card-detail__section"
+            factsClassName="workstation-card__facts"
+          />
 
           {card.detail.originatingSessionId ? (
             <div className="workstation-card-detail__section">

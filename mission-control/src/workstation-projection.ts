@@ -135,10 +135,10 @@ export interface WorkstationCardDetail {
   readonly reviewState: WorkstationReviewState;
   readonly governedActions: readonly WorkstationGovernedAction[];
   readonly retirementRecord: MissionSessionSummary["retirement_record"] | null;
-  readonly retirementPhase?: string;
+  readonly retirementPhase?: MissionSessionSummary["retirement_phase"];
   readonly retirementBlockedReason?: string;
-  readonly retirementRunnerBoundary?: Readonly<Record<string, unknown>>;
-  readonly preservationBudget?: Readonly<Record<string, unknown>>;
+  readonly retirementRunnerBoundary?: MissionSessionSummary["retirement_runner_boundary"];
+  readonly preservationBudget?: MissionSessionSummary["preservation_budget"];
 }
 
 export interface WorkstationCardProjection {
@@ -1299,7 +1299,7 @@ function sessionDetail(
   repairActionAvailable = false,
   reviewOutcome = "",
   repairTaskPacket: MissionSessionSummary["repair_task_packet"] = null,
-  retirementPhase = "active",
+  retirementPhase: MissionSessionSummary["retirement_phase"] = "active",
   retirementActions: MissionSessionSummary["retirement_actions"] = undefined,
   retirementRecord: MissionSessionSummary["retirement_record"] = undefined,
   retirementRevision = acceptedRevision,
@@ -1579,7 +1579,7 @@ function governedActions(
   missionId: string,
   repairActionAvailable = false,
   repairTaskPacket: MissionSessionSummary["repair_task_packet"] = null,
-  retirementPhase = "active",
+  retirementPhase: MissionSessionSummary["retirement_phase"] = "active",
   retirementActions: MissionSessionSummary["retirement_actions"] = undefined,
   retirementRecord: MissionSessionSummary["retirement_record"] = undefined,
   retirementRevision = expectedRevision,
@@ -1879,11 +1879,13 @@ export function workstationActionConsequence(action: WorkstationGovernedAction):
     case "issue-restore":
       return `Acknowledgement restores the retained ${targetId || "Issue Slice"} subtree to active Mission Work with its identity, sessions, Evidence Packages, and Activity Journal history intact.`;
     case "retirement-pin":
-      return `${action.pinState ? "Pinning" : "Unpinning"} changes retention policy for ${targetId || "this Snapshot Payload"}, records the new pin state, and advances the session revision.`;
+      return action.pinState
+        ? `Pinning protects ${targetId || "this Snapshot Payload"} from expiry reclamation, records the new pin state, and advances the session revision.`
+        : `Unpinning makes ${targetId || "this Snapshot Payload"} eligible for expiry reclamation at the next startup or admission; it does not delete the payload now. The new pin state is recorded and the session revision advances.`;
     case "retirement-retry":
       return `Acknowledgement retries the exact blocked Retirement Unit ${targetId || "session"} without bypassing preservation, quiescence, or containment checks.`;
     case "retirement-export":
-      return `Acknowledgement copies the exact blocked retained material for ${targetId || "this session"} to the empty destination after quiescence and identity checks; it does not change canonical work.`;
+      return `Acknowledgement copies the exact blocked retained material for ${targetId || "this session"} to a safe empty destination after quiescence and content proof; it does not change canonical work.`;
     case "retirement-discard":
       return `Acknowledgement irreversibly deletes only the exact retained managed worktree for ${targetId || "this session"} after confirmation, reason, quiescence, identity, and containment proof.`;
     case "review-decision":

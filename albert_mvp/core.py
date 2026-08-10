@@ -1090,6 +1090,11 @@ def _validated_retirement_action_receipt(
         or raw["result_revision"] <= raw["expected_revision"]
         or not isinstance(raw.get("recorded_at"), str)
         or not raw["recorded_at"].strip()
+        or any(
+            not isinstance(raw.get(field_name), str)
+            or not raw[field_name].strip()
+            for field_name in ("mission_id", "session_id")
+        )
     ):
         raise AlbertError("Retirement Unit action receipt is invalid")
     try:
@@ -1280,6 +1285,26 @@ def _validated_retirement_unit(raw: Any) -> dict[str, Any]:
         or not isinstance(discard_intent.get("claim_revision"), int)
         or isinstance(discard_intent.get("claim_revision"), bool)
         or discard_intent["claim_revision"] < 0
+        or discard_intent.get("discard_kind", "snapshot-backed")
+        not in {"snapshot-backed", "retained-worktree", "managed-absence"}
+        or (
+            discard_intent.get("discard_kind") == "retained-worktree"
+            and (
+                not isinstance(discard_intent.get("tree_sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", discard_intent["tree_sha256"])
+                or any(
+                    not isinstance(discard_intent.get(field_name), int)
+                    or isinstance(discard_intent.get(field_name), bool)
+                    or discard_intent[field_name] < 0
+                    for field_name in ("root_device", "root_inode")
+                )
+                or not isinstance(
+                    discard_intent.get("exclude_git_metadata"), bool
+                )
+                or discard_intent.get("direct_removal_kind")
+                not in {"git-worktree", "managed-directory"}
+            )
+        )
     ):
         raise AlbertError("Retained Worktree Discard intent is invalid")
     export_intent = raw.get("export_intent", {})
@@ -1917,8 +1942,13 @@ class LocalAgentSession:
         ):
             raise AlbertError("Retirement Unit preservation receipt does not match its exact result.")
         for action_receipt in session.retirement.get("action_receipts", {}).values():
-            if action_receipt["result_revision"] > session.revision or (
-                action_receipt["action"] == "discard" and action_receipt["confirmation"] != session.session_id
+            if (
+                action_receipt["session_id"] != session.session_id
+                or action_receipt["result_revision"] > session.revision
+                or (
+                    action_receipt["action"] == "discard"
+                    and action_receipt["confirmation"] != session.session_id
+                )
             ):
                 raise AlbertError("Retirement Unit action receipt is invalid")
         return session
@@ -5530,6 +5560,11 @@ class AlbertMission:
         }
         for session in self.sessions.values():
             self._validate_snapshot_payload_authority(session)
+            if any(
+                receipt["mission_id"] != self.mission_id
+                for receipt in session.retirement.get("action_receipts", {}).values()
+            ):
+                raise AlbertError("Retirement Unit action receipt is invalid")
         self.reviews = [ReviewDecision.from_dict(item) for item in data.get("reviews", [])]
         self.delegations = {
             issue_id: DelegationDecision.from_dict(item)
@@ -6583,6 +6618,8 @@ class AlbertMission:
             if correlation_id in receipts:
                 if (
                     existing.get("action") == "snapshot-pin"
+                    and existing.get("mission_id") == self.mission_id
+                    and existing.get("session_id") == session_id
                     and existing.get("expected_revision") == expected_revision
                     and existing.get("pinned") is pinned
                     and isinstance(existing.get("result_revision"), int)
@@ -6602,12 +6639,18 @@ class AlbertMission:
                 session.revision += 1
                 receipts[correlation_id] = {
                     "action": "snapshot-pin",
+                    "mission_id": self.mission_id,
+                    "session_id": session_id,
                     "expected_revision": expected_revision,
                     "result_revision": session.revision,
                     "pinned": pinned,
                     "recorded_at": _utc_now(),
                 }
                 data["sessions"][session_id] = session.to_dict()
+                if not pinned:
+                    self._refresh_snapshot_storage_attention_after_policy_change(
+                        data
+                    )
                 data.setdefault("timeline", []).append(
                     f"{session.issue_id} Snapshot Payload for {session_id} {'pinned' if pinned else 'unpinned'}."
                 )
@@ -6615,14 +6658,70 @@ class AlbertMission:
                 self.sessions[session_id] = session
                 self.timeline = list(data.get("timeline", []))
                 result = session
-        if not pinned:
-            self._reclaim_snapshot_payloads(
-                required_bytes=_PRESERVATION_BUDGET_BYTES,
-                reclaim_all_expired=True,
-                raise_on_exhaustion=False,
-            )
-            return self._refresh_persisted_session(session_id)
         return result
+
+    def _refresh_snapshot_storage_attention_after_policy_change(
+        self,
+        data: dict[str, Any],
+    ) -> None:
+        """Clear protected-exhaustion attention once admission can reclaim enough."""
+
+        storage = self._retirement_storage_from_payload(data)
+        attention = storage.get("attention", {})
+        if attention.get("code") != "snapshot-storage-exhausted":
+            return
+        required_bytes = attention.get("required_bytes")
+        if (
+            not isinstance(required_bytes, int)
+            or isinstance(required_bytes, bool)
+            or required_bytes < 0
+        ):
+            return
+        sessions = [
+            LocalAgentSession.from_dict(raw)
+            for raw in data.get("sessions", {}).values()
+            if isinstance(raw, dict)
+        ]
+        retained_usage = sum(
+            int(session.retirement.get("snapshot", {}).get("snapshot_bytes", 0))
+            for session in sessions
+            if session.retirement.get("snapshot", {}).get(
+                "payload_disposition", "retained"
+            )
+            == "retained"
+        )
+        reserved_usage = sum(
+            int(session.preservation_budget.get("reserved_bytes", 0))
+            for session in sessions
+            if session.preservation_budget.get("bound") is True
+        )
+        now = datetime.now(timezone.utc)
+        reclaimable_bytes = 0
+        for session in sessions:
+            snapshot = session.retirement.get("snapshot", {})
+            if (
+                not snapshot
+                or snapshot.get("payload_disposition", "retained") != "retained"
+                or snapshot.get("pinned") is True
+                or session.retirement.get("phase") != "retired"
+            ):
+                continue
+            try:
+                expires = datetime.fromisoformat(str(snapshot.get("expires_at", "")))
+            except ValueError:
+                continue
+            if expires.tzinfo is not None and expires.astimezone(timezone.utc) <= now:
+                reclaimable_bytes += int(snapshot.get("snapshot_bytes", 0))
+        if (
+            retained_usage
+            + reserved_usage
+            + required_bytes
+            - reclaimable_bytes
+            <= self.snapshot_storage_budget_bytes
+        ):
+            storage["attention"] = {}
+            data["retirement_storage"] = storage
+            self.retirement_storage = storage
 
     def retirement_storage_inspection(self) -> dict[str, Any]:
         """Return deterministic read-only Snapshot Payload details."""
@@ -6792,6 +6891,8 @@ class AlbertMission:
                 if correlation_id in receipts:
                     if (
                         existing.get("action") == "export"
+                        and existing.get("mission_id") == self.mission_id
+                        and existing.get("session_id") == session_id
                         and existing.get("expected_revision") == expected_revision
                         and existing.get("destination") == str(destination / "repository")
                         and isinstance(existing.get("result_revision"), int)
@@ -6816,7 +6917,8 @@ class AlbertMission:
                     )
                 if not resuming_intent:
                     self._require_lifecycle_revision(session, expected_revision)
-                if session.retirement.get("phase") not in {
+                retirement_phase = str(session.retirement.get("phase", "active"))
+                if retirement_phase not in {
                     "preservation-blocked",
                     "retirement-blocked",
                 }:
@@ -6849,14 +6951,29 @@ class AlbertMission:
                     manifest_sha256 = str(snapshot["manifest_sha256"])
                 else:
                     expected_path = self._session_worktree_path(session_id)
-                    if _runtime_identity_path(session.worktree_path.resolve(strict=False)) != _runtime_identity_path(
+                    source_boundary = session.worktree_path.resolve(strict=False)
+                    if _runtime_identity_path(source_boundary) != _runtime_identity_path(
                         expected_path
-                    ) or _runtime_identity_path(session.worktree_path.resolve(strict=False)) == _runtime_identity_path(
+                    ) or _runtime_identity_path(source_boundary) == _runtime_identity_path(
                         self.target_repo
                     ):
                         raise LaunchBlockedError(
                             "Retained Worktree export requires the exact managed path "
                             "and cannot target the Coding Workspace."
+                        )
+                    if destination == source_boundary or destination.is_relative_to(
+                        source_boundary
+                    ):
+                        raise AlbertError(
+                            "Retirement export destination must be outside the Retained "
+                            "Worktree."
+                        )
+                    if destination == self.runtime_dir or destination.is_relative_to(
+                        self.runtime_dir
+                    ):
+                        raise AlbertError(
+                            "Retirement export destination must be outside app-private "
+                            "runtime storage."
                         )
                     source_present = session.worktree_path.exists() or session.worktree_path.is_symlink()
                     if not source_present and not resuming_intent:
@@ -6869,10 +6986,8 @@ class AlbertMission:
                             "Runner Quiescence was not independently corroborated for "
                             f"export: owner={owner_signal}, "
                             f"process-group={process_group_signal}."
-                        )
+                    )
                     if source_present:
-                        if self._worktree_identity_for_session(session) != session.worktree_identity:
-                            raise LaunchBlockedError("Retained Worktree identity changed before export.")
                         retained_manifest = RetirementSnapshotStore.retained_worktree_manifest(
                             session.worktree_path,
                             exclude_git_metadata=exclude_git_metadata,
@@ -7028,6 +7143,8 @@ class AlbertMission:
                 latest.retirement["export_intent"] = {}
                 receipt = {
                     "action": "export",
+                    "mission_id": self.mission_id,
+                    "session_id": session_id,
                     "expected_revision": expected_revision,
                     "result_revision": latest.revision,
                     "destination": str(materialized),
@@ -7069,6 +7186,8 @@ class AlbertMission:
                 if correlation_id in receipts:
                     if (
                         existing.get("action") == "retry"
+                        and existing.get("mission_id") == self.mission_id
+                        and existing.get("session_id") == session_id
                         and existing.get("expected_revision") == expected_revision
                         and isinstance(existing.get("result_revision"), int)
                         and not isinstance(existing.get("result_revision"), bool)
@@ -7191,6 +7310,8 @@ class AlbertMission:
                     correlation_id
                 ] = {
                     "action": "retry",
+                    "mission_id": self.mission_id,
+                    "session_id": session_id,
                     "expected_revision": expected_revision,
                     "result_revision": result.revision,
                     "result_phase": result_phase,
@@ -7232,6 +7353,8 @@ class AlbertMission:
                 if correlation_id in receipts:
                     if (
                         existing.get("action") == "discard"
+                        and existing.get("mission_id") == self.mission_id
+                        and existing.get("session_id") == session_id
                         and existing.get("expected_revision") == expected_revision
                         and existing.get("confirmation") == confirmation
                         and existing.get("reason") == reason.strip()
@@ -7258,7 +7381,8 @@ class AlbertMission:
                     )
                 if not resuming_intent:
                     self._require_lifecycle_revision(session, expected_revision)
-                if session.retirement.get("phase") not in {
+                retirement_phase = str(session.retirement.get("phase", "active"))
+                if retirement_phase not in {
                     "preservation-blocked",
                     "retirement-blocked",
                 }:
@@ -7298,12 +7422,54 @@ class AlbertMission:
                 if resuming_intent:
                     claim_revision = int(discard_intent["claim_revision"])
                 else:
-                    session.retirement["discard_intent"] = {
+                    new_discard_intent: dict[str, Any] = {
                         "correlation_id": correlation_id,
                         "expected_revision": expected_revision,
                         "confirmation": confirmation,
                         "reason": reason.strip(),
                     }
+                    if retirement_phase == "preservation-blocked":
+                        path = session.worktree_path
+                        if path.exists() or path.is_symlink():
+                            if path.is_symlink() or not path.is_dir():
+                                raise LaunchBlockedError(
+                                    "Retained Worktree Discard source boundary is invalid."
+                                )
+                            path_status = path.stat(follow_symlinks=False)
+                            exclude_git_metadata = session.worktree_identity.startswith(
+                                "managed-git:"
+                            )
+                            tree_manifest = (
+                                RetirementSnapshotStore.retained_worktree_manifest(
+                                    path,
+                                    exclude_git_metadata=exclude_git_metadata,
+                                )
+                            )
+                            direct_removal_kind = "managed-directory"
+                            if exclude_git_metadata:
+                                try:
+                                    current_identity = self._worktree_identity_for_session(
+                                        session
+                                    )
+                                except AlbertError:
+                                    current_identity = ""
+                                if current_identity == session.worktree_identity:
+                                    direct_removal_kind = "git-worktree"
+                            new_discard_intent.update(
+                                {
+                                    "discard_kind": "retained-worktree",
+                                    "tree_sha256": tree_manifest["tree_sha256"],
+                                    "root_device": path_status.st_dev,
+                                    "root_inode": path_status.st_ino,
+                                    "exclude_git_metadata": exclude_git_metadata,
+                                    "direct_removal_kind": direct_removal_kind,
+                                }
+                            )
+                        else:
+                            new_discard_intent["discard_kind"] = "managed-absence"
+                    else:
+                        new_discard_intent["discard_kind"] = "snapshot-backed"
+                    session.retirement["discard_intent"] = new_discard_intent
                     session.revision += 1
                     claim_revision = session.revision
                     session.retirement["discard_intent"][
@@ -7321,55 +7487,34 @@ class AlbertMission:
             path = session.worktree_path
             effect_path = self._retirement_removal_effect_path(session_id)
             try:
-                path_present = path.exists() or path.is_symlink()
-                effect_present = effect_path.exists() or effect_path.is_symlink()
-                if path_present and effect_present:
-                    raise AlbertError(
-                        "Retained Worktree Discard found both original and effect paths."
+                discard_kind = str(
+                    session.retirement.get("discard_intent", {}).get(
+                        "discard_kind", "snapshot-backed"
                     )
-                if path_present:
-                    current_identity = self._worktree_identity_for_session(session)
-                    if current_identity != session.worktree_identity:
-                        raise AlbertError(
-                            "Retained Worktree Discard identity changed before deletion."
-                        )
-                removal_kind = str(session.retirement.get("removal_kind", ""))
-                if removal_kind not in {
-                    "git-worktree",
-                    "git-registration",
-                    "managed-directory",
-                    "managed-absence",
-                }:
-                    if session.worktree_identity.startswith("managed-git:"):
-                        removal_kind = "git-worktree"
-                    elif session.worktree_identity.startswith("managed-directory:"):
-                        removal_kind = "managed-directory"
-                    else:
-                        removal_kind = "managed-absence"
-                if removal_kind != "managed-absence":
-                    snapshot_revision = int(
-                        session.retirement["snapshot"].get(
-                            "session_revision",
-                            session.revision,
-                        )
-                    )
-                    store = self._retirement_snapshot_store(
+                )
+                if discard_kind == "retained-worktree":
+                    removal_kind = self._discard_unpreserved_retained_worktree(
                         session,
-                        snapshot_revision,
+                        session.retirement["discard_intent"],
                     )
-                    if removal_kind == "managed-directory" and path_present:
-                        store.prepare_managed_directory_removal(
-                            session.retirement["snapshot"],
-                            worktree_path=path,
+                    self._verify_retirement_removal(session, removal_kind)
+                elif discard_kind == "managed-absence":
+                    if (
+                        path.exists()
+                        or path.is_symlink()
+                        or effect_path.exists()
+                        or effect_path.is_symlink()
+                    ):
+                        raise AlbertError(
+                            "Retained Worktree appeared after absence was claimed."
                         )
-                    elif removal_kind == "git-worktree" and path_present:
-                        self._assert_no_open_retirement_handles(path)
-                        store.prepare_git_non_force_removal(
-                            session.retirement["snapshot"],
-                            worktree_path=path,
-                        )
-                    self._remove_retirement_worktree(session, removal_kind)
-                self._verify_retirement_removal(session, removal_kind)
+                    removal_kind = "managed-absence"
+                    self._verify_retirement_removal(session, removal_kind)
+                else:
+                    removal_kind = self._discard_snapshot_backed_worktree(
+                        session,
+                    )
+                    self._verify_retirement_removal(session, removal_kind)
             except (OSError, AlbertError, RetirementSnapshotError) as exc:
                 with self._runtime_lock(exclusive=True):
                     data = self._read_runtime_payload()
@@ -7410,6 +7555,8 @@ class AlbertMission:
                     correlation_id
                 ] = {
                     "action": "discard",
+                    "mission_id": self.mission_id,
+                    "session_id": session_id,
                     "expected_revision": expected_revision,
                     "result_revision": latest.revision,
                     "confirmation": confirmation,
@@ -7424,6 +7571,187 @@ class AlbertMission:
                 self.sessions[session_id] = latest
                 self.timeline = list(data.get("timeline", []))
                 return latest
+
+    def _discard_unpreserved_retained_worktree(
+        self,
+        session: LocalAgentSession,
+        intent: dict[str, Any],
+    ) -> str:
+        """Delete only the exact retained tree fingerprint claimed by discard."""
+
+        path = session.worktree_path
+        effect_path = self._retirement_removal_effect_path(session.session_id)
+        removal_kind = str(intent["direct_removal_kind"])
+        exclude_git_metadata = bool(intent["exclude_git_metadata"])
+
+        def assert_claimed_tree(candidate: Path) -> None:
+            if candidate.is_symlink() or not candidate.is_dir():
+                raise AlbertError(
+                    "Retained Worktree Discard source boundary changed."
+                )
+            status = candidate.stat(follow_symlinks=False)
+            if (
+                status.st_dev != intent["root_device"]
+                or status.st_ino != intent["root_inode"]
+            ):
+                raise AlbertError(
+                    "Retained Worktree Discard root identity changed."
+                )
+            manifest = RetirementSnapshotStore.retained_worktree_manifest(
+                candidate,
+                exclude_git_metadata=exclude_git_metadata,
+            )
+            if manifest["tree_sha256"] != intent["tree_sha256"]:
+                raise AlbertError(
+                    "Retained Worktree Discard content changed after authorization."
+                )
+
+        path_present = path.exists() or path.is_symlink()
+        effect_present = effect_path.exists() or effect_path.is_symlink()
+        if path_present and effect_present:
+            raise AlbertError(
+                "Retained Worktree Discard found both original and effect paths."
+            )
+        if not path_present and not effect_present:
+            if removal_kind == "git-worktree":
+                if self._git_worktree_registration_present_at(effect_path):
+                    self._remove_retirement_git_registration(effect_path)
+                elif self._git_worktree_registration_present(session):
+                    self._remove_retirement_git_registration(path)
+            return removal_kind
+
+        if path_present:
+            assert_claimed_tree(path)
+            if removal_kind == "git-worktree":
+                if self._worktree_identity_for_session(session) != session.worktree_identity:
+                    raise AlbertError(
+                        "Retained Worktree Discard Git identity changed after authorization."
+                    )
+            self._assert_no_open_retirement_handles(path)
+            effect_path.parent.mkdir(parents=True, exist_ok=True)
+            if removal_kind == "git-worktree":
+                completed = _run_bounded_process(
+                    [
+                        "git",
+                        "-C",
+                        str(self.target_repo),
+                        "worktree",
+                        "move",
+                        str(path),
+                        str(effect_path),
+                    ],
+                    timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+                    output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
+                )
+                if completed.returncode != 0:
+                    reason = (
+                        self._subprocess_output_text(completed.stderr).strip()
+                        or self._subprocess_output_text(completed.stdout).strip()
+                        or f"exit {completed.returncode}"
+                    )
+                    raise AlbertError(
+                        f"exact Git worktree discard isolation failed: {reason}"
+                    )
+            else:
+                path.replace(effect_path)
+
+        if path.exists() or path.is_symlink():
+            raise AlbertError(
+                "Retained Worktree appeared after its discard effect began."
+            )
+        assert_claimed_tree(effect_path)
+        self._assert_no_open_retirement_handles(effect_path)
+        if removal_kind == "git-worktree":
+            if self._git_worktree_registration_present(session):
+                self._repair_retirement_git_backpointer(
+                    original_path=path,
+                    effect_path=effect_path,
+                )
+            if not self._git_worktree_registration_present_at(effect_path):
+                raise AlbertError(
+                    "Exact Git worktree discard registration could not be proven."
+                )
+            completed = _run_bounded_process(
+                [
+                    "git",
+                    "-C",
+                    str(self.target_repo),
+                    "worktree",
+                    "remove",
+                    "--force",
+                    str(effect_path),
+                ],
+                timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+                output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
+            )
+            if completed.returncode != 0:
+                reason = (
+                    self._subprocess_output_text(completed.stderr).strip()
+                    or self._subprocess_output_text(completed.stdout).strip()
+                    or f"exit {completed.returncode}"
+                )
+                raise AlbertError(
+                    f"exact forced Git worktree discard failed: {reason}"
+                )
+        else:
+            shutil.rmtree(effect_path)
+        return removal_kind
+
+    def _discard_snapshot_backed_worktree(
+        self,
+        session: LocalAgentSession,
+    ) -> str:
+        path = session.worktree_path
+        effect_path = self._retirement_removal_effect_path(session.session_id)
+        path_present = path.exists() or path.is_symlink()
+        effect_present = effect_path.exists() or effect_path.is_symlink()
+        if path_present and effect_present:
+            raise AlbertError(
+                "Retained Worktree Discard found both original and effect paths."
+            )
+        if path_present:
+            current_identity = self._worktree_identity_for_session(session)
+            if current_identity != session.worktree_identity:
+                raise AlbertError(
+                    "Retained Worktree Discard identity changed before deletion."
+                )
+        removal_kind = str(session.retirement.get("removal_kind", ""))
+        if removal_kind not in {
+            "git-worktree",
+            "git-registration",
+            "managed-directory",
+            "managed-absence",
+        }:
+            if session.worktree_identity.startswith("managed-git:"):
+                removal_kind = "git-worktree"
+            elif session.worktree_identity.startswith("managed-directory:"):
+                removal_kind = "managed-directory"
+            else:
+                removal_kind = "managed-absence"
+        if removal_kind != "managed-absence":
+            snapshot_revision = int(
+                session.retirement["snapshot"].get(
+                    "session_revision",
+                    session.revision,
+                )
+            )
+            store = self._retirement_snapshot_store(
+                session,
+                snapshot_revision,
+            )
+            if removal_kind == "managed-directory" and path_present:
+                store.prepare_managed_directory_removal(
+                    session.retirement["snapshot"],
+                    worktree_path=path,
+                )
+            elif removal_kind == "git-worktree" and path_present:
+                self._assert_no_open_retirement_handles(path)
+                store.prepare_git_non_force_removal(
+                    session.retirement["snapshot"],
+                    worktree_path=path,
+                )
+            self._remove_retirement_worktree(session, removal_kind)
+        return removal_kind
 
     def _admit_retirement_unit(self) -> None:
         self._reclaim_snapshot_payloads(required_bytes=_PRESERVATION_BUDGET_BYTES)

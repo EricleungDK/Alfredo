@@ -679,7 +679,7 @@ test("requires exact-session confirmation before submitting a typed retirement d
   ).toBeVisible();
   expect(within(inspector).getByText("Retained worktree still has open handles.")).toBeVisible();
   expect(within(inspector).getByText(/retire-operation-9/)).toBeVisible();
-  expect(within(inspector).getByText(/33554432/)).toBeVisible();
+  expect(within(inspector).getByText("32 MiB")).toBeVisible();
   expect(within(inspector).getByRole("heading", { name: "Retirement Record" })).toBeVisible();
   const discard = within(inspector).getByRole("button", { name: "Discard Retained Worktree" });
   expect(discard).toHaveClass("action--danger");

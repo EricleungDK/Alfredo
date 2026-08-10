@@ -23,6 +23,7 @@ import {
   workstationActionTargetId,
 } from "./workstation-projection";
 import type { ReviewDecision, WorkspaceQueueDecision } from "./contracts";
+import { RetirementInspectionDetails } from "./RetirementInspectionDetails";
 
 export type MissionExecutionOutputState = "unavailable" | "subscribing" | "subscribed" | "failed";
 
@@ -693,45 +694,12 @@ function MissionExecutionInspector({
         ))}
       </section>
 
-      {card?.detail.retirementPhase === "preservation-blocked" ||
-      card?.detail.retirementPhase === "retirement-blocked" ? (
-        <section className="mission-execution-inspector__section">
-          <h5>Retirement Unit Inspection</h5>
-          <dl className="mission-execution-inspector__facts">
-            <div><dt>Phase</dt><dd>{card.detail.retirementPhase}</dd></div>
-            <div><dt>Blocked reason</dt><dd>{card.detail.retirementBlockedReason || "No reason recorded."}</dd></div>
-            <div><dt>Runner boundary</dt><dd>{JSON.stringify(card.detail.retirementRunnerBoundary ?? {})}</dd></div>
-            <div><dt>Preservation Budget</dt><dd>{JSON.stringify(card.detail.preservationBudget ?? {})}</dd></div>
-          </dl>
-        </section>
-      ) : null}
-
-      {card?.detail.retirementRecord ? (
-        <section className="mission-execution-inspector__section">
-          <h5>Retirement Record</h5>
-          <dl className="mission-execution-inspector__facts">
-            <div>
-              <dt>Disposition</dt>
-              <dd>{card.detail.retirementRecord.payload_disposition || "unknown"}</dd>
-            </div>
-            <div>
-              <dt>Manifest</dt>
-              <dd>{card.detail.retirementRecord.manifest_sha256 || "not recorded"}</dd>
-            </div>
-            <div>
-              <dt>Worktree Identity</dt>
-              <dd>{card.detail.retirementRecord.worktree_identity || "not recorded"}</dd>
-            </div>
-            <div>
-              <dt>Expires</dt>
-              <dd>{card.detail.retirementRecord.expires_at || "not recorded"}</dd>
-            </div>
-            <div>
-              <dt>Pinned</dt>
-              <dd>{card.detail.retirementRecord.pinned ? "yes" : "no"}</dd>
-            </div>
-          </dl>
-        </section>
+      {card ? (
+        <RetirementInspectionDetails
+          detail={card.detail}
+          sectionClassName="mission-execution-inspector__section"
+          factsClassName="mission-execution-inspector__facts"
+        />
       ) : null}
 
       {node.kind === "agent-session" ? (

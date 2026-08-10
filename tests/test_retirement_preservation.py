@@ -274,6 +274,53 @@ class RetirementPreservationTest(unittest.TestCase):
         self.assertEqual(replayed.revision, unpinned.revision)
         self.assertFalse(replayed.retirement["snapshot"]["pinned"])
 
+    def test_unpin_exact_replay_never_reclaims_newly_expired_payload(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        preserved = mission.preserve_retirement_unit(
+            completed.session_id,
+            expected_revision=completed.revision,
+            correlation_id="preserve-for-unpin-replay",
+        )
+        pinned = mission.set_retirement_snapshot_pin(
+            completed.session_id,
+            pinned=True,
+            expected_revision=preserved.revision,
+            correlation_id="pin-before-unpin-replay",
+        )
+        unpinned = mission.set_retirement_snapshot_pin(
+            completed.session_id,
+            pinned=False,
+            expected_revision=pinned.revision,
+            correlation_id="unpin-replay-boundary",
+        )
+        runtime = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        snapshot = runtime["sessions"][completed.session_id]["retirement"][
+            "snapshot"
+        ]
+        snapshot["created_at"] = (
+            datetime.now().astimezone() - timedelta(days=2)
+        ).isoformat()
+        snapshot["expires_at"] = (
+            datetime.now().astimezone() - timedelta(seconds=1)
+        ).isoformat()
+        mission.runtime_path.write_text(
+            json.dumps(runtime, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        before = mission.runtime_path.read_bytes()
+
+        replayed = mission.set_retirement_snapshot_pin(
+            completed.session_id,
+            pinned=False,
+            expected_revision=pinned.revision,
+            correlation_id="unpin-replay-boundary",
+        )
+
+        self.assertEqual(replayed.revision, unpinned.revision)
+        self.assertEqual(mission.runtime_path.read_bytes(), before)
+        self.assertTrue(Path(snapshot["payload_path"]).is_dir())
+
     def test_expired_unpinned_payloads_reclaim_oldest_first_and_keep_records(self) -> None:
         second_issue = self.add_issue(2)
         third_issue = self.add_issue(3)
@@ -419,7 +466,16 @@ class RetirementPreservationTest(unittest.TestCase):
         self.assertFalse(unpinned.retirement["snapshot"]["pinned"])
         resolved = constrained.retirement_storage_inspection()
         self.assertEqual(resolved["blockers"], [])
-        self.assertEqual(resolved["counts"]["retained_payloads"], 0)
+        self.assertEqual(resolved["counts"]["retained_payloads"], 1)
+        self.assertTrue(Path(pinned_snapshot["payload_path"]).is_dir())
+
+        launched = constrained.launch_issue(second_issue)
+        self.assertTrue(launched.preservation_budget["bound"])
+        reclaimed = constrained._refresh_persisted_session(first.session_id)
+        self.assertEqual(
+            reclaimed.retirement["snapshot"]["payload_disposition"],
+            "reclaimed",
+        )
 
     def test_expired_unpinned_payload_reclaims_during_mission_startup(self) -> None:
         mission = self.load_mission()
@@ -542,6 +598,8 @@ class RetirementPreservationTest(unittest.TestCase):
         impossible_revision = json.loads(json.dumps(baseline))
         impossible_revision["sessions"][preserved.session_id]["retirement"]["action_receipts"]["impossible-result"] = {
             "action": "retry",
+            "mission_id": mission.mission_id,
+            "session_id": preserved.session_id,
             "expected_revision": preserved.revision,
             "result_revision": preserved.revision + 2,
             "result_phase": "retired",
@@ -560,6 +618,8 @@ class RetirementPreservationTest(unittest.TestCase):
         wrong_confirmation = json.loads(json.dumps(baseline))
         wrong_confirmation["sessions"][preserved.session_id]["retirement"]["action_receipts"]["wrong-confirmation"] = {
             "action": "discard",
+            "mission_id": mission.mission_id,
+            "session_id": preserved.session_id,
             "expected_revision": completed.revision,
             "result_revision": preserved.revision,
             "confirmation": "some-other-session",
@@ -568,6 +628,31 @@ class RetirementPreservationTest(unittest.TestCase):
         }
         mission.runtime_path.write_text(
             json.dumps(wrong_confirmation, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        with self.assertRaisesRegex(
+            AlbertError,
+            "Retirement Unit action receipt is invalid",
+        ):
+            self.load_mission()
+
+        mission.runtime_path.write_text(
+            json.dumps(baseline, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        pinned = mission.set_retirement_snapshot_pin(
+            preserved.session_id,
+            pinned=True,
+            expected_revision=preserved.revision,
+            correlation_id="owner-bound-pin-receipt",
+        )
+        owner_bound = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        receipt = owner_bound["sessions"][pinned.session_id]["retirement"][
+            "action_receipts"
+        ]["owner-bound-pin-receipt"]
+        receipt["session_id"] = "some-other-session"
+        mission.runtime_path.write_text(
+            json.dumps(owner_bound, indent=2, sort_keys=True),
             encoding="utf-8",
         )
         with self.assertRaisesRegex(
@@ -2268,6 +2353,113 @@ class RetirementPreservationTest(unittest.TestCase):
         )
         reloaded = self.load_mission().sessions[completed.session_id]
         self.assertEqual(reloaded.retirement["phase"], "preserved")
+
+    def test_preservation_blocked_discard_does_not_require_a_snapshot(self) -> None:
+        blocked_mission = self.load_mission(quiescence=("absent", "live-exact"))
+        completed = self.completed_session(blocked_mission)
+        with self.assertRaisesRegex(LaunchBlockedError, "Runner Quiescence"):
+            blocked_mission.preserve_retirement_unit(
+                completed.session_id,
+                expected_revision=completed.revision,
+                correlation_id="preserve-before-direct-discard",
+            )
+        blocked = blocked_mission._refresh_persisted_session(completed.session_id)
+        self.assertEqual(blocked.retirement["snapshot"], {})
+
+        quiesced = self.load_mission()
+        discarded = quiesced.discard_retained_worktree(
+            completed.session_id,
+            expected_revision=blocked.revision,
+            correlation_id="discard-preservation-blocked-worktree",
+            confirmation=completed.session_id,
+            reason="Mission Commander explicitly discards unpreserved retained work.",
+        )
+
+        self.assertEqual(discarded.retirement["phase"], "retired")
+        self.assertFalse(completed.worktree_path.exists())
+
+    def test_preservation_blocked_export_uses_exact_path_when_git_identity_is_broken(
+        self,
+    ) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        git_pointer = completed.worktree_path / ".git"
+        git_pointer.write_text("gitdir: /missing/retained-worktree-admin\n", encoding="utf-8")
+        with self.assertRaisesRegex(LaunchBlockedError, "Worktree Identity"):
+            mission.preserve_retirement_unit(
+                completed.session_id,
+                expected_revision=completed.revision,
+                correlation_id="preserve-with-broken-git-pointer",
+            )
+        blocked = mission._refresh_persisted_session(completed.session_id)
+        destination = self.root / "broken-identity-export"
+
+        receipt = mission.export_retirement_unit(
+            completed.session_id,
+            destination=destination,
+            expected_revision=blocked.revision,
+            correlation_id="export-broken-git-identity",
+        )
+
+        self.assertEqual(
+            receipt["destination"], str(destination.resolve() / "repository")
+        )
+        self.assertEqual(
+            (destination / "repository" / "tracked.txt").read_text(encoding="utf-8"),
+            "baseline\n",
+        )
+        self.assertFalse((destination / "repository" / ".git").exists())
+
+    def test_preservation_blocked_discard_uses_exact_path_when_git_identity_is_broken(
+        self,
+    ) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        git_pointer = completed.worktree_path / ".git"
+        git_pointer.write_text("gitdir: /missing/retained-worktree-admin\n", encoding="utf-8")
+        with self.assertRaisesRegex(LaunchBlockedError, "Worktree Identity"):
+            mission.preserve_retirement_unit(
+                completed.session_id,
+                expected_revision=completed.revision,
+                correlation_id="preserve-before-broken-identity-discard",
+            )
+        blocked = mission._refresh_persisted_session(completed.session_id)
+
+        discarded = mission.discard_retained_worktree(
+            completed.session_id,
+            expected_revision=blocked.revision,
+            correlation_id="discard-broken-git-identity",
+            confirmation=completed.session_id,
+            reason="Mission Commander explicitly discards the fingerprinted path.",
+        )
+
+        self.assertEqual(discarded.retirement["phase"], "retired")
+        self.assertFalse(completed.worktree_path.exists())
+        self.assertTrue((self.target_repo / "tracked.txt").is_file())
+
+    def test_retained_worktree_export_rejects_destination_below_its_source(self) -> None:
+        blocked_mission = self.load_mission(quiescence=("absent", "live-exact"))
+        completed = self.completed_session(blocked_mission)
+        with self.assertRaisesRegex(LaunchBlockedError, "Runner Quiescence"):
+            blocked_mission.preserve_retirement_unit(
+                completed.session_id,
+                expected_revision=completed.revision,
+                correlation_id="preserve-before-nested-export",
+            )
+        blocked = blocked_mission._refresh_persisted_session(completed.session_id)
+        destination = completed.worktree_path / "nested-export"
+
+        with self.assertRaisesRegex(AlbertError, "outside the Retained Worktree"):
+            self.load_mission().export_retirement_unit(
+                completed.session_id,
+                destination=destination,
+                expected_revision=blocked.revision,
+                correlation_id="reject-nested-retained-export",
+            )
+
+        self.assertFalse(destination.exists())
+        persisted = self.load_mission().sessions[completed.session_id]
+        self.assertEqual(persisted.retirement.get("export_intent") or {}, {})
 
     def test_concurrent_headless_admission_serializes_capacity_reservation(
         self,

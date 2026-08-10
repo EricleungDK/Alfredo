@@ -1059,6 +1059,62 @@ export interface WorkspaceIssueSliceSummary {
   readonly working_context_sources: readonly WorkspaceIssueContextSourceSummary[];
 }
 
+export type RetirementPhase =
+  | "active"
+  | "preserving"
+  | "preserved"
+  | "grace"
+  | "retiring"
+  | "retired"
+  | "preservation-blocked"
+  | "retirement-blocked";
+
+export interface RetirementRunnerBoundary {
+  readonly mission_id?: string;
+  readonly session_id?: string;
+  readonly runner_operation_id?: string;
+  readonly owner_pid?: number | null;
+  readonly owner_identity?: string;
+  readonly process_group_pid?: number | null;
+  readonly process_group_identity?: string;
+  readonly process_token?: string;
+  readonly owner_released_at?: string;
+  readonly owner_release_operation_id?: string;
+  readonly owner_lease_path?: string;
+  readonly owner_lease_token?: string;
+}
+
+export interface PreservationBudget {
+  readonly schema_version?: 1;
+  readonly state?: "reserved" | "verified" | "discarded";
+  readonly bound?: boolean;
+  readonly reserved_bytes?: number;
+  readonly reserved_at?: string;
+  readonly verified_at?: string;
+  readonly discarded_at?: string;
+}
+
+export interface RetirementRecord {
+  readonly schema_version?: 1;
+  readonly manifest_path?: string;
+  readonly manifest_sha256?: string;
+  readonly payload_path?: string;
+  readonly worktree_identity?: string;
+  readonly payload_bytes?: number;
+  readonly manifest_bytes?: number;
+  readonly snapshot_bytes?: number;
+  readonly session_revision?: number;
+  readonly mission_id?: string;
+  readonly session_id?: string;
+  readonly terminal_status?: string;
+  readonly created_at?: string;
+  readonly expires_at?: string;
+  readonly pinned?: boolean;
+  readonly payload_disposition?: "retained" | "reclaimed";
+  readonly reclaimed_at?: string;
+  readonly reclamation_reason?: string;
+}
+
 export interface MissionSessionSummary {
   readonly session_id: string;
   readonly issue_id: string;
@@ -1099,21 +1155,11 @@ export interface MissionSessionSummary {
   readonly work_kind?: "issue-slice" | "ad-hoc-delegation" | string;
   readonly parent_session_id?: string;
   readonly session_revision?: number;
-  readonly retirement_phase?: string;
+  readonly retirement_phase?: RetirementPhase;
   readonly retirement_blocked_reason?: string;
-  readonly retirement_runner_boundary?: Readonly<Record<string, unknown>>;
-  readonly preservation_budget?: Readonly<Record<string, unknown>>;
-  readonly retirement_record?: {
-    readonly manifest_sha256?: string;
-    readonly worktree_identity?: string;
-    readonly snapshot_bytes?: number;
-    readonly created_at?: string;
-    readonly expires_at?: string;
-    readonly pinned?: boolean;
-    readonly payload_disposition?: string;
-    readonly reclaimed_at?: string;
-    readonly reclamation_reason?: string;
-  } | null;
+  readonly retirement_runner_boundary?: RetirementRunnerBoundary;
+  readonly preservation_budget?: PreservationBudget;
+  readonly retirement_record?: RetirementRecord | null;
   readonly retirement_actions?: Readonly<{
     retry: boolean;
     inspect: boolean;
