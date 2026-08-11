@@ -1052,6 +1052,29 @@ def _run(args: argparse.Namespace) -> int:
         workspace_root=target_repo,
         registry_path=registry_path,
     )
+    read_only_load_commands = {
+        "activity-journal",
+        "agent-console-history",
+        "agent-console-message",
+        "agent-console-response",
+        "agents",
+        "board",
+        "mission-drafts",
+        "retirement-inspect",
+        "retirement-storage",
+        "retirement-verify",
+        "review-workspace",
+        "session-artifact",
+        "session-output",
+        "shell-terminal",
+        "show",
+        "tui",
+        "working-context",
+        "workspace-queue",
+        "workspace-snapshot",
+        "workspace-updates",
+    }
+    perform_startup_effects = args.command not in read_only_load_commands
     mission = AlbertMission(
         target_repo=target_repo,
         tracker_dir=Path(args.tracker_dir),
@@ -1100,7 +1123,7 @@ def _run(args: argparse.Namespace) -> int:
         retention_grace_seconds=args.retention_grace_seconds,
         snapshot_storage_retention_seconds=args.snapshot_storage_retention_seconds,
         snapshot_storage_budget_bytes=args.snapshot_storage_budget_bytes,
-    ).load()
+    ).load(perform_startup_effects=perform_startup_effects)
     workspace_commands = {
         "workspace-snapshot",
         "workspace-action",
@@ -1138,7 +1161,13 @@ def _run(args: argparse.Namespace) -> int:
         "mission-draft-abandon",
     }
     snapshots = (
-        _load_workspace_service(args, mission) if args.command in workspace_commands else None
+        _load_workspace_service(
+            args,
+            mission,
+            perform_startup_effects=perform_startup_effects,
+        )
+        if args.command in workspace_commands
+        else None
     )
     if args.command == "board":
         summary = mission.board_summary()
@@ -1888,7 +1917,10 @@ def _workstation_session_payload(
 
 
 def _load_workspace_service(
-    args: argparse.Namespace, primary: AlbertMission
+    args: argparse.Namespace,
+    primary: AlbertMission,
+    *,
+    perform_startup_effects: bool = True,
 ) -> WorkspaceSnapshotService:
     if not args.mission_catalog:
         return WorkspaceSnapshotService(primary)
@@ -1938,7 +1970,7 @@ def _load_workspace_service(
                     snapshot_storage_budget_bytes=(
                         primary.snapshot_storage_budget_bytes
                     ),
-                ).load()
+                ).load(perform_startup_effects=perform_startup_effects)
             )
         return WorkspaceSnapshotService(primary, missions=tuple(missions))
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:

@@ -11584,6 +11584,163 @@ Wait for the accepted dependency.
             "Controller: selected-status-controller", selected_status.message.content
         )
 
+    def test_storage_command_renders_complete_usage_and_count_totals(self) -> None:
+        mission = AlbertMission(
+            target_repo=self.target_repo,
+            tracker_dir=self.tracker,
+            runtime_root=self.runtime,
+            mission_id="command-deck",
+            allow_empty_tracker=True,
+            snapshot_storage_budget_bytes=8192,
+        ).load()
+        snapshots = WorkspaceSnapshotService(mission)
+        session_id = "retired-storage-session"
+        payload_path = mission.runtime_dir / "retirement" / "payloads" / session_id
+        stored_session = LocalAgentSession(
+            session_id=session_id,
+            issue_id="ISS-01",
+            assigned_agent="retirement-local",
+            worktree_path=self.root / "retired-storage-worktree",
+            task_packet={},
+            status="completed",
+            revision=3,
+            preservation_budget={
+                "schema_version": 1,
+                "state": "verified",
+                "bound": False,
+                "reserved_bytes": 32 * 1024 * 1024,
+                "reserved_at": "2026-08-09T08:00:00+00:00",
+                "verified_at": "2026-08-09T08:30:00+00:00",
+            },
+            retirement={
+                "schema_version": 1,
+                "phase": "retired",
+                "runner_boundary": {},
+                "snapshot": {
+                    "schema_version": 1,
+                    "verified": True,
+                    "manifest_path": str(payload_path / "manifest.json"),
+                    "manifest_sha256": "a" * 64,
+                    "payload_path": str(payload_path),
+                    "worktree_identity": "managed:retired-storage-session",
+                    "payload_bytes": 1024,
+                    "manifest_bytes": 512,
+                    "snapshot_bytes": 1536,
+                    "session_revision": 2,
+                    "mission_id": mission.mission_id,
+                    "session_id": session_id,
+                    "terminal_status": "completed",
+                    "created_at": "2026-08-09T08:30:00+00:00",
+                    "expires_at": "2026-08-10T08:30:00+00:00",
+                    "pinned": False,
+                    "payload_disposition": "retained",
+                    "reclaimed_at": "",
+                    "reclamation_reason": "",
+                },
+                "preservation_intent": {},
+                "preservation_receipt": {},
+                "blocked_reason": "",
+                "retirement_attempts": 0,
+                "removal_kind": "managed-directory",
+                "retired_at": "2026-08-09T09:00:00+00:00",
+                "action_receipts": {},
+            },
+        )
+        runtime = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        runtime["sessions"][session_id] = stored_session.to_dict()
+        mission.runtime_path.write_text(
+            json.dumps(runtime, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        scope = snapshots.snapshot().conversation_scope
+        prompt = AgentConsoleHistoryService(snapshots).append(
+            role="user",
+            content="/storage",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        response = AgentConsoleResponseService(snapshots).respond(
+            message_id=prompt.message_id,
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        self.assertIn(
+            "Usage: 1.50 KiB payload + 0 B reserved = 1.50 KiB committed; "
+            "6.50 KiB available",
+            response.message.content,
+        )
+        self.assertIn(
+            "Records: 1; retained 1; pinned 0; reclaimed 0; expired eligible 1",
+            response.message.content,
+        )
+
+    def test_storage_command_renders_every_recent_reclamation_with_labeled_fields(
+        self,
+    ) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        runtime = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        runtime["retirement_storage"].update(
+            {
+                "reclamation_count": 3,
+                "reclaimed_bytes": 4096,
+                "recent_reclamations": [
+                    {
+                        "session_id": "retired-session-000001",
+                        "reclaimed_at": "2026-08-10T08:15:30+00:00",
+                        "snapshot_bytes": 1536,
+                        "reason": "retention-expired-capacity-reclamation",
+                    },
+                    {
+                        "session_id": "retired-session-000002",
+                        "reclaimed_at": "2026-08-10T09:45:00+00:00",
+                        "snapshot_bytes": 7,
+                        "reason": "retention-expired-capacity-reclamation",
+                    },
+                ],
+            }
+        )
+        mission.runtime_path.write_text(
+            json.dumps(runtime, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        scope = snapshots.snapshot().conversation_scope
+        prompt = AgentConsoleHistoryService(snapshots).append(
+            role="user",
+            content="/storage",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        response = AgentConsoleResponseService(snapshots).respond(
+            message_id=prompt.message_id,
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        first_row = (
+            "- Session: retired-session-000001; Reclaimed bytes: 1.50 KiB; "
+            "Reclaimed at: 2026-08-10T08:15:30+00:00; "
+            "Reason: retention-expired-capacity-reclamation"
+        )
+        second_row = (
+            "- Session: retired-session-000002; Reclaimed bytes: 7 B; "
+            "Reclaimed at: 2026-08-10T09:45:00+00:00; "
+            "Reason: retention-expired-capacity-reclamation"
+        )
+        content = response.message.content
+        self.assertIn("Reclamation: 3 payloads, 4.00 KiB", content)
+        self.assertIn("Recent reclamations:\n", content)
+        self.assertEqual(content.count(first_row), 1)
+        self.assertEqual(content.count(second_row), 1)
+        self.assertLess(content.index(first_row), content.index(second_row))
+
     def test_use_command_is_not_redispatched_after_skill_validation(self) -> None:
         skill = self.target_repo / ".agents" / "skills" / "diagnose" / "SKILL.md"
         skill.parent.mkdir(parents=True)

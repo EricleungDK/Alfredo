@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import tempfile
@@ -10,6 +11,10 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+
+_RETAINED_WORKTREE_RECOVERY_METADATA_BYTES_LIMIT = 32 * 1024 * 1024
+_GIT_WORKTREE_POINTER_BYTES_LIMIT = 4096
 
 
 class RetirementSnapshotError(RuntimeError):
@@ -155,36 +160,71 @@ class RetirementSnapshotStore:
     def materialize(self, record: dict[str, Any], destination_root: Path) -> Path:
         """Reconstruct verified preserved material below an explicit empty root."""
 
-        self.verify(record)
-        if (
-            destination_root.is_symlink()
-            or not destination_root.is_dir()
-            or any(destination_root.iterdir())
-        ):
-            raise RetirementSnapshotError(
-                "Retirement Snapshot reconstruction destination is not an empty directory."
-            )
-        manifest_path = self._contained_payload_file(
-            self.payload_root,
-            PurePosixPath("manifest.json"),
+        destination_fd = self._open_directory_path(
+            destination_root,
+            error="Retirement Snapshot reconstruction destination is invalid.",
         )
-        manifest = self._read_manifest(manifest_path)
-        repository_kind = manifest["git_state"]["kind"]
-        if repository_kind == "git-worktree":
-            self._reconstruct_git(self.payload_root, manifest, destination_root)
-        elif repository_kind == "managed-directory":
-            self._reconstruct_directory(
-                self.payload_root,
-                manifest,
-                destination_root,
-            )
-        elif repository_kind == "managed-absence":
-            self._reconstruct_absence(destination_root)
-        else:
-            raise RetirementSnapshotError(
-                "Retirement Snapshot reconstruction kind is unsupported."
-            )
+        try:
+            self.materialize_into_directory(record, destination_fd)
+        finally:
+            os.close(destination_fd)
         return destination_root / "repository"
+
+    def materialize_into_directory(
+        self,
+        record: dict[str, Any],
+        destination_fd: int,
+    ) -> None:
+        """Reconstruct one snapshot below an exact borrowed directory descriptor."""
+
+        self.verify(record)
+        root_fd = self._duplicate_directory_fd(
+            destination_fd,
+            error="Retirement Snapshot reconstruction destination is invalid.",
+        )
+        try:
+            self._require_empty_directory_fd(
+                root_fd,
+                error=(
+                    "Retirement Snapshot reconstruction destination is not an empty "
+                    "directory."
+                ),
+            )
+            manifest_path = self._contained_payload_file(
+                self.payload_root,
+                PurePosixPath("manifest.json"),
+            )
+            manifest = self._read_manifest(manifest_path)
+            materialization_root = (
+                self.request.runtime_dir / "retirement" / "export-materialization"
+            )
+            materialization_root.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(
+                dir=materialization_root,
+                prefix=f"{self.request.session_id}.",
+            ) as temporary_name:
+                temporary = Path(temporary_name)
+                self._materialize_manifest_to_trusted_root(
+                    manifest,
+                    temporary,
+                )
+                source_repository_fd = self._open_directory_path(
+                    temporary / "repository",
+                    error="Retirement Snapshot private reconstruction is invalid.",
+                )
+                try:
+                    self._copy_repository_into_directory(
+                        source_repository_fd,
+                        root_fd,
+                    )
+                finally:
+                    os.close(source_repository_fd)
+            if self._directory_names_fd(root_fd) != ("repository",):
+                raise RetirementSnapshotError(
+                    "Retirement Snapshot reconstruction destination changed."
+                )
+        finally:
+            os.close(root_fd)
 
     def verify_materialized_repository(
         self,
@@ -193,48 +233,392 @@ class RetirementSnapshotStore:
     ) -> bool:
         """Prove a crash-left export is exactly the retained Snapshot Payload."""
 
-        self.verify(record)
-        if repository.is_symlink() or not repository.is_dir():
-            raise RetirementSnapshotError(
-                "Retirement Snapshot exported repository boundary is invalid."
-            )
-        manifest_path = self._contained_payload_file(
-            self.payload_root,
-            PurePosixPath("manifest.json"),
+        repository_fd = self._open_directory_path(
+            repository,
+            error="Retirement Snapshot exported repository boundary is invalid.",
         )
-        manifest = self._read_manifest(manifest_path)
-        git_state = manifest["git_state"]
-        if git_state["kind"] == "git-worktree":
-            head = self._git(repository, ["rev-parse", "HEAD"]).strip()
-            status = self._git(repository, ["status", "--porcelain=v2", "-z", "--"])
-            if (
-                head != git_state["baseline_commit"]
-                or sha256(status.encode("utf-8")).hexdigest()
-                != git_state["status_sha256"]
-            ):
-                raise RetirementSnapshotError(
-                    "Retirement Snapshot exported Git state is invalid."
-                )
+        try:
+            return self.verify_materialized_repository_in_directory(
+                record,
+                repository_fd,
+            )
+        finally:
+            os.close(repository_fd)
 
-        verification_root = self.request.runtime_dir / "retirement" / "export-check"
-        verification_root.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(
-            dir=verification_root,
-            prefix=f"{self.request.session_id}.",
-        ) as expected_name:
-            expected = self.materialize(record, Path(expected_name))
-            exclude_git_metadata = git_state["kind"] == "git-worktree"
-            if self._repository_tree_entries(
-                repository,
-                exclude_git_metadata=exclude_git_metadata,
-            ) != self._repository_tree_entries(
-                expected,
-                exclude_git_metadata=exclude_git_metadata,
+    def verify_materialized_repository_in_directory(
+        self,
+        record: dict[str, Any],
+        repository_fd: int,
+    ) -> bool:
+        """Prove one exported repository through an exact borrowed descriptor."""
+
+        self.verify(record)
+        source_fd = self._duplicate_directory_fd(
+            repository_fd,
+            error="Retirement Snapshot exported repository boundary is invalid.",
+        )
+        try:
+            manifest_path = self._contained_payload_file(
+                self.payload_root,
+                PurePosixPath("manifest.json"),
+            )
+            manifest = self._read_manifest(manifest_path)
+            verification_root = (
+                self.request.runtime_dir / "retirement" / "export-check"
+            )
+            verification_root.mkdir(parents=True, exist_ok=True)
+            with tempfile.TemporaryDirectory(
+                dir=verification_root,
+                prefix=f"{self.request.session_id}.actual.",
+            ) as actual_name:
+                actual_root = Path(actual_name)
+                actual_root_fd = self._open_directory_path(
+                    actual_root,
+                    error="Retirement Snapshot private verification is invalid.",
+                )
+                try:
+                    self._copy_repository_into_directory(source_fd, actual_root_fd)
+                finally:
+                    os.close(actual_root_fd)
+                actual = actual_root / "repository"
+                self._verify_materialized_repository_path(
+                    manifest,
+                    actual,
+                )
+            return True
+        finally:
+            os.close(source_fd)
+
+    @staticmethod
+    def _is_git_worktree_pointer_content(content: bytes) -> bool:
+        """Recognize only one bounded Git administration-pointer line."""
+
+        if not content or len(content) > _GIT_WORKTREE_POINTER_BYTES_LIMIT:
+            return False
+        line = content[:-1] if content.endswith(b"\n") else content
+        if line.endswith(b"\r"):
+            line = line[:-1]
+        prefix = b"gitdir: "
+        return (
+            line.startswith(prefix)
+            and bool(line[len(prefix) :])
+            and b"\0" not in line
+            and b"\n" not in line
+            and b"\r" not in line
+        )
+
+    @classmethod
+    def _bounded_git_worktree_pointer(
+        cls,
+        path: Path,
+    ) -> dict[str, Any] | None:
+        """Read one stable no-follow Git pointer, or classify it as user data."""
+
+        try:
+            before = path.stat(follow_symlinks=False)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise RetirementSnapshotError(
+                "Retained Worktree Git metadata could not be inspected."
+            ) from exc
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_size > _GIT_WORKTREE_POINTER_BYTES_LIMIT
+        ):
+            return None
+        try:
+            descriptor = os.open(
+                path,
+                os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+            )
+        except OSError as exc:
+            raise RetirementSnapshotError(
+                "Retained Worktree Git metadata could not be inspected."
+            ) from exc
+        try:
+            after = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(after.st_mode)
+                or (after.st_dev, after.st_ino, after.st_size)
+                != (before.st_dev, before.st_ino, before.st_size)
             ):
                 raise RetirementSnapshotError(
-                    "Retirement Snapshot exported repository content is invalid."
+                    "Retained Worktree Git metadata changed during inspection."
                 )
-        return True
+            with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                content = handle.read(_GIT_WORKTREE_POINTER_BYTES_LIMIT + 1)
+        finally:
+            os.close(descriptor)
+        if len(content) != before.st_size:
+            raise RetirementSnapshotError(
+                "Retained Worktree Git metadata changed during inspection."
+            )
+        if not cls._is_git_worktree_pointer_content(content):
+            return None
+        return {"mode": before.st_mode & 0o777, "content": content}
+
+    @classmethod
+    def _bounded_git_worktree_pointer_at(
+        cls,
+        parent_fd: int,
+        name: str,
+        initial: os.stat_result,
+    ) -> dict[str, Any] | None:
+        """Read one stable Git pointer relative to an exact parent descriptor."""
+
+        if (
+            not stat.S_ISREG(initial.st_mode)
+            or initial.st_size > _GIT_WORKTREE_POINTER_BYTES_LIMIT
+        ):
+            return None
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        try:
+            descriptor = os.open(name, flags, dir_fd=parent_fd)
+        except OSError as exc:
+            raise RetirementSnapshotError(
+                "Retained Worktree Git metadata could not be inspected."
+            ) from exc
+        try:
+            before = os.fstat(descriptor)
+            if cls._stable_stat(before) != cls._stable_stat(initial):
+                raise RetirementSnapshotError(
+                    "Retained Worktree Git metadata changed during inspection."
+                )
+            content = bytearray()
+            while len(content) <= _GIT_WORKTREE_POINTER_BYTES_LIMIT:
+                chunk = os.read(descriptor, _GIT_WORKTREE_POINTER_BYTES_LIMIT + 1)
+                if not chunk:
+                    break
+                content.extend(chunk)
+            after = os.fstat(descriptor)
+            if (
+                cls._stable_stat(after) != cls._stable_stat(before)
+                or len(content) != before.st_size
+                or len(content) > _GIT_WORKTREE_POINTER_BYTES_LIMIT
+            ):
+                raise RetirementSnapshotError(
+                    "Retained Worktree Git metadata changed during inspection."
+                )
+        except OSError as exc:
+            raise RetirementSnapshotError(
+                "Retained Worktree Git metadata could not be inspected."
+            ) from exc
+        finally:
+            os.close(descriptor)
+        payload = bytes(content)
+        if not cls._is_git_worktree_pointer_content(payload):
+            return None
+        return {"mode": before.st_mode & 0o777, "content": payload}
+
+    @staticmethod
+    def _retained_regular_file_record(path: Path) -> dict[str, Any]:
+        """Fingerprint one stable no-follow regular-file descriptor."""
+
+        try:
+            initial = path.stat(follow_symlinks=False)
+            if not stat.S_ISREG(initial.st_mode):
+                raise RetirementSnapshotError(
+                    "Retained Worktree export contains an unsupported entry."
+                )
+            descriptor = os.open(
+                path,
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_NONBLOCK", 0),
+            )
+        except RetirementSnapshotError:
+            raise
+        except OSError as exc:
+            raise RetirementSnapshotError(
+                "Retained Worktree file changed during inspection."
+            ) from exc
+        try:
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode) or (
+                initial.st_dev,
+                initial.st_ino,
+                initial.st_mode,
+                initial.st_size,
+                initial.st_mtime_ns,
+                initial.st_ctime_ns,
+            ) != (
+                before.st_dev,
+                before.st_ino,
+                before.st_mode,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            ):
+                raise RetirementSnapshotError(
+                    "Retained Worktree file changed during inspection."
+                )
+            digest = sha256()
+            while chunk := os.read(descriptor, 1024 * 1024):
+                digest.update(chunk)
+            after = os.fstat(descriptor)
+            if (
+                before.st_dev,
+                before.st_ino,
+                before.st_mode,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            ) != (
+                after.st_dev,
+                after.st_ino,
+                after.st_mode,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            ):
+                raise RetirementSnapshotError(
+                    "Retained Worktree file changed during inspection."
+                )
+            return {
+                "kind": "file",
+                "mode": after.st_mode & 0o777,
+                "size": after.st_size,
+                "sha256": digest.hexdigest(),
+            }
+        except OSError as exc:
+            raise RetirementSnapshotError(
+                "Retained Worktree file changed during inspection."
+            ) from exc
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def _retained_regular_file_record_at(
+        cls,
+        parent_fd: int,
+        name: str,
+        initial: os.stat_result,
+    ) -> dict[str, Any]:
+        """Fingerprint one regular file relative to an exact parent descriptor."""
+
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        try:
+            descriptor = os.open(name, flags, dir_fd=parent_fd)
+        except OSError as exc:
+            raise RetirementSnapshotError(
+                "Retained Worktree file changed during inspection."
+            ) from exc
+        try:
+            before = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or cls._stable_stat(before) != cls._stable_stat(initial)
+            ):
+                raise RetirementSnapshotError(
+                    "Retained Worktree file changed during inspection."
+                )
+            digest = cls._file_descriptor_digest(descriptor)
+            after = os.fstat(descriptor)
+            if cls._stable_stat(after) != cls._stable_stat(before):
+                raise RetirementSnapshotError(
+                    "Retained Worktree file changed during inspection."
+                )
+            return {
+                "kind": "file",
+                "mode": after.st_mode & 0o777,
+                "size": after.st_size,
+                "sha256": digest,
+            }
+        except OSError as exc:
+            raise RetirementSnapshotError(
+                "Retained Worktree file changed during inspection."
+            ) from exc
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def _retained_worktree_digest(
+        cls,
+        *,
+        root_mode: int,
+        entries: dict[str, dict[str, Any]],
+    ) -> str:
+        payload = {
+            "schema_version": 2,
+            "root_mode": root_mode,
+            "entries": entries,
+        }
+        return sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+        ).hexdigest()
+
+    @classmethod
+    def _enforce_retained_worktree_manifest_bound(
+        cls,
+        manifest: dict[str, Any],
+    ) -> None:
+        encoded_bytes = 0
+        encoder = json.JSONEncoder(
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        try:
+            for chunk in encoder.iterencode(manifest):
+                encoded_bytes += len(chunk.encode("ascii"))
+                if encoded_bytes > _RETAINED_WORKTREE_RECOVERY_METADATA_BYTES_LIMIT:
+                    raise RetirementSnapshotError(
+                        "Retained Worktree recovery metadata exceeds 32 MiB."
+                    )
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise RetirementSnapshotError(
+                "Retained Worktree recovery manifest is invalid."
+            ) from exc
+
+    @classmethod
+    def _build_retained_worktree_manifest(
+        cls,
+        *,
+        root_mode: int,
+        entries: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        materialized_entries = {
+            relative_value: record
+            for relative_value, record in entries.items()
+            if record.get("kind") != "git-pointer"
+        }
+        manifest = {
+            "schema_version": 2,
+            "root_mode": root_mode,
+            "entries": entries,
+            "tree_sha256": cls._retained_worktree_digest(
+                root_mode=root_mode,
+                entries=entries,
+            ),
+            "materialized_tree_sha256": cls._retained_worktree_digest(
+                root_mode=root_mode,
+                entries=materialized_entries,
+            ),
+        }
+        cls._enforce_retained_worktree_manifest_bound(manifest)
+        return manifest
+
+    @staticmethod
+    def _raise_incomplete_tree_walk(error: OSError) -> None:
+        raise RetirementSnapshotError(
+            "Retained Worktree recovery scan could not inspect the full tree."
+        ) from error
 
     @classmethod
     def retained_worktree_manifest(
@@ -245,58 +629,345 @@ class RetirementSnapshotStore:
     ) -> dict[str, Any]:
         """Fingerprint an exact retained filesystem tree without following links."""
 
-        if worktree.is_symlink() or not worktree.is_dir():
-            raise RetirementSnapshotError("Retained Worktree export source boundary is invalid.")
+        descriptor = cls._open_directory_path(
+            worktree,
+            error="Retained Worktree export source boundary is invalid.",
+        )
+        try:
+            return cls.retained_worktree_manifest_from_directory(
+                descriptor,
+                exclude_git_metadata=exclude_git_metadata,
+            )
+        finally:
+            os.close(descriptor)
+
+    @classmethod
+    def retained_worktree_manifest_from_directory(
+        cls,
+        worktree_fd: int,
+        *,
+        exclude_git_metadata: bool,
+    ) -> dict[str, Any]:
+        """Fingerprint one tree through an exact borrowed root descriptor."""
+
+        root_fd = cls._duplicate_directory_fd(
+            worktree_fd,
+            error="Retained Worktree export source boundary is invalid.",
+        )
         entries: dict[str, dict[str, Any]] = {}
-        scanned = 0
-        for directory, names, filenames in os.walk(worktree, followlinks=False):
-            directory_path = Path(directory)
-            if exclude_git_metadata and directory_path == worktree:
-                names[:] = [name for name in names if name != ".git"]
-                filenames = [name for name in filenames if name != ".git"]
-            for name in sorted(tuple(names)):
-                path = directory_path / name
-                relative = path.relative_to(worktree).as_posix()
-                scanned += 1
-                if path.is_symlink():
-                    names.remove(name)
-                    entries[relative] = {
-                        "kind": "symlink",
-                        "target": os.readlink(os.fsencode(path)).hex(),
-                    }
+        metadata_bytes = 0
+
+        def add_entry(relative: str, record: dict[str, Any]) -> None:
+            nonlocal metadata_bytes
+            entries[relative] = record
+            metadata_bytes += len(
+                json.dumps(relative, ensure_ascii=True).encode("ascii")
+            ) + len(
+                json.dumps(
+                    record,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("ascii")
+            )
+            if metadata_bytes > _RETAINED_WORKTREE_RECOVERY_METADATA_BYTES_LIMIT:
+                raise RetirementSnapshotError(
+                    "Retained Worktree recovery metadata exceeds 32 MiB."
+                )
+
+        def scan(directory_fd: int, parent_parts: tuple[str, ...]) -> None:
+            before = os.fstat(directory_fd)
+            if not stat.S_ISDIR(before.st_mode):
+                raise RetirementSnapshotError(
+                    "Retained Worktree export source boundary is invalid."
+                )
+            names = cls._directory_names_fd(directory_fd)
+            for name in names:
+                try:
+                    initial = os.stat(
+                        name,
+                        dir_fd=directory_fd,
+                        follow_symlinks=False,
+                    )
+                except OSError as exc:
+                    raise RetirementSnapshotError(
+                        "Retained Worktree recovery scan could not inspect the full tree."
+                    ) from exc
+                relative = PurePosixPath(*parent_parts, name).as_posix()
+                if stat.S_ISLNK(initial.st_mode):
+                    target = cls._read_stable_symlink_at(
+                        directory_fd,
+                        name,
+                        initial,
+                        error="Retained Worktree changed during inspection.",
+                    )
+                    add_entry(
+                        relative,
+                        {"kind": "symlink", "target": target.hex()},
+                    )
+                    continue
+                if stat.S_ISDIR(initial.st_mode):
+                    add_entry(
+                        relative,
+                        {"kind": "directory", "mode": initial.st_mode & 0o777},
+                    )
+                    child_fd = cls._open_directory_at(
+                        directory_fd,
+                        name,
+                        error=(
+                            "Retained Worktree recovery scan could not inspect the "
+                            "full tree."
+                        ),
+                    )
+                    try:
+                        current = os.fstat(child_fd)
+                        if cls._stat_identity(current) != cls._stat_identity(initial):
+                            raise RetirementSnapshotError(
+                                "Retained Worktree changed during inspection."
+                            )
+                        scan(child_fd, (*parent_parts, name))
+                        after = os.fstat(child_fd)
+                        if cls._stable_stat(after) != cls._stable_stat(current):
+                            raise RetirementSnapshotError(
+                                "Retained Worktree changed during inspection."
+                            )
+                    finally:
+                        os.close(child_fd)
+                    continue
+                if not stat.S_ISREG(initial.st_mode):
+                    raise RetirementSnapshotError(
+                        "Retained Worktree export contains an unsupported entry."
+                    )
+                git_pointer = None
+                if exclude_git_metadata and not parent_parts and name == ".git":
+                    git_pointer = cls._bounded_git_worktree_pointer_at(
+                        directory_fd,
+                        name,
+                        initial,
+                    )
+                if git_pointer is not None:
+                    add_entry(
+                        relative,
+                        {
+                            "kind": "git-pointer",
+                            "mode": git_pointer["mode"],
+                            "content_hex": git_pointer["content"].hex(),
+                        },
+                    )
                 else:
-                    mode = path.stat(follow_symlinks=False).st_mode
-                    if not stat.S_ISDIR(mode):
-                        raise RetirementSnapshotError("Retained Worktree export contains an unsupported entry.")
-                    entries[relative] = {
-                        "kind": "directory",
-                        "mode": mode & 0o777,
-                    }
-                if scanned > 10_000:
-                    raise RetirementSnapshotError("Retained Worktree export exceeds the 10000-entry limit.")
-            names[:] = sorted(names)
-            for name in sorted(filenames):
-                path = directory_path / name
-                relative = path.relative_to(worktree).as_posix()
-                scanned += 1
-                if path.is_symlink():
-                    entries[relative] = {
-                        "kind": "symlink",
-                        "target": os.readlink(os.fsencode(path)).hex(),
-                    }
-                else:
-                    status = path.stat(follow_symlinks=False)
-                    if not stat.S_ISREG(status.st_mode):
-                        raise RetirementSnapshotError("Retained Worktree export contains an unsupported entry.")
-                    entries[relative] = {
-                        "kind": "file",
-                        "mode": status.st_mode & 0o777,
-                        "size": status.st_size,
-                        "sha256": cls._file_digest(path),
-                    }
-                if scanned > 10_000:
-                    raise RetirementSnapshotError("Retained Worktree export exceeds the 10000-entry limit.")
-        tree_sha256 = sha256(json.dumps(entries, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+                    add_entry(
+                        relative,
+                        cls._retained_regular_file_record_at(
+                            directory_fd,
+                            name,
+                            initial,
+                        ),
+                    )
+            if cls._directory_names_fd(directory_fd) != names:
+                raise RetirementSnapshotError(
+                    "Retained Worktree changed during inspection."
+                )
+            after = os.fstat(directory_fd)
+            if cls._stable_stat(after) != cls._stable_stat(before):
+                raise RetirementSnapshotError(
+                    "Retained Worktree changed during inspection."
+                )
+
+        try:
+            root_status = os.fstat(root_fd)
+            scan(root_fd, ())
+            return cls._build_retained_worktree_manifest(
+                root_mode=root_status.st_mode & 0o777,
+                entries=entries,
+            )
+        except RetirementSnapshotError:
+            raise
+        except OSError as exc:
+            raise RetirementSnapshotError(
+                "Retained Worktree recovery scan could not inspect the full tree."
+            ) from exc
+        finally:
+            os.close(root_fd)
+
+    @classmethod
+    def validated_retained_worktree_manifest(
+        cls,
+        raw: Any,
+    ) -> dict[str, Any]:
+        """Validate one durable no-follow recovery manifest."""
+
+        if (
+            not isinstance(raw, dict)
+            or set(raw)
+            != {
+                "schema_version",
+                "root_mode",
+                "entries",
+                "tree_sha256",
+                "materialized_tree_sha256",
+            }
+            or not isinstance(raw.get("schema_version"), int)
+            or isinstance(raw.get("schema_version"), bool)
+            or raw["schema_version"] != 2
+            or not isinstance(raw.get("root_mode"), int)
+            or isinstance(raw.get("root_mode"), bool)
+            or not 0 <= raw["root_mode"] <= 0o777
+            or not isinstance(raw.get("entries"), dict)
+            or not isinstance(raw.get("tree_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", raw["tree_sha256"])
+            or not isinstance(raw.get("materialized_tree_sha256"), str)
+            or not re.fullmatch(
+                r"[0-9a-f]{64}", raw["materialized_tree_sha256"]
+            )
+        ):
+            raise RetirementSnapshotError(
+                "Retained Worktree recovery manifest is invalid."
+            )
+        entries = raw["entries"]
+        metadata_bytes = 0
+        for relative_value, record in entries.items():
+            if not isinstance(relative_value, str) or not isinstance(record, dict):
+                raise RetirementSnapshotError(
+                    "Retained Worktree recovery manifest is invalid."
+                )
+            relative = cls._safe_retained_relative(relative_value)
+            kind = record.get("kind")
+            if kind == "directory":
+                valid = (
+                    set(record) == {"kind", "mode"}
+                    and isinstance(record.get("mode"), int)
+                    and not isinstance(record.get("mode"), bool)
+                    and 0 <= record["mode"] <= 0o777
+                )
+            elif kind == "file":
+                valid = (
+                    set(record) == {"kind", "mode", "size", "sha256"}
+                    and isinstance(record.get("mode"), int)
+                    and not isinstance(record.get("mode"), bool)
+                    and 0 <= record["mode"] <= 0o777
+                    and isinstance(record.get("size"), int)
+                    and not isinstance(record.get("size"), bool)
+                    and record["size"] >= 0
+                    and isinstance(record.get("sha256"), str)
+                    and re.fullmatch(r"[0-9a-f]{64}", record["sha256"])
+                    is not None
+                )
+            elif kind == "symlink":
+                target = record.get("target")
+                valid = (
+                    set(record) == {"kind", "target"}
+                    and isinstance(target, str)
+                    and len(target) % 2 == 0
+                    and re.fullmatch(r"[0-9a-f]*", target) is not None
+                )
+                if valid:
+                    try:
+                        decoded_target = bytes.fromhex(target)
+                    except ValueError:
+                        valid = False
+                    else:
+                        valid = b"\0" not in decoded_target
+            elif kind == "git-pointer":
+                content_hex = record.get("content_hex")
+                valid = (
+                    relative_value == ".git"
+                    and set(record) == {"kind", "mode", "content_hex"}
+                    and isinstance(record.get("mode"), int)
+                    and not isinstance(record.get("mode"), bool)
+                    and 0 <= record["mode"] <= 0o777
+                    and isinstance(content_hex, str)
+                    and len(content_hex) % 2 == 0
+                    and re.fullmatch(r"[0-9a-f]*", content_hex) is not None
+                )
+                if valid:
+                    try:
+                        content = bytes.fromhex(content_hex)
+                    except ValueError:
+                        valid = False
+                    else:
+                        valid = cls._is_git_worktree_pointer_content(content)
+            else:
+                valid = False
+            if not valid:
+                raise RetirementSnapshotError(
+                    "Retained Worktree recovery manifest is invalid."
+                )
+            metadata_bytes += len(
+                json.dumps(relative_value, ensure_ascii=True).encode("ascii")
+            ) + len(
+                json.dumps(
+                    record,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("ascii")
+            )
+            if (
+                metadata_bytes
+                > _RETAINED_WORKTREE_RECOVERY_METADATA_BYTES_LIMIT
+            ):
+                raise RetirementSnapshotError(
+                    "Retained Worktree recovery metadata exceeds 32 MiB."
+                )
+        for relative_value, record in entries.items():
+            relative = PurePosixPath(relative_value)
+            for parent in relative.parents:
+                if parent == PurePosixPath("."):
+                    continue
+                parent_record = entries.get(parent.as_posix())
+                if not isinstance(parent_record, dict) or parent_record.get(
+                    "kind"
+                ) != "directory":
+                    raise RetirementSnapshotError(
+                        "Retained Worktree recovery manifest is invalid."
+                    )
+        validated = cls._build_retained_worktree_manifest(
+            root_mode=raw["root_mode"],
+            entries={
+                relative_value: dict(record)
+                for relative_value, record in entries.items()
+            },
+        )
+        if (
+            validated["tree_sha256"] != raw["tree_sha256"]
+            or validated["materialized_tree_sha256"]
+            != raw["materialized_tree_sha256"]
+        ):
+            raise RetirementSnapshotError(
+                "Retained Worktree recovery manifest is invalid."
+            )
+        return validated
+
+    @classmethod
+    def legacy_retained_worktree_manifest_projection(
+        cls,
+        manifest: dict[str, Any],
+        *,
+        exclude_git_metadata: bool,
+    ) -> dict[str, Any]:
+        """Project a schema-v2 tree into the exact pre-upgrade digest shape."""
+
+        validated = cls.validated_retained_worktree_manifest(manifest)
+        entries = {
+            relative_value: dict(record)
+            for relative_value, record in validated["entries"].items()
+            if record.get("kind") != "git-pointer"
+            and not (
+                exclude_git_metadata
+                and (
+                    relative_value == ".git"
+                    or relative_value.startswith(".git/")
+                )
+            )
+        }
+        tree_sha256 = sha256(
+            json.dumps(
+                entries,
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("ascii")
+        ).hexdigest()
         return {
             "schema_version": 1,
             "entries": entries,
@@ -314,84 +985,418 @@ class RetirementSnapshotStore:
     ) -> Path:
         """Copy and re-prove one blocked retained tree below an empty root."""
 
-        if (
-            cls.retained_worktree_manifest(
-                worktree,
+        source_fd = cls._open_directory_path(
+            worktree,
+            error="Retained Worktree export source boundary is invalid.",
+        )
+        destination_fd: int | None = None
+        try:
+            destination_fd = cls._open_directory_path(
+                destination_root,
+                error="Retained Worktree export destination boundary is invalid.",
+            )
+            cls.materialize_retained_worktree_into_directory(
+                source_fd,
+                destination_fd,
+                manifest,
                 exclude_git_metadata=exclude_git_metadata,
             )
-            != manifest
-        ):
-            raise RetirementSnapshotError("Retained Worktree changed before export materialization.")
-        if destination_root.is_symlink() or not destination_root.is_dir() or any(destination_root.iterdir()):
-            raise RetirementSnapshotError("Retained Worktree export destination is not an empty directory.")
-        entries = manifest.get("entries")
-        if not isinstance(entries, dict):
-            raise RetirementSnapshotError("Retained Worktree export manifest is invalid.")
-        repository = destination_root / "repository"
-        repository.mkdir()
-        directories = sorted(
-            (
-                (relative, record)
-                for relative, record in entries.items()
-                if isinstance(record, dict) and record.get("kind") == "directory"
-            ),
-            key=lambda item: (len(PurePosixPath(item[0]).parts), item[0]),
-        )
-        for relative_value, record in directories:
-            relative = cls._safe_relative(relative_value)
-            destination = repository / Path(*relative.parts)
-            destination.mkdir()
-            destination.chmod(record["mode"])
-        for relative_value, record in sorted(entries.items()):
-            if not isinstance(record, dict) or record.get("kind") == "directory":
-                continue
-            relative = cls._safe_relative(relative_value)
-            source = worktree / Path(*relative.parts)
-            destination = repository / Path(*relative.parts)
-            if record.get("kind") == "symlink":
-                target = bytes.fromhex(record["target"])
-                if not source.is_symlink() or os.readlink(os.fsencode(source)) != target:
-                    raise RetirementSnapshotError("Retained Worktree changed during export materialization.")
-                os.symlink(target, os.fsencode(destination))
-            elif record.get("kind") == "file":
-                source_fd = os.open(
-                    source,
-                    os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+        finally:
+            if destination_fd is not None:
+                os.close(destination_fd)
+            os.close(source_fd)
+        return destination_root / "repository"
+
+    @classmethod
+    def materialize_retained_worktree_into_directory(
+        cls,
+        source_fd: int | Path,
+        destination_fd: int,
+        manifest: dict[str, Any],
+        *,
+        exclude_git_metadata: bool,
+    ) -> None:
+        """Copy one retained tree between exact borrowed directory descriptors.
+
+        ``Path`` remains accepted for the source so callers of the historical path
+        API can migrate independently.  It is opened once and all subsequent reads
+        are relative to that bound descriptor.
+        """
+
+        manifest = cls.validated_retained_worktree_manifest(manifest)
+        if isinstance(source_fd, Path):
+            retained_fd = cls._open_directory_path(
+                source_fd,
+                error="Retained Worktree export source boundary is invalid.",
+            )
+        else:
+            retained_fd = cls._duplicate_directory_fd(
+                source_fd,
+                error="Retained Worktree export source boundary is invalid.",
+            )
+        root_fd: int | None = None
+        repository_fd: int | None = None
+        try:
+            root_fd = cls._duplicate_directory_fd(
+                destination_fd,
+                error="Retained Worktree export destination boundary is invalid.",
+            )
+            if (
+                cls.retained_worktree_manifest_from_directory(
+                    retained_fd,
+                    exclude_git_metadata=exclude_git_metadata,
+                )
+                != manifest
+            ):
+                raise RetirementSnapshotError(
+                    "Retained Worktree changed before export materialization."
+                )
+            cls._require_empty_directory_fd(
+                root_fd,
+                error=(
+                    "Retained Worktree export destination is not an empty directory."
+                ),
+            )
+            os.mkdir("repository", mode=0o700, dir_fd=root_fd)
+            repository_fd = cls._open_directory_at(
+                root_fd,
+                "repository",
+                error="Retained Worktree export destination boundary changed.",
+            )
+            directories = sorted(
+                (
+                    (relative, record)
+                    for relative, record in manifest["entries"].items()
+                    if record.get("kind") == "directory"
+                ),
+                key=lambda item: (len(PurePosixPath(item[0]).parts), item[0]),
+            )
+            for relative_value, _record in directories:
+                relative = cls._safe_retained_relative(relative_value)
+                parent_fd, name = cls._open_relative_parent_at(
+                    repository_fd,
+                    relative,
+                    error="Retained Worktree export destination boundary changed.",
                 )
                 try:
-                    source_status = os.fstat(source_fd)
-                    if not stat.S_ISREG(source_status.st_mode):
-                        raise RetirementSnapshotError("Retained Worktree changed during export materialization.")
-                    destination_fd = os.open(
-                        destination,
-                        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                        record["mode"],
+                    os.mkdir(name, mode=0o700, dir_fd=parent_fd)
+                    child_fd = cls._open_directory_at(
+                        parent_fd,
+                        name,
+                        error=(
+                            "Retained Worktree export destination boundary changed."
+                        ),
                     )
                     try:
-                        with os.fdopen(source_fd, "rb", closefd=False) as source_file:
-                            with os.fdopen(destination_fd, "wb", closefd=False) as destination_file:
-                                shutil.copyfileobj(source_file, destination_file)
+                        os.fchmod(child_fd, 0o700)
                     finally:
-                        os.close(destination_fd)
+                        os.close(child_fd)
                 finally:
-                    os.close(source_fd)
-                destination.chmod(record["mode"])
-            else:
-                raise RetirementSnapshotError("Retained Worktree export manifest is invalid.")
-        if (
-            cls.retained_worktree_manifest(
-                worktree,
-                exclude_git_metadata=exclude_git_metadata,
+                    os.close(parent_fd)
+            for relative_value, record in sorted(manifest["entries"].items()):
+                kind = record["kind"]
+                if kind in {"directory", "git-pointer"}:
+                    continue
+                relative = cls._safe_retained_relative(relative_value)
+                source_parent_fd, source_name = cls._open_relative_parent_at(
+                    retained_fd,
+                    relative,
+                    error="Retained Worktree changed during export materialization.",
+                )
+                destination_parent_fd, destination_name = (
+                    cls._open_relative_parent_at(
+                        repository_fd,
+                        relative,
+                        error=(
+                            "Retained Worktree export destination boundary changed."
+                        ),
+                    )
+                )
+                try:
+                    if kind == "symlink":
+                        cls._copy_expected_symlink_at(
+                            source_parent_fd,
+                            source_name,
+                            destination_parent_fd,
+                            destination_name,
+                            bytes.fromhex(record["target"]),
+                        )
+                    elif kind == "file":
+                        cls._copy_expected_regular_at(
+                            source_parent_fd,
+                            source_name,
+                            destination_parent_fd,
+                            destination_name,
+                            record,
+                        )
+                    else:
+                        raise RetirementSnapshotError(
+                            "Retained Worktree export manifest is invalid."
+                        )
+                finally:
+                    os.close(destination_parent_fd)
+                    os.close(source_parent_fd)
+            for relative_value, record in reversed(directories):
+                relative = cls._safe_retained_relative(relative_value)
+                parent_fd, name = cls._open_relative_parent_at(
+                    repository_fd,
+                    relative,
+                    error="Retained Worktree export destination boundary changed.",
+                )
+                try:
+                    child_fd = cls._open_directory_at(
+                        parent_fd,
+                        name,
+                        error=(
+                            "Retained Worktree export destination boundary changed."
+                        ),
+                    )
+                    try:
+                        os.fchmod(child_fd, record["mode"])
+                        os.fsync(child_fd)
+                    finally:
+                        os.close(child_fd)
+                finally:
+                    os.close(parent_fd)
+            os.fchmod(repository_fd, manifest["root_mode"])
+            os.fsync(repository_fd)
+            if (
+                cls.retained_worktree_manifest_from_directory(
+                    retained_fd,
+                    exclude_git_metadata=exclude_git_metadata,
+                )
+                != manifest
+                or not cls.verify_retained_worktree_in_directory(
+                    repository_fd,
+                    manifest,
+                )
+                or cls._directory_names_fd(root_fd) != ("repository",)
+            ):
+                raise RetirementSnapshotError(
+                    "Retained Worktree export failed exact readback verification."
+                )
+        except OSError as exc:
+            raise RetirementSnapshotError(
+                f"Retained Worktree export materialization failed: {exc}"
+            ) from exc
+        finally:
+            if repository_fd is not None:
+                os.close(repository_fd)
+            if root_fd is not None:
+                os.close(root_fd)
+            os.close(retained_fd)
+
+    @classmethod
+    def verify_retained_worktree_in_directory(
+        cls,
+        repository_fd: int,
+        manifest: dict[str, Any],
+    ) -> bool:
+        """Verify a materialized retained tree through a borrowed root descriptor."""
+
+        manifest = cls.validated_retained_worktree_manifest(manifest)
+        actual = cls.retained_worktree_manifest_from_directory(
+            repository_fd,
+            exclude_git_metadata=False,
+        )
+        expected_entries = {
+            relative_value: dict(record)
+            for relative_value, record in manifest["entries"].items()
+            if record.get("kind") != "git-pointer"
+        }
+        expected = cls._build_retained_worktree_manifest(
+            root_mode=manifest["root_mode"],
+            entries=expected_entries,
+        )
+        if actual != expected:
+            raise RetirementSnapshotError(
+                "Retained Worktree exported repository content is invalid."
             )
-            != manifest
-            or cls.retained_worktree_manifest(
-                repository,
-                exclude_git_metadata=False,
+        return True
+
+    @classmethod
+    def prepare_retained_worktree_removal(
+        cls,
+        worktree: Path,
+        manifest: dict[str, Any],
+    ) -> None:
+        """Make only claimed directories owner-writable for resumable deletion."""
+
+        manifest = cls.validated_retained_worktree_manifest(manifest)
+        directories: list[tuple[Path, int]] = [(worktree, manifest["root_mode"])]
+        directories.extend(
+            (
+                worktree
+                / Path(*cls._safe_retained_relative(relative_value).parts),
+                record["mode"],
             )
-            != manifest
-        ):
-            raise RetirementSnapshotError("Retained Worktree export failed exact readback verification.")
-        return repository
+            for relative_value, record in sorted(
+                manifest["entries"].items(),
+                key=lambda item: (
+                    len(PurePosixPath(item[0]).parts),
+                    item[0],
+                ),
+            )
+            if record.get("kind") == "directory"
+        )
+        for directory, claimed_mode in directories:
+            try:
+                descriptor = os.open(
+                    directory,
+                    os.O_RDONLY
+                    | getattr(os, "O_DIRECTORY", 0)
+                    | getattr(os, "O_NOFOLLOW", 0),
+                )
+            except FileNotFoundError:
+                if directory == worktree:
+                    raise RetirementSnapshotError(
+                        "Retained Worktree removal boundary disappeared."
+                    )
+                continue
+            except OSError as exc:
+                raise RetirementSnapshotError(
+                    "Retained Worktree removal directory changed."
+                ) from exc
+            try:
+                status = os.fstat(descriptor)
+                if not stat.S_ISDIR(status.st_mode):
+                    raise RetirementSnapshotError(
+                        "Retained Worktree removal directory changed."
+                    )
+                current_mode = status.st_mode & 0o777
+                prepared_mode = claimed_mode | 0o700
+                if current_mode not in {claimed_mode, prepared_mode}:
+                    raise RetirementSnapshotError(
+                        "Retained Worktree removal directory mode changed."
+                    )
+                if hasattr(os, "fchmod"):
+                    os.fchmod(descriptor, prepared_mode)
+                else:
+                    os.chmod(directory, prepared_mode, follow_symlinks=False)
+            finally:
+                os.close(descriptor)
+
+    @classmethod
+    def remove_retained_worktree(
+        cls,
+        worktree: Path,
+        manifest: dict[str, Any],
+    ) -> None:
+        """Remove only entries still matching one validated retained-tree claim."""
+
+        manifest = cls.validated_retained_worktree_manifest(manifest)
+        children: dict[tuple[str, ...], dict[str, dict[str, Any]]] = {}
+        for relative_value, record in manifest["entries"].items():
+            relative = cls._safe_retained_relative(relative_value)
+            children.setdefault(tuple(relative.parts[:-1]), {})[
+                relative.parts[-1]
+            ] = record
+
+        def directory_mode_matches(path: Path, claimed_mode: int) -> bool:
+            try:
+                status = path.stat(follow_symlinks=False)
+            except FileNotFoundError:
+                return False
+            return bool(
+                stat.S_ISDIR(status.st_mode)
+                and (status.st_mode & 0o777)
+                in {claimed_mode, claimed_mode | 0o700}
+            )
+
+        def record_matches(path: Path, record: dict[str, Any]) -> bool:
+            kind = record["kind"]
+            if kind == "directory":
+                return directory_mode_matches(path, record["mode"])
+            if kind == "symlink":
+                try:
+                    return bool(
+                        path.is_symlink()
+                        and os.readlink(os.fsencode(path)).hex()
+                        == record["target"]
+                    )
+                except OSError:
+                    return False
+            if kind == "git-pointer":
+                pointer = cls._bounded_git_worktree_pointer(path)
+                return bool(
+                    pointer is not None
+                    and pointer["mode"] == record["mode"]
+                    and pointer["content"].hex() == record["content_hex"]
+                )
+            if kind == "file":
+                try:
+                    return cls._retained_regular_file_record(path) == record
+                except RetirementSnapshotError:
+                    return False
+            return False
+
+        def remove_directory(path: Path, relative_parts: tuple[str, ...]) -> None:
+            expected = children.get(relative_parts, {})
+            try:
+                with os.scandir(path) as iterator:
+                    current = sorted(tuple(iterator), key=lambda item: item.name)
+            except OSError as exc:
+                raise RetirementSnapshotError(
+                    "Retained Worktree removal could not inspect the full tree."
+                ) from exc
+            for entry in current:
+                record = expected.get(entry.name)
+                if record is None:
+                    raise RetirementSnapshotError(
+                        "Retained Worktree removal found unauthorized content."
+                    )
+                child = path / entry.name
+                if record["kind"] == "directory":
+                    if not directory_mode_matches(child, record["mode"]):
+                        raise RetirementSnapshotError(
+                            "Retained Worktree removal content changed."
+                        )
+                    remove_directory(child, (*relative_parts, entry.name))
+                    try:
+                        child.rmdir()
+                    except FileNotFoundError:
+                        pass
+                    except OSError as exc:
+                        raise RetirementSnapshotError(
+                            "Retained Worktree removal found unauthorized content."
+                        ) from exc
+                    continue
+                if not record_matches(child, record):
+                    raise RetirementSnapshotError(
+                        "Retained Worktree removal content changed."
+                    )
+                try:
+                    child.unlink()
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    raise RetirementSnapshotError(
+                        "Retained Worktree removal content changed."
+                    ) from exc
+            try:
+                with os.scandir(path) as iterator:
+                    if next(iterator, None) is not None:
+                        raise RetirementSnapshotError(
+                            "Retained Worktree removal found unauthorized content."
+                        )
+            except RetirementSnapshotError:
+                raise
+            except OSError as exc:
+                raise RetirementSnapshotError(
+                    "Retained Worktree removal could not inspect the full tree."
+                ) from exc
+
+        if not directory_mode_matches(worktree, manifest["root_mode"]):
+            raise RetirementSnapshotError(
+                "Retained Worktree removal boundary changed."
+            )
+        remove_directory(worktree, ())
+        try:
+            worktree.rmdir()
+        except OSError as exc:
+            raise RetirementSnapshotError(
+                "Retained Worktree removal found unauthorized content."
+            ) from exc
 
     def recover_published(self) -> dict[str, Any]:
         """Recover an exact publication whose canonical phase commit was interrupted."""
@@ -1188,6 +2193,66 @@ class RetirementSnapshotStore:
                 "Retirement Snapshot clean-room absence reconstruction failed."
             )
 
+    def _materialize_manifest_to_trusted_root(
+        self,
+        manifest: dict[str, Any],
+        root: Path,
+    ) -> None:
+        """Reconstruct one verified manifest only inside an app-private root."""
+
+        repository_kind = manifest["git_state"]["kind"]
+        if repository_kind == "git-worktree":
+            self._reconstruct_git(self.payload_root, manifest, root)
+        elif repository_kind == "managed-directory":
+            self._reconstruct_directory(self.payload_root, manifest, root)
+        elif repository_kind == "managed-absence":
+            self._reconstruct_absence(root)
+        else:
+            raise RetirementSnapshotError(
+                "Retirement Snapshot reconstruction kind is unsupported."
+            )
+
+    def _verify_materialized_repository_path(
+        self,
+        manifest: dict[str, Any],
+        repository: Path,
+    ) -> None:
+        """Semantically verify a repository copied into app-private storage."""
+
+        git_state = manifest["git_state"]
+        if git_state["kind"] == "git-worktree":
+            head = self._git(repository, ["rev-parse", "HEAD"]).strip()
+            status = self._git(repository, ["status", "--porcelain=v2", "-z", "--"])
+            if (
+                head != git_state["baseline_commit"]
+                or sha256(status.encode("utf-8")).hexdigest()
+                != git_state["status_sha256"]
+            ):
+                raise RetirementSnapshotError(
+                    "Retirement Snapshot exported Git state is invalid."
+                )
+
+        verification_root = self.request.runtime_dir / "retirement" / "export-check"
+        verification_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            dir=verification_root,
+            prefix=f"{self.request.session_id}.expected.",
+        ) as expected_name:
+            expected_root = Path(expected_name)
+            self._materialize_manifest_to_trusted_root(manifest, expected_root)
+            expected = expected_root / "repository"
+            exclude_git_metadata = git_state["kind"] == "git-worktree"
+            if self._repository_tree_entries(
+                repository,
+                exclude_git_metadata=exclude_git_metadata,
+            ) != self._repository_tree_entries(
+                expected,
+                exclude_git_metadata=exclude_git_metadata,
+            ):
+                raise RetirementSnapshotError(
+                    "Retirement Snapshot exported repository content is invalid."
+                )
+
     def _validated_untracked_entries(
         self,
         git_state: dict[str, Any],
@@ -1306,6 +2371,514 @@ class RetirementSnapshotStore:
             )
         return stdout
 
+    @staticmethod
+    def _stat_identity(status: os.stat_result) -> tuple[int, int]:
+        return status.st_dev, status.st_ino
+
+    @staticmethod
+    def _stable_stat(status: os.stat_result) -> tuple[int, int, int, int, int, int]:
+        return (
+            status.st_dev,
+            status.st_ino,
+            status.st_mode,
+            status.st_size,
+            status.st_mtime_ns,
+            status.st_ctime_ns,
+        )
+
+    @staticmethod
+    def _open_directory_path(path: Path, *, error: str) -> int:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(path, flags)
+            status = os.fstat(descriptor)
+            if not stat.S_ISDIR(status.st_mode):
+                raise RetirementSnapshotError(error)
+            return descriptor
+        except RetirementSnapshotError:
+            if descriptor is not None:
+                os.close(descriptor)
+            raise
+        except OSError as exc:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            raise RetirementSnapshotError(error) from exc
+
+    @staticmethod
+    def _duplicate_directory_fd(descriptor: int, *, error: str) -> int:
+        duplicate: int | None = None
+        try:
+            duplicate = os.dup(descriptor)
+            status = os.fstat(duplicate)
+            if not stat.S_ISDIR(status.st_mode):
+                raise RetirementSnapshotError(error)
+            return duplicate
+        except RetirementSnapshotError:
+            if duplicate is not None:
+                os.close(duplicate)
+            raise
+        except OSError as exc:
+            if duplicate is not None:
+                try:
+                    os.close(duplicate)
+                except OSError:
+                    pass
+            raise RetirementSnapshotError(error) from exc
+
+    @staticmethod
+    def _open_directory_at(parent_fd: int, name: str, *, error: str) -> int:
+        if not name or "/" in name or "\0" in name or name in {".", ".."}:
+            raise RetirementSnapshotError(error)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor: int | None = None
+        try:
+            descriptor = os.open(name, flags, dir_fd=parent_fd)
+            status = os.fstat(descriptor)
+            if not stat.S_ISDIR(status.st_mode):
+                raise RetirementSnapshotError(error)
+            return descriptor
+        except RetirementSnapshotError:
+            if descriptor is not None:
+                os.close(descriptor)
+            raise
+        except OSError as exc:
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+            raise RetirementSnapshotError(error) from exc
+
+    @staticmethod
+    def _directory_names_fd(descriptor: int) -> tuple[str, ...]:
+        try:
+            names = tuple(os.listdir(descriptor))
+        except OSError as exc:
+            raise RetirementSnapshotError(
+                "Retirement Snapshot directory could not be inspected."
+            ) from exc
+        if not all(
+            isinstance(name, str)
+            and name
+            and "/" not in name
+            and "\0" not in name
+            and name not in {".", ".."}
+            for name in names
+        ):
+            raise RetirementSnapshotError(
+                "Retirement Snapshot directory contains an invalid entry name."
+            )
+        return tuple(sorted(names, key=os.fsencode))
+
+    @classmethod
+    def _require_empty_directory_fd(cls, descriptor: int, *, error: str) -> None:
+        try:
+            status = os.fstat(descriptor)
+        except OSError as exc:
+            raise RetirementSnapshotError(error) from exc
+        if not stat.S_ISDIR(status.st_mode) or cls._directory_names_fd(descriptor):
+            raise RetirementSnapshotError(error)
+
+    @classmethod
+    def _open_relative_parent_at(
+        cls,
+        root_fd: int,
+        relative: PurePosixPath,
+        *,
+        error: str,
+    ) -> tuple[int, str]:
+        if not relative.parts:
+            raise RetirementSnapshotError(error)
+        current = cls._duplicate_directory_fd(root_fd, error=error)
+        try:
+            for part in relative.parts[:-1]:
+                child = cls._open_directory_at(current, part, error=error)
+                os.close(current)
+                current = child
+            return current, relative.parts[-1]
+        except BaseException:
+            os.close(current)
+            raise
+
+    @staticmethod
+    def _file_descriptor_digest(descriptor: int) -> str:
+        digest = sha256()
+        try:
+            position = os.lseek(descriptor, 0, os.SEEK_CUR)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            while chunk := os.read(descriptor, 1024 * 1024):
+                digest.update(chunk)
+            os.lseek(descriptor, position, os.SEEK_SET)
+        except OSError as exc:
+            raise RetirementSnapshotError(
+                "Retirement Snapshot descriptor integrity read failed."
+            ) from exc
+        return digest.hexdigest()
+
+    @classmethod
+    def _read_stable_symlink_at(
+        cls,
+        parent_fd: int,
+        name: str,
+        initial: os.stat_result,
+        *,
+        error: str,
+    ) -> bytes:
+        if not stat.S_ISLNK(initial.st_mode):
+            raise RetirementSnapshotError(error)
+        try:
+            target = os.readlink(os.fsencode(name), dir_fd=parent_fd)
+            after = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError as exc:
+            raise RetirementSnapshotError(error) from exc
+        if (
+            not isinstance(target, bytes)
+            or b"\0" in target
+            or cls._stable_stat(after) != cls._stable_stat(initial)
+        ):
+            raise RetirementSnapshotError(error)
+        return target
+
+    @classmethod
+    def _copy_expected_symlink_at(
+        cls,
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+        expected_target: bytes,
+    ) -> None:
+        error = "Retained Worktree changed during export materialization."
+        try:
+            source_before = os.stat(
+                source_name,
+                dir_fd=source_parent_fd,
+                follow_symlinks=False,
+            )
+            if (
+                cls._read_stable_symlink_at(
+                    source_parent_fd,
+                    source_name,
+                    source_before,
+                    error=error,
+                )
+                != expected_target
+            ):
+                raise RetirementSnapshotError(error)
+            os.symlink(
+                expected_target,
+                os.fsencode(destination_name),
+                dir_fd=destination_parent_fd,
+            )
+            destination_status = os.stat(
+                destination_name,
+                dir_fd=destination_parent_fd,
+                follow_symlinks=False,
+            )
+            if (
+                cls._read_stable_symlink_at(
+                    destination_parent_fd,
+                    destination_name,
+                    destination_status,
+                    error="Retained Worktree export destination boundary changed.",
+                )
+                != expected_target
+            ):
+                raise RetirementSnapshotError(
+                    "Retained Worktree export destination boundary changed."
+                )
+            source_after = os.stat(
+                source_name,
+                dir_fd=source_parent_fd,
+                follow_symlinks=False,
+            )
+            if cls._stable_stat(source_after) != cls._stable_stat(source_before):
+                raise RetirementSnapshotError(error)
+        except RetirementSnapshotError:
+            raise
+        except OSError as exc:
+            raise RetirementSnapshotError(error) from exc
+
+    @classmethod
+    def _copy_expected_regular_at(
+        cls,
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+        expected: dict[str, Any],
+    ) -> None:
+        source_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+        )
+        destination_flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        source_descriptor: int | None = None
+        destination_descriptor: int | None = None
+        try:
+            initial = os.stat(
+                source_name,
+                dir_fd=source_parent_fd,
+                follow_symlinks=False,
+            )
+            source_descriptor = os.open(
+                source_name,
+                source_flags,
+                dir_fd=source_parent_fd,
+            )
+            before = os.fstat(source_descriptor)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or cls._stable_stat(before) != cls._stable_stat(initial)
+                or before.st_mode & 0o777 != expected["mode"]
+                or before.st_size != expected["size"]
+            ):
+                raise RetirementSnapshotError(
+                    "Retained Worktree changed during export materialization."
+                )
+            destination_descriptor = os.open(
+                destination_name,
+                destination_flags,
+                expected["mode"],
+                dir_fd=destination_parent_fd,
+            )
+            digest = sha256()
+            copied = 0
+            while chunk := os.read(source_descriptor, 1024 * 1024):
+                digest.update(chunk)
+                copied += len(chunk)
+                written = 0
+                while written < len(chunk):
+                    count = os.write(destination_descriptor, chunk[written:])
+                    if count <= 0:
+                        raise OSError("Retained Worktree export write did not progress.")
+                    written += count
+            after = os.fstat(source_descriptor)
+            if (
+                cls._stable_stat(after) != cls._stable_stat(before)
+                or copied != expected["size"]
+                or digest.hexdigest() != expected["sha256"]
+            ):
+                raise RetirementSnapshotError(
+                    "Retained Worktree changed during export materialization."
+                )
+            os.fchmod(destination_descriptor, expected["mode"])
+            os.fsync(destination_descriptor)
+            destination_status = os.fstat(destination_descriptor)
+            named_destination = os.stat(
+                destination_name,
+                dir_fd=destination_parent_fd,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(destination_status.st_mode)
+                or cls._stat_identity(destination_status)
+                != cls._stat_identity(named_destination)
+                or destination_status.st_mode & 0o777 != expected["mode"]
+                or destination_status.st_size != expected["size"]
+                or cls._file_descriptor_digest(destination_descriptor)
+                != expected["sha256"]
+            ):
+                raise RetirementSnapshotError(
+                    "Retained Worktree export destination boundary changed."
+                )
+        except RetirementSnapshotError:
+            raise
+        except OSError as exc:
+            raise RetirementSnapshotError(
+                "Retained Worktree changed during export materialization."
+            ) from exc
+        finally:
+            if destination_descriptor is not None:
+                os.close(destination_descriptor)
+            if source_descriptor is not None:
+                os.close(source_descriptor)
+
+    @classmethod
+    def _copy_repository_into_directory(
+        cls,
+        source_repository_fd: int,
+        destination_root_fd: int,
+    ) -> None:
+        """Copy an exact repository into an empty borrowed destination root."""
+
+        source_fd = cls._duplicate_directory_fd(
+            source_repository_fd,
+            error="Retirement Snapshot private reconstruction is invalid.",
+        )
+        root_fd: int | None = None
+        repository_fd: int | None = None
+        try:
+            root_fd = cls._duplicate_directory_fd(
+                destination_root_fd,
+                error="Retirement Snapshot reconstruction destination is invalid.",
+            )
+            cls._require_empty_directory_fd(
+                root_fd,
+                error=(
+                    "Retirement Snapshot reconstruction destination is not an empty "
+                    "directory."
+                ),
+            )
+            source_manifest = cls.retained_worktree_manifest_from_directory(
+                source_fd,
+                exclude_git_metadata=False,
+            )
+            os.mkdir("repository", mode=0o700, dir_fd=root_fd)
+            repository_fd = cls._open_directory_at(
+                root_fd,
+                "repository",
+                error="Retirement Snapshot reconstruction destination changed.",
+            )
+            cls._copy_directory_contents_at(source_fd, repository_fd)
+            os.fchmod(repository_fd, source_manifest["root_mode"])
+            os.fsync(repository_fd)
+            if (
+                cls.retained_worktree_manifest_from_directory(
+                    source_fd,
+                    exclude_git_metadata=False,
+                )
+                != source_manifest
+                or cls.retained_worktree_manifest_from_directory(
+                    repository_fd,
+                    exclude_git_metadata=False,
+                )
+                != source_manifest
+                or cls._directory_names_fd(root_fd) != ("repository",)
+            ):
+                raise RetirementSnapshotError(
+                    "Retirement Snapshot reconstruction destination changed."
+                )
+        except RetirementSnapshotError:
+            raise
+        except OSError as exc:
+            raise RetirementSnapshotError(
+                f"Retirement Snapshot reconstruction failed: {exc}"
+            ) from exc
+        finally:
+            if repository_fd is not None:
+                os.close(repository_fd)
+            if root_fd is not None:
+                os.close(root_fd)
+            os.close(source_fd)
+
+    @classmethod
+    def _copy_directory_contents_at(
+        cls,
+        source_fd: int,
+        destination_fd: int,
+    ) -> None:
+        source_before = os.fstat(source_fd)
+        if (
+            not stat.S_ISDIR(source_before.st_mode)
+            or cls._directory_names_fd(destination_fd)
+        ):
+            raise RetirementSnapshotError(
+                "Retirement Snapshot reconstruction directory is invalid."
+            )
+        names = cls._directory_names_fd(source_fd)
+        for name in names:
+            initial = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+            if stat.S_ISLNK(initial.st_mode):
+                target = cls._read_stable_symlink_at(
+                    source_fd,
+                    name,
+                    initial,
+                    error="Retirement Snapshot private reconstruction changed.",
+                )
+                cls._copy_expected_symlink_at(
+                    source_fd,
+                    name,
+                    destination_fd,
+                    name,
+                    target,
+                )
+                continue
+            if stat.S_ISREG(initial.st_mode):
+                record = cls._retained_regular_file_record_at(
+                    source_fd,
+                    name,
+                    initial,
+                )
+                cls._copy_expected_regular_at(
+                    source_fd,
+                    name,
+                    destination_fd,
+                    name,
+                    record,
+                )
+                continue
+            if not stat.S_ISDIR(initial.st_mode):
+                raise RetirementSnapshotError(
+                    "Retirement Snapshot private reconstruction contains an "
+                    "unsupported entry."
+                )
+            source_child_fd = cls._open_directory_at(
+                source_fd,
+                name,
+                error="Retirement Snapshot private reconstruction changed.",
+            )
+            destination_child_fd: int | None = None
+            try:
+                if cls._stat_identity(os.fstat(source_child_fd)) != cls._stat_identity(
+                    initial
+                ):
+                    raise RetirementSnapshotError(
+                        "Retirement Snapshot private reconstruction changed."
+                    )
+                os.mkdir(name, mode=0o700, dir_fd=destination_fd)
+                destination_child_fd = cls._open_directory_at(
+                    destination_fd,
+                    name,
+                    error="Retirement Snapshot reconstruction destination changed.",
+                )
+                cls._copy_directory_contents_at(
+                    source_child_fd,
+                    destination_child_fd,
+                )
+                os.fchmod(destination_child_fd, initial.st_mode & 0o777)
+                os.fsync(destination_child_fd)
+                if cls._stable_stat(os.fstat(source_child_fd)) != cls._stable_stat(
+                    initial
+                ):
+                    raise RetirementSnapshotError(
+                        "Retirement Snapshot private reconstruction changed."
+                    )
+            finally:
+                if destination_child_fd is not None:
+                    os.close(destination_child_fd)
+                os.close(source_child_fd)
+        if (
+            cls._directory_names_fd(source_fd) != names
+            or cls._directory_names_fd(destination_fd) != names
+            or cls._stable_stat(os.fstat(source_fd)) != cls._stable_stat(source_before)
+        ):
+            raise RetirementSnapshotError(
+                "Retirement Snapshot reconstruction directory changed."
+            )
+
     def _write_payload(
         self,
         path: Path,
@@ -1366,11 +2939,49 @@ class RetirementSnapshotStore:
             )
         return path
 
+    @staticmethod
+    def _safe_retained_relative(value: str) -> PurePosixPath:
+        """Validate one filesystem-representable retained POSIX path."""
+
+        if (
+            not isinstance(value, str)
+            or not value
+            or "\0" in value
+            or (os.name == "nt" and "\\" in value)
+        ):
+            raise RetirementSnapshotError(
+                "Retained Worktree recovery manifest is invalid."
+            )
+        try:
+            if os.fsdecode(os.fsencode(value)) != value:
+                raise RetirementSnapshotError(
+                    "Retained Worktree recovery manifest is invalid."
+                )
+        except UnicodeError as exc:
+            raise RetirementSnapshotError(
+                "Retained Worktree recovery manifest is invalid."
+            ) from exc
+        path = PurePosixPath(value)
+        if (
+            path.is_absolute()
+            or not path.parts
+            or ".." in path.parts
+            or path.as_posix() != value
+        ):
+            raise RetirementSnapshotError(
+                "Retained Worktree recovery manifest is invalid."
+            )
+        return path
+
     @classmethod
     def _filesystem_files(cls, root: Path) -> list[str]:
         result: list[str] = []
         scanned = 0
-        for directory, names, filenames in os.walk(root, followlinks=False):
+        for directory, names, filenames in os.walk(
+            root,
+            followlinks=False,
+            onerror=cls._raise_incomplete_tree_walk,
+        ):
             for name in names:
                 if (Path(directory) / name).is_symlink():
                     raise RetirementSnapshotError(
@@ -1399,7 +3010,11 @@ class RetirementSnapshotStore:
     ) -> dict[str, dict[str, Any]]:
         entries: dict[str, dict[str, Any]] = {}
         scanned = 0
-        for directory, names, filenames in os.walk(root, followlinks=False):
+        for directory, names, filenames in os.walk(
+            root,
+            followlinks=False,
+            onerror=self._raise_incomplete_tree_walk,
+        ):
             directory_path = Path(directory)
             if exclude_git_metadata and directory_path == root and ".git" in names:
                 names.remove(".git")

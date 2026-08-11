@@ -3559,6 +3559,18 @@ class AgentConsoleResponseService:
                 "; ".join(str(item.get("message", item.get("code", "blocked"))) for item in blockers)
                 or "none"
             )
+            recent_reclamation_rows = (
+                "\n".join(
+                    "- "
+                    f"Session: {item['session_id']}; "
+                    "Reclaimed bytes: "
+                    f"{self._format_storage_bytes(item['snapshot_bytes'])}; "
+                    f"Reclaimed at: {item['reclaimed_at']}; "
+                    f"Reason: {item['reason']}"
+                    for item in inspection["reclamation"]["recent"]
+                )
+                or "none"
+            )
             retention_days = inspection["policy"]["retention_seconds"] / 86_400
             retention_label = (
                 str(int(retention_days))
@@ -3570,15 +3582,19 @@ class AgentConsoleResponseService:
                 f"Retention: {retention_label} days\n"
                 f"Budget: {self._format_storage_bytes(inspection['policy']['budget_bytes'])}\n"
                 f"Usage: {self._format_storage_bytes(inspection['usage']['payload_bytes'])} payload + "
-                f"{self._format_storage_bytes(inspection['usage']['reserved_bytes'])} reserved\n"
+                f"{self._format_storage_bytes(inspection['usage']['reserved_bytes'])} reserved = "
+                f"{self._format_storage_bytes(inspection['usage']['committed_bytes'])} committed; "
+                f"{self._format_storage_bytes(inspection['usage']['available_bytes'])} available\n"
                 f"Records: {inspection['counts']['records']}; retained "
                 f"{inspection['counts']['retained_payloads']}; pinned "
                 f"{inspection['counts']['pinned_payloads']}; reclaimed "
-                f"{inspection['counts']['reclaimed_payloads']}\n"
+                f"{inspection['counts']['reclaimed_payloads']}; expired eligible "
+                f"{inspection['counts']['expired_eligible_payloads']}\n"
                 f"Expiry: {expiry_rows}\n"
                 f"Largest payloads: {largest_rows}\n"
                 f"Reclamation: {inspection['reclamation']['count']} payloads, "
                 f"{self._format_storage_bytes(inspection['reclamation']['bytes'])}\n"
+                f"Recent reclamations:\n{recent_reclamation_rows}\n"
                 f"Blockers: {blocker_rows}"
             )
         if command == "/run":

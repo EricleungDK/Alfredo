@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import codecs
 from contextlib import contextmanager, nullcontext
+import ctypes
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import difflib
+import errno
 from hashlib import sha1, sha256
 import fcntl
 import json
@@ -15,12 +17,14 @@ import secrets
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 from typing import Any, Callable
+import unicodedata
 from urllib.parse import quote
 
 from .agents import (
@@ -89,9 +93,31 @@ _DEFAULT_RETENTION_GRACE_SECONDS = 72 * 60 * 60
 _DEFAULT_SNAPSHOT_STORAGE_RETENTION_SECONDS = 30 * 24 * 60 * 60
 _DEFAULT_SNAPSHOT_STORAGE_BUDGET_BYTES = 5 * 1024 * 1024 * 1024
 _RETIREMENT_RETRY_BACKOFF_SECONDS = 0.05
+_RETIREMENT_EXPORT_STAGE_ATTEMPT_LIMIT = 2
+_RETIREMENT_EXPORT_MARKER_BYTES_LIMIT = 64 * 1024
+_RETIREMENT_EXPORT_OWNER_BYTES_LIMIT = 16 * 1024
+_RETIREMENT_EXPORT_OWNER_COUNT_LIMIT = 10_000
+_RETIREMENT_EXPORT_LEGACY_INTENT_FIELDS = frozenset(
+    {
+        "claim_revision",
+        "correlation_id",
+        "destination",
+        "expected_revision",
+        "export_kind",
+        "manifest_sha256",
+    }
+)
 _GIT_NOT_REPOSITORY_MESSAGE = (
     "fatal: not a git repository (or any of the parent directories): .git"
 )
+
+
+@dataclass(frozen=True)
+class _RetirementExportDestinationLease:
+    digest: str
+    lock_root: Path
+
+
 _GIT_NOT_REPOSITORY_BOUNDARY_PATTERN = re.compile(
     r"fatal: not a git repository \(or any parent up to mount point .+\)\n"
     r"Stopping at filesystem boundary "
@@ -879,6 +905,108 @@ def _runtime_identity_path(path: Path) -> str:
     return value
 
 
+def _host_normalized_path_parts(path: Path) -> tuple[str, ...]:
+    """Return conservative host-normalized parts for an already-bound path."""
+
+    candidate = PurePosixPath(_runtime_identity_path(path))
+    if sys.platform == "darwin":
+        return tuple(
+            unicodedata.normalize("NFD", part).casefold()
+            for part in candidate.parts
+        )
+    if os.name == "nt":
+        return tuple(part.casefold() for part in candidate.parts)
+    return candidate.parts
+
+
+def _path_is_within_boundary(path: Path, boundary: Path) -> bool:
+    """Compare one resolved path to a boundary using conservative host aliases."""
+
+    candidate_parts = _host_normalized_path_parts(path.resolve(strict=False))
+    root_parts = _host_normalized_path_parts(boundary.resolve(strict=False))
+    return candidate_parts[: len(root_parts)] == root_parts
+
+
+def _rename_directory_noreplace_at(
+    source_parent_fd: int,
+    source_name: str,
+    destination_parent_fd: int,
+    destination_name: str,
+) -> None:
+    """Atomically publish one sibling directory without replacement."""
+
+    if (
+        not source_name
+        or not destination_name
+        or Path(source_name).name != source_name
+        or Path(destination_name).name != destination_name
+    ):
+        raise AlbertError("Retirement export publication name is invalid.")
+    libc = ctypes.CDLL(None, use_errno=True)
+    source = os.fsencode(source_name)
+    destination = os.fsencode(destination_name)
+    if sys.platform.startswith("linux"):
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is None:
+            raise AlbertError(
+                "Exclusive retirement export publication is unsupported on this host."
+            )
+        renameat2.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        renameat2.restype = ctypes.c_int
+        result = renameat2(
+            source_parent_fd,
+            source,
+            destination_parent_fd,
+            destination,
+            1,  # RENAME_NOREPLACE
+        )
+    elif sys.platform == "darwin":
+        renameatx_np = getattr(libc, "renameatx_np", None)
+        if renameatx_np is None:
+            raise AlbertError(
+                "Exclusive retirement export publication is unsupported on this host."
+            )
+        renameatx_np.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        renameatx_np.restype = ctypes.c_int
+        result = renameatx_np(
+            source_parent_fd,
+            source,
+            destination_parent_fd,
+            destination,
+            0x00000004,  # RENAME_EXCL
+        )
+    else:
+        raise AlbertError(
+            "Exclusive retirement export publication is unsupported on this host."
+        )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise FileExistsError(
+            error_number,
+            "Retirement export destination already exists.",
+            destination_name,
+        )
+    raise OSError(
+        error_number,
+        os.strerror(error_number),
+        f"{source_name} -> {destination_name}",
+    )
+
+
 def _git_metadata_exists(root: Path) -> bool:
     marker = root / ".git"
     return marker.exists() or marker.is_symlink()
@@ -1273,6 +1401,16 @@ def _validated_retirement_unit(raw: Any) -> dict[str, Any]:
     ):
         raise AlbertError("Retirement Unit preservation receipt is invalid")
     discard_intent = raw.get("discard_intent", {})
+    discard_manifest: dict[str, Any] | None = None
+    if discard_intent.get("discard_kind") == "retained-worktree":
+        try:
+            discard_manifest = (
+                RetirementSnapshotStore.validated_retained_worktree_manifest(
+                    discard_intent.get("tree_manifest")
+                )
+            )
+        except RetirementSnapshotError as exc:
+            raise AlbertError("Retained Worktree Discard intent is invalid") from exc
     if discard_intent and (
         any(
             not isinstance(discard_intent.get(field_name), str)
@@ -1303,12 +1441,50 @@ def _validated_retirement_unit(raw: Any) -> dict[str, Any]:
                 )
                 or discard_intent.get("direct_removal_kind")
                 not in {"git-worktree", "managed-directory"}
+                or not isinstance(
+                    discard_intent.get("remove_git_registration"), bool
+                )
+                or discard_manifest is None
+                or discard_manifest["tree_sha256"]
+                != discard_intent.get("tree_sha256")
             )
         )
     ):
         raise AlbertError("Retained Worktree Discard intent is invalid")
     export_intent = raw.get("export_intent", {})
-    if export_intent and (
+    legacy_export_intent = bool(
+        export_intent
+        and set(export_intent) == _RETIREMENT_EXPORT_LEGACY_INTENT_FIELDS
+    )
+    export_intent_fields = {
+        "claim_revision",
+        "correlation_id",
+        "destination",
+        "destination_lock_sha256",
+        "destination_name",
+        "destination_parent",
+        "expected_revision",
+        "export_kind",
+        "claimed_at",
+        "manifest_sha256",
+        "parent_device",
+        "parent_inode",
+        "runtime_root",
+        "runtime_root_device",
+        "runtime_root_inode",
+        "source_boundary",
+        "source_device",
+        "source_inode",
+        "source_present",
+        "stage_attempt",
+        "stage_anchor_device",
+        "stage_anchor_inode",
+        "stage_name",
+        "stage_root_device",
+        "stage_root_inode",
+        "stage_state",
+    }
+    if legacy_export_intent and (
         any(
             not isinstance(export_intent.get(field_name), str)
             or not export_intent[field_name].strip()
@@ -1326,9 +1502,121 @@ def _validated_retirement_unit(raw: Any) -> dict[str, Any]:
         or not isinstance(export_intent.get("claim_revision"), int)
         or isinstance(export_intent.get("claim_revision"), bool)
         or export_intent["claim_revision"] < 0
-        or export_intent.get("export_kind", "snapshot-payload") not in {"snapshot-payload", "retained-worktree"}
+        or export_intent.get("export_kind")
+        not in {"snapshot-payload", "retained-worktree"}
     ):
         raise AlbertError("Retirement export intent is invalid")
+    if export_intent and not legacy_export_intent and (
+        set(export_intent) != export_intent_fields
+        or any(
+            not isinstance(export_intent.get(field_name), str)
+            or not export_intent[field_name].strip()
+            for field_name in (
+                "correlation_id",
+                "destination",
+                "destination_lock_sha256",
+                "destination_name",
+                "destination_parent",
+                "claimed_at",
+                "manifest_sha256",
+                "runtime_root",
+                "source_boundary",
+                "stage_name",
+            )
+        )
+        or not Path(export_intent["destination"]).is_absolute()
+        or not Path(export_intent["destination_parent"]).is_absolute()
+        or not Path(export_intent["runtime_root"]).is_absolute()
+        or not Path(export_intent["source_boundary"]).is_absolute()
+        or Path(export_intent["destination"]).parent
+        != Path(export_intent["destination_parent"])
+        or Path(export_intent["destination"]).name
+        != export_intent["destination_name"]
+        or Path(export_intent["destination_name"]).name
+        != export_intent["destination_name"]
+        or not re.fullmatch(
+            r"\.alfredo-retirement-export\.[0-9a-f]{32}\.stage",
+            export_intent["stage_name"],
+        )
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", export_intent["destination_lock_sha256"]
+        )
+        or not re.fullmatch(r"[0-9a-f]{64}", export_intent["manifest_sha256"])
+        or not isinstance(export_intent.get("expected_revision"), int)
+        or isinstance(export_intent.get("expected_revision"), bool)
+        or export_intent["expected_revision"] < 0
+        or not isinstance(export_intent.get("claim_revision"), int)
+        or isinstance(export_intent.get("claim_revision"), bool)
+        or export_intent["claim_revision"] < 0
+        or export_intent.get("export_kind")
+        not in {"snapshot-payload", "retained-worktree"}
+        or any(
+            not isinstance(export_intent.get(field_name), int)
+            or isinstance(export_intent.get(field_name), bool)
+            or export_intent[field_name] < 0
+            for field_name in (
+                "parent_device",
+                "runtime_root_device",
+                "source_device",
+                "stage_anchor_device",
+                "stage_root_device",
+            )
+        )
+        or any(
+            not isinstance(export_intent.get(field_name), int)
+            or isinstance(export_intent.get(field_name), bool)
+            or export_intent[field_name] <= 0
+            for field_name in (
+                "parent_inode",
+                "runtime_root_inode",
+            )
+        )
+        or not isinstance(export_intent.get("stage_anchor_inode"), int)
+        or isinstance(export_intent.get("stage_anchor_inode"), bool)
+        or export_intent["stage_anchor_inode"] < 0
+        or not isinstance(export_intent.get("stage_root_inode"), int)
+        or isinstance(export_intent.get("stage_root_inode"), bool)
+        or export_intent["stage_root_inode"] < 0
+        or not isinstance(export_intent.get("source_inode"), int)
+        or isinstance(export_intent.get("source_inode"), bool)
+        or export_intent["source_inode"] < 0
+        or not isinstance(export_intent.get("source_present"), bool)
+        or export_intent["source_present"]
+        != (export_intent["source_inode"] > 0)
+        or not isinstance(export_intent.get("stage_attempt"), int)
+        or isinstance(export_intent.get("stage_attempt"), bool)
+        or not 1
+        <= export_intent["stage_attempt"]
+        <= _RETIREMENT_EXPORT_STAGE_ATTEMPT_LIMIT
+        or export_intent.get("stage_state") not in {"reserved", "bound"}
+        or (
+            export_intent["stage_state"] == "reserved"
+            and any(
+                export_intent[field_name] != 0
+                for field_name in (
+                    "stage_anchor_device",
+                    "stage_anchor_inode",
+                    "stage_root_device",
+                    "stage_root_inode",
+                )
+            )
+        )
+        or (
+            export_intent["stage_state"] == "bound"
+            and (
+                export_intent["stage_anchor_inode"] <= 0
+                or export_intent["stage_root_inode"] <= 0
+            )
+        )
+    ):
+        raise AlbertError("Retirement export intent is invalid")
+    if export_intent and not legacy_export_intent:
+        try:
+            export_started_at = datetime.fromisoformat(export_intent["claimed_at"])
+        except ValueError as exc:
+            raise AlbertError("Retirement export intent is invalid") from exc
+        if export_started_at.tzinfo is None:
+            raise AlbertError("Retirement export intent is invalid")
     retry_intent = raw.get("retry_intent", {})
     if retry_intent and (
         not isinstance(retry_intent.get("correlation_id"), str)
@@ -2287,9 +2575,30 @@ class AlbertMission:
         raw = data.get("retirement_storage")
         if raw is None:
             return cls._empty_retirement_storage_state()
+
+        def timestamp_is_valid(value: Any) -> bool:
+            if not isinstance(value, str) or not value.strip():
+                return False
+            try:
+                parsed = datetime.fromisoformat(value)
+            except ValueError:
+                return False
+            return parsed.tzinfo is not None
+
         if (
             not isinstance(raw, dict)
-            or raw.get("schema_version") != 1
+            or set(raw)
+            != {
+                "schema_version",
+                "reclamation_count",
+                "reclaimed_bytes",
+                "recent_reclamations",
+                "reclamation_intents",
+                "attention",
+            }
+            or not isinstance(raw.get("schema_version"), int)
+            or isinstance(raw.get("schema_version"), bool)
+            or raw["schema_version"] != 1
             or not isinstance(raw.get("reclamation_count"), int)
             or isinstance(raw.get("reclamation_count"), bool)
             or raw["reclamation_count"] < 0
@@ -2298,29 +2607,113 @@ class AlbertMission:
             or raw["reclaimed_bytes"] < 0
             or not isinstance(raw.get("recent_reclamations"), list)
             or len(raw["recent_reclamations"]) > 64
-            or not all(
-                isinstance(item, dict) for item in raw["recent_reclamations"]
-            )
-            or not isinstance(raw.get("reclamation_intents", {}), dict)
-            or not all(
-                isinstance(session_id, str)
-                and session_id.strip()
-                and isinstance(intent, dict)
-                and intent.get("session_id") == session_id
-                and isinstance(intent.get("manifest_sha256"), str)
-                and bool(re.fullmatch(r"[0-9a-f]{64}", intent["manifest_sha256"]))
-                and isinstance(intent.get("payload_path"), str)
-                and Path(intent["payload_path"]).is_absolute()
-                and isinstance(intent.get("snapshot_bytes"), int)
-                and not isinstance(intent.get("snapshot_bytes"), bool)
-                and intent["snapshot_bytes"] >= 0
-                and isinstance(intent.get("claimed_at"), str)
-                and bool(intent["claimed_at"].strip())
-                for session_id, intent in raw.get("reclamation_intents", {}).items()
-            )
+            or not isinstance(raw.get("reclamation_intents"), dict)
             or not isinstance(raw.get("attention"), dict)
         ):
             raise AlbertError("Snapshot storage state is invalid")
+        recent_reclamations = raw["recent_reclamations"]
+        if (
+            not all(
+                isinstance(item, dict)
+                and set(item)
+                == {"session_id", "reclaimed_at", "snapshot_bytes", "reason"}
+                and isinstance(item.get("session_id"), str)
+                and bool(item["session_id"].strip())
+                and timestamp_is_valid(item.get("reclaimed_at"))
+                and isinstance(item.get("snapshot_bytes"), int)
+                and not isinstance(item.get("snapshot_bytes"), bool)
+                and item["snapshot_bytes"] >= 0
+                and item.get("reason") == "retention-expired-capacity-reclamation"
+                for item in recent_reclamations
+            )
+            or len(
+                {
+                    item["session_id"]
+                    for item in recent_reclamations
+                    if isinstance(item, dict) and "session_id" in item
+                }
+            )
+            != len(recent_reclamations)
+            or raw["reclamation_count"] < len(recent_reclamations)
+            or raw["reclaimed_bytes"]
+            < sum(item["snapshot_bytes"] for item in recent_reclamations)
+        ):
+            raise AlbertError("Snapshot storage state is invalid")
+        reclamation_intents = raw["reclamation_intents"]
+        if not all(
+            isinstance(session_id, str)
+            and session_id.strip()
+            and isinstance(intent, dict)
+            and set(intent)
+            == {
+                "session_id",
+                "manifest_sha256",
+                "payload_path",
+                "snapshot_bytes",
+                "claimed_at",
+            }
+            and intent.get("session_id") == session_id
+            and isinstance(intent.get("manifest_sha256"), str)
+            and bool(re.fullmatch(r"[0-9a-f]{64}", intent["manifest_sha256"]))
+            and isinstance(intent.get("payload_path"), str)
+            and Path(intent["payload_path"]).is_absolute()
+            and isinstance(intent.get("snapshot_bytes"), int)
+            and not isinstance(intent.get("snapshot_bytes"), bool)
+            and intent["snapshot_bytes"] >= 0
+            and timestamp_is_valid(intent.get("claimed_at"))
+            for session_id, intent in reclamation_intents.items()
+        ):
+            raise AlbertError("Snapshot storage state is invalid")
+        attention = raw["attention"]
+        if attention:
+            common_attention_valid = bool(
+                attention.get("active") is True
+                and isinstance(attention.get("message"), str)
+                and attention["message"].strip()
+                and timestamp_is_valid(attention.get("recorded_at"))
+            )
+            if attention.get("code") == "snapshot-reclamation-failed":
+                attention_valid = bool(
+                    common_attention_valid
+                    and set(attention)
+                    == {
+                        "active",
+                        "code",
+                        "session_id",
+                        "message",
+                        "recorded_at",
+                    }
+                    and isinstance(attention.get("session_id"), str)
+                    and attention["session_id"].strip()
+                )
+            elif attention.get("code") == "snapshot-storage-exhausted":
+                attention_valid = bool(
+                    common_attention_valid
+                    and set(attention)
+                    == {
+                        "active",
+                        "code",
+                        "message",
+                        "required_bytes",
+                        "committed_bytes",
+                        "budget_bytes",
+                        "recorded_at",
+                    }
+                    and all(
+                        isinstance(attention.get(field_name), int)
+                        and not isinstance(attention.get(field_name), bool)
+                        and attention[field_name] >= 0
+                        for field_name in (
+                            "required_bytes",
+                            "committed_bytes",
+                            "budget_bytes",
+                        )
+                    )
+                )
+            else:
+                attention_valid = False
+            if not attention_valid:
+                raise AlbertError("Snapshot storage state is invalid")
         return {
             "schema_version": 1,
             "reclamation_count": raw["reclamation_count"],
@@ -2330,9 +2723,9 @@ class AlbertMission:
             ],
             "reclamation_intents": {
                 session_id: dict(intent)
-                for session_id, intent in raw.get("reclamation_intents", {}).items()
+                for session_id, intent in reclamation_intents.items()
             },
-            "attention": dict(raw["attention"]),
+            "attention": dict(attention),
         }
 
     @classmethod
@@ -2694,7 +3087,7 @@ class AlbertMission:
         if recorder is not None:
             recorder.record(stream_name, payload)
 
-    def load(self) -> "AlbertMission":
+    def load(self, *, perform_startup_effects: bool = True) -> "AlbertMission":
         self.agent_registry = load_agent_registry(self.agent_config_path)
         if self.agent_availability_snapshot is not None:
             refreshed_agents: list[AgentConfig] = []
@@ -2730,7 +3123,7 @@ class AlbertMission:
         self.issues = self._load_issues()
         runtime_exists = self.runtime_path.exists()
         self._load_runtime()
-        if runtime_exists:
+        if runtime_exists and perform_startup_effects:
             self._reconcile_abandoned_sessions()
             self._reconcile_retirement_units()
             self._reclaim_snapshot_payloads(
@@ -2738,7 +3131,7 @@ class AlbertMission:
                 reclaim_all_expired=True,
                 raise_on_exhaustion=False,
             )
-        else:
+        elif not runtime_exists and perform_startup_effects:
             self._persist()
         return self
 
@@ -5868,6 +6261,560 @@ class AlbertMission:
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
+    @staticmethod
+    def _retirement_export_lock_digest(destination: Path) -> str:
+        identity = json.dumps(
+            _host_normalized_path_parts(destination),
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        return sha256(identity.encode("ascii")).hexdigest()
+
+    @contextmanager
+    def _retirement_export_destination_lock(self, destination: Path):
+        """Hold one nonblocking cross-session lock through export receipt."""
+
+        lock_root = self.runtime_root / ".retirement-export-locks"
+        lock_root.mkdir(parents=True, exist_ok=True)
+        lock_digest = self._retirement_export_lock_digest(destination)
+        lock_path = lock_root / f"{lock_digest}.lock"
+        flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        lock_fd = os.open(lock_path, flags, 0o600)
+        try:
+            lock_status = os.fstat(lock_fd)
+            if not stat.S_ISREG(lock_status.st_mode):
+                raise AlbertError(
+                    "Retirement export destination lock boundary is invalid."
+                )
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                    raise AlbertError(
+                        "Retirement export destination is already being claimed."
+                    ) from exc
+                raise
+            try:
+                yield _RetirementExportDestinationLease(
+                    digest=lock_digest,
+                    lock_root=lock_root,
+                )
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+    def _retirement_export_owner_identity(
+        self,
+        *,
+        destination: Path,
+        session_id: str,
+        correlation_id: str,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "project_key": self.project_key,
+            "mission_id": self.mission_id,
+            "session_id": session_id,
+            "correlation_id": correlation_id,
+            "expected_revision": expected_revision,
+            "destination": str(destination),
+            "destination_lock_sha256": (
+                self._retirement_export_lock_digest(destination)
+            ),
+        }
+
+    @staticmethod
+    def _retirement_export_owner_name(identity: dict[str, Any]) -> str:
+        session_payload = json.dumps(
+            {
+                "project_key": identity["project_key"],
+                "mission_id": identity["mission_id"],
+                "session_id": identity["session_id"],
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        request_payload = json.dumps(
+            identity,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        return (
+            f"{identity['destination_lock_sha256']}."
+            f"{sha256(session_payload).hexdigest()}."
+            f"{sha256(request_payload).hexdigest()}.owner"
+        )
+
+    def _retirement_export_owner_directories(self) -> list[str]:
+        lock_root = self.runtime_root / ".retirement-export-locks"
+        if not lock_root.exists():
+            return []
+        names: list[str] = []
+        pattern = re.compile(
+            r"[0-9a-f]{64}\.[0-9a-f]{64}\.[0-9a-f]{64}\.owner"
+        )
+        try:
+            with os.scandir(lock_root) as iterator:
+                for entry in iterator:
+                    if not entry.name.endswith(".owner"):
+                        continue
+                    if (
+                        len(names) >= _RETIREMENT_EXPORT_OWNER_COUNT_LIMIT
+                        or pattern.fullmatch(entry.name) is None
+                    ):
+                        raise AlbertError(
+                            "Retirement export owner registry is invalid."
+                        )
+                    status = entry.stat(follow_symlinks=False)
+                    if not stat.S_ISDIR(status.st_mode):
+                        raise AlbertError(
+                            "Retirement export owner registry is invalid."
+                        )
+                    names.append(entry.name)
+        except OSError as exc:
+            raise AlbertError(
+                "Retirement export owner registry is unavailable."
+            ) from exc
+        return sorted(names)
+
+    def _claim_retirement_export_destination_directory(
+        self,
+        lease: _RetirementExportDestinationLease,
+        *,
+        destination: Path,
+        session_id: str,
+        correlation_id: str,
+        expected_revision: int,
+        claimed_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically persist one permanent hash-bound destination owner."""
+
+        identity = self._retirement_export_owner_identity(
+            destination=destination,
+            session_id=session_id,
+            correlation_id=correlation_id,
+            expected_revision=expected_revision,
+        )
+        if identity["destination_lock_sha256"] != lease.digest:
+            raise AlbertError(
+                "Retirement export destination lock identity changed."
+            )
+        owner_claimed_at = claimed_at or _utc_now()
+        try:
+            parsed_claimed_at = datetime.fromisoformat(owner_claimed_at)
+        except ValueError as exc:
+            raise AlbertError(
+                "Retirement export destination owner is invalid."
+            ) from exc
+        owner = {**identity, "claimed_at": owner_claimed_at}
+        encoded_owner = json.dumps(
+            owner,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        if (
+            parsed_claimed_at.tzinfo is None
+            or len(encoded_owner) > _RETIREMENT_EXPORT_OWNER_BYTES_LIMIT
+        ):
+            raise AlbertError(
+                "Retirement export destination owner is invalid or exceeds its "
+                "byte bound."
+            )
+        owner_name = self._retirement_export_owner_name(identity)
+        destination_prefix = f"{lease.digest}."
+        owner_names = self._retirement_export_owner_directories()
+        conflicts = [
+            name
+            for name in owner_names
+            if name.startswith(destination_prefix) and name != owner_name
+        ]
+        if conflicts:
+            raise AlbertError(
+                "Retirement export destination is already durably claimed."
+            )
+        if owner_name in owner_names:
+            return owner
+        if len(owner_names) >= _RETIREMENT_EXPORT_OWNER_COUNT_LIMIT:
+            raise AlbertError(
+                "Retirement export owner registry capacity is exhausted."
+            )
+        directory_fd = self._open_retirement_export_directory(lease.lock_root)
+        try:
+            try:
+                os.mkdir(owner_name, mode=0o700, dir_fd=directory_fd)
+            except FileExistsError:
+                pass
+            owner_fd = self._open_retirement_export_directory(
+                owner_name,
+                dir_fd=directory_fd,
+            )
+            try:
+                if os.listdir(owner_fd):
+                    raise AlbertError(
+                        "Retirement export destination owner boundary changed."
+                    )
+                os.fchmod(owner_fd, 0o700)
+                os.fsync(owner_fd)
+            finally:
+                os.close(owner_fd)
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return owner
+
+    def _retirement_export_session_has_unfinished_directory_owner(
+        self,
+        session: LocalAgentSession,
+        *,
+        permitted_owner_name: str = "",
+    ) -> bool:
+        session_identity = self._retirement_export_owner_identity(
+            destination=self.runtime_root / ".owner-session-placeholder",
+            session_id=session.session_id,
+            correlation_id="owner-session-placeholder",
+            expected_revision=0,
+        )
+        session_name = self._retirement_export_owner_name(session_identity)
+        session_digest = session_name.split(".")[1]
+        completed_owner_names: set[str] = set()
+        for correlation_id, receipt in session.retirement.get(
+            "action_receipts", {}
+        ).items():
+            if not isinstance(receipt, dict) or receipt.get("action") != "export":
+                continue
+            repository = Path(receipt["destination"])
+            identity = self._retirement_export_owner_identity(
+                destination=repository.parent,
+                session_id=session.session_id,
+                correlation_id=correlation_id,
+                expected_revision=receipt["expected_revision"],
+            )
+            completed_owner_names.add(
+                self._retirement_export_owner_name(identity)
+            )
+        for owner_name in self._retirement_export_owner_directories():
+            if owner_name.split(".")[1] != session_digest:
+                continue
+            if owner_name == permitted_owner_name:
+                continue
+            if owner_name not in completed_owner_names:
+                return True
+        return False
+
+    @staticmethod
+    def _open_retirement_export_directory(
+        path: Path | str,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags, dir_fd=dir_fd)
+        status = os.fstat(descriptor)
+        if not stat.S_ISDIR(status.st_mode):
+            os.close(descriptor)
+            raise AlbertError("Retirement export directory boundary is invalid.")
+        return descriptor
+
+    @staticmethod
+    def _bound_retirement_export_directory_path(descriptor: int) -> Path:
+        expected = os.fstat(descriptor)
+        if sys.platform.startswith("linux"):
+            descriptor_path = Path("/proc/self/fd") / str(descriptor)
+            try:
+                raw_path = os.readlink(descriptor_path)
+                if raw_path.endswith(" (deleted)"):
+                    raise AlbertError(
+                        "Bound retirement export directory was removed."
+                    )
+                path = Path(raw_path)
+                current = path.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise AlbertError(
+                    "Bound retirement export directory is unavailable."
+                ) from exc
+        elif sys.platform == "darwin" and hasattr(fcntl, "F_GETPATH"):
+            try:
+                raw_path = fcntl.fcntl(
+                    descriptor,
+                    fcntl.F_GETPATH,
+                    b"\0" * 1024,
+                ).split(b"\0", 1)[0]
+                path = Path(os.fsdecode(raw_path))
+                current = path.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise AlbertError(
+                    "Bound retirement export directory is unavailable."
+                ) from exc
+        else:
+            raise AlbertError(
+                "Bound retirement export directories are unsupported on this host."
+            )
+        if (current.st_dev, current.st_ino) != (
+            expected.st_dev,
+            expected.st_ino,
+        ):
+            raise AlbertError("Bound retirement export directory changed.")
+        return path
+
+    @staticmethod
+    def _publish_retirement_export_noreplace(
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+        expected_source_device: int,
+        expected_source_inode: int,
+    ) -> None:
+        """Publish one expected directory, restoring a substituted source."""
+
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            source_fd = os.open(source_name, flags, dir_fd=source_parent_fd)
+        except OSError as exc:
+            raise AlbertError(
+                "Retirement export staging source is unavailable."
+            ) from exc
+        try:
+            source_status = os.fstat(source_fd)
+            if (
+                not stat.S_ISDIR(source_status.st_mode)
+                or (source_status.st_dev, source_status.st_ino)
+                != (expected_source_device, expected_source_inode)
+            ):
+                raise AlbertError(
+                    "Retirement export staging source identity changed."
+                )
+            _rename_directory_noreplace_at(
+                source_parent_fd,
+                source_name,
+                destination_parent_fd,
+                destination_name,
+            )
+            try:
+                published_fd = os.open(
+                    destination_name,
+                    flags,
+                    dir_fd=destination_parent_fd,
+                )
+            except OSError as exc:
+                raise AlbertError(
+                    "Retirement export publication is unavailable."
+                ) from exc
+            try:
+                published_status = os.fstat(published_fd)
+                if (published_status.st_dev, published_status.st_ino) == (
+                    expected_source_device,
+                    expected_source_inode,
+                ):
+                    return
+                try:
+                    _rename_directory_noreplace_at(
+                        destination_parent_fd,
+                        destination_name,
+                        source_parent_fd,
+                        source_name,
+                    )
+                    restored_status = os.stat(
+                        source_name,
+                        dir_fd=source_parent_fd,
+                        follow_symlinks=False,
+                    )
+                    os.fsync(source_parent_fd)
+                    os.fsync(destination_parent_fd)
+                except OSError as exc:
+                    raise AlbertError(
+                        "Retirement export publication source changed and could "
+                        "not be restored."
+                    ) from exc
+                if (
+                    not stat.S_ISDIR(restored_status.st_mode)
+                    or (restored_status.st_dev, restored_status.st_ino)
+                    != (published_status.st_dev, published_status.st_ino)
+                ):
+                    raise AlbertError(
+                        "Retirement export substituted source restoration failed."
+                    )
+                raise AlbertError(
+                    "Retirement export staging source changed during publication."
+                )
+            finally:
+                os.close(published_fd)
+        finally:
+            os.close(source_fd)
+
+    @staticmethod
+    def _read_retirement_export_marker(root_fd: int) -> dict[str, Any]:
+        """Read one stable, bounded, no-follow export marker."""
+
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(
+            "retirement-export.json",
+            flags,
+            dir_fd=root_fd,
+        )
+        try:
+            before = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_size > _RETIREMENT_EXPORT_MARKER_BYTES_LIMIT
+            ):
+                raise AlbertError(
+                    "Retirement export recovery marker is invalid."
+                )
+            payload = bytearray()
+            while len(payload) <= _RETIREMENT_EXPORT_MARKER_BYTES_LIMIT:
+                chunk = os.read(descriptor, 64 * 1024)
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            after = os.fstat(descriptor)
+            if (
+                len(payload) > _RETIREMENT_EXPORT_MARKER_BYTES_LIMIT
+                or (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
+                )
+                != (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    after.st_mtime_ns,
+                    after.st_ctime_ns,
+                )
+            ):
+                raise AlbertError(
+                    "Retirement export recovery marker changed."
+                )
+        finally:
+            os.close(descriptor)
+        marker = json.loads(bytes(payload).decode("utf-8"))
+        if not isinstance(marker, dict):
+            raise AlbertError("Retirement export recovery marker is invalid.")
+        return marker
+
+    @staticmethod
+    def _write_retirement_export_marker_exclusive(
+        stage_fd: int,
+        marker_path: Path,
+        content: str,
+    ) -> None:
+        """Create one private-stage marker without replacing any entry."""
+
+        if marker_path.name != "retirement-export.json":
+            raise AlbertError("Retirement export marker path is invalid.")
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(marker_path.name, flags, 0o600, dir_fd=stage_fd)
+        try:
+            payload = content.encode("utf-8")
+            if len(payload) > _RETIREMENT_EXPORT_MARKER_BYTES_LIMIT:
+                raise AlbertError("Retirement export marker exceeds its byte bound.")
+            written = 0
+            while written < len(payload):
+                count = os.write(descriptor, payload[written:])
+                if count <= 0:
+                    raise OSError("Retirement export marker write did not progress.")
+                written += count
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.fsync(stage_fd)
+
+    @classmethod
+    def _durably_sync_retirement_export_tree(cls, root_fd: int) -> None:
+        """Flush one no-follow directory tree from files through its root."""
+
+        try:
+            with os.scandir(root_fd) as iterator:
+                entries = sorted(iterator, key=lambda entry: os.fsencode(entry.name))
+        except OSError as exc:
+            raise AlbertError(
+                "Retirement export durability scan could not inspect its tree."
+            ) from exc
+        for entry in entries:
+            try:
+                before = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise AlbertError(
+                    "Retirement export durability boundary changed."
+                ) from exc
+            if stat.S_ISLNK(before.st_mode):
+                continue
+            if stat.S_ISDIR(before.st_mode):
+                child_fd = cls._open_retirement_export_directory(
+                    entry.name,
+                    dir_fd=root_fd,
+                )
+                try:
+                    current = os.fstat(child_fd)
+                    if (current.st_dev, current.st_ino) != (
+                        before.st_dev,
+                        before.st_ino,
+                    ):
+                        raise AlbertError(
+                            "Retirement export durability boundary changed."
+                        )
+                    cls._durably_sync_retirement_export_tree(child_fd)
+                finally:
+                    os.close(child_fd)
+                continue
+            if not stat.S_ISREG(before.st_mode):
+                raise AlbertError(
+                    "Retirement export durability tree contains an unsupported entry."
+                )
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            descriptor = os.open(entry.name, flags, dir_fd=root_fd)
+            try:
+                current = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(current.st_mode)
+                    or (current.st_dev, current.st_ino)
+                    != (before.st_dev, before.st_ino)
+                ):
+                    raise AlbertError(
+                        "Retirement export durability boundary changed."
+                    )
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        os.fsync(root_fd)
+
     def _read_runtime_payload(self) -> dict[str, Any]:
         if not self.runtime_path.exists():
             raise AlbertError("mission runtime does not exist")
@@ -5892,8 +6839,17 @@ class AlbertMission:
                 delete=False,
             ) as temporary:
                 temporary.write(payload)
+                temporary.flush()
+                os.fsync(temporary.fileno())
                 temporary_path = Path(temporary.name)
             temporary_path.replace(self.runtime_path)
+            directory_fd = self._open_retirement_export_directory(
+                self.runtime_dir
+            )
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         finally:
             if temporary_path is not None and temporary_path.exists():
                 temporary_path.unlink()
@@ -6431,6 +7387,18 @@ class AlbertMission:
                     )
                 claim_revision = session.revision
             else:
+                if any(
+                    session.retirement.get(intent_name)
+                    for intent_name in (
+                        "discard_intent",
+                        "export_intent",
+                    )
+                ) or self._retirement_export_session_has_unfinished_directory_owner(
+                    session
+                ):
+                    raise LaunchBlockedError(
+                        f"{session_id} has a Retirement Unit action in progress."
+                    )
                 self._require_lifecycle_revision(session, expected_revision)
                 self._require_active_retirement_unit(session, "begin preservation")
             if session.status not in {
@@ -6630,6 +7598,19 @@ class AlbertMission:
                 else:
                     raise AlbertError("Retirement action correlation id was reused for a different request.")
             else:
+                if any(
+                    session.retirement.get(intent_name)
+                    for intent_name in (
+                        "discard_intent",
+                        "export_intent",
+                        "retry_intent",
+                    )
+                ) or self._retirement_export_session_has_unfinished_directory_owner(
+                    session
+                ):
+                    raise LaunchBlockedError(
+                        f"{session_id} has a Retirement Unit action in progress."
+                    )
                 self._require_lifecycle_revision(session, expected_revision)
                 self._ensure_snapshot_storage_metadata(session)
                 snapshot = session.retirement.get("snapshot", {})
@@ -6726,8 +7707,14 @@ class AlbertMission:
     def retirement_storage_inspection(self) -> dict[str, Any]:
         """Return deterministic read-only Snapshot Payload details."""
 
-        with self._runtime_lock(exclusive=False):
-            data = self._read_runtime_payload()
+        if self.runtime_path.exists():
+            with self._runtime_lock(exclusive=False):
+                data = self._read_runtime_payload()
+        else:
+            data = {
+                "sessions": {},
+                "retirement_storage": dict(self.retirement_storage),
+            }
         sessions = {
             session_id: LocalAgentSession.from_dict(raw)
             for session_id, raw in data.get("sessions", {}).items()
@@ -6845,6 +7832,20 @@ class AlbertMission:
             and snapshot.get("verified") is True
             and snapshot.get("payload_disposition", "retained") == "retained"
         )
+        expected_path = self._session_worktree_path(session_id)
+        retained_source_available = bool(
+            phase == "preservation-blocked"
+            and not session.worktree_path.is_symlink()
+            and session.worktree_path.is_dir()
+            and _runtime_identity_path(
+                session.worktree_path.resolve(strict=False)
+            )
+            == _runtime_identity_path(expected_path)
+            and _runtime_identity_path(
+                session.worktree_path.resolve(strict=False)
+            )
+            != _runtime_identity_path(self.target_repo)
+        )
         return {
             "schema_version": 1,
             "mission_id": self.mission_id,
@@ -6861,7 +7862,8 @@ class AlbertMission:
             "actions": {
                 "retry": blocked,
                 "inspect": True,
-                "export": blocked and (retained_snapshot or phase == "preservation-blocked"),
+                "export": blocked
+                and (retained_snapshot or retained_source_available),
                 "discard": blocked,
             },
         }
@@ -6878,233 +7880,1049 @@ class AlbertMission:
 
         if not correlation_id.strip():
             raise AlbertError("Retirement export correlation id is required.")
-        destination = destination.resolve(strict=False)
-        with self._retirement_effect_lock(session_id):
-            with self._runtime_lock(exclusive=True):
-                data = self._read_runtime_payload()
-                raw_session = data.get("sessions", {}).get(session_id)
-                if not isinstance(raw_session, dict):
-                    raise AlbertError(f"Unknown Local Agent session: {session_id}")
-                session = LocalAgentSession.from_dict(raw_session)
-                receipts = session.retirement.setdefault("action_receipts", {})
-                existing = receipts.get(correlation_id)
-                if correlation_id in receipts:
-                    if (
-                        existing.get("action") == "export"
-                        and existing.get("mission_id") == self.mission_id
-                        and existing.get("session_id") == session_id
-                        and existing.get("expected_revision") == expected_revision
-                        and existing.get("destination") == str(destination / "repository")
-                        and isinstance(existing.get("result_revision"), int)
-                        and not isinstance(existing.get("result_revision"), bool)
-                        and existing["result_revision"] <= session.revision
+        requested_destination = Path(destination)
+        if not requested_destination.is_absolute():
+            requested_destination = Path.cwd() / requested_destination
+        if (
+            not requested_destination.name
+            or requested_destination.name in {".", ".."}
+        ):
+            raise AlbertError("Retirement export destination name is invalid.")
+        if _path_is_within_boundary(
+            requested_destination,
+            self.runtime_root,
+        ):
+            raise AlbertError(
+                "Retirement export destination must be outside app-private runtime "
+                "storage."
+            )
+        try:
+            destination = (
+                requested_destination.parent.resolve(strict=True)
+                / requested_destination.name
+            )
+        except OSError as exc:
+            raise AlbertError(
+                "Retirement export destination parent must be an existing directory."
+            ) from exc
+        with (
+            self._retirement_effect_lock(session_id),
+            self._retirement_export_destination_lock(destination) as destination_lease,
+        ):
+            lock_digest = destination_lease.digest
+            parent_fd: int | None = None
+            try:
+                with self._runtime_lock(exclusive=True):
+                    data = self._read_runtime_payload()
+                    raw_session = data.get("sessions", {}).get(session_id)
+                    if not isinstance(raw_session, dict):
+                        raise AlbertError(
+                            f"Unknown Local Agent session: {session_id}"
+                        )
+                    session = LocalAgentSession.from_dict(raw_session)
+                    requested_owner_identity = (
+                        self._retirement_export_owner_identity(
+                            destination=destination,
+                            session_id=session_id,
+                            correlation_id=correlation_id,
+                            expected_revision=expected_revision,
+                        )
+                    )
+                    requested_owner_name = self._retirement_export_owner_name(
+                        requested_owner_identity
+                    )
+                    if self._retirement_export_session_has_unfinished_directory_owner(
+                        session,
+                        permitted_owner_name=requested_owner_name,
                     ):
-                        return dict(existing)
-                    raise AlbertError(
-                        "Retirement action correlation id was reused for a different request."
+                        raise LaunchBlockedError(
+                            f"{session_id} has a different durable export owner."
+                        )
+                    if any(
+                        session.retirement.get(intent_name)
+                        for intent_name in ("discard_intent", "retry_intent")
+                    ):
+                        raise LaunchBlockedError(
+                            f"{session_id} has a different Retirement Unit action "
+                            "in progress."
+                        )
+                    receipts = session.retirement.setdefault(
+                        "action_receipts", {}
                     )
-                export_intent = session.retirement.get("export_intent", {})
-                resuming_intent = bool(
-                    export_intent
-                    and export_intent.get("correlation_id") == correlation_id
-                    and export_intent.get("expected_revision") == expected_revision
-                    and export_intent.get("destination") == str(destination)
-                    and export_intent.get("claim_revision") == session.revision
-                )
-                if export_intent and not resuming_intent:
-                    raise AlbertError(
-                        "Retirement export already has a different durable intent."
-                    )
-                if not resuming_intent:
-                    self._require_lifecycle_revision(session, expected_revision)
-                retirement_phase = str(session.retirement.get("phase", "active"))
-                if retirement_phase not in {
-                    "preservation-blocked",
-                    "retirement-blocked",
-                }:
-                    raise LaunchBlockedError(
-                        f"{session_id} is not a blocked Retirement Unit."
-                    )
-                snapshot = session.retirement.get("snapshot", {})
-                retained_snapshot = bool(
-                    snapshot
-                    and snapshot.get("verified") is True
-                    and snapshot.get("payload_disposition", "retained") == "retained"
-                )
-                export_kind = str(export_intent.get("export_kind", ""))
-                if not export_kind:
-                    export_kind = "snapshot-payload" if retained_snapshot else "retained-worktree"
-                if export_kind not in {"snapshot-payload", "retained-worktree"}:
-                    raise AlbertError("Retirement export intent kind is invalid.")
-                if export_kind == "snapshot-payload" and not retained_snapshot:
-                    raise LaunchBlockedError(f"{session_id} does not have a retained verified payload to export.")
-                if export_kind == "retained-worktree" and session.retirement.get("phase") != "preservation-blocked":
-                    raise LaunchBlockedError(f"{session_id} does not have a blocked Retained Worktree to export.")
-                if not resuming_intent and (destination.exists() or destination.is_symlink()):
-                    raise AlbertError("Retirement export destination must not exist.")
-                store: RetirementSnapshotStore | None = None
-                retained_manifest: dict[str, Any] | None = None
-                exclude_git_metadata = session.worktree_identity.startswith("managed-git:")
-                if export_kind == "snapshot-payload":
-                    snapshot_revision = int(snapshot.get("session_revision", session.revision))
-                    store = self._retirement_snapshot_store(session, snapshot_revision)
-                    manifest_sha256 = str(snapshot["manifest_sha256"])
-                else:
-                    expected_path = self._session_worktree_path(session_id)
+                    existing = receipts.get(correlation_id)
+                    if correlation_id in receipts:
+                        if (
+                            existing.get("action") == "export"
+                            and existing.get("mission_id") == self.mission_id
+                            and existing.get("session_id") == session_id
+                            and existing.get("expected_revision")
+                            == expected_revision
+                            and existing.get("destination")
+                            == str(destination / "repository")
+                            and isinstance(existing.get("result_revision"), int)
+                            and not isinstance(
+                                existing.get("result_revision"), bool
+                            )
+                            and existing["result_revision"] <= session.revision
+                        ):
+                            return dict(existing)
+                        raise AlbertError(
+                            "Retirement action correlation id was reused for a "
+                            "different request."
+                        )
+
                     source_boundary = session.worktree_path.resolve(strict=False)
-                    if _runtime_identity_path(source_boundary) != _runtime_identity_path(
-                        expected_path
-                    ) or _runtime_identity_path(source_boundary) == _runtime_identity_path(
-                        self.target_repo
-                    ):
-                        raise LaunchBlockedError(
-                            "Retained Worktree export requires the exact managed path "
-                            "and cannot target the Coding Workspace."
+                    if _path_is_within_boundary(destination, self.runtime_root):
+                        raise AlbertError(
+                            "Retirement export destination must be outside "
+                            "app-private runtime storage."
                         )
-                    if destination == source_boundary or destination.is_relative_to(
-                        source_boundary
+                    if _path_is_within_boundary(destination, source_boundary):
+                        raise AlbertError(
+                            "Retirement export destination must be outside the "
+                            "Retained Worktree."
+                        )
+                    export_intent = session.retirement.get("export_intent", {})
+                    legacy_export_intent = bool(
+                        export_intent
+                        and set(export_intent)
+                        == _RETIREMENT_EXPORT_LEGACY_INTENT_FIELDS
+                    )
+                    resuming_intent = bool(
+                        export_intent
+                        and export_intent.get("correlation_id") == correlation_id
+                        and export_intent.get("expected_revision")
+                        == expected_revision
+                        and export_intent.get("destination") == str(destination)
+                        and export_intent.get("claim_revision") == session.revision
+                    )
+                    if export_intent and not resuming_intent:
+                        raise AlbertError(
+                            "Retirement export already has a different durable intent."
+                        )
+                    if not resuming_intent:
+                        self._require_lifecycle_revision(
+                            session, expected_revision
+                        )
+                    if session.retirement.get("phase", "active") not in {
+                        "preservation-blocked",
+                        "retirement-blocked",
+                    }:
+                        raise LaunchBlockedError(
+                            f"{session_id} is not a blocked Retirement Unit."
+                        )
+
+                    try:
+                        parent_fd = self._open_retirement_export_directory(
+                            destination.parent
+                        )
+                    except OSError as exc:
+                        raise AlbertError(
+                            "Retirement export destination parent must be an "
+                            "existing directory."
+                        ) from exc
+                    bound_parent = (
+                        self._bound_retirement_export_directory_path(parent_fd)
+                    )
+                    parent_status = os.fstat(parent_fd)
+                    try:
+                        named_parent_status = destination.parent.stat(
+                            follow_symlinks=False
+                        )
+                    except OSError as exc:
+                        raise AlbertError(
+                            "Retirement export destination parent changed."
+                        ) from exc
+                    if (
+                        not stat.S_ISDIR(named_parent_status.st_mode)
+                        or (named_parent_status.st_dev, named_parent_status.st_ino)
+                        != (parent_status.st_dev, parent_status.st_ino)
+                        or _host_normalized_path_parts(bound_parent)
+                        != _host_normalized_path_parts(destination.parent)
                     ):
                         raise AlbertError(
-                            "Retirement export destination must be outside the Retained "
-                            "Worktree."
+                            "Retirement export destination parent changed."
                         )
-                    if destination == self.runtime_dir or destination.is_relative_to(
-                        self.runtime_dir
+                    bound_destination = bound_parent / destination.name
+                    if _path_is_within_boundary(
+                        bound_destination, self.runtime_root
                     ):
                         raise AlbertError(
-                            "Retirement export destination must be outside app-private "
-                            "runtime storage."
+                            "Retirement export destination must be outside "
+                            "app-private runtime storage."
                         )
-                    source_present = session.worktree_path.exists() or session.worktree_path.is_symlink()
-                    if not source_present and not resuming_intent:
-                        raise LaunchBlockedError("Retained Worktree is unavailable for export.")
-                    owner_signal, process_group_signal = self._probe_retirement_quiescence(
-                        session.retirement.get("runner_boundary", {})
+                    if _path_is_within_boundary(
+                        bound_destination, source_boundary
+                    ):
+                        raise AlbertError(
+                            "Retirement export destination must be outside the "
+                            "Retained Worktree."
+                        )
+
+                    runtime_root = self.runtime_root.resolve(strict=True)
+                    runtime_root_status = runtime_root.stat(
+                        follow_symlinks=False
                     )
-                    if owner_signal != "absent" or process_group_signal != "absent":
+                    snapshot = session.retirement.get("snapshot", {})
+                    retained_snapshot = bool(
+                        snapshot
+                        and snapshot.get("verified") is True
+                        and snapshot.get(
+                            "payload_disposition", "retained"
+                        )
+                        == "retained"
+                    )
+                    export_kind = str(
+                        export_intent.get("export_kind", "")
+                    ) or (
+                        "snapshot-payload"
+                        if retained_snapshot
+                        else "retained-worktree"
+                    )
+                    if export_kind not in {
+                        "snapshot-payload",
+                        "retained-worktree",
+                    }:
+                        raise AlbertError(
+                            "Retirement export intent kind is invalid."
+                        )
+                    if export_kind == "snapshot-payload" and not retained_snapshot:
                         raise LaunchBlockedError(
-                            "Runner Quiescence was not independently corroborated for "
-                            f"export: owner={owner_signal}, "
-                            f"process-group={process_group_signal}."
-                    )
-                    if source_present:
-                        retained_manifest = RetirementSnapshotStore.retained_worktree_manifest(
-                            session.worktree_path,
-                            exclude_git_metadata=exclude_git_metadata,
+                            f"{session_id} does not have a retained verified "
+                            "payload to export."
                         )
-                        manifest_sha256 = str(retained_manifest["tree_sha256"])
-                    else:
-                        manifest_sha256 = str(export_intent["manifest_sha256"])
-                if resuming_intent:
-                    manifest_sha256 = str(export_intent["manifest_sha256"])
-                    if export_kind == "snapshot-payload" and (manifest_sha256 != snapshot.get("manifest_sha256")):
-                        raise AlbertError("Retirement export intent no longer matches its snapshot.")
                     if (
                         export_kind == "retained-worktree"
-                        and retained_manifest is not None
-                        and retained_manifest["tree_sha256"] != manifest_sha256
+                        and session.retirement.get("phase")
+                        != "preservation-blocked"
                     ):
-                        raise AlbertError("Retirement export intent no longer matches its retained worktree.")
-                    claim_revision = int(export_intent["claim_revision"])
-                else:
-                    session.retirement["export_intent"] = {
-                        "correlation_id": correlation_id,
-                        "expected_revision": expected_revision,
-                        "destination": str(destination),
-                        "manifest_sha256": manifest_sha256,
-                        "export_kind": export_kind,
-                    }
-                    session.revision += 1
-                    claim_revision = session.revision
-                    session.retirement["export_intent"][
-                        "claim_revision"
-                    ] = claim_revision
-                    data["sessions"][session_id] = session.to_dict()
-                    self._write_runtime_payload(data)
-                    self.sessions[session_id] = session
-
-            marker_path = destination / "retirement-export.json"
-            recovered_materialization = False
-            created_destination = False
-
-            def verify_exported_repository(repository: Path) -> None:
-                if export_kind == "snapshot-payload":
-                    if store is None:
-                        raise AlbertError("Retirement Snapshot export store is missing.")
-                    store.verify_materialized_repository(snapshot, repository)
-                    return
-                exported_manifest = RetirementSnapshotStore.retained_worktree_manifest(
-                    repository,
-                    exclude_git_metadata=False,
-                )
-                if exported_manifest["tree_sha256"] != manifest_sha256:
-                    raise RetirementSnapshotError("Retained Worktree exported repository content is invalid.")
-
-            try:
-                if destination.exists() or destination.is_symlink():
-                    if destination.is_symlink() or not destination.is_dir():
-                        raise AlbertError(
-                            "Retirement export destination boundary changed."
+                        raise LaunchBlockedError(
+                            f"{session_id} does not have a blocked Retained "
+                            "Worktree to export."
                         )
-                    if marker_path.is_file() and not marker_path.is_symlink():
-                        marker = json.loads(marker_path.read_text(encoding="utf-8"))
+
+                    try:
+                        destination_status = os.stat(
+                            destination.name,
+                            dir_fd=parent_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        destination_status = None
+                    if not resuming_intent and destination_status is not None:
+                        raise AlbertError(
+                            "Retirement export destination must not exist."
+                        )
+
+                    store: RetirementSnapshotStore | None = None
+                    retained_manifest: dict[str, Any] | None = None
+                    legacy_retained_projection: dict[str, Any] | None = None
+                    exclude_git_metadata = session.worktree_identity.startswith(
+                        "managed-git:"
+                    )
+                    source_present = False
+                    source_device = 0
+                    source_inode = 0
+                    if export_kind == "snapshot-payload":
+                        snapshot_revision = int(
+                            snapshot.get("session_revision", session.revision)
+                        )
+                        store = self._retirement_snapshot_store(
+                            session, snapshot_revision
+                        )
+                        manifest_sha256 = str(snapshot["manifest_sha256"])
+                        if (
+                            legacy_export_intent
+                            and manifest_sha256
+                            != export_intent["manifest_sha256"]
+                        ):
+                            raise AlbertError(
+                                "Legacy retirement export intent no longer matches "
+                                "its snapshot."
+                            )
+                    else:
+                        expected_path = self._session_worktree_path(session_id)
+                        if (
+                            _runtime_identity_path(source_boundary)
+                            != _runtime_identity_path(expected_path)
+                            or _runtime_identity_path(source_boundary)
+                            == _runtime_identity_path(self.target_repo)
+                        ):
+                            raise LaunchBlockedError(
+                                "Retained Worktree export requires the exact managed "
+                                "path and cannot target the Coding Workspace."
+                            )
+                        source_present = bool(
+                            session.worktree_path.exists()
+                            or session.worktree_path.is_symlink()
+                        )
+                        if not source_present and not resuming_intent:
+                            raise LaunchBlockedError(
+                                "Retained Worktree is unavailable for export."
+                            )
+                        owner_signal, process_group_signal = (
+                            self._probe_retirement_quiescence(
+                                session.retirement.get("runner_boundary", {})
+                            )
+                        )
+                        if (
+                            owner_signal != "absent"
+                            or process_group_signal != "absent"
+                        ):
+                            raise LaunchBlockedError(
+                                "Runner Quiescence was not independently "
+                                "corroborated for export: "
+                                f"owner={owner_signal}, "
+                                f"process-group={process_group_signal}."
+                            )
+                        if source_present:
+                            source_status = session.worktree_path.stat(
+                                follow_symlinks=False
+                            )
+                            if not stat.S_ISDIR(source_status.st_mode):
+                                raise AlbertError(
+                                    "Retained Worktree export source boundary changed."
+                                )
+                            source_device = source_status.st_dev
+                            source_inode = source_status.st_ino
+                            retained_manifest = (
+                                RetirementSnapshotStore.retained_worktree_manifest(
+                                    session.worktree_path,
+                                    exclude_git_metadata=exclude_git_metadata,
+                                )
+                            )
+                            source_after = session.worktree_path.stat(
+                                follow_symlinks=False
+                            )
+                            if (source_after.st_dev, source_after.st_ino) != (
+                                source_device,
+                                source_inode,
+                            ):
+                                raise AlbertError(
+                                    "Retained Worktree export source boundary changed."
+                                )
+                            manifest_sha256 = str(
+                                retained_manifest[
+                                    "materialized_tree_sha256"
+                                ]
+                            )
+                            if legacy_export_intent:
+                                legacy_retained_projection = RetirementSnapshotStore.legacy_retained_worktree_manifest_projection(
+                                    retained_manifest,
+                                    exclude_git_metadata=exclude_git_metadata,
+                                )
+                                if (
+                                    legacy_retained_projection["tree_sha256"]
+                                    != export_intent["manifest_sha256"]
+                                ):
+                                    raise AlbertError(
+                                        "Legacy retirement export intent no longer "
+                                        "matches its retained worktree."
+                                    )
+                        else:
+                            manifest_sha256 = str(
+                                export_intent["manifest_sha256"]
+                            )
+
+                    def verify_legacy_repository(repository_fd: int) -> None:
+                        if export_kind == "snapshot-payload":
+                            if store is None:
+                                raise AlbertError(
+                                    "Retirement Snapshot export store is missing."
+                                )
+                            store.verify_materialized_repository_in_directory(
+                                snapshot,
+                                repository_fd,
+                            )
+                            return
+                        actual_manifest = RetirementSnapshotStore.retained_worktree_manifest_from_directory(
+                            repository_fd,
+                            exclude_git_metadata=False,
+                        )
+                        actual_projection = RetirementSnapshotStore.legacy_retained_worktree_manifest_projection(
+                            actual_manifest,
+                            exclude_git_metadata=False,
+                        )
+                        if (
+                            actual_projection["tree_sha256"]
+                            != export_intent["manifest_sha256"]
+                            or (
+                                legacy_retained_projection is not None
+                                and actual_projection
+                                != legacy_retained_projection
+                            )
+                        ):
+                            raise RetirementSnapshotError(
+                                "Legacy Retained Worktree exported repository "
+                                "content is invalid."
+                            )
+
+                    def verify_legacy_complete_root(
+                        root_fd: int,
+                        root_device: int,
+                        root_inode: int,
+                    ) -> dict[str, Any]:
+                        root_status = os.fstat(root_fd)
+                        if (
+                            not stat.S_ISDIR(root_status.st_mode)
+                            or (root_status.st_dev, root_status.st_ino)
+                            != (root_device, root_inode)
+                            or set(os.listdir(root_fd))
+                            != {"repository", "retirement-export.json"}
+                        ):
+                            raise AlbertError(
+                                "Legacy retirement export destination is incomplete "
+                                "or changed."
+                            )
+                        marker_before = self._read_retirement_export_marker(root_fd)
                         expected_marker = {
                             "schema_version": 1,
                             "mission_id": self.mission_id,
                             "session_id": session_id,
                             "correlation_id": correlation_id,
                             "expected_revision": expected_revision,
-                            "manifest_sha256": manifest_sha256,
+                            "manifest_sha256": export_intent["manifest_sha256"],
+                            "export_kind": export_kind,
                         }
+                        exported_at = marker_before.get("exported_at")
                         if (
-                            any(marker.get(field_name) != value for field_name, value in expected_marker.items())
-                            or marker.get("export_kind", "snapshot-payload") != export_kind
+                            set(marker_before)
+                            != {*expected_marker, "exported_at"}
+                            or any(
+                                marker_before.get(field_name) != value
+                                for field_name, value in expected_marker.items()
+                            )
+                            or not isinstance(exported_at, str)
+                            or not exported_at.strip()
                         ):
-                            raise AlbertError("Retirement export recovery marker is invalid.")
-                        verify_exported_repository(destination / "repository")
-                        recovered_materialization = True
-                    elif set(destination.iterdir()) == {destination / "repository"}:
-                        materialized = destination / "repository"
-                        verify_exported_repository(materialized)
-                        marker = {
-                            "schema_version": 1,
+                            raise AlbertError(
+                                "Legacy retirement export recovery marker is invalid."
+                            )
+                        try:
+                            parsed_exported_at = datetime.fromisoformat(exported_at)
+                        except ValueError as exc:
+                            raise AlbertError(
+                                "Legacy retirement export recovery marker is invalid."
+                            ) from exc
+                        if parsed_exported_at.tzinfo is None:
+                            raise AlbertError(
+                                "Legacy retirement export recovery marker is invalid."
+                            )
+                        repository_fd = self._open_retirement_export_directory(
+                            "repository",
+                            dir_fd=root_fd,
+                        )
+                        try:
+                            repository_before = os.fstat(repository_fd)
+                            verify_legacy_repository(repository_fd)
+                            repository_after = os.fstat(repository_fd)
+                        finally:
+                            os.close(repository_fd)
+                        root_after = os.fstat(root_fd)
+                        if (
+                            (root_after.st_dev, root_after.st_ino)
+                            != (root_device, root_inode)
+                            or (repository_after.st_dev, repository_after.st_ino)
+                            != (repository_before.st_dev, repository_before.st_ino)
+                            or set(os.listdir(root_fd))
+                            != {"repository", "retirement-export.json"}
+                            or self._read_retirement_export_marker(root_fd)
+                            != marker_before
+                        ):
+                            raise AlbertError(
+                                "Legacy retirement export destination changed."
+                            )
+                        return marker_before
+
+                    legacy_published_identity: tuple[int, int] | None = None
+                    legacy_published_marker: dict[str, Any] | None = None
+                    if legacy_export_intent and destination_status is not None:
+                        if not stat.S_ISDIR(destination_status.st_mode):
+                            raise AlbertError(
+                                "Legacy retirement export destination is incomplete "
+                                "or changed."
+                            )
+                        legacy_fd = self._open_retirement_export_directory(
+                            destination.name,
+                            dir_fd=parent_fd,
+                        )
+                        try:
+                            legacy_status = os.fstat(legacy_fd)
+                            if (legacy_status.st_dev, legacy_status.st_ino) != (
+                                destination_status.st_dev,
+                                destination_status.st_ino,
+                            ):
+                                raise AlbertError(
+                                    "Legacy retirement export destination changed."
+                                )
+                            legacy_published_marker = verify_legacy_complete_root(
+                                legacy_fd,
+                                legacy_status.st_dev,
+                                legacy_status.st_ino,
+                            )
+                            legacy_published_identity = (
+                                legacy_status.st_dev,
+                                legacy_status.st_ino,
+                            )
+                        finally:
+                            os.close(legacy_fd)
+
+                    destination_owner = (
+                        self._claim_retirement_export_destination_directory(
+                            destination_lease,
+                            destination=destination,
+                            session_id=session_id,
+                            correlation_id=correlation_id,
+                            expected_revision=expected_revision,
+                            claimed_at=(
+                                str(legacy_published_marker["exported_at"])
+                                if legacy_published_marker is not None
+                                else (
+                                    str(export_intent["claimed_at"])
+                                    if resuming_intent
+                                    and not legacy_export_intent
+                                    else None
+                                )
+                            ),
+                        )
+                    )
+
+                    def stage_name_for(attempt: int) -> str:
+                        if not 1 <= attempt <= _RETIREMENT_EXPORT_STAGE_ATTEMPT_LIMIT:
+                            raise AlbertError(
+                                "Retirement export staging attempts are exhausted."
+                            )
+                        stage_token = sha256(
+                            (
+                                f"{lock_digest}\0{self.project_key}\0"
+                                f"{self.mission_id}\0{session_id}\0"
+                                f"{correlation_id}\0{expected_revision}\0{attempt}"
+                            ).encode("utf-8")
+                        ).hexdigest()[:32]
+                        return (
+                            ".alfredo-retirement-export."
+                            f"{stage_token}.stage"
+                        )
+
+                    def reserved_intent_for(
+                        *,
+                        claim_revision: int,
+                        claimed_at: str,
+                    ) -> dict[str, Any]:
+                        return {
+                            "claim_revision": claim_revision,
+                            "correlation_id": correlation_id,
+                            "destination": str(destination),
+                            "destination_lock_sha256": lock_digest,
+                            "destination_name": destination.name,
+                            "destination_parent": str(destination.parent),
+                            "expected_revision": expected_revision,
+                            "export_kind": export_kind,
+                            "claimed_at": claimed_at,
+                            "manifest_sha256": manifest_sha256,
+                            "parent_device": parent_status.st_dev,
+                            "parent_inode": parent_status.st_ino,
+                            "runtime_root": str(runtime_root),
+                            "runtime_root_device": runtime_root_status.st_dev,
+                            "runtime_root_inode": runtime_root_status.st_ino,
+                            "source_boundary": str(source_boundary),
+                            "source_device": source_device,
+                            "source_inode": source_inode,
+                            "source_present": source_present,
+                            "stage_attempt": 1,
+                            "stage_anchor_device": 0,
+                            "stage_anchor_inode": 0,
+                            "stage_name": stage_name_for(1),
+                            "stage_root_device": 0,
+                            "stage_root_inode": 0,
+                            "stage_state": "reserved",
+                        }
+
+                    if resuming_intent and not legacy_export_intent:
+                        if (
+                            export_intent["claimed_at"]
+                            != destination_owner["claimed_at"]
+                            or
+                            export_intent["destination_lock_sha256"]
+                            != lock_digest
+                            or export_intent["destination_name"]
+                            != destination.name
+                            or export_intent["destination_parent"]
+                            != str(destination.parent)
+                            or export_intent["parent_device"]
+                            != parent_status.st_dev
+                            or export_intent["parent_inode"]
+                            != parent_status.st_ino
+                            or export_intent["runtime_root"]
+                            != str(runtime_root)
+                            or export_intent["runtime_root_device"]
+                            != runtime_root_status.st_dev
+                            or export_intent["runtime_root_inode"]
+                            != runtime_root_status.st_ino
+                            or export_intent["source_boundary"]
+                            != str(source_boundary)
+                        ):
+                            raise AlbertError(
+                                "Retirement export durable boundary changed."
+                            )
+                        if (
+                            export_kind == "snapshot-payload"
+                            and manifest_sha256
+                            != snapshot.get("manifest_sha256")
+                        ):
+                            raise AlbertError(
+                                "Retirement export intent no longer matches its "
+                                "snapshot."
+                            )
+                        if export_kind == "retained-worktree" and source_present:
+                            if (
+                                source_present
+                                and (
+                                    export_intent["source_device"],
+                                    export_intent["source_inode"],
+                                )
+                                != (source_device, source_inode)
+                            ):
+                                raise AlbertError(
+                                    "Retirement export source identity changed."
+                                )
+                            if (
+                                retained_manifest is not None
+                                and retained_manifest[
+                                    "materialized_tree_sha256"
+                                ]
+                                != export_intent["manifest_sha256"]
+                            ):
+                                raise AlbertError(
+                                    "Retirement export intent no longer matches its "
+                                    "retained worktree."
+                                )
+                        manifest_sha256 = str(
+                            export_intent["manifest_sha256"]
+                        )
+                        claim_revision = int(
+                            export_intent["claim_revision"]
+                        )
+                    elif (
+                        resuming_intent
+                        and legacy_published_identity is not None
+                    ):
+                        manifest_sha256 = str(
+                            export_intent["manifest_sha256"]
+                        )
+                        claim_revision = int(
+                            export_intent["claim_revision"]
+                        )
+                    elif resuming_intent:
+                        if (
+                            export_kind == "snapshot-payload"
+                            and manifest_sha256
+                            != export_intent["manifest_sha256"]
+                        ):
+                            raise AlbertError(
+                                "Legacy retirement export intent no longer matches "
+                                "its snapshot."
+                            )
+                        if export_kind == "retained-worktree":
+                            if not source_present:
+                                raise AlbertError(
+                                    "Legacy retirement export source is unavailable "
+                                    "for safe recovery."
+                                )
+                            if legacy_retained_projection is None:
+                                raise AlbertError(
+                                    "Legacy retirement export intent no longer "
+                                    "matches its retained worktree."
+                                )
+                        claim_revision = int(
+                            export_intent["claim_revision"]
+                        )
+                        export_intent = reserved_intent_for(
+                            claim_revision=claim_revision,
+                            claimed_at=destination_owner["claimed_at"],
+                        )
+                        session.retirement["export_intent"] = export_intent
+                        data["sessions"][session_id] = session.to_dict()
+                        self._write_runtime_payload(data)
+                        self.sessions[session_id] = session
+                    else:
+                        session.revision += 1
+                        claim_revision = session.revision
+                        export_intent = reserved_intent_for(
+                            claim_revision=claim_revision,
+                            claimed_at=destination_owner["claimed_at"],
+                        )
+                        session.retirement["export_intent"] = export_intent
+                        data["sessions"][session_id] = session.to_dict()
+                        self._write_runtime_payload(data)
+                        self.sessions[session_id] = session
+
+                if legacy_published_identity is not None:
+                    with self._runtime_lock(exclusive=True):
+                        data = self._read_runtime_payload()
+                        raw_latest = data.get("sessions", {}).get(session_id)
+                        if not isinstance(raw_latest, dict):
+                            raise AlbertError(
+                                f"Unknown Local Agent session: {session_id}"
+                            )
+                        latest = LocalAgentSession.from_dict(raw_latest)
+                        if (
+                            latest.revision != claim_revision
+                            or latest.retirement.get("export_intent", {})
+                            != export_intent
+                        ):
+                            raise LaunchBlockedError(
+                                f"{session_id} lifecycle boundary changed during "
+                                "legacy export recovery."
+                            )
+                        if parent_fd is None:
+                            raise AlbertError(
+                                "Legacy retirement export parent is unavailable."
+                            )
+                        current_parent = (
+                            self._bound_retirement_export_directory_path(parent_fd)
+                        )
+                        current_parent_status = os.fstat(parent_fd)
+                        named_parent_status = destination.parent.stat(
+                            follow_symlinks=False
+                        )
+                        if (
+                            not stat.S_ISDIR(named_parent_status.st_mode)
+                            or (
+                                current_parent_status.st_dev,
+                                current_parent_status.st_ino,
+                            )
+                            != (parent_status.st_dev, parent_status.st_ino)
+                            or (
+                                named_parent_status.st_dev,
+                                named_parent_status.st_ino,
+                            )
+                            != (parent_status.st_dev, parent_status.st_ino)
+                            or _host_normalized_path_parts(current_parent)
+                            != _host_normalized_path_parts(destination.parent)
+                            or _path_is_within_boundary(
+                                current_parent / destination.name,
+                                runtime_root,
+                            )
+                            or _path_is_within_boundary(
+                                current_parent / destination.name,
+                                source_boundary,
+                            )
+                        ):
+                            raise AlbertError(
+                                "Legacy retirement export parent boundary changed."
+                            )
+                        current_runtime = self.runtime_root.resolve(strict=True)
+                        current_runtime_status = current_runtime.stat(
+                            follow_symlinks=False
+                        )
+                        if (
+                            str(current_runtime) != str(runtime_root)
+                            or (
+                                current_runtime_status.st_dev,
+                                current_runtime_status.st_ino,
+                            )
+                            != (
+                                runtime_root_status.st_dev,
+                                runtime_root_status.st_ino,
+                            )
+                        ):
+                            raise AlbertError(
+                                "Legacy retirement export runtime boundary changed."
+                            )
+                        if export_kind == "retained-worktree" and source_present:
+                            current_source = source_boundary.stat(
+                                follow_symlinks=False
+                            )
+                            if (
+                                not stat.S_ISDIR(current_source.st_mode)
+                                or (current_source.st_dev, current_source.st_ino)
+                                != (source_device, source_inode)
+                                or _host_normalized_path_parts(
+                                    source_boundary.resolve(strict=False)
+                                )
+                                != _host_normalized_path_parts(
+                                    session.worktree_path.resolve(strict=False)
+                                )
+                            ):
+                                raise AlbertError(
+                                    "Legacy retirement export source boundary changed."
+                                )
+                        elif export_kind == "retained-worktree" and (
+                            source_boundary.exists()
+                            or source_boundary.is_symlink()
+                        ):
+                            raise AlbertError(
+                                "Legacy retirement export source boundary changed."
+                            )
+                        final_fd = self._open_retirement_export_directory(
+                            destination.name,
+                            dir_fd=parent_fd,
+                        )
+                        try:
+                            final_status = os.fstat(final_fd)
+                            if (final_status.st_dev, final_status.st_ino) != (
+                                legacy_published_identity
+                            ):
+                                raise AlbertError(
+                                    "Legacy retirement export destination changed."
+                                )
+                            if verify_legacy_complete_root(
+                                final_fd,
+                                final_status.st_dev,
+                                final_status.st_ino,
+                            ) != legacy_published_marker:
+                                raise AlbertError(
+                                    "Legacy retirement export destination changed."
+                                )
+                            self._durably_sync_retirement_export_tree(final_fd)
+                            if verify_legacy_complete_root(
+                                final_fd,
+                                final_status.st_dev,
+                                final_status.st_ino,
+                            ) != legacy_published_marker:
+                                raise AlbertError(
+                                    "Legacy retirement export destination changed."
+                                )
+                        finally:
+                            os.close(final_fd)
+                        os.fsync(parent_fd)
+                        latest.revision += 1
+                        latest.retirement["export_intent"] = {}
+                        receipt = {
+                            "action": "export",
                             "mission_id": self.mission_id,
                             "session_id": session_id,
-                            "correlation_id": correlation_id,
                             "expected_revision": expected_revision,
+                            "result_revision": latest.revision,
+                            "destination": str(destination / "repository"),
                             "manifest_sha256": manifest_sha256,
-                            "export_kind": export_kind,
-                            "exported_at": _utc_now(),
+                            "recorded_at": _utc_now(),
                         }
-                        self._write(
-                            marker_path,
-                            json.dumps(marker, indent=2, sort_keys=True) + "\n",
+                        latest.retirement.setdefault("action_receipts", {})[
+                            correlation_id
+                        ] = receipt
+                        data["sessions"][session_id] = latest.to_dict()
+                        data.setdefault("timeline", []).append(
+                            f"{latest.issue_id} blocked Retirement Unit "
+                            f"{session_id} exported."
                         )
-                        recovered_materialization = True
-                    elif any(destination.iterdir()):
+                        self._write_runtime_payload(data)
+                        self.sessions[session_id] = latest
+                        self.timeline = list(data.get("timeline", []))
+                        return receipt
+
+                def assert_bound_source() -> None:
+                    if export_kind != "retained-worktree":
+                        return
+                    if export_intent["source_present"] is not True:
                         raise AlbertError(
-                            "Retirement export destination changed before recovery."
+                            "Retirement export source boundary is unavailable."
                         )
-                else:
-                    destination.mkdir(parents=True)
-                    created_destination = True
-                if recovered_materialization:
-                    materialized = destination / "repository"
-                else:
+                    source = Path(export_intent["source_boundary"])
+                    try:
+                        source_status = source.stat(follow_symlinks=False)
+                    except OSError as exc:
+                        raise AlbertError(
+                            "Retirement export source boundary changed."
+                        ) from exc
+                    if (
+                        not stat.S_ISDIR(source_status.st_mode)
+                        or (source_status.st_dev, source_status.st_ino)
+                        != (
+                            export_intent["source_device"],
+                            export_intent["source_inode"],
+                        )
+                        or _host_normalized_path_parts(
+                            source.resolve(strict=False)
+                        )
+                        != _host_normalized_path_parts(source_boundary)
+                    ):
+                        raise AlbertError(
+                            "Retirement export source boundary changed."
+                        )
+
+                def assert_bound_parent() -> Path:
+                    assert parent_fd is not None
+                    current_parent = (
+                        self._bound_retirement_export_directory_path(parent_fd)
+                    )
+                    current_status = os.fstat(parent_fd)
+                    try:
+                        named_status = destination.parent.stat(
+                            follow_symlinks=False
+                        )
+                    except OSError as exc:
+                        raise AlbertError(
+                            "Retirement export destination parent changed."
+                        ) from exc
+                    if (
+                        not stat.S_ISDIR(named_status.st_mode)
+                        or (named_status.st_dev, named_status.st_ino)
+                        != (
+                            export_intent["parent_device"],
+                            export_intent["parent_inode"],
+                        )
+                        or (current_status.st_dev, current_status.st_ino)
+                        != (named_status.st_dev, named_status.st_ino)
+                        or _host_normalized_path_parts(current_parent)
+                        != _host_normalized_path_parts(
+                            Path(export_intent["destination_parent"])
+                        )
+                    ):
+                        raise AlbertError(
+                            "Retirement export destination parent boundary changed."
+                        )
+                    current_destination = current_parent / destination.name
+                    if _path_is_within_boundary(
+                        current_destination, Path(export_intent["runtime_root"])
+                    ):
+                        raise AlbertError(
+                            "Retirement export destination entered app-private "
+                            "runtime storage."
+                        )
+                    if _path_is_within_boundary(
+                        current_destination,
+                        Path(export_intent["source_boundary"]),
+                    ):
+                        raise AlbertError(
+                            "Retirement export destination entered the Retained "
+                            "Worktree."
+                        )
+                    current_runtime = self.runtime_root.resolve(strict=True)
+                    runtime_status = current_runtime.stat(
+                        follow_symlinks=False
+                    )
+                    if (
+                        str(current_runtime) != export_intent["runtime_root"]
+                        or (runtime_status.st_dev, runtime_status.st_ino)
+                        != (
+                            export_intent["runtime_root_device"],
+                            export_intent["runtime_root_inode"],
+                        )
+                    ):
+                        raise AlbertError(
+                            "Retirement export runtime boundary changed."
+                        )
+                    assert_bound_source()
+                    return current_parent
+
+                def bind_reserved_stage() -> None:
+                    nonlocal export_intent, session
+                    if export_intent["stage_state"] == "bound":
+                        return
+                    if export_intent["stage_state"] != "reserved":
+                        raise AlbertError(
+                            "Retirement export staging state is invalid."
+                        )
+                    assert parent_fd is not None
+                    assert_bound_parent()
+                    try:
+                        os.mkdir(
+                            export_intent["stage_name"],
+                            mode=0o700,
+                            dir_fd=parent_fd,
+                        )
+                    except FileExistsError:
+                        pass
+                    anchor_fd = self._open_retirement_export_directory(
+                        export_intent["stage_name"],
+                        dir_fd=parent_fd,
+                    )
+                    payload_fd: int | None = None
+                    try:
+                        anchor_entries = set(os.listdir(anchor_fd))
+                        if not anchor_entries:
+                            os.mkdir("payload", mode=0o700, dir_fd=anchor_fd)
+                        elif anchor_entries != {"payload"}:
+                            raise AlbertError(
+                                "Retirement export reserved staging anchor contains "
+                                "unclaimed data."
+                            )
+                        payload_fd = self._open_retirement_export_directory(
+                            "payload",
+                            dir_fd=anchor_fd,
+                        )
+                        if os.listdir(payload_fd):
+                            raise AlbertError(
+                                "Retirement export reserved staging payload contains "
+                                "unclaimed data."
+                            )
+                        os.fchmod(anchor_fd, 0o700)
+                        os.fchmod(payload_fd, 0o700)
+                        anchor_status = os.fstat(anchor_fd)
+                        payload_status = os.fstat(payload_fd)
+                        os.fsync(payload_fd)
+                        os.fsync(anchor_fd)
+                        os.fsync(parent_fd)
+                    finally:
+                        if payload_fd is not None:
+                            os.close(payload_fd)
+                        os.close(anchor_fd)
+
+                    bound_intent = dict(export_intent)
+                    bound_intent.update(
+                        {
+                            "stage_anchor_device": anchor_status.st_dev,
+                            "stage_anchor_inode": anchor_status.st_ino,
+                            "stage_root_device": payload_status.st_dev,
+                            "stage_root_inode": payload_status.st_ino,
+                            "stage_state": "bound",
+                        }
+                    )
+                    with self._runtime_lock(exclusive=True):
+                        update_data = self._read_runtime_payload()
+                        raw_latest = update_data.get("sessions", {}).get(
+                            session_id
+                        )
+                        if not isinstance(raw_latest, dict):
+                            raise AlbertError(
+                                f"Unknown Local Agent session: {session_id}"
+                            )
+                        latest = LocalAgentSession.from_dict(raw_latest)
+                        if (
+                            latest.revision != claim_revision
+                            or latest.retirement.get("export_intent", {})
+                            != export_intent
+                        ):
+                            raise LaunchBlockedError(
+                                f"{session_id} lifecycle boundary changed during "
+                                "export staging."
+                            )
+                        latest.retirement["export_intent"] = bound_intent
+                        update_data["sessions"][session_id] = latest.to_dict()
+                        self._write_runtime_payload(update_data)
+                        self.sessions[session_id] = latest
+                        session = latest
+                        export_intent = bound_intent
+
+                def verify_exported_repository(repository_fd: int) -> None:
                     if export_kind == "snapshot-payload":
                         if store is None:
-                            raise AlbertError("Retirement Snapshot export store is missing.")
-                        materialized = store.materialize(snapshot, destination)
-                    else:
-                        if retained_manifest is None:
-                            raise RetirementSnapshotError("Retained Worktree is unavailable for export recovery.")
-                        materialized = RetirementSnapshotStore.materialize_retained_worktree(
-                            session.worktree_path,
-                            destination,
-                            retained_manifest,
-                            exclude_git_metadata=exclude_git_metadata,
+                            raise AlbertError(
+                                "Retirement Snapshot export store is missing."
+                            )
+                        store.verify_materialized_repository_in_directory(
+                            snapshot,
+                            repository_fd,
                         )
-                    marker = {
+                        return
+                    if retained_manifest is None:
+                        raise RetirementSnapshotError(
+                            "Retained Worktree recovery manifest is unavailable."
+                        )
+                    RetirementSnapshotStore.verify_retained_worktree_in_directory(
+                        repository_fd,
+                        retained_manifest,
+                    )
+
+                def read_expected_marker(
+                    root_fd: int,
+                    root_device: int,
+                    root_inode: int,
+                ) -> dict[str, Any]:
+                    marker = self._read_retirement_export_marker(root_fd)
+                    expected = {
                         "schema_version": 1,
                         "mission_id": self.mission_id,
                         "session_id": session_id,
@@ -7112,56 +8930,485 @@ class AlbertMission:
                         "expected_revision": expected_revision,
                         "manifest_sha256": manifest_sha256,
                         "export_kind": export_kind,
-                        "exported_at": _utc_now(),
+                        "stage_name": export_intent["stage_name"],
+                        "stage_root_device": root_device,
+                        "stage_root_inode": root_inode,
+                        "exported_at": export_intent["claimed_at"],
                     }
-                    self._write(
-                        marker_path,
-                        json.dumps(marker, indent=2, sort_keys=True) + "\n",
+                    if (
+                        set(marker) != set(expected)
+                        or any(
+                            marker.get(field_name) != value
+                            for field_name, value in expected.items()
+                        )
+                    ):
+                        raise AlbertError(
+                            "Retirement export recovery marker is invalid."
+                        )
+                    return marker
+
+                def exact_root_entries(root_fd: int) -> set[str]:
+                    try:
+                        return set(os.listdir(root_fd))
+                    except OSError as exc:
+                        raise AlbertError(
+                            "Retirement export root could not be inspected."
+                        ) from exc
+
+                def verify_complete_root(
+                    root_fd: int,
+                    root_device: int,
+                    root_inode: int,
+                ) -> None:
+                    status = os.fstat(root_fd)
+                    if (
+                        not stat.S_ISDIR(status.st_mode)
+                        or (status.st_dev, status.st_ino)
+                        != (root_device, root_inode)
+                        or exact_root_entries(root_fd)
+                        != {"repository", "retirement-export.json"}
+                    ):
+                        raise AlbertError(
+                            "Retirement export destination boundary changed."
+                        )
+                    marker_before = read_expected_marker(
+                        root_fd, root_device, root_inode
                     )
-            except (OSError, UnicodeError, json.JSONDecodeError, RetirementSnapshotError) as exc:
-                if (
-                    created_destination
-                    and destination.is_dir()
-                    and not destination.is_symlink()
-                ):
-                    shutil.rmtree(destination)
+                    repository_fd = self._open_retirement_export_directory(
+                        "repository",
+                        dir_fd=root_fd,
+                    )
+                    try:
+                        repository_before = os.fstat(repository_fd)
+                        verify_exported_repository(repository_fd)
+                        repository_after = os.fstat(repository_fd)
+                    finally:
+                        os.close(repository_fd)
+                    after = os.fstat(root_fd)
+                    if (
+                        (after.st_dev, after.st_ino)
+                        != (root_device, root_inode)
+                        or (repository_after.st_dev, repository_after.st_ino)
+                        != (repository_before.st_dev, repository_before.st_ino)
+                        or exact_root_entries(root_fd)
+                        != {"repository", "retirement-export.json"}
+                        or read_expected_marker(
+                            root_fd,
+                            root_device,
+                            root_inode,
+                        )
+                        != marker_before
+                    ):
+                        raise AlbertError(
+                            "Retirement export destination boundary changed."
+                        )
+
+                def open_claimed_stage() -> tuple[int, int]:
+                    assert parent_fd is not None
+                    if export_intent["stage_state"] != "bound":
+                        raise AlbertError(
+                            "Retirement export staging identity is not bound."
+                        )
+                    anchor_fd = self._open_retirement_export_directory(
+                        export_intent["stage_name"],
+                        dir_fd=parent_fd,
+                    )
+                    anchor_status = os.fstat(anchor_fd)
+                    if (anchor_status.st_dev, anchor_status.st_ino) != (
+                        export_intent["stage_anchor_device"],
+                        export_intent["stage_anchor_inode"],
+                    ):
+                        os.close(anchor_fd)
+                        raise AlbertError(
+                            "Retirement export staging anchor identity changed."
+                        )
+                    try:
+                        if set(os.listdir(anchor_fd)) != {"payload"}:
+                            raise AlbertError(
+                                "Retirement export staging anchor changed."
+                            )
+                        payload_fd = self._open_retirement_export_directory(
+                            "payload",
+                            dir_fd=anchor_fd,
+                        )
+                    except BaseException:
+                        os.close(anchor_fd)
+                        raise
+                    payload_status = os.fstat(payload_fd)
+                    if (payload_status.st_dev, payload_status.st_ino) != (
+                        export_intent["stage_root_device"],
+                        export_intent["stage_root_inode"],
+                    ):
+                        os.close(payload_fd)
+                        os.close(anchor_fd)
+                        raise AlbertError(
+                            "Retirement export staging payload identity changed."
+                        )
+                    return anchor_fd, payload_fd
+
+                def advance_stage() -> None:
+                    nonlocal export_intent, session
+                    attempt = int(export_intent["stage_attempt"]) + 1
+                    if attempt > _RETIREMENT_EXPORT_STAGE_ATTEMPT_LIMIT:
+                        raise AlbertError(
+                            "Retirement export staging recovery attempts are "
+                            "exhausted; retained staging data was preserved."
+                        )
+                    assert_bound_parent()
+                    reserved_intent = dict(export_intent)
+                    reserved_intent.update(
+                        {
+                            "stage_attempt": attempt,
+                            "stage_anchor_device": 0,
+                            "stage_anchor_inode": 0,
+                            "stage_name": stage_name_for(attempt),
+                            "stage_root_device": 0,
+                            "stage_root_inode": 0,
+                            "stage_state": "reserved",
+                        }
+                    )
+                    with self._runtime_lock(exclusive=True):
+                        update_data = self._read_runtime_payload()
+                        raw_latest = update_data.get("sessions", {}).get(
+                            session_id
+                        )
+                        if not isinstance(raw_latest, dict):
+                            raise AlbertError(
+                                f"Unknown Local Agent session: {session_id}"
+                            )
+                        latest = LocalAgentSession.from_dict(raw_latest)
+                        latest_intent = latest.retirement.get(
+                            "export_intent", {}
+                        )
+                        if (
+                            latest.revision != claim_revision
+                            or latest_intent != export_intent
+                        ):
+                            raise LaunchBlockedError(
+                                f"{session_id} lifecycle boundary changed during "
+                                "export recovery."
+                            )
+                        latest.retirement["export_intent"] = reserved_intent
+                        update_data["sessions"][session_id] = latest.to_dict()
+                        self._write_runtime_payload(update_data)
+                        self.sessions[session_id] = latest
+                        session = latest
+                        export_intent = reserved_intent
+                    bind_reserved_stage()
+
+                assert parent_fd is not None
+                try:
+                    bind_reserved_stage()
+                except (OSError, AlbertError):
+                    if not resuming_intent:
+                        raise
+                    advance_stage()
+                assert_bound_parent()
+                try:
+                    public_status = os.stat(
+                        destination.name,
+                        dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    public_status = None
+
+                materialized = destination / "repository"
+                if public_status is not None:
+                    if (
+                        not stat.S_ISDIR(public_status.st_mode)
+                        or (public_status.st_dev, public_status.st_ino)
+                        != (
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        )
+                    ):
+                        raise AlbertError(
+                            "Retirement export destination is owned by another "
+                            "publisher."
+                        )
+                    public_fd = self._open_retirement_export_directory(
+                        destination.name,
+                        dir_fd=parent_fd,
+                    )
+                    try:
+                        public_after = os.fstat(public_fd)
+                        if (public_after.st_dev, public_after.st_ino) != (
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        ):
+                            raise AlbertError(
+                                "Retirement export destination boundary changed."
+                            )
+                        verify_complete_root(
+                            public_fd,
+                            public_after.st_dev,
+                            public_after.st_ino,
+                        )
+                        self._durably_sync_retirement_export_tree(public_fd)
+                        verify_complete_root(
+                            public_fd,
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        )
+                    finally:
+                        os.close(public_fd)
+                else:
+                    anchor_fd: int | None = None
+                    payload_fd: int | None = None
+                    stage_state = "invalid"
+                    try:
+                        anchor_fd, payload_fd = open_claimed_stage()
+                        entries = exact_root_entries(payload_fd)
+                        if not entries:
+                            stage_state = "empty"
+                        elif entries == {"repository"}:
+                            repository_fd = (
+                                self._open_retirement_export_directory(
+                                    "repository",
+                                    dir_fd=payload_fd,
+                                )
+                            )
+                            try:
+                                verify_exported_repository(repository_fd)
+                            finally:
+                                os.close(repository_fd)
+                            stage_state = "repository"
+                        elif entries == {
+                            "repository",
+                            "retirement-export.json",
+                        }:
+                            verify_complete_root(
+                                payload_fd,
+                                export_intent["stage_root_device"],
+                                export_intent["stage_root_inode"],
+                            )
+                            stage_state = "complete"
+                    except (
+                        OSError,
+                        UnicodeError,
+                        json.JSONDecodeError,
+                        RetirementSnapshotError,
+                        AlbertError,
+                    ):
+                        if not resuming_intent:
+                            raise
+                    finally:
+                        if payload_fd is not None:
+                            os.close(payload_fd)
+                        if anchor_fd is not None:
+                            os.close(anchor_fd)
+
+                    if stage_state == "invalid":
+                        advance_stage()
+                        anchor_fd, payload_fd = open_claimed_stage()
+                        stage_state = "empty"
+                    else:
+                        anchor_fd, payload_fd = open_claimed_stage()
+                    try:
+                        if stage_state == "empty":
+                            if export_kind == "snapshot-payload":
+                                if store is None:
+                                    raise AlbertError(
+                                        "Retirement Snapshot export store is missing."
+                                    )
+                                store.materialize_into_directory(
+                                    snapshot,
+                                    payload_fd,
+                                )
+                            else:
+                                if retained_manifest is None:
+                                    raise RetirementSnapshotError(
+                                        "Retained Worktree is unavailable for "
+                                        "export recovery."
+                                    )
+                                RetirementSnapshotStore.materialize_retained_worktree_into_directory(
+                                    session.worktree_path,
+                                    payload_fd,
+                                    retained_manifest,
+                                    exclude_git_metadata=exclude_git_metadata,
+                                )
+                            if exact_root_entries(payload_fd) != {"repository"}:
+                                raise AlbertError(
+                                    "Retirement export private stage changed during "
+                                    "materialization."
+                                )
+                            repository_fd = (
+                                self._open_retirement_export_directory(
+                                    "repository",
+                                    dir_fd=payload_fd,
+                                )
+                            )
+                            try:
+                                verify_exported_repository(repository_fd)
+                            finally:
+                                os.close(repository_fd)
+                            stage_state = "repository"
+                        if stage_state == "repository":
+                            marker = {
+                                "schema_version": 1,
+                                "mission_id": self.mission_id,
+                                "session_id": session_id,
+                                "correlation_id": correlation_id,
+                                "expected_revision": expected_revision,
+                                "manifest_sha256": manifest_sha256,
+                                "export_kind": export_kind,
+                                "stage_name": export_intent["stage_name"],
+                                "stage_root_device": export_intent[
+                                    "stage_root_device"
+                                ],
+                                "stage_root_inode": export_intent[
+                                    "stage_root_inode"
+                                ],
+                                "exported_at": export_intent["claimed_at"],
+                            }
+                            self._write_retirement_export_marker_exclusive(
+                                payload_fd,
+                                Path("retirement-export.json"),
+                                json.dumps(
+                                    marker, indent=2, sort_keys=True
+                                )
+                                + "\n",
+                            )
+                        verify_complete_root(
+                            payload_fd,
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        )
+                        self._durably_sync_retirement_export_tree(payload_fd)
+                        verify_complete_root(
+                            payload_fd,
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        )
+                        assert_bound_parent()
+                        self._publish_retirement_export_noreplace(
+                            anchor_fd,
+                            "payload",
+                            parent_fd,
+                            destination.name,
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        )
+                        os.fsync(anchor_fd)
+                        os.fsync(parent_fd)
+                        if os.listdir(anchor_fd):
+                            raise AlbertError(
+                                "Retirement export staging anchor changed during "
+                                "publication."
+                            )
+                        verify_complete_root(
+                            payload_fd,
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        )
+                    finally:
+                        os.close(payload_fd)
+                        os.close(anchor_fd)
+
+                    published_fd = self._open_retirement_export_directory(
+                        destination.name,
+                        dir_fd=parent_fd,
+                    )
+                    try:
+                        published_status = os.fstat(published_fd)
+                        if (
+                            published_status.st_dev,
+                            published_status.st_ino,
+                        ) != (
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        ):
+                            raise AlbertError(
+                                "Retirement export publication identity changed."
+                            )
+                        verify_complete_root(
+                            published_fd,
+                            published_status.st_dev,
+                            published_status.st_ino,
+                        )
+                    finally:
+                        os.close(published_fd)
+
+                with self._runtime_lock(exclusive=True):
+                    data = self._read_runtime_payload()
+                    raw_latest = data.get("sessions", {}).get(session_id)
+                    if not isinstance(raw_latest, dict):
+                        raise AlbertError(
+                            f"Unknown Local Agent session: {session_id}"
+                        )
+                    latest = LocalAgentSession.from_dict(raw_latest)
+                    if (
+                        latest.revision != claim_revision
+                        or latest.retirement.get("export_intent", {})
+                        != export_intent
+                    ):
+                        raise LaunchBlockedError(
+                            f"{session_id} lifecycle boundary changed during export."
+                        )
+                    assert_bound_parent()
+                    final_fd = self._open_retirement_export_directory(
+                        destination.name,
+                        dir_fd=parent_fd,
+                    )
+                    try:
+                        final_status = os.fstat(final_fd)
+                        if (final_status.st_dev, final_status.st_ino) != (
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        ):
+                            raise AlbertError(
+                                "Retirement export destination boundary changed."
+                            )
+                        verify_complete_root(
+                            final_fd,
+                            final_status.st_dev,
+                            final_status.st_ino,
+                        )
+                        self._durably_sync_retirement_export_tree(final_fd)
+                        verify_complete_root(
+                            final_fd,
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        )
+                    finally:
+                        os.close(final_fd)
+                    latest.revision += 1
+                    latest.retirement["export_intent"] = {}
+                    receipt = {
+                        "action": "export",
+                        "mission_id": self.mission_id,
+                        "session_id": session_id,
+                        "expected_revision": expected_revision,
+                        "result_revision": latest.revision,
+                        "destination": str(materialized),
+                        "manifest_sha256": manifest_sha256,
+                        "recorded_at": _utc_now(),
+                    }
+                    latest.retirement.setdefault("action_receipts", {})[
+                        correlation_id
+                    ] = receipt
+                    data["sessions"][session_id] = latest.to_dict()
+                    data.setdefault("timeline", []).append(
+                        f"{latest.issue_id} blocked Retirement Unit {session_id} "
+                        "exported."
+                    )
+                    self._write_runtime_payload(data)
+                    self.sessions[session_id] = latest
+                    self.timeline = list(data.get("timeline", []))
+                    return receipt
+            except (
+                OSError,
+                UnicodeError,
+                json.JSONDecodeError,
+                RetirementSnapshotError,
+            ) as exc:
                 raise AlbertError(
                     f"{session_id} retirement export failed: {exc}"
                 ) from exc
-
-            with self._runtime_lock(exclusive=True):
-                data = self._read_runtime_payload()
-                raw_latest = data.get("sessions", {}).get(session_id)
-                if not isinstance(raw_latest, dict):
-                    raise AlbertError(f"Unknown Local Agent session: {session_id}")
-                latest = LocalAgentSession.from_dict(raw_latest)
-                if latest.revision != claim_revision:
-                    raise LaunchBlockedError(
-                        f"{session_id} lifecycle boundary changed during export."
-                    )
-                latest.revision += 1
-                latest.retirement["export_intent"] = {}
-                receipt = {
-                    "action": "export",
-                    "mission_id": self.mission_id,
-                    "session_id": session_id,
-                    "expected_revision": expected_revision,
-                    "result_revision": latest.revision,
-                    "destination": str(materialized),
-                    "manifest_sha256": manifest_sha256,
-                    "recorded_at": _utc_now(),
-                }
-                latest.retirement.setdefault("action_receipts", {})[
-                    correlation_id
-                ] = receipt
-                data["sessions"][session_id] = latest.to_dict()
-                data.setdefault("timeline", []).append(
-                    f"{latest.issue_id} blocked Retirement Unit {session_id} exported."
-                )
-                self._write_runtime_payload(data)
-                self.sessions[session_id] = latest
-                self.timeline = list(data.get("timeline", []))
-                return receipt
+            finally:
+                if parent_fd is not None:
+                    os.close(parent_fd)
 
     def retry_retirement_unit(
         self,
@@ -7196,6 +9443,15 @@ class AlbertMission:
                         return session
                     raise AlbertError(
                         "Retirement action correlation id was reused for a different request."
+                    )
+                if any(
+                    session.retirement.get(intent_name)
+                    for intent_name in ("discard_intent", "export_intent")
+                ) or self._retirement_export_session_has_unfinished_directory_owner(
+                    session
+                ):
+                    raise LaunchBlockedError(
+                        f"{session_id} has a different Retirement Unit action in progress."
                     )
                 retry_intent = session.retirement.get("retry_intent", {})
                 resuming_intent = bool(
@@ -7366,6 +9622,15 @@ class AlbertMission:
                     raise AlbertError(
                         "Retirement action correlation id was reused for a different request."
                     )
+                if any(
+                    session.retirement.get(intent_name)
+                    for intent_name in ("export_intent", "retry_intent")
+                ) or self._retirement_export_session_has_unfinished_directory_owner(
+                    session
+                ):
+                    raise LaunchBlockedError(
+                        f"{session_id} has a different Retirement Unit action in progress."
+                    )
                 discard_intent = session.retirement.get("discard_intent", {})
                 resuming_intent = bool(
                     discard_intent
@@ -7455,14 +9720,21 @@ class AlbertMission:
                                     current_identity = ""
                                 if current_identity == session.worktree_identity:
                                     direct_removal_kind = "git-worktree"
+                            remove_git_registration = bool(
+                                direct_removal_kind == "managed-directory"
+                                and exclude_git_metadata
+                                and self._git_worktree_registration_present(session)
+                            )
                             new_discard_intent.update(
                                 {
                                     "discard_kind": "retained-worktree",
                                     "tree_sha256": tree_manifest["tree_sha256"],
+                                    "tree_manifest": tree_manifest,
                                     "root_device": path_status.st_dev,
                                     "root_inode": path_status.st_ino,
                                     "exclude_git_metadata": exclude_git_metadata,
                                     "direct_removal_kind": direct_removal_kind,
+                                    "remove_git_registration": remove_git_registration,
                                 }
                             )
                         else:
@@ -7583,8 +9855,13 @@ class AlbertMission:
         effect_path = self._retirement_removal_effect_path(session.session_id)
         removal_kind = str(intent["direct_removal_kind"])
         exclude_git_metadata = bool(intent["exclude_git_metadata"])
+        claimed_manifest = (
+            RetirementSnapshotStore.validated_retained_worktree_manifest(
+                intent["tree_manifest"]
+            )
+        )
 
-        def assert_claimed_tree(candidate: Path) -> None:
+        def assert_claimed_tree(candidate: Path, *, allow_partial: bool) -> None:
             if candidate.is_symlink() or not candidate.is_dir():
                 raise AlbertError(
                     "Retained Worktree Discard source boundary changed."
@@ -7601,9 +9878,52 @@ class AlbertMission:
                 candidate,
                 exclude_git_metadata=exclude_git_metadata,
             )
-            if manifest["tree_sha256"] != intent["tree_sha256"]:
+            if allow_partial:
+                claimed_entries = claimed_manifest["entries"]
+
+                def matches_claimed_record(
+                    relative_value: str,
+                    record: dict[str, Any],
+                ) -> bool:
+                    claimed = claimed_entries.get(relative_value)
+                    if claimed == record:
+                        return True
+                    return bool(
+                        isinstance(claimed, dict)
+                        and claimed.get("kind") == "directory"
+                        and record.get("kind") == "directory"
+                        and set(claimed) == {"kind", "mode"}
+                        and set(record) == {"kind", "mode"}
+                        and record["mode"] == claimed["mode"] | 0o700
+                    )
+
+                claimed_root_mode = claimed_manifest["root_mode"]
+                matches_claimed_subset = all(
+                    matches_claimed_record(relative_value, record)
+                    for relative_value, record in manifest["entries"].items()
+                ) and manifest["root_mode"] in {
+                    claimed_root_mode,
+                    claimed_root_mode | 0o700,
+                }
+            else:
+                matches_claimed_subset = manifest == claimed_manifest
+            if not matches_claimed_subset:
                 raise AlbertError(
                     "Retained Worktree Discard content changed after authorization."
+                )
+
+        def remove_claimed_git_registration() -> None:
+            if not intent["remove_git_registration"]:
+                return
+            if self._git_worktree_registration_present_at(effect_path):
+                self._remove_retirement_git_registration(effect_path, force=True)
+            elif self._git_worktree_registration_present(session):
+                self._remove_retirement_git_registration(path, force=True)
+            if self._git_worktree_registration_present_at(
+                effect_path
+            ) or self._git_worktree_registration_present(session):
+                raise AlbertError(
+                    "Exact Git worktree discard registration remains."
                 )
 
         path_present = path.exists() or path.is_symlink()
@@ -7615,13 +9935,14 @@ class AlbertMission:
         if not path_present and not effect_present:
             if removal_kind == "git-worktree":
                 if self._git_worktree_registration_present_at(effect_path):
-                    self._remove_retirement_git_registration(effect_path)
+                    self._remove_retirement_git_registration(effect_path, force=True)
                 elif self._git_worktree_registration_present(session):
-                    self._remove_retirement_git_registration(path)
+                    self._remove_retirement_git_registration(path, force=True)
+            remove_claimed_git_registration()
             return removal_kind
 
         if path_present:
-            assert_claimed_tree(path)
+            assert_claimed_tree(path, allow_partial=False)
             if removal_kind == "git-worktree":
                 if self._worktree_identity_for_session(session) != session.worktree_identity:
                     raise AlbertError(
@@ -7659,42 +9980,31 @@ class AlbertMission:
             raise AlbertError(
                 "Retained Worktree appeared after its discard effect began."
             )
-        assert_claimed_tree(effect_path)
+        assert_claimed_tree(effect_path, allow_partial=effect_present)
         self._assert_no_open_retirement_handles(effect_path)
+        RetirementSnapshotStore.prepare_retained_worktree_removal(
+            effect_path,
+            claimed_manifest,
+        )
+        RetirementSnapshotStore.remove_retained_worktree(
+            effect_path,
+            claimed_manifest,
+        )
         if removal_kind == "git-worktree":
-            if self._git_worktree_registration_present(session):
-                self._repair_retirement_git_backpointer(
-                    original_path=path,
-                    effect_path=effect_path,
+            if self._git_worktree_registration_present_at(effect_path):
+                self._remove_retirement_git_registration(
+                    effect_path,
+                    force=True,
                 )
-            if not self._git_worktree_registration_present_at(effect_path):
+            elif self._git_worktree_registration_present(session):
+                self._remove_retirement_git_registration(path, force=True)
+            if self._git_worktree_registration_present_at(
+                effect_path
+            ) or self._git_worktree_registration_present(session):
                 raise AlbertError(
-                    "Exact Git worktree discard registration could not be proven."
+                    "Exact Git worktree discard registration remains."
                 )
-            completed = _run_bounded_process(
-                [
-                    "git",
-                    "-C",
-                    str(self.target_repo),
-                    "worktree",
-                    "remove",
-                    "--force",
-                    str(effect_path),
-                ],
-                timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
-                output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
-            )
-            if completed.returncode != 0:
-                reason = (
-                    self._subprocess_output_text(completed.stderr).strip()
-                    or self._subprocess_output_text(completed.stdout).strip()
-                    or f"exit {completed.returncode}"
-                )
-                raise AlbertError(
-                    f"exact forced Git worktree discard failed: {reason}"
-                )
-        else:
-            shutil.rmtree(effect_path)
+        remove_claimed_git_registration()
         return removal_kind
 
     def _discard_snapshot_backed_worktree(
@@ -8444,54 +10754,43 @@ class AlbertMission:
                 raise AlbertError(
                     "Open-handle inspection was unavailable before retirement."
                 )
-            candidates = [canonical_effect]
-            for directory, names, filenames in os.walk(
-                canonical_effect,
-                followlinks=False,
-            ):
-                candidates.extend(Path(directory) / name for name in names)
-                candidates.extend(Path(directory) / name for name in filenames)
-                if len(candidates) > 10_001:
-                    raise AlbertError(
-                        "Open-handle inspection exceeded its retirement path limit."
-                    )
-            for offset in range(0, len(candidates), 64):
-                completed = _run_bounded_process(
-                    [
-                        lsof,
-                        "-Fn",
-                        "--",
-                        *(str(path) for path in candidates[offset : offset + 64]),
-                    ],
-                    timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
-                    output_limit_bytes=_GIT_PATH_OUTPUT_BYTES_LIMIT,
+            completed = _run_bounded_process(
+                [lsof, "-Fn", "-xf", "+D", str(canonical_effect)],
+                timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+                output_limit_bytes=_GIT_PATH_OUTPUT_BYTES_LIMIT,
+            )
+            if any(line.startswith("n") for line in completed.stdout.splitlines()):
+                raise AlbertError(
+                    "Retirement removal is blocked while an exact managed path "
+                    "has an open process handle."
                 )
-                if any(
-                    line.startswith("n") for line in completed.stdout.splitlines()
-                ):
-                    raise AlbertError(
-                        "Retirement removal is blocked while an exact managed path "
-                        "has an open process handle."
-                    )
-                if completed.returncode == 1 and not completed.stderr.strip():
-                    continue
-                if completed.returncode != 0:
-                    raise AlbertError(
-                        "Open-handle inspection was unavailable before retirement."
-                    )
+            if completed.returncode == 1 and not completed.stderr.strip():
+                return
+            if completed.returncode != 0:
+                raise AlbertError(
+                    "Open-handle inspection was unavailable before retirement."
+                )
             return
         raise AlbertError("Open-handle inspection is unsupported on this host.")
 
-    def _remove_retirement_git_registration(self, path: Path) -> None:
+    def _remove_retirement_git_registration(
+        self,
+        path: Path,
+        *,
+        force: bool = False,
+    ) -> None:
+        command = [
+            "git",
+            "-C",
+            str(self.target_repo),
+            "worktree",
+            "remove",
+        ]
+        if force:
+            command.append("--force")
+        command.append(str(path))
         completed = _run_bounded_process(
-            [
-                "git",
-                "-C",
-                str(self.target_repo),
-                "worktree",
-                "remove",
-                str(path),
-            ],
+            command,
             timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
             output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
         )
@@ -8502,7 +10801,7 @@ class AlbertMission:
                 or f"exit {completed.returncode}"
             )
             raise AlbertError(
-                f"exact non-force Git worktree registration removal failed: {reason}"
+                "exact Git worktree registration removal failed: " + reason
             )
 
     def _restore_retirement_git_marker(self, path: Path) -> None:
