@@ -1866,24 +1866,52 @@ class RetirementPreservationTest(unittest.TestCase):
             json.dumps(runtime, indent=2, sort_keys=True),
             encoding="utf-8",
         )
-        remove_tree = shutil.rmtree
+        reclaim_payload = RetirementSnapshotStore.reclaim_verified_payload
         interrupted = False
 
-        def interrupt_after_payload_deletion(path: Path, *args, **kwargs) -> None:
+        def interrupt_after_payload_deletion(
+            store: RetirementSnapshotStore,
+            record: dict[str, object],
+            *,
+            expected_root_device: int,
+            expected_root_inode: int,
+        ) -> None:
             nonlocal interrupted
-            remove_tree(path, *args, **kwargs)
-            if Path(path) == Path(first_record["payload_path"]) and not interrupted:
+            reclaim_payload(
+                store,
+                record,
+                expected_root_device=expected_root_device,
+                expected_root_inode=expected_root_inode,
+            )
+            if (
+                store.payload_root == Path(first_record["payload_path"])
+                and not interrupted
+            ):
                 interrupted = True
                 raise KeyboardInterrupt("crash after payload deletion")
 
-        with patch(
-            "albert_mvp.core.shutil.rmtree",
+        with patch.object(
+            RetirementSnapshotStore,
+            "reclaim_verified_payload",
+            autospec=True,
             side_effect=interrupt_after_payload_deletion,
         ):
             with self.assertRaisesRegex(KeyboardInterrupt, "payload deletion"):
                 constrained.launch_issue(third_issue)
 
         self.assertFalse(Path(first_record["payload_path"]).exists())
+        crash_runtime = json.loads(
+            constrained.runtime_path.read_text(encoding="utf-8")
+        )
+        legacy_intent = crash_runtime["retirement_storage"][
+            "reclamation_intents"
+        ][first.session_id]
+        legacy_intent.pop("root_device")
+        legacy_intent.pop("root_inode")
+        constrained.runtime_path.write_text(
+            json.dumps(crash_runtime, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
         recovered = self.load_mission(
             snapshot_storage_budget_bytes=32 * 1024 * 1024
             + max(first_record["snapshot_bytes"], second_record["snapshot_bytes"]),
@@ -1895,6 +1923,85 @@ class RetirementPreservationTest(unittest.TestCase):
         ]
         self.assertEqual(compact["payload_disposition"], "reclaimed")
         self.assertEqual(compact["manifest_sha256"], first_record["manifest_sha256"])
+
+    def test_reclamation_preserves_payload_root_replaced_after_verification(
+        self,
+    ) -> None:
+        second_issue = self.add_issue(2)
+        mission = self.load_mission()
+        completed = self.completed_issue(mission, "ISS-01")
+        mission.record_frontier_review(
+            completed.session_id,
+            "Approved",
+            reason="Retire one payload before testing a reclamation root swap.",
+            allowed_session_statuses={"evidence-ready"},
+            expected_revision=completed.revision,
+        )
+        retired = mission._refresh_persisted_session(completed.session_id)
+        payload_root = Path(retired.retirement["snapshot"]["payload_path"])
+        runtime = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        snapshot = runtime["sessions"][completed.session_id]["retirement"][
+            "snapshot"
+        ]
+        snapshot["created_at"] = (
+            datetime.now().astimezone() - timedelta(days=2)
+        ).isoformat()
+        snapshot["expires_at"] = (
+            datetime.now().astimezone() - timedelta(seconds=1)
+        ).isoformat()
+        mission.runtime_path.write_text(
+            json.dumps(runtime, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        constrained = self.load_mission(
+            snapshot_storage_budget_bytes=32 * 1024 * 1024,
+            perform_startup_effects=False,
+        )
+        constrained.assign_issue(second_issue, "fake-local")
+        constrained.approve_issue(second_issue)
+        verify_snapshot = RetirementSnapshotStore.verify
+        parked_payload = self.root / "verified-payload-parked-before-reclamation"
+        replacement = payload_root / "foreign-replacement.txt"
+        swapped = False
+
+        def replace_root_after_verification(
+            store: RetirementSnapshotStore,
+            record: dict[str, object],
+        ) -> bool:
+            nonlocal swapped
+            verified = verify_snapshot(store, record)
+            if store.payload_root == payload_root and not swapped:
+                swapped = True
+                store.payload_root.replace(parked_payload)
+                store.payload_root.mkdir()
+                replacement.write_text(
+                    "replacement payload bytes must survive\n",
+                    encoding="utf-8",
+                )
+            return verified
+
+        with patch.object(
+            RetirementSnapshotStore,
+            "verify",
+            autospec=True,
+            side_effect=replace_root_after_verification,
+        ):
+            with self.assertRaisesRegex(
+                LaunchBlockedError,
+                "Storage Budget is exhausted",
+            ):
+                constrained.launch_issue(second_issue)
+
+        self.assertTrue(swapped)
+        self.assertEqual(
+            replacement.read_text(encoding="utf-8"),
+            "replacement payload bytes must survive\n",
+        )
+        self.assertTrue(parked_payload.is_dir())
+        compact = constrained._refresh_persisted_session(
+            completed.session_id
+        ).retirement["snapshot"]
+        self.assertEqual(compact["payload_disposition"], "retained")
 
     def test_preservation_budget_is_reserved_before_execution_and_released_only_after_verification(
         self,
@@ -5093,6 +5200,33 @@ class RetirementPreservationTest(unittest.TestCase):
         self.assertFalse(inspection["actions"]["export"])
         self.assertTrue(inspection["actions"]["discard"])
 
+    def test_preservation_blocked_inspection_hides_actions_until_quiescent(
+        self,
+    ) -> None:
+        mission = self.load_mission(quiescence=("absent", "live-exact"))
+        completed = self.completed_session(mission)
+        with self.assertRaisesRegex(LaunchBlockedError, "Runner Quiescence"):
+            mission.preserve_retirement_unit(
+                completed.session_id,
+                expected_revision=completed.revision,
+                correlation_id="preserve-before-live-inspection",
+            )
+
+        inspection = mission.inspect_retirement_unit(completed.session_id)
+
+        self.assertEqual(
+            inspection["actions"],
+            {"retry": True, "inspect": True, "export": False, "discard": False},
+        )
+
+        quiesced = self.load_mission().inspect_retirement_unit(
+            completed.session_id
+        )
+        self.assertEqual(
+            quiesced["actions"],
+            {"retry": True, "inspect": True, "export": True, "discard": True},
+        )
+
     def test_retained_worktree_export_fails_closed_on_unreadable_subtree(
         self,
     ) -> None:
@@ -5551,6 +5685,7 @@ class RetirementPreservationTest(unittest.TestCase):
         def interrupt_after_partial_delete(
             path: Path,
             _manifest: dict[str, object],
+            **_identity: int,
         ) -> None:
             (path / "partial-delete.txt").unlink()
             raise OSError("simulated partial direct discard")
@@ -5628,6 +5763,7 @@ class RetirementPreservationTest(unittest.TestCase):
         def interrupt_forced_git_remove(
             path: Path,
             _manifest: dict[str, object],
+            **_identity: int,
         ) -> None:
             (path / "partial-git-delete.txt").unlink()
             raise OSError("simulated partial forced Git discard")
@@ -5714,6 +5850,99 @@ class RetirementPreservationTest(unittest.TestCase):
         self.assertEqual(
             foreign.read_text(encoding="utf-8"),
             "must survive exact discard\n",
+        )
+
+    def test_direct_discard_preserves_file_replaced_after_entry_validation(
+        self,
+    ) -> None:
+        shutil.move(self.target_repo / ".git", self.root / "detached-target-git")
+        mission = self.load_mission(quiescence=("absent", "live-exact"))
+        completed = self.completed_session(mission)
+        claimed = completed.worktree_path / "claimed-before-discard.txt"
+        claimed.write_text("claimed retained bytes\n", encoding="utf-8")
+        with self.assertRaisesRegex(LaunchBlockedError, "Runner Quiescence"):
+            mission.preserve_retirement_unit(
+                completed.session_id,
+                expected_revision=completed.revision,
+                correlation_id="preserve-before-entry-swap-discard",
+            )
+        blocked = mission._refresh_persisted_session(completed.session_id)
+        quiesced = self.load_mission()
+        effect_path = quiesced._retirement_removal_effect_path(completed.session_id)
+        effect_claimed = effect_path / claimed.name
+        parked_claimed = self.root / "validated-discard-file-parked"
+        replacement_text = "replacement bytes must survive discard\n"
+        record_path = RetirementSnapshotStore._retained_regular_file_record
+        record_at = RetirementSnapshotStore._retained_regular_file_record_at
+        prepare = RetirementSnapshotStore.prepare_retained_worktree_removal
+        swapped = False
+        removal_started = False
+
+        def prepare_then_arm(
+            path: Path,
+            manifest: dict[str, object],
+        ) -> None:
+            nonlocal removal_started
+            prepare(path, manifest)
+            removal_started = True
+
+        def swap_after_record() -> None:
+            nonlocal swapped
+            if swapped:
+                return
+            swapped = True
+            effect_claimed.replace(parked_claimed)
+            effect_claimed.write_text(replacement_text, encoding="utf-8")
+
+        def record_then_swap(path: Path) -> dict[str, object]:
+            record = record_path(path)
+            if removal_started and Path(path) == effect_claimed:
+                swap_after_record()
+            return record
+
+        def record_at_then_swap(
+            parent_fd: int,
+            name: str,
+            initial: os.stat_result,
+        ) -> dict[str, object]:
+            record = record_at(parent_fd, name, initial)
+            if removal_started and name == claimed.name and effect_claimed.exists():
+                swap_after_record()
+            return record
+
+        with patch.object(
+            RetirementSnapshotStore,
+            "prepare_retained_worktree_removal",
+            side_effect=prepare_then_arm,
+        ), patch.object(
+            RetirementSnapshotStore,
+            "_retained_regular_file_record",
+            side_effect=record_then_swap,
+        ), patch.object(
+            RetirementSnapshotStore,
+            "_retained_regular_file_record_at",
+            side_effect=record_at_then_swap,
+        ):
+            with self.assertRaisesRegex(
+                RetirementSnapshotError,
+                "changed|unauthorized",
+            ):
+                quiesced.discard_retained_worktree(
+                    completed.session_id,
+                    expected_revision=blocked.revision,
+                    correlation_id="discard-with-validated-entry-swap",
+                    confirmation=completed.session_id,
+                    reason="Never delete a replacement installed after entry proof.",
+                )
+
+        self.assertTrue(swapped)
+        self.assertEqual(
+            effect_claimed.read_text(encoding="utf-8"),
+            replacement_text,
+        )
+        self.assertEqual(
+            parked_claimed.read_text(encoding="utf-8"),
+            "claimed retained bytes\n",
         )
 
     def test_retained_worktree_export_rejects_destination_below_its_source(self) -> None:

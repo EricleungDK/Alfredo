@@ -2640,17 +2640,24 @@ class AlbertMission:
         ):
             raise AlbertError("Snapshot storage state is invalid")
         reclamation_intents = raw["reclamation_intents"]
+        reclamation_intent_fields = {
+            "session_id",
+            "manifest_sha256",
+            "payload_path",
+            "snapshot_bytes",
+            "claimed_at",
+        }
         if not all(
             isinstance(session_id, str)
             and session_id.strip()
             and isinstance(intent, dict)
-            and set(intent)
-            == {
-                "session_id",
-                "manifest_sha256",
-                "payload_path",
-                "snapshot_bytes",
-                "claimed_at",
+            and frozenset(intent)
+            in {
+                frozenset(reclamation_intent_fields),
+                frozenset(
+                    reclamation_intent_fields
+                    | {"root_device", "root_inode"}
+                ),
             }
             and intent.get("session_id") == session_id
             and isinstance(intent.get("manifest_sha256"), str)
@@ -2661,6 +2668,21 @@ class AlbertMission:
             and not isinstance(intent.get("snapshot_bytes"), bool)
             and intent["snapshot_bytes"] >= 0
             and timestamp_is_valid(intent.get("claimed_at"))
+            and (
+                "root_device" not in intent
+                or (
+                    isinstance(intent.get("root_device"), int)
+                    and not isinstance(intent.get("root_device"), bool)
+                    and intent["root_device"] >= 0
+                    and isinstance(intent.get("root_inode"), int)
+                    and not isinstance(intent.get("root_inode"), bool)
+                    and intent["root_inode"] >= 0
+                    and (
+                        intent["root_inode"] > 0
+                        or intent["root_device"] == 0
+                    )
+                )
+            )
             for session_id, intent in reclamation_intents.items()
         ):
             raise AlbertError("Snapshot storage state is invalid")
@@ -7846,6 +7868,14 @@ class AlbertMission:
             )
             != _runtime_identity_path(self.target_repo)
         )
+        runner_quiescent = False
+        if blocked:
+            owner_signal, process_group_signal = self._probe_retirement_quiescence(
+                session.retirement.get("runner_boundary", {})
+            )
+            runner_quiescent = (
+                owner_signal == "absent" and process_group_signal == "absent"
+            )
         return {
             "schema_version": 1,
             "mission_id": self.mission_id,
@@ -7863,8 +7893,11 @@ class AlbertMission:
                 "retry": blocked,
                 "inspect": True,
                 "export": blocked
-                and (retained_snapshot or retained_source_available),
-                "discard": blocked,
+                and (
+                    retained_snapshot
+                    or (retained_source_available and runner_quiescent)
+                ),
+                "discard": blocked and runner_quiescent,
             },
         }
 
@@ -9989,6 +10022,8 @@ class AlbertMission:
         RetirementSnapshotStore.remove_retained_worktree(
             effect_path,
             claimed_manifest,
+            expected_root_device=int(intent["root_device"]),
+            expected_root_inode=int(intent["root_inode"]),
         )
         if removal_kind == "git-worktree":
             if self._git_worktree_registration_present_at(effect_path):
@@ -10146,15 +10181,7 @@ class AlbertMission:
                     "payload_path": snapshot["payload_path"],
                     "snapshot_bytes": int(snapshot["snapshot_bytes"]),
                 }
-                if pending_intent is None:
-                    pending_intent = {
-                        **expected_intent,
-                        "claimed_at": _utc_now(),
-                    }
-                    storage["reclamation_intents"][session_id] = pending_intent
-                    data["retirement_storage"] = storage
-                    self._write_runtime_payload(data)
-                elif any(
+                if pending_intent is not None and any(
                     pending_intent.get(field_name) != value
                     for field_name, value in expected_intent.items()
                 ):
@@ -10183,8 +10210,6 @@ class AlbertMission:
                     payload_present = (
                         store.payload_root.exists() or store.payload_root.is_symlink()
                     )
-                    if payload_present:
-                        store.verify(snapshot)
                     if (
                         store.payload_root.is_symlink()
                         or (payload_present and not store.payload_root.is_dir())
@@ -10192,9 +10217,45 @@ class AlbertMission:
                         raise RetirementSnapshotError(
                             "Snapshot Payload reclamation boundary is invalid."
                         )
+                    if pending_intent is None or "root_inode" not in pending_intent:
+                        if payload_present:
+                            root_device, root_inode = (
+                                store.verified_payload_root_identity(snapshot)
+                            )
+                        else:
+                            root_device, root_inode = 0, 0
+                        pending_intent = {
+                            **(
+                                pending_intent
+                                if pending_intent is not None
+                                else {
+                                    **expected_intent,
+                                    "claimed_at": _utc_now(),
+                                }
+                            ),
+                            "root_device": root_device,
+                            "root_inode": root_inode,
+                        }
+                        storage["reclamation_intents"][session_id] = pending_intent
+                        data["retirement_storage"] = storage
+                        self._write_runtime_payload(data)
+                    root_device = int(pending_intent["root_device"])
+                    root_inode = int(pending_intent["root_inode"])
+                    payload_present = (
+                        store.payload_root.exists() or store.payload_root.is_symlink()
+                    )
+                    if root_inode == 0 and payload_present:
+                        raise RetirementSnapshotError(
+                            "Snapshot Payload appeared after reclamation absence was "
+                            "claimed."
+                        )
                     reclaimed_bytes = int(snapshot["snapshot_bytes"])
-                    if payload_present:
-                        shutil.rmtree(store.payload_root)
+                    if payload_present and root_inode > 0:
+                        store.reclaim_verified_payload(
+                            snapshot,
+                            expected_root_device=root_device,
+                            expected_root_inode=root_inode,
+                        )
                     if store.payload_root.exists() or store.payload_root.is_symlink():
                         raise RetirementSnapshotError(
                             "Snapshot Payload remained after reclamation."

@@ -157,6 +157,112 @@ class RetirementSnapshotStore:
         self._verify_clean_room(manifest_path, manifest)
         return True
 
+    def _verified_payload_root_manifest(
+        self,
+        record: dict[str, Any],
+        *,
+        expected_root_device: int | None = None,
+        expected_root_inode: int | None = None,
+    ) -> tuple[tuple[int, int], dict[str, Any]]:
+        """Verify one payload while its parent and root identities stay bound."""
+
+        parent_fd = self._open_directory_path(
+            self.payload_root.parent,
+            error="Snapshot Payload reclamation parent boundary is invalid.",
+        )
+        root_fd: int | None = None
+        try:
+            root_fd = self._open_directory_at(
+                parent_fd,
+                self.payload_root.name,
+                error="Snapshot Payload reclamation boundary is invalid.",
+            )
+            before_status = os.fstat(root_fd)
+            identity = self._stat_identity(before_status)
+            if expected_root_device is not None or expected_root_inode is not None:
+                if (
+                    expected_root_device is None
+                    or expected_root_inode is None
+                    or identity != (expected_root_device, expected_root_inode)
+                ):
+                    raise RetirementSnapshotError(
+                        "Snapshot Payload reclamation boundary changed."
+                    )
+            before_manifest = self.retained_worktree_manifest_from_directory(
+                root_fd,
+                exclude_git_metadata=False,
+            )
+            self.verify(record)
+            try:
+                named_status = os.stat(
+                    self.payload_root.name,
+                    dir_fd=parent_fd,
+                    follow_symlinks=False,
+                )
+            except OSError as exc:
+                raise RetirementSnapshotError(
+                    "Snapshot Payload reclamation boundary changed."
+                ) from exc
+            after_status = os.fstat(root_fd)
+            if (
+                self._stat_identity(named_status) != identity
+                or self._stat_identity(after_status) != identity
+            ):
+                raise RetirementSnapshotError(
+                    "Snapshot Payload reclamation boundary changed."
+                )
+            after_manifest = self.retained_worktree_manifest_from_directory(
+                root_fd,
+                exclude_git_metadata=False,
+            )
+            final_status = os.fstat(root_fd)
+            if (
+                self._stat_identity(final_status) != identity
+                or before_manifest != after_manifest
+            ):
+                raise RetirementSnapshotError(
+                    "Snapshot Payload changed during reclamation proof."
+                )
+            return identity, after_manifest
+        finally:
+            if root_fd is not None:
+                os.close(root_fd)
+            os.close(parent_fd)
+
+    def verified_payload_root_identity(
+        self,
+        record: dict[str, Any],
+    ) -> tuple[int, int]:
+        """Return one exact payload-root identity after descriptor-bound proof."""
+
+        identity, _manifest = self._verified_payload_root_manifest(record)
+        return identity
+
+    def reclaim_verified_payload(
+        self,
+        record: dict[str, Any],
+        *,
+        expected_root_device: int,
+        expected_root_inode: int,
+    ) -> None:
+        """Delete only one verified payload whose durable root identity still matches."""
+
+        identity, manifest = self._verified_payload_root_manifest(
+            record,
+            expected_root_device=expected_root_device,
+            expected_root_inode=expected_root_inode,
+        )
+        self.remove_retained_worktree(
+            self.payload_root,
+            manifest,
+            expected_root_device=identity[0],
+            expected_root_inode=identity[1],
+        )
+        if self.payload_root.exists() or self.payload_root.is_symlink():
+            raise RetirementSnapshotError(
+                "Snapshot Payload remained after reclamation."
+            )
+
     def materialize(self, record: dict[str, Any], destination_root: Path) -> Path:
         """Reconstruct verified preserved material below an explicit empty root."""
 
@@ -1281,10 +1387,24 @@ class RetirementSnapshotStore:
         cls,
         worktree: Path,
         manifest: dict[str, Any],
+        *,
+        expected_root_device: int,
+        expected_root_inode: int,
     ) -> None:
-        """Remove only entries still matching one validated retained-tree claim."""
+        """Remove only entries below one descriptor-bound retained-tree claim."""
 
         manifest = cls.validated_retained_worktree_manifest(manifest)
+        if (
+            not isinstance(expected_root_device, int)
+            or isinstance(expected_root_device, bool)
+            or expected_root_device < 0
+            or not isinstance(expected_root_inode, int)
+            or isinstance(expected_root_inode, bool)
+            or expected_root_inode <= 0
+        ):
+            raise RetirementSnapshotError(
+                "Retained Worktree removal boundary is invalid."
+            )
         children: dict[tuple[str, ...], dict[str, dict[str, Any]]] = {}
         for relative_value, record in manifest["entries"].items():
             relative = cls._safe_retained_relative(relative_value)
@@ -1292,111 +1412,208 @@ class RetirementSnapshotStore:
                 relative.parts[-1]
             ] = record
 
-        def directory_mode_matches(path: Path, claimed_mode: int) -> bool:
+        def stat_entry(parent_fd: int, name: str) -> os.stat_result:
             try:
-                status = path.stat(follow_symlinks=False)
-            except FileNotFoundError:
-                return False
-            return bool(
-                stat.S_ISDIR(status.st_mode)
-                and (status.st_mode & 0o777)
-                in {claimed_mode, claimed_mode | 0o700}
-            )
-
-        def record_matches(path: Path, record: dict[str, Any]) -> bool:
-            kind = record["kind"]
-            if kind == "directory":
-                return directory_mode_matches(path, record["mode"])
-            if kind == "symlink":
-                try:
-                    return bool(
-                        path.is_symlink()
-                        and os.readlink(os.fsencode(path)).hex()
-                        == record["target"]
-                    )
-                except OSError:
-                    return False
-            if kind == "git-pointer":
-                pointer = cls._bounded_git_worktree_pointer(path)
-                return bool(
-                    pointer is not None
-                    and pointer["mode"] == record["mode"]
-                    and pointer["content"].hex() == record["content_hex"]
-                )
-            if kind == "file":
-                try:
-                    return cls._retained_regular_file_record(path) == record
-                except RetirementSnapshotError:
-                    return False
-            return False
-
-        def remove_directory(path: Path, relative_parts: tuple[str, ...]) -> None:
-            expected = children.get(relative_parts, {})
-            try:
-                with os.scandir(path) as iterator:
-                    current = sorted(tuple(iterator), key=lambda item: item.name)
+                return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
             except OSError as exc:
                 raise RetirementSnapshotError(
-                    "Retained Worktree removal could not inspect the full tree."
+                    "Retained Worktree removal content changed."
                 ) from exc
-            for entry in current:
-                record = expected.get(entry.name)
+
+        def validate_entry(
+            parent_fd: int,
+            name: str,
+            record: dict[str, Any],
+            initial: os.stat_result,
+        ) -> None:
+            kind = record["kind"]
+            if kind == "directory":
+                if not stat.S_ISDIR(initial.st_mode) or (
+                    initial.st_mode & 0o777
+                ) not in {record["mode"], record["mode"] | 0o700}:
+                    raise RetirementSnapshotError(
+                        "Retained Worktree removal content changed."
+                    )
+                return
+            if kind == "symlink":
+                target = cls._read_stable_symlink_at(
+                    parent_fd,
+                    name,
+                    initial,
+                    error="Retained Worktree removal content changed.",
+                )
+                if target.hex() != record["target"]:
+                    raise RetirementSnapshotError(
+                        "Retained Worktree removal content changed."
+                    )
+                return
+            if kind == "git-pointer":
+                pointer = cls._bounded_git_worktree_pointer_at(
+                    parent_fd,
+                    name,
+                    initial,
+                )
+                if (
+                    pointer is None
+                    or pointer["mode"] != record["mode"]
+                    or pointer["content"].hex() != record["content_hex"]
+                ):
+                    raise RetirementSnapshotError(
+                        "Retained Worktree removal content changed."
+                    )
+                return
+            if kind == "file":
+                if cls._retained_regular_file_record_at(
+                    parent_fd,
+                    name,
+                    initial,
+                ) != record:
+                    raise RetirementSnapshotError(
+                        "Retained Worktree removal content changed."
+                    )
+                return
+            raise RetirementSnapshotError(
+                "Retained Worktree removal content changed."
+            )
+
+        def unlink_verified_entry(
+            parent_fd: int,
+            name: str,
+            record: dict[str, Any],
+            expected_identity: tuple[int, int],
+        ) -> None:
+            current = stat_entry(parent_fd, name)
+            if cls._stat_identity(current) != expected_identity:
+                raise RetirementSnapshotError(
+                    "Retained Worktree removal content changed."
+                )
+            validate_entry(parent_fd, name, record, current)
+            latest = stat_entry(parent_fd, name)
+            if cls._stable_stat(latest) != cls._stable_stat(current):
+                raise RetirementSnapshotError(
+                    "Retained Worktree removal content changed."
+                )
+            try:
+                os.unlink(name, dir_fd=parent_fd)
+            except OSError as exc:
+                raise RetirementSnapshotError(
+                    "Retained Worktree removal content changed."
+                ) from exc
+
+        def remove_directory(
+            directory_fd: int,
+            relative_parts: tuple[str, ...],
+            claimed_mode: int,
+        ) -> None:
+            directory_status = os.fstat(directory_fd)
+            if not stat.S_ISDIR(directory_status.st_mode) or (
+                directory_status.st_mode & 0o777
+            ) not in {claimed_mode, claimed_mode | 0o700}:
+                raise RetirementSnapshotError(
+                    "Retained Worktree removal directory changed."
+                )
+            try:
+                os.fchmod(directory_fd, claimed_mode | 0o700)
+            except OSError as exc:
+                raise RetirementSnapshotError(
+                    "Retained Worktree removal directory changed."
+                ) from exc
+            expected = children.get(relative_parts, {})
+            current_names = cls._directory_names_fd(directory_fd)
+            for name in current_names:
+                record = expected.get(name)
                 if record is None:
                     raise RetirementSnapshotError(
                         "Retained Worktree removal found unauthorized content."
                     )
-                child = path / entry.name
+                initial = stat_entry(directory_fd, name)
+                validate_entry(directory_fd, name, record, initial)
                 if record["kind"] == "directory":
-                    if not directory_mode_matches(child, record["mode"]):
-                        raise RetirementSnapshotError(
-                            "Retained Worktree removal content changed."
-                        )
-                    remove_directory(child, (*relative_parts, entry.name))
-                    try:
-                        child.rmdir()
-                    except FileNotFoundError:
-                        pass
-                    except OSError as exc:
-                        raise RetirementSnapshotError(
-                            "Retained Worktree removal found unauthorized content."
-                        ) from exc
-                    continue
-                if not record_matches(child, record):
-                    raise RetirementSnapshotError(
-                        "Retained Worktree removal content changed."
+                    child_fd = cls._open_directory_at(
+                        directory_fd,
+                        name,
+                        error="Retained Worktree removal content changed.",
                     )
-                try:
-                    child.unlink()
-                except FileNotFoundError:
-                    pass
-                except OSError as exc:
-                    raise RetirementSnapshotError(
-                        "Retained Worktree removal content changed."
-                    ) from exc
-            try:
-                with os.scandir(path) as iterator:
-                    if next(iterator, None) is not None:
-                        raise RetirementSnapshotError(
-                            "Retained Worktree removal found unauthorized content."
+                    try:
+                        child_status = os.fstat(child_fd)
+                        if cls._stat_identity(child_status) != cls._stat_identity(
+                            initial
+                        ):
+                            raise RetirementSnapshotError(
+                                "Retained Worktree removal content changed."
+                            )
+                        remove_directory(
+                            child_fd,
+                            (*relative_parts, name),
+                            record["mode"],
                         )
-            except RetirementSnapshotError:
-                raise
+                        named_child = stat_entry(directory_fd, name)
+                        if (
+                            cls._stat_identity(named_child)
+                            != cls._stat_identity(child_status)
+                            or cls._directory_names_fd(child_fd)
+                        ):
+                            raise RetirementSnapshotError(
+                                "Retained Worktree removal content changed."
+                            )
+                        try:
+                            os.rmdir(name, dir_fd=directory_fd)
+                        except OSError as exc:
+                            raise RetirementSnapshotError(
+                                "Retained Worktree removal found unauthorized content."
+                            ) from exc
+                    finally:
+                        os.close(child_fd)
+                    continue
+                unlink_verified_entry(
+                    directory_fd,
+                    name,
+                    record,
+                    cls._stat_identity(initial),
+                )
+            if cls._directory_names_fd(directory_fd):
+                raise RetirementSnapshotError(
+                    "Retained Worktree removal found unauthorized content."
+                )
+
+        parent_fd = cls._open_directory_path(
+            worktree.parent,
+            error="Retained Worktree removal boundary changed.",
+        )
+        root_fd: int | None = None
+        try:
+            root_fd = cls._open_directory_at(
+                parent_fd,
+                worktree.name,
+                error="Retained Worktree removal boundary changed.",
+            )
+            root_status = os.fstat(root_fd)
+            if cls._stat_identity(root_status) != (
+                expected_root_device,
+                expected_root_inode,
+            ):
+                raise RetirementSnapshotError(
+                    "Retained Worktree removal boundary changed."
+                )
+            remove_directory(root_fd, (), manifest["root_mode"])
+            named_root = stat_entry(parent_fd, worktree.name)
+            if (
+                cls._stat_identity(named_root) != cls._stat_identity(root_status)
+                or cls._directory_names_fd(root_fd)
+            ):
+                raise RetirementSnapshotError(
+                    "Retained Worktree removal boundary changed."
+                )
+            try:
+                os.rmdir(worktree.name, dir_fd=parent_fd)
             except OSError as exc:
                 raise RetirementSnapshotError(
-                    "Retained Worktree removal could not inspect the full tree."
+                    "Retained Worktree removal found unauthorized content."
                 ) from exc
-
-        if not directory_mode_matches(worktree, manifest["root_mode"]):
-            raise RetirementSnapshotError(
-                "Retained Worktree removal boundary changed."
-            )
-        remove_directory(worktree, ())
-        try:
-            worktree.rmdir()
-        except OSError as exc:
-            raise RetirementSnapshotError(
-                "Retained Worktree removal found unauthorized content."
-            ) from exc
+        finally:
+            if root_fd is not None:
+                os.close(root_fd)
+            os.close(parent_fd)
 
     def recover_published(self) -> dict[str, Any]:
         """Recover an exact publication whose canonical phase commit was interrupted."""

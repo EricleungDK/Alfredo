@@ -1,8 +1,8 @@
 # Issue #68 Retirement Storage and Blocked Outcomes
 
-**Date:** 2026-08-10
+**Date:** 2026-08-12
 
-**Status:** Implemented locally; fourth-review corrections validated, final independent review pending
+**Status:** Implemented locally; final Standards, Spec, and Correctness/Risk reviews clean
 
 **Issue:** [GitHub #68](https://github.com/EricleungDK/Alfredo/issues/68)
 
@@ -43,7 +43,7 @@ Every persisted action receipt is validated against its action-specific shape, e
 
 ## Verification
 
-- Retirement preservation/lifecycle/storage coverage: pytest reports 130 passed, one APFS-inapplicable POSIX byte-name case skipped, and 29 subtests passed; the export-focused unittest matrix passes 40 tests, including every fourth-review filesystem, publication, replay, ownership, and compatibility reproduction.
+- Retirement preservation/lifecycle/storage coverage: unittest reports 134 run with one APFS-inapplicable POSIX byte-name case skipped; pytest reports 133 passed, one skipped, and 29 subtests passed. This includes the final quiescence-projection, direct-entry-substitution, Snapshot Payload root-substitution, legacy reclamation-intent upgrade, and partial-removal replay regressions. The export-focused matrix passes 40 tests, including every fourth-review filesystem, publication, replay, ownership, and compatibility reproduction.
 - Focused workspace coverage passes for the four audited retirement Workstation actions, exact replay-safe Activity Journal entries, blocked Retirement Record projection, and Active-Mission storage resolution.
 - Workstation projection passes 32/32 and App passes 143/143, including the shared human-readable Retirement Record inspector plus reason/exact-session discard gate. TypeScript typecheck and the Vite production build pass.
 - Python compilation, scoped Ruff fatal checks, Cargo formatting, and Cargo check pass. Including F82 for the complete modified workspace file reports the pre-existing undefined `EvidencePackage` annotation now at `albert_mvp/workspace.py:9782`, outside the Issue #68 hunk.
@@ -51,6 +51,7 @@ Every persisted action receipt is validated against its action-specific shape, e
 - The complete frontend run passes 267/292. Its 25 failures remain the existing unsupported Darwin/arm64 Ubuntu-release fixtures, Darwin `/var` aliasing, missing Bubblewrap, and the downstream real-backend release seam. The transient generic-CLI parser regression discovered by this gate was fixed and regression-tested before this recorded rerun.
 - Cargo tests pass 43/54. Its 11 failures reproduce the same missing-Bubblewrap, path-alias, and downstream scope-startup constraints; the typed retirement bridge compiles and formats cleanly.
 - Documentation audit reports six heuristic findings: three broad recent-feature connection ratios and three pre-existing orphan reports. Standards validation remains Grade A at 98.0%, with those same three low-severity report traceability findings.
+- Final scoped Ruff fatal checks, Python compilation, and diff checks pass after the review corrections.
 
 ## Review Corrections
 
@@ -58,6 +59,10 @@ The first required review against `aa92ab36ec92280b696e758f60e6da07362e54b5...69
 
 Review of `21db693` and the bounded follow-on audits found partial direct-discard replay, broken-Git registration cleanup, incomplete export containment, silent/estimated retained-tree scanning, permission-stranded recovery, arbitrary `.git` loss, public read commands causing reclamation, incomplete `/storage` projection, private-stage publication races, crash-unbounded stage names, cross-session destination ownership gaps, and pre-upgrade intent incompatibility. The fourth correction covers that set with canonical bounded manifests, exact subset removal, complete runtime/source guards, descriptor-bound materialization and verification, permanent bounded destination owners, reserved/bound two-attempt stages, exact no-replace publication and reproof, durable writes, legacy replay, complete read-only projections, and the corresponding public regressions.
 
+The final Spec pass against `5353d16` found that `retirement-inspect` still advertised direct export and discard while Runner Quiescence was known live even though both commands correctly failed closed. The focused red/green correction now probes the persisted runner boundary read-only, suppresses those two actions until both owner and process-group evidence are absent, and retains snapshot export availability because that action does not touch the live retained source.
+
+Correctness/Risk then found two deletion substitution windows: direct retained-tree removal validated a pathname before unlink, and Snapshot Payload reclamation verified a root before path-based recursive deletion. Direct discard now binds the durable root inode and recursively revalidates each named entry through its parent descriptor immediately around unlink/rmdir. Reclamation now persists the descriptor-proven payload root device/inode, safely upgrades exact pre-field crash intents, and removes only the matching root/tree through the same descriptor authority. Deterministic tests replace a file after entry fingerprinting and a payload root after complete verification; both replacement payloads survive, the action fails closed, and legacy/replay coverage remains green. Standards' evidence/schema/date findings are reconciled in this record and the linked system documents. Final independent Standards, Spec, and Correctness/Risk rechecks all report clean, with no remaining supported Issue #68 finding or scope creep.
+
 ## Remaining Gate
 
-Commit the validated fourth correction set, restart the persistent Apple workstation, then repeat independent parallel Standards, Spec, and Correctness/Risk review against fixed point `aa92ab36ec92280b696e758f60e6da07362e54b5`. Resolve every supported finding before marking this report complete. No push, pull request, or GitHub tracker mutation is part of this implementation run.
+Commit the focused final-review corrections and evidence locally, restart/verify the persistent Apple workstation, and confirm a clean worktree. No push, pull request, or GitHub tracker mutation is part of this implementation run.
