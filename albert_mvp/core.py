@@ -36,6 +36,15 @@ from .agents import (
     load_agent_registry,
 )
 from .capabilities import CapabilityCatalogService, SKILL_NAME_PATTERN
+from .execution import (
+    ExecutionCoordinator,
+    ExecutionJournal,
+    ExecutionLimits,
+    ExecutionRequest,
+    ExecutionSandbox,
+    LocalAgentExecutionAuthority,
+    PythonExecutionProvider,
+)
 from .retirement import (
     RetirementSnapshotError,
     RetirementSnapshotStore,
@@ -685,7 +694,14 @@ def _trusted_system_executable(name: str) -> str | None:
     return None
 
 
-def _resource_bounded_process_argv(argv: str | list[str]) -> str | list[str]:
+def _resource_bounded_process_argv(
+    argv: str | list[str],
+    *,
+    address_space_bytes: int = _PROCESS_ADDRESS_SPACE_BYTES_LIMIT,
+    file_size_bytes: int = _PROCESS_FILE_SIZE_BYTES_LIMIT,
+    open_file_limit: int = _PROCESS_OPEN_FILE_LIMIT,
+    process_count_limit: int = _PROCESS_COUNT_LIMIT,
+) -> str | list[str]:
     """Apply inherited host resource limits without unsafe pre-exec callbacks."""
 
     if os.name != "posix" or not isinstance(argv, list):
@@ -697,20 +713,34 @@ def _resource_bounded_process_argv(argv: str | list[str]) -> str | list[str]:
         )
     return [
         prlimit,
-        f"--as={_PROCESS_ADDRESS_SPACE_BYTES_LIMIT}",
-        f"--fsize={_PROCESS_FILE_SIZE_BYTES_LIMIT}",
-        f"--nofile={_PROCESS_OPEN_FILE_LIMIT}",
-        f"--nproc={_PROCESS_COUNT_LIMIT}",
+        f"--as={address_space_bytes}",
+        f"--fsize={file_size_bytes}",
+        f"--nofile={open_file_limit}",
+        f"--nproc={process_count_limit}",
         "--",
         *argv,
     ]
 
 
-def _process_isolated_argv(argv: str | list[str]) -> str | list[str]:
+def _process_isolated_argv(
+    argv: str | list[str],
+    *,
+    address_space_bytes: int = _PROCESS_ADDRESS_SPACE_BYTES_LIMIT,
+    file_size_bytes: int = _PROCESS_FILE_SIZE_BYTES_LIMIT,
+    open_file_limit: int = _PROCESS_OPEN_FILE_LIMIT,
+    process_count_limit: int = _PROCESS_COUNT_LIMIT,
+    descendant_grace_seconds: float = _PROCESS_DESCENDANT_GRACE_SECONDS,
+) -> str | list[str]:
     """Place raw POSIX children in a kill-on-exit PID namespace."""
 
     if os.name != "posix" or not isinstance(argv, list):
-        return _resource_bounded_process_argv(argv)
+        return _resource_bounded_process_argv(
+            argv,
+            address_space_bytes=address_space_bytes,
+            file_size_bytes=file_size_bytes,
+            open_file_limit=open_file_limit,
+            process_count_limit=process_count_limit,
+        )
     bubblewrap = _trusted_system_executable("bwrap")
     if bubblewrap is None:
         raise AlbertError(
@@ -726,7 +756,13 @@ def _process_isolated_argv(argv: str | list[str]) -> str | list[str]:
         # sandboxed_process_argv places prlimit inside the new namespaces so its
         # per-UID process limit cannot prevent Bubblewrap from creating them.
         return argv
-    bounded = _resource_bounded_process_argv(argv)
+    bounded = _resource_bounded_process_argv(
+        argv,
+        address_space_bytes=address_space_bytes,
+        file_size_bytes=file_size_bytes,
+        open_file_limit=open_file_limit,
+        process_count_limit=process_count_limit,
+    )
     assert isinstance(bounded, list)
     supervisor = Path(__file__).with_name("process_supervisor.py")
     return [
@@ -745,7 +781,7 @@ def _process_isolated_argv(argv: str | list[str]) -> str | list[str]:
         "--",
         sys.executable,
         str(supervisor),
-        str(_PROCESS_DESCENDANT_GRACE_SECONDS),
+        str(descendant_grace_seconds),
         "--",
         *bounded,
     ]
@@ -759,6 +795,11 @@ def _run_bounded_process(
     env: dict[str, str] | None = None,
     timeout_seconds: float,
     output_limit_bytes: int = _PROCESS_OUTPUT_BYTES_LIMIT,
+    address_space_bytes: int = _PROCESS_ADDRESS_SPACE_BYTES_LIMIT,
+    file_size_bytes: int = _PROCESS_FILE_SIZE_BYTES_LIMIT,
+    open_file_limit: int = _PROCESS_OPEN_FILE_LIMIT,
+    process_count_limit: int = _PROCESS_COUNT_LIMIT,
+    descendant_grace_seconds: float = _PROCESS_DESCENDANT_GRACE_SECONDS,
     process_started: Callable[[subprocess.Popen[bytes]], None] | None = None,
     process_binding_started: (
         Callable[[subprocess.Popen[bytes], str], None] | None
@@ -772,7 +813,14 @@ def _run_bounded_process(
     process_env = sanitized_process_environment(env)
     process_env["ALFREDO_PROCESS_TOKEN"] = process_token
     process = subprocess.Popen(
-        _process_isolated_argv(argv),
+        _process_isolated_argv(
+            argv,
+            address_space_bytes=address_space_bytes,
+            file_size_bytes=file_size_bytes,
+            open_file_limit=open_file_limit,
+            process_count_limit=process_count_limit,
+            descendant_grace_seconds=descendant_grace_seconds,
+        ),
         cwd=cwd,
         stdin=subprocess.PIPE if input_text is not None else None,
         stdout=subprocess.PIPE,
@@ -3146,6 +3194,7 @@ class AlbertMission:
         runtime_exists = self.runtime_path.exists()
         self._load_runtime()
         if runtime_exists and perform_startup_effects:
+            ExecutionJournal(self.runtime_dir / "execution-receipts.json").reconcile()
             self._reconcile_abandoned_sessions()
             self._reconcile_retirement_units()
             self._reclaim_snapshot_payloads(
@@ -13270,6 +13319,7 @@ class AlbertMission:
                 session,
                 _command_invocation(command),
                 env=env,
+                effect_label="runner-command",
             )
             self._raise_if_cancelled(session)
             exit_status = completed.returncode
@@ -13348,6 +13398,7 @@ class AlbertMission:
                     _command_invocation(command),
                     input_text=prompt,
                     output_limit_bytes=_MODEL_PROCESS_OUTPUT_BYTES_LIMIT,
+                    effect_label=f"model-inference-round-{iteration}",
                 )
                 self._raise_if_cancelled(session)
                 exit_status = completed.returncode
@@ -13613,6 +13664,7 @@ class AlbertMission:
                     session,
                     argv,
                     timeout_seconds=_MODEL_COMMAND_TIMEOUT_SECONDS,
+                    effect_label=f"planned-command-{iteration}-{index}",
                 )
                 self._raise_if_cancelled(session)
                 exit_status = completed.returncode
@@ -13724,6 +13776,7 @@ class AlbertMission:
         env: dict[str, str] | None = None,
         timeout_seconds: float = _RUNNER_COMMAND_TIMEOUT_SECONDS,
         output_limit_bytes: int = _PROCESS_OUTPUT_BYTES_LIMIT,
+        effect_label: str = "",
     ) -> subprocess.CompletedProcess[str]:
         self._raise_if_cancelled(session)
         process_env = sanitized_process_environment(env)
@@ -13795,6 +13848,67 @@ class AlbertMission:
         governed_session = session.runner_pid is not None
         process_started = False
 
+        effective_argv = (
+            tuple(governed_argv)
+            if isinstance(governed_argv, list)
+            else (governed_argv,)
+        )
+        execution_label = effect_label.strip() or "process"
+        execution_request_id = "local-agent:" + sha256(
+            "\n".join(
+                (
+                    self.mission_id,
+                    session.session_id,
+                    session.runner_operation_id,
+                    execution_label,
+                    json.dumps(list(effective_argv), ensure_ascii=True),
+                    str(session.worktree_path.resolve()),
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+        execution_request = ExecutionRequest(
+            request_id=execution_request_id,
+            effect="local-agent",
+            argv=effective_argv,
+            working_directory=str(session.worktree_path.resolve()),
+            authority=LocalAgentExecutionAuthority(
+                mission_id=self.mission_id,
+                session_id=session.session_id,
+                session_revision=session.revision,
+                runner_operation_id=session.runner_operation_id,
+                worktree_identity=session.worktree_identity,
+                allowed_paths=tuple(
+                    value
+                    for value in session.task_packet.get("allowed_paths", [])
+                    if isinstance(value, str)
+                ),
+            ),
+            limits=ExecutionLimits(
+                timeout_seconds=timeout_seconds,
+                output_limit_bytes=output_limit_bytes,
+                address_space_bytes=_PROCESS_ADDRESS_SPACE_BYTES_LIMIT,
+                file_size_bytes=_PROCESS_FILE_SIZE_BYTES_LIMIT,
+                open_file_limit=_PROCESS_OPEN_FILE_LIMIT,
+                process_count_limit=_PROCESS_COUNT_LIMIT,
+                descendant_grace_seconds=_PROCESS_DESCENDANT_GRACE_SECONDS,
+            ),
+            sandbox=ExecutionSandbox(
+                mode="bubblewrap",
+                readable_roots=tuple(
+                    str(Path(value).resolve())
+                    for value in readable_roots
+                    if Path(value).exists()
+                ),
+                writable_roots=(str(session.worktree_path.resolve()),),
+                readonly_bindings=tuple(
+                    (str(source.resolve()), str(destination.resolve(strict=False)))
+                    for source, destination in dependency_bindings
+                ),
+            ),
+            environment=tuple(sorted(process_env.items())),
+            input_text=input_text,
+        )
+
         def record_process_start(
             process: subprocess.Popen[bytes],
             process_token: str,
@@ -13813,13 +13927,11 @@ class AlbertMission:
                     )
 
         try:
-            return _run_bounded_process(
-                governed_argv,
-                input_text=input_text,
-                cwd=session.worktree_path,
-                env=process_env,
-                timeout_seconds=timeout_seconds,
-                output_limit_bytes=output_limit_bytes,
+            receipt = ExecutionCoordinator(
+                ExecutionJournal(self.runtime_dir / "execution-receipts.json"),
+                PythonExecutionProvider(executor=_run_bounded_process),
+            ).execute(
+                execution_request,
                 process_binding_started=record_process_start,
                 poll_callback=lambda: self._raise_if_cancelled(session),
                 output_callback=lambda stream_name, payload: self._record_session_output(
@@ -13827,6 +13939,31 @@ class AlbertMission:
                     stream_name,
                     payload,
                 ),
+                authorize=lambda request: self._authorize_local_execution_request(
+                    request,
+                    session,
+                ),
+                exception_status=lambda exc: (
+                    "cancelled"
+                    if isinstance(exc, SessionCancelledError)
+                    else "outcome-unknown"
+                ),
+            )
+            if receipt.status == "executing":
+                raise AlbertError(
+                    f"{session.session_id} host effect {execution_label} is already executing; "
+                    "the effect was not replayed."
+                )
+            if receipt.reconciliation_required:
+                raise AlbertError(
+                    f"{session.session_id} host effect {execution_label} has an uncertain "
+                    f"outcome and requires reconciliation: {receipt.error_message}"
+                )
+            return subprocess.CompletedProcess(
+                argv,
+                receipt.exit_code if receipt.exit_code is not None else 1,
+                receipt.stdout,
+                receipt.stderr or receipt.error_message,
             )
         finally:
             # Retain the last exact process-group binding until the canonical
@@ -13836,6 +13973,24 @@ class AlbertMission:
                 persisted = self._persist_session_update(session)
                 if persisted.status == "cancelled":
                     session.status = "cancelled"
+
+    def _authorize_local_execution_request(
+        self,
+        request: ExecutionRequest,
+        session: LocalAgentSession,
+    ) -> None:
+        if request.effect != "local-agent" or request.authority.kind != "local-agent":
+            raise AlbertError("Local Agent execution request authority is invalid.")
+        authority = request.authority
+        if (
+            authority.mission_id != self.mission_id
+            or authority.session_id != session.session_id
+            or authority.session_revision != session.revision
+            or authority.runner_operation_id != session.runner_operation_id
+            or authority.worktree_identity != session.worktree_identity
+            or request.working_directory != str(session.worktree_path.resolve())
+        ):
+            raise AlbertError("Local Agent execution request does not match the active session.")
 
     def _ollama_prompt(self, session: LocalAgentSession, agent_config: AgentConfig) -> str:
         selected_skill = session.task_packet.get("selected_skill")
@@ -14287,6 +14442,7 @@ class AlbertMission:
                 session,
                 _command_invocation(agent_config.test_command),
                 env=env,
+                effect_label="agent-test-command",
             )
             self._raise_if_cancelled(session)
             exit_status = completed.returncode

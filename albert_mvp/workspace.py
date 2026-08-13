@@ -40,6 +40,16 @@ from .core import (
     sanitized_process_environment,
     wayfinder_state_path,
 )
+from .execution import (
+    ExecutionCoordinator,
+    ExecutionJournal,
+    ExecutionLimits,
+    ExecutionReceipt,
+    ExecutionRequest,
+    ExecutionSandbox,
+    PythonExecutionProvider,
+    ShellExecutionAuthority,
+)
 from .performance import measured_stage
 
 
@@ -543,6 +553,9 @@ class ShellTerminalService:
         self._path_grant_requests_path = (
             snapshots.preferences_path.parent / "path-grant-requests.json"
         )
+        self._execution_journal_path = (
+            snapshots.preferences_path.parent / "execution-receipts.json"
+        )
 
     @property
     def terminal_path(self) -> Path:
@@ -554,6 +567,7 @@ class ShellTerminalService:
 
     @_causal_chronology
     def inspect(self) -> ShellTerminalProjection:
+        ExecutionJournal(self._execution_journal_path).reconcile()
         terminal = self._load_terminal()
         path_grant_requests = self._load_path_grant_requests()
         if any(
@@ -598,6 +612,7 @@ class ShellTerminalService:
     @_causal_chronology
     def reconcile_audit(self) -> None:
         """Repair missing command audit phases before unrelated chronology advances."""
+        ExecutionJournal(self._execution_journal_path).reconcile()
         terminal = self._load_terminal()
         if any(
             record.get("status") == "executing"
@@ -1283,12 +1298,41 @@ class ShellTerminalService:
                 stdout="",
                 stderr=mount_error,
             )
+        execution_request = ExecutionRequest(
+            request_id=f"shell:{record['command_id']}",
+            effect="shell",
+            argv=tuple(sandbox_argv),
+            working_directory=str(Path(record["working_directory"]).resolve()),
+            authority=ShellExecutionAuthority(
+                mission_id=str(record["mission_id"]),
+                command_id=str(record["command_id"]),
+                correlation_id=str(record["correlation_id"]),
+                command=str(record["command"]),
+                classification=record["classification"],
+                requester=str(record["requester"]),
+                working_directory=str(Path(record["working_directory"]).resolve()),
+                requested_paths=tuple(record["requested_paths"]),
+                access_level=record.get("access_level", "read"),
+                approval_actor=str(record.get("approver", "")),
+            ),
+            limits=ExecutionLimits(
+                timeout_seconds=self._COMMAND_TIMEOUT_SECONDS,
+                output_limit_bytes=self._OUTPUT_BYTES_LIMIT,
+            ),
+            sandbox=self._execution_sandbox_for_record(
+                terminal=terminal,
+                record=record,
+            ),
+            environment=tuple(sorted(sanitized_process_environment().items())),
+        )
         attempt_record = {
             **record,
             "status": "executing",
             "exit_code": None,
             "executor_pid": os.getpid(),
             "executor_identity": _process_identity(os.getpid()),
+            "execution_request_id": execution_request.request_id,
+            "execution_request_digest": execution_request.request_digest,
         }
         commands = list(terminal["commands"])
         if record_index is None:
@@ -1312,19 +1356,51 @@ class ShellTerminalService:
                 grant_denials=terminal["grant_denials"],
             )
         try:
-            completed = _run_bounded_process(
-                sandbox_argv,
-                env=sanitized_process_environment(),
-                timeout_seconds=self._COMMAND_TIMEOUT_SECONDS,
-                output_limit_bytes=self._OUTPUT_BYTES_LIMIT,
+            receipt = ExecutionCoordinator(
+                ExecutionJournal(self._execution_journal_path),
+                PythonExecutionProvider(executor=_run_bounded_process),
+            ).execute(
+                execution_request,
+                authorize=lambda request: self._authorize_execution_request(request),
             )
+            if receipt.status == "executing":
+                return ShellTerminalCommandResult(
+                    command_id=record["command_id"],
+                    correlation_id=record["correlation_id"],
+                    classification=record["classification"],
+                    status="executing",
+                    exit_code=None,
+                    stdout="",
+                    stderr=(
+                        "Shell Terminal execution is still owned by a live provider; "
+                        "the command was not replayed."
+                    ),
+                )
+            if receipt.reconciliation_required:
+                result = self._finish_outcome_unknown(
+                    terminal=attempt_terminal,
+                    record=attempt_record,
+                    record_index=record_index,
+                    receipt=receipt,
+                )
+                # Preserve the existing Shell Terminal transport failure contract
+                # while the durable canonical state and execution ledger retain the
+                # stronger typed uncertainty boundary. Exact retry returns the
+                # outcome-unknown record and never reaches this provider path again.
+                if receipt.status == "outcome-unknown":
+                    raise OSError(
+                        receipt.error_message
+                        or "Shell Terminal host effect outcome is unknown; reconciliation is required."
+                    )
+                return result
             return self._finish_execution(
                 terminal=attempt_terminal,
                 record=attempt_record,
                 record_index=record_index,
-                exit_code=completed.returncode,
-                stdout=completed.stdout,
-                stderr=completed.stderr,
+                exit_code=receipt.exit_code if receipt.exit_code is not None else 1,
+                stdout=receipt.stdout,
+                stderr=receipt.stderr or receipt.error_message,
+                receipt=receipt,
             )
         except BaseException:
             completion_is_durable = False
@@ -1348,6 +1424,13 @@ class ShellTerminalService:
                 )
             raise
 
+    @staticmethod
+    def _authorize_execution_request(request: ExecutionRequest) -> None:
+        if request.effect != "shell" or request.authority.kind != "shell":
+            raise AlbertError("Shell Terminal execution request authority is invalid.")
+        if request.shell:
+            raise AlbertError("Shell Terminal execution request cannot enable shell parsing.")
+
     @_causal_chronology
     def _finish_execution(
         self,
@@ -1358,6 +1441,7 @@ class ShellTerminalService:
         exit_code: int,
         stdout: str,
         stderr: str,
+        receipt: ExecutionReceipt | None = None,
     ) -> ShellTerminalCommandResult:
         status: Literal["completed", "failed"] = (
             "completed" if exit_code == 0 else "failed"
@@ -1369,6 +1453,13 @@ class ShellTerminalService:
             "executor_pid": None,
             "executor_identity": "",
         }
+        if receipt is not None:
+            completed_record.update(
+                {
+                    "execution_receipt_id": receipt.receipt_id,
+                    "execution_status": receipt.status,
+                }
+            )
         commands = list(terminal["commands"])
         if record_index is None:
             commands.append(completed_record)
@@ -1390,6 +1481,35 @@ class ShellTerminalService:
             stdout=stdout,
             stderr=stderr,
         )
+
+    @_causal_chronology
+    def _finish_outcome_unknown(
+        self,
+        *,
+        terminal: dict[str, Any],
+        record: dict[str, Any],
+        record_index: int,
+        receipt: ExecutionReceipt,
+    ) -> ShellTerminalCommandResult:
+        unknown = {
+            **record,
+            "status": "outcome-unknown",
+            "exit_code": None,
+            "executor_pid": None,
+            "executor_identity": "",
+            "execution_receipt_id": receipt.receipt_id,
+            "execution_status": receipt.status,
+        }
+        commands = list(terminal["commands"])
+        commands[record_index] = unknown
+        self._persist_terminal(
+            revision=terminal["revision"] + 1,
+            commands=commands,
+            grants=terminal["grants"],
+            grant_denials=terminal["grant_denials"],
+        )
+        self._reconcile_submission_audit(unknown)
+        return self._result_from_record(unknown)
 
     @_causal_chronology
     def _best_effort_mark_outcome_unknown(
@@ -1778,20 +1898,19 @@ class ShellTerminalService:
                 "Shell Terminal command record cannot be replayed."
             ) from exc
 
-    def _sandbox_argv(
+    def _sandbox_mounts(
         self,
         *,
-        bubblewrap: str,
         terminal: dict[str, Any],
         record: dict[str, Any],
-    ) -> tuple[list[str], str]:
+    ) -> tuple[dict[Path, Literal["read", "write"]], str]:
         mission_id = str(record.get("mission_id", ""))
         if not mission_id:
             snapshot = self._snapshots.snapshot()
             mission_id = snapshot.active_mission.id if snapshot.active_mission else ""
         mission = self._snapshots._missions.get(mission_id)
         if mission is None:
-            return [], "Shell Terminal sandbox could not resolve the submitting Mission."
+            return {}, "Shell Terminal sandbox could not resolve the submitting Mission."
         workspace = mission.target_repo.resolve()
         requested_access = record.get("access_level", "read")
         requested_mounts: dict[Path, Literal["read", "write"]] = {
@@ -1811,17 +1930,58 @@ class ShellTerminalService:
             )
             if mount_access is None:
                 return (
-                    [],
+                    {},
                     "Shell Terminal sandbox refused an external path because its "
                     f"Additional Path Grant is missing or expired: {path}",
                 )
             if not path.exists():
                 return (
-                    [],
+                    {},
                     "Shell Terminal sandbox cannot mount an authorized path that does "
                     f"not exist: {path}",
                 )
             requested_mounts[path] = mount_access
+        return requested_mounts, ""
+
+    def _execution_sandbox_for_record(
+        self,
+        *,
+        terminal: dict[str, Any],
+        record: dict[str, Any],
+    ) -> ExecutionSandbox:
+        requested_mounts, mount_error = self._sandbox_mounts(
+            terminal=terminal,
+            record=record,
+        )
+        if mount_error:
+            raise AlbertError(mount_error)
+        return ExecutionSandbox(
+            mode="bubblewrap",
+            readable_roots=tuple(
+                str(path.resolve())
+                for path, access in requested_mounts.items()
+                if access == "read"
+            ),
+            writable_roots=tuple(
+                str(path.resolve())
+                for path, access in requested_mounts.items()
+                if access == "write"
+            ),
+        )
+
+    def _sandbox_argv(
+        self,
+        *,
+        bubblewrap: str,
+        terminal: dict[str, Any],
+        record: dict[str, Any],
+    ) -> tuple[list[str], str]:
+        requested_mounts, mount_error = self._sandbox_mounts(
+            terminal=terminal,
+            record=record,
+        )
+        if mount_error:
+            return [], mount_error
         readable_roots = tuple(
             path for path, access in requested_mounts.items() if access == "read"
         )
@@ -2091,7 +2251,16 @@ class ShellTerminalService:
             raise ValueError("Shell Terminal requested_paths must be unique")
         if item.get("access_level", "read") not in {"read", "write"}:
             raise ValueError("Shell Terminal access_level is invalid")
-        for field_name in ("approver", "decider", "reason", "executor_identity"):
+        for field_name in (
+            "approver",
+            "decider",
+            "reason",
+            "executor_identity",
+            "execution_request_id",
+            "execution_request_digest",
+            "execution_receipt_id",
+            "execution_status",
+        ):
             if field_name in item and not isinstance(item[field_name], str):
                 raise ValueError(f"Shell Terminal command {field_name} must be a string")
         for field_name in ("executor_pid",):

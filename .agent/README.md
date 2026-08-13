@@ -41,7 +41,8 @@
 │   ├── 2026-07-12-alfredo-install-queue-acceptance-correction.md
 │   ├── 2026-08-09-issue-67-retirement-lifecycle.md
 │   ├── 2026-08-09-issue-68-retirement-storage.md
-│   └── 2026-08-13-issue-70-inference-qualification.md
+│   ├── 2026-08-13-issue-70-inference-qualification.md
+│   └── 2026-08-13-issue-71-host-execution.md
 │
 └── README.md                      # This file
 ```
@@ -80,6 +81,7 @@
 - [Retirement lifecycle](Reports/2026-08-09-issue-67-retirement-lifecycle.md) records Issue #67's outcome policy, passive grace, durable recovery phases, bounded removal attempts, exact Git/directory removal, and verified repair lineage.
 - [Retirement storage and blocked outcomes](Reports/2026-08-09-issue-68-retirement-storage.md) records Issue #68's aggregate Snapshot Storage Budget, retention/reclamation/pinning, deterministic inspection, and replay-safe retry/export/discard actions.
 - [Local Inference Profile qualification and promotion](Reports/2026-08-13-issue-70-inference-qualification.md) records Issue #70's governed fixture family, reviewed-outcome/timing reports, bounded context and prefix measurements, exact runtime pinning, and rollback state.
+- [Versioned host execution request/receipt boundary](Reports/2026-08-13-issue-71-host-execution.md) records Issue #71's shared Python provider, effect-specific authority inputs, bounded process enforcement, exact replay, crash-cut uncertainty, and raw-output separation.
 - [Workspace selection and false-success diagnosis](Reports/2026-07-24-workspace-selection-false-success-diagnosis.md) records the defect and the receipt-truth blueprint resolved by Issue #59.
 - [Alfredo one-shot workstation correction](Reports/2026-07-11-alfredo-one-shot-workstation.md) remains the historical implementation report.
 - Historical implementation reports remain in [`Reports/`](Reports/) and are indexed from [project architecture](System/project_architecture.md#implementation-report-index).

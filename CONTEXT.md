@@ -50,6 +50,14 @@ An observation that the exact digest of a bounded prompt prefix was reused. Only
 
 A temporary scheduling claim on bounded local inference capacity for one controller or Local Agent model turn. It may order or delay inference and expose non-authoritative loading, prefill, and generation progress, but it does not authorize work or change accepted Mission state; the Orchestrator continues to own cancellation, session, evidence, and review authority.
 
+### Execution Request
+
+A schema-versioned, exact argv host-effect description prepared by Python after authorization. It binds either Local Agent session/runner authority or Shell command/approval authority to canonical paths, Bubblewrap and environment boundaries, bounded input, resource limits, timeout, and output limits. It is an effect request, not Mission policy or canonical state authority.
+
+### Execution Receipt
+
+A typed provider outcome for one Execution Request, including start/completion/failure, timeout, output-limit, cancellation, and explicit outcome-unknown states. Durable receipts retain process identity and output/input digests and byte counts while raw streams remain transient. An exact terminal receipt may be replayed without re-running the external effect; an uncertain receipt requires reconciliation before any decision.
+
 ### Local Agent
 
 A coding worker powered primarily by a local model through Ollama or a governed local command. Local Agents receive task packets with acceptance criteria and allowed paths, work in isolated session worktrees, execute commands inside a minimal Bubblewrap filesystem view, and must return an Evidence Package. Controller/router identities are not manually assignable workers. Cancelled Local Agent work is terminal unsuccessful work, not completed work.
