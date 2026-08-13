@@ -30,6 +30,22 @@ The Alfredo product posture in which the complete primary path from Mission form
 
 A versioned, empirically qualified combination of local model identity and inference boundaries for one Alfredo role, including context and output budgets, thinking and sampling mode, weight and cache precision, residency, and concurrency. Qualification is based on governed reviewed-outcome evidence rather than raw token speed, and a profile does not confer Mission authority.
 
+### Governed Qualification Fixture
+
+A stable, bounded workload used to compare Local Inference Profiles across discussion, routing, edits, repair, malformed output, policy violations, cancellation, long context, model swaps, and queued Local Agents. A fixture run produces observation metadata and reviewed outcomes through the existing Orchestrator boundary; it does not make model output authoritative by itself.
+
+### Qualification Report
+
+A bounded, repeatable record of governed fixture observations for one exact Local Inference Profile and runtime pin. It includes route/plan/evidence validity, accepted outcomes, repair and escalation cost, decomposed inference timings, and goal-to-reviewed-Evidence-Package latency. Prompts, raw streams, source-dependent plans, Evidence Packages, authority decisions, and outcomes are never reusable cache truth.
+
+### Runtime Pin
+
+The exact non-withdrawn runtime version plus binary and configuration SHA-256 identities used by a promoted Local Inference Profile. Promotion and rollback retain the pin so a later runtime change cannot silently reuse qualification evidence.
+
+### Prompt-Prefix Reuse
+
+An observation that the exact digest of a bounded prompt prefix was reused. Only digest-keyed deterministic context-source selection may be reused; changing any source invalidates the prefix, and no source-dependent plan, evidence, authority decision, or outcome is cached.
+
 ### Local Inference Lease
 
 A temporary scheduling claim on bounded local inference capacity for one controller or Local Agent model turn. It may order or delay inference and expose non-authoritative loading, prefill, and generation progress, but it does not authorize work or change accepted Mission state; the Orchestrator continues to own cancellation, session, evidence, and review authority.

@@ -25,6 +25,11 @@ from .core import (
     SharedUnderstandingGateError,
     WayfinderStatePersistenceError,
 )
+from .inference_qualification import (
+    PromotionError,
+    QualificationReportStore,
+    RuntimePin,
+)
 from .tui import build_tui_state, perform_tui_action, render_tui_state
 from .workspace import (
     AgentConsoleHistoryService,
@@ -135,6 +140,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="Return the versioned canonical Workspace Session snapshot as JSON.",
     )
     _add_common_args(workspace_snapshot)
+
+    qualification_inspect = subparsers.add_parser(
+        "inference-qualification",
+        help="Inspect bounded Local Inference Profile qualification reports and promotion state.",
+    )
+    _add_common_args(
+        qualification_inspect,
+        require_mission_state=False,
+        require_runtime_root=True,
+    )
+
+    qualification_promote = subparsers.add_parser(
+        "inference-qualification-promote",
+        help="Promote one promotion-ready Local Inference Profile report with an exact runtime pin.",
+    )
+    _add_common_args(
+        qualification_promote,
+        require_mission_state=False,
+        require_runtime_root=True,
+    )
+    qualification_promote.add_argument("--report-id", required=True)
+    qualification_promote.add_argument("--profile-id", required=True)
+    qualification_promote.add_argument("--runtime-id", required=True)
+    qualification_promote.add_argument("--runtime-version", required=True)
+    qualification_promote.add_argument("--binary-digest", required=True)
+    qualification_promote.add_argument("--configuration-digest", required=True)
+
+    qualification_rollback = subparsers.add_parser(
+        "inference-qualification-rollback",
+        help="Rollback one promoted Local Inference Profile to its retained prior pin.",
+    )
+    _add_common_args(
+        qualification_rollback,
+        require_mission_state=False,
+        require_runtime_root=True,
+    )
+    qualification_rollback.add_argument("--profile-id", required=True)
 
     coding_workspace_select = subparsers.add_parser(
         "coding-workspace-select",
@@ -787,12 +829,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _add_common_args(
-    parser: argparse.ArgumentParser, *, require_mission_state: bool = True
+    parser: argparse.ArgumentParser,
+    *,
+    require_mission_state: bool = True,
+    require_runtime_root: bool | None = None,
 ) -> None:
+    if require_runtime_root is None:
+        require_runtime_root = require_mission_state
     parser.add_argument("--target-repo", required=True)
     parser.add_argument("--tracker-dir", required=require_mission_state, default="")
     parser.add_argument("--issues-dir", default="")
-    parser.add_argument("--runtime-root", required=require_mission_state, default="")
+    parser.add_argument("--runtime-root", required=require_runtime_root, default="")
     parser.add_argument("--mission-id", default="mission-001")
     parser.add_argument("--agent-config", default="")
     parser.add_argument("--mission-catalog", default="")
@@ -1001,6 +1048,21 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    except PromotionError as exc:
+        print(
+            json.dumps(
+                {
+                    "error": {
+                        "code": "inference-qualification-failed",
+                        "message": str(exc),
+                        "recoverable": True,
+                    }
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 1
     except (AlbertError, AgentConfigError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -1041,6 +1103,30 @@ def _run(args: argparse.Namespace) -> int:
             ollama_probe=_cached_ollama_health,
         ).inspect()
         print(json.dumps(projection.to_dict(), sort_keys=True))
+        return 0
+    if args.command in {
+        "inference-qualification",
+        "inference-qualification-promote",
+        "inference-qualification-rollback",
+    }:
+        store = QualificationReportStore(Path(args.runtime_root))
+        if args.command == "inference-qualification":
+            print(json.dumps(store.inspect_reports(), sort_keys=True))
+            return 0
+        if args.command == "inference-qualification-promote":
+            state = store.promote(
+                profile_id=args.profile_id,
+                report_id=args.report_id,
+                runtime_pin=RuntimePin(
+                    runtime_id=args.runtime_id,
+                    runtime_version=args.runtime_version,
+                    binary_digest=args.binary_digest,
+                    configuration_digest=args.configuration_digest,
+                ),
+            )
+        else:
+            state = store.rollback(args.profile_id)
+        print(json.dumps(state, sort_keys=True))
         return 0
     target_repo = Path(args.target_repo)
     registry_path = (
