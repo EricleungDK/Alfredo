@@ -79,6 +79,13 @@ _VALID_ERROR_CODES = {
     "runner-failed",
     "invalid-runner-result",
 }
+_VALID_CANCELLATION_ERROR_CODES = frozenset(
+    {
+        "",
+        "qualification-cancelled",
+        "qualification-deadline-exceeded",
+    }
+)
 _CONTROL_ERROR_CODES = frozenset(
     {
         "qualification-cancelled",
@@ -2553,10 +2560,15 @@ class InferenceQualificationService:
         outcome = result.get("outcome")
         if not isinstance(outcome, str) or outcome not in _VALID_OUTCOMES:
             raise ValueError("qualification runner outcome is invalid")
+        error_code = result.get("error_code", "")
+        if not isinstance(error_code, str) or error_code not in _VALID_ERROR_CODES:
+            raise ValueError("qualification error code is invalid")
         timings = result.get("timings", {})
         if not isinstance(timings, Mapping):
             raise ValueError("qualification runner timings must be an object")
-        allow_missing_timings = outcome == "cancelled"
+        allow_missing_timings = (
+            outcome == "cancelled" and error_code in _VALID_CANCELLATION_ERROR_CODES
+        )
         for field_name in _TIMING_FIELDS:
             value = timings.get(field_name)
             if value is None and allow_missing_timings:
@@ -2593,9 +2605,6 @@ class InferenceQualificationService:
             raise ValueError("qualification model digest is invalid")
         _utf8_size(digest, "qualification model digest must be valid UTF-8")
         result["model_digest"] = digest.strip()
-        error_code = result.get("error_code", "")
-        if not isinstance(error_code, str) or error_code not in _VALID_ERROR_CODES:
-            raise ValueError("qualification error code is invalid")
         result["error_code"] = error_code
         for field_name in (
             "model_swapped",
@@ -2765,7 +2774,10 @@ class InferenceQualificationService:
             ):
                 raise ValueError("qualification observation quality is invalid")
             timings = observation["timings"]
-            timing_missing_allowed = observation["outcome"] == "cancelled"
+            timing_missing_allowed = (
+                observation["outcome"] == "cancelled"
+                and observation["error_code"] in _VALID_CANCELLATION_ERROR_CODES
+            )
             if set(timings) != set(_TIMING_FIELDS) or any(
                 (timings[field_name] is None and not timing_missing_allowed)
                 or (
