@@ -203,7 +203,7 @@ class InferenceQualificationCliTests(unittest.TestCase):
                     0,
                 )
             rolled_back = json.loads(captured[-1])
-            self.assertIsNone(rolled_back["active"])
+            self.assertEqual(rolled_back["active"]["report_id"], "baseline")
 
     def test_persistent_transport_returns_the_same_inspection_projection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

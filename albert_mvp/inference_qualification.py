@@ -1166,6 +1166,7 @@ class QualificationReport:
                     for blocker in (
                         "quality-regression",
                         "reliability-regression",
+                        "latency-regression",
                         "baseline-incomparable",
                     )
                     if blocker in raw_blockers
@@ -1210,6 +1211,22 @@ class QualificationReportStore:
         self.state_path = self.root / "promotion-state.json"
         self.lock_path = self.root / "promotion-state.lock"
 
+    @staticmethod
+    def _atomic_write_text(path: Path, content: str, *, error_message: str) -> None:
+        temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
+        try:
+            temporary.write_text(content, encoding="utf-8")
+            os.replace(temporary, path)
+        except OSError as exc:
+            raise PromotionError(error_message) from exc
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
+
     def save_report(self, report: QualificationReport) -> QualificationReport:
         if not isinstance(report, QualificationReport):
             raise TypeError("qualification report must be a QualificationReport")
@@ -1228,7 +1245,12 @@ class QualificationReportStore:
             if report.baseline_report_id:
                 baseline_report = self.load_report(report.baseline_report_id)
             self._validate_rollback_target(report, baseline_report=baseline_report)
-            self.reports_root.mkdir(parents=True, exist_ok=True)
+            try:
+                self.reports_root.mkdir(parents=True, exist_ok=True)
+            except OSError as exc:
+                raise PromotionError(
+                    "qualification report storage is unavailable"
+                ) from exc
             path = self._report_path(report.report_id)
             if path.exists():
                 existing = self.load_report(report.report_id)
@@ -1242,9 +1264,11 @@ class QualificationReportStore:
                 >= self._MAX_REPORT_COUNT
             ):
                 raise PromotionError("qualification report capacity exhausted")
-            temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
-            temporary.write_text(encoded, encoding="utf-8")
-            os.replace(temporary, path)
+            self._atomic_write_text(
+                path,
+                encoded,
+                error_message="qualification report could not be persisted",
+            )
         return report
 
     def load_report(self, report_id: str) -> QualificationReport:
@@ -1448,6 +1472,7 @@ class QualificationReportStore:
                 state["last_action"] = "promote-replay"
                 return state
             active = state.get("active")
+            rollback_target_id = report.rollback_evidence.get("previous_report_id")
             if active is not None and active.get("profile_id") == profile_id:
                 if (
                     active.get("report_id") == report_id
@@ -1456,9 +1481,30 @@ class QualificationReportStore:
                     state["last_action"] = "promote-replay"
                     self._write_state(state)
                     return state
+                if active.get("report_id") != rollback_target_id:
+                    raise PromotionError(
+                        "qualification rollback target does not match active state"
+                    )
                 state["previous"] = dict(active)
             elif active is not None:
+                if active.get("report_id") != rollback_target_id:
+                    raise PromotionError(
+                        "qualification rollback target does not match active state"
+                    )
                 state["previous"] = dict(active)
+            elif report.baseline_report_id:
+                baseline = self.load_report(report.baseline_report_id)
+                if baseline.report_id != rollback_target_id:
+                    raise PromotionError(
+                        "qualification rollback target does not match baseline"
+                    )
+                state["previous"] = {
+                    "profile_id": baseline.profile["profile_id"],
+                    "report_id": baseline.report_id,
+                    "profile": dict(baseline.profile),
+                    "runtime_pin": dict(baseline.runtime_pin),
+                    "promoted_at": baseline.created_at,
+                }
             if len(state.get("history", [])) >= _MAX_PROMOTION_HISTORY:
                 raise PromotionError("promotion history capacity exhausted")
             state["active"] = {
@@ -1596,9 +1642,11 @@ class QualificationReportStore:
             or len(history) > _MAX_PROMOTION_HISTORY
             or not all(isinstance(item, dict) for item in history)
             or any(
-                not isinstance(item.get("action"), str)
+                item.get("action") not in {"promote", "rollback"}
                 or not isinstance(item.get("profile_id"), str)
+                or not item["profile_id"].strip()
                 or not isinstance(item.get("report_id"), str)
+                or not item["report_id"].strip()
                 or not isinstance(item.get("correlation_id"), str)
                 or not item["correlation_id"].strip()
                 or len(item["correlation_id"]) > _MAX_CORRELATION_ID_LENGTH
@@ -1615,7 +1663,34 @@ class QualificationReportStore:
             )
         ):
             raise PromotionError("promotion state is invalid")
-        if not isinstance(payload.get("last_action"), str):
+        if payload.get("history"):
+            correlations = [item["correlation_id"] for item in history]
+            revisions = [item["revision"] for item in history]
+            if (
+                len(set(correlations)) != len(correlations)
+                or revisions != list(range(1, len(history) + 1))
+                or payload["revision"] != revisions[-1]
+            ):
+                raise PromotionError("promotion state history is invalid")
+        elif payload["revision"] != 0:
+            raise PromotionError("promotion state history is invalid")
+        valid_last_actions = {
+            "none",
+            "promote",
+            "rollback",
+            "promote-replay",
+            "rollback-replay",
+        }
+        if (
+            not isinstance(payload.get("last_action"), str)
+            or payload["last_action"] not in valid_last_actions
+            or (not history and payload["last_action"] != "none")
+            or (
+                history
+                and payload["last_action"].removesuffix("-replay")
+                != history[-1]["action"]
+            )
+        ):
             raise PromotionError("promotion state is invalid")
         try:
             encoded = json.dumps(payload, ensure_ascii=True, allow_nan=False)
@@ -1707,25 +1782,28 @@ class QualificationReportStore:
 
     def _write_state(self, state: dict[str, Any]) -> None:
         validated = self._validated_state(state)
-        self.root.mkdir(parents=True, exist_ok=True)
-        temporary = self.state_path.with_name(
-            f".{self.state_path.name}.{secrets.token_hex(6)}.tmp"
-        )
-        temporary.write_text(
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise PromotionError("promotion state storage is unavailable") from exc
+        self._atomic_write_text(
+            self.state_path,
             json.dumps(validated, ensure_ascii=True, sort_keys=True, indent=2) + "\n",
-            encoding="utf-8",
+            error_message="promotion state could not be persisted",
         )
-        os.replace(temporary, self.state_path)
 
     @contextmanager
     def _state_lock(self):
-        self.root.mkdir(parents=True, exist_ok=True)
-        with self.lock_path.open("a+", encoding="utf-8") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+            with self.lock_path.open("a+", encoding="utf-8") as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                try:
+                    yield
+                finally:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        except OSError as exc:
+            raise PromotionError("qualification store lock is unavailable") from exc
 
 
 class InferenceQualificationService:
@@ -2314,12 +2392,25 @@ class InferenceQualificationService:
             ):
                 raise ValueError("qualification observation quality is invalid")
             timings = observation["timings"]
+            timing_missing_allowed = observation["outcome"] == "cancelled" or (
+                observation["error_code"]
+                in {
+                    "qualification-cancelled",
+                    "qualification-deadline-exceeded",
+                    "context-over-budget",
+                    "runner-failed",
+                    "invalid-runner-result",
+                }
+            )
             if set(timings) != set(_TIMING_FIELDS) or any(
-                timings[field_name] is not None
-                and (
-                    not isinstance(timings[field_name], float)
-                    or not math.isfinite(timings[field_name])
-                    or timings[field_name] < 0.0
+                (timings[field_name] is None and not timing_missing_allowed)
+                or (
+                    timings[field_name] is not None
+                    and (
+                        not isinstance(timings[field_name], float)
+                        or not math.isfinite(timings[field_name])
+                        or timings[field_name] < 0.0
+                    )
                 )
                 for field_name in _TIMING_FIELDS
             ):
@@ -2653,4 +2744,14 @@ class InferenceQualificationService:
                 < baseline_report.metrics["reliability_rate"]
             ):
                 blockers.append("reliability-regression")
+            candidate_latency_summary = metrics["reviewed_latency_ms"]
+            baseline_latency_summary = baseline_report.metrics["reviewed_latency_ms"]
+            if any(
+                candidate_latency_summary.get(percentile) is not None
+                and baseline_latency_summary.get(percentile) is not None
+                and candidate_latency_summary[percentile]
+                > baseline_latency_summary[percentile]
+                for percentile in ("p50", "p95")
+            ):
+                blockers.append("latency-regression")
         return blockers

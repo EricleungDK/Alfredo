@@ -5,6 +5,7 @@ from dataclasses import replace
 import json
 from pathlib import Path
 import tempfile
+from unittest.mock import patch
 
 from albert_mvp.inference import LocalInferenceProfile
 from albert_mvp.inference_qualification import (
@@ -342,9 +343,9 @@ class QualificationReportTests(unittest.TestCase):
                 correlation_id="rollback-1",
                 expected_revision=1,
             )
-            self.assertIsNone(rolled_back["active"])
+            self.assertEqual(rolled_back["active"]["report_id"], baseline.report_id)
             self.assertEqual(rolled_back["last_action"], "rollback")
-            self.assertIsNone(store.inspect()["active"])
+            self.assertEqual(store.inspect()["active"]["report_id"], baseline.report_id)
             rollback_replay = store.rollback(
                 profile.profile_id,
                 correlation_id="rollback-1",
@@ -364,6 +365,7 @@ class QualificationReportTests(unittest.TestCase):
                 }
                 for index in range(32)
             ]
+            state["last_action"] = "promote"
             store._write_state(state)
             with self.assertRaisesRegex(
                 PromotionError, "promotion history capacity exhausted"
@@ -610,6 +612,64 @@ class QualificationReportTests(unittest.TestCase):
 
         self.assertIn("baseline-incomparable", candidate.promotion_blockers)
 
+    def test_baseline_rejects_reviewed_latency_regression(self) -> None:
+        profile = replace(
+            LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1"),
+            model_digest="sha256:worker-digest",
+        )
+        runtime_pin = RuntimePin(
+            runtime_id="ollama",
+            runtime_version="0.11.4",
+            binary_digest="a" * 64,
+            configuration_digest="b" * 64,
+        )
+        fixture = next(
+            item
+            for item in build_governed_fixture_family()
+            if item.kind == "small-edit"
+        )
+
+        def runner(latency):
+            def run(_fixture, _profile, context, _repetition):
+                return {
+                    "route": {"kind": "coding-task"},
+                    "plan": {"files": ["src/example.py"]},
+                    "evidence": {"changed_files": ["src/example.py"]},
+                    "outcome": "accepted",
+                    "model_digest": "sha256:worker-digest",
+                    "runtime_pin": context["runtime_pin"],
+                    "timings": {
+                        "load_ms": 1,
+                        "prompt_evaluation_ms": 1,
+                        "first_token_ms": 1,
+                        "decoding_ms": 1,
+                    },
+                    "reviewed_latency_ms": latency,
+                }
+
+            return run
+
+        service = InferenceQualificationService(
+            Path("/tmp/qualification-latency-baseline"),
+            fixtures=(fixture,),
+            repetitions=2,
+        )
+        baseline = service.qualify(
+            profile,
+            runner(1),
+            runtime_pin=runtime_pin,
+            report_id="baseline-latency",
+        )
+        candidate = service.qualify(
+            profile,
+            runner(2),
+            runtime_pin=runtime_pin,
+            baseline_report=baseline,
+            report_id="candidate-latency",
+        )
+
+        self.assertIn("latency-regression", candidate.promotion_blockers)
+
     def test_cancellation_after_runner_failure_is_recorded_as_cancellation(
         self,
     ) -> None:
@@ -846,6 +906,20 @@ class QualificationReportTests(unittest.TestCase):
             with self.assertRaises(PromotionError):
                 store.load_report(report.report_id)
 
+            payload = report.to_dict()
+            payload["observations"][0]["timings"] = {
+                field_name: None
+                for field_name in (
+                    "load_ms",
+                    "prompt_evaluation_ms",
+                    "first_token_ms",
+                    "decoding_ms",
+                )
+            }
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaises(PromotionError):
+                store.load_report(report.report_id)
+
     def test_persisted_rollback_receipt_requires_a_stored_target(self) -> None:
         profile = replace(
             LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1"),
@@ -893,6 +967,55 @@ class QualificationReportTests(unittest.TestCase):
 
             with self.assertRaises(PromotionError):
                 store.inspect_reports()
+
+    def test_atomic_report_write_translates_failures_and_cleans_temporary_files(
+        self,
+    ) -> None:
+        profile = replace(
+            LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1"),
+            model_digest="sha256:worker-digest",
+        )
+        runtime_pin = RuntimePin(
+            runtime_id="ollama",
+            runtime_version="0.11.4",
+            binary_digest="a" * 64,
+            configuration_digest="b" * 64,
+        )
+        report = InferenceQualificationService(
+            Path("/tmp/qualification-atomic-write"),
+            fixtures=(build_governed_fixture_family()[0],),
+            repetitions=1,
+        ).qualify(profile, successful_fixture_result, runtime_pin=runtime_pin)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = QualificationReportStore(Path(directory))
+            with patch(
+                "albert_mvp.inference_qualification.os.replace",
+                side_effect=OSError("disk full"),
+            ):
+                with self.assertRaises(PromotionError):
+                    store.save_report(report)
+            self.assertEqual(list(store.reports_root.glob("*.tmp")), [])
+
+    def test_promotion_history_rejects_semantically_invalid_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = QualificationReportStore(Path(directory))
+            state = store._empty_state()
+            state["revision"] = 1
+            state["last_action"] = "promote"
+            state["history"] = [
+                {
+                    "action": "unknown",
+                    "profile_id": "worker-v1",
+                    "report_id": "report-1",
+                    "correlation_id": "correlation-1",
+                    "request_digest": "a" * 64,
+                    "revision": 1,
+                }
+            ]
+
+            with self.assertRaises(PromotionError):
+                store._write_state(state)
 
     def test_persisted_report_rejects_tampered_metrics_and_blockers(self) -> None:
         profile = replace(
