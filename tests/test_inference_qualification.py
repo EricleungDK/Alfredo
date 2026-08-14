@@ -267,6 +267,7 @@ class QualificationReportTests(unittest.TestCase):
         )
 
         self.assertEqual(report.metrics["escalations"], 1)
+        self.assertEqual(report.observations[0]["error_code"], "invalid-runner-result")
         self.assertIn("reliability-not-qualified", report.promotion_blockers)
 
     def test_promotion_pins_report_runtime_and_replays_rollback(self) -> None:
@@ -371,25 +372,47 @@ class QualificationReportTests(unittest.TestCase):
             self.assertEqual(rollback_replay["last_action"], "rollback-replay")
             state = store.inspect()
             state["revision"] = 32
-            state["history"] = [
-                {
-                    "action": "promote",
-                    "profile_id": profile.profile_id,
-                    "report_id": report.report_id,
-                    "correlation_id": f"historical-{index}",
-                    "request_digest": store._mutation_digest(
-                        "promote",
-                        profile_id=profile.profile_id,
-                        report_id=report.report_id,
-                        runtime_pin=runtime_pin,
-                        correlation_id=f"historical-{index}",
-                        expected_revision=index,
-                    ),
-                    "revision": index + 1,
-                }
-                for index in range(32)
-            ]
-            state["last_action"] = "promote"
+            state["history"] = []
+            for index in range(16):
+                promote_revision = index * 2 + 1
+                promote_correlation = f"historical-promote-{index}"
+                state["history"].append(
+                    {
+                        "action": "promote",
+                        "profile_id": profile.profile_id,
+                        "report_id": report.report_id,
+                        "correlation_id": promote_correlation,
+                        "request_digest": store._mutation_digest(
+                            "promote",
+                            profile_id=profile.profile_id,
+                            report_id=report.report_id,
+                            runtime_pin=runtime_pin,
+                            correlation_id=promote_correlation,
+                            expected_revision=promote_revision - 1,
+                        ),
+                        "revision": promote_revision,
+                    }
+                )
+                rollback_revision = promote_revision + 1
+                rollback_correlation = f"historical-rollback-{index}"
+                state["history"].append(
+                    {
+                        "action": "rollback",
+                        "profile_id": profile.profile_id,
+                        "report_id": report.report_id,
+                        "correlation_id": rollback_correlation,
+                        "request_digest": store._mutation_digest(
+                            "rollback",
+                            profile_id=profile.profile_id,
+                            report_id="",
+                            runtime_pin=None,
+                            correlation_id=rollback_correlation,
+                            expected_revision=rollback_revision - 1,
+                        ),
+                        "revision": rollback_revision,
+                    }
+                )
+            state["last_action"] = "rollback"
             store._write_state(state)
             with self.assertRaisesRegex(
                 PromotionError, "promotion history capacity exhausted"
@@ -402,10 +425,113 @@ class QualificationReportTests(unittest.TestCase):
                     expected_revision=32,
                 )
 
+    def test_successive_promotions_preserve_rollback_chain(self) -> None:
+        profile = replace(
+            LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1"),
+            model_digest="sha256:worker-digest",
+            context_budget=16_384,
+            output_budget=2_048,
+        )
+        runtime_pin = RuntimePin(
+            runtime_id="ollama",
+            runtime_version="0.11.4",
+            binary_digest="a" * 64,
+            configuration_digest="b" * 64,
+        )
+
+        def candidate_one_rollback(profile_value, runtime_value, _control):
+            return baseline_rollback_evidence(profile_value, runtime_value, _control)
+
+        def candidate_two_rollback(profile_value, runtime_value, _control):
+            return {
+                "profile_id": profile_value.profile_id,
+                "runtime_pin": runtime_value.to_dict(),
+                "previous_report_id": "candidate-one",
+                "restored_report_id": "candidate-one",
+                "replay_verified": True,
+            }
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = InferenceQualificationService(Path(directory), repetitions=2)
+            baseline = service.qualify(
+                profile,
+                successful_fixture_result,
+                runtime_pin=runtime_pin,
+                report_id="baseline",
+                context_sources=long_context_sources(),
+                required_source_ids=("long-context",),
+            )
+            store = QualificationReportStore(Path(directory))
+            store.save_report(baseline)
+            candidate_one = service.qualify(
+                profile,
+                successful_fixture_result,
+                runtime_pin=runtime_pin,
+                rollback_test=candidate_one_rollback,
+                baseline_report=baseline,
+                report_id="candidate-one",
+                context_sources=long_context_sources(),
+                required_source_ids=("long-context",),
+            )
+            store.save_report(candidate_one)
+            store.promote(
+                profile_id=profile.profile_id,
+                report_id=candidate_one.report_id,
+                runtime_pin=runtime_pin,
+                correlation_id="promote-one",
+                expected_revision=0,
+            )
+            candidate_two = service.qualify(
+                profile,
+                successful_fixture_result,
+                runtime_pin=runtime_pin,
+                rollback_test=candidate_two_rollback,
+                baseline_report=candidate_one,
+                report_id="candidate-two",
+                context_sources=long_context_sources(),
+                required_source_ids=("long-context",),
+            )
+            store.save_report(candidate_two)
+            store.promote(
+                profile_id=profile.profile_id,
+                report_id=candidate_two.report_id,
+                runtime_pin=runtime_pin,
+                correlation_id="promote-two",
+                expected_revision=1,
+            )
+            rolled_back_once = store.rollback(
+                profile.profile_id,
+                correlation_id="rollback-two",
+                expected_revision=2,
+            )
+            self.assertEqual(
+                rolled_back_once["active"]["report_id"], candidate_one.report_id
+            )
+            self.assertEqual(
+                rolled_back_once["previous"]["report_id"], baseline.report_id
+            )
+            rolled_back_twice = store.rollback(
+                profile.profile_id,
+                correlation_id="rollback-one",
+                expected_revision=3,
+            )
+            self.assertEqual(
+                rolled_back_twice["active"]["report_id"], baseline.report_id
+            )
+            self.assertIsNone(rolled_back_twice["previous"])
+            replayed = store.rollback(
+                profile.profile_id,
+                correlation_id="rollback-one",
+                expected_revision=3,
+            )
+            self.assertEqual(replayed["last_action"], "rollback-replay")
+
     def test_runner_must_echo_the_qualified_runtime_identity(self) -> None:
         profile = replace(
             LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1"),
             model_digest="sha256:worker-digest",
+            context_budget=16_384,
+            output_budget=2_048,
         )
         runtime_pin = RuntimePin(
             runtime_id="ollama",
@@ -571,6 +697,7 @@ class QualificationReportTests(unittest.TestCase):
         self.assertEqual(
             report.observations[0]["error_code"], "qualification-cancelled"
         )
+        self.assertFalse(report.observations[0]["reliable"])
         self.assertFalse(report.observations[0]["context_over_budget"])
 
     def test_baseline_rejects_profile_configuration_drift(self) -> None:
@@ -720,6 +847,50 @@ class QualificationReportTests(unittest.TestCase):
         )
 
         self.assertIn("latency-regression", candidate.promotion_blockers)
+
+    def test_baseline_without_reviewed_latency_blocks_promotion(self) -> None:
+        profile = replace(
+            LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1"),
+            model_digest="sha256:worker-digest",
+            context_budget=16_384,
+            output_budget=2_048,
+        )
+        runtime_pin = RuntimePin(
+            runtime_id="ollama",
+            runtime_version="0.11.4",
+            binary_digest="a" * 64,
+            configuration_digest="b" * 64,
+        )
+
+        def baseline_runner(fixture, candidate, context, repetition):
+            result = successful_fixture_result(fixture, candidate, context, repetition)
+            if result["outcome"] in {"accepted", "repaired"}:
+                result["reviewed_latency_ms"] = None
+            return result
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = InferenceQualificationService(Path(directory), repetitions=2)
+            baseline = service.qualify(
+                profile,
+                baseline_runner,
+                runtime_pin=runtime_pin,
+                report_id="baseline-without-latency",
+                context_sources=long_context_sources(),
+                required_source_ids=("long-context",),
+            )
+            service.report_store.save_report(baseline)
+            candidate = service.qualify(
+                profile,
+                successful_fixture_result,
+                runtime_pin=runtime_pin,
+                baseline_report=baseline,
+                rollback_test=baseline_rollback_evidence,
+                report_id="candidate-without-baseline-latency",
+                context_sources=long_context_sources(),
+                required_source_ids=("long-context",),
+            )
+
+        self.assertIn("latency-evidence-incomplete", candidate.promotion_blockers)
 
     def test_cancellation_after_runner_failure_is_recorded_as_cancellation(
         self,
@@ -916,6 +1087,13 @@ class QualificationReportTests(unittest.TestCase):
             store.save_report(report)
             restored = store.load_report(report.report_id)
 
+            payload = report.to_dict()
+            payload["prompt"] = "must not be persisted"
+            report_path = store._report_path(report.report_id)
+            report_path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaises(PromotionError):
+                store.load_report(report.report_id)
+
         self.assertEqual(restored.report_id, report.report_id)
         self.assertNotIn("prompt", restored.to_dict())
         self.assertNotIn("raw_output", restored.to_dict())
@@ -1065,6 +1243,11 @@ class QualificationReportTests(unittest.TestCase):
                 }
             ]
 
+            with self.assertRaises(PromotionError):
+                store._write_state(state)
+
+            state = store._empty_state()
+            state["unexpected"] = "must not persist"
             with self.assertRaises(PromotionError):
                 store._write_state(state)
 

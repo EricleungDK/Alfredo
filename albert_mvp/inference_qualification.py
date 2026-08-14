@@ -88,9 +88,6 @@ _CONTROL_ERROR_CODES = frozenset(
         "invalid-runner-result",
     }
 )
-_EXPECTED_CANCELLATION_ERRORS = frozenset(
-    {"qualification-cancelled", "qualification-deadline-exceeded"}
-)
 _ROUTE_KINDS = {
     "discussion": "discussion",
     "routing": "discussion",
@@ -155,6 +152,13 @@ def _canonical_json(value: Any) -> str:
     )
 
 
+def _utf8_size(value: str, error_message: str) -> int:
+    try:
+        return len(value.encode("utf-8"))
+    except UnicodeError as exc:
+        raise ValueError(error_message) from exc
+
+
 @dataclass(frozen=True)
 class GovernedFixture:
     """One bounded, repeatable workload used to qualify a Profile."""
@@ -169,13 +173,17 @@ class GovernedFixture:
     def __post_init__(self) -> None:
         if not isinstance(self.fixture_id, str) or not self.fixture_id.strip():
             raise ValueError("governed fixture id must be non-empty")
+        _utf8_size(self.fixture_id, "governed fixture id must be valid UTF-8")
         if len(self.fixture_id) > _MAX_FIXTURE_ID_LENGTH:
             raise ValueError("governed fixture id is too long")
         if not isinstance(self.kind, str) or self.kind not in GOVERNED_FIXTURE_KINDS:
             raise ValueError(f"unsupported governed fixture kind: {self.kind}")
         if not isinstance(self.prompt, str) or not self.prompt.strip():
             raise ValueError("governed fixture prompt must be non-empty")
-        if len(self.prompt.encode("utf-8")) > _MAX_FIXTURE_PROMPT_BYTES:
+        if (
+            _utf8_size(self.prompt, "governed fixture prompt must be valid UTF-8")
+            > _MAX_FIXTURE_PROMPT_BYTES
+        ):
             raise ValueError("governed fixture prompt exceeds the bounded size")
         if (
             not isinstance(self.expected_outcomes, tuple)
@@ -453,9 +461,8 @@ def _baseline_profile_identity(profile: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _is_control_error(fixture_kind: str, error_code: str) -> bool:
-    return error_code in _CONTROL_ERROR_CODES and not (
-        fixture_kind == "cancellation" and error_code in _EXPECTED_CANCELLATION_ERRORS
-    )
+    del fixture_kind
+    return error_code in _CONTROL_ERROR_CODES
 
 
 @dataclass(frozen=True)
@@ -473,9 +480,13 @@ class ContextSource:
             or len(self.source_id) > 128
         ):
             raise ValueError("context source id must be non-empty")
+        _utf8_size(self.source_id, "context source id must be valid UTF-8")
         if not isinstance(self.content, str):
             raise ValueError("context source content must be text")
-        if len(self.content.encode("utf-8")) > _MAX_CONTEXT_SOURCE_BYTES:
+        if (
+            _utf8_size(self.content, "context source content must be valid UTF-8")
+            > _MAX_CONTEXT_SOURCE_BYTES
+        ):
             raise ValueError("context source exceeds the bounded size")
         if not isinstance(self.required, bool):
             raise ValueError("context source required flag must be boolean")
@@ -665,7 +676,10 @@ class PromptPrefixReuseTracker:
     def observe(self, prefix: str) -> PrefixReuseObservation:
         if not isinstance(prefix, str):
             raise TypeError("prompt prefix must be text")
-        digest = hashlib.sha256(prefix.encode("utf-8")).hexdigest()
+        try:
+            digest = hashlib.sha256(prefix.encode("utf-8")).hexdigest()
+        except UnicodeError as exc:
+            raise ValueError("prompt prefix must be valid UTF-8") from exc
         previous = self._last_prefix_digest
         self._last_prefix_digest = digest
         return PrefixReuseObservation(
@@ -912,6 +926,32 @@ class QualificationReport:
             or data.get("schema_version") != QUALIFICATION_SCHEMA_VERSION
         ):
             raise ValueError("qualification report schema is invalid")
+        required_fields = {
+            "schema_version",
+            "report_id",
+            "created_at",
+            "profile",
+            "runtime_pin",
+            "fixture_ids",
+            "repetitions",
+            "observations",
+            "metrics",
+            "promotion_ready",
+            "promotion_blockers",
+            "rollback_tested",
+        }
+        optional_legacy_fields = {
+            "fixture_digests",
+            "fixture_digests_complete",
+            "baseline_report_id",
+            "rollback_receipt_id",
+            "rollback_evidence",
+        }
+        if (
+            not required_fields.issubset(data)
+            or set(data) - required_fields - optional_legacy_fields
+        ):
+            raise ValueError("qualification report fields are invalid")
         try:
             json.dumps(data, ensure_ascii=True, allow_nan=False)
         except (TypeError, ValueError, RecursionError) as exc:
@@ -920,6 +960,10 @@ class QualificationReport:
         created_at = data.get("created_at")
         if not isinstance(report_id, str) or not report_id.strip():
             raise ValueError("qualification report id is invalid")
+        try:
+            report_id.encode("utf-8")
+        except UnicodeError as exc:
+            raise ValueError("qualification report id is invalid") from exc
         if not isinstance(created_at, str) or not created_at.strip():
             raise ValueError("qualification report timestamp is invalid")
         try:
@@ -1185,6 +1229,7 @@ class QualificationReport:
                         "quality-regression",
                         "reliability-regression",
                         "latency-regression",
+                        "latency-evidence-incomplete",
                         "baseline-incomparable",
                     )
                     if blocker in raw_blockers
@@ -1221,6 +1266,7 @@ class QualificationReportStore:
     _MAX_REPORT_BYTES = 2 * 1024 * 1024
     _MAX_STATE_BYTES = 256 * 1024
     _MAX_REPORT_COUNT = 128
+    _MAX_TEMPORARY_FILES = 128
 
     def __init__(self, runtime_root: Path):
         self.runtime_root = Path(runtime_root).resolve()
@@ -1233,8 +1279,16 @@ class QualificationReportStore:
     def _atomic_write_text(path: Path, content: str, *, error_message: str) -> None:
         temporary = path.with_name(f".{path.name}.{secrets.token_hex(6)}.tmp")
         try:
-            temporary.write_text(content, encoding="utf-8")
+            with temporary.open("w", encoding="utf-8") as handle:
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
             os.replace(temporary, path)
+            directory_fd = os.open(str(path.parent), os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         except OSError as exc:
             raise PromotionError(error_message) from exc
         finally:
@@ -1244,6 +1298,31 @@ class QualificationReportStore:
                 pass
             except OSError:
                 pass
+
+    def _cleanup_temporary_files(self, directory: Path, pattern: str) -> None:
+        if not directory.exists():
+            return
+        try:
+            temporary_files = heapq.nsmallest(
+                self._MAX_TEMPORARY_FILES,
+                directory.glob(pattern),
+                key=lambda path: path.name,
+            )
+        except OSError as exc:
+            raise PromotionError(
+                "qualification temporary storage is unavailable"
+            ) from exc
+        for temporary in temporary_files:
+            try:
+                if temporary.is_symlink() or not temporary.is_file():
+                    continue
+                temporary.unlink()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise PromotionError(
+                    "qualification temporary storage could not be cleaned"
+                ) from exc
 
     def save_report(self, report: QualificationReport) -> QualificationReport:
         if not isinstance(report, QualificationReport):
@@ -1262,6 +1341,24 @@ class QualificationReportStore:
             baseline_report = None
             if report.baseline_report_id:
                 baseline_report = self.load_report(report.baseline_report_id)
+                expected_blockers = InferenceQualificationService._promotion_blockers(
+                    profile=LocalInferenceProfile.from_dict(report.profile),
+                    observations=[dict(item) for item in report.observations],
+                    metrics=report.metrics,
+                    runtime_pin=_runtime_pin_from_dict(report.runtime_pin),
+                    rollback_tested=report.rollback_tested,
+                    rollback_receipt_id=report.rollback_receipt_id,
+                    rollback_evidence=report.rollback_evidence,
+                    baseline_report=baseline_report,
+                    fixture_ids=report.fixture_ids,
+                    fixture_digests=report.fixture_digests,
+                    fixture_digests_complete=report.fixture_digests_complete,
+                    repetitions=report.repetitions,
+                )
+                if tuple(expected_blockers) != report.promotion_blockers:
+                    raise PromotionError(
+                        "qualification report baseline comparison is invalid"
+                    )
             self._validate_rollback_target(report, baseline_report=baseline_report)
             try:
                 self.reports_root.mkdir(parents=True, exist_ok=True)
@@ -1269,6 +1366,7 @@ class QualificationReportStore:
                 raise PromotionError(
                     "qualification report storage is unavailable"
                 ) from exc
+            self._cleanup_temporary_files(self.reports_root, ".*.json.*.tmp")
             path = self._report_path(report.report_id)
             if path.exists():
                 existing = self.load_report(report.report_id)
@@ -1357,6 +1455,13 @@ class QualificationReportStore:
         previous_report_id = report.rollback_evidence["previous_report_id"]
         if (
             baseline_report is not None
+            and previous_report_id != baseline_report.report_id
+        ):
+            raise PromotionError(
+                "qualification report rollback target does not match baseline"
+            )
+        if (
+            baseline_report is not None
             and previous_report_id == baseline_report.report_id
         ):
             previous_report = baseline_report
@@ -1435,6 +1540,8 @@ class QualificationReportStore:
             raise PromotionError("promotion state rollback relation is invalid")
 
     def _validate_history_semantics(self, state: Mapping[str, Any]) -> None:
+        active_report_id: str | None = None
+        previous_report_id: str | None = None
         for item in state.get("history", []):
             try:
                 report = self.load_report(item["report_id"])
@@ -1445,6 +1552,26 @@ class QualificationReportStore:
             if report.profile.get("profile_id") != item["profile_id"]:
                 raise PromotionError("promotion history report identity is invalid")
             if item["action"] == "promote":
+                if not report.promotion_ready:
+                    raise PromotionError("promotion history report is not ready")
+                target_report_id = report.rollback_evidence.get("previous_report_id")
+                if not isinstance(target_report_id, str) or not target_report_id:
+                    raise PromotionError("promotion history rollback target is invalid")
+                if active_report_id is None:
+                    if (
+                        not report.baseline_report_id
+                        or target_report_id != report.baseline_report_id
+                    ):
+                        raise PromotionError(
+                            "promotion history initial rollback target is invalid"
+                        )
+                elif target_report_id != active_report_id:
+                    raise PromotionError(
+                        "promotion history rollback target is discontinuous"
+                    )
+                self.load_report(target_report_id)
+                previous_report_id = target_report_id
+                active_report_id = report.report_id
                 expected_digest = self._mutation_digest(
                     "promote",
                     profile_id=item["profile_id"],
@@ -1454,6 +1581,25 @@ class QualificationReportStore:
                     expected_revision=item["revision"] - 1,
                 )
             else:
+                if active_report_id != report.report_id or previous_report_id is None:
+                    raise PromotionError("promotion history rollback is discontinuous")
+                restored_report = self.load_report(previous_report_id)
+                active_report_id = restored_report.report_id
+                if restored_report.promotion_ready:
+                    restored_target_id = restored_report.rollback_evidence.get(
+                        "previous_report_id"
+                    )
+                    if (
+                        not isinstance(restored_target_id, str)
+                        or not restored_target_id
+                    ):
+                        raise PromotionError(
+                            "promotion history restored rollback target is invalid"
+                        )
+                    self.load_report(restored_target_id)
+                    previous_report_id = restored_target_id
+                else:
+                    previous_report_id = None
                 expected_digest = self._mutation_digest(
                     "rollback",
                     profile_id=item["profile_id"],
@@ -1464,6 +1610,19 @@ class QualificationReportStore:
                 )
             if item["request_digest"] != expected_digest:
                 raise PromotionError("promotion history request digest is invalid")
+        state_active_report_id = (
+            state["active"]["report_id"] if state.get("active") is not None else None
+        )
+        state_previous_report_id = (
+            state["previous"]["report_id"]
+            if state.get("previous") is not None
+            else None
+        )
+        if (
+            active_report_id != state_active_report_id
+            or previous_report_id != state_previous_report_id
+        ):
+            raise PromotionError("promotion state does not match promotion history")
 
     def inspect_reports(self) -> dict[str, Any]:
         """Return bounded report summaries plus promotion state for inspection."""
@@ -1550,6 +1709,7 @@ class QualificationReportStore:
             )
             if replay:
                 state["last_action"] = "promote-replay"
+                self._write_state(state)
                 return state
             active = state.get("active")
             rollback_target_id = report.rollback_evidence.get("previous_report_id")
@@ -1635,6 +1795,7 @@ class QualificationReportStore:
             )
             if replay:
                 state["last_action"] = "rollback-replay"
+                self._write_state(state)
                 return state
             active = state.get("active")
             if active is None or active.get("profile_id") != profile_id:
@@ -1642,10 +1803,26 @@ class QualificationReportStore:
             previous = state.get("previous")
             if not isinstance(previous, dict):
                 raise PromotionError("no retained rollback target")
+            restored_report = self.load_report(previous["report_id"])
+            next_previous: dict[str, Any] | None = None
+            if restored_report.promotion_ready:
+                restored_target_id = restored_report.rollback_evidence.get(
+                    "previous_report_id"
+                )
+                if not isinstance(restored_target_id, str) or not restored_target_id:
+                    raise PromotionError("restored promotion has no rollback target")
+                restored_target = self.load_report(restored_target_id)
+                next_previous = {
+                    "profile_id": restored_target.profile["profile_id"],
+                    "report_id": restored_target.report_id,
+                    "profile": dict(restored_target.profile),
+                    "runtime_pin": dict(restored_target.runtime_pin),
+                    "promoted_at": restored_target.created_at,
+                }
             if len(state.get("history", [])) >= _MAX_PROMOTION_HISTORY:
                 raise PromotionError("promotion history capacity exhausted")
             state["active"] = dict(previous)
-            state["previous"] = None
+            state["previous"] = next_previous
             state["last_action"] = "rollback"
             state["revision"] += 1
             state["history"] = [
@@ -1665,10 +1842,11 @@ class QualificationReportStore:
     def _report_path(self, report_id: str) -> Path:
         if not isinstance(report_id, str) or not report_id.strip():
             raise PromotionError("qualification report id is invalid")
-        return (
-            self.reports_root
-            / f"{hashlib.sha256(report_id.encode('utf-8')).hexdigest()}.json"
-        )
+        try:
+            report_digest = hashlib.sha256(report_id.encode("utf-8")).hexdigest()
+        except UnicodeError as exc:
+            raise PromotionError("qualification report id is invalid") from exc
+        return self.reports_root / f"{report_digest}.json"
 
     def _report_id_from_path(self, path: Path) -> str:
         try:
@@ -1682,7 +1860,11 @@ class QualificationReportStore:
             raise PromotionError(
                 "qualification report is unavailable or invalid"
             ) from exc
-        if not isinstance(report_id, str) or self._report_path(report_id) != path:
+        try:
+            expected_path = self._report_path(report_id)
+        except PromotionError:
+            raise
+        if not isinstance(report_id, str) or expected_path != path:
             raise PromotionError(
                 "qualification report identity does not match its path"
             )
@@ -1706,6 +1888,25 @@ class QualificationReportStore:
             or payload.get("schema_version") != QUALIFICATION_SCHEMA_VERSION
         ):
             raise PromotionError("promotion state is invalid")
+        allowed_state_fields = {
+            "schema_version",
+            "revision",
+            "active",
+            "previous",
+            "history",
+            "last_action",
+        }
+        required_state_fields = {
+            "schema_version",
+            "active",
+            "previous",
+            "history",
+            "last_action",
+        }
+        if set(payload) - allowed_state_fields or not required_state_fields.issubset(
+            payload
+        ):
+            raise PromotionError("promotion state fields are invalid")
         if "revision" not in payload:
             payload = {"revision": 0, **payload}
         if (
@@ -1724,7 +1925,16 @@ class QualificationReportStore:
             or len(history) > _MAX_PROMOTION_HISTORY
             or not all(isinstance(item, dict) for item in history)
             or any(
-                item.get("action") not in {"promote", "rollback"}
+                set(item)
+                != {
+                    "action",
+                    "profile_id",
+                    "report_id",
+                    "correlation_id",
+                    "request_digest",
+                    "revision",
+                }
+                or item.get("action") not in {"promote", "rollback"}
                 or not isinstance(item.get("profile_id"), str)
                 or not item["profile_id"].strip()
                 or not isinstance(item.get("report_id"), str)
@@ -1789,6 +1999,14 @@ class QualificationReportStore:
     def _validated_promotion_record(value: Any) -> None:
         if not isinstance(value, dict):
             raise PromotionError("promotion state is invalid")
+        if set(value) != {
+            "profile_id",
+            "report_id",
+            "profile",
+            "runtime_pin",
+            "promoted_at",
+        }:
+            raise PromotionError("promotion state fields are invalid")
         if any(
             not isinstance(value.get(field_name), str) or not value[field_name].strip()
             for field_name in ("profile_id", "report_id", "promoted_at")
@@ -1871,6 +2089,8 @@ class QualificationReportStore:
             self.root.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise PromotionError("promotion state storage is unavailable") from exc
+        self._cleanup_temporary_files(self.root, ".promotion-state.json.*.tmp")
+        self._cleanup_temporary_files(self.reports_root, ".*.json.*.tmp")
         self._atomic_write_text(
             self.state_path,
             json.dumps(validated, ensure_ascii=True, sort_keys=True, indent=2) + "\n",
@@ -2100,11 +2320,6 @@ class InferenceQualificationService:
                     else:
                         try:
                             raw_result = runner(fixture, profile, context, repetition)
-                            result = self._validated_result(raw_result)
-                            if result.get("runtime_pin") != expected_runtime_pin:
-                                raise ValueError(
-                                    "qualification runner runtime identity does not match"
-                                )
                         except Exception:  # a failed cohort is evidence, not authority
                             result = {
                                 "outcome": "escalated",
@@ -2114,6 +2329,30 @@ class InferenceQualificationService:
                                     field_name: None for field_name in _TIMING_FIELDS
                                 },
                             }
+                        else:
+                            try:
+                                result = self._validated_result(raw_result)
+                            except (TypeError, ValueError, RecursionError):
+                                result = {
+                                    "outcome": "escalated",
+                                    "unexpected_failure": True,
+                                    "error_code": "invalid-runner-result",
+                                    "timings": {
+                                        field_name: None
+                                        for field_name in _TIMING_FIELDS
+                                    },
+                                }
+                            else:
+                                if result.get("runtime_pin") != expected_runtime_pin:
+                                    result = {
+                                        "outcome": "escalated",
+                                        "unexpected_failure": True,
+                                        "error_code": "runner-failed",
+                                        "timings": {
+                                            field_name: None
+                                            for field_name in _TIMING_FIELDS
+                                        },
+                                    }
                         if refresh_control():
                             result = cancellation_result(fixture)
                 observation = self._observation(
@@ -2827,12 +3066,17 @@ class InferenceQualificationService:
                 blockers.append("reliability-regression")
             candidate_latency_summary = metrics["reviewed_latency_ms"]
             baseline_latency_summary = baseline_report.metrics["reviewed_latency_ms"]
+            latency_percentiles = ("p50", "p95")
             if any(
-                candidate_latency_summary.get(percentile) is not None
-                and baseline_latency_summary.get(percentile) is not None
-                and candidate_latency_summary[percentile]
+                candidate_latency_summary.get(percentile) is None
+                or baseline_latency_summary.get(percentile) is None
+                for percentile in latency_percentiles
+            ):
+                blockers.append("latency-evidence-incomplete")
+            elif any(
+                candidate_latency_summary[percentile]
                 > baseline_latency_summary[percentile]
-                for percentile in ("p50", "p95")
+                for percentile in latency_percentiles
             ):
                 blockers.append("latency-regression")
         return blockers

@@ -226,6 +226,23 @@ class InferenceQualificationCliTests(unittest.TestCase):
             {item["report_id"] for item in projection["reports"]},
         )
 
+    def test_cli_projects_malformed_promotion_state_as_structured_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            (runtime / "target").mkdir()
+            state_path = runtime / "inference/qualification/promotion-state.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text("{}", encoding="utf-8")
+            stderr = StringIO()
+
+            with patch("sys.stderr", stderr):
+                result = main(["inference-qualification", *self.common(runtime)])
+
+        self.assertEqual(result, 1)
+        error = json.loads(stderr.getvalue())
+        self.assertEqual(error["error"]["code"], "inference-qualification-failed")
+        self.assertTrue(error["error"]["recoverable"])
+
     def test_persistent_transport_replays_promotion_and_rollback(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime = Path(directory)
