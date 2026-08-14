@@ -1,6 +1,6 @@
 # API Endpoints and Command Boundaries
 
-**Last Updated:** 2026-08-12
+**Last Updated:** 2026-08-15
 
 Alfredo has no remote or production HTTP API. Its application boundary is a versioned JSON command protocol shared by the React client, the Tauri bridge, the development-only localhost gateway, the persistent Python server, and the one-process Python CLI fallback. Python remains authoritative; Rust validates and transports typed payloads, while React renders acknowledged projections.
 
@@ -24,6 +24,7 @@ The endpoint families are:
 | Local inference qualification | `inference-qualification`, `inference-qualification-promote`, `inference-qualification-rollback` | Inspect bounded governed Profile reports, promote an exact non-withdrawn runtime pin after quality/reliability gates, and replay-safe rollback to the retained prior pin |
 | Shell | `shell-terminal`, `shell-terminal-submit`, decision commands, `additional-path-grant-create`, `additional-path-grant-deny` | Execute classified argv commands with explicit permissions and transient output; inspect typed pending contextual path requests and decide their exact boundary |
 | Mission planning | `mission-drafts` and Mission Draft create/update/decision commands | Keep proposed mission work separate until confirmation |
+| Rust shadow execution | `alfredo-execution-provider` JSONL process (app-local candidate only) | Compare typed Rust execution receipts against Python on production-equivalent fixtures without granting Rust canonical write authority |
 | Audit | `activity-journal` | Query meaningful acknowledged actions without raw model or terminal bytes |
 
 The desktop bridge starts a persistent `python3 -m albert_mvp.server` process and exchanges newline-delimited correlated CLI envelopes. It builds the same arguments as the one-process `python3 -m albert_mvp <command>` fallback. Transport persistence is an optimization, not an authority change.
@@ -56,6 +57,10 @@ Before a Mission exists, `alfredo_launch_context` returns schema version 1, Star
 
 
 The `albert_mvp.inference_qualification` public seam runs repeated governed fixture cohorts without granting model output authority. `InferenceQualificationService` reports valid routes/plans/evidence, accepted outcomes, repairs, escalations, policy blocks, cancellation, model swaps, queued Local Agents, decomposed stage timings, and goal-to-reviewed-Evidence-Package latency. Context comparison uses bounded controller/normal-worker profiles, output-headroom admission, digest-keyed deterministic source selection, and exact-prefix reuse/invalidation observations. `QualificationReportStore` persists only bounded metadata below `runtime_root/inference/qualification/`; its promotion state pins the exact Profile and non-withdrawn runtime/binary/configuration digests, rejects quality/reliability regression, supports exact replay, and retains a rollback action. It never persists prompts, raw streams, plans, Evidence Packages, authority decisions, or source-dependent outcomes as reusable truth. See the [Issue #70 qualification report](../Reports/2026-08-13-issue-70-inference-qualification.md).
+
+## Shadow Rust Execution Receipts (Issue #72)
+
+The app-local `alfredo-execution-provider` consumes the same versioned `ExecutionRequest` JSON object as Python and emits one typed `ExecutionReceipt` or structured failure per JSONL request. `execution_shadow.py` hashes every canonical store before and after a sample, compares a normalized receipt projection, and records crash or parity uncertainty without transferring authority. Cohorts bind exact fixture/source/artifact digests, production-equivalent stages, and explicit sample metadata; reducer, sidecar, and microbenchmark evidence is rejected. Rust eligibility is persisted separately and fails closed on parity, canonical-store, crash-cut, state-version, packaging, release-gate, production-equivalence, or stage-measurement failure.
 
 ## Host Execution Request/Receipt
 

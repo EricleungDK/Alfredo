@@ -12,6 +12,8 @@ use std::sync::{
 };
 use std::time::Instant;
 
+pub mod execution;
+
 #[cfg(feature = "rust-orchestrator-prototype")]
 #[path = "../prototypes/rust-orchestrator-slice/src/model.rs"]
 mod rust_orchestrator_prototype_model;

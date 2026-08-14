@@ -1,6 +1,6 @@
 # Persistence Schema
 
-**Last Updated:** 2026-08-12
+**Last Updated:** 2026-08-15
 
 Alfredo has no relational database and no database migration layer. Authoritative configuration begins in local Markdown/JSON files, while runtime projections are versioned JSON documents stored below the configured app-local runtime root. Each Python authority store listed below uses atomic sibling-file replacement; append or read-modify-write stores additionally use `flock`, and expected-revision action families share a cross-process coordinator lock.
 
@@ -23,11 +23,16 @@ There are no SQL tables. The table-like JSON stores are:
 | `path-grant-requests.json` | `ShellTerminalService` | request id, correlation id, Mission, canonical path, access, duration, reason, affected action, requested time | Append-only typed contextual authority requests that survive restart independently of mutable terminal decision state |
 | `execution-receipts.json` | `ExecutionJournal` | schema version, exact redacted request, request digest, typed receipt, process/owner identity, output byte counts/digests | Shared Local Agent/Shell host-effect intent and receipt ledger; prevents exact replay from launching a duplicate effect and records uncertain crash cuts for reconciliation |
 | `inference/qualification/reports/*.json` | `QualificationReportStore` | schema version, exact Profile/runtime pin, governed fixture digests, bounded observations/metrics, promotion blockers | Bounded qualification evidence; prompts, streams, plans, Evidence Packages, authority decisions, and source-dependent outcomes are excluded |
+| `shadow/rust-eligibility.json` | `RustEligibilityStore` | schema version, revision, gate evidence, disabled reason | Fail-closed Rust shadow eligibility; never grants canonical writer authority |
 | `inference/qualification/promotion-state.json` | `QualificationReportStore` | revision, active/previous exact report and runtime pin, correlation history | Replay-safe Profile promotion and rollback metadata under a cross-process lock; does not grant Mission authority |
 
 Bulky raw command output, worker prompts/responses, test logs, and `review.diff` files live under per-session artifact directories and are registered on the owning session rather than embedded into the JSON stores or Markdown tracker. Review projections replace eligible host paths with opaque app-local references. The bounded Session Artifact reader resolves only an exact Mission/session/reference tuple and returns text without creating an artifact-content JSON store.
 
 The execution ledger is per Mission runtime and uses schema version 1. Each record stores the request without input bytes plus a typed receipt without stdout/stderr; input/output SHA-256 digests and byte counts preserve evidence without promoting raw host data into canonical state, and reload rejects any record that reintroduces raw fields. A request is structurally validated, then claimed before provider invocation under an inter-process lock; deterministic pre-effect authorization/boundary failures are durably recorded as `start-failed`, while the claim/receipt replacement also syncs its containing directory. Exact terminal replay returns its stored receipt; a changed request identity is rejected; a dead `executing` owner becomes `outcome-unknown` and requires reconciliation. `LocalAgentSession.execution_receipts` stores a bounded redacted terminal projection only after matching the durable request, authority, current runner operation, and Worktree Identity, while Shell command records store the receipt identity/status and can be repaired from the submitting Mission's ledger after a projection crash, with a read-only, idempotent legacy app-level ledger fallback. Missing ledgers decode as empty, while malformed requests, receipts, identities, digests, raw fields, or schema fail closed. Automatic same-session runner recovery is blocked when the Local Agent ledger still contains an executing or uncertain effect. On Darwin, process-group cleanup requires a matching leader start identity and observable quiescence; uncertainty fails closed rather than being treated as absence.
+
+## Shadow Rust Eligibility
+
+Rust shadow samples do not write canonical Mission or execution stores. The app-local eligibility record retains only bounded sample/cohort identities, gate booleans, stage names, failure codes, and a revisioned decision; malformed or missing evidence disables Rust.
 
 Finalized Agent Console user/controller turns remain in the durable full history store so conversation continuity survives restart. Only the Working Context extraction used for one model turn is windowed and content-bounded.
 
@@ -89,4 +94,5 @@ No database indexes exist. Stores use stable ids and in-memory dictionaries/list
 - 2026-08-09 extended Retirement Unit state with grace, retiring/retired, and retirement-blocked phases, durable preservation intent, three-attempt retirement accounting, verified removal receipts, managed-directory snapshots, and restart reconciliation. The additive schema remains version 1 so existing active/preserved records decode conservatively without migration.
 - 2026-08-09 added Snapshot Payload retention metadata, pin/disposition fields, aggregate `retirement_storage`, reclamation intents/attention, strictly action-shaped correlated blocked-action receipts, retry/export/discard intents, and the `discarded` Preservation Budget outcome. Malformed action receipts fail closed during runtime load. Existing verified snapshots without storage fields remain readable and are conservatively upgraded from their preserved timestamps or immutable manifest metadata.
 
+- 2026-08-15 added the app-local Rust shadow eligibility record and production-equivalent cohort evidence. Missing or failed parity, store-integrity, crash-cut, state-version, packaging, release-gate, or stage evidence keeps Rust disabled.
 If a future workload outgrows bounded JSON stores, migration must preserve Orchestrator authority, expected-revision semantics, append order, Mission isolation, and artifact separation before replacing this design.
