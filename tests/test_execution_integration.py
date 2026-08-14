@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+import json
 from pathlib import Path
 import subprocess
 from types import SimpleNamespace
@@ -53,7 +54,24 @@ class HostExecutionIntegrationTests(unittest.TestCase):
             )
         )
         stack.enter_context(
-            patch.object(terminal, "_sandbox_argv", return_value=(["bwrap"], ""))
+            patch.object(
+                terminal,
+                "_sandbox_argv",
+                return_value=(
+                    [
+                        "/usr/bin/bwrap",
+                        "--die-with-parent",
+                        "--new-session",
+                        "--chdir",
+                        str(self.target.resolve()),
+                        "--",
+                        "python3",
+                        "-c",
+                        "pass",
+                    ],
+                    "",
+                ),
+            )
         )
         return stack
 
@@ -150,6 +168,50 @@ class HostExecutionIntegrationTests(unittest.TestCase):
         run.assert_called_once()
         replay_run.assert_not_called()
 
+    def test_shell_projects_completed_receipt_after_terminal_projection_crash(
+        self,
+    ) -> None:
+        terminal = self._terminal()
+        completed = subprocess.CompletedProcess(
+            args=["bwrap"],
+            returncode=0,
+            stdout="transient shell output",
+            stderr="",
+        )
+        with self._sandboxed_terminal(terminal):
+            with patch(
+                "albert_mvp.workspace._run_bounded_process",
+                return_value=completed,
+            ):
+                first = terminal.submit(
+                    correlation_id="shell-projection-recovery-1",
+                    command="python3 -m unittest --help",
+                    working_directory=str(self.target),
+                    requested_paths=[],
+                    requester="mission-commander",
+                )
+        self.assertEqual(first.status, "completed")
+        terminal_payload = json.loads(
+            terminal.terminal_path.read_text(encoding="utf-8")
+        )
+        terminal_payload["commands"][0].update(
+            {
+                "status": "executing",
+                "exit_code": None,
+                "executor_pid": 999999,
+                "executor_identity": "",
+            }
+        )
+        terminal.terminal_path.write_text(
+            json.dumps(terminal_payload),
+            encoding="utf-8",
+        )
+
+        recovered = self._terminal().inspect().commands[0]
+
+        self.assertEqual(recovered.status, "completed")
+        self.assertEqual(recovered.exit_code, 0)
+
     def test_local_agent_uses_the_same_provider_with_local_authority(self) -> None:
         mission = self._mission()
         session = LocalAgentSession(
@@ -162,6 +224,8 @@ class HostExecutionIntegrationTests(unittest.TestCase):
             runner_operation_id="runner:test-mission:session-local-execution-1:1",
             worktree_identity="managed:test-mission:session-local-execution-1",
         )
+        mission.sessions[session.session_id] = session
+        mission._persist()
         completed = subprocess.CompletedProcess(
             args=["bwrap"],
             returncode=0,
@@ -171,7 +235,20 @@ class HostExecutionIntegrationTests(unittest.TestCase):
         with (
             patch(
                 "albert_mvp.core.sandboxed_process_argv",
-                return_value=(["bwrap"], True),
+                return_value=(
+                    [
+                        "/usr/bin/bwrap",
+                        "--die-with-parent",
+                        "--new-session",
+                        "--chdir",
+                        str(self.target.resolve()),
+                        "--",
+                        "python3",
+                        "-c",
+                        "pass",
+                    ],
+                    True,
+                ),
             ),
             patch(
                 "albert_mvp.core._run_bounded_process",
@@ -191,6 +268,29 @@ class HostExecutionIntegrationTests(unittest.TestCase):
         self.assertEqual(receipt.effect, "local-agent")
         self.assertEqual(receipt.status, "completed")
         self.assertEqual(receipt.stdout, "")
+        persisted_session = mission._refresh_persisted_session(session.session_id)
+        self.assertEqual(len(persisted_session.execution_receipts), 1)
+        self.assertEqual(
+            persisted_session.execution_receipts[0]["status"],
+            "completed",
+        )
+        runtime_payload = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        runtime_payload["sessions"][session.session_id]["execution_receipts"] = []
+        mission.runtime_path.write_text(
+            json.dumps(runtime_payload),
+            encoding="utf-8",
+        )
+        restarted = AlbertMission(
+            target_repo=self.target,
+            tracker_dir=self.tracker,
+            runtime_root=self.runtime,
+            mission_id="test-mission",
+            allow_empty_tracker=True,
+        ).load()
+        self.assertEqual(
+            len(restarted.sessions[session.session_id].execution_receipts),
+            1,
+        )
 
 
 if __name__ == "__main__":

@@ -23,11 +23,12 @@ Local Agent requests retain Mission/session revision, runner operation, Worktree
 
 - Local Agent command, model-inference, planned-command, and test-command paths use the provider after their existing worktree/sandbox/policy preparation.
 - Shell Terminal uses the provider after existing command classification, approvals, Additional Path Grant checks, sandbox argv construction, and durable `executing` marker persistence. Canonical Shell metadata records request and receipt identities.
+- Local Agent projects each terminal receipt into a bounded, redacted `LocalAgentSession.execution_receipts` history and replays journal receipts into that canonical session projection during startup. Shell inspection and mutation boundaries replay a durable journal receipt into the canonical terminal record if a crash occurred after provider completion but before terminal projection.
 - Mission startup and Shell inspection reconcile dead execution owners before projecting state. An uncertain effect remains `outcome-unknown`; retries never launch it automatically.
 - Existing one-process CLI and persistent transport argv envelopes remain unchanged. The Python backend remains the public authority consumed by the packaged desktop bridge.
 
 ## Verification
 
-Focused contract/integration coverage: `python3 -m unittest tests.test_execution tests.test_execution_integration -v` — 11 tests passed.
+Focused contract/integration coverage: `python3 -m unittest tests.test_execution tests.test_execution_integration` — 16 tests passed. Runner-supervision compatibility coverage also passes with 17 tests.
 
-The existing broad Shell/Workspace suite was also exercised. The environment lacks trusted Bubblewrap, so host-dependent tests that require real process isolation fail closed as expected; the focused tests inject the bounded runner at the provider seam and verify successful receipts, exact replay, resource-limit propagation, authority separation, raw-output redaction, and crash-cut no-replay behavior.
+The existing broad Shell/Workspace suite was also exercised. The environment lacks trusted Bubblewrap, so host-dependent tests that require real process isolation fail closed as expected; the focused tests inject the bounded runner at the provider seam and verify successful receipts, exact replay, resource-limit propagation, authority separation, raw-output redaction, prepared-Bubblewrap validation, canonical projection recovery, and crash-cut no-replay behavior.

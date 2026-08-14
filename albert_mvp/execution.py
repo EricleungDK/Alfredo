@@ -264,6 +264,37 @@ class ExecutionSandbox:
         )
 
 
+def _validate_prepared_bubblewrap_argv(
+    argv: Sequence[str],
+    sandbox: ExecutionSandbox,
+    working_directory: str,
+) -> None:
+    if sandbox.mode == "none" and os.name != "posix":
+        return
+    if not argv or not Path(argv[0]).is_absolute() or Path(argv[0]).name != "bwrap":
+        raise ExecutionContractError(
+            "execution provider requires a prepared Bubblewrap argv"
+        )
+    if "--die-with-parent" not in argv or "--new-session" not in argv:
+        raise ExecutionContractError(
+            "execution Bubblewrap argv must retain process supervision"
+        )
+    if "--" not in argv:
+        raise ExecutionContractError("execution Bubblewrap argv is incomplete")
+    if sandbox.mode != "bubblewrap":
+        raise ExecutionContractError("execution provider requires Bubblewrap")
+    required_paths = (
+        *sandbox.readable_roots,
+        *sandbox.writable_roots,
+        *(value for binding in sandbox.readonly_bindings for value in binding),
+        working_directory,
+    )
+    if any(path not in argv for path in required_paths):
+        raise ExecutionContractError(
+            "execution Bubblewrap argv does not match its filesystem boundary"
+        )
+
+
 @dataclass(frozen=True)
 class LocalAgentExecutionAuthority:
     mission_id: str
@@ -447,7 +478,7 @@ class ExecutionRequest:
             raise ExecutionContractError("execution limits are invalid")
         if not isinstance(self.sandbox, ExecutionSandbox):
             raise ExecutionContractError("execution sandbox is invalid")
-        if self.sandbox.mode != "bubblewrap":
+        if os.name == "posix" and self.sandbox.mode != "bubblewrap":
             raise ExecutionContractError("host effects require the Bubblewrap sandbox")
         if len(self.environment) > _MAX_ENVIRONMENT_ENTRIES:
             raise ExecutionContractError("execution environment is too large")
@@ -607,6 +638,14 @@ class ExecutionReceipt:
             not isinstance(self.exit_code, int) or isinstance(self.exit_code, bool)
         ):
             raise ExecutionContractError("execution receipt exit code is invalid")
+        for pid, label in (
+            (self.owner_pid, "owner_pid"),
+            (self.process_pid, "process_pid"),
+        ):
+            if pid is not None and (
+                not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0
+            ):
+                raise ExecutionContractError(f"execution receipt {label} is invalid")
         if not isinstance(self.effect_started, bool) or not isinstance(
             self.reconciliation_required, bool
         ):
@@ -629,6 +668,8 @@ class ExecutionReceipt:
         ):
             if not isinstance(value, str) or "\0" in value:
                 raise ExecutionContractError(f"execution receipt {label} is invalid")
+        if self.receipt_id:
+            _validate_identity(self.receipt_id, label="execution receipt identity")
         if not re.fullmatch(r"[0-9a-f]{64}", self.stdout_sha256) or not re.fullmatch(
             r"[0-9a-f]{64}", self.stderr_sha256
         ):
@@ -873,15 +914,7 @@ def _process_identity(pid: int) -> str:
 def _owner_is_live(pid: int | None, identity: str) -> bool:
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
-    if identity and _process_identity(pid) == identity:
-        return True
-    if not identity:
-        try:
-            os.kill(pid, 0)
-            return True
-        except (OSError, ProcessLookupError):
-            return False
-    return False
+    return bool(identity) and _process_identity(pid) == identity
 
 
 ExecutionExecutor = Callable[..., subprocess.CompletedProcess[str]]
@@ -918,6 +951,11 @@ class PythonExecutionProvider:
         output_callback: Callable[[str, bytes], None] | None = None,
     ) -> ExecutionReceipt:
         request.validate()
+        _validate_prepared_bubblewrap_argv(
+            request.argv,
+            request.sandbox,
+            request.working_directory,
+        )
         binding: dict[str, Any] = {}
 
         def bind(process: Any, process_token: str = "") -> None:
@@ -948,6 +986,13 @@ class PythonExecutionProvider:
                 output_callback=output_callback,
             )
         except FileNotFoundError as exc:
+            if binding:
+                return ExecutionReceipt.unknown(
+                    request,
+                    error_message=str(exc),
+                    process_pid=binding.get("pid"),
+                    process_identity=binding.get("identity", ""),
+                )
             return ExecutionReceipt.start_failed(
                 request,
                 exit_code=127,
@@ -1056,6 +1101,7 @@ class ExecutionJournal:
             if (
                 request.request_digest != record.get("request_digest")
                 or receipt.request_digest != request.request_digest
+                or receipt.effect != request.effect
             ):
                 raise ExecutionContractError("execution journal digest is inconsistent")
         return payload
@@ -1182,15 +1228,21 @@ class ExecutionJournal:
             )
 
     def inspect(self) -> tuple[ExecutionReceipt, ...]:
+        return tuple(receipt for _request, receipt in self.inspect_records())
+
+    def inspect_records(self) -> tuple[tuple[ExecutionRequest, ExecutionReceipt], ...]:
         with self._lock():
             payload = self._read()
             return tuple(
                 sorted(
                     (
-                        ExecutionReceipt.from_dict(record["receipt"])
+                        (
+                            ExecutionRequest.from_dict(record["request"]),
+                            ExecutionReceipt.from_dict(record["receipt"]),
+                        )
                         for record in payload["records"].values()
                     ),
-                    key=lambda receipt: (receipt.started_at, receipt.request_id),
+                    key=lambda item: (item[1].started_at, item[1].request_id),
                 )
             )
 

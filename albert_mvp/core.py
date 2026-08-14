@@ -40,6 +40,8 @@ from .execution import (
     ExecutionCoordinator,
     ExecutionJournal,
     ExecutionLimits,
+    ExecutionReceipt,
+    ExecutionReplayConflict,
     ExecutionRequest,
     ExecutionSandbox,
     LocalAgentExecutionAuthority,
@@ -74,6 +76,7 @@ _PROCESS_FILE_SIZE_BYTES_LIMIT = 2 * 1024 * 1024 * 1024
 _PROCESS_OPEN_FILE_LIMIT = 1_024
 _PROCESS_COUNT_LIMIT = 256
 _PROCESS_DESCENDANT_GRACE_SECONDS = 1.0
+_EXECUTION_RECEIPT_HISTORY_LIMIT = 128
 _GIT_SNAPSHOT_TIMEOUT_SECONDS = 30
 _GIT_SNAPSHOT_BYTES_LIMIT = 8_000_000
 _GIT_COMMAND_OUTPUT_BYTES_LIMIT = 64_000
@@ -734,13 +737,16 @@ def _process_isolated_argv(
     """Place raw POSIX children in a kill-on-exit PID namespace."""
 
     if os.name != "posix" or not isinstance(argv, list):
-        return _resource_bounded_process_argv(
-            argv,
-            address_space_bytes=address_space_bytes,
-            file_size_bytes=file_size_bytes,
-            open_file_limit=open_file_limit,
-            process_count_limit=process_count_limit,
-        )
+        resource_limits = {}
+        if address_space_bytes != _PROCESS_ADDRESS_SPACE_BYTES_LIMIT:
+            resource_limits["address_space_bytes"] = address_space_bytes
+        if file_size_bytes != _PROCESS_FILE_SIZE_BYTES_LIMIT:
+            resource_limits["file_size_bytes"] = file_size_bytes
+        if open_file_limit != _PROCESS_OPEN_FILE_LIMIT:
+            resource_limits["open_file_limit"] = open_file_limit
+        if process_count_limit != _PROCESS_COUNT_LIMIT:
+            resource_limits["process_count_limit"] = process_count_limit
+        return _resource_bounded_process_argv(argv, **resource_limits)
     bubblewrap = _trusted_system_executable("bwrap")
     if bubblewrap is None:
         raise AlbertError(
@@ -756,13 +762,16 @@ def _process_isolated_argv(
         # sandboxed_process_argv places prlimit inside the new namespaces so its
         # per-UID process limit cannot prevent Bubblewrap from creating them.
         return argv
-    bounded = _resource_bounded_process_argv(
-        argv,
-        address_space_bytes=address_space_bytes,
-        file_size_bytes=file_size_bytes,
-        open_file_limit=open_file_limit,
-        process_count_limit=process_count_limit,
-    )
+    resource_limits = {}
+    if address_space_bytes != _PROCESS_ADDRESS_SPACE_BYTES_LIMIT:
+        resource_limits["address_space_bytes"] = address_space_bytes
+    if file_size_bytes != _PROCESS_FILE_SIZE_BYTES_LIMIT:
+        resource_limits["file_size_bytes"] = file_size_bytes
+    if open_file_limit != _PROCESS_OPEN_FILE_LIMIT:
+        resource_limits["open_file_limit"] = open_file_limit
+    if process_count_limit != _PROCESS_COUNT_LIMIT:
+        resource_limits["process_count_limit"] = process_count_limit
+    bounded = _resource_bounded_process_argv(argv, **resource_limits)
     assert isinstance(bounded, list)
     supervisor = Path(__file__).with_name("process_supervisor.py")
     return [
@@ -812,15 +821,19 @@ def _run_bounded_process(
     process_token = secrets.token_hex(16)
     process_env = sanitized_process_environment(env)
     process_env["ALFREDO_PROCESS_TOKEN"] = process_token
+    isolation_limits = {}
+    if address_space_bytes != _PROCESS_ADDRESS_SPACE_BYTES_LIMIT:
+        isolation_limits["address_space_bytes"] = address_space_bytes
+    if file_size_bytes != _PROCESS_FILE_SIZE_BYTES_LIMIT:
+        isolation_limits["file_size_bytes"] = file_size_bytes
+    if open_file_limit != _PROCESS_OPEN_FILE_LIMIT:
+        isolation_limits["open_file_limit"] = open_file_limit
+    if process_count_limit != _PROCESS_COUNT_LIMIT:
+        isolation_limits["process_count_limit"] = process_count_limit
+    if descendant_grace_seconds != _PROCESS_DESCENDANT_GRACE_SECONDS:
+        isolation_limits["descendant_grace_seconds"] = descendant_grace_seconds
     process = subprocess.Popen(
-        _process_isolated_argv(
-            argv,
-            address_space_bytes=address_space_bytes,
-            file_size_bytes=file_size_bytes,
-            open_file_limit=open_file_limit,
-            process_count_limit=process_count_limit,
-            descendant_grace_seconds=descendant_grace_seconds,
-        ),
+        _process_isolated_argv(argv, **isolation_limits),
         cwd=cwd,
         stdin=subprocess.PIPE if input_text is not None else None,
         stdout=subprocess.PIPE,
@@ -888,12 +901,12 @@ def _run_bounded_process(
                 break
             if (
                 leader_exited_at is not None
-                and now - leader_exited_at >= _PROCESS_DESCENDANT_GRACE_SECONDS
+                and now - leader_exited_at >= descendant_grace_seconds
             ):
                 exit_status = 124
                 extra_stderr = (
                     "Process descendants timed out "
-                    f"{_PROCESS_DESCENDANT_GRACE_SECONDS} seconds after the leader "
+                    f"{descendant_grace_seconds} seconds after the leader "
                     "exited and were terminated."
                 )
                 _terminate_process_group(process, process_token)
@@ -1764,6 +1777,28 @@ def _validated_runner_result(data: dict[str, Any]) -> dict[str, Any]:
     return dict(raw)
 
 
+def _validated_execution_receipts(data: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = data.get("execution_receipts", [])
+    if not isinstance(raw, list) or len(raw) > _EXECUTION_RECEIPT_HISTORY_LIMIT:
+        raise AlbertError("Local Agent execution receipt history is invalid")
+    receipts: list[dict[str, Any]] = []
+    seen_request_ids: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise AlbertError("Local Agent execution receipt history is invalid")
+        try:
+            receipt = ExecutionReceipt.from_dict(item)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AlbertError("Local Agent execution receipt is invalid") from exc
+        if receipt.effect != "local-agent" or receipt.status == "executing":
+            raise AlbertError("Local Agent execution receipt authority is invalid")
+        if receipt.request_id in seen_request_ids:
+            raise AlbertError("Local Agent execution receipt identity is duplicated")
+        seen_request_ids.add(receipt.request_id)
+        receipts.append(receipt.to_dict(include_output=False))
+    return receipts
+
+
 def _process_identity(pid: int) -> str:
     """Return a Linux PID start identity so PID reuse cannot impersonate a runner."""
     if pid <= 0:
@@ -2136,6 +2171,7 @@ class LocalAgentSession:
     automatic_recovery_count: int = 0
     supervision_receipt_id: str = ""
     runner_result: dict[str, Any] = field(default_factory=dict)
+    execution_receipts: list[dict[str, Any]] = field(default_factory=list)
     cancel_requested_at: str = ""
     cancel_reason: str = ""
     preservation_budget: dict[str, Any] = field(default_factory=dict)
@@ -2194,6 +2230,7 @@ class LocalAgentSession:
             "automatic_recovery_count": self.automatic_recovery_count,
             "supervision_receipt_id": self.supervision_receipt_id,
             "runner_result": self.runner_result,
+            "execution_receipts": self.execution_receipts,
             "cancel_requested_at": self.cancel_requested_at,
             "cancel_reason": self.cancel_reason,
             "preservation_budget": self.preservation_budget,
@@ -2211,6 +2248,7 @@ class LocalAgentSession:
         ):
             status = "queued"
         runner_result = _validated_runner_result(data)
+        execution_receipts = _validated_execution_receipts(data)
         session = cls(
             session_id=data["session_id"],
             issue_id=data["issue_id"],
@@ -2254,6 +2292,7 @@ class LocalAgentSession:
                 "supervision_receipt_id",
             ),
             runner_result=runner_result,
+            execution_receipts=execution_receipts,
             cancel_requested_at=str(data.get("cancel_requested_at", "")),
             cancel_reason=str(data.get("cancel_reason", "")),
             preservation_budget=_validated_preservation_budget(
@@ -3157,6 +3196,60 @@ class AlbertMission:
         if recorder is not None:
             recorder.record(stream_name, payload)
 
+    def _record_local_execution_receipt(
+        self,
+        session: LocalAgentSession,
+        receipt: ExecutionReceipt,
+    ) -> None:
+        """Project one redacted host receipt into the canonical session."""
+
+        if receipt.effect != "local-agent" or receipt.status == "executing":
+            raise AlbertError("Local Agent execution receipt cannot be projected.")
+        for existing in session.execution_receipts:
+            if existing.get("request_id") != receipt.request_id:
+                continue
+            if existing.get("request_digest") != receipt.request_digest:
+                raise ExecutionReplayConflict(
+                    f"Local Agent execution receipt {receipt.request_id} changed its boundary."
+                )
+            return
+        if len(session.execution_receipts) >= _EXECUTION_RECEIPT_HISTORY_LIMIT:
+            raise AlbertError("Local Agent execution receipt history is full.")
+        latest = self._refresh_persisted_session(session.session_id)
+        if latest.status == "cancelled" and session.status != "cancelled":
+            session.status = "cancelled"
+            session.runner_ended_at = latest.runner_ended_at
+            session.runner_pid = None
+            session.runner_identity = ""
+            session.runner_process_pid = None
+            session.runner_process_identity = ""
+            session.runner_process_token = ""
+            session.cancel_requested_at = latest.cancel_requested_at
+            session.cancel_reason = latest.cancel_reason
+        session.execution_receipts.append(receipt.to_dict(include_output=False))
+        persisted = self._persist_session_update(session)
+        if persisted is not session:
+            session.execution_receipts = list(persisted.execution_receipts)
+
+    def _reconcile_local_execution_receipts(self) -> None:
+        """Recover completed host receipts that missed session projection."""
+
+        journal = ExecutionJournal(self.runtime_dir / "execution-receipts.json")
+        for request, receipt in journal.inspect_records():
+            if request.effect != "local-agent" or receipt.status == "executing":
+                continue
+            if not isinstance(request.authority, LocalAgentExecutionAuthority):
+                raise AlbertError("Local Agent execution receipt authority is invalid")
+            authority = request.authority
+            if authority.mission_id != self.mission_id:
+                raise AlbertError("Local Agent execution receipt Mission is invalid")
+            session = self.sessions.get(authority.session_id)
+            if session is None:
+                raise AlbertError(
+                    "Local Agent execution receipt references an unknown session"
+                )
+            self._record_local_execution_receipt(session, receipt)
+
     def load(self, *, perform_startup_effects: bool = True) -> "AlbertMission":
         self.agent_registry = load_agent_registry(self.agent_config_path)
         if self.agent_availability_snapshot is not None:
@@ -3195,6 +3288,7 @@ class AlbertMission:
         self._load_runtime()
         if runtime_exists and perform_startup_effects:
             ExecutionJournal(self.runtime_dir / "execution-receipts.json").reconcile()
+            self._reconcile_local_execution_receipts()
             self._reconcile_abandoned_sessions()
             self._reconcile_retirement_units()
             self._reclaim_snapshot_payloads(
@@ -13893,7 +13987,7 @@ class AlbertMission:
                 descendant_grace_seconds=_PROCESS_DESCENDANT_GRACE_SECONDS,
             ),
             sandbox=ExecutionSandbox(
-                mode="bubblewrap",
+                mode="bubblewrap" if os.name == "posix" else "none",
                 readable_roots=tuple(
                     str(Path(value).resolve())
                     for value in readable_roots
@@ -13926,9 +14020,12 @@ class AlbertMission:
                         f"{session.session_id} cancelled before runner process startup"
                     )
 
+        execution_journal = ExecutionJournal(
+            self.runtime_dir / "execution-receipts.json"
+        )
         try:
             receipt = ExecutionCoordinator(
-                ExecutionJournal(self.runtime_dir / "execution-receipts.json"),
+                execution_journal,
                 PythonExecutionProvider(executor=_run_bounded_process),
             ).execute(
                 execution_request,
@@ -13949,6 +14046,8 @@ class AlbertMission:
                     else "outcome-unknown"
                 ),
             )
+            if receipt.status != "executing":
+                self._record_local_execution_receipt(session, receipt)
             if receipt.status == "executing":
                 raise AlbertError(
                     f"{session.session_id} host effect {execution_label} is already executing; "
@@ -13965,6 +14064,18 @@ class AlbertMission:
                 receipt.stdout,
                 receipt.stderr or receipt.error_message,
             )
+        except BaseException:
+            try:
+                for request, receipt in execution_journal.inspect_records():
+                    if (
+                        request.request_id == execution_request.request_id
+                        and receipt.status != "executing"
+                    ):
+                        self._record_local_execution_receipt(session, receipt)
+                        break
+            except Exception:
+                pass
+            raise
         finally:
             # Retain the last exact process-group binding until the canonical
             # runner transition clears it. A late result or owner-loss probe

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 import subprocess
@@ -53,11 +54,22 @@ class ExecutionContractTests(unittest.TestCase):
                 access_level="read",
                 approval_actor="",
             )
+        worktree = str(self.worktree.resolve())
         return ExecutionRequest(
             request_id=request_id,
             effect=effect,
-            argv=("python3", "-c", "pass"),
-            working_directory=str(self.worktree.resolve()),
+            argv=(
+                "/usr/bin/bwrap",
+                "--die-with-parent",
+                "--new-session",
+                "--chdir",
+                worktree,
+                "--",
+                "python3",
+                "-c",
+                "pass",
+            ),
+            working_directory=worktree,
             authority=authority,
             limits=ExecutionLimits(timeout_seconds=2, output_limit_bytes=1024),
             sandbox=ExecutionSandbox(
@@ -95,6 +107,13 @@ class ExecutionContractTests(unittest.TestCase):
         request = self._request()
         with self.assertRaisesRegex(ValueError, "shell execution is not allowed"):
             request.with_updates(shell=True)
+
+        with self.assertRaisesRegex(ValueError, "prepared Bubblewrap"):
+            PythonExecutionProvider(
+                executor=lambda *_args, **_kwargs: subprocess.CompletedProcess(
+                    [], 0, "", ""
+                )
+            ).execute(request.with_updates(argv=("python3", "-c", "pass")))
 
         with self.assertRaisesRegex(ValueError, "authority kind"):
             self._request(
@@ -199,6 +218,41 @@ class ExecutionContractTests(unittest.TestCase):
         self.assertTrue(second.reconciliation_required)
         self.assertEqual(calls, 1)
         self.assertIn("provider connection lost", first.error_message)
+
+    def test_post_start_file_not_found_is_uncertain(self) -> None:
+        request = self._request(request_id="shell:post-start-not-found")
+
+        def effect_then_file_not_found(
+            _argv: tuple[str, ...], **kwargs: object
+        ) -> subprocess.CompletedProcess[str]:
+            callback = kwargs["process_binding_started"]
+            assert callable(callback)
+            callback(SimpleNamespace(pid=12345), "test-process-token")
+            raise FileNotFoundError("provider lost the bound process")
+
+        receipt = PythonExecutionProvider(
+            executor=effect_then_file_not_found,
+        ).execute(request)
+
+        self.assertEqual(receipt.status, "outcome-unknown")
+        self.assertTrue(receipt.reconciliation_required)
+        self.assertTrue(receipt.effect_started)
+
+    def test_owner_without_process_identity_is_not_claimed_live(self) -> None:
+        request = self._request(request_id="shell:identity-unavailable")
+        journal = ExecutionJournal(self.runtime / "execution-receipts.json")
+        self.assertIsNone(journal.claim(request))
+        payload = json.loads((self.runtime / "execution-receipts.json").read_text())
+        payload["records"][request.request_id]["receipt"].update(
+            {"owner_pid": os.getpid(), "owner_identity": ""}
+        )
+        (self.runtime / "execution-receipts.json").write_text(json.dumps(payload))
+
+        receipt = journal.claim(request)
+
+        self.assertIsNotNone(receipt)
+        self.assertEqual(receipt.status, "outcome-unknown")
+        self.assertTrue(receipt.reconciliation_required)
 
     def test_dead_intent_owner_is_reconciled_to_unknown_on_restart(self) -> None:
         request = self._request(request_id="shell:restart-cut")

@@ -56,7 +56,7 @@ A schema-versioned, exact argv host-effect description prepared by Python after 
 
 ### Execution Receipt
 
-A typed provider outcome for one Execution Request, including start/completion/failure, timeout, output-limit, cancellation, and explicit outcome-unknown states. Durable receipts retain process identity and output/input digests and byte counts while raw streams remain transient. An exact terminal receipt may be replayed without re-running the external effect; an uncertain receipt requires reconciliation before any decision.
+A typed provider outcome for one Execution Request, including start/completion/failure, timeout, output-limit, cancellation, and explicit outcome-unknown states. Durable receipts retain process identity and output/input digests and byte counts while raw streams remain transient. An exact terminal receipt may be replayed without re-running the external effect; an uncertain receipt requires reconciliation before any decision. Local Agent and Shell project only redacted receipt metadata into their existing canonical records; the shared ledger never becomes Mission policy authority.
 
 ### Local Agent
 

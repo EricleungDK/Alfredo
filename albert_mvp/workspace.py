@@ -567,8 +567,7 @@ class ShellTerminalService:
 
     @_causal_chronology
     def inspect(self) -> ShellTerminalProjection:
-        ExecutionJournal(self._execution_journal_path).reconcile()
-        terminal = self._load_terminal()
+        terminal = self._reconcile_execution_ledger(self._load_terminal())
         path_grant_requests = self._load_path_grant_requests()
         if any(
             record.get("status") == "executing"
@@ -612,8 +611,7 @@ class ShellTerminalService:
     @_causal_chronology
     def reconcile_audit(self) -> None:
         """Repair missing command audit phases before unrelated chronology advances."""
-        ExecutionJournal(self._execution_journal_path).reconcile()
-        terminal = self._load_terminal()
+        terminal = self._reconcile_execution_ledger(self._load_terminal())
         if any(
             record.get("status") == "executing"
             and self._projected_command_status(record) == "outcome-unknown"
@@ -669,7 +667,7 @@ class ShellTerminalService:
         requester: str,
         access_level: Literal["read", "write"],
     ) -> ShellTerminalCommandResult:
-        terminal = self._load_terminal()
+        terminal = self._reconcile_execution_ledger(self._load_terminal())
         normalized_correlation_id = correlation_id.strip()
         normalized_working_directory = str(Path(working_directory).resolve())
         normalized_requested_paths = [
@@ -911,7 +909,7 @@ class ShellTerminalService:
         duration_seconds: int,
         request_id: str,
     ) -> AdditionalPathGrant:
-        terminal = self._load_terminal()
+        terminal = self._reconcile_execution_ledger(self._load_terminal())
         normalized_correlation_id = correlation_id.strip()
         normalized_path = str(Path(path).resolve())
         normalized_request_id = request_id.strip()
@@ -1872,6 +1870,78 @@ class ShellTerminalService:
             console.append("shell-outcome-unknown")
             journal.append("shell-command-outcome-unknown")
         return tuple(console), tuple(journal)
+
+    def _reconcile_execution_ledger(
+        self,
+        terminal: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Project durable typed receipts into Shell's canonical command store."""
+
+        journal = ExecutionJournal(self._execution_journal_path)
+        journal.reconcile()
+        receipts = {receipt.request_id: receipt for receipt in journal.inspect()}
+        commands = list(terminal["commands"])
+        changed_records: list[dict[str, Any]] = []
+        changed = False
+        for index, record in enumerate(commands):
+            if record.get("status") not in {"executing", "outcome-unknown"}:
+                continue
+            request_id = record.get("execution_request_id")
+            request_digest = record.get("execution_request_digest")
+            if not isinstance(request_id, str) or not isinstance(request_digest, str):
+                continue
+            receipt = receipts.get(request_id)
+            if receipt is None or receipt.status == "executing":
+                continue
+            if receipt.request_digest != request_digest:
+                raise WorkspacePersistenceError(
+                    "Shell Terminal execution receipt does not match its request boundary."
+                )
+            if receipt.reconciliation_required:
+                reconciled = {
+                    **record,
+                    "status": "outcome-unknown",
+                    "exit_code": None,
+                    "executor_pid": None,
+                    "executor_identity": "",
+                    "execution_receipt_id": receipt.receipt_id,
+                    "execution_status": receipt.status,
+                }
+            else:
+                exit_code = receipt.exit_code if receipt.exit_code is not None else 1
+                reconciled = {
+                    **record,
+                    "status": "completed" if exit_code == 0 else "failed",
+                    "exit_code": exit_code,
+                    "executor_pid": None,
+                    "executor_identity": "",
+                    "execution_receipt_id": receipt.receipt_id,
+                    "execution_status": receipt.status,
+                }
+            if reconciled != record:
+                commands[index] = reconciled
+                changed_records.append(reconciled)
+                changed = True
+        if not changed:
+            return terminal
+        reconciled_terminal = {
+            **terminal,
+            "revision": terminal["revision"] + 1,
+            "commands": commands,
+        }
+        chronology_path = (
+            self._snapshots.preferences_path.parent / ".chronology-order.lock"
+        )
+        with _chronology_order_lock(chronology_path):
+            self._persist_terminal(
+                revision=reconciled_terminal["revision"],
+                commands=commands,
+                grants=terminal["grants"],
+                grant_denials=terminal["grant_denials"],
+            )
+        for record in changed_records:
+            self._reconcile_submission_audit(record)
+        return reconciled_terminal
 
     @staticmethod
     def _result_from_record(record: dict[str, Any]) -> ShellTerminalCommandResult:
