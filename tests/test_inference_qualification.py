@@ -23,7 +23,7 @@ from albert_mvp.inference_qualification import (
 )
 
 
-def successful_fixture_result(fixture, _profile, _context, _repetition):
+def successful_fixture_result(fixture, _profile, context, _repetition):
     edit_kinds = {
         "small-edit",
         "multi-file-edit",
@@ -38,6 +38,7 @@ def successful_fixture_result(fixture, _profile, _context, _repetition):
         },
         "outcome": "accepted",
         "model_digest": "sha256:worker-digest",
+        "runtime_pin": context["runtime_pin"],
         "timings": {
             "load_ms": 1,
             "prompt_evaluation_ms": 2,
@@ -63,6 +64,16 @@ def successful_fixture_result(fixture, _profile, _context, _repetition):
     elif fixture.kind == "queued-local-agent":
         result["queued"] = True
     return result
+
+
+def successful_rollback_evidence(profile, runtime_pin):
+    return {
+        "profile_id": profile.profile_id,
+        "runtime_pin": runtime_pin.to_dict(),
+        "previous_report_id": "previous-report",
+        "restored_report_id": "previous-report",
+        "replay_verified": True,
+    }
 
 
 def long_context_sources():
@@ -110,6 +121,7 @@ class GovernedFixtureFamilyTests(unittest.TestCase):
                 },
                 "reviewed_latency_ms": 10,
             }
+            result["runtime_pin"] = _context["runtime_pin"]
             if fixture.kind in {
                 "small-edit",
                 "multi-file-edit",
@@ -142,7 +154,7 @@ class GovernedFixtureFamilyTests(unittest.TestCase):
             profile,
             run_fixture,
             runtime_pin=runtime_pin,
-            rollback_test=lambda: True,
+            rollback_test=successful_rollback_evidence,
             context_sources=long_context_sources(),
             required_source_ids=("long-context",),
         )
@@ -190,6 +202,7 @@ class QualificationReportTests(unittest.TestCase):
                 },
                 "outcome": "accepted",
                 "model_digest": "sha256:worker-digest",
+                "runtime_pin": _context["runtime_pin"],
                 "timings": {
                     "load_ms": 12 + repetition,
                     "prompt_evaluation_ms": 20,
@@ -265,7 +278,7 @@ class QualificationReportTests(unittest.TestCase):
                 profile,
                 successful_fixture_result,
                 runtime_pin=runtime_pin,
-                rollback_test=lambda: True,
+                rollback_test=successful_rollback_evidence,
                 context_sources=long_context_sources(),
                 required_source_ids=("long-context",),
                 report_id="baseline",
@@ -274,7 +287,7 @@ class QualificationReportTests(unittest.TestCase):
                 profile,
                 successful_fixture_result,
                 runtime_pin=runtime_pin,
-                rollback_test=lambda: True,
+                rollback_test=successful_rollback_evidence,
                 baseline_report=baseline,
                 context_sources=long_context_sources(),
                 required_source_ids=("long-context",),
@@ -293,6 +306,13 @@ class QualificationReportTests(unittest.TestCase):
             )
             self.assertEqual(promoted["active"]["report_id"], report.report_id)
             self.assertEqual(promoted["active"]["runtime_pin"], runtime_pin.to_dict())
+            self.assertEqual(
+                report.rollback_evidence["runtime_pin"], runtime_pin.to_dict()
+            )
+            self.assertEqual(
+                report.rollback_receipt_id,
+                report.rollback_evidence["receipt_id"],
+            )
             self.assertIn(
                 report.report_id,
                 {item["report_id"] for item in inspection["reports"]},
@@ -321,6 +341,118 @@ class QualificationReportTests(unittest.TestCase):
                 expected_revision=1,
             )
             self.assertEqual(rollback_replay["last_action"], "rollback-replay")
+            state = store.inspect()
+            state["revision"] = 32
+            state["history"] = [
+                {
+                    "action": "promote",
+                    "profile_id": profile.profile_id,
+                    "report_id": report.report_id,
+                    "correlation_id": f"historical-{index}",
+                    "revision": index + 1,
+                }
+                for index in range(32)
+            ]
+            store._write_state(state)
+            with self.assertRaisesRegex(
+                PromotionError, "promotion history capacity exhausted"
+            ):
+                store.promote(
+                    profile_id=profile.profile_id,
+                    report_id=report.report_id,
+                    runtime_pin=runtime_pin,
+                    correlation_id="after-capacity",
+                    expected_revision=32,
+                )
+
+    def test_runner_must_echo_the_qualified_runtime_identity(self) -> None:
+        profile = replace(
+            LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1"),
+            model_digest="sha256:worker-digest",
+        )
+        runtime_pin = RuntimePin(
+            runtime_id="ollama",
+            runtime_version="0.11.4",
+            binary_digest="a" * 64,
+            configuration_digest="b" * 64,
+        )
+
+        def runner(fixture, candidate, context, repetition):
+            result = successful_fixture_result(fixture, candidate, context, repetition)
+            result["runtime_pin"] = {**context["runtime_pin"], "runtime_id": "other"}
+            return result
+
+        report = InferenceQualificationService(
+            Path("/tmp/qualification-runtime-identity"),
+            fixtures=(build_governed_fixture_family()[0],),
+            repetitions=1,
+        ).qualify(profile, runner, runtime_pin=runtime_pin)
+
+        self.assertEqual(report.observations[0]["error_code"], "runner-failed")
+        self.assertEqual(report.metrics["unexpected_outcomes"], 1)
+        self.assertIn("reliability-not-qualified", report.promotion_blockers)
+
+    def test_expected_alternative_outcomes_preserve_fixture_quality(self) -> None:
+        profile = replace(
+            LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1"),
+            model_digest="sha256:worker-digest",
+        )
+        runtime_pin = RuntimePin(
+            runtime_id="ollama",
+            runtime_version="0.11.4",
+            binary_digest="a" * 64,
+            configuration_digest="b" * 64,
+        )
+        repair = next(
+            fixture
+            for fixture in build_governed_fixture_family()
+            if fixture.kind == "repair"
+        )
+        policy = next(
+            fixture
+            for fixture in build_governed_fixture_family()
+            if fixture.kind == "policy-violation"
+        )
+
+        def runner(fixture, _profile, context, _repetition):
+            result = {
+                "route": {"kind": "discussion"},
+                "outcome": "escalated",
+                "runtime_pin": context["runtime_pin"],
+                "timings": {
+                    "load_ms": 1,
+                    "prompt_evaluation_ms": 1,
+                    "first_token_ms": 1,
+                    "decoding_ms": 1,
+                },
+            }
+            if fixture.kind == "repair":
+                result.update(
+                    {
+                        "route": {"kind": "coding-task"},
+                        "plan": {"files": ["src/example.py"]},
+                        "evidence": {"changed_files": ["src/example.py"]},
+                        "outcome": "accepted",
+                        "reviewed_latency_ms": 1,
+                    }
+                )
+            return result
+
+        repair_report = InferenceQualificationService(
+            Path("/tmp/qualification-repair-alternative"),
+            fixtures=(repair,),
+            repetitions=1,
+        ).qualify(profile, runner, runtime_pin=runtime_pin)
+        policy_report = InferenceQualificationService(
+            Path("/tmp/qualification-policy-alternative"),
+            fixtures=(policy,),
+            repetitions=1,
+        ).qualify(profile, runner, runtime_pin=runtime_pin)
+
+        self.assertTrue(repair_report.observations[0]["reliable"])
+        self.assertTrue(policy_report.observations[0]["reliable"])
+        self.assertEqual(repair_report.metrics["quality_rate"], 1.0)
+        self.assertEqual(policy_report.metrics["quality_rate"], 1.0)
 
     def test_promotion_rejects_a_withdrawn_runtime(self) -> None:
         profile = replace(
@@ -342,6 +474,7 @@ class QualificationReportTests(unittest.TestCase):
                 "evidence": {"tests": ["not applicable"]},
                 "outcome": "accepted",
                 "model_digest": "sha256:worker-digest",
+                "runtime_pin": _context["runtime_pin"],
                 "timings": {
                     "load_ms": 1,
                     "prompt_evaluation_ms": 1,
@@ -392,6 +525,7 @@ class QualificationReportTests(unittest.TestCase):
                 "evidence": {"private": "must not be persisted"},
                 "outcome": "accepted",
                 "model_digest": "sha256:worker-digest",
+                "runtime_pin": _context["runtime_pin"],
                 "timings": {
                     "load_ms": 1,
                     "prompt_evaluation_ms": 1,
@@ -439,6 +573,7 @@ class QualificationReportTests(unittest.TestCase):
                 "route": {"kind": "discussion"},
                 "outcome": "accepted",
                 "model_digest": "sha256:worker-digest",
+                "runtime_pin": _context["runtime_pin"],
                 "timings": {
                     "load_ms": 1,
                     "prompt_evaluation_ms": 1,
@@ -497,6 +632,7 @@ class QualificationReportTests(unittest.TestCase):
                 lambda *_args: {
                     "route": {"kind": "discussion"},
                     "outcome": "accepted",
+                    "runtime_pin": _args[2]["runtime_pin"],
                     "timings": {
                         "load_ms": 1,
                         "prompt_evaluation_ms": 1,
@@ -519,6 +655,7 @@ class QualificationReportTests(unittest.TestCase):
                 lambda *_args: {
                     "route": {"kind": "discussion"},
                     "outcome": "accepted",
+                    "runtime_pin": _args[2]["runtime_pin"],
                     "timings": {
                         "load_ms": 1,
                         "prompt_evaluation_ms": 1,
@@ -560,6 +697,7 @@ class QualificationReportTests(unittest.TestCase):
             lambda *_args: {
                 "route": {"kind": "discussion"},
                 "outcome": "accepted",
+                "runtime_pin": _args[2]["runtime_pin"],
                 "timings": {
                     "load_ms": 1,
                     "prompt_evaluation_ms": 1,
@@ -594,6 +732,7 @@ class QualificationReportTests(unittest.TestCase):
             return {
                 "route": {"kind": "discussion"},
                 "outcome": "accepted",
+                "runtime_pin": context["runtime_pin"],
                 "timings": {
                     "load_ms": 1,
                     "prompt_evaluation_ms": 1,
@@ -615,7 +754,7 @@ class QualificationReportTests(unittest.TestCase):
         )
 
         self.assertEqual(calls, 1)
-        self.assertEqual(report.metrics["cancellations"], 2)
+        self.assertEqual(report.metrics["cancellations"], 3)
         self.assertIn("unexpected-outcome", report.promotion_blockers)
 
     def test_rollback_flag_alone_cannot_qualify_without_executed_receipt(self) -> None:
@@ -646,7 +785,7 @@ class QualificationReportTests(unittest.TestCase):
             profile,
             runner,
             runtime_pin=runtime_pin,
-            rollback_test=lambda: True,
+            rollback_test=successful_rollback_evidence,
         )
 
         self.assertIn("rollback-not-tested", unproven.promotion_blockers)
@@ -674,14 +813,14 @@ class QualificationReportTests(unittest.TestCase):
             profile,
             successful_fixture_result,
             runtime_pin=runtime_pin,
-            rollback_test=lambda: True,
+            rollback_test=successful_rollback_evidence,
             report_id="missing-baseline",
         )
         candidate = service.qualify(
             profile,
             successful_fixture_result,
             runtime_pin=runtime_pin,
-            rollback_test=lambda: True,
+            rollback_test=successful_rollback_evidence,
             baseline_report=baseline,
             report_id="candidate-with-missing-baseline",
         )
@@ -712,6 +851,7 @@ class QualificationReportTests(unittest.TestCase):
             lambda *_args: {
                 "route": {"kind": "discussion"},
                 "outcome": "accepted",
+                "runtime_pin": _args[2]["runtime_pin"],
                 "timings": {
                     "load_ms": 1,
                     "prompt_evaluation_ms": 1,
@@ -748,6 +888,7 @@ class QualificationReportTests(unittest.TestCase):
                 "evidence": {"changed_files": ["src/example.py"]},
                 "outcome": "accepted",
                 "model_digest": "sha256:worker-digest",
+                "runtime_pin": _args[2]["runtime_pin"],
                 "timings": {
                     "load_ms": 1,
                     "prompt_evaluation_ms": 1,
@@ -800,6 +941,7 @@ class QualificationReportTests(unittest.TestCase):
                 "route": {"kind": "discussion"},
                 "outcome": "accepted",
                 "model_digest": "sha256:worker-digest",
+                "runtime_pin": context["runtime_pin"],
                 "timings": {
                     "load_ms": 1,
                     "prompt_evaluation_ms": 1,

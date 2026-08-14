@@ -19,7 +19,7 @@ from albert_mvp.inference_qualification import (
 from albert_mvp.server import serve
 
 
-def successful_fixture_result(fixture, _profile, _context, _repetition):
+def successful_fixture_result(fixture, _profile, context, _repetition):
     edit_kinds = {
         "small-edit",
         "multi-file-edit",
@@ -34,6 +34,7 @@ def successful_fixture_result(fixture, _profile, _context, _repetition):
         },
         "outcome": "accepted",
         "model_digest": "sha256:worker-digest",
+        "runtime_pin": context["runtime_pin"],
         "timings": {
             "load_ms": 1,
             "prompt_evaluation_ms": 2,
@@ -61,6 +62,16 @@ def successful_fixture_result(fixture, _profile, _context, _repetition):
     return result
 
 
+def successful_rollback_evidence(profile, runtime_pin):
+    return {
+        "profile_id": profile.profile_id,
+        "runtime_pin": runtime_pin.to_dict(),
+        "previous_report_id": "previous-report",
+        "restored_report_id": "previous-report",
+        "replay_verified": True,
+    }
+
+
 class InferenceQualificationCliTests(unittest.TestCase):
     def make_report(self, runtime: Path):
         profile = replace(
@@ -81,7 +92,7 @@ class InferenceQualificationCliTests(unittest.TestCase):
             profile,
             successful_fixture_result,
             runtime_pin=runtime_pin,
-            rollback_test=lambda: True,
+            rollback_test=successful_rollback_evidence,
             context_sources=(
                 ContextSource("long-context", "x" * 28_800, required=True),
             ),
@@ -92,7 +103,7 @@ class InferenceQualificationCliTests(unittest.TestCase):
             profile,
             successful_fixture_result,
             runtime_pin=runtime_pin,
-            rollback_test=lambda: True,
+            rollback_test=successful_rollback_evidence,
             baseline_report=baseline,
             context_sources=(
                 ContextSource("long-context", "x" * 28_800, required=True),
