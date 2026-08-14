@@ -553,9 +553,6 @@ class ShellTerminalService:
         self._path_grant_requests_path = (
             snapshots.preferences_path.parent / "path-grant-requests.json"
         )
-        self._execution_journal_path = (
-            snapshots.preferences_path.parent / "execution-receipts.json"
-        )
 
     @property
     def terminal_path(self) -> Path:
@@ -573,11 +570,19 @@ class ShellTerminalService:
             )
         return mission.runtime_dir / "execution-receipts.json"
 
+    @contextmanager
+    def _chronology_then_terminal_lock(self):
+        chronology_path = (
+            self._snapshots.preferences_path.parent / ".chronology-order.lock"
+        )
+        with _chronology_order_lock(chronology_path):
+            with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+                yield
+
     def inspect(self) -> ShellTerminalProjection:
-        with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+        with self._chronology_then_terminal_lock():
             return self._inspect_locked()
 
-    @_causal_chronology
     def _inspect_locked(self) -> ShellTerminalProjection:
         terminal = self._reconcile_execution_ledger(
             self._load_terminal(), terminal_lock_held=True
@@ -626,10 +631,9 @@ class ShellTerminalService:
 
     def reconcile_audit(self) -> None:
         """Repair missing command audit phases before unrelated chronology advances."""
-        with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+        with self._chronology_then_terminal_lock():
             return self._reconcile_audit_locked()
 
-    @_causal_chronology
     def _reconcile_audit_locked(self) -> None:
         terminal = self._reconcile_execution_ledger(
             self._load_terminal(), terminal_lock_held=True
@@ -671,7 +675,7 @@ class ShellTerminalService:
             raise AlbertError("Shell Terminal requester must not be empty")
         if access_level not in {"read", "write"}:
             raise AlbertError(f"Unknown Shell Terminal access level: {access_level}")
-        with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+        with self._chronology_then_terminal_lock():
             return self._submit_locked(
                 correlation_id=correlation_id,
                 command=command,
@@ -915,7 +919,7 @@ class ShellTerminalService:
             raise AlbertError(f"Unknown Additional Path Grant access level: {access_level}")
         if duration_seconds <= 0:
             raise AlbertError("Additional Path Grant duration must be positive")
-        with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+        with self._chronology_then_terminal_lock():
             return self._create_path_grant_locked(
                 correlation_id=correlation_id,
                 expected_revision=expected_revision,
@@ -1056,7 +1060,7 @@ class ShellTerminalService:
             raise AlbertError("Additional Path Grant denial reason must not be empty")
         if not affected_action.strip():
             raise AlbertError("Additional Path Grant affected action must not be empty")
-        with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+        with self._chronology_then_terminal_lock():
             terminal = self._load_terminal()
             normalized_correlation_id = correlation_id.strip()
             normalized_request_id = request_id.strip()
@@ -1181,7 +1185,7 @@ class ShellTerminalService:
         command_id: str,
         approver: str,
     ) -> ShellTerminalCommandResult:
-        with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+        with self._chronology_then_terminal_lock():
             return self._approve_locked(command_id=command_id, approver=approver)
 
     def _approve_locked(
@@ -1240,7 +1244,7 @@ class ShellTerminalService:
             raise AlbertError("Only the Mission Commander can deny a Shell Terminal command.")
         if not reason.strip():
             raise AlbertError("Shell Terminal command denial requires a reason.")
-        with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+        with self._chronology_then_terminal_lock():
             return self._deny_locked(
                 command_id=command_id,
                 decider=decider,
@@ -1939,14 +1943,31 @@ class ShellTerminalService:
                     "Shell Terminal execution record has no Mission boundary."
                 )
             if mission_id not in journal_records_by_mission:
-                journal = ExecutionJournal(
-                    self._execution_journal_path_for_mission(mission_id)
-                )
+                journal_path = self._execution_journal_path_for_mission(mission_id)
+                journal = ExecutionJournal(journal_path)
                 journal.reconcile()
-                journal_records_by_mission[mission_id] = {
+                records_for_mission = {
                     request.request_id: (request, receipt)
                     for request, receipt in journal.inspect_records()
                 }
+                legacy_path = (
+                    self._snapshots.preferences_path.parent / "execution-receipts.json"
+                )
+                if journal_path.resolve() != legacy_path.resolve():
+                    legacy = ExecutionJournal(legacy_path)
+                    legacy.reconcile()
+                    for request, receipt in legacy.inspect_records():
+                        authority = request.authority
+                        if (
+                            request.request_id not in records_for_mission
+                            and isinstance(authority, ShellExecutionAuthority)
+                            and authority.mission_id == mission_id
+                        ):
+                            records_for_mission[request.request_id] = (
+                                request,
+                                receipt,
+                            )
+                journal_records_by_mission[mission_id] = records_for_mission
             request_and_receipt = journal_records_by_mission[mission_id].get(request_id)
             if request_and_receipt is None:
                 continue
@@ -11280,8 +11301,16 @@ class WorkspaceSnapshotService:
                 delete=False,
             ) as temporary:
                 temporary.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+                temporary.flush()
+                os.fsync(temporary.fileno())
                 temporary_path = Path(temporary.name)
             temporary_path.replace(path)
+            if os.name == "posix":
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
         finally:
             if temporary_path is not None and temporary_path.exists():
                 temporary_path.unlink()

@@ -377,10 +377,16 @@ class HostExecutionIntegrationTests(unittest.TestCase):
             ),
             environment=(("PATH", "/usr/bin:/bin"),),
         )
-        mission._record_local_execution_receipt(
-            session,
-            ExecutionReceipt.completed(request, exit_code=0, stdout="", stderr=""),
+        receipt = ExecutionReceipt.completed(
+            request,
+            exit_code=0,
+            stdout="",
+            stderr="",
         )
+        journal = self._execution_journal()
+        self.assertIsNone(journal.claim(request))
+        journal.complete(request, receipt)
+        mission._record_local_execution_receipt(session, receipt)
         persisted = mission._refresh_persisted_session(session.session_id)
         self.assertEqual(persisted.status, "cancelled")
         self.assertEqual(len(persisted.execution_receipts), 1)

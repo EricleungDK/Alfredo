@@ -22,6 +22,7 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -42,6 +43,14 @@ _MAX_ADDRESS_SPACE_BYTES = 64 * 1024 * 1024 * 1024
 _MAX_FILE_SIZE_BYTES = 16 * 1024 * 1024 * 1024
 _MAX_OPEN_FILE_LIMIT = 65_536
 _MAX_PROCESS_COUNT_LIMIT = 4_096
+_IMPLICIT_READONLY_ROOTS = {
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+    "/etc",
+}
 _IDENTITY_PATTERN = re.compile(r"^[A-Za-z0-9._:/=-]+$")
 _ENVIRONMENT_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _EXECUTION_ENVIRONMENT_ALLOWLIST = {
@@ -305,6 +314,7 @@ def _validate_prepared_bubblewrap_argv(
     sandbox: ExecutionSandbox,
     working_directory: str,
     limits: ExecutionLimits,
+    environment: Sequence[tuple[str, str]] = (),
 ) -> None:
     if sandbox.mode == "none" and os.name != "posix":
         return
@@ -436,6 +446,68 @@ def _validate_prepared_bubblewrap_argv(
     if any(destination in writable for _source, destination in ro_bindings):
         raise ExecutionContractError(
             "execution Bubblewrap writable path is also readonly"
+        )
+
+    implicit_command = (
+        list(command[6:]) if len(command) > 6 and command[5] == "--" else []
+    )
+    environment_path = dict(environment).get("PATH", os.defpath)
+    implicit_executable_paths: set[Path] = set()
+    if implicit_command:
+        command_executable = Path(implicit_command[0])
+        if command_executable.is_absolute():
+            implicit_executable_paths.add(command_executable.resolve(strict=False))
+        else:
+            resolved_executable = shutil.which(
+                implicit_command[0],
+                path=environment_path,
+            )
+            if resolved_executable:
+                implicit_executable_paths.add(
+                    Path(resolved_executable).resolve(strict=False)
+                )
+    implicit_script_path: Path | None = None
+    if implicit_command and (
+        Path(implicit_command[0]).name.casefold().startswith("python")
+        or Path(implicit_command[0]).name.casefold() in {"node", "bash", "sh", "ruby"}
+    ):
+        for argument in implicit_command[1:]:
+            if argument in {"-c", "-m", "-e"}:
+                break
+            if argument.startswith("-"):
+                continue
+            candidate = Path(argument)
+            if candidate.is_absolute() and candidate.is_relative_to(Path("/tmp")):
+                implicit_script_path = candidate.resolve(strict=False)
+            break
+
+    def is_allowed_implicit_binding(binding: tuple[str, str]) -> bool:
+        source, destination = binding
+        if source == destination and source in _IMPLICIT_READONLY_ROOTS:
+            return True
+        source_path = Path(source)
+        destination_path = Path(destination)
+        if not source_path.is_file():
+            return False
+        try:
+            same_file = source_path.resolve(strict=True) == destination_path.resolve(
+                strict=False
+            )
+        except OSError:
+            return False
+        if not same_file:
+            return False
+        if destination_path.resolve(strict=False) in implicit_executable_paths:
+            return os.access(source_path, os.X_OK)
+        return (
+            implicit_script_path is not None
+            and destination_path.resolve(strict=False) == implicit_script_path
+        )
+
+    undeclared_readonly = set(ro_bindings) - expected_ro
+    if any(not is_allowed_implicit_binding(binding) for binding in undeclared_readonly):
+        raise ExecutionContractError(
+            "execution Bubblewrap contains an undeclared readonly mount"
         )
 
     if Path(command[0]).name != "prlimit" or len(command) < 7:
@@ -1176,21 +1248,17 @@ class PythonExecutionProvider:
         provider_id: str = "python",
     ) -> None:
         self._executor = executor or self._default_executor
-        self._strict_boundary = executor is None or (
-            getattr(executor, "__name__", "") == "_run_bounded_process"
-            and getattr(executor, "__module__", "") == "albert_mvp.core"
-        )
         self.provider_id = provider_id
 
     def validate_request(self, request: ExecutionRequest) -> None:
         request.validate()
-        if self._strict_boundary:
-            _validate_prepared_bubblewrap_argv(
-                request.argv,
-                request.sandbox,
-                request.working_directory,
-                request.limits,
-            )
+        _validate_prepared_bubblewrap_argv(
+            request.argv,
+            request.sandbox,
+            request.working_directory,
+            request.limits,
+            request.environment,
+        )
 
     @staticmethod
     def _default_executor(
@@ -1357,6 +1425,12 @@ class ExecutionJournal:
                 receipt_payload, dict
             ):
                 raise ExecutionContractError("execution journal record is incomplete")
+            if "input_text" in request_payload or any(
+                field_name in receipt_payload for field_name in ("stdout", "stderr")
+            ):
+                raise ExecutionContractError(
+                    "execution journal must not contain raw input or output"
+                )
             try:
                 request = ExecutionRequest.from_dict(request_payload)
                 receipt = ExecutionReceipt.from_dict(receipt_payload)
@@ -1544,9 +1618,21 @@ class ExecutionCoordinator:
         | None = None,
     ) -> ExecutionReceipt:
         request.validate()
-        if authorize is not None:
-            authorize(request)
-        self.provider.validate_request(request)
+        try:
+            if authorize is not None:
+                authorize(request)
+            self.provider.validate_request(request)
+        except Exception as exc:
+            receipt = ExecutionReceipt.start_failed(
+                request,
+                exit_code=127,
+                error_message=str(exc),
+            )
+            existing = self.journal.claim(request)
+            if existing is not None:
+                return existing
+            self.journal.complete(request, receipt)
+            return receipt
         process_bound = False
 
         def bind(process: Any, process_token: str = "") -> None:

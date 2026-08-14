@@ -842,8 +842,7 @@ def _run_bounded_process(
         shell=False,
         start_new_session=True,
     )
-    capture = _BoundedProcessCapture(output_limit_bytes, output_callback=output_callback)
-    capture.start(process)
+    capture: _BoundedProcessCapture | None = None
     input_thread: threading.Thread | None = None
 
     def deliver_input() -> None:
@@ -863,6 +862,12 @@ def _run_bounded_process(
     try:
         if process_binding_started is not None:
             process_binding_started(process, process_token)
+        capture = _BoundedProcessCapture(
+            output_limit_bytes,
+            output_callback=output_callback,
+        )
+        capture.start(process)
+        assert capture is not None
         if process_started is not None:
             process_started(process)
         started = time.monotonic()
@@ -956,7 +961,8 @@ def _run_bounded_process(
         return completed
     except BaseException:
         _terminate_process_group(process, process_token)
-        capture.finish()
+        if capture is not None:
+            capture.finish()
         if input_thread is not None:
             input_thread.join(timeout=1)
         raise
@@ -3224,7 +3230,43 @@ class AlbertMission:
 
         if receipt.effect != "local-agent" or receipt.status == "executing":
             raise AlbertError("Local Agent execution receipt cannot be projected.")
+        journal = ExecutionJournal(self.runtime_dir / "execution-receipts.json")
+        journal_record = next(
+            (
+                (request, stored_receipt)
+                for request, stored_receipt in journal.inspect_records()
+                if request.request_id == receipt.request_id
+            ),
+            None,
+        )
+        if journal_record is None:
+            raise AlbertError(
+                "Local Agent execution receipt is not bound to a durable request."
+            )
+        request, stored_receipt = journal_record
+        if (
+            request.effect != "local-agent"
+            or stored_receipt.to_dict(include_output=False)
+            != receipt.to_dict(include_output=False)
+            or not isinstance(request.authority, LocalAgentExecutionAuthority)
+        ):
+            raise AlbertError("Local Agent execution receipt authority is invalid")
+        authority = request.authority
+        if (
+            authority.mission_id != self.mission_id
+            or authority.session_id != session.session_id
+            or request.working_directory != str(session.worktree_path.resolve())
+        ):
+            raise AlbertError("Local Agent execution receipt session boundary is invalid")
         latest = self._refresh_persisted_session(session.session_id)
+        if (
+            authority.runner_operation_id != latest.runner_operation_id
+            or authority.worktree_identity != latest.worktree_identity
+            or authority.session_revision > latest.revision
+        ):
+            raise ExecutionReplayConflict(
+                f"Local Agent execution receipt {receipt.request_id} has a changed session boundary."
+            )
         if latest.runner_operation_id != session.runner_operation_id:
             raise ExecutionReplayConflict(
                 f"Local Agent execution receipt {receipt.request_id} has a stale runner operation."
@@ -5059,6 +5101,30 @@ class AlbertMission:
                 )
         return owner, process_group
 
+    def _local_execution_needs_reconciliation(
+        self,
+        session: LocalAgentSession,
+    ) -> bool:
+        """Block automatic runner recovery while a host effect is uncertain."""
+
+        journal = ExecutionJournal(self.runtime_dir / "execution-receipts.json")
+        try:
+            journal.reconcile()
+            records = journal.inspect_records()
+        except Exception:
+            return True
+        for request, receipt in records:
+            authority = request.authority
+            if (
+                request.effect == "local-agent"
+                and isinstance(authority, LocalAgentExecutionAuthority)
+                and authority.mission_id == self.mission_id
+                and authority.session_id == session.session_id
+                and receipt.status in {"executing", "outcome-unknown"}
+            ):
+                return True
+        return False
+
     def _apply_supervision_intent(self, receipt_id: str) -> SupervisionReceipt:
         with self._runtime_lock(exclusive=True):
             data = self._read_runtime_payload()
@@ -5105,6 +5171,15 @@ class AlbertMission:
             identity_boundary = exact_boundary
             effect = intent.get("effect")
             if effect == "recover-same-session":
+                if self._local_execution_needs_reconciliation(session):
+                    return self._fail_closed_supervision_intent(
+                        data,
+                        supervision,
+                        intent,
+                        receipt_payload,
+                        "An uncertain Local Agent host effect requires reconciliation "
+                        "before automatic runner recovery.",
+                    )
                 runner_boundary = session.retirement.get("runner_boundary", {})
                 has_owner_lease = bool(
                     runner_boundary.get("owner_lease_path")

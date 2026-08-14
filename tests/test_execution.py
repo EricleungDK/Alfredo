@@ -131,6 +131,12 @@ class ExecutionContractTests(unittest.TestCase):
             PythonExecutionProvider().execute(
                 request.with_updates(argv=("python3", "-c", "pass"))
             )
+        with self.assertRaisesRegex(ValueError, "prepared Bubblewrap"):
+            PythonExecutionProvider(
+                executor=lambda *_args, **_kwargs: subprocess.CompletedProcess(
+                    [], 0, "", ""
+                )
+            ).execute(request.with_updates(argv=("python3", "-c", "pass")))
 
         with self.assertRaisesRegex(ValueError, "authority kind"):
             self._request(
@@ -149,18 +155,37 @@ class ExecutionContractTests(unittest.TestCase):
                 ),
             )
 
-    def test_prepared_boundary_rejects_unsafe_mount_before_claim(self) -> None:
+    def test_prepared_boundary_records_typed_start_failure(self) -> None:
         request = self._request(request_id="shell:unsafe-boundary")
         unsafe = list(request.argv)
         bind_index = unsafe.index("--bind")
         unsafe[bind_index + 1 : bind_index + 3] = ["/", "/"]
         journal = ExecutionJournal(self.runtime / "execution-receipts.json")
-        with self.assertRaisesRegex(ValueError, "host root"):
-            ExecutionCoordinator(
-                journal,
-                PythonExecutionProvider(),
-            ).execute(request.with_updates(argv=tuple(unsafe)))
-        self.assertFalse((self.runtime / "execution-receipts.json").exists())
+        receipt = ExecutionCoordinator(
+            journal,
+            PythonExecutionProvider(),
+        ).execute(request.with_updates(argv=tuple(unsafe)))
+        self.assertEqual(receipt.status, "start-failed")
+        self.assertIn("host root", receipt.error_message)
+        self.assertEqual(journal.inspect()[0].status, "start-failed")
+
+    def test_prepared_boundary_rejects_undeclared_readonly_mount(self) -> None:
+        request = self._request(request_id="shell:unsafe-readonly-boundary")
+        unsafe = list(request.argv)
+        chdir_index = unsafe.index("--chdir")
+        unsafe[chdir_index:chdir_index] = [
+            "--ro-bind",
+            "/etc/shadow",
+            "/etc/shadow",
+        ]
+        journal = ExecutionJournal(self.runtime / "execution-receipts.json")
+        receipt = ExecutionCoordinator(
+            journal,
+            PythonExecutionProvider(),
+        ).execute(request.with_updates(argv=tuple(unsafe)))
+        self.assertEqual(receipt.status, "start-failed")
+        self.assertIn("undeclared readonly", receipt.error_message)
+        self.assertEqual(journal.inspect()[0].status, "start-failed")
 
     def test_exact_replay_returns_the_typed_receipt_without_rerunning_effect(
         self,
@@ -416,6 +441,17 @@ class ExecutionContractTests(unittest.TestCase):
         missing_schema.pop("schema_version")
         with self.assertRaises(ValueError):
             ExecutionReceipt.from_dict(missing_schema)
+
+    def test_journal_rejects_raw_input_and_output_fields(self) -> None:
+        request = self._request(request_id="shell:raw-journal")
+        journal = ExecutionJournal(self.runtime / "execution-receipts.json")
+        self.assertIsNone(journal.claim(request))
+        payload = json.loads((self.runtime / "execution-receipts.json").read_text())
+        payload["records"][request.request_id]["request"]["input_text"] = "secret"
+        payload["records"][request.request_id]["receipt"]["stdout"] = "secret"
+        (self.runtime / "execution-receipts.json").write_text(json.dumps(payload))
+        with self.assertRaisesRegex(ValueError, "raw input or output"):
+            journal.inspect()
 
     def test_input_digest_supports_restart_replay_without_persisting_prompt_bytes(
         self,
