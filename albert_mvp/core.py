@@ -46,6 +46,8 @@ from .execution import (
     ExecutionSandbox,
     LocalAgentExecutionAuthority,
     PythonExecutionProvider,
+    _is_protected_writable_path,
+    _is_under_private_tmp,
 )
 from .retirement import (
     RetirementSnapshotError,
@@ -77,16 +79,6 @@ _PROCESS_OPEN_FILE_LIMIT = 1_024
 _PROCESS_COUNT_LIMIT = 256
 _PROCESS_DESCENDANT_GRACE_SECONDS = 1.0
 _EXECUTION_RECEIPT_HISTORY_LIMIT = 128
-_PROTECTED_WRITABLE_ROOTS = {
-    Path("/usr"),
-    Path("/bin"),
-    Path("/sbin"),
-    Path("/lib"),
-    Path("/lib64"),
-    Path("/etc"),
-    Path("/dev"),
-    Path("/proc"),
-}
 _GIT_SNAPSHOT_TIMEOUT_SECONDS = 30
 _GIT_SNAPSHOT_BYTES_LIMIT = 8_000_000
 _GIT_COMMAND_OUTPUT_BYTES_LIMIT = 64_000
@@ -621,9 +613,82 @@ def _process_token_pids(process_token: str) -> set[int]:
     return matches
 
 
+def _darwin_process_identity_probe(pid: int) -> tuple[str, str]:
+    """Probe a Darwin PID without treating an unavailable probe as absence."""
+
+    if sys.platform != "darwin" or pid <= 0:
+        return "unavailable", ""
+    for executable in ("/bin/ps", "/usr/bin/ps"):
+        try:
+            result = subprocess.run(
+                [executable, "-p", str(pid), "-o", "lstart="],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=0.5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        started_at = result.stdout.strip()
+        if result.returncode == 0 and started_at:
+            return "live", f"darwin:{pid}:{started_at}"
+        if result.returncode == 1:
+            return "absent", ""
+        return "unavailable", ""
+    return "unavailable", ""
+
+
+def _darwin_process_identity_state(pid: int, expected_identity: str) -> str:
+    state, actual_identity = _darwin_process_identity_probe(pid)
+    if state != "live":
+        return state
+    if expected_identity and actual_identity == expected_identity:
+        return "same"
+    return "reused"
+
+
+def _darwin_process_group_probe(process_group_id: int) -> tuple[str, set[int]]:
+    """Enumerate a Darwin process group without trusting killpg existence probes."""
+
+    if sys.platform != "darwin" or process_group_id <= 0:
+        return "unavailable", set()
+    for executable in ("/bin/ps", "/usr/bin/ps"):
+        try:
+            result = subprocess.run(
+                [executable, "-axo", "pid=,pgid=,lstart="],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=0.5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode != 0:
+            continue
+        group_pids: set[int] = set()
+        for line in result.stdout.splitlines():
+            fields = line.strip().split(None, 2)
+            if not fields:
+                continue
+            if len(fields) < 2:
+                return "unavailable", set()
+            try:
+                pid = int(fields[0])
+                process_group = int(fields[1])
+            except ValueError:
+                return "unavailable", set()
+            if pid <= 0 or process_group <= 0:
+                return "unavailable", set()
+            if process_group == process_group_id:
+                group_pids.add(pid)
+        return ("live" if group_pids else "absent"), group_pids
+    return "unavailable", set()
+
+
 def _process_group_is_live(
     process: subprocess.Popen[Any],
     process_token: str = "",
+    process_identity: str = "",
 ) -> bool:
     if os.name != "posix":
         return process.poll() is None
@@ -631,7 +696,27 @@ def _process_group_is_live(
     # Never probe or signal that old process-group number again; descendants
     # are tracked by the inherited random token instead.
     if process.poll() is not None:
-        return bool(_process_token_pids(process_token))
+        token_pids = _process_token_pids(process_token)
+        if token_pids:
+            return True
+        if sys.platform == "darwin":
+            state = _darwin_process_identity_state(process.pid, process_identity)
+            if state in {"same", "reused"}:
+                # A live or reused PID is uncertainty, never proof that the
+                # bounded process tree is gone.
+                return True
+            if state == "absent":
+                group_state, _group_pids = _darwin_process_group_probe(process.pid)
+                if group_state != "unavailable":
+                    return group_state == "live"
+            try:
+                os.getpgid(process.pid)
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+            return True
+        return False
     try:
         os.killpg(process.pid, 0)
     except ProcessLookupError:
@@ -645,9 +730,20 @@ def _signal_process_group(
     process: subprocess.Popen[Any],
     signal_number: int,
     process_token: str = "",
+    process_identity: str = "",
 ) -> None:
     try:
-        if os.name == "posix" and process.poll() is None:
+        can_signal_reaped_darwin_group = (
+            os.name == "posix"
+            and sys.platform == "darwin"
+            and process.poll() is not None
+            and _darwin_process_identity_state(process.pid, process_identity)
+            == "absent"
+            and _darwin_process_group_probe(process.pid)[0] == "live"
+        )
+        if os.name == "posix" and (
+            process.poll() is None or can_signal_reaped_darwin_group
+        ):
             os.killpg(process.pid, signal_number)
         elif process.poll() is None:
             if signal_number == signal.SIGTERM:
@@ -667,23 +763,47 @@ def _signal_process_group(
 def _terminate_process_group(
     process: subprocess.Popen[Any],
     process_token: str = "",
+    process_identity: str = "",
 ) -> None:
-    _signal_process_group(process, signal.SIGTERM, process_token)
+    _signal_process_group(
+        process,
+        signal.SIGTERM,
+        process_token,
+        process_identity,
+    )
     deadline = time.monotonic() + 1.0
     while (
-        _process_group_is_live(process, process_token)
+        _process_group_is_live(process, process_token, process_identity)
         and time.monotonic() < deadline
     ):
         process.poll()
         time.sleep(0.02)
-    if _process_group_is_live(process, process_token):
-        _signal_process_group(process, signal.SIGKILL, process_token)
+    if _process_group_is_live(process, process_token, process_identity):
+        _signal_process_group(
+            process,
+            signal.SIGKILL,
+            process_token,
+            process_identity,
+        )
     if process.poll() is None:
         try:
             process.wait(timeout=1)
         except subprocess.TimeoutExpired:
-            _signal_process_group(process, signal.SIGKILL, process_token)
+            _signal_process_group(
+                process,
+                signal.SIGKILL,
+                process_token,
+                process_identity,
+            )
             process.wait(timeout=1)
+    if process.poll() is not None and _process_group_is_live(
+        process,
+        process_token,
+        process_identity,
+    ):
+        raise AlbertError(
+            "Unable to verify that the bounded process group was terminated."
+        )
 
 
 def _trusted_system_executable(name: str) -> str | None:
@@ -857,6 +977,7 @@ def _run_bounded_process(
         shell=False,
         start_new_session=True,
     )
+    process_identity = _process_identity(process.pid)
     capture: _BoundedProcessCapture | None = None
     input_thread: threading.Thread | None = None
 
@@ -905,17 +1026,29 @@ def _run_bounded_process(
                     "Process output exceeded the "
                     f"{output_limit_bytes}-byte aggregate limit and was terminated."
                 )
-                _terminate_process_group(process, process_token)
+                _terminate_process_group(
+                    process,
+                    process_token,
+                    process_identity,
+                )
                 break
             if now - started >= timeout_seconds:
                 exit_status = 124
                 bounded_outcome = "timed-out"
                 extra_stderr = f"Process timed out after {timeout_seconds} seconds."
-                _terminate_process_group(process, process_token)
+                _terminate_process_group(
+                    process,
+                    process_token,
+                    process_identity,
+                )
                 break
             if poll_callback is not None:
                 poll_callback()
-            group_live = _process_group_is_live(process, process_token)
+            group_live = _process_group_is_live(
+                process,
+                process_token,
+                process_identity,
+            )
             if (
                 leader_status is not None
                 and capture.drained.is_set()
@@ -933,7 +1066,11 @@ def _run_bounded_process(
                     f"{descendant_grace_seconds} seconds after the leader "
                     "exited and were terminated."
                 )
-                _terminate_process_group(process, process_token)
+                _terminate_process_group(
+                    process,
+                    process_token,
+                    process_identity,
+                )
                 break
             time.sleep(0.02)
         if exit_status is not None:
@@ -945,7 +1082,11 @@ def _run_bounded_process(
                 "Process output exceeded the "
                 f"{output_limit_bytes}-byte aggregate limit and was terminated."
             )
-            _terminate_process_group(process, process_token)
+            _terminate_process_group(
+                process,
+                process_token,
+                process_identity,
+            )
             capture.wait_for_eof(1.0)
         stdout, stderr = capture.finish(
             extra_stderr=extra_stderr,
@@ -975,7 +1116,16 @@ def _run_bounded_process(
             completed.albert_outcome = bounded_outcome
         return completed
     except BaseException:
-        _terminate_process_group(process, process_token)
+        try:
+            _terminate_process_group(
+                process,
+                process_token,
+                process_identity,
+            )
+        except BaseException:
+            # Preserve the original provider/cancellation exception when the
+            # cleanup probe itself is unavailable or contradictory.
+            pass
         if capture is not None:
             capture.finish()
         if input_thread is not None:
@@ -1834,9 +1984,12 @@ def _validated_execution_receipts(data: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _process_identity(pid: int) -> str:
-    """Return a Linux PID start identity so PID reuse cannot impersonate a runner."""
+    """Return a PID start identity so PID reuse cannot impersonate a runner."""
     if pid <= 0:
         return ""
+    if sys.platform == "darwin":
+        state, identity = _darwin_process_identity_probe(pid)
+        return identity if state == "live" else ""
     stat_path = Path(f"/proc/{pid}/stat")
     try:
         remainder = stat_path.read_text(encoding="utf-8").rsplit(")", 1)[1].split()
@@ -1876,36 +2029,6 @@ def sanitized_process_environment(
     return result
 
 
-def _path_is_under_private_tmp(path: Path) -> bool:
-    """Match OS temporary roots, including macOS's /private/tmp alias."""
-
-    try:
-        resolved = path.resolve(strict=False)
-    except OSError:
-        resolved = path
-    for root in (Path("/tmp"), Path(tempfile.gettempdir())):
-        if path.is_relative_to(root) or resolved.is_relative_to(
-            root.resolve(strict=False)
-        ):
-            return True
-    return False
-
-
-def _is_protected_writable_root(path: Path) -> bool:
-    try:
-        resolved = path.resolve(strict=False)
-    except OSError:
-        resolved = path
-    temporary_roots = (Path("/tmp"), Path(tempfile.gettempdir()))
-    if any(resolved == root.resolve(strict=False) for root in temporary_roots):
-        return True
-    return any(
-        resolved == root.resolve(strict=False)
-        or resolved.is_relative_to(root.resolve(strict=False))
-        for root in _PROTECTED_WRITABLE_ROOTS
-    )
-
-
 def sandboxed_process_argv(
     argv: str | list[str],
     *,
@@ -1926,7 +2049,7 @@ def sandboxed_process_argv(
     bubblewrap = _trusted_system_executable("bwrap")
     if not bubblewrap:
         return argv, False
-    if any(_is_protected_writable_root(path) for path in writable_roots):
+    if any(_is_protected_writable_path(str(path)) for path in writable_roots):
         raise AlbertError(
             "Writable process roots cannot override protected sandbox roots."
         )
@@ -1964,13 +2087,13 @@ def sandboxed_process_argv(
     executable_bindings: set[tuple[Path, Path]] = set()
     if executable:
         executable_entry = Path(executable).absolute()
-        if _path_is_under_private_tmp(executable_entry):
+        if _is_under_private_tmp(executable_entry):
             if executable_entry.is_symlink():
                 raise AlbertError(
                     f"Executable {executable_entry} under /tmp must not be a symlink."
                 )
             executable_path = executable_entry.resolve()
-            if not _path_is_under_private_tmp(executable_path):
+            if not _is_under_private_tmp(executable_path):
                 raise AlbertError(
                     f"Executable {executable_entry} must resolve inside /tmp."
                 )
@@ -1995,14 +2118,14 @@ def sandboxed_process_argv(
             if token.startswith("-"):
                 continue
             candidate = Path(token)
-            if candidate.is_absolute() and _path_is_under_private_tmp(candidate):
+            if candidate.is_absolute() and _is_under_private_tmp(candidate):
                 candidate_entry = candidate.absolute()
                 if candidate_entry.is_symlink():
                     raise AlbertError(
                         f"Interpreter script {candidate_entry} under /tmp must not be a symlink."
                     )
                 candidate_source = candidate_entry.resolve()
-                if not _path_is_under_private_tmp(candidate_source):
+                if not _is_under_private_tmp(candidate_source):
                     raise AlbertError(
                         f"Interpreter script {candidate_entry} must resolve inside /tmp."
                     )
@@ -4168,11 +4291,12 @@ class AlbertMission:
             raise LaunchBlockedError(f"{issue_id} router command policy is {self.classify_command(command)}; auto-allowed is required.")
         prompt = self._delegation_prompt(issue, router)
         command_argv = _command_invocation(command)
+        process_env = sanitized_process_environment()
         governed_argv, sandboxed = sandboxed_process_argv(
             command_argv,
             working_directory=self.target_repo,
             readable_roots=(self.target_repo,),
-            path=sanitized_process_environment().get("PATH"),
+            path=process_env.get("PATH"),
         )
         if not sandboxed or not isinstance(governed_argv, list):
             raise AlbertError(
@@ -4183,7 +4307,7 @@ class AlbertMission:
                 governed_argv,
                 input_text=prompt,
                 cwd=self.target_repo,
-                env=sanitized_process_environment(),
+                env=process_env,
                 timeout_seconds=_MODEL_COMMAND_TIMEOUT_SECONDS,
             )
         except OSError as exc:
@@ -14090,36 +14214,26 @@ class AlbertMission:
             ).encode("utf-8")
         ).hexdigest()
 
-    def _record_local_preflight_failure(
+    def _build_local_execution_request(
         self,
         session: LocalAgentSession,
-        argv: str | list[str],
+        effective_argv: tuple[str, ...],
         *,
+        execution_label: str,
         input_text: str | None,
         process_env: dict[str, str],
         timeout_seconds: float,
         output_limit_bytes: int,
-        effect_label: str,
-        public_exit_code: int,
-        error_message: str,
         readable_roots: tuple[Path, ...] = (),
-    ) -> subprocess.CompletedProcess[str]:
-        """Durably record a deterministic failure before any child can start."""
-
-        if os.name != "posix":
-            return subprocess.CompletedProcess(
-                argv,
-                public_exit_code,
-                "",
-                error_message,
-            )
-        effective_argv = tuple(argv) if isinstance(argv, list) else (argv,)
+        readonly_bindings: tuple[tuple[Path, Path], ...] = (),
+        sandbox_mode: str = "bubblewrap",
+    ) -> ExecutionRequest:
         worktree = str(session.worktree_path.resolve())
-        execution_request = ExecutionRequest(
+        return ExecutionRequest(
             request_id=self._local_execution_request_id(
                 session,
                 effective_argv,
-                effect_label.strip() or "process",
+                execution_label.strip() or "process",
             ),
             effect="local-agent",
             argv=effective_argv,
@@ -14146,14 +14260,53 @@ class AlbertMission:
                 descendant_grace_seconds=_PROCESS_DESCENDANT_GRACE_SECONDS,
             ),
             sandbox=ExecutionSandbox(
-                mode="bubblewrap",
+                mode=sandbox_mode,
                 readable_roots=tuple(
                     str(path.resolve()) for path in readable_roots if path.exists()
                 ),
                 writable_roots=(worktree,),
+                readonly_bindings=tuple(
+                    (str(source.resolve()), str(destination.resolve(strict=False)))
+                    for source, destination in readonly_bindings
+                ),
             ),
             environment=tuple(sorted(process_env.items())),
             input_text=input_text,
+        )
+
+    def _record_local_preflight_failure(
+        self,
+        session: LocalAgentSession,
+        argv: str | list[str],
+        *,
+        input_text: str | None,
+        process_env: dict[str, str],
+        timeout_seconds: float,
+        output_limit_bytes: int,
+        effect_label: str,
+        public_exit_code: int,
+        error_message: str,
+        readable_roots: tuple[Path, ...] = (),
+    ) -> subprocess.CompletedProcess[str]:
+        """Durably record a deterministic failure before any child can start."""
+
+        if os.name != "posix":
+            return subprocess.CompletedProcess(
+                argv,
+                public_exit_code,
+                "",
+                error_message,
+            )
+        effective_argv = tuple(argv) if isinstance(argv, list) else (argv,)
+        execution_request = self._build_local_execution_request(
+            session,
+            effective_argv,
+            execution_label=effect_label,
+            input_text=input_text,
+            process_env=process_env,
+            timeout_seconds=timeout_seconds,
+            output_limit_bytes=output_limit_bytes,
+            readable_roots=readable_roots,
         )
         journal = ExecutionJournal(self.runtime_dir / "execution-receipts.json")
         receipt = journal.record_start_failed(
@@ -14305,52 +14458,17 @@ class AlbertMission:
             else (governed_argv,)
         )
         execution_label = effect_label.strip() or "process"
-        execution_request_id = self._local_execution_request_id(
+        execution_request = self._build_local_execution_request(
             session,
             effective_argv,
-            execution_label,
-        )
-        execution_request = ExecutionRequest(
-            request_id=execution_request_id,
-            effect="local-agent",
-            argv=effective_argv,
-            working_directory=str(session.worktree_path.resolve()),
-            authority=LocalAgentExecutionAuthority(
-                mission_id=self.mission_id,
-                session_id=session.session_id,
-                session_revision=session.revision,
-                runner_operation_id=session.runner_operation_id,
-                worktree_identity=session.worktree_identity,
-                allowed_paths=tuple(
-                    value
-                    for value in session.task_packet.get("allowed_paths", [])
-                    if isinstance(value, str)
-                ),
-            ),
-            limits=ExecutionLimits(
-                timeout_seconds=timeout_seconds,
-                output_limit_bytes=output_limit_bytes,
-                address_space_bytes=_PROCESS_ADDRESS_SPACE_BYTES_LIMIT,
-                file_size_bytes=_PROCESS_FILE_SIZE_BYTES_LIMIT,
-                open_file_limit=_PROCESS_OPEN_FILE_LIMIT,
-                process_count_limit=_PROCESS_COUNT_LIMIT,
-                descendant_grace_seconds=_PROCESS_DESCENDANT_GRACE_SECONDS,
-            ),
-            sandbox=ExecutionSandbox(
-                mode="bubblewrap" if os.name == "posix" else "none",
-                readable_roots=tuple(
-                    str(Path(value).resolve())
-                    for value in readable_roots
-                    if Path(value).exists()
-                ),
-                writable_roots=(str(session.worktree_path.resolve()),),
-                readonly_bindings=tuple(
-                    (str(source.resolve()), str(destination.resolve(strict=False)))
-                    for source, destination in dependency_bindings
-                ),
-            ),
-            environment=tuple(sorted(process_env.items())),
+            execution_label=execution_label,
             input_text=input_text,
+            process_env=process_env,
+            timeout_seconds=timeout_seconds,
+            output_limit_bytes=output_limit_bytes,
+            readable_roots=readable_roots,
+            readonly_bindings=tuple(dependency_bindings),
+            sandbox_mode="bubblewrap" if os.name == "posix" else "none",
         )
 
         def record_process_start(

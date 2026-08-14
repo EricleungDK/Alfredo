@@ -215,6 +215,35 @@ class ExecutionContractTests(unittest.TestCase):
         self.assertEqual(receipt.status, "start-failed")
         self.assertIn("must not be a symlink", receipt.error_message)
 
+    def test_prepared_boundary_uses_the_request_path_for_implicit_executable(self) -> None:
+        executable_dir = self.root / "governed-bin"
+        executable_dir.mkdir()
+        executable = executable_dir / "governed-runner"
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+        request = self._request(request_id="shell:custom-path")
+        unsafe = list(request.argv)
+        separator = unsafe.index("--")
+        unsafe[separator + 7 :] = ["governed-runner", "-c", "pass"]
+        chdir_index = unsafe.index("--chdir")
+        unsafe[chdir_index:chdir_index] = [
+            "--ro-bind",
+            str(executable),
+            str(executable),
+        ]
+        request = request.with_updates(
+            argv=tuple(unsafe),
+            environment=(("PATH", str(executable_dir)),),
+        )
+
+        receipt = PythonExecutionProvider(
+            executor=lambda argv, **_kwargs: subprocess.CompletedProcess(
+                argv, 0, "", ""
+            )
+        ).execute(request)
+
+        self.assertEqual(receipt.status, "completed")
+
     def test_exact_replay_returns_the_typed_receipt_without_rerunning_effect(
         self,
     ) -> None:

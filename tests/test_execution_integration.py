@@ -311,6 +311,123 @@ class HostExecutionIntegrationTests(unittest.TestCase):
         self.assertEqual(second.exit_code, 126)
         replay_run.assert_not_called()
 
+    def test_shell_legacy_fallback_is_read_only_and_idempotent(self) -> None:
+        primary = self._mission()
+        secondary_tracker = self.root / "legacy-fallback-tracker"
+        (secondary_tracker / "issues").mkdir(parents=True)
+        (secondary_tracker / "PRD.md").write_text(
+            "# Legacy Fallback Mission\n",
+            encoding="utf-8",
+        )
+        secondary = AlbertMission(
+            target_repo=self.target,
+            tracker_dir=secondary_tracker,
+            runtime_root=self.runtime,
+            mission_id="legacy-fallback-mission",
+            allow_empty_tracker=True,
+        ).load()
+        snapshots = WorkspaceSnapshotService(primary, missions=(secondary,))
+        terminal = ShellTerminalService(snapshots)
+        initial = snapshots.snapshot()
+        snapshots.update_preferences(
+            active_mission_id=secondary.mission_id,
+            conversation_scope=initial.conversation_scope,
+            operations_view=initial.operations_view,
+        )
+        completed = subprocess.CompletedProcess(
+            args=["bwrap"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+        with self._sandboxed_terminal(terminal):
+            with patch(
+                "albert_mvp.workspace._run_bounded_process",
+                return_value=completed,
+            ):
+                terminal.submit(
+                    correlation_id="shell-legacy-fallback-1",
+                    command="python3 -m unittest --help",
+                    working_directory=str(self.target),
+                    requested_paths=[],
+                    requester="mission-commander",
+                )
+
+        mission_journal_path = secondary.runtime_dir / "execution-receipts.json"
+        legacy_path = snapshots.preferences_path.parent / "execution-receipts.json"
+        legacy_path.write_bytes(mission_journal_path.read_bytes())
+        mission_journal_path.unlink()
+        legacy_payload = json.loads(legacy_path.read_text(encoding="utf-8"))
+        request_id = next(iter(legacy_payload["records"]))
+        legacy_request = ExecutionRequest.from_dict(
+            legacy_payload["records"][request_id]["request"]
+        )
+        legacy_payload["records"][request_id]["receipt"] = (
+            ExecutionReceipt.executing(legacy_request).to_dict(include_output=False)
+        )
+        legacy_payload["records"][request_id]["receipt"].update(
+            {"owner_pid": 999999, "owner_identity": ""}
+        )
+        legacy_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+        legacy_before = legacy_path.read_bytes()
+        legacy_mtime = legacy_path.stat().st_mtime_ns
+
+        terminal_payload = json.loads(
+            terminal.terminal_path.read_text(encoding="utf-8")
+        )
+        terminal_payload["commands"][0].update(
+            {
+                "status": "executing",
+                "exit_code": None,
+                "executor_pid": 999999,
+                "executor_identity": "",
+            }
+        )
+        terminal.terminal_path.write_text(
+            json.dumps(terminal_payload),
+            encoding="utf-8",
+        )
+
+        first = terminal.inspect().commands[0]
+        second = terminal.inspect().commands[0]
+
+        self.assertEqual(first.status, "outcome-unknown")
+        self.assertEqual(second.status, "outcome-unknown")
+        self.assertEqual(first.exit_code, None)
+        self.assertEqual(second.exit_code, None)
+        self.assertEqual(legacy_path.read_bytes(), legacy_before)
+        self.assertEqual(legacy_path.stat().st_mtime_ns, legacy_mtime)
+
+    def test_shell_provider_start_failure_replays_with_the_public_exit_code(self) -> None:
+        terminal = self._terminal()
+        with self._sandboxed_terminal(terminal):
+            with patch(
+                "albert_mvp.workspace._run_bounded_process",
+                side_effect=FileNotFoundError("provider executable missing"),
+            ):
+                first = terminal.submit(
+                    correlation_id="shell-provider-start-failure-1",
+                    command="python3 -m unittest --help",
+                    working_directory=str(self.target),
+                    requested_paths=[],
+                    requester="mission-commander",
+                )
+
+        with patch("albert_mvp.workspace._run_bounded_process") as replay_run:
+            second = self._terminal().submit(
+                correlation_id="shell-provider-start-failure-1",
+                command="python3 -m unittest --help",
+                working_directory=str(self.target),
+                requested_paths=[],
+                requester="mission-commander",
+            )
+
+        self.assertEqual(first.status, "failed")
+        self.assertEqual(first.exit_code, 126)
+        self.assertEqual(second.status, "failed")
+        self.assertEqual(second.exit_code, 126)
+        replay_run.assert_not_called()
+
     def test_local_agent_uses_the_same_provider_with_local_authority(self) -> None:
         mission = self._mission()
         session = LocalAgentSession(

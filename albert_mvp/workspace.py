@@ -49,6 +49,7 @@ from .execution import (
     ExecutionSandbox,
     PythonExecutionProvider,
     ShellExecutionAuthority,
+    _owner_is_live,
 )
 from .performance import measured_stage
 
@@ -1296,37 +1297,19 @@ class ShellTerminalService:
         self._reconcile_submission_audit(denied)
         return self._result_from_record(denied)
 
-    def _record_preflight_execution_failure(
+    def _build_shell_execution_request(
         self,
         *,
-        terminal: dict[str, Any],
         record: dict[str, Any],
-        record_index: int | None,
-        public_exit_code: int,
-        error_message: str,
-    ) -> ShellTerminalCommandResult:
-        """Persist a typed Shell start failure before any child can start."""
-
-        if os.name != "posix":
-            return self._finish_execution(
-                terminal=terminal,
-                record=record,
-                record_index=record_index,
-                exit_code=public_exit_code,
-                stdout="",
-                stderr=error_message,
-            )
+        argv: tuple[str, ...],
+        sandbox: ExecutionSandbox,
+        process_env: dict[str, str],
+    ) -> ExecutionRequest:
         working_directory = str(Path(record["working_directory"]).resolve())
-        try:
-            raw_argv = tuple(shlex.split(record["command"]))
-        except ValueError:
-            raw_argv = (str(record["command"]),)
-        if not raw_argv:
-            raw_argv = (str(record["command"]),)
-        execution_request = ExecutionRequest(
+        return ExecutionRequest(
             request_id=f"shell:{record['command_id']}",
             effect="shell",
-            argv=raw_argv,
+            argv=argv,
             working_directory=working_directory,
             authority=ShellExecutionAuthority(
                 mission_id=str(record["mission_id"]),
@@ -1344,12 +1327,18 @@ class ShellTerminalService:
                 timeout_seconds=self._COMMAND_TIMEOUT_SECONDS,
                 output_limit_bytes=self._OUTPUT_BYTES_LIMIT,
             ),
-            sandbox=ExecutionSandbox(
-                mode="bubblewrap",
-                readable_roots=(working_directory,),
-            ),
-            environment=tuple(sorted(sanitized_process_environment().items())),
+            sandbox=sandbox,
+            environment=tuple(sorted(process_env.items())),
         )
+
+    def _persist_execution_attempt(
+        self,
+        *,
+        terminal: dict[str, Any],
+        record: dict[str, Any],
+        record_index: int | None,
+        execution_request: ExecutionRequest,
+    ) -> tuple[dict[str, Any], dict[str, Any], int]:
         attempt_record = {
             **record,
             "status": "executing",
@@ -1380,6 +1369,52 @@ class ShellTerminalService:
                 grants=terminal["grants"],
                 grant_denials=terminal["grant_denials"],
             )
+        return attempt_terminal, attempt_record, record_index
+
+    def _record_preflight_execution_failure(
+        self,
+        *,
+        terminal: dict[str, Any],
+        record: dict[str, Any],
+        record_index: int | None,
+        public_exit_code: int,
+        error_message: str,
+    ) -> ShellTerminalCommandResult:
+        """Persist a typed Shell start failure before any child can start."""
+
+        if os.name != "posix":
+            return self._finish_execution(
+                terminal=terminal,
+                record=record,
+                record_index=record_index,
+                exit_code=public_exit_code,
+                stdout="",
+                stderr=error_message,
+            )
+        try:
+            raw_argv = tuple(shlex.split(record["command"]))
+        except ValueError:
+            raw_argv = (str(record["command"]),)
+        if not raw_argv:
+            raw_argv = (str(record["command"]),)
+        process_env = sanitized_process_environment()
+        execution_request = self._build_shell_execution_request(
+            record=record,
+            argv=raw_argv,
+            sandbox=ExecutionSandbox(
+                mode="bubblewrap",
+                readable_roots=(str(Path(record["working_directory"]).resolve()),),
+            ),
+            process_env=process_env,
+        )
+        attempt_terminal, attempt_record, record_index = (
+            self._persist_execution_attempt(
+                terminal=terminal,
+                record=record,
+                record_index=record_index,
+                execution_request=execution_request,
+            )
+        )
         journal = ExecutionJournal(
             self._execution_journal_path_for_mission(str(record["mission_id"]))
         )
@@ -1471,60 +1506,20 @@ class ShellTerminalService:
                 public_exit_code=self._SANDBOX_UNAVAILABLE_EXIT_CODE,
                 error_message=str(exc),
             )
-        execution_request = ExecutionRequest(
-            request_id=f"shell:{record['command_id']}",
-            effect="shell",
+        execution_request = self._build_shell_execution_request(
+            record=record,
             argv=tuple(sandbox_argv),
-            working_directory=str(Path(record["working_directory"]).resolve()),
-            authority=ShellExecutionAuthority(
-                mission_id=str(record["mission_id"]),
-                command_id=str(record["command_id"]),
-                correlation_id=str(record["correlation_id"]),
-                command=str(record["command"]),
-                classification=record["classification"],
-                requester=str(record["requester"]),
-                working_directory=str(Path(record["working_directory"]).resolve()),
-                requested_paths=tuple(record["requested_paths"]),
-                access_level=record.get("access_level", "read"),
-                approval_actor=str(record.get("approver", "")),
-            ),
-            limits=ExecutionLimits(
-                timeout_seconds=self._COMMAND_TIMEOUT_SECONDS,
-                output_limit_bytes=self._OUTPUT_BYTES_LIMIT,
-            ),
             sandbox=execution_sandbox,
-            environment=tuple(sorted(process_env.items())),
+            process_env=process_env,
         )
-        attempt_record = {
-            **record,
-            "status": "executing",
-            "exit_code": None,
-            "executor_pid": os.getpid(),
-            "executor_identity": _process_identity(os.getpid()),
-            "execution_request_id": execution_request.request_id,
-            "execution_request_digest": execution_request.request_digest,
-        }
-        commands = list(terminal["commands"])
-        if record_index is None:
-            record_index = len(commands)
-            commands.append(attempt_record)
-        else:
-            commands[record_index] = attempt_record
-        attempt_terminal = {
-            **terminal,
-            "revision": terminal["revision"] + 1,
-            "commands": commands,
-        }
-        chronology_path = (
-            self._snapshots.preferences_path.parent / ".chronology-order.lock"
-        )
-        with _chronology_order_lock(chronology_path):
-            self._persist_terminal(
-                revision=attempt_terminal["revision"],
-                commands=commands,
-                grants=terminal["grants"],
-                grant_denials=terminal["grant_denials"],
+        attempt_terminal, attempt_record, record_index = (
+            self._persist_execution_attempt(
+                terminal=terminal,
+                record=record,
+                record_index=record_index,
+                execution_request=execution_request,
             )
+        )
         try:
             receipt = ExecutionCoordinator(
                 ExecutionJournal(
@@ -1569,7 +1564,11 @@ class ShellTerminalService:
                 terminal=attempt_terminal,
                 record=attempt_record,
                 record_index=record_index,
-                exit_code=receipt.exit_code if receipt.exit_code is not None else 1,
+                exit_code=(
+                    self._SANDBOX_UNAVAILABLE_EXIT_CODE
+                    if receipt.status == "start-failed"
+                    else receipt.exit_code if receipt.exit_code is not None else 1
+                ),
                 stdout=receipt.stdout,
                 stderr=receipt.stderr or receipt.error_message,
                 receipt=receipt,
@@ -2109,7 +2108,7 @@ class ShellTerminalService:
                 if journal_path.resolve() != legacy_path.resolve():
                     legacy = ExecutionJournal(legacy_path)
                     for request, receipt in legacy.inspect_records():
-                        if receipt.status == "executing" and not _process_identity_is_live(
+                        if receipt.status == "executing" and not _owner_is_live(
                             receipt.owner_pid,
                             receipt.owner_identity,
                         ):
@@ -2123,6 +2122,8 @@ class ShellTerminalService:
                                 owner_identity=receipt.owner_identity,
                                 process_pid=receipt.process_pid,
                                 process_identity=receipt.process_identity,
+                                started_at=receipt.started_at,
+                                ended_at=receipt.ended_at,
                             )
                         authority = request.authority
                         if (

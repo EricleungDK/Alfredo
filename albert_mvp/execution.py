@@ -1197,6 +1197,8 @@ class ExecutionReceipt:
         owner_identity: str = "",
         process_pid: int | None = None,
         process_identity: str = "",
+        started_at: str | None = None,
+        ended_at: str | None = None,
     ) -> "ExecutionReceipt":
         return cls._make(
             request,
@@ -1210,6 +1212,8 @@ class ExecutionReceipt:
             owner_identity=owner_identity,
             process_pid=process_pid,
             process_identity=process_identity,
+            started_at=started_at,
+            ended_at=ended_at,
         )
 
     @classmethod
