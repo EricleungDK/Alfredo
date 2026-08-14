@@ -29,7 +29,7 @@ The promotion state remains scheduling/profile configuration metadata. Python Mi
 
 ## Verification
 
-- `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_inference_qualification*.py' -q` — 42 passed (39 qualification/store tests plus 3 CLI/transport tests).
+- `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p 'test_inference_qualification*.py' -q` — 46 passed (42 qualification/store tests plus 4 CLI/transport tests).
 - `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest tests.test_inference -q` — 19 passed with one expected Bubblewrap skip.
 - `python3 -m compileall -q albert_mvp/inference_qualification.py tests/test_inference_qualification.py tests/test_inference_qualification_cli.py` — passed.
 - `ruff check --select E,F --ignore E501` and `ruff format --check` passed for the qualification module and tests; `git diff --check` passed.

@@ -292,12 +292,8 @@ class InferenceQualificationCliTests(unittest.TestCase):
 
         responses = [json.loads(line) for line in output.getvalue().splitlines()]
         self.assertTrue(all(response["success"] for response in responses))
-        self.assertEqual(
-            json.loads(responses[1]["stdout"])["last_action"], "promote-replay"
-        )
-        self.assertEqual(
-            json.loads(responses[3]["stdout"])["last_action"], "rollback-replay"
-        )
+        self.assertEqual(json.loads(responses[1]["stdout"])["last_action"], "promote")
+        self.assertEqual(json.loads(responses[3]["stdout"])["last_action"], "rollback")
 
 
 if __name__ == "__main__":

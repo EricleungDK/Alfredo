@@ -88,6 +88,12 @@ _CONTROL_ERROR_CODES = frozenset(
         "invalid-runner-result",
     }
 )
+_BASELINE_BOOTSTRAP_BLOCKERS = frozenset(
+    {
+        "baseline-required",
+        "rollback-not-tested",
+    }
+)
 _ROUTE_KINDS = {
     "discussion": "discussion",
     "routing": "discussion",
@@ -157,6 +163,12 @@ def _utf8_size(value: str, error_message: str) -> int:
         return len(value.encode("utf-8"))
     except UnicodeError as exc:
         raise ValueError(error_message) from exc
+
+
+def _validate_profile_identity(profile: LocalInferenceProfile) -> None:
+    _utf8_size(profile.profile_id, "qualification profile id must be valid UTF-8")
+    _utf8_size(profile.model, "qualification model name must be valid UTF-8")
+    _utf8_size(profile.model_digest, "qualification model digest must be valid UTF-8")
 
 
 @dataclass(frozen=True)
@@ -352,6 +364,11 @@ class RuntimePin:
             or not self.runtime_version.strip()
         ):
             raise ValueError("promotion runtime identity must be non-empty")
+        _utf8_size(self.runtime_id, "promotion runtime id must be valid UTF-8")
+        _utf8_size(
+            self.runtime_version,
+            "promotion runtime version must be valid UTF-8",
+        )
         for name, value in (
             ("binary_digest", self.binary_digest),
             ("configuration_digest", self.configuration_digest),
@@ -418,6 +435,7 @@ def _validated_rollback_claim(
         or claim["replay_verified"] is not True
     ):
         raise ValueError("rollback test restoration evidence is invalid")
+    _utf8_size(previous_report_id, "rollback test report id must be valid UTF-8")
     return {
         "profile_id": profile.profile_id,
         "runtime_pin": expected_runtime_pin,
@@ -461,8 +479,13 @@ def _baseline_profile_identity(profile: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _is_control_error(fixture_kind: str, error_code: str) -> bool:
-    del fixture_kind
-    return error_code in _CONTROL_ERROR_CODES
+    return fixture_kind == "cancellation" or error_code in _CONTROL_ERROR_CODES
+
+
+def _reliability_scope(observations: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Exclude cancellation-control fixtures from the work reliability gate."""
+
+    return [item for item in observations if item["fixture_kind"] != "cancellation"]
 
 
 @dataclass(frozen=True)
@@ -510,6 +533,10 @@ class ContextSelection:
     prompt_prefix: str
     token_count: int
     cache_hit: bool = False
+
+
+class _RequiredContextBudgetError(ValueError):
+    """A required source cannot fit the bounded prompt headroom."""
 
 
 class DeterministicContextSelector:
@@ -610,7 +637,7 @@ class DeterministicContextSelector:
                 continue
             next_count = token_count + source.token_count
             if next_count > budget_tokens:
-                raise ValueError(
+                raise _RequiredContextBudgetError(
                     f"required context does not fit the {budget_tokens}-token budget"
                 )
             selected.append(source)
@@ -672,6 +699,11 @@ class PromptPrefixReuseTracker:
 
     def __init__(self) -> None:
         self._last_prefix_digest: str | None = None
+
+    def reset(self) -> None:
+        """Start a new report-local prefix evidence sequence."""
+
+        self._last_prefix_digest = None
 
     def observe(self, prefix: str) -> PrefixReuseObservation:
         if not isinstance(prefix, str):
@@ -933,24 +965,19 @@ class QualificationReport:
             "profile",
             "runtime_pin",
             "fixture_ids",
+            "fixture_digests",
+            "fixture_digests_complete",
             "repetitions",
             "observations",
             "metrics",
             "promotion_ready",
             "promotion_blockers",
             "rollback_tested",
-        }
-        optional_legacy_fields = {
-            "fixture_digests",
-            "fixture_digests_complete",
             "baseline_report_id",
             "rollback_receipt_id",
             "rollback_evidence",
         }
-        if (
-            not required_fields.issubset(data)
-            or set(data) - required_fields - optional_legacy_fields
-        ):
+        if set(data) != required_fields:
             raise ValueError("qualification report fields are invalid")
         try:
             json.dumps(data, ensure_ascii=True, allow_nan=False)
@@ -960,10 +987,7 @@ class QualificationReport:
         created_at = data.get("created_at")
         if not isinstance(report_id, str) or not report_id.strip():
             raise ValueError("qualification report id is invalid")
-        try:
-            report_id.encode("utf-8")
-        except UnicodeError as exc:
-            raise ValueError("qualification report id is invalid") from exc
+        _utf8_size(report_id, "qualification report id is invalid")
         if not isinstance(created_at, str) or not created_at.strip():
             raise ValueError("qualification report timestamp is invalid")
         try:
@@ -982,6 +1006,7 @@ class QualificationReport:
             profile = LocalInferenceProfile.from_dict(dict(raw_profile))
         except (TypeError, ValueError, RecursionError) as exc:
             raise ValueError("qualification report profile is invalid") from exc
+        _validate_profile_identity(profile)
         if dict(raw_profile) != profile.to_dict():
             raise ValueError("qualification report profile is not canonical")
         raw_runtime = data.get("runtime_pin")
@@ -989,10 +1014,10 @@ class QualificationReport:
             raise ValueError("qualification report runtime pin is invalid")
         try:
             runtime_pin = RuntimePin(
-                runtime_id=str(raw_runtime.get("runtime_id", "")),
-                runtime_version=str(raw_runtime.get("runtime_version", "")),
-                binary_digest=str(raw_runtime.get("binary_digest", "")),
-                configuration_digest=str(raw_runtime.get("configuration_digest", "")),
+                runtime_id=raw_runtime.get("runtime_id", ""),
+                runtime_version=raw_runtime.get("runtime_version", ""),
+                binary_digest=raw_runtime.get("binary_digest", ""),
+                configuration_digest=raw_runtime.get("configuration_digest", ""),
                 withdrawn=raw_runtime.get("withdrawn", False),
             )
         except (TypeError, ValueError) as exc:
@@ -1001,7 +1026,6 @@ class QualificationReport:
             raise ValueError("qualification report runtime pin is not canonical")
         raw_fixture_ids = data.get("fixture_ids")
         raw_fixture_digests = data.get("fixture_digests")
-        legacy_fixture_digests = "fixture_digests" not in data
         raw_observations = data.get("observations")
         raw_blockers = data.get("promotion_blockers")
         if (
@@ -1032,6 +1056,13 @@ class QualificationReport:
             or not all(isinstance(item, str) and item.strip() for item in raw_blockers)
         ):
             raise ValueError("qualification report collection fields are invalid")
+        for fixture_id in raw_fixture_ids:
+            _utf8_size(fixture_id, "qualification fixture id is invalid")
+        if any(
+            "runtime_pin" not in item or "prefix_digest" not in item
+            for item in raw_observations
+        ):
+            raise ValueError("qualification observation identity fields are incomplete")
         forbidden_observation_fields = {
             "prompt",
             "raw_output",
@@ -1061,16 +1092,7 @@ class QualificationReport:
             for fixture in build_governed_fixture_family()
         }
         if raw_fixture_digests is None:
-            if "fixture_digests" in data:
-                raise ValueError("qualification fixture definition digests are invalid")
-            if not set(raw_fixture_ids).issubset(canonical_fixture_digests):
-                raise ValueError(
-                    "legacy qualification report lacks fixture definition digests"
-                )
-            raw_fixture_digests = {
-                fixture_id: canonical_fixture_digests[fixture_id]
-                for fixture_id in raw_fixture_ids
-            }
+            raise ValueError("qualification fixture definition digests are invalid")
         for fixture_id, digest in raw_fixture_digests.items():
             if (
                 fixture_id in canonical_fixture_digests
@@ -1081,23 +1103,9 @@ class QualificationReport:
         rollback_tested = data.get("rollback_tested")
         baseline_report_id = data.get("baseline_report_id", "")
         rollback_receipt_id = data.get("rollback_receipt_id", "")
-        legacy_rollback_fields = (
-            "rollback_receipt_id" not in data or "rollback_evidence" not in data
-        )
-        legacy_observation_fields = any(
-            "runtime_pin" not in item or "prefix_digest" not in item
-            for item in raw_observations
-        )
-        legacy_report_fields = (
-            legacy_fixture_digests
-            or legacy_rollback_fields
-            or legacy_observation_fields
-        )
         raw_rollback_evidence = data.get("rollback_evidence", {})
         raw_metrics = data.get("metrics")
-        fixture_digests_complete = data.get(
-            "fixture_digests_complete", not legacy_fixture_digests
-        )
+        fixture_digests_complete = data.get("fixture_digests_complete")
         if (
             not isinstance(repetitions, int)
             or isinstance(repetitions, bool)
@@ -1123,44 +1131,16 @@ class QualificationReport:
             or (not rollback_tested and rollback_receipt_id)
         ):
             raise ValueError("qualification report scalar fields are invalid")
+        _utf8_size(baseline_report_id, "qualification baseline report id is invalid")
         raw_blockers = list(raw_blockers)
-        if legacy_fixture_digests and fixture_digests_complete:
-            raise ValueError("legacy qualification fixture digests are incomplete")
         if (
             not fixture_digests_complete
             and "fixture-digests-incomplete" not in raw_blockers
         ):
-            raw_blockers.insert(0, "fixture-digests-incomplete")
-        if (
-            legacy_observation_fields
-            and "observation-identity-incomplete" not in raw_blockers
-        ):
-            raw_blockers.insert(
-                1 if "fixture-digests-incomplete" in raw_blockers else 0,
-                "observation-identity-incomplete",
-            )
-        if not raw_rollback_evidence and rollback_receipt_id and legacy_rollback_fields:
-            rollback_receipt_id = ""
-        if (
-            legacy_rollback_fields
-            and rollback_tested
-            and "rollback-not-tested" not in raw_blockers
-        ):
-            insertion_index = next(
-                (
-                    index
-                    for index, blocker in enumerate(raw_blockers)
-                    if blocker in {"runtime-withdrawn", "baseline-required"}
-                ),
-                len(raw_blockers),
-            )
-            raw_blockers.insert(insertion_index, "rollback-not-tested")
+            raise ValueError("qualification fixture digest evidence is incomplete")
         if not isinstance(data.get("promotion_ready"), bool):
             raise ValueError("qualification report scalar fields are invalid")
-        if (
-            data.get("promotion_ready") != (not raw_blockers)
-            and not legacy_report_fields
-        ):
+        if data.get("promotion_ready") != (not raw_blockers):
             raise ValueError("qualification report scalar fields are invalid")
         try:
             rollback_evidence = (
@@ -1231,6 +1211,7 @@ class QualificationReport:
                         "latency-regression",
                         "latency-evidence-incomplete",
                         "baseline-incomparable",
+                        "baseline-not-rollback-safe",
                     )
                     if blocker in raw_blockers
                 ),
@@ -1479,6 +1460,10 @@ class QualificationReportStore:
             "profile_id"
         ):
             raise PromotionError("qualification report rollback target is invalid")
+        if set(previous_report.promotion_blockers) - _BASELINE_BOOTSTRAP_BLOCKERS:
+            raise PromotionError(
+                "qualification report rollback target is not rollback-safe"
+            )
 
     def inspect(self) -> dict[str, Any]:
         if not self.state_path.exists():
@@ -1708,8 +1693,6 @@ class QualificationReportStore:
                 expected_revision=expected_revision,
             )
             if replay:
-                state["last_action"] = "promote-replay"
-                self._write_state(state)
                 return state
             active = state.get("active")
             rollback_target_id = report.rollback_evidence.get("previous_report_id")
@@ -1718,9 +1701,7 @@ class QualificationReportStore:
                     active.get("report_id") == report_id
                     and active.get("runtime_pin") == runtime_pin.to_dict()
                 ):
-                    state["last_action"] = "promote-replay"
-                    self._write_state(state)
-                    return state
+                    raise PromotionError("qualification report is already promoted")
                 if active.get("report_id") != rollback_target_id:
                     raise PromotionError(
                         "qualification rollback target does not match active state"
@@ -1794,8 +1775,6 @@ class QualificationReportStore:
                 expected_revision=expected_revision,
             )
             if replay:
-                state["last_action"] = "rollback-replay"
-                self._write_state(state)
                 return state
             active = state.get("active")
             if active is None or active.get("profile_id") != profile_id:
@@ -1898,6 +1877,7 @@ class QualificationReportStore:
         }
         required_state_fields = {
             "schema_version",
+            "revision",
             "active",
             "previous",
             "history",
@@ -1907,8 +1887,6 @@ class QualificationReportStore:
             payload
         ):
             raise PromotionError("promotion state fields are invalid")
-        if "revision" not in payload:
-            payload = {"revision": 0, **payload}
         if (
             not isinstance(payload.get("revision"), int)
             or isinstance(payload.get("revision"), bool)
@@ -1955,6 +1933,16 @@ class QualificationReportStore:
             )
         ):
             raise PromotionError("promotion state is invalid")
+        for item in history:
+            try:
+                _utf8_size(item["profile_id"], "promotion state profile id is invalid")
+                _utf8_size(item["report_id"], "promotion state report id is invalid")
+                _utf8_size(
+                    item["correlation_id"],
+                    "promotion state correlation id is invalid",
+                )
+            except ValueError as exc:
+                raise PromotionError("promotion state identity is invalid") from exc
         if payload.get("history"):
             correlations = [item["correlation_id"] for item in history]
             revisions = [item["revision"] for item in history]
@@ -1970,18 +1958,12 @@ class QualificationReportStore:
             "none",
             "promote",
             "rollback",
-            "promote-replay",
-            "rollback-replay",
         }
         if (
             not isinstance(payload.get("last_action"), str)
             or payload["last_action"] not in valid_last_actions
             or (not history and payload["last_action"] != "none")
-            or (
-                history
-                and payload["last_action"].removesuffix("-replay")
-                != history[-1]["action"]
-            )
+            or (history and payload["last_action"] != history[-1]["action"])
         ):
             raise PromotionError("promotion state is invalid")
         try:
@@ -2012,6 +1994,11 @@ class QualificationReportStore:
             for field_name in ("profile_id", "report_id", "promoted_at")
         ):
             raise PromotionError("promotion state is invalid")
+        try:
+            for field_name in ("profile_id", "report_id", "promoted_at"):
+                _utf8_size(value[field_name], "promotion state identity is invalid")
+        except ValueError as exc:
+            raise PromotionError("promotion state identity is invalid") from exc
         profile = value.get("profile")
         runtime_pin = value.get("runtime_pin")
         if not isinstance(profile, dict) or not isinstance(runtime_pin, dict):
@@ -2027,6 +2014,21 @@ class QualificationReportStore:
             ).to_dict()
         except (TypeError, ValueError, RecursionError) as exc:
             raise PromotionError("promotion state is invalid") from exc
+        try:
+            _utf8_size(
+                canonical_profile["profile_id"],
+                "promotion state profile id is invalid",
+            )
+            _utf8_size(
+                canonical_profile["model"],
+                "promotion state model name is invalid",
+            )
+            _utf8_size(
+                canonical_profile["model_digest"],
+                "promotion state model digest is invalid",
+            )
+        except (KeyError, ValueError) as exc:
+            raise PromotionError("promotion state identity is invalid") from exc
         if profile != canonical_profile or runtime_pin != canonical_runtime:
             raise PromotionError("promotion state is not canonical")
         if value["profile_id"] != profile.get("profile_id"):
@@ -2044,12 +2046,25 @@ class QualificationReportStore:
         correlation_id: str,
         expected_revision: int,
     ) -> str:
+        if not isinstance(profile_id, str) or not profile_id.strip():
+            raise PromotionError("qualification mutation profile id is required")
+        if not isinstance(report_id, str):
+            raise PromotionError("qualification mutation report id is invalid")
         if (
             not isinstance(correlation_id, str)
             or not correlation_id.strip()
             or len(correlation_id) > _MAX_CORRELATION_ID_LENGTH
         ):
             raise PromotionError("qualification mutation correlation id is required")
+        try:
+            _utf8_size(profile_id, "qualification mutation profile id is invalid")
+            _utf8_size(report_id, "qualification mutation report id is invalid")
+            _utf8_size(
+                correlation_id,
+                "qualification mutation correlation id is invalid",
+            )
+        except ValueError as exc:
+            raise PromotionError("qualification mutation identity is invalid") from exc
         if (
             not isinstance(expected_revision, int)
             or isinstance(expected_revision, bool)
@@ -2180,6 +2195,17 @@ class InferenceQualificationService:
             raise TypeError("qualification profile must be a LocalInferenceProfile")
         if not isinstance(runtime_pin, RuntimePin):
             raise TypeError("qualification runtime_pin must be a RuntimePin")
+        _validate_profile_identity(profile)
+        if report_id is not None:
+            if not isinstance(report_id, str) or not report_id.strip():
+                raise ValueError("qualification report id must be non-empty")
+            _utf8_size(report_id, "qualification report id must be valid UTF-8")
+        if baseline_report is not None and not isinstance(
+            baseline_report, QualificationReport
+        ):
+            raise TypeError(
+                "qualification baseline_report must be a QualificationReport"
+            )
         if not isinstance(rollback_tested, bool):
             raise TypeError("qualification rollback_tested must be boolean")
         if rollback_test is not None and not callable(rollback_test):
@@ -2226,6 +2252,20 @@ class InferenceQualificationService:
                 "timings": {field_name: None for field_name in _TIMING_FIELDS},
             }
 
+        def control_failure_result(
+            error_code: str,
+            *,
+            outcome: str = "escalated",
+            context_over_budget: bool = False,
+        ) -> dict[str, Any]:
+            return {
+                "outcome": outcome,
+                "unexpected_failure": True,
+                "context_over_budget": context_over_budget,
+                "error_code": error_code,
+                "timings": {field_name: 0.0 for field_name in _TIMING_FIELDS},
+            }
+
         rollback_claim: dict[str, Any] = {}
         control_context = {
             "cancel_check": cancel_check,
@@ -2259,6 +2299,7 @@ class InferenceQualificationService:
         rollback_receipt_id = ""
         expected_runtime_pin = runtime_pin.to_dict()
 
+        self.prefix_tracker.reset()
         observations: list[dict[str, Any]] = []
         observed_digests: set[str] = set()
         for fixture in self.fixtures:
@@ -2271,90 +2312,89 @@ class InferenceQualificationService:
                 if cancellation_requested:
                     result = cancellation_result(fixture)
                 else:
-                    if context_sources:
-                        selection = self.context_selector.select(
-                            context_sources,
-                            profile_role=profile_role,
-                            budget_tokens=available_context_tokens,
-                            required_source_ids=required_source_ids,
+                    try:
+                        if context_sources:
+                            selection = self.context_selector.select(
+                                context_sources,
+                                profile_role=profile_role,
+                                budget_tokens=available_context_tokens,
+                                required_source_ids=required_source_ids,
+                            )
+                            prompt_prefix = (
+                                f"{selection.prompt_prefix}\n\n{fixture.prompt}"
+                            )
+                            prefix = self.prefix_tracker.observe(
+                                selection.prompt_prefix
+                            )
+                        else:
+                            prompt_prefix = fixture.prompt
+                            prefix = self.prefix_tracker.observe(fixture.prompt)
+                    except _RequiredContextBudgetError:
+                        result = control_failure_result(
+                            "context-over-budget",
+                            outcome="rejected",
+                            context_over_budget=True,
                         )
-                        prompt_prefix = f"{selection.prompt_prefix}\n\n{fixture.prompt}"
-                        prefix = self.prefix_tracker.observe(selection.prompt_prefix)
                     else:
-                        prompt_prefix = fixture.prompt
-                        prefix = self.prefix_tracker.observe(fixture.prompt)
-                    combined_context_tokens = estimate_prompt_tokens(prompt_prefix)
-                    context = {
-                        "source_digest": (
-                            selection.source_digest if context_sources else ""
-                        ),
-                        "source_ids": (selection.source_ids if context_sources else ()),
-                        "token_count": combined_context_tokens,
-                        "context_over_budget": combined_context_tokens
-                        > available_context_tokens,
-                        "cache_hit": selection.cache_hit if context_sources else False,
-                        "prefix_digest": prefix.prefix_digest,
-                        "prefix_reused": prefix.reused,
-                        "prefix_invalidated": prefix.invalidated,
-                        "prompt_prefix": prompt_prefix,
-                        "cancel_check": cancel_check,
-                        "deadline_at": deadline_at,
-                        "runtime_pin": runtime_pin.to_dict(),
-                    }
-                    refresh_control()
-                    if cancellation_requested:
-                        result = cancellation_result(fixture)
-                    elif (
-                        context["context_over_budget"]
-                        or fixture.required_context_tokens > available_context_tokens
-                    ):
-                        result = {
-                            "outcome": "rejected",
-                            "context_over_budget": True,
-                            "unexpected_failure": True,
-                            "error_code": "context-over-budget",
-                            "timings": {
-                                field_name: None for field_name in _TIMING_FIELDS
-                            },
+                        combined_context_tokens = estimate_prompt_tokens(prompt_prefix)
+                        context = {
+                            "source_digest": (
+                                selection.source_digest if context_sources else ""
+                            ),
+                            "source_ids": (
+                                selection.source_ids if context_sources else ()
+                            ),
+                            "token_count": combined_context_tokens,
+                            "context_over_budget": combined_context_tokens
+                            > available_context_tokens,
+                            "cache_hit": selection.cache_hit
+                            if context_sources
+                            else False,
+                            "prefix_digest": prefix.prefix_digest,
+                            "prefix_reused": prefix.reused,
+                            "prefix_invalidated": prefix.invalidated,
+                            "prompt_prefix": prompt_prefix,
+                            "cancel_check": cancel_check,
+                            "deadline_at": deadline_at,
+                            "runtime_pin": runtime_pin.to_dict(),
                         }
-                    else:
-                        try:
-                            raw_result = runner(fixture, profile, context, repetition)
-                        except Exception:  # a failed cohort is evidence, not authority
-                            result = {
-                                "outcome": "escalated",
-                                "unexpected_failure": True,
-                                "error_code": "runner-failed",
-                                "timings": {
-                                    field_name: None for field_name in _TIMING_FIELDS
-                                },
-                            }
+                        refresh_control()
+                        if cancellation_requested:
+                            result = cancellation_result(fixture)
+                        elif (
+                            context["context_over_budget"]
+                            or fixture.required_context_tokens
+                            > available_context_tokens
+                        ):
+                            result = control_failure_result(
+                                "context-over-budget",
+                                outcome="rejected",
+                                context_over_budget=True,
+                            )
                         else:
                             try:
-                                result = self._validated_result(raw_result)
-                            except (TypeError, ValueError, RecursionError):
-                                result = {
-                                    "outcome": "escalated",
-                                    "unexpected_failure": True,
-                                    "error_code": "invalid-runner-result",
-                                    "timings": {
-                                        field_name: None
-                                        for field_name in _TIMING_FIELDS
-                                    },
-                                }
+                                raw_result = runner(
+                                    fixture, profile, context, repetition
+                                )
+                            except (
+                                Exception
+                            ):  # a failed cohort is evidence, not authority
+                                result = control_failure_result("runner-failed")
                             else:
-                                if result.get("runtime_pin") != expected_runtime_pin:
-                                    result = {
-                                        "outcome": "escalated",
-                                        "unexpected_failure": True,
-                                        "error_code": "runner-failed",
-                                        "timings": {
-                                            field_name: None
-                                            for field_name in _TIMING_FIELDS
-                                        },
-                                    }
-                        if refresh_control():
-                            result = cancellation_result(fixture)
+                                try:
+                                    result = self._validated_result(raw_result)
+                                except (TypeError, ValueError, RecursionError):
+                                    result = control_failure_result(
+                                        "invalid-runner-result"
+                                    )
+                                else:
+                                    if (
+                                        result.get("runtime_pin")
+                                        != expected_runtime_pin
+                                    ):
+                                        result = control_failure_result("runner-failed")
+                            if refresh_control():
+                                result = cancellation_result(fixture)
                 observation = self._observation(
                     fixture,
                     profile,
@@ -2551,6 +2591,7 @@ class InferenceQualificationService:
             raise ValueError("qualification model digest is invalid")
         if digest and not digest.strip():
             raise ValueError("qualification model digest is invalid")
+        _utf8_size(digest, "qualification model digest must be valid UTF-8")
         result["model_digest"] = digest.strip()
         error_code = result.get("error_code", "")
         if not isinstance(error_code, str) or error_code not in _VALID_ERROR_CODES:
@@ -2681,6 +2722,14 @@ class InferenceQualificationService:
                 )
             ):
                 raise ValueError("qualification observation scalar is invalid")
+            _utf8_size(
+                observation["profile_id"],
+                "qualification observation profile id is invalid",
+            )
+            _utf8_size(
+                observation["model_digest"],
+                "qualification observation model digest is invalid",
+            )
             if observation_identity_complete and (
                 not isinstance(observation["runtime_pin"], Mapping)
                 or dict(observation["runtime_pin"]) != expected_runtime_pin
@@ -2716,11 +2765,7 @@ class InferenceQualificationService:
             ):
                 raise ValueError("qualification observation quality is invalid")
             timings = observation["timings"]
-            timing_missing_allowed = observation["outcome"] == "cancelled" or (
-                _is_control_error(
-                    observation["fixture_kind"], observation["error_code"]
-                )
-            )
+            timing_missing_allowed = observation["outcome"] == "cancelled"
             if set(timings) != set(_TIMING_FIELDS) or any(
                 (timings[field_name] is None and not timing_missing_allowed)
                 or (
@@ -2760,6 +2805,13 @@ class InferenceQualificationService:
                             raise ValueError(
                                 "qualification observation prefix semantics are invalid"
                             )
+                    elif (
+                        observation["prefix_reused"]
+                        or observation["prefix_invalidated"]
+                    ):
+                        raise ValueError(
+                            "qualification observation prefix semantics are invalid"
+                        )
                     previous_prefix_digest = prefix_digest
                 elif observation["prefix_reused"] or observation["prefix_invalidated"]:
                     raise ValueError(
@@ -2945,8 +2997,9 @@ class InferenceQualificationService:
             for field_name in _TIMING_FIELDS
         }
         count = len(observations)
+        reliability_observations = _reliability_scope(observations)
         quality = sum(float(item["quality_score"]) for item in observations)
-        reliable = sum(1 for item in observations if item["reliable"])
+        reliable = sum(1 for item in reliability_observations if item["reliable"])
         return {
             "sample_count": count,
             "valid_routes": sum(1 for item in observations if item["route_valid"]),
@@ -2962,7 +3015,11 @@ class InferenceQualificationService:
             "context_over_budget": sum(
                 1 for item in observations if item["context_over_budget"]
             ),
-            "reliability_rate": round(reliable / count, 4) if count else 0.0,
+            "reliability_rate": (
+                round(reliable / len(reliability_observations), 4)
+                if reliability_observations
+                else 0.0
+            ),
             "quality_rate": round(quality / count, 4) if count else 0.0,
             "unexpected_outcomes": sum(
                 1 for item in observations if not item["expected"]
@@ -3034,7 +3091,10 @@ class InferenceQualificationService:
             item.get("model_digest") != profile.model_digest for item in observations
         ):
             blockers.append("model-digest-mismatch")
-        if not observations or any(not item["reliable"] for item in observations):
+        reliability_observations = _reliability_scope(observations)
+        if not reliability_observations or any(
+            not item["reliable"] for item in reliability_observations
+        ):
             blockers.append("reliability-not-qualified")
         if metrics["quality_rate"] < 1.0:
             blockers.append("quality-not-qualified")
@@ -3047,6 +3107,8 @@ class InferenceQualificationService:
         if baseline_report is None:
             blockers.append("baseline-required")
         else:
+            if set(baseline_report.promotion_blockers) - _BASELINE_BOOTSTRAP_BLOCKERS:
+                blockers.append("baseline-not-rollback-safe")
             if (
                 set(baseline_report.fixture_ids) != set(fixture_ids)
                 or baseline_report.fixture_digests != dict(fixture_digests)
