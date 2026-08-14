@@ -330,6 +330,14 @@ class QualificationReportTests(unittest.TestCase):
             )
             self.assertNotIn("observations", inspection["reports"][0])
 
+            valid_state = store.inspect()
+            tampered_state = json.loads(json.dumps(valid_state))
+            tampered_state["previous"]["report_id"] = report.report_id
+            store._write_state(tampered_state)
+            with self.assertRaisesRegex(PromotionError, "rollback relation is invalid"):
+                store.inspect()
+            store._write_state(valid_state)
+
             replayed = store.promote(
                 profile_id=profile.profile_id,
                 report_id=report.report_id,
@@ -338,6 +346,15 @@ class QualificationReportTests(unittest.TestCase):
                 expected_revision=0,
             )
             self.assertEqual(replayed["last_action"], "promote-replay")
+            valid_state = store.inspect()
+            tampered_history = json.loads(json.dumps(valid_state))
+            tampered_history["history"][0]["request_digest"] = "a" * 64
+            store._write_state(tampered_history)
+            with self.assertRaisesRegex(
+                PromotionError, "history request digest is invalid"
+            ):
+                store.inspect()
+            store._write_state(valid_state)
             rolled_back = store.rollback(
                 profile.profile_id,
                 correlation_id="rollback-1",
@@ -360,7 +377,14 @@ class QualificationReportTests(unittest.TestCase):
                     "profile_id": profile.profile_id,
                     "report_id": report.report_id,
                     "correlation_id": f"historical-{index}",
-                    "request_digest": "c" * 64,
+                    "request_digest": store._mutation_digest(
+                        "promote",
+                        profile_id=profile.profile_id,
+                        report_id=report.report_id,
+                        runtime_pin=runtime_pin,
+                        correlation_id=f"historical-{index}",
+                        expected_revision=index,
+                    ),
                     "revision": index + 1,
                 }
                 for index in range(32)
@@ -403,6 +427,33 @@ class QualificationReportTests(unittest.TestCase):
 
         self.assertEqual(report.observations[0]["error_code"], "runner-failed")
         self.assertEqual(report.metrics["unexpected_outcomes"], 1)
+        self.assertIn("reliability-not-qualified", report.promotion_blockers)
+
+    def test_control_error_makes_an_expected_accepted_result_unreliable(self) -> None:
+        profile = replace(
+            LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1"),
+            model_digest="sha256:worker-digest",
+        )
+        runtime_pin = RuntimePin(
+            runtime_id="ollama",
+            runtime_version="0.11.4",
+            binary_digest="a" * 64,
+            configuration_digest="b" * 64,
+        )
+
+        def runner(fixture, candidate, context, repetition):
+            result = successful_fixture_result(fixture, candidate, context, repetition)
+            result["error_code"] = "runner-failed"
+            return result
+
+        report = InferenceQualificationService(
+            Path("/tmp/qualification-control-error"),
+            fixtures=(build_governed_fixture_family()[0],),
+            repetitions=1,
+        ).qualify(profile, runner, runtime_pin=runtime_pin)
+
+        self.assertTrue(report.observations[0]["expected"])
+        self.assertFalse(report.observations[0]["reliable"])
         self.assertIn("reliability-not-qualified", report.promotion_blockers)
 
     def test_cancelled_runner_may_omit_stage_timings_and_reviewed_latency(self) -> None:
@@ -1104,6 +1155,7 @@ class QualificationReportTests(unittest.TestCase):
                 },
                 runtime_pin=runtime_pin,
             )
+            self.assertIn("fixture-definition-mismatch", report.promotion_blockers)
             store = QualificationReportStore(Path(directory))
             with self.assertRaises(ValueError):
                 store.save_report(report)
