@@ -166,6 +166,8 @@ def build_parser() -> argparse.ArgumentParser:
     qualification_promote.add_argument("--runtime-version", required=True)
     qualification_promote.add_argument("--binary-digest", required=True)
     qualification_promote.add_argument("--configuration-digest", required=True)
+    qualification_promote.add_argument("--correlation-id", required=True)
+    qualification_promote.add_argument("--expected-revision", type=int, required=True)
 
     qualification_rollback = subparsers.add_parser(
         "inference-qualification-rollback",
@@ -177,6 +179,8 @@ def build_parser() -> argparse.ArgumentParser:
         require_runtime_root=True,
     )
     qualification_rollback.add_argument("--profile-id", required=True)
+    qualification_rollback.add_argument("--correlation-id", required=True)
+    qualification_rollback.add_argument("--expected-revision", type=int, required=True)
 
     coding_workspace_select = subparsers.add_parser(
         "coding-workspace-select",
@@ -1114,18 +1118,28 @@ def _run(args: argparse.Namespace) -> int:
             print(json.dumps(store.inspect_reports(), sort_keys=True))
             return 0
         if args.command == "inference-qualification-promote":
-            state = store.promote(
-                profile_id=args.profile_id,
-                report_id=args.report_id,
-                runtime_pin=RuntimePin(
+            try:
+                runtime_pin = RuntimePin(
                     runtime_id=args.runtime_id,
                     runtime_version=args.runtime_version,
                     binary_digest=args.binary_digest,
                     configuration_digest=args.configuration_digest,
-                ),
+                )
+            except ValueError as exc:
+                raise PromotionError(str(exc)) from exc
+            state = store.promote(
+                profile_id=args.profile_id,
+                report_id=args.report_id,
+                runtime_pin=runtime_pin,
+                correlation_id=args.correlation_id,
+                expected_revision=args.expected_revision,
             )
         else:
-            state = store.rollback(args.profile_id)
+            state = store.rollback(
+                args.profile_id,
+                correlation_id=args.correlation_id,
+                expected_revision=args.expected_revision,
+            )
         print(json.dumps(state, sort_keys=True))
         return 0
     target_repo = Path(args.target_repo)

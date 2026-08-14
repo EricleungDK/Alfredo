@@ -23,6 +23,52 @@ from albert_mvp.inference_qualification import (
 )
 
 
+def successful_fixture_result(fixture, _profile, _context, _repetition):
+    edit_kinds = {
+        "small-edit",
+        "multi-file-edit",
+        "repair",
+        "long-context",
+        "queued-local-agent",
+    }
+    evidence_kinds = edit_kinds | {"model-swap"}
+    result = {
+        "route": {
+            "kind": "coding-task" if fixture.kind in edit_kinds else "discussion"
+        },
+        "outcome": "accepted",
+        "model_digest": "sha256:worker-digest",
+        "timings": {
+            "load_ms": 1,
+            "prompt_evaluation_ms": 2,
+            "first_token_ms": 3,
+            "decoding_ms": 4,
+        },
+        "reviewed_latency_ms": 10,
+    }
+    if fixture.kind in edit_kinds:
+        result["plan"] = {"files": ["src/example.py"]}
+    if fixture.kind in evidence_kinds:
+        result["evidence"] = {"changed_files": ["src/example.py"]}
+    if fixture.kind == "repair":
+        result["outcome"] = "repaired"
+    elif fixture.kind == "malformed-output":
+        result["outcome"] = "escalated"
+    elif fixture.kind == "policy-violation":
+        result["outcome"] = "policy-blocked"
+    elif fixture.kind == "cancellation":
+        result["outcome"] = "cancelled"
+    elif fixture.kind == "model-swap":
+        result["model_swapped"] = True
+    elif fixture.kind == "queued-local-agent":
+        result["queued"] = True
+    return result
+
+
+def long_context_sources():
+    return (ContextSource("long-context", "x" * 28_800, required=True),)
+
+
 class GovernedFixtureFamilyTests(unittest.TestCase):
     def test_fixture_family_covers_every_required_profile_workload(self) -> None:
         fixtures = build_governed_fixture_family()
@@ -96,7 +142,9 @@ class GovernedFixtureFamilyTests(unittest.TestCase):
             profile,
             run_fixture,
             runtime_pin=runtime_pin,
-            rollback_tested=True,
+            rollback_test=lambda: True,
+            context_sources=long_context_sources(),
+            required_source_ids=("long-context",),
         )
 
         self.assertEqual(report.metrics["sample_count"], 22)
@@ -122,6 +170,8 @@ class QualificationReportTests(unittest.TestCase):
         profile = replace(
             LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1"),
             model_digest="sha256:worker-digest",
+            context_budget=16_384,
+            output_budget=2_048,
         )
         runtime_pin = RuntimePin(
             runtime_id="ollama",
@@ -170,7 +220,8 @@ class QualificationReportTests(unittest.TestCase):
         self.assertEqual(report.metrics["escalations"], 0)
         self.assertEqual(report.metrics["reviewed_latency_ms"]["p50"], 140.0)
         self.assertEqual(report.metrics["timings_ms"]["load_ms"]["p95"], 13.0)
-        self.assertTrue(report.promotion_ready)
+        self.assertFalse(report.promotion_ready)
+        self.assertIn("fixture-coverage-incomplete", report.promotion_blockers)
 
     def test_invalid_runner_output_is_recorded_as_non_promotable_evidence(self) -> None:
         profile = LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1")
@@ -198,6 +249,8 @@ class QualificationReportTests(unittest.TestCase):
         profile = replace(
             LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1"),
             model_digest="sha256:worker-digest",
+            context_budget=16_384,
+            output_budget=2_048,
         )
         runtime_pin = RuntimePin(
             runtime_id="ollama",
@@ -206,50 +259,68 @@ class QualificationReportTests(unittest.TestCase):
             configuration_digest="b" * 64,
         )
 
-        def run_fixture(_fixture, _profile, _context, _repetition):
-            return {
-                "route": {"kind": "discussion"},
-                "plan": {"files": []},
-                "evidence": {"tests": ["not applicable"]},
-                "outcome": "accepted",
-                "model_digest": "sha256:worker-digest",
-                "timings": {
-                    "load_ms": 1,
-                    "prompt_evaluation_ms": 2,
-                    "first_token_ms": 3,
-                    "decoding_ms": 4,
-                },
-                "reviewed_latency_ms": 10,
-            }
-
         with tempfile.TemporaryDirectory() as directory:
-            report = InferenceQualificationService(
-                Path(directory),
-                fixtures=(build_governed_fixture_family()[0],),
-                repetitions=1,
-            ).qualify(
+            service = InferenceQualificationService(Path(directory), repetitions=2)
+            baseline = service.qualify(
                 profile,
-                run_fixture,
+                successful_fixture_result,
                 runtime_pin=runtime_pin,
-                rollback_tested=True,
+                rollback_test=lambda: True,
+                context_sources=long_context_sources(),
+                required_source_ids=("long-context",),
+                report_id="baseline",
+            )
+            report = service.qualify(
+                profile,
+                successful_fixture_result,
+                runtime_pin=runtime_pin,
+                rollback_test=lambda: True,
+                baseline_report=baseline,
+                context_sources=long_context_sources(),
+                required_source_ids=("long-context",),
+                report_id="candidate",
             )
             store = QualificationReportStore(Path(directory))
+            store.save_report(baseline)
             store.save_report(report)
             inspection = store.inspect_reports()
             promoted = store.promote(
                 profile_id=profile.profile_id,
                 report_id=report.report_id,
                 runtime_pin=runtime_pin,
+                correlation_id="promote-1",
+                expected_revision=0,
             )
             self.assertEqual(promoted["active"]["report_id"], report.report_id)
             self.assertEqual(promoted["active"]["runtime_pin"], runtime_pin.to_dict())
-            self.assertEqual(inspection["reports"][0]["report_id"], report.report_id)
+            self.assertIn(
+                report.report_id,
+                {item["report_id"] for item in inspection["reports"]},
+            )
             self.assertNotIn("observations", inspection["reports"][0])
 
-            rolled_back = store.rollback(profile.profile_id)
+            replayed = store.promote(
+                profile_id=profile.profile_id,
+                report_id=report.report_id,
+                runtime_pin=runtime_pin,
+                correlation_id="promote-1",
+                expected_revision=0,
+            )
+            self.assertEqual(replayed["last_action"], "promote-replay")
+            rolled_back = store.rollback(
+                profile.profile_id,
+                correlation_id="rollback-1",
+                expected_revision=1,
+            )
             self.assertIsNone(rolled_back["active"])
             self.assertEqual(rolled_back["last_action"], "rollback")
             self.assertIsNone(store.inspect()["active"])
+            rollback_replay = store.rollback(
+                profile.profile_id,
+                correlation_id="rollback-1",
+                expected_revision=1,
+            )
+            self.assertEqual(rollback_replay["last_action"], "rollback-replay")
 
     def test_promotion_rejects_a_withdrawn_runtime(self) -> None:
         profile = replace(
@@ -298,6 +369,8 @@ class QualificationReportTests(unittest.TestCase):
                     profile_id=profile.profile_id,
                     report_id=report.report_id,
                     runtime_pin=withdrawn,
+                    correlation_id="withdrawn-1",
+                    expected_revision=0,
                 )
 
     def test_report_persists_only_bounded_observation_metadata(self) -> None:
@@ -404,6 +477,252 @@ class QualificationReportTests(unittest.TestCase):
             report_path.write_text(json.dumps(payload), encoding="utf-8")
             with self.assertRaises(PromotionError):
                 store.load_report(report.report_id)
+
+    def test_fixture_definition_and_repetition_integrity_are_persisted(self) -> None:
+        profile = LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1")
+        runtime_pin = RuntimePin(
+            runtime_id="ollama",
+            runtime_version="0.11.4",
+            binary_digest="a" * 64,
+            configuration_digest="b" * 64,
+        )
+        original = build_governed_fixture_family()[0]
+        substituted = replace(original, prompt="substituted workload")
+
+        with tempfile.TemporaryDirectory() as directory:
+            report = InferenceQualificationService(
+                Path(directory), fixtures=(substituted,), repetitions=2
+            ).qualify(
+                profile,
+                lambda *_args: {
+                    "route": {"kind": "discussion"},
+                    "outcome": "accepted",
+                    "timings": {
+                        "load_ms": 1,
+                        "prompt_evaluation_ms": 1,
+                        "first_token_ms": 1,
+                        "decoding_ms": 1,
+                    },
+                    "reviewed_latency_ms": 1,
+                },
+                runtime_pin=runtime_pin,
+            )
+            store = QualificationReportStore(Path(directory))
+            with self.assertRaises(ValueError):
+                store.save_report(report)
+
+        with tempfile.TemporaryDirectory() as directory:
+            report = InferenceQualificationService(
+                Path(directory), fixtures=(original,), repetitions=2
+            ).qualify(
+                profile,
+                lambda *_args: {
+                    "route": {"kind": "discussion"},
+                    "outcome": "accepted",
+                    "timings": {
+                        "load_ms": 1,
+                        "prompt_evaluation_ms": 1,
+                        "first_token_ms": 1,
+                        "decoding_ms": 1,
+                    },
+                    "reviewed_latency_ms": 1,
+                },
+                runtime_pin=runtime_pin,
+            )
+            store = QualificationReportStore(Path(directory))
+            store.save_report(report)
+            path = next(
+                (Path(directory) / "inference/qualification/reports").glob("*.json")
+            )
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            payload["observations"][1]["repetition"] = 0
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaises(PromotionError):
+                store.load_report(report.report_id)
+
+    def test_profile_schema_names_do_not_trigger_observation_truth_filter(self) -> None:
+        profile = replace(
+            LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1"),
+            schema={"properties": {"plan": {"type": "string"}}},
+        )
+        runtime_pin = RuntimePin(
+            runtime_id="ollama",
+            runtime_version="0.11.4",
+            binary_digest="a" * 64,
+            configuration_digest="b" * 64,
+        )
+        report = InferenceQualificationService(
+            Path("/tmp/qualification-schema"),
+            fixtures=(build_governed_fixture_family()[0],),
+            repetitions=1,
+        ).qualify(
+            profile,
+            lambda *_args: {
+                "route": {"kind": "discussion"},
+                "outcome": "accepted",
+                "timings": {
+                    "load_ms": 1,
+                    "prompt_evaluation_ms": 1,
+                    "first_token_ms": 1,
+                    "decoding_ms": 1,
+                },
+                "reviewed_latency_ms": 1,
+            },
+            runtime_pin=runtime_pin,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            QualificationReportStore(Path(directory)).save_report(report)
+
+    def test_qualification_can_stop_cooperatively_without_claiming_promotion(
+        self,
+    ) -> None:
+        profile = LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1")
+        runtime_pin = RuntimePin(
+            runtime_id="ollama",
+            runtime_version="0.11.4",
+            binary_digest="a" * 64,
+            configuration_digest="b" * 64,
+        )
+        calls = 0
+
+        def runner(*_args):
+            nonlocal calls
+            calls += 1
+            context = _args[2]
+            self.assertIn("cancel_check", context)
+            self.assertIn("deadline_at", context)
+            return {
+                "route": {"kind": "discussion"},
+                "outcome": "accepted",
+                "timings": {
+                    "load_ms": 1,
+                    "prompt_evaluation_ms": 1,
+                    "first_token_ms": 1,
+                    "decoding_ms": 1,
+                },
+                "reviewed_latency_ms": 1,
+            }
+
+        report = InferenceQualificationService(
+            Path("/tmp/qualification-cancel"),
+            fixtures=(build_governed_fixture_family()[0],),
+            repetitions=3,
+        ).qualify(
+            profile,
+            runner,
+            runtime_pin=runtime_pin,
+            cancel_check=lambda: calls >= 1,
+        )
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(report.metrics["cancellations"], 2)
+        self.assertIn("unexpected-outcome", report.promotion_blockers)
+
+    def test_rollback_flag_alone_cannot_qualify_without_executed_receipt(self) -> None:
+        profile = replace(
+            LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1"),
+            model_digest="sha256:worker-digest",
+        )
+        runtime_pin = RuntimePin(
+            runtime_id="ollama",
+            runtime_version="0.11.4",
+            binary_digest="a" * 64,
+            configuration_digest="b" * 64,
+        )
+        runner = successful_fixture_result
+        service = InferenceQualificationService(
+            Path("/tmp/qualification-rollback-proof"),
+            fixtures=(build_governed_fixture_family()[0],),
+            repetitions=2,
+        )
+
+        unproven = service.qualify(
+            profile,
+            runner,
+            runtime_pin=runtime_pin,
+            rollback_tested=True,
+        )
+        proven = service.qualify(
+            profile,
+            runner,
+            runtime_pin=runtime_pin,
+            rollback_test=lambda: True,
+        )
+
+        self.assertIn("rollback-not-tested", unproven.promotion_blockers)
+        self.assertEqual(unproven.rollback_receipt_id, "")
+        self.assertTrue(proven.rollback_receipt_id.startswith("rollback-test:"))
+        self.assertNotIn("rollback-not-tested", proven.promotion_blockers)
+
+    def test_persisted_candidate_requires_an_existing_baseline_report(self) -> None:
+        profile = replace(
+            LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1"),
+            model_digest="sha256:worker-digest",
+        )
+        runtime_pin = RuntimePin(
+            runtime_id="ollama",
+            runtime_version="0.11.4",
+            binary_digest="a" * 64,
+            configuration_digest="b" * 64,
+        )
+        service = InferenceQualificationService(
+            Path("/tmp/qualification-baseline-proof"),
+            fixtures=(build_governed_fixture_family()[0],),
+            repetitions=2,
+        )
+        baseline = service.qualify(
+            profile,
+            successful_fixture_result,
+            runtime_pin=runtime_pin,
+            rollback_test=lambda: True,
+            report_id="missing-baseline",
+        )
+        candidate = service.qualify(
+            profile,
+            successful_fixture_result,
+            runtime_pin=runtime_pin,
+            rollback_test=lambda: True,
+            baseline_report=baseline,
+            report_id="candidate-with-missing-baseline",
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaises(PromotionError):
+                QualificationReportStore(Path(directory)).save_report(candidate)
+
+    def test_unqualified_profile_and_oversized_context_are_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            ContextSource("too-large", "x" * (1_048_576 + 1))
+        profile = replace(
+            LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1"),
+            qualified=False,
+        )
+        runtime_pin = RuntimePin(
+            runtime_id="ollama",
+            runtime_version="0.11.4",
+            binary_digest="a" * 64,
+            configuration_digest="b" * 64,
+        )
+        report = InferenceQualificationService(
+            Path("/tmp/qualification-unqualified"),
+            fixtures=(build_governed_fixture_family()[0],),
+            repetitions=1,
+        ).qualify(
+            profile,
+            lambda *_args: {
+                "route": {"kind": "discussion"},
+                "outcome": "accepted",
+                "timings": {
+                    "load_ms": 1,
+                    "prompt_evaluation_ms": 1,
+                    "first_token_ms": 1,
+                    "decoding_ms": 1,
+                },
+                "reviewed_latency_ms": 1,
+            },
+            runtime_pin=runtime_pin,
+        )
+        self.assertIn("profile-not-qualified", report.promotion_blockers)
 
     def test_promotion_requires_non_inferior_quality_and_reliability(self) -> None:
         profile = replace(

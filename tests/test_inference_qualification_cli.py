@@ -11,12 +11,54 @@ from unittest.mock import patch
 from albert_mvp.cli import main
 from albert_mvp.inference import LocalInferenceProfile
 from albert_mvp.inference_qualification import (
+    ContextSource,
     InferenceQualificationService,
     QualificationReportStore,
     RuntimePin,
-    build_governed_fixture_family,
 )
 from albert_mvp.server import serve
+
+
+def successful_fixture_result(fixture, _profile, _context, _repetition):
+    edit_kinds = {
+        "small-edit",
+        "multi-file-edit",
+        "repair",
+        "long-context",
+        "queued-local-agent",
+    }
+    evidence_kinds = edit_kinds | {"model-swap"}
+    result = {
+        "route": {
+            "kind": "coding-task" if fixture.kind in edit_kinds else "discussion"
+        },
+        "outcome": "accepted",
+        "model_digest": "sha256:worker-digest",
+        "timings": {
+            "load_ms": 1,
+            "prompt_evaluation_ms": 2,
+            "first_token_ms": 3,
+            "decoding_ms": 4,
+        },
+        "reviewed_latency_ms": 1,
+    }
+    if fixture.kind in edit_kinds:
+        result["plan"] = {"files": ["src/example.py"]}
+    if fixture.kind in evidence_kinds:
+        result["evidence"] = {"changed_files": ["src/example.py"]}
+    if fixture.kind == "repair":
+        result["outcome"] = "repaired"
+    elif fixture.kind == "malformed-output":
+        result["outcome"] = "escalated"
+    elif fixture.kind == "policy-violation":
+        result["outcome"] = "policy-blocked"
+    elif fixture.kind == "cancellation":
+        result["outcome"] = "cancelled"
+    elif fixture.kind == "model-swap":
+        result["model_swapped"] = True
+    elif fixture.kind == "queued-local-agent":
+        result["queued"] = True
+    return result
 
 
 class InferenceQualificationCliTests(unittest.TestCase):
@@ -24,6 +66,8 @@ class InferenceQualificationCliTests(unittest.TestCase):
         profile = replace(
             LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1"),
             model_digest="sha256:worker-digest",
+            context_budget=16_384,
+            output_budget=2_048,
         )
         runtime_pin = RuntimePin(
             runtime_id="ollama",
@@ -32,31 +76,33 @@ class InferenceQualificationCliTests(unittest.TestCase):
             configuration_digest="b" * 64,
         )
 
-        def runner(_fixture, _profile, _context, _repetition):
-            return {
-                "route": {"kind": "discussion"},
-                "outcome": "accepted",
-                "model_digest": "sha256:worker-digest",
-                "timings": {
-                    "load_ms": 1,
-                    "prompt_evaluation_ms": 1,
-                    "first_token_ms": 1,
-                    "decoding_ms": 1,
-                },
-                "reviewed_latency_ms": 1,
-            }
-
-        report = InferenceQualificationService(
-            runtime,
-            fixtures=(build_governed_fixture_family()[0],),
-            repetitions=1,
-        ).qualify(
+        service = InferenceQualificationService(runtime, repetitions=2)
+        baseline = service.qualify(
             profile,
-            runner,
+            successful_fixture_result,
             runtime_pin=runtime_pin,
-            rollback_tested=True,
+            rollback_test=lambda: True,
+            context_sources=(
+                ContextSource("long-context", "x" * 28_800, required=True),
+            ),
+            required_source_ids=("long-context",),
+            report_id="baseline",
         )
-        QualificationReportStore(runtime).save_report(report)
+        report = service.qualify(
+            profile,
+            successful_fixture_result,
+            runtime_pin=runtime_pin,
+            rollback_test=lambda: True,
+            baseline_report=baseline,
+            context_sources=(
+                ContextSource("long-context", "x" * 28_800, required=True),
+            ),
+            required_source_ids=("long-context",),
+            report_id="candidate",
+        )
+        store = QualificationReportStore(runtime)
+        store.save_report(baseline)
+        store.save_report(report)
         return report, runtime_pin
 
     def common(self, runtime: Path) -> list[str]:
@@ -85,7 +131,10 @@ class InferenceQualificationCliTests(unittest.TestCase):
                     0,
                 )
             inspection = json.loads(captured[-1])
-            self.assertEqual(inspection["reports"][0]["report_id"], report.report_id)
+            self.assertIn(
+                report.report_id,
+                {item["report_id"] for item in inspection["reports"]},
+            )
 
             with patch("builtins.print", side_effect=capture):
                 self.assertEqual(
@@ -105,6 +154,10 @@ class InferenceQualificationCliTests(unittest.TestCase):
                             runtime_pin.binary_digest,
                             "--configuration-digest",
                             runtime_pin.configuration_digest,
+                            "--correlation-id",
+                            "promote-1",
+                            "--expected-revision",
+                            "0",
                         ]
                     ),
                     0,
@@ -120,6 +173,10 @@ class InferenceQualificationCliTests(unittest.TestCase):
                             *self.common(runtime),
                             "--profile-id",
                             "worker-v1",
+                            "--correlation-id",
+                            "rollback-1",
+                            "--expected-revision",
+                            "1",
                         ]
                     ),
                     0,
@@ -143,7 +200,66 @@ class InferenceQualificationCliTests(unittest.TestCase):
         self.assertEqual(response["id"], "qualification-1")
         self.assertTrue(response["success"])
         projection = json.loads(response["stdout"])
-        self.assertEqual(projection["reports"][0]["report_id"], report.report_id)
+        self.assertIn(
+            report.report_id,
+            {item["report_id"] for item in projection["reports"]},
+        )
+
+    def test_persistent_transport_replays_promotion_and_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory)
+            (runtime / "target").mkdir()
+            report, runtime_pin = self.make_report(runtime)
+            promote_argv = [
+                "inference-qualification-promote",
+                *self.common(runtime),
+                "--report-id",
+                report.report_id,
+                "--profile-id",
+                "worker-v1",
+                "--runtime-id",
+                runtime_pin.runtime_id,
+                "--runtime-version",
+                runtime_pin.runtime_version,
+                "--binary-digest",
+                runtime_pin.binary_digest,
+                "--configuration-digest",
+                runtime_pin.configuration_digest,
+                "--correlation-id",
+                "promote-transport-1",
+                "--expected-revision",
+                "0",
+            ]
+            rollback_argv = [
+                "inference-qualification-rollback",
+                *self.common(runtime),
+                "--profile-id",
+                "worker-v1",
+                "--correlation-id",
+                "rollback-transport-1",
+                "--expected-revision",
+                "1",
+            ]
+            request = (
+                "\n".join(
+                    json.dumps({"id": str(index), "argv": argv})
+                    for index, argv in enumerate(
+                        (promote_argv, promote_argv, rollback_argv, rollback_argv), 1
+                    )
+                )
+                + "\n"
+            )
+            output = StringIO()
+            serve(StringIO(request), output)
+
+        responses = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertTrue(all(response["success"] for response in responses))
+        self.assertEqual(
+            json.loads(responses[1]["stdout"])["last_action"], "promote-replay"
+        )
+        self.assertEqual(
+            json.loads(responses[3]["stdout"])["last_action"], "rollback-replay"
+        )
 
 
 if __name__ == "__main__":
