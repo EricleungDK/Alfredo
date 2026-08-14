@@ -2013,6 +2013,14 @@ def _workstation_session_payload(
         "runner_ended_at": session.runner_ended_at,
         "runner_exit_status": session.runner_exit_status,
         "evidence_valid": session.evidence_valid,
+        "inference": {
+            "turns": [
+                mission._public_inference_receipt(item)
+                for item in mission.inference_turns
+                if item.get("session_id") == session.session_id
+            ],
+            "lease": mission.inference_lease_state(),
+        },
     }
 
 

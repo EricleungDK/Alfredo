@@ -10,7 +10,7 @@ import {
 } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { App, isExactAdHocDelegationBoundary } from "./App";
-import { MissionExecutionTree } from "./MissionExecutionTree";
+import { LocalInferenceOverview, MissionExecutionTree } from "./MissionExecutionTree";
 import type { MissionExecutionTreeProjection } from "./workstation-projection";
 import type {
   AdHocDelegationProposalRequest,
@@ -36,6 +36,9 @@ import type {
   WorkingContextCurationRequest,
   WorkingContextProjection,
   WorkstationActionRequest,
+  LocalInferenceProjection,
+  LocalInferenceReceiptProjection,
+  LocalInferenceSessionProjection,
 } from "./contracts";
 import type { SessionOutputSubscriptionState, WorkspaceClient } from "./workspace-client";
 
@@ -79,6 +82,108 @@ const snapshot: WorkspaceSnapshot = {
 
 const client: WorkspaceClient = {
   loadSnapshot: async () => ({ kind: "ready", snapshot }),
+};
+
+const nonAuthoritativeInferenceReceipt: LocalInferenceReceiptProjection = {
+  schema_version: 1,
+  request_id: "inference-turn:tree-0001",
+  mission_id: "command-deck",
+  session_id: "session-ISS-TREE-1",
+  turn_kind: "worker",
+  recorded_at: "2026-08-13T08:00:03Z",
+  outcome: "timed-out",
+  authoritative: false,
+  profile: {
+    profile_id: "worker-v1",
+    version: 1,
+    model: "qwen3:14b",
+    model_digest: "sha256:qwen3-tree",
+    keep_alive: "10m",
+    context_budget: 4096,
+    output_budget: 512,
+    thinking: false,
+    sampling: { temperature: 0.2, top_p: 0.9 },
+    schema: {
+      type: "object",
+      required: ["answer"],
+      properties: { answer: { type: "string" } },
+      additionalProperties: false,
+    },
+    quantization: "Q4_K_M",
+    residency: "normal",
+    processor_placement: "gpu",
+    qualified: true,
+    priority: 60,
+    queue_limit: 8,
+    max_queue_wait_seconds: 30,
+    timeout_seconds: 120,
+    max_output_bytes: 4096,
+  },
+  admission: {
+    admitted: true,
+    prompt_tokens: 64,
+    output_headroom: 4032,
+    context_budget: 4096,
+    output_budget: 512,
+  },
+  timings: {
+    load_ms: 8.4,
+    prompt_evaluation_ms: 13.1,
+    first_token_ms: 21.7,
+    decoding_ms: null,
+  },
+  usage: { prompt_tokens: 64, output_tokens: 12, output_bytes: 48 },
+  lease: {
+    lease_id: "lease:tree-0001",
+    request_id: "inference-turn:tree-0001",
+    mission_id: "command-deck",
+    session_id: "session-ISS-TREE-1",
+    model: "qwen3:14b",
+    model_digest: "sha256:qwen3-tree",
+    residency: "normal",
+    priority: 60,
+    sequence: 2,
+    resident_match: true,
+    model_swap: false,
+  },
+  error: "Local model response exceeded the bounded timeout.",
+};
+
+const queuedInferenceProjection: LocalInferenceProjection = {
+  turn_count: 2,
+  last_turn: nonAuthoritativeInferenceReceipt,
+  lease: {
+    schema_version: 1,
+    active: null,
+    queued: [
+      {
+        lease_id: "lease:queued-0001",
+        request_id: "inference-turn:queued-0001",
+        mission_id: "command-deck",
+        session_id: "session-ISS-TREE-1",
+        model: "qwen3:14b",
+        model_digest: "sha256:qwen3-tree",
+        residency: "normal",
+        priority: 90,
+        sequence: 4,
+        enqueued_at: "2026-08-13T08:00:04Z",
+      },
+    ],
+    resident: {
+      model: "qwen3:14b",
+      digest: "sha256:qwen3-tree",
+      residency: "normal",
+      updated_at: "2026-08-13T07:59:59Z",
+    },
+    audit: [],
+    next_sequence: 5,
+  },
+};
+
+const sessionInferenceProjection: LocalInferenceSessionProjection = {
+  state: "non-authoritative",
+  turn_count: 1,
+  last: nonAuthoritativeInferenceReceipt,
 };
 
 const stylesSource = readFileSync(`${process.cwd()}/src/styles.css`, "utf8");
@@ -328,6 +433,7 @@ test("renders the canonical Mission Execution Tree and scopes detailed output to
       ...snapshot.mission_board,
       issue_count: 1,
       ordered_issue_ids: ["ISS-TREE"],
+      inference: queuedInferenceProjection,
       issue_slices: [
         appIssueSlice({
           issue_id: "ISS-TREE",
@@ -362,6 +468,7 @@ test("renders the canonical Mission Execution Tree and scopes detailed output to
             supervision_receipt_id: "supervision-receipt:tree-recovery",
             supervision_outcome: "recovered",
             automatic_recovery_count: 1,
+            inference: sessionInferenceProjection,
           },
         ],
         attention: [],
@@ -379,6 +486,11 @@ test("renders the canonical Mission Execution Tree and scopes detailed output to
   );
 
   const tree = await screen.findByRole("region", { name: "Mission Execution Tree" });
+  const inferenceOverview = screen.getByRole("region", { name: "Local Inference telemetry" });
+  expect(within(inferenceOverview).getByText("Queued")).toBeVisible();
+  expect(within(inferenceOverview).getByText("1 waiting")).toBeVisible();
+  expect(within(inferenceOverview).getByText("No model result entered governance")).toBeVisible();
+  expect(within(inferenceOverview).getByText("qwen3:14b · sha256:qwen3-tree")).toBeVisible();
   expect(within(tree).getByText("1 Issue Slices")).toBeVisible();
   expect(within(tree).getByText("1 Local Agent sessions")).toBeVisible();
   const issueNode = within(tree).getByRole("treeitem", {
@@ -415,6 +527,15 @@ test("renders the canonical Mission Execution Tree and scopes detailed output to
     ),
   ).toBeVisible();
   expect(within(inspector).getByText("Automatic recovery: 1 of 1 used")).toBeVisible();
+  const inferenceTelemetry = within(inspector).getByRole("region", {
+    name: "Local Inference telemetry for this session",
+  });
+  expect(within(inferenceTelemetry).getByText("Non-authoritative outcome")).toBeVisible();
+  expect(within(inferenceTelemetry).getByText("qwen3:14b")).toBeVisible();
+  expect(within(inferenceTelemetry).getByText("sha256:qwen3-tree")).toBeVisible();
+  expect(within(inferenceTelemetry).getByText(/Context \/ output/).parentElement).toHaveTextContent(
+    "4096 / 512 tokens",
+  );
   expect(subscribeToSessionOutput).toHaveBeenCalledTimes(1);
   expect(outputHandler).toBeDefined();
   expect(within(inspector).getByText("Subscribing…")).toBeVisible();

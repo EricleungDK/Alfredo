@@ -10,6 +10,7 @@ import errno
 from hashlib import sha1, sha256
 import fcntl
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -49,6 +50,11 @@ from .execution import (
     _is_protected_writable_path,
     _is_under_private_tmp,
 )
+from .inference import (
+    LocalInferenceAdapter,
+    LocalInferenceLease,
+    LocalInferenceProfile,
+)
 from .retirement import (
     RetirementSnapshotError,
     RetirementSnapshotStore,
@@ -69,6 +75,7 @@ _MODEL_COMMAND_TIMEOUT_SECONDS = 120
 _MODEL_AGENT_ITERATION_LIMIT = 3
 _MODEL_FEEDBACK_LIMIT = 8_000
 _MODEL_PROCESS_OUTPUT_BYTES_LIMIT = 3_000_000
+_INFERENCE_RECEIPT_BYTES_LIMIT = 512_000
 _RUNNER_COMMAND_TIMEOUT_SECONDS = 600
 _PROCESS_OUTPUT_BYTES_LIMIT = 1_000_000
 _PROCESS_OUTPUT_LIMIT_EXIT_STATUS = 125
@@ -124,6 +131,28 @@ _RETIREMENT_EXPORT_LEGACY_INTENT_FIELDS = frozenset(
 _GIT_NOT_REPOSITORY_MESSAGE = (
     "fatal: not a git repository (or any of the parent directories): .git"
 )
+
+_DELEGATION_INFERENCE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "complexity": {"type": "string"},
+        "recommended_agent": {"type": "string"},
+        "requires_approval": {"type": "boolean"},
+        "reason": {"type": "string"},
+    },
+    "required": ["complexity", "recommended_agent", "reason"],
+    "additionalProperties": False,
+}
+_MODEL_FILE_PLAN_INFERENCE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "files": {"type": "array"},
+        "commands": {"type": "array"},
+    },
+    "required": ["files"],
+    "additionalProperties": False,
+}
 
 
 @dataclass(frozen=True)
@@ -2675,6 +2704,7 @@ class AlbertMission:
             _DEFAULT_SNAPSHOT_STORAGE_RETENTION_SECONDS
         ),
         snapshot_storage_budget_bytes: int = _DEFAULT_SNAPSHOT_STORAGE_BUDGET_BYTES,
+        inference_opener: Callable[..., Any] | None = None,
     ):
         self.target_repo = target_repo.resolve()
         self.tracker_dir = tracker_dir.resolve()
@@ -2708,6 +2738,7 @@ class AlbertMission:
             raise AlbertError("Snapshot Storage Budget must be a positive integer.")
         self.snapshot_storage_retention_seconds = snapshot_storage_retention_seconds
         self.snapshot_storage_budget_bytes = snapshot_storage_budget_bytes
+        self.inference_opener = inference_opener
         identity_paths = [
             _runtime_identity_path(path)
             for path in (self.target_repo, self.tracker_dir, self.issues_dir)
@@ -2728,6 +2759,7 @@ class AlbertMission:
         self.retirement_storage: dict[str, Any] = (
             self._empty_retirement_storage_state()
         )
+        self.inference_turns: list[dict[str, Any]] = []
         self._workspace_preferences_path: Path | None = None
         self.timeline: list[str] = []
         self.agent_registry = AgentRegistry(agents=[], source_path=self.agent_config_path)
@@ -3628,6 +3660,35 @@ class AlbertMission:
                 "pinned_payloads": storage["counts"]["pinned_payloads"],
                 "blocker_count": len(storage["blockers"]),
             },
+            "inference": {
+                "turn_count": len(self.inference_turns),
+                "last_turn": (
+                    self._public_inference_receipt(self.inference_turns[-1])
+                    if self.inference_turns
+                    else None
+                ),
+                "lease": self.inference_lease_state(),
+            },
+        }
+
+    @staticmethod
+    def _public_inference_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+        """Project bounded receipt metadata without prompt or stream contents."""
+
+        return {
+            "request_id": receipt.get("request_id", ""),
+            "mission_id": receipt.get("mission_id", ""),
+            "session_id": receipt.get("session_id", ""),
+            "turn_kind": receipt.get("turn_kind", ""),
+            "recorded_at": receipt.get("recorded_at", ""),
+            "outcome": receipt.get("outcome", ""),
+            "authoritative": bool(receipt.get("authoritative", False)),
+            "profile": receipt.get("profile", {}),
+            "admission": receipt.get("admission", {}),
+            "timings": receipt.get("timings", {}),
+            "usage": receipt.get("usage", {}),
+            "lease": receipt.get("lease", {}),
+            "error": receipt.get("error", ""),
         }
 
     def _issue_summary(self, issue_id: str) -> dict[str, Any]:
@@ -3775,10 +3836,35 @@ class AlbertMission:
             "disconnected": disconnected,
             "operation_status": self._session_operation_status(session, disconnected),
             "failure": self._session_failure(session),
+            "inference": self._session_inference_summary(session),
             "evidence": self._evidence_summary(
                 evidence,
                 accepted=evidence_accepted,
             ),
+        }
+
+    def _session_inference_summary(self, session: LocalAgentSession) -> dict[str, Any]:
+        turns = [
+            item
+            for item in self.inference_turns
+            if item.get("session_id") == session.session_id
+        ]
+        if not turns:
+            return {"state": "none", "turn_count": 0, "last": None}
+        last = turns[-1]
+        return {
+            "state": "authoritative" if last.get("authoritative") else "non-authoritative",
+            "turn_count": len(turns),
+            "last": {
+                "request_id": last.get("request_id", ""),
+                "outcome": last.get("outcome", ""),
+                "profile": last.get("profile", {}),
+                "timings": last.get("timings", {}),
+                "usage": last.get("usage", {}),
+                "lease": last.get("lease", {}),
+                "error": last.get("error", ""),
+                "authoritative": bool(last.get("authoritative", False)),
+            },
         }
 
     @staticmethod
@@ -3940,7 +4026,7 @@ class AlbertMission:
             "model": issue.assigned_agent or issue.suggested_agent,
         }
 
-    def _model_assignment(self, issue: IssueSlice, sessions: list[dict[str, Any]]) -> dict[str, str]:
+    def _model_assignment(self, issue: IssueSlice, sessions: list[dict[str, Any]]) -> dict[str, Any]:
         agent = self.agent_registry.find(issue.assigned_agent)
         if agent:
             role = agent.role
@@ -3966,7 +4052,7 @@ class AlbertMission:
         if latest:
             operation_status = str(latest.get("operation_status", "idle"))
             failure = str(latest.get("failure", ""))
-        return {
+        assignment: dict[str, Any] = {
             "agent_id": issue.assigned_agent,
             "role": role,
             "provider": provider,
@@ -3976,6 +4062,9 @@ class AlbertMission:
             "operation_status": operation_status,
             "failure": failure,
         }
+        if agent is not None and agent.inference_profile:
+            assignment["inference_profile"] = dict(agent.inference_profile)
+        return assignment
 
     def _assignment_available(self, issue: IssueSlice) -> bool:
         agent = self.agent_registry.find(issue.assigned_agent)
@@ -4286,42 +4375,61 @@ class AlbertMission:
         if issue.review_state != "approved":
             raise LaunchBlockedError(f"{issue_id} must be approved before routing.")
         router = self._router_agent()
-        command = self._runner_command(router)
-        if command and self.classify_command(command) != "auto-allowed":
-            raise LaunchBlockedError(f"{issue_id} router command policy is {self.classify_command(command)}; auto-allowed is required.")
         prompt = self._delegation_prompt(issue, router)
-        command_argv = _command_invocation(command)
-        process_env = sanitized_process_environment()
-        governed_argv, sandboxed = sandboxed_process_argv(
-            command_argv,
-            working_directory=self.target_repo,
-            readable_roots=(self.target_repo,),
-            path=process_env.get("PATH"),
-        )
-        if not sandboxed or not isinstance(governed_argv, list):
-            raise AlbertError(
-                "Router command sandbox unavailable: bubblewrap (bwrap) is required."
+        if router.runner == "ollama" and not router.command:
+            result = self._run_profile_inference(
+                agent_config=router,
+                prompt=prompt,
+                mission_id=self.mission_id,
+                session_id=f"issue:{issue.id}",
+                turn_kind="routing",
+                schema=_DELEGATION_INFERENCE_SCHEMA,
+                validator=_parse_delegation_decision,
             )
-        try:
-            completed = _run_bounded_process(
-                governed_argv,
-                input_text=prompt,
-                cwd=self.target_repo,
-                env=process_env,
-                timeout_seconds=_MODEL_COMMAND_TIMEOUT_SECONDS,
+            if not result.authoritative:
+                raise AlbertError(
+                    f"Local inference {result.receipt.get('outcome', 'failed')}: "
+                    f"{result.receipt.get('error', 'result was not authoritative')}"
+                )
+            data = result.value
+        else:
+            # An explicit command is a compatibility/test harness override. The
+            # normal Ollama registry path above is always the bounded HTTP adapter.
+            command = self._runner_command(router)
+            if command and self.classify_command(command) != "auto-allowed":
+                raise LaunchBlockedError(f"{issue_id} router command policy is {self.classify_command(command)}; auto-allowed is required.")
+            command_argv = _command_invocation(command)
+            process_env = sanitized_process_environment()
+            governed_argv, sandboxed = sandboxed_process_argv(
+                command_argv,
+                working_directory=self.target_repo,
+                readable_roots=(self.target_repo,),
+                path=process_env.get("PATH"),
             )
-        except OSError as exc:
-            raise AlbertError(f"Router command failed: {exc}") from exc
-        exit_status = completed.returncode
-        output = completed.stdout
-        stderr = completed.stderr
-        if exit_status == 124:
-            raise AlbertError(stderr)
-        if exit_status == _PROCESS_OUTPUT_LIMIT_EXIT_STATUS:
-            raise AlbertError(stderr)
-        if exit_status != 0:
-            raise AlbertError(f"Router command exited {exit_status}: {stderr.strip()}")
-        data = _parse_delegation_decision(output)
+            if not sandboxed or not isinstance(governed_argv, list):
+                raise AlbertError(
+                    "Router command sandbox unavailable: bubblewrap (bwrap) is required."
+                )
+            try:
+                completed = _run_bounded_process(
+                    governed_argv,
+                    input_text=prompt,
+                    cwd=self.target_repo,
+                    env=process_env,
+                    timeout_seconds=_MODEL_COMMAND_TIMEOUT_SECONDS,
+                )
+            except OSError as exc:
+                raise AlbertError(f"Router command failed: {exc}") from exc
+            exit_status = completed.returncode
+            output = completed.stdout
+            stderr = completed.stderr
+            if exit_status == 124:
+                raise AlbertError(stderr)
+            if exit_status == _PROCESS_OUTPUT_LIMIT_EXIT_STATUS:
+                raise AlbertError(stderr)
+            if exit_status != 0:
+                raise AlbertError(f"Router command exited {exit_status}: {stderr.strip()}")
+            data = _parse_delegation_decision(output)
         recommended_agent = data["recommended_agent"]
         agent = self.agent_registry.find(recommended_agent)
         if not agent:
@@ -5807,6 +5915,134 @@ class AlbertMission:
             return f"ollama run {agent_config.model} --think=false --nowordwrap --format json"
         return ""
 
+    def _inference_profile_for(
+        self,
+        agent_config: AgentConfig,
+        *,
+        turn_kind: str,
+        schema: Any,
+    ) -> LocalInferenceProfile:
+        """Resolve one exact versioned Profile for a model turn."""
+
+        defaults = {
+            "profile_id": f"{agent_config.id}-v1",
+            "version": 1,
+            "model": agent_config.model,
+            "context_budget": 16_384 if turn_kind == "worker" else 8_192,
+            "output_budget": 2_048 if turn_kind == "worker" else 1_024,
+            "keep_alive": "10m" if turn_kind == "worker" else "5m",
+            "thinking": False,
+            "sampling": {"temperature": 0.2, "top_p": 0.9},
+            "schema": schema,
+            "quantization": "auto",
+            "residency": "normal",
+            "processor_placement": "gpu",
+            "qualified": True,
+            "priority": 60 if turn_kind == "routing" else 50,
+            "queue_limit": 8,
+            "max_queue_wait_seconds": 30.0,
+            "timeout_seconds": float(_MODEL_COMMAND_TIMEOUT_SECONDS),
+            "max_output_bytes": _MODEL_PROCESS_OUTPUT_BYTES_LIMIT,
+        }
+        configured = dict(agent_config.inference_profile)
+        defaults.update(configured)
+        defaults["model"] = agent_config.model
+        defaults["profile_id"] = configured.get(
+            "profile_id", f"{agent_config.id}-v1"
+        )
+        defaults["schema"] = schema
+        try:
+            return LocalInferenceProfile.from_dict(defaults)
+        except ValueError as exc:
+            raise AlbertError(
+                f"Agent {agent_config.id} has an invalid Local Inference Profile: {exc}"
+            ) from exc
+
+    def _record_inference_receipt(self, receipt: dict[str, Any]) -> None:
+        """Persist one bounded non-authoritative or completed model-turn receipt."""
+
+        if receipt.get("mission_id") != self.mission_id:
+            raise AlbertError("Local Inference receipt Mission attribution is invalid")
+        request_id = receipt.get("request_id")
+        if not isinstance(request_id, str) or not request_id.strip():
+            raise AlbertError("Local Inference receipt request identity is invalid")
+        if receipt.get("schema_version") != 1 or not isinstance(
+            receipt.get("authoritative"), bool
+        ):
+            raise AlbertError("Local Inference receipt schema is invalid")
+        self._validate_inference_turn(receipt)
+        try:
+            encoded_receipt = json.dumps(
+                receipt,
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise AlbertError("Local Inference receipt schema is invalid") from exc
+        if len(encoded_receipt.encode("utf-8")) > _INFERENCE_RECEIPT_BYTES_LIMIT:
+            raise AlbertError("Local Inference receipt exceeds the bounded size")
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            turns = data.get("inference_turns", [])
+            if not isinstance(turns, list):
+                raise AlbertError("Mission inference turn ledger is invalid")
+            existing = next(
+                (
+                    item
+                    for item in turns
+                    if isinstance(item, dict) and item.get("request_id") == request_id
+                ),
+                None,
+            )
+            if existing is not None:
+                if existing != receipt:
+                    raise AlbertError(
+                        "Local Inference request id was already used for a different turn"
+                    )
+                self.inference_turns = [dict(item) for item in turns]
+                return
+            turns = [*turns, json.loads(encoded_receipt)][-128:]
+            data["inference_turns"] = turns
+            self._write_runtime_payload(data)
+            self.inference_turns = [dict(item) for item in turns]
+
+    def inference_lease_state(self) -> dict[str, Any]:
+        """Return the bounded scheduler projection without invoking a model."""
+
+        return LocalInferenceLease.inspect(self.runtime_root)
+
+    def _run_profile_inference(
+        self,
+        *,
+        agent_config: AgentConfig,
+        prompt: str,
+        mission_id: str,
+        session_id: str,
+        turn_kind: str,
+        schema: Any,
+        validator: Callable[[str], Any],
+        cancellation_requested: Callable[[], bool] | None = None,
+    ) -> Any:
+        profile = self._inference_profile_for(
+            agent_config,
+            turn_kind=turn_kind,
+            schema=schema,
+        )
+        result = LocalInferenceAdapter(
+            runtime_root=self.runtime_root,
+            opener=self.inference_opener,
+        ).infer(
+            prompt=prompt,
+            profile=profile,
+            mission_id=mission_id,
+            session_id=session_id,
+            turn_kind=turn_kind,
+            validator=validator,
+            cancellation_requested=cancellation_requested,
+        )
+        self._record_inference_receipt(result.receipt)
+        return result
+
     def record_evidence(
         self,
         session_id: str,
@@ -6478,7 +6714,197 @@ class AlbertMission:
         self.archived_issue_ids = set(archived)
         self.supervision = self._supervision_from_payload(data)
         self.retirement_storage = self._retirement_storage_from_payload(data)
+        raw_inference_turns = data.get("inference_turns", [])
+        if not isinstance(raw_inference_turns, list) or len(raw_inference_turns) > 128:
+            raise AlbertError("Mission inference turn ledger is invalid")
+        self.inference_turns = []
+        for item in raw_inference_turns:
+            self._validate_inference_turn(item)
+            self.inference_turns.append(dict(item))
         self.timeline = list(data.get("timeline", []))
+
+    def _validate_inference_turn(self, item: Any) -> None:
+        if not isinstance(item, dict):
+            raise AlbertError("Mission inference turn ledger is invalid")
+        required_fields = {
+            "schema_version",
+            "request_id",
+            "mission_id",
+            "session_id",
+            "turn_kind",
+            "recorded_at",
+            "profile",
+            "admission",
+            "outcome",
+            "authoritative",
+            "timings",
+            "usage",
+            "lease",
+        }
+        if set(item) - (required_fields | {"error"}) or not required_fields.issubset(item):
+            raise AlbertError("Mission inference turn ledger is invalid")
+        required_strings = (
+            "request_id",
+            "mission_id",
+            "session_id",
+            "turn_kind",
+            "recorded_at",
+            "outcome",
+        )
+        if any(
+            not isinstance(item.get(field_name), str)
+            or not item[field_name].strip()
+            for field_name in required_strings
+        ):
+            raise AlbertError("Mission inference turn ledger is invalid")
+        if (
+            item["mission_id"] != self.mission_id
+            or item.get("schema_version") != 1
+            or not isinstance(item.get("authoritative"), bool)
+            or not isinstance(item.get("profile"), dict)
+            or not isinstance(item.get("admission"), dict)
+            or not isinstance(item.get("timings"), dict)
+            or not isinstance(item.get("usage"), dict)
+            or not isinstance(item.get("lease"), dict)
+            or item["outcome"]
+            not in {
+                "completed",
+                "rejected-over-budget",
+                "profile-not-qualified",
+                "metadata-error",
+                "digest-mismatch",
+                "partial-stream",
+                "malformed-stream",
+                "malformed-output",
+                "oversized-output",
+                "timed-out",
+                "cancelled",
+                "transport-error",
+                "queue-full",
+                "lease-timeout",
+                "lease-lost",
+                "ledger-invalid",
+            }
+            or item["authoritative"] != (item["outcome"] == "completed")
+        ):
+            raise AlbertError("Mission inference turn ledger is invalid")
+        try:
+            recorded_at = datetime.fromisoformat(
+                item["recorded_at"].removesuffix("Z")
+                + ("+00:00" if item["recorded_at"].endswith("Z") else "")
+            )
+            if recorded_at.tzinfo is None:
+                raise ValueError("timestamp must include timezone")
+        except ValueError as exc:
+            raise AlbertError("Mission inference turn ledger is invalid") from exc
+        try:
+            profile = LocalInferenceProfile.from_dict(item["profile"])
+        except (ValueError, TypeError, RecursionError) as exc:
+            raise AlbertError("Mission inference turn Profile is invalid") from exc
+        if set(item["admission"]) != {
+            "admitted",
+            "prompt_tokens",
+            "output_headroom",
+            "context_budget",
+            "output_budget",
+        } or set(item["timings"]) != {
+            "load_ms",
+            "prompt_evaluation_ms",
+            "first_token_ms",
+            "decoding_ms",
+        } or set(item["usage"]) != {"prompt_tokens", "output_tokens", "output_bytes"}:
+            raise AlbertError("Mission inference receipt shape is invalid")
+        if item["profile"] != profile.to_dict():
+            raise AlbertError("Mission inference turn Profile is not canonical")
+        admission = item["admission"]
+        if (
+            not isinstance(admission.get("admitted"), bool)
+            or not isinstance(admission.get("prompt_tokens"), int)
+            or isinstance(admission["prompt_tokens"], bool)
+            or admission["prompt_tokens"] < 0
+            or not isinstance(admission.get("output_headroom"), int)
+            or isinstance(admission["output_headroom"], bool)
+            or not isinstance(admission.get("context_budget"), int)
+            or isinstance(admission["context_budget"], bool)
+            or not isinstance(admission.get("output_budget"), int)
+            or isinstance(admission["output_budget"], bool)
+            or admission["context_budget"] != profile.context_budget
+            or admission["output_budget"] != profile.output_budget
+            or admission["output_headroom"]
+            != admission["context_budget"] - admission["prompt_tokens"]
+        ):
+            raise AlbertError("Mission inference admission record is invalid")
+        for value in item["timings"].values():
+            if value is not None and (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise AlbertError("Mission inference timing record is invalid")
+        usage = item["usage"]
+        if (
+            usage.get("prompt_tokens") is not None
+            and (
+                not isinstance(usage.get("prompt_tokens"), int)
+                or isinstance(usage["prompt_tokens"], bool)
+                or usage["prompt_tokens"] < 0
+            )
+        ):
+            raise AlbertError("Mission inference usage record is invalid")
+        for field_name in ("output_tokens", "output_bytes"):
+            value = usage.get(field_name)
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+                or value > _MODEL_PROCESS_OUTPUT_BYTES_LIMIT * 8
+            ):
+                raise AlbertError("Mission inference usage record is invalid")
+        lease = item["lease"]
+        if lease:
+            lease_fields = {
+                "lease_id",
+                "request_id",
+                "mission_id",
+                "session_id",
+                "model",
+                "model_digest",
+                "residency",
+                "priority",
+                "sequence",
+                "enqueued_at",
+                "started_at",
+                "resident_match",
+                "model_swap",
+            }
+            if set(lease) != lease_fields:
+                raise AlbertError("Mission inference lease record is invalid")
+            for field_name in (
+                "lease_id",
+                "request_id",
+                "mission_id",
+                "session_id",
+                "model",
+                "model_digest",
+                "residency",
+                "enqueued_at",
+                "started_at",
+            ):
+                if not isinstance(lease[field_name], str):
+                    raise AlbertError("Mission inference lease record is invalid")
+            for field_name in ("priority", "sequence"):
+                if (
+                    not isinstance(lease[field_name], int)
+                    or isinstance(lease[field_name], bool)
+                    or lease[field_name] < 0
+                ):
+                    raise AlbertError("Mission inference lease record is invalid")
+            for field_name in ("resident_match", "model_swap"):
+                if not isinstance(lease[field_name], bool):
+                    raise AlbertError("Mission inference lease record is invalid")
+        if "error" in item and not isinstance(item["error"], str):
+            raise AlbertError("Mission inference error record is invalid")
 
     def _reconcile_abandoned_sessions(self) -> None:
         """Run token-free startup reconciliation through the durable ledger."""
@@ -6557,6 +6983,7 @@ class AlbertMission:
             "archived_issue_ids": sorted(self.archived_issue_ids),
             "supervision": self.supervision,
             "retirement_storage": self.retirement_storage,
+            "inference_turns": self.inference_turns[-128:],
             "timeline": self.timeline,
         }
 
@@ -6601,6 +7028,20 @@ class AlbertMission:
                 data["retirement_storage"] = self._retirement_storage_from_payload(
                     latest
                 )
+                latest_inference_turns = latest.get("inference_turns", [])
+                if not isinstance(latest_inference_turns, list):
+                    raise AlbertError("Mission inference turn ledger is invalid")
+                merged_inference_turns: list[dict[str, Any]] = []
+                for item in [*latest_inference_turns, *data.get("inference_turns", [])]:
+                    if not isinstance(item, dict):
+                        raise AlbertError("Mission inference turn ledger is invalid")
+                    self._validate_inference_turn(item)
+                    if not any(
+                        existing.get("request_id") == item.get("request_id")
+                        for existing in merged_inference_turns
+                    ):
+                        merged_inference_turns.append(item)
+                data["inference_turns"] = merged_inference_turns[-128:]
             self._write_runtime_payload(data)
         reconciled_sessions: dict[str, LocalAgentSession] = {}
         for session_id, session_data in data["sessions"].items():
@@ -13820,18 +14261,43 @@ class AlbertMission:
             output_path = artifact_dir / f"ollama-output{suffix}.txt"
             stderr_path = artifact_dir / f"ollama-stderr{suffix}.log"
             self._write(prompt_path, prompt)
+            inference_result = None
             try:
-                completed = self._run_cancellable_process(
-                    session,
-                    _command_invocation(command),
-                    input_text=prompt,
-                    output_limit_bytes=_MODEL_PROCESS_OUTPUT_BYTES_LIMIT,
-                    effect_label=f"model-inference-round-{iteration}",
-                )
-                self._raise_if_cancelled(session)
-                exit_status = completed.returncode
-                stdout = completed.stdout
-                stderr = completed.stderr
+                if agent_config.command:
+                    completed = self._run_cancellable_process(
+                        session,
+                        _command_invocation(command),
+                        input_text=prompt,
+                        output_limit_bytes=_MODEL_PROCESS_OUTPUT_BYTES_LIMIT,
+                        effect_label=f"model-inference-round-{iteration}",
+                    )
+                    self._raise_if_cancelled(session)
+                    exit_status = completed.returncode
+                    stdout = completed.stdout
+                    stderr = completed.stderr
+                else:
+                    def inference_cancel_requested() -> bool:
+                        try:
+                            self._raise_if_cancelled(session)
+                        except SessionCancelledError:
+                            return True
+                        return False
+
+                    inference_result = self._run_profile_inference(
+                        agent_config=agent_config,
+                        prompt=prompt,
+                        mission_id=self.mission_id,
+                        session_id=session.session_id,
+                        turn_kind="worker",
+                        schema=_MODEL_FILE_PLAN_INFERENCE_SCHEMA,
+                        validator=_parse_model_file_plan,
+                        cancellation_requested=inference_cancel_requested,
+                    )
+                    if inference_result.receipt.get("outcome") == "cancelled":
+                        self._raise_if_cancelled(session)
+                    exit_status = 0 if inference_result.authoritative else 1
+                    stdout = inference_result.raw_output
+                    stderr = str(inference_result.receipt.get("error", ""))
             except FileNotFoundError as exc:
                 exit_status = 127
                 stdout = ""
@@ -13846,6 +14312,23 @@ class AlbertMission:
                 "output": str(output_path),
                 "stderr": str(stderr_path),
             }
+            if inference_result is not None:
+                inference_receipt_path = artifact_dir / (
+                    f"inference-receipt-round-{iteration:02d}.json"
+                )
+                self._write(
+                    inference_receipt_path,
+                    json.dumps(
+                        inference_result.receipt,
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n",
+                )
+                round_result["inference_receipt"] = str(inference_receipt_path)
+                session.artifacts[
+                    f"inference_round_{iteration:02d}"
+                ] = str(inference_receipt_path)
             round_results.append(round_result)
             round_key = f"ollama_round_{iteration:02d}"
             session.artifacts.update(
@@ -13870,13 +14353,24 @@ class AlbertMission:
                     f"Ollama command exited {exit_status}; inspect stderr artifact."
                 )
                 break
-            try:
-                plan = _parse_model_file_plan(stdout)
-            except AlbertError as exc:
-                session.status = "failed"
-                overall_exit_status = 1
-                known_risk = f"Malformed Ollama output: {exc}"
-                break
+            if inference_result is not None:
+                if not inference_result.authoritative:
+                    session.status = "failed"
+                    overall_exit_status = 1
+                    known_risk = (
+                        f"Local inference {inference_result.receipt.get('outcome', 'failed')}: "
+                        f"{inference_result.receipt.get('error', 'result was not authoritative')}"
+                    )
+                    break
+                plan = inference_result.value
+            else:
+                try:
+                    plan = _parse_model_file_plan(stdout)
+                except AlbertError as exc:
+                    session.status = "failed"
+                    overall_exit_status = 1
+                    known_risk = f"Malformed Ollama output: {exc}"
+                    break
             command_specs, rejected_command = self._preflight_model_commands(
                 session,
                 plan["commands"],

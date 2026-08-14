@@ -6,7 +6,18 @@
       "provider": "ollama",
       "runner": "ollama",
       "model": "qwen3:14b",
-      "routing": "controller"
+      "routing": "controller",
+      "inference_profile": {
+        "version": 1,
+        "profile_id": "qwen3-14b-controller-v1",
+        "keep_alive": "5m",
+        "context_budget": 8192,
+        "output_budget": 1024,
+        "thinking": false,
+        "quantization": "auto",
+        "residency": "normal",
+        "processor_placement": "gpu"
+      }
     },
     {
       "id": "qwen3.6-27b",
@@ -14,7 +25,18 @@
       "provider": "ollama",
       "runner": "ollama",
       "model": "qwen3.6:27b",
-      "routing": "router"
+      "routing": "router",
+      "inference_profile": {
+        "version": 1,
+        "profile_id": "qwen3-6-27b-router-v1",
+        "keep_alive": "10m",
+        "context_budget": 8192,
+        "output_budget": 1024,
+        "thinking": false,
+        "quantization": "auto",
+        "residency": "normal",
+        "processor_placement": "gpu"
+      }
     },
     {
       "id": "gemma4-12b",
@@ -22,7 +44,18 @@
       "provider": "ollama",
       "runner": "ollama",
       "model": "gemma4:12b",
-      "routing": "worker"
+      "routing": "worker",
+      "inference_profile": {
+        "version": 1,
+        "profile_id": "gemma4-12b-worker-v1",
+        "keep_alive": "10m",
+        "context_budget": 16384,
+        "output_budget": 2048,
+        "thinking": false,
+        "quantization": "auto",
+        "residency": "normal",
+        "processor_placement": "gpu"
+      }
     },
     {
       "id": "gemma4-26b",
@@ -30,7 +63,18 @@
       "provider": "ollama",
       "runner": "ollama",
       "model": "gemma4:26b",
-      "routing": "worker"
+      "routing": "worker",
+      "inference_profile": {
+        "version": 1,
+        "profile_id": "gemma4-26b-worker-v1",
+        "keep_alive": "10m",
+        "context_budget": 16384,
+        "output_budget": 2048,
+        "thinking": false,
+        "quantization": "auto",
+        "residency": "normal",
+        "processor_placement": "gpu"
+      }
     },
     {
       "id": "qwen2.5-coder-14b",

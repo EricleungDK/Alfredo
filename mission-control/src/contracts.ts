@@ -801,6 +801,7 @@ export interface WorkstationSessionRunProjection {
   readonly runner_ended_at: string;
   readonly runner_exit_status: number | null;
   readonly evidence_valid: boolean;
+  readonly inference?: LocalInferenceSessionRunProjection;
 }
 
 export type WorkstationSessionRunResult =
@@ -979,8 +980,154 @@ export interface WorkspaceSnapshot {
     readonly ready_issue_ids: readonly string[];
     readonly approved_issue_ids: readonly string[];
     readonly issue_slices?: readonly WorkspaceIssueSliceSummary[];
+    readonly inference?: LocalInferenceProjection;
   };
   readonly missions?: readonly WorkspaceMissionSummary[];
+}
+
+export type LocalInferenceOutcome =
+  | "completed"
+  | "rejected-over-budget"
+  | "profile-not-qualified"
+  | "metadata-error"
+  | "digest-mismatch"
+  | "partial-stream"
+  | "malformed-stream"
+  | "malformed-output"
+  | "oversized-output"
+  | "timed-out"
+  | "cancelled"
+  | "transport-error"
+  | "queue-full"
+  | "lease-timeout"
+  | "lease-lost"
+  | "ledger-invalid";
+
+export type LocalInferenceSchema = "json" | Readonly<Record<string, unknown>>;
+
+export interface LocalInferenceProfileProjection {
+  readonly profile_id: string;
+  readonly version: 1;
+  readonly model: string;
+  readonly model_digest: string;
+  readonly keep_alive: string | number;
+  readonly context_budget: number;
+  readonly output_budget: number;
+  readonly thinking: boolean;
+  readonly sampling: Readonly<Record<string, number>>;
+  readonly schema: LocalInferenceSchema;
+  readonly quantization: string;
+  readonly residency: "normal" | "ephemeral" | string;
+  readonly processor_placement: string;
+  readonly qualified: boolean;
+  readonly priority: number;
+  readonly queue_limit: number;
+  readonly max_queue_wait_seconds: number;
+  readonly timeout_seconds: number;
+  readonly max_output_bytes: number;
+}
+
+export interface LocalInferenceAdmissionProjection {
+  readonly admitted: boolean;
+  readonly prompt_tokens: number;
+  readonly output_headroom: number;
+  readonly context_budget: number;
+  readonly output_budget: number;
+}
+
+export interface LocalInferenceTimingsProjection {
+  readonly load_ms: number | null;
+  readonly prompt_evaluation_ms: number | null;
+  readonly first_token_ms: number | null;
+  readonly decoding_ms: number | null;
+}
+
+export interface LocalInferenceUsageProjection {
+  readonly prompt_tokens: number | null;
+  readonly output_tokens: number;
+  readonly output_bytes: number;
+}
+
+export interface LocalInferenceLeaseEntry {
+  readonly lease_id: string;
+  readonly request_id: string;
+  readonly mission_id: string;
+  readonly session_id: string;
+  readonly model: string;
+  readonly model_digest: string;
+  readonly residency: string;
+  readonly priority: number;
+  readonly sequence: number;
+  readonly enqueued_at?: string;
+  readonly started_at?: string;
+  readonly resident_match?: boolean;
+  readonly model_swap?: boolean;
+}
+
+export type LocalInferenceLeaseMetadata = Partial<LocalInferenceLeaseEntry>;
+
+export interface LocalInferenceResidentProjection {
+  readonly model: string;
+  readonly digest: string;
+  readonly residency: string;
+  readonly updated_at: string;
+}
+
+export interface LocalInferenceAuditProjection {
+  readonly event: string;
+  readonly recorded_at: string;
+  readonly lease_id: string;
+  readonly request_id: string;
+  readonly mission_id: string;
+  readonly session_id: string;
+  readonly outcome?: string;
+  readonly resident_match?: boolean;
+  readonly model_swap?: boolean;
+}
+
+export interface LocalInferenceLeaseStateProjection {
+  readonly schema_version: 1;
+  readonly active: LocalInferenceLeaseEntry | null;
+  readonly queued: readonly LocalInferenceLeaseEntry[];
+  readonly resident: LocalInferenceResidentProjection | null;
+  readonly audit: readonly LocalInferenceAuditProjection[];
+  readonly next_sequence: number;
+}
+
+export interface LocalInferenceReceiptProjection {
+  readonly schema_version?: 1;
+  readonly request_id: string;
+  readonly mission_id: string;
+  readonly session_id: string;
+  readonly turn_kind: string;
+  readonly recorded_at: string;
+  readonly outcome: LocalInferenceOutcome;
+  readonly authoritative: boolean;
+  readonly profile: LocalInferenceProfileProjection;
+  readonly admission: LocalInferenceAdmissionProjection;
+  readonly timings: LocalInferenceTimingsProjection;
+  readonly usage: LocalInferenceUsageProjection;
+  readonly lease: LocalInferenceLeaseMetadata;
+  readonly error?: string;
+}
+
+export type LocalInferenceSessionState = "none" | "authoritative" | "non-authoritative";
+
+export interface LocalInferenceSessionProjection {
+  readonly state: LocalInferenceSessionState;
+  readonly turn_count: number;
+  readonly last: LocalInferenceReceiptProjection | null;
+}
+
+export interface LocalInferenceProjection {
+  readonly turn_count: number;
+  readonly last_turn: LocalInferenceReceiptProjection | null;
+  readonly lease: LocalInferenceLeaseStateProjection;
+}
+
+export interface LocalInferenceSessionRunProjection {
+  readonly turns: readonly LocalInferenceReceiptProjection[];
+  readonly lease: LocalInferenceLeaseStateProjection;
 }
 
 export interface WorkspaceIssueBlockerSummary {
@@ -1166,6 +1313,7 @@ export interface MissionSessionSummary {
     export: boolean;
     discard: boolean;
   }>;
+  readonly inference?: LocalInferenceSessionProjection;
 }
 
 export interface WorkspaceQueueAttention {

@@ -334,6 +334,7 @@ class MissionSessionSummary:
     preservation_budget: dict[str, Any] = field(default_factory=dict)
     retirement_record: dict[str, Any] | None = None
     retirement_actions: dict[str, bool] = field(default_factory=dict)
+    inference: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -11316,6 +11317,7 @@ class WorkspaceSnapshotService:
                     dict(session.retirement["snapshot"]) if session.retirement.get("snapshot") else None
                 ),
                 retirement_actions=mission.inspect_retirement_unit(session.session_id)["actions"],
+                inference=dict(canonical.get("inference", {})),
             )
 
         sessions = tuple(

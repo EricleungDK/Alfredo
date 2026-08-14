@@ -42,7 +42,11 @@ import type {
   WorkstationActionRequest,
 } from "./contracts";
 import type { WorkspaceClient } from "./workspace-client";
-import { MissionExecutionTree, type MissionExecutionOutputState } from "./MissionExecutionTree";
+import {
+  LocalInferenceOverview,
+  MissionExecutionTree,
+  type MissionExecutionOutputState,
+} from "./MissionExecutionTree";
 import { RetirementInspectionDetails } from "./RetirementInspectionDetails";
 import {
   afterTwoAnimationFrames,
@@ -5120,6 +5124,7 @@ function CommandDeck({
             </div>
           </div>
           <div className="mission-work-scroll">
+            <LocalInferenceOverview projection={snapshot.mission_board.inference} />
             <MissionExecutionTree
               projection={executionTreeProjection}
               selectedNodeId={selectedExecutionNodeId}

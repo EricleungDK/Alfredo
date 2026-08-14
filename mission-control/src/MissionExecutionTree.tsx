@@ -22,7 +22,14 @@ import {
   workstationActionStateId,
   workstationActionTargetId,
 } from "./workstation-projection";
-import type { ReviewDecision, WorkspaceQueueDecision } from "./contracts";
+import type {
+  LocalInferenceLeaseEntry,
+  LocalInferenceProjection,
+  LocalInferenceReceiptProjection,
+  LocalInferenceSessionProjection,
+  ReviewDecision,
+  WorkspaceQueueDecision,
+} from "./contracts";
 import { RetirementInspectionDetails } from "./RetirementInspectionDetails";
 
 export type MissionExecutionOutputState = "unavailable" | "subscribing" | "subscribed" | "failed";
@@ -93,6 +100,284 @@ export interface MissionExecutionTreeProps {
   ) => void;
   readonly onOpenView?: (view: string) => void;
   readonly agentOptions?: readonly { readonly id: string; readonly model?: string }[];
+}
+
+export interface LocalInferenceOverviewProps {
+  readonly projection?: LocalInferenceProjection;
+}
+
+export function LocalInferenceOverview({
+  projection,
+}: LocalInferenceOverviewProps): ReactElement {
+  const lease = projection?.lease;
+  const active = lease?.active ?? null;
+  const queued = lease?.queued ?? [];
+  const last = projection?.last_turn ?? null;
+  const status = active
+    ? "Running"
+    : queued.length > 0
+      ? "Queued"
+      : last
+        ? last.authoritative
+          ? "Complete"
+          : "Non-authoritative"
+        : "Idle";
+  const statusTone = active
+    ? "active"
+    : queued.length > 0
+      ? "queued"
+      : last?.authoritative
+        ? "complete"
+        : last
+          ? "failed"
+          : "idle";
+  const resident = lease?.resident ?? null;
+
+  return (
+    <section
+      className="local-inference-overview"
+      data-state={statusTone}
+      aria-label="Local Inference telemetry"
+    >
+      <header className="local-inference-overview__heading">
+        <div>
+          <span className="eyebrow">Instrumented runtime / bounded turns</span>
+          <h3>Local Inference</h3>
+          <p>
+            Profile admission, model identity, lease activity, and result authority stay visible
+            beside canonical Mission Work.
+          </p>
+        </div>
+        <span className={`local-inference-status local-inference-status--${statusTone}`}>
+          {status}
+        </span>
+      </header>
+
+      {!projection || !lease ? (
+        <p className="local-inference-empty">
+          No local inference telemetry is recorded for this Mission yet.
+        </p>
+      ) : (
+        <>
+          <dl className="local-inference-overview__facts">
+            <div>
+              <dt>Turn records</dt>
+              <dd>{projection.turn_count}</dd>
+            </div>
+            <div>
+              <dt>Resident model</dt>
+              <dd>
+                {resident
+                  ? `${resident.model} · ${resident.digest}`
+                  : "No qualified resident recorded"}
+              </dd>
+            </div>
+            <div>
+              <dt>Queue</dt>
+              <dd>{queued.length > 0 ? `${queued.length} waiting` : "Empty"}</dd>
+            </div>
+            <div>
+              <dt>Authority boundary</dt>
+              <dd>
+                {last?.authoritative
+                  ? "Complete schema-valid result"
+                  : last
+                    ? "No model result entered governance"
+                    : "No result recorded"}
+              </dd>
+            </div>
+          </dl>
+
+          {active ? (
+            <div className="local-inference-overview__lease" aria-label="Active local inference lease">
+              <div>
+                <strong>Active lease</strong>
+                <span>
+                  {active.model} · {active.model_digest} · {active.mission_id}/{active.session_id}
+                </span>
+              </div>
+              <small>
+                Priority {active.priority} · sequence {active.sequence} · {active.resident_match
+                  ? "qualified resident affinity"
+                  : "model placement may require a swap"}
+              </small>
+            </div>
+          ) : null}
+
+          {queued.length > 0 ? (
+            <div className="local-inference-overview__queue">
+              <div className="local-inference-overview__subheading">
+                <h4>Visible queue</h4>
+                <span>Priority, resident affinity, then FIFO</span>
+              </div>
+              <ol aria-label="Queued local inference requests">
+                {queued.map((entry) => (
+                  <li key={entry.lease_id}>
+                    <span>
+                      <strong>Priority {entry.priority}</strong> · {entry.model} · {entry.model_digest}
+                    </span>
+                    <small>
+                      {entry.mission_id}/{entry.session_id} · sequence {entry.sequence} · {leaseAffinity(entry, resident)}
+                    </small>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          ) : null}
+
+          {last ? (
+            <LocalInferenceReceiptDetails receipt={last} compact />
+          ) : (
+            <p className="local-inference-empty">No completed or failed inference turn recorded.</p>
+          )}
+          <p className="local-inference-overview__boundary">
+            The lease serializes local model work only; Mission governance remains authoritative.
+          </p>
+        </>
+      )}
+    </section>
+  );
+}
+
+export function LocalInferenceTelemetry({
+  projection,
+}: {
+  readonly projection?: LocalInferenceSessionProjection;
+}): ReactElement {
+  return (
+    <section
+      className="mission-execution-inspector__section local-inference-telemetry"
+      aria-label="Local Inference telemetry for this session"
+    >
+      <div className="mission-execution-inspector__section-heading">
+        <h5>Local Inference telemetry</h5>
+        <span>
+          {projection?.state === "authoritative"
+            ? "Complete bounded result"
+            : projection?.state === "non-authoritative"
+              ? "Non-authoritative outcome"
+              : "No turn recorded"}
+        </span>
+      </div>
+      {!projection || projection.state === "none" || !projection.last ? (
+        <p className="local-inference-empty">
+          No local inference turn is recorded for this session.
+        </p>
+      ) : (
+        <LocalInferenceReceiptDetails receipt={projection.last} />
+      )}
+    </section>
+  );
+}
+
+function LocalInferenceReceiptDetails({
+  receipt,
+  compact = false,
+}: {
+  readonly receipt: LocalInferenceReceiptProjection;
+  readonly compact?: boolean;
+}): ReactElement {
+  const profile = receipt.profile;
+  return (
+    <div className={`local-inference-receipt${compact ? " local-inference-receipt--compact" : ""}`}>
+      <dl className="local-inference-receipt__facts">
+        <div><dt>Outcome</dt><dd>{localInferenceOutcomeLabel(receipt.outcome)}</dd></div>
+        <div><dt>Authority</dt><dd>{receipt.authoritative ? "Authoritative result" : "Non-authoritative"}</dd></div>
+        <div><dt>Model</dt><dd>{profile.model}</dd></div>
+        <div><dt>Exact digest</dt><dd>{profile.model_digest}</dd></div>
+        <div><dt>Profile</dt><dd>{profile.profile_id} · v{profile.version}</dd></div>
+        <div><dt>Keep-alive</dt><dd>{String(profile.keep_alive)}</dd></div>
+        <div><dt>Context / output</dt><dd>{profile.context_budget} / {profile.output_budget} tokens</dd></div>
+        <div><dt>Thinking / sampling</dt><dd>{profile.thinking ? "on" : "off"} · {samplingLabel(profile.sampling)}</dd></div>
+        <div><dt>Quantization</dt><dd>{profile.quantization}</dd></div>
+        <div><dt>Residency / placement</dt><dd>{profile.residency} / {profile.processor_placement}</dd></div>
+        <div><dt>Admission</dt><dd>{admissionLabel(receipt)}</dd></div>
+        <div><dt>Usage</dt><dd>{usageLabel(receipt)}</dd></div>
+        <div><dt>Timings</dt><dd>{timingsLabel(receipt.timings)}</dd></div>
+        <div><dt>Recorded</dt><dd>{receipt.recorded_at}</dd></div>
+      </dl>
+      <details className="local-inference-receipt__schema">
+        <summary>Declared schema and request identity</summary>
+        <p>
+          <span>Request</span> <code>{receipt.request_id}</code> · <span>Turn</span> <code>{receipt.turn_kind}</code>
+        </p>
+        <pre>{schemaLabel(profile.schema)}</pre>
+      </details>
+      {receipt.error ? <p className="local-inference-receipt__error">{receipt.error}</p> : null}
+    </div>
+  );
+}
+
+function localInferenceOutcomeLabel(outcome: string): string {
+  const labels: Readonly<Record<string, string>> = {
+    completed: "Completed · schema-valid",
+    "rejected-over-budget": "Rejected · output headroom unavailable",
+    "profile-not-qualified": "Rejected · profile not qualified",
+    "metadata-error": "Rejected · model metadata unavailable",
+    "digest-mismatch": "Rejected · digest mismatch",
+    "partial-stream": "Non-authoritative · partial stream",
+    "malformed-stream": "Non-authoritative · malformed stream",
+    "malformed-output": "Non-authoritative · malformed output",
+    "oversized-output": "Non-authoritative · oversized output",
+    "timed-out": "Non-authoritative · timed out",
+    cancelled: "Non-authoritative · cancelled",
+    "transport-error": "Non-authoritative · transport error",
+    "queue-full": "Non-authoritative · queue full",
+    "lease-timeout": "Non-authoritative · lease timeout",
+    "lease-lost": "Non-authoritative · lease lost",
+    "ledger-invalid": "Non-authoritative · ledger invalid",
+  };
+  return labels[outcome] ?? `Non-authoritative · ${outcome}`;
+}
+
+function leaseAffinity(
+  entry: LocalInferenceLeaseEntry,
+  resident: LocalInferenceProjection["lease"]["resident"],
+): string {
+  if (
+    resident &&
+    entry.residency === "normal" &&
+    entry.model === resident.model &&
+    entry.model_digest === resident.digest
+  ) {
+    return "qualified resident";
+  }
+  return "model swap candidate";
+}
+
+function samplingLabel(sampling: Readonly<Record<string, number>>): string {
+  return Object.entries(sampling)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(", ") || "none";
+}
+
+function admissionLabel(receipt: LocalInferenceReceiptProjection): string {
+  const admission = receipt.admission;
+  return `${admission.admitted ? "admitted" : "rejected"} · ${admission.prompt_tokens} prompt / ${admission.output_headroom} headroom`;
+}
+
+function usageLabel(receipt: LocalInferenceReceiptProjection): string {
+  const usage = receipt.usage;
+  return `${usage.prompt_tokens ?? "?"} prompt / ${usage.output_tokens} output tokens · ${usage.output_bytes} bytes`;
+}
+
+function timingsLabel(timings: LocalInferenceReceiptProjection["timings"]): string {
+  return [
+    `load ${durationLabel(timings.load_ms)}`,
+    `prompt ${durationLabel(timings.prompt_evaluation_ms)}`,
+    `first ${durationLabel(timings.first_token_ms)}`,
+    `decode ${durationLabel(timings.decoding_ms)}`,
+  ].join(" · ");
+}
+
+function durationLabel(value: number | null): string {
+  return value === null ? "—" : `${value} ms`;
+}
+
+function schemaLabel(schema: LocalInferenceReceiptProjection["profile"]["schema"]): string {
+  if (schema === "json") return 'format: "json"';
+  const encoded = JSON.stringify(schema, null, 2) ?? "{}";
+  return encoded.length > 4_096 ? `${encoded.slice(0, 4_096)}\n… schema display truncated` : encoded;
 }
 
 export function MissionExecutionTree({
@@ -616,6 +901,8 @@ function MissionExecutionInspector({
         <div><dt>Risk</dt><dd>{riskLabel(node.risk)}</dd></div>
         <div><dt>Evidence risk</dt><dd>{issue?.evidence.risks.trim() || "None recorded."}</dd></div>
       </dl>
+
+      {session ? <LocalInferenceTelemetry projection={session.inference} /> : null}
 
       {node.kind === "issue-slice" && issue ? (
         <section className="mission-execution-inspector__section">
