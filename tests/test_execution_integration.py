@@ -10,7 +10,14 @@ import unittest
 from unittest.mock import patch
 
 from albert_mvp.core import AlbertMission, LocalAgentSession
-from albert_mvp.execution import ExecutionJournal
+from albert_mvp.execution import (
+    ExecutionJournal,
+    ExecutionLimits,
+    ExecutionReceipt,
+    ExecutionRequest,
+    ExecutionSandbox,
+    LocalAgentExecutionAuthority,
+)
 from albert_mvp.workspace import ShellTerminalService, WorkspaceSnapshotService
 
 
@@ -62,8 +69,27 @@ class HostExecutionIntegrationTests(unittest.TestCase):
                         "/usr/bin/bwrap",
                         "--die-with-parent",
                         "--new-session",
+                        "--unshare-user",
+                        "--unshare-pid",
+                        "--tmpfs",
+                        "/",
+                        "--dev",
+                        "/dev",
+                        "--proc",
+                        "/proc",
+                        "--tmpfs",
+                        "/tmp",
+                        "--ro-bind",
+                        str(self.target.resolve()),
+                        str(self.target.resolve()),
                         "--chdir",
                         str(self.target.resolve()),
+                        "--",
+                        "/usr/bin/prlimit",
+                        "--as=8589934592",
+                        "--fsize=2147483648",
+                        "--nofile=1024",
+                        "--nproc=256",
                         "--",
                         "python3",
                         "-c",
@@ -240,8 +266,27 @@ class HostExecutionIntegrationTests(unittest.TestCase):
                         "/usr/bin/bwrap",
                         "--die-with-parent",
                         "--new-session",
+                        "--unshare-user",
+                        "--unshare-pid",
+                        "--tmpfs",
+                        "/",
+                        "--dev",
+                        "/dev",
+                        "--proc",
+                        "/proc",
+                        "--tmpfs",
+                        "/tmp",
+                        "--bind",
+                        str(self.target.resolve()),
+                        str(self.target.resolve()),
                         "--chdir",
                         str(self.target.resolve()),
+                        "--",
+                        "/usr/bin/prlimit",
+                        "--as=8589934592",
+                        "--fsize=2147483648",
+                        "--nofile=1024",
+                        "--nproc=256",
                         "--",
                         "python3",
                         "-c",
@@ -291,6 +336,54 @@ class HostExecutionIntegrationTests(unittest.TestCase):
             len(restarted.sessions[session.session_id].execution_receipts),
             1,
         )
+
+    def test_local_receipt_projection_uses_latest_cancelled_session_revision(
+        self,
+    ) -> None:
+        mission = self._mission()
+        session = LocalAgentSession(
+            session_id="session-local-cancelled-receipt",
+            issue_id="ISS-01",
+            assigned_agent="local-test",
+            worktree_path=self.target,
+            task_packet={"allowed_paths": ["src"]},
+            status="running",
+            runner_operation_id="runner:test-mission:session-local-cancelled-receipt:1",
+            worktree_identity="managed:test-mission:session-local-cancelled-receipt",
+        )
+        mission.sessions[session.session_id] = session
+        mission._persist()
+        mission.cancel_session(
+            session.session_id,
+            reason="user requested cancellation",
+            expected_revision=session.revision,
+        )
+        request = ExecutionRequest(
+            request_id="local-agent:session-local-cancelled-receipt:command",
+            effect="local-agent",
+            argv=("/usr/bin/bwrap", "--"),
+            working_directory=str(self.target.resolve()),
+            authority=LocalAgentExecutionAuthority(
+                mission_id=mission.mission_id,
+                session_id=session.session_id,
+                session_revision=0,
+                runner_operation_id=session.runner_operation_id,
+                worktree_identity=session.worktree_identity,
+            ),
+            limits=ExecutionLimits(timeout_seconds=2, output_limit_bytes=1024),
+            sandbox=ExecutionSandbox(
+                mode="bubblewrap",
+                writable_roots=(str(self.target.resolve()),),
+            ),
+            environment=(("PATH", "/usr/bin:/bin"),),
+        )
+        mission._record_local_execution_receipt(
+            session,
+            ExecutionReceipt.completed(request, exit_code=0, stdout="", stderr=""),
+        )
+        persisted = mission._refresh_persisted_session(session.session_id)
+        self.assertEqual(persisted.status, "cancelled")
+        self.assertEqual(len(persisted.execution_receipts), 1)
 
 
 if __name__ == "__main__":

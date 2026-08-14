@@ -565,16 +565,32 @@ class ShellTerminalService:
     def path_grant_requests_path(self) -> Path:
         return self._path_grant_requests_path
 
-    @_causal_chronology
+    def _execution_journal_path_for_mission(self, mission_id: str) -> Path:
+        mission = self._snapshots._missions.get(mission_id)
+        if mission is None:
+            raise WorkspacePersistenceError(
+                f"Shell Terminal command references unknown Mission: {mission_id}"
+            )
+        return mission.runtime_dir / "execution-receipts.json"
+
     def inspect(self) -> ShellTerminalProjection:
-        terminal = self._reconcile_execution_ledger(self._load_terminal())
+        with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+            return self._inspect_locked()
+
+    @_causal_chronology
+    def _inspect_locked(self) -> ShellTerminalProjection:
+        terminal = self._reconcile_execution_ledger(
+            self._load_terminal(), terminal_lock_held=True
+        )
         path_grant_requests = self._load_path_grant_requests()
         if any(
             record.get("status") == "executing"
             and self._projected_command_status(record) == "outcome-unknown"
             for record in terminal["commands"]
         ):
-            terminal = self._try_persist_orphaned_executions(terminal)
+            terminal = self._try_persist_orphaned_executions(
+                terminal, terminal_lock_held=True
+            )
         self._reconcile_terminal_audit(terminal)
         return ShellTerminalProjection(
             schema_version=1,
@@ -608,16 +624,24 @@ class ShellTerminalService:
             ),
         )
 
-    @_causal_chronology
     def reconcile_audit(self) -> None:
         """Repair missing command audit phases before unrelated chronology advances."""
-        terminal = self._reconcile_execution_ledger(self._load_terminal())
+        with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+            return self._reconcile_audit_locked()
+
+    @_causal_chronology
+    def _reconcile_audit_locked(self) -> None:
+        terminal = self._reconcile_execution_ledger(
+            self._load_terminal(), terminal_lock_held=True
+        )
         if any(
             record.get("status") == "executing"
             and self._projected_command_status(record) == "outcome-unknown"
             for record in terminal["commands"]
         ):
-            terminal = self._try_persist_orphaned_executions(terminal)
+            terminal = self._try_persist_orphaned_executions(
+                terminal, terminal_lock_held=True
+            )
         if any(
             record.get("status") == "executing"
             and self._projected_command_status(record) == "outcome-unknown"
@@ -667,7 +691,9 @@ class ShellTerminalService:
         requester: str,
         access_level: Literal["read", "write"],
     ) -> ShellTerminalCommandResult:
-        terminal = self._reconcile_execution_ledger(self._load_terminal())
+        terminal = self._reconcile_execution_ledger(
+            self._load_terminal(), terminal_lock_held=True
+        )
         normalized_correlation_id = correlation_id.strip()
         normalized_working_directory = str(Path(working_directory).resolve())
         normalized_requested_paths = [
@@ -909,7 +935,9 @@ class ShellTerminalService:
         duration_seconds: int,
         request_id: str,
     ) -> AdditionalPathGrant:
-        terminal = self._reconcile_execution_ledger(self._load_terminal())
+        terminal = self._reconcile_execution_ledger(
+            self._load_terminal(), terminal_lock_held=True
+        )
         normalized_correlation_id = correlation_id.strip()
         normalized_path = str(Path(path).resolve())
         normalized_request_id = request_id.strip()
@@ -1162,7 +1190,9 @@ class ShellTerminalService:
         command_id: str,
         approver: str,
     ) -> ShellTerminalCommandResult:
-        terminal = self._load_terminal()
+        terminal = self._reconcile_execution_ledger(
+            self._load_terminal(), terminal_lock_held=True
+        )
         commands = list(terminal["commands"])
         index = next(
             (position for position, item in enumerate(commands) if item["command_id"] == command_id),
@@ -1355,7 +1385,9 @@ class ShellTerminalService:
             )
         try:
             receipt = ExecutionCoordinator(
-                ExecutionJournal(self._execution_journal_path),
+                ExecutionJournal(
+                    self._execution_journal_path_for_mission(str(record["mission_id"]))
+                ),
                 PythonExecutionProvider(executor=_run_bounded_process),
             ).execute(
                 execution_request,
@@ -1606,7 +1638,11 @@ class ShellTerminalService:
     def _try_persist_orphaned_executions(
         self,
         observed_terminal: dict[str, Any],
+        *,
+        terminal_lock_held: bool = False,
     ) -> dict[str, Any]:
+        if terminal_lock_held:
+            return self._persist_orphaned_executions_locked(self._load_terminal())
         lock_path = self._terminal_path.with_name(
             f".{self._terminal_path.name}.lock"
         )
@@ -1874,12 +1910,19 @@ class ShellTerminalService:
     def _reconcile_execution_ledger(
         self,
         terminal: dict[str, Any],
+        *,
+        terminal_lock_held: bool = False,
     ) -> dict[str, Any]:
         """Project durable typed receipts into Shell's canonical command store."""
 
-        journal = ExecutionJournal(self._execution_journal_path)
-        journal.reconcile()
-        receipts = {receipt.request_id: receipt for receipt in journal.inspect()}
+        if not terminal_lock_held:
+            with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+                return self._reconcile_execution_ledger(
+                    self._load_terminal(), terminal_lock_held=True
+                )
+        journal_records_by_mission: dict[
+            str, dict[str, tuple[ExecutionRequest, ExecutionReceipt]]
+        ] = {}
         commands = list(terminal["commands"])
         changed_records: list[dict[str, Any]] = []
         changed = False
@@ -1890,12 +1933,47 @@ class ShellTerminalService:
             request_digest = record.get("execution_request_digest")
             if not isinstance(request_id, str) or not isinstance(request_digest, str):
                 continue
-            receipt = receipts.get(request_id)
-            if receipt is None or receipt.status == "executing":
+            mission_id = record.get("mission_id")
+            if not isinstance(mission_id, str) or not mission_id.strip():
+                raise WorkspacePersistenceError(
+                    "Shell Terminal execution record has no Mission boundary."
+                )
+            if mission_id not in journal_records_by_mission:
+                journal = ExecutionJournal(
+                    self._execution_journal_path_for_mission(mission_id)
+                )
+                journal.reconcile()
+                journal_records_by_mission[mission_id] = {
+                    request.request_id: (request, receipt)
+                    for request, receipt in journal.inspect_records()
+                }
+            request_and_receipt = journal_records_by_mission[mission_id].get(request_id)
+            if request_and_receipt is None:
+                continue
+            request, receipt = request_and_receipt
+            if receipt.status == "executing":
                 continue
             if receipt.request_digest != request_digest:
                 raise WorkspacePersistenceError(
                     "Shell Terminal execution receipt does not match its request boundary."
+                )
+            authority = request.authority
+            if not isinstance(authority, ShellExecutionAuthority) or (
+                request.effect != "shell"
+                or authority.mission_id != mission_id
+                or authority.command_id != record.get("command_id")
+                or authority.correlation_id != record.get("correlation_id")
+                or authority.command != record.get("command")
+                or authority.classification != record.get("classification")
+                or authority.requester != record.get("requester")
+                or authority.working_directory != record.get("working_directory")
+                or authority.requested_paths != tuple(record.get("requested_paths", []))
+                or authority.access_level != record.get("access_level", "read")
+                or authority.approval_actor != record.get("approver", "")
+                or request.working_directory != record.get("working_directory")
+            ):
+                raise WorkspacePersistenceError(
+                    "Shell Terminal execution receipt authority does not match its command."
                 )
             if receipt.reconciliation_required:
                 reconciled = {
@@ -2338,6 +2416,48 @@ class ShellTerminalService:
                 not isinstance(item[field_name], int) or isinstance(item[field_name], bool)
             ):
                 raise ValueError(f"Shell Terminal command {field_name} is invalid")
+        execution_request_id = item.get("execution_request_id")
+        execution_request_digest = item.get("execution_request_digest")
+        if (execution_request_id is None) != (execution_request_digest is None):
+            raise ValueError("Shell Terminal execution request identity is incomplete")
+        if execution_request_id is not None:
+            if (
+                not isinstance(execution_request_id, str)
+                or not execution_request_id.strip()
+                or not re.fullmatch(r"[A-Za-z0-9._:/=-]+", execution_request_id)
+                or not isinstance(execution_request_digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", execution_request_digest) is None
+            ):
+                raise ValueError("Shell Terminal execution request identity is invalid")
+        receipt_id = item.get("execution_receipt_id")
+        execution_status = item.get("execution_status")
+        if (receipt_id is None) != (execution_status is None):
+            raise ValueError("Shell Terminal execution receipt is incomplete")
+        if receipt_id is not None:
+            if (
+                not isinstance(receipt_id, str)
+                or not receipt_id.strip()
+                or not re.fullmatch(r"[A-Za-z0-9._:/=-]+", receipt_id)
+                or execution_status
+                not in {
+                    "completed",
+                    "failed",
+                    "cancelled",
+                    "timed-out",
+                    "output-limit",
+                    "start-failed",
+                    "outcome-unknown",
+                }
+            ):
+                raise ValueError("Shell Terminal execution receipt is invalid")
+        if receipt_id is not None and execution_request_id is None:
+            raise ValueError("Shell Terminal execution request is missing")
+        if (
+            execution_request_id is not None
+            and status in {"completed", "failed"}
+            and receipt_id is None
+        ):
+            raise ValueError("Shell Terminal terminal receipt is missing")
 
     @classmethod
     def _validate_terminal_grant(cls, item: object) -> None:

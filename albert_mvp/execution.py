@@ -23,6 +23,7 @@ import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import tempfile
 from typing import Any, Callable, Literal, Mapping, Sequence
 
@@ -34,9 +35,36 @@ _MAX_INPUT_BYTES = 96_000
 _MAX_OUTPUT_BYTES = 8_000_000
 _MAX_TIMEOUT_SECONDS = 3_600.0
 _MAX_ENVIRONMENT_ENTRIES = 128
+_MAX_ENVIRONMENT_VALUE_BYTES = 16 * 1024
+_MAX_ENVIRONMENT_TOTAL_BYTES = 64 * 1024
 _MAX_PATH_ENTRIES = 256
+_MAX_ADDRESS_SPACE_BYTES = 64 * 1024 * 1024 * 1024
+_MAX_FILE_SIZE_BYTES = 16 * 1024 * 1024 * 1024
+_MAX_OPEN_FILE_LIMIT = 65_536
+_MAX_PROCESS_COUNT_LIMIT = 4_096
 _IDENTITY_PATTERN = re.compile(r"^[A-Za-z0-9._:/=-]+$")
 _ENVIRONMENT_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_EXECUTION_ENVIRONMENT_ALLOWLIST = {
+    "CI",
+    "COLORTERM",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LOGNAME",
+    "NO_COLOR",
+    "OLLAMA_HOST",
+    "PATH",
+    "PYTHONPATH",
+    "SHELL",
+    "TERM",
+    "TMPDIR",
+    "USER",
+    "PIP_CACHE_DIR",
+    "PYTHONDONTWRITEBYTECODE",
+    "npm_config_cache",
+    "ALBERT_SESSION_ID",
+    "ALBERT_TASK_PACKET",
+}
 
 ExecutionEffect = Literal["local-agent", "shell"]
 ExecutionStatus = Literal[
@@ -177,6 +205,14 @@ class ExecutionLimits:
             value = getattr(self, name)
             if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
                 raise ExecutionContractError(f"execution {name} must be positive")
+        if self.address_space_bytes > _MAX_ADDRESS_SPACE_BYTES:
+            raise ExecutionContractError("execution address space limit is too large")
+        if self.file_size_bytes > _MAX_FILE_SIZE_BYTES:
+            raise ExecutionContractError("execution file size limit is too large")
+        if self.open_file_limit > _MAX_OPEN_FILE_LIMIT:
+            raise ExecutionContractError("execution open file limit is too large")
+        if self.process_count_limit > _MAX_PROCESS_COUNT_LIMIT:
+            raise ExecutionContractError("execution process count limit is too large")
         if (
             not isinstance(self.descendant_grace_seconds, (int, float))
             or isinstance(self.descendant_grace_seconds, bool)
@@ -268,6 +304,7 @@ def _validate_prepared_bubblewrap_argv(
     argv: Sequence[str],
     sandbox: ExecutionSandbox,
     working_directory: str,
+    limits: ExecutionLimits,
 ) -> None:
     if sandbox.mode == "none" and os.name != "posix":
         return
@@ -275,23 +312,151 @@ def _validate_prepared_bubblewrap_argv(
         raise ExecutionContractError(
             "execution provider requires a prepared Bubblewrap argv"
         )
-    if "--die-with-parent" not in argv or "--new-session" not in argv:
-        raise ExecutionContractError(
-            "execution Bubblewrap argv must retain process supervision"
-        )
-    if "--" not in argv:
-        raise ExecutionContractError("execution Bubblewrap argv is incomplete")
     if sandbox.mode != "bubblewrap":
         raise ExecutionContractError("execution provider requires Bubblewrap")
-    required_paths = (
-        *sandbox.readable_roots,
-        *sandbox.writable_roots,
-        *(value for binding in sandbox.readonly_bindings for value in binding),
-        working_directory,
+    trusted_roots = tuple(
+        Path(value).resolve(strict=False)
+        for value in ("/usr/bin", "/usr/sbin", "/bin", "/sbin")
     )
-    if any(path not in argv for path in required_paths):
+    bubblewrap_path = Path(argv[0]).resolve(strict=False)
+    if not any(
+        bubblewrap_path == root or bubblewrap_path.is_relative_to(root)
+        for root in trusted_roots
+    ):
+        raise ExecutionContractError("execution Bubblewrap executable is not trusted")
+
+    try:
+        separator = argv.index("--")
+    except ValueError as exc:
         raise ExecutionContractError(
-            "execution Bubblewrap argv does not match its filesystem boundary"
+            "execution Bubblewrap argv is missing its separator"
+        ) from exc
+    if separator <= 1 or separator == len(argv) - 1:
+        raise ExecutionContractError("execution Bubblewrap argv is incomplete")
+
+    prefix = list(argv[1:separator])
+    command = list(argv[separator + 1 :])
+    required_flags = {
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-user",
+        "--unshare-pid",
+    }
+    if any(prefix.count(flag) != 1 for flag in required_flags):
+        raise ExecutionContractError(
+            "execution Bubblewrap argv must retain process supervision and isolation"
+        )
+
+    ro_bindings: list[tuple[str, str]] = []
+    rw_bindings: list[tuple[str, str]] = []
+    tmpfs_targets: list[str] = []
+    dev_targets: list[str] = []
+    proc_targets: list[str] = []
+    chdir_targets: list[str] = []
+    directory_targets: list[str] = []
+    flag_tokens = required_flags
+    pair_tokens = {
+        "--ro-bind",
+        "--bind",
+        "--tmpfs",
+        "--dev",
+        "--proc",
+        "--chdir",
+        "--dir",
+    }
+    index = 0
+    while index < len(prefix):
+        token = prefix[index]
+        if token in flag_tokens:
+            index += 1
+            continue
+        if token not in pair_tokens or index + 1 >= len(prefix):
+            raise ExecutionContractError(
+                "execution Bubblewrap argv contains an unsupported option"
+            )
+        if token in {"--ro-bind", "--bind"}:
+            if index + 2 >= len(prefix):
+                raise ExecutionContractError("execution Bubblewrap mount is incomplete")
+            source, destination = prefix[index + 1 : index + 3]
+            if token == "--ro-bind":
+                ro_bindings.append((source, destination))
+            else:
+                rw_bindings.append((source, destination))
+            index += 3
+            continue
+        value = prefix[index + 1]
+        if token == "--tmpfs":
+            tmpfs_targets.append(value)
+        elif token == "--dev":
+            dev_targets.append(value)
+        elif token == "--proc":
+            proc_targets.append(value)
+        elif token == "--chdir":
+            chdir_targets.append(value)
+        else:
+            directory_targets.append(value)
+        index += 2
+
+    if tmpfs_targets.count("/") != 1 or tmpfs_targets.count("/tmp") != 1:
+        raise ExecutionContractError(
+            "execution Bubblewrap root and temporary mounts are invalid"
+        )
+    if dev_targets != ["/dev"] or proc_targets != ["/proc"]:
+        raise ExecutionContractError("execution Bubblewrap device mounts are invalid")
+    if chdir_targets != [working_directory]:
+        raise ExecutionContractError(
+            "execution Bubblewrap working directory is invalid"
+        )
+    if any(not Path(value).is_absolute() for value in directory_targets):
+        raise ExecutionContractError("execution Bubblewrap directory mount is invalid")
+    if any(source == "/" and destination == "/" for source, destination in rw_bindings):
+        raise ExecutionContractError(
+            "execution Bubblewrap host root cannot be writable"
+        )
+    if any(source == "/" or destination == "/" for source, destination in ro_bindings):
+        raise ExecutionContractError("execution Bubblewrap host root cannot be mounted")
+
+    writable = set(sandbox.writable_roots)
+    readable = set(sandbox.readable_roots) - writable
+    expected_rw = {(path, path) for path in writable}
+    expected_ro = {(path, path) for path in readable}
+    expected_ro.update(sandbox.readonly_bindings)
+    if not expected_rw.issubset(set(rw_bindings)):
+        raise ExecutionContractError(
+            "execution Bubblewrap writable boundary is incomplete"
+        )
+    if expected_ro - set(ro_bindings):
+        raise ExecutionContractError(
+            "execution Bubblewrap readonly boundary is incomplete"
+        )
+    if any(binding not in expected_rw for binding in rw_bindings):
+        raise ExecutionContractError(
+            "execution Bubblewrap contains an undeclared writable mount"
+        )
+    if any(destination in writable for _source, destination in ro_bindings):
+        raise ExecutionContractError(
+            "execution Bubblewrap writable path is also readonly"
+        )
+
+    if Path(command[0]).name != "prlimit" or len(command) < 7:
+        raise ExecutionContractError(
+            "execution Bubblewrap resource boundary is missing"
+        )
+    prlimit_path = Path(command[0]).resolve(strict=False)
+    if not any(
+        prlimit_path == root or prlimit_path.is_relative_to(root)
+        for root in trusted_roots
+    ):
+        raise ExecutionContractError("execution prlimit executable is not trusted")
+    expected_limits = [
+        f"--as={limits.address_space_bytes}",
+        f"--fsize={limits.file_size_bytes}",
+        f"--nofile={limits.open_file_limit}",
+        f"--nproc={limits.process_count_limit}",
+    ]
+    if command[1:5] != expected_limits or command[5] != "--":
+        raise ExecutionContractError(
+            "execution Bubblewrap resource boundary is invalid"
         )
 
 
@@ -483,15 +648,23 @@ class ExecutionRequest:
         if len(self.environment) > _MAX_ENVIRONMENT_ENTRIES:
             raise ExecutionContractError("execution environment is too large")
         environment_keys: set[str] = set()
+        environment_bytes = 0
         for key, value in self.environment:
             if (
                 not isinstance(key, str)
                 or not _ENVIRONMENT_KEY_PATTERN.fullmatch(key)
                 or key in environment_keys
+                or key not in _EXECUTION_ENVIRONMENT_ALLOWLIST
                 or not isinstance(value, str)
                 or "\0" in value
             ):
                 raise ExecutionContractError("execution environment is invalid")
+            value_bytes = len(value.encode("utf-8"))
+            if value_bytes > _MAX_ENVIRONMENT_VALUE_BYTES:
+                raise ExecutionContractError("execution environment value is too large")
+            environment_bytes += len(key.encode("utf-8")) + value_bytes
+            if environment_bytes > _MAX_ENVIRONMENT_TOTAL_BYTES:
+                raise ExecutionContractError("execution environment is too large")
             environment_keys.add(key)
         if self.input_text is not None:
             if not isinstance(self.input_text, str) or "\0" in self.input_text:
@@ -542,6 +715,8 @@ class ExecutionRequest:
     def from_dict(cls, payload: Mapping[str, Any]) -> "ExecutionRequest":
         if not isinstance(payload, Mapping):
             raise ExecutionContractError("execution request must be an object")
+        if "schema_version" not in payload:
+            raise ExecutionContractError("execution request schema is missing")
         raw_authority = payload.get("authority")
         if not isinstance(raw_authority, Mapping):
             raise ExecutionContractError("execution request authority is missing")
@@ -559,7 +734,7 @@ class ExecutionRequest:
         if input_text is not None and not isinstance(input_text, str):
             raise ExecutionContractError("execution request input is invalid")
         request = cls(
-            schema_version=payload.get("schema_version", EXECUTION_SCHEMA_VERSION),
+            schema_version=payload["schema_version"],
             request_id=payload["request_id"],
             effect=payload["effect"],
             argv=tuple(payload["argv"]),
@@ -650,6 +825,39 @@ class ExecutionReceipt:
             self.reconciliation_required, bool
         ):
             raise ExecutionContractError("execution receipt effect flags are invalid")
+        if self.status == "executing":
+            if (
+                self.effect_started
+                or self.reconciliation_required
+                or self.exit_code is not None
+            ):
+                raise ExecutionContractError("executing receipt flags are invalid")
+        elif self.status == "start-failed":
+            if (
+                self.effect_started
+                or self.reconciliation_required
+                or self.exit_code != 127
+            ):
+                raise ExecutionContractError("start-failed receipt flags are invalid")
+        elif self.status == "outcome-unknown":
+            if (
+                not self.effect_started
+                or not self.reconciliation_required
+                or self.exit_code is not None
+            ):
+                raise ExecutionContractError(
+                    "outcome-unknown receipt flags are invalid"
+                )
+        elif self.status == "cancelled":
+            if self.reconciliation_required or self.exit_code is not None:
+                raise ExecutionContractError("cancelled receipt flags are invalid")
+        else:
+            if (
+                not self.effect_started
+                or self.reconciliation_required
+                or self.exit_code is None
+            ):
+                raise ExecutionContractError("terminal receipt flags are invalid")
         for value, label in ((self.stdout, "stdout"), (self.stderr, "stderr")):
             if not isinstance(value, str) or "\0" in value:
                 raise ExecutionContractError(f"execution receipt {label} is invalid")
@@ -668,8 +876,20 @@ class ExecutionReceipt:
         ):
             if not isinstance(value, str) or "\0" in value:
                 raise ExecutionContractError(f"execution receipt {label} is invalid")
-        if self.receipt_id:
-            _validate_identity(self.receipt_id, label="execution receipt identity")
+        _validate_identity(self.receipt_id, label="execution receipt identity")
+        expected_receipt_id = "execution-receipt:" + _sha256_text(
+            "\n".join(
+                (
+                    self.request_id,
+                    self.request_digest,
+                    self.started_at,
+                    self.ended_at,
+                    self.status,
+                )
+            )
+        )
+        if self.receipt_id != expected_receipt_id:
+            raise ExecutionContractError("execution receipt identity is invalid")
         if not re.fullmatch(r"[0-9a-f]{64}", self.stdout_sha256) or not re.fullmatch(
             r"[0-9a-f]{64}", self.stderr_sha256
         ):
@@ -807,13 +1027,17 @@ class ExecutionReceipt:
 
     @classmethod
     def cancelled(
-        cls, request: ExecutionRequest, *, error_message: str
+        cls,
+        request: ExecutionRequest,
+        *,
+        error_message: str,
+        effect_started: bool = True,
     ) -> "ExecutionReceipt":
         return cls._make(
             request,
             status="cancelled",
             exit_code=None,
-            effect_started=True,
+            effect_started=effect_started,
             reconciliation_required=False,
             error_code="cancelled",
             error_message=error_message,
@@ -823,8 +1047,13 @@ class ExecutionReceipt:
     def from_dict(cls, payload: Mapping[str, Any]) -> "ExecutionReceipt":
         if not isinstance(payload, Mapping):
             raise ExecutionContractError("execution receipt must be an object")
+        for field_name in ("schema_version", "receipt_id"):
+            if field_name not in payload:
+                raise ExecutionContractError(
+                    f"execution receipt {field_name} is missing"
+                )
         receipt = cls(
-            schema_version=payload.get("schema_version", EXECUTION_SCHEMA_VERSION),
+            schema_version=payload["schema_version"],
             request_id=payload["request_id"],
             request_digest=payload["request_digest"],
             effect=payload["effect"],
@@ -842,7 +1071,7 @@ class ExecutionReceipt:
             reconciliation_required=payload["reconciliation_required"],
             error_code=payload.get("error_code", ""),
             error_message=payload.get("error_message", ""),
-            receipt_id=payload.get("receipt_id", ""),
+            receipt_id=payload["receipt_id"],
             owner_pid=payload.get("owner_pid"),
             owner_identity=payload.get("owner_identity", ""),
             process_pid=payload.get("process_pid"),
@@ -897,18 +1126,35 @@ class ExecutionReceipt:
 def _process_identity(pid: int) -> str:
     if pid <= 0:
         return ""
-    try:
-        remainder = (
-            Path(f"/proc/{pid}/stat")
-            .read_text(encoding="utf-8")
-            .rsplit(")", 1)[1]
-            .split()
-        )
-    except (OSError, IndexError, UnicodeError):
-        return ""
-    if len(remainder) <= 19:
-        return ""
-    return f"linux:{pid}:{remainder[19]}"
+    if sys.platform.startswith("linux"):
+        try:
+            remainder = (
+                Path(f"/proc/{pid}/stat")
+                .read_text(encoding="utf-8")
+                .rsplit(")", 1)[1]
+                .split()
+            )
+        except (OSError, IndexError, UnicodeError):
+            return ""
+        if len(remainder) <= 19:
+            return ""
+        return f"linux:{pid}:{remainder[19]}"
+    if os.name == "posix":
+        for executable in ("/bin/ps", "/usr/bin/ps"):
+            try:
+                result = subprocess.run(
+                    [executable, "-p", str(pid), "-o", "lstart="],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=0.5,
+                )
+            except (OSError, subprocess.SubprocessError):
+                continue
+            started_at = result.stdout.strip()
+            if result.returncode == 0 and started_at:
+                return f"posix:{pid}:{started_at}"
+    return ""
 
 
 def _owner_is_live(pid: int | None, identity: str) -> bool:
@@ -930,7 +1176,21 @@ class PythonExecutionProvider:
         provider_id: str = "python",
     ) -> None:
         self._executor = executor or self._default_executor
+        self._strict_boundary = executor is None or (
+            getattr(executor, "__name__", "") == "_run_bounded_process"
+            and getattr(executor, "__module__", "") == "albert_mvp.core"
+        )
         self.provider_id = provider_id
+
+    def validate_request(self, request: ExecutionRequest) -> None:
+        request.validate()
+        if self._strict_boundary:
+            _validate_prepared_bubblewrap_argv(
+                request.argv,
+                request.sandbox,
+                request.working_directory,
+                request.limits,
+            )
 
     @staticmethod
     def _default_executor(
@@ -950,12 +1210,7 @@ class PythonExecutionProvider:
         poll_callback: Callable[[], None] | None = None,
         output_callback: Callable[[str, bytes], None] | None = None,
     ) -> ExecutionReceipt:
-        request.validate()
-        _validate_prepared_bubblewrap_argv(
-            request.argv,
-            request.sandbox,
-            request.working_directory,
-        )
+        self.validate_request(request)
         binding: dict[str, Any] = {}
 
         def bind(process: Any, process_token: str = "") -> None:
@@ -969,8 +1224,11 @@ class PythonExecutionProvider:
                 process_binding_started(process, process_token)
 
         try:
+            provider_argv: Sequence[str] | str = list(request.argv)
+            if os.name == "nt" and len(request.argv) == 1:
+                provider_argv = request.argv[0]
             completed = self._executor(
-                list(request.argv),
+                provider_argv,
                 input_text=request.input_text,
                 cwd=Path(request.working_directory),
                 env=dict(request.environment),
@@ -1006,20 +1264,27 @@ class PythonExecutionProvider:
                     process_pid=binding.get("pid"),
                     process_identity=binding.get("identity", ""),
                 )
-            raise
+            return ExecutionReceipt.start_failed(
+                request,
+                exit_code=127,
+                error_message=str(exc),
+            )
         if not isinstance(completed, subprocess.CompletedProcess):
             raise ExecutionContractError(
                 "Python execution provider returned an invalid result"
             )
         stdout = completed.stdout if isinstance(completed.stdout, str) else ""
         stderr = completed.stderr if isinstance(completed.stderr, str) else ""
+        bounded_outcome = getattr(completed, "albert_outcome", "")
+        if bounded_outcome not in {"", "timed-out", "output-limit"}:
+            raise ExecutionContractError(
+                "Python execution provider returned an invalid outcome marker"
+            )
         return ExecutionReceipt._make(
             request,
             status=(
-                "timed-out"
-                if completed.returncode == 124
-                else "output-limit"
-                if completed.returncode == 125
+                bounded_outcome
+                if bounded_outcome
                 else "completed"
                 if completed.returncode == 0
                 else "failed"
@@ -1031,16 +1296,16 @@ class PythonExecutionProvider:
             reconciliation_required=False,
             error_code=(
                 "timeout"
-                if completed.returncode == 124
+                if bounded_outcome == "timed-out"
                 else "output-limit"
-                if completed.returncode == 125
+                if bounded_outcome == "output-limit"
                 else ""
             ),
             error_message=(
                 "Process timed out after the bounded timeout."
-                if completed.returncode == 124
+                if bounded_outcome == "timed-out"
                 else "Process output exceeded the bounded output limit."
-                if completed.returncode == 125
+                if bounded_outcome == "output-limit"
                 else ""
             ),
             process_pid=binding.get("pid"),
@@ -1092,8 +1357,13 @@ class ExecutionJournal:
                 receipt_payload, dict
             ):
                 raise ExecutionContractError("execution journal record is incomplete")
-            request = ExecutionRequest.from_dict(request_payload)
-            receipt = ExecutionReceipt.from_dict(receipt_payload)
+            try:
+                request = ExecutionRequest.from_dict(request_payload)
+                receipt = ExecutionReceipt.from_dict(receipt_payload)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ExecutionContractError(
+                    "execution journal record contains an invalid request or receipt"
+                ) from exc
             if request.request_id != request_id or receipt.request_id != request_id:
                 raise ExecutionContractError(
                     "execution journal identity is inconsistent"
@@ -1123,6 +1393,12 @@ class ExecutionJournal:
                 os.fsync(temporary.fileno())
                 temporary_path = Path(temporary.name)
             temporary_path.replace(self.path)
+            if os.name == "posix":
+                directory_fd = os.open(self.path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
         finally:
             if temporary_path is not None and temporary_path.exists():
                 temporary_path.unlink()
@@ -1270,13 +1546,22 @@ class ExecutionCoordinator:
         request.validate()
         if authorize is not None:
             authorize(request)
+        self.provider.validate_request(request)
+        process_bound = False
+
+        def bind(process: Any, process_token: str = "") -> None:
+            nonlocal process_bound
+            process_bound = True
+            if process_binding_started is not None:
+                process_binding_started(process, process_token)
+
         existing = self.journal.claim(request)
         if existing is not None:
             return existing
         try:
             receipt = self.provider.execute(
                 request,
-                process_binding_started=process_binding_started,
+                process_binding_started=bind,
                 poll_callback=poll_callback,
                 output_callback=output_callback,
             )
@@ -1287,9 +1572,19 @@ class ExecutionCoordinator:
                 else "outcome-unknown"
             )
             if status == "cancelled":
-                receipt = ExecutionReceipt.cancelled(request, error_message=str(exc))
-            else:
+                receipt = ExecutionReceipt.cancelled(
+                    request,
+                    error_message=str(exc),
+                    effect_started=process_bound,
+                )
+            elif process_bound:
                 receipt = ExecutionReceipt.unknown(request, error_message=str(exc))
+            else:
+                receipt = ExecutionReceipt.start_failed(
+                    request,
+                    exit_code=127,
+                    error_message=str(exc),
+                )
             try:
                 self.journal.complete(request, receipt)
             finally:

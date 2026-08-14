@@ -62,8 +62,27 @@ class ExecutionContractTests(unittest.TestCase):
                 "/usr/bin/bwrap",
                 "--die-with-parent",
                 "--new-session",
+                "--unshare-user",
+                "--unshare-pid",
+                "--tmpfs",
+                "/",
+                "--dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "--tmpfs",
+                "/tmp",
+                "--bind",
+                worktree,
+                worktree,
                 "--chdir",
                 worktree,
+                "--",
+                "/usr/bin/prlimit",
+                "--as=8589934592",
+                "--fsize=2147483648",
+                "--nofile=1024",
+                "--nproc=256",
                 "--",
                 "python3",
                 "-c",
@@ -109,11 +128,9 @@ class ExecutionContractTests(unittest.TestCase):
             request.with_updates(shell=True)
 
         with self.assertRaisesRegex(ValueError, "prepared Bubblewrap"):
-            PythonExecutionProvider(
-                executor=lambda *_args, **_kwargs: subprocess.CompletedProcess(
-                    [], 0, "", ""
-                )
-            ).execute(request.with_updates(argv=("python3", "-c", "pass")))
+            PythonExecutionProvider().execute(
+                request.with_updates(argv=("python3", "-c", "pass"))
+            )
 
         with self.assertRaisesRegex(ValueError, "authority kind"):
             self._request(
@@ -131,6 +148,19 @@ class ExecutionContractTests(unittest.TestCase):
                     approval_actor="",
                 ),
             )
+
+    def test_prepared_boundary_rejects_unsafe_mount_before_claim(self) -> None:
+        request = self._request(request_id="shell:unsafe-boundary")
+        unsafe = list(request.argv)
+        bind_index = unsafe.index("--bind")
+        unsafe[bind_index + 1 : bind_index + 3] = ["/", "/"]
+        journal = ExecutionJournal(self.runtime / "execution-receipts.json")
+        with self.assertRaisesRegex(ValueError, "host root"):
+            ExecutionCoordinator(
+                journal,
+                PythonExecutionProvider(),
+            ).execute(request.with_updates(argv=tuple(unsafe)))
+        self.assertFalse((self.runtime / "execution-receipts.json").exists())
 
     def test_exact_replay_returns_the_typed_receipt_without_rerunning_effect(
         self,
@@ -280,12 +310,14 @@ class ExecutionContractTests(unittest.TestCase):
                     argv: tuple[str, ...], **kwargs: object
                 ) -> subprocess.CompletedProcess[str]:
                     observed.update(kwargs)
-                    return subprocess.CompletedProcess(
+                    result = subprocess.CompletedProcess(
                         argv,
                         returncode,
                         "bounded",
                         "bounded process result",
                     )
+                    result.albert_outcome = status
+                    return result
 
                 provider = PythonExecutionProvider(
                     executor=executor,
@@ -317,6 +349,40 @@ class ExecutionContractTests(unittest.TestCase):
         self.assertFalse(receipt.effect_started)
         self.assertFalse(receipt.reconciliation_required)
 
+    def test_literal_timeout_exit_code_is_a_normal_failed_result(self) -> None:
+        request = self._request(request_id="shell:literal-timeout")
+        receipt = PythonExecutionProvider(
+            executor=lambda argv, **_kwargs: subprocess.CompletedProcess(
+                argv, 124, "", ""
+            )
+        ).execute(request)
+        self.assertEqual(receipt.status, "failed")
+        self.assertEqual(receipt.exit_code, 124)
+
+    def test_cancellation_receipt_is_durable_before_exception_reaches_caller(
+        self,
+    ) -> None:
+        request = self._request(request_id="shell:cancelled")
+        journal = ExecutionJournal(self.runtime / "execution-receipts.json")
+
+        def cancelling_executor(_argv, **kwargs):
+            callback = kwargs["poll_callback"]
+            assert callable(callback)
+            callback()
+            return subprocess.CompletedProcess([], 0, "", "")
+
+        coordinator = ExecutionCoordinator(
+            journal,
+            PythonExecutionProvider(executor=cancelling_executor),
+        )
+        with self.assertRaisesRegex(RuntimeError, "cancelled"):
+            coordinator.execute(
+                request,
+                poll_callback=lambda: (_ for _ in ()).throw(RuntimeError("cancelled")),
+                exception_status=lambda _exc: "cancelled",
+            )
+        self.assertEqual(journal.inspect()[0].status, "cancelled")
+
     def test_execution_receipt_round_trips_without_promoting_raw_output(self) -> None:
         request = self._request()
         receipt = ExecutionReceipt.completed(
@@ -333,6 +399,23 @@ class ExecutionContractTests(unittest.TestCase):
         self.assertEqual(restored.stdout, "")
         self.assertEqual(restored.stdout_sha256, receipt.stdout_sha256)
         self.assertNotIn("secret terminal output", str(persisted))
+
+    def test_receipt_rejects_impossible_flags_and_missing_schema_identity(self) -> None:
+        request = self._request()
+        receipt = ExecutionReceipt.completed(
+            request,
+            exit_code=0,
+            stdout="",
+            stderr="",
+        )
+        impossible = receipt.to_dict()
+        impossible["effect_started"] = False
+        with self.assertRaises(ValueError):
+            ExecutionReceipt.from_dict(impossible)
+        missing_schema = receipt.to_dict()
+        missing_schema.pop("schema_version")
+        with self.assertRaises(ValueError):
+            ExecutionReceipt.from_dict(missing_schema)
 
     def test_input_digest_supports_restart_replay_without_persisting_prompt_bytes(
         self,

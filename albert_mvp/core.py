@@ -870,6 +870,7 @@ def _run_bounded_process(
             input_thread = threading.Thread(target=deliver_input, daemon=True)
             input_thread.start()
         exit_status: int | None = None
+        bounded_outcome = ""
         extra_stderr = ""
         leader_exited_at: float | None = None
         while True:
@@ -879,6 +880,7 @@ def _run_bounded_process(
                 leader_exited_at = now
             if capture.exceeded.is_set():
                 exit_status = _PROCESS_OUTPUT_LIMIT_EXIT_STATUS
+                bounded_outcome = "output-limit"
                 extra_stderr = (
                     "Process output exceeded the "
                     f"{output_limit_bytes}-byte aggregate limit and was terminated."
@@ -887,6 +889,7 @@ def _run_bounded_process(
                 break
             if now - started >= timeout_seconds:
                 exit_status = 124
+                bounded_outcome = "timed-out"
                 extra_stderr = f"Process timed out after {timeout_seconds} seconds."
                 _terminate_process_group(process, process_token)
                 break
@@ -904,6 +907,7 @@ def _run_bounded_process(
                 and now - leader_exited_at >= descendant_grace_seconds
             ):
                 exit_status = 124
+                bounded_outcome = "timed-out"
                 extra_stderr = (
                     "Process descendants timed out "
                     f"{descendant_grace_seconds} seconds after the leader "
@@ -916,6 +920,7 @@ def _run_bounded_process(
             capture.wait_for_eof(1.0)
         if capture.exceeded.is_set():
             exit_status = _PROCESS_OUTPUT_LIMIT_EXIT_STATUS
+            bounded_outcome = "output-limit"
             extra_stderr = (
                 "Process output exceeded the "
                 f"{output_limit_bytes}-byte aggregate limit and was terminated."
@@ -937,14 +942,18 @@ def _run_bounded_process(
             )
             if exit_status is None:
                 exit_status = _PROCESS_OUTPUT_LIMIT_EXIT_STATUS
+                bounded_outcome = "output-limit"
         if input_thread is not None:
             input_thread.join(timeout=1)
-        return subprocess.CompletedProcess(
+        completed = subprocess.CompletedProcess(
             argv,
             process.returncode if exit_status is None else exit_status,
             stdout,
             stderr,
         )
+        if bounded_outcome:
+            completed.albert_outcome = bounded_outcome
+        return completed
     except BaseException:
         _terminate_process_group(process, process_token)
         capture.finish()
@@ -1850,6 +1859,10 @@ def sandboxed_process_argv(
     writable_roots: tuple[Path, ...] = (),
     readonly_bindings: tuple[tuple[Path, Path], ...] = (),
     allow_implicit_executable_bindings: bool = True,
+    address_space_bytes: int = _PROCESS_ADDRESS_SPACE_BYTES_LIMIT,
+    file_size_bytes: int = _PROCESS_FILE_SIZE_BYTES_LIMIT,
+    open_file_limit: int = _PROCESS_OPEN_FILE_LIMIT,
+    process_count_limit: int = _PROCESS_COUNT_LIMIT,
 ) -> tuple[str | list[str], bool]:
     """Wrap a child command in a minimal bubblewrap filesystem view."""
     if os.name != "posix" or not isinstance(argv, list):
@@ -1857,7 +1870,13 @@ def sandboxed_process_argv(
     bubblewrap = _trusted_system_executable("bwrap")
     if not bubblewrap:
         return argv, False
-    bounded_argv = _resource_bounded_process_argv(argv)
+    bounded_argv = _resource_bounded_process_argv(
+        argv,
+        address_space_bytes=address_space_bytes,
+        file_size_bytes=file_size_bytes,
+        open_file_limit=open_file_limit,
+        process_count_limit=process_count_limit,
+    )
     assert isinstance(bounded_argv, list)
     command = [
         bubblewrap,
@@ -3205,7 +3224,16 @@ class AlbertMission:
 
         if receipt.effect != "local-agent" or receipt.status == "executing":
             raise AlbertError("Local Agent execution receipt cannot be projected.")
-        for existing in session.execution_receipts:
+        latest = self._refresh_persisted_session(session.session_id)
+        if latest.runner_operation_id != session.runner_operation_id:
+            raise ExecutionReplayConflict(
+                f"Local Agent execution receipt {receipt.request_id} has a stale runner operation."
+            )
+        if latest.worktree_identity != session.worktree_identity:
+            raise ExecutionReplayConflict(
+                f"Local Agent execution receipt {receipt.request_id} has a changed Worktree Identity."
+            )
+        for existing in latest.execution_receipts:
             if existing.get("request_id") != receipt.request_id:
                 continue
             if existing.get("request_digest") != receipt.request_digest:
@@ -3213,23 +3241,11 @@ class AlbertMission:
                     f"Local Agent execution receipt {receipt.request_id} changed its boundary."
                 )
             return
-        if len(session.execution_receipts) >= _EXECUTION_RECEIPT_HISTORY_LIMIT:
+        if len(latest.execution_receipts) >= _EXECUTION_RECEIPT_HISTORY_LIMIT:
             raise AlbertError("Local Agent execution receipt history is full.")
-        latest = self._refresh_persisted_session(session.session_id)
-        if latest.status == "cancelled" and session.status != "cancelled":
-            session.status = "cancelled"
-            session.runner_ended_at = latest.runner_ended_at
-            session.runner_pid = None
-            session.runner_identity = ""
-            session.runner_process_pid = None
-            session.runner_process_identity = ""
-            session.runner_process_token = ""
-            session.cancel_requested_at = latest.cancel_requested_at
-            session.cancel_reason = latest.cancel_reason
-        session.execution_receipts.append(receipt.to_dict(include_output=False))
-        persisted = self._persist_session_update(session)
-        if persisted is not session:
-            session.execution_receipts = list(persisted.execution_receipts)
+        latest.execution_receipts.append(receipt.to_dict(include_output=False))
+        persisted = self._persist_session_update(latest)
+        session.__dict__.update(persisted.__dict__)
 
     def _reconcile_local_execution_receipts(self) -> None:
         """Recover completed host receipts that missed session projection."""
@@ -3247,6 +3263,14 @@ class AlbertMission:
             if session is None:
                 raise AlbertError(
                     "Local Agent execution receipt references an unknown session"
+                )
+            if (
+                authority.runner_operation_id != session.runner_operation_id
+                or authority.worktree_identity != session.worktree_identity
+                or authority.session_revision > session.revision
+            ):
+                raise AlbertError(
+                    "Local Agent execution receipt session boundary is invalid"
                 )
             self._record_local_execution_receipt(session, receipt)
 
