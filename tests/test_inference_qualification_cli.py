@@ -62,12 +62,22 @@ def successful_fixture_result(fixture, _profile, context, _repetition):
     return result
 
 
-def successful_rollback_evidence(profile, runtime_pin):
+def successful_rollback_evidence(profile, runtime_pin, _control):
     return {
         "profile_id": profile.profile_id,
         "runtime_pin": runtime_pin.to_dict(),
         "previous_report_id": "previous-report",
         "restored_report_id": "previous-report",
+        "replay_verified": True,
+    }
+
+
+def baseline_rollback_evidence(profile, runtime_pin, _control):
+    return {
+        "profile_id": profile.profile_id,
+        "runtime_pin": runtime_pin.to_dict(),
+        "previous_report_id": "baseline",
+        "restored_report_id": "baseline",
         "replay_verified": True,
     }
 
@@ -99,11 +109,12 @@ class InferenceQualificationCliTests(unittest.TestCase):
             required_source_ids=("long-context",),
             report_id="baseline",
         )
+        QualificationReportStore(runtime).save_report(baseline)
         report = service.qualify(
             profile,
             successful_fixture_result,
             runtime_pin=runtime_pin,
-            rollback_test=successful_rollback_evidence,
+            rollback_test=baseline_rollback_evidence,
             baseline_report=baseline,
             context_sources=(
                 ContextSource("long-context", "x" * 28_800, required=True),
@@ -112,7 +123,6 @@ class InferenceQualificationCliTests(unittest.TestCase):
             report_id="candidate",
         )
         store = QualificationReportStore(runtime)
-        store.save_report(baseline)
         store.save_report(report)
         return report, runtime_pin
 

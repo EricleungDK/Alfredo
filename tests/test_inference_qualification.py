@@ -66,12 +66,22 @@ def successful_fixture_result(fixture, _profile, context, _repetition):
     return result
 
 
-def successful_rollback_evidence(profile, runtime_pin):
+def successful_rollback_evidence(profile, runtime_pin, _control):
     return {
         "profile_id": profile.profile_id,
         "runtime_pin": runtime_pin.to_dict(),
         "previous_report_id": "previous-report",
         "restored_report_id": "previous-report",
+        "replay_verified": True,
+    }
+
+
+def baseline_rollback_evidence(profile, runtime_pin, _control):
+    return {
+        "profile_id": profile.profile_id,
+        "runtime_pin": runtime_pin.to_dict(),
+        "previous_report_id": "baseline",
+        "restored_report_id": "baseline",
         "replay_verified": True,
     }
 
@@ -278,23 +288,23 @@ class QualificationReportTests(unittest.TestCase):
                 profile,
                 successful_fixture_result,
                 runtime_pin=runtime_pin,
-                rollback_test=successful_rollback_evidence,
+                rollback_test=baseline_rollback_evidence,
                 context_sources=long_context_sources(),
                 required_source_ids=("long-context",),
                 report_id="baseline",
             )
+            store = QualificationReportStore(Path(directory))
+            store.save_report(baseline)
             report = service.qualify(
                 profile,
                 successful_fixture_result,
                 runtime_pin=runtime_pin,
-                rollback_test=successful_rollback_evidence,
+                rollback_test=baseline_rollback_evidence,
                 baseline_report=baseline,
                 context_sources=long_context_sources(),
                 required_source_ids=("long-context",),
                 report_id="candidate",
             )
-            store = QualificationReportStore(Path(directory))
-            store.save_report(baseline)
             store.save_report(report)
             inspection = store.inspect_reports()
             promoted = store.promote(
@@ -391,6 +401,80 @@ class QualificationReportTests(unittest.TestCase):
         self.assertEqual(report.observations[0]["error_code"], "runner-failed")
         self.assertEqual(report.metrics["unexpected_outcomes"], 1)
         self.assertIn("reliability-not-qualified", report.promotion_blockers)
+
+    def test_baseline_rejects_profile_configuration_drift(self) -> None:
+        profile = replace(
+            LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1"),
+            model_digest="sha256:worker-digest",
+        )
+        changed_profile = replace(
+            profile, context_budget=profile.context_budget + 1_024
+        )
+        runtime_pin = RuntimePin(
+            runtime_id="ollama",
+            runtime_version="0.11.4",
+            binary_digest="a" * 64,
+            configuration_digest="b" * 64,
+        )
+        fixture = build_governed_fixture_family()[0]
+
+        with tempfile.TemporaryDirectory() as directory:
+            service = InferenceQualificationService(
+                Path(directory), fixtures=(fixture,), repetitions=2
+            )
+            baseline = service.qualify(
+                profile,
+                successful_fixture_result,
+                runtime_pin=runtime_pin,
+                report_id="baseline",
+            )
+            service.report_store.save_report(baseline)
+            candidate = service.qualify(
+                changed_profile,
+                successful_fixture_result,
+                runtime_pin=runtime_pin,
+                baseline_report=baseline,
+                report_id="candidate",
+            )
+
+        self.assertIn("baseline-incomparable", candidate.promotion_blockers)
+
+    def test_cancellation_after_runner_failure_is_recorded_as_cancellation(
+        self,
+    ) -> None:
+        profile = LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1")
+        runtime_pin = RuntimePin(
+            runtime_id="ollama",
+            runtime_version="0.11.4",
+            binary_digest="a" * 64,
+            configuration_digest="b" * 64,
+        )
+        calls = 0
+
+        def runner(*_args):
+            nonlocal calls
+            calls += 1
+            raise RuntimeError("runner failed")
+
+        report = InferenceQualificationService(
+            Path("/tmp/qualification-cancel-after-failure"),
+            fixtures=(build_governed_fixture_family()[0],),
+            repetitions=2,
+        ).qualify(
+            profile,
+            runner,
+            runtime_pin=runtime_pin,
+            cancel_check=lambda: calls >= 1,
+        )
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(report.metrics["cancellations"], 2)
+        self.assertTrue(
+            all(
+                item["error_code"] == "qualification-cancelled"
+                for item in report.observations
+            )
+        )
 
     def test_expected_alternative_outcomes_preserve_fixture_quality(self) -> None:
         profile = replace(
@@ -769,24 +853,31 @@ class QualificationReportTests(unittest.TestCase):
             configuration_digest="b" * 64,
         )
         runner = successful_fixture_result
-        service = InferenceQualificationService(
-            Path("/tmp/qualification-rollback-proof"),
-            fixtures=(build_governed_fixture_family()[0],),
-            repetitions=2,
-        )
-
-        unproven = service.qualify(
-            profile,
-            runner,
-            runtime_pin=runtime_pin,
-            rollback_tested=True,
-        )
-        proven = service.qualify(
-            profile,
-            runner,
-            runtime_pin=runtime_pin,
-            rollback_test=successful_rollback_evidence,
-        )
+        with tempfile.TemporaryDirectory() as directory:
+            service = InferenceQualificationService(
+                Path(directory),
+                fixtures=(build_governed_fixture_family()[0],),
+                repetitions=2,
+            )
+            unproven = service.qualify(
+                profile,
+                runner,
+                runtime_pin=runtime_pin,
+                rollback_tested=True,
+            )
+            previous = service.qualify(
+                profile,
+                runner,
+                runtime_pin=runtime_pin,
+                report_id="previous-report",
+            )
+            service.report_store.save_report(previous)
+            proven = service.qualify(
+                profile,
+                runner,
+                runtime_pin=runtime_pin,
+                rollback_test=successful_rollback_evidence,
+            )
 
         self.assertIn("rollback-not-tested", unproven.promotion_blockers)
         self.assertEqual(unproven.rollback_receipt_id, "")
@@ -820,7 +911,7 @@ class QualificationReportTests(unittest.TestCase):
             profile,
             successful_fixture_result,
             runtime_pin=runtime_pin,
-            rollback_test=successful_rollback_evidence,
+            rollback_test=baseline_rollback_evidence,
             baseline_report=baseline,
             report_id="candidate-with-missing-baseline",
         )
@@ -1023,6 +1114,49 @@ class ContextQualificationTests(unittest.TestCase):
         self.assertTrue(tracker.observe(first.prompt_prefix).reused)
         invalidated = tracker.observe(changed.prompt_prefix)
         self.assertTrue(invalidated.invalidated)
+
+    def test_context_prefix_reuse_ignores_fixture_suffix_changes(self) -> None:
+        profile = replace(
+            LocalInferenceProfile.default("gemma4:12b", profile_id="worker-v1"),
+            model_digest="sha256:worker-digest",
+        )
+        runtime_pin = RuntimePin(
+            runtime_id="ollama",
+            runtime_version="0.11.4",
+            binary_digest="a" * 64,
+            configuration_digest="b" * 64,
+        )
+        fixtures = build_governed_fixture_family()[:2]
+
+        def runner(fixture, _profile, context, _repetition):
+            return {
+                "route": {"kind": "discussion"},
+                "outcome": "accepted",
+                "model_digest": "sha256:worker-digest",
+                "runtime_pin": context["runtime_pin"],
+                "timings": {
+                    "load_ms": 1,
+                    "prompt_evaluation_ms": 1,
+                    "first_token_ms": 1,
+                    "decoding_ms": 1,
+                },
+                "reviewed_latency_ms": 1,
+            }
+
+        report = InferenceQualificationService(
+            Path("/tmp/qualification-prefix-suffix"),
+            fixtures=fixtures,
+            repetitions=1,
+        ).qualify(
+            profile,
+            runner,
+            runtime_pin=runtime_pin,
+            context_sources=(ContextSource("mission", "stable mission context"),),
+            required_source_ids=("mission",),
+        )
+
+        self.assertEqual(report.metrics["prefix_reuses"], 1)
+        self.assertEqual(report.metrics["prefix_invalidations"], 0)
 
     def test_context_expands_only_when_required_material_fits_and_quality_improves(
         self,
