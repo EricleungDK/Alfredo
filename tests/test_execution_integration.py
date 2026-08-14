@@ -9,7 +9,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from albert_mvp.core import AlbertMission, LocalAgentSession
+from albert_mvp.core import AlbertError, AlbertMission, LocalAgentSession
 from albert_mvp.execution import (
     ExecutionJournal,
     ExecutionLimits,
@@ -18,7 +18,11 @@ from albert_mvp.execution import (
     ExecutionSandbox,
     LocalAgentExecutionAuthority,
 )
-from albert_mvp.workspace import ShellTerminalService, WorkspaceSnapshotService
+from albert_mvp.workspace import (
+    ShellTerminalService,
+    WorkspacePersistenceError,
+    WorkspaceSnapshotService,
+)
 
 
 class HostExecutionIntegrationTests(unittest.TestCase):
@@ -238,6 +242,75 @@ class HostExecutionIntegrationTests(unittest.TestCase):
         self.assertEqual(recovered.status, "completed")
         self.assertEqual(recovered.exit_code, 0)
 
+    def test_shell_rejects_terminal_result_that_disagrees_with_typed_receipt(self) -> None:
+        terminal = self._terminal()
+        completed = subprocess.CompletedProcess(
+            args=["bwrap"],
+            returncode=0,
+            stdout="",
+            stderr="",
+        )
+        with self._sandboxed_terminal(terminal):
+            with patch(
+                "albert_mvp.workspace._run_bounded_process",
+                return_value=completed,
+            ):
+                result = terminal.submit(
+                    correlation_id="shell-tampered-receipt-1",
+                    command="python3 -m unittest --help",
+                    working_directory=str(self.target),
+                    requested_paths=[],
+                    requester="mission-commander",
+                )
+        self.assertEqual(result.status, "completed")
+        terminal_payload = json.loads(
+            terminal.terminal_path.read_text(encoding="utf-8")
+        )
+        terminal_payload["commands"][0].update(
+            {"status": "failed", "exit_code": 1}
+        )
+        terminal.terminal_path.write_text(
+            json.dumps(terminal_payload),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(
+            WorkspacePersistenceError,
+            "disagrees with its typed receipt",
+        ):
+            terminal.inspect()
+
+    def test_shell_preflight_sandbox_failure_is_typed_and_not_replayed(self) -> None:
+        terminal = self._terminal()
+        with patch(
+            "albert_mvp.workspace._trusted_system_executable",
+            return_value=None,
+        ):
+            first = terminal.submit(
+                correlation_id="shell-preflight-failure-1",
+                command="python3 -m unittest --help",
+                working_directory=str(self.target),
+                requested_paths=[],
+                requester="mission-commander",
+            )
+        self.assertEqual(first.status, "failed")
+        self.assertEqual(first.exit_code, 126)
+        receipt = self._execution_journal().inspect()[0]
+        self.assertEqual(receipt.status, "start-failed")
+        self.assertEqual(receipt.exit_code, 127)
+
+        with patch("albert_mvp.workspace._run_bounded_process") as replay_run:
+            second = self._terminal().submit(
+                correlation_id="shell-preflight-failure-1",
+                command="python3 -m unittest --help",
+                working_directory=str(self.target),
+                requested_paths=[],
+                requester="mission-commander",
+            )
+        self.assertEqual(second.status, "failed")
+        self.assertEqual(second.exit_code, 126)
+        replay_run.assert_not_called()
+
     def test_local_agent_uses_the_same_provider_with_local_authority(self) -> None:
         mission = self._mission()
         session = LocalAgentSession(
@@ -336,6 +409,130 @@ class HostExecutionIntegrationTests(unittest.TestCase):
             len(restarted.sessions[session.session_id].execution_receipts),
             1,
         )
+
+    def test_local_preflight_failure_is_typed_and_projected(self) -> None:
+        mission = self._mission()
+        session = LocalAgentSession(
+            session_id="session-local-preflight-failure",
+            issue_id="ISS-01",
+            assigned_agent="local-test",
+            worktree_path=self.target,
+            task_packet={"allowed_paths": ["src"]},
+            status="running",
+            runner_operation_id="runner:test-mission:session-local-preflight-failure:1",
+            worktree_identity="managed:test-mission:session-local-preflight-failure",
+        )
+        mission.sessions[session.session_id] = session
+        mission._persist()
+
+        result = mission._run_cancellable_process(
+            session,
+            ["alfredo-command-that-does-not-exist"],
+            effect_label="preflight-missing-command",
+        )
+
+        self.assertEqual(result.returncode, 127)
+        receipt = self._execution_journal().inspect()[0]
+        self.assertEqual(receipt.status, "start-failed")
+        self.assertEqual(receipt.exit_code, 127)
+        persisted = mission._refresh_persisted_session(session.session_id)
+        self.assertEqual(len(persisted.execution_receipts), 1)
+
+    def test_local_automatic_recovery_blocks_on_uncertain_journal_receipt(self) -> None:
+        mission = self._mission()
+        session = LocalAgentSession(
+            session_id="session-local-uncertain-recovery",
+            issue_id="ISS-01",
+            assigned_agent="local-test",
+            worktree_path=self.target,
+            task_packet={"allowed_paths": ["src"]},
+            status="running",
+            runner_operation_id="runner:test-mission:session-local-uncertain-recovery:1",
+            worktree_identity="managed:test-mission:session-local-uncertain-recovery",
+        )
+        mission.sessions[session.session_id] = session
+        mission._persist()
+        request = ExecutionRequest(
+            request_id="local-agent:uncertain-recovery",
+            effect="local-agent",
+            argv=("/usr/bin/bwrap", "--"),
+            working_directory=str(self.target.resolve()),
+            authority=LocalAgentExecutionAuthority(
+                mission_id=mission.mission_id,
+                session_id=session.session_id,
+                session_revision=session.revision,
+                runner_operation_id=session.runner_operation_id,
+                worktree_identity=session.worktree_identity,
+            ),
+            limits=ExecutionLimits(timeout_seconds=2, output_limit_bytes=1024),
+            sandbox=ExecutionSandbox(
+                mode="bubblewrap",
+                writable_roots=(str(self.target.resolve()),),
+            ),
+            environment=(("PATH", "/usr/bin:/bin"),),
+        )
+        journal = self._execution_journal()
+        self.assertIsNone(journal.claim(request))
+        payload = json.loads(
+            (self.mission_runtime_dir / "execution-receipts.json").read_text()
+        )
+        payload["records"][request.request_id]["receipt"].update(
+            {"owner_pid": 999999, "owner_identity": ""}
+        )
+        (self.mission_runtime_dir / "execution-receipts.json").write_text(
+            json.dumps(payload)
+        )
+
+        self.assertTrue(mission._local_execution_needs_reconciliation(session))
+
+    def test_local_receipt_history_without_matching_journal_fails_closed(self) -> None:
+        mission = self._mission()
+        session = LocalAgentSession(
+            session_id="session-local-missing-ledger",
+            issue_id="ISS-01",
+            assigned_agent="local-test",
+            worktree_path=self.target,
+            task_packet={"allowed_paths": ["src"]},
+            status="running",
+            runner_operation_id="runner:test-mission:session-local-missing-ledger:1",
+            worktree_identity="managed:test-mission:session-local-missing-ledger",
+        )
+        mission.sessions[session.session_id] = session
+        mission._persist()
+        request = ExecutionRequest(
+            request_id="local-agent:missing-ledger",
+            effect="local-agent",
+            argv=("/usr/bin/bwrap", "--"),
+            working_directory=str(self.target.resolve()),
+            authority=LocalAgentExecutionAuthority(
+                mission_id=mission.mission_id,
+                session_id=session.session_id,
+                session_revision=session.revision,
+                runner_operation_id=session.runner_operation_id,
+                worktree_identity=session.worktree_identity,
+            ),
+            limits=ExecutionLimits(timeout_seconds=2, output_limit_bytes=1024),
+            sandbox=ExecutionSandbox(
+                mode="bubblewrap",
+                writable_roots=(str(self.target.resolve()),),
+            ),
+            environment=(("PATH", "/usr/bin:/bin"),),
+        )
+        receipt = ExecutionReceipt.completed(
+            request,
+            exit_code=0,
+            stdout="",
+            stderr="",
+        )
+        session.execution_receipts.append(receipt.to_dict(include_output=False))
+        runtime_payload = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        runtime_payload["sessions"][session.session_id]["execution_receipts"] = list(
+            session.execution_receipts
+        )
+        mission.runtime_path.write_text(json.dumps(runtime_payload), encoding="utf-8")
+
+        with self.assertRaisesRegex(AlbertError, "not bound"):
+            mission._reconcile_local_execution_receipts()
 
     def test_local_receipt_projection_uses_latest_cancelled_session_revision(
         self,

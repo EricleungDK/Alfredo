@@ -77,6 +77,16 @@ _PROCESS_OPEN_FILE_LIMIT = 1_024
 _PROCESS_COUNT_LIMIT = 256
 _PROCESS_DESCENDANT_GRACE_SECONDS = 1.0
 _EXECUTION_RECEIPT_HISTORY_LIMIT = 128
+_PROTECTED_WRITABLE_ROOTS = {
+    Path("/usr"),
+    Path("/bin"),
+    Path("/sbin"),
+    Path("/lib"),
+    Path("/lib64"),
+    Path("/etc"),
+    Path("/dev"),
+    Path("/proc"),
+}
 _GIT_SNAPSHOT_TIMEOUT_SECONDS = 30
 _GIT_SNAPSHOT_BYTES_LIMIT = 8_000_000
 _GIT_COMMAND_OUTPUT_BYTES_LIMIT = 64_000
@@ -617,6 +627,11 @@ def _process_group_is_live(
 ) -> bool:
     if os.name != "posix":
         return process.poll() is None
+    # Once Popen.poll() has reaped the leader, its numeric PID may be reused.
+    # Never probe or signal that old process-group number again; descendants
+    # are tracked by the inherited random token instead.
+    if process.poll() is not None:
+        return bool(_process_token_pids(process_token))
     try:
         os.killpg(process.pid, 0)
     except ProcessLookupError:
@@ -632,7 +647,7 @@ def _signal_process_group(
     process_token: str = "",
 ) -> None:
     try:
-        if os.name == "posix":
+        if os.name == "posix" and process.poll() is None:
             os.killpg(process.pid, signal_number)
         elif process.poll() is None:
             if signal_number == signal.SIGTERM:
@@ -1801,6 +1816,10 @@ def _validated_execution_receipts(data: dict[str, Any]) -> list[dict[str, Any]]:
     for item in raw:
         if not isinstance(item, dict):
             raise AlbertError("Local Agent execution receipt history is invalid")
+        if "stdout" in item or "stderr" in item:
+            raise AlbertError(
+                "Local Agent execution receipt history must not contain raw output"
+            )
         try:
             receipt = ExecutionReceipt.from_dict(item)
         except (KeyError, TypeError, ValueError) as exc:
@@ -1857,6 +1876,36 @@ def sanitized_process_environment(
     return result
 
 
+def _path_is_under_private_tmp(path: Path) -> bool:
+    """Match OS temporary roots, including macOS's /private/tmp alias."""
+
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError:
+        resolved = path
+    for root in (Path("/tmp"), Path(tempfile.gettempdir())):
+        if path.is_relative_to(root) or resolved.is_relative_to(
+            root.resolve(strict=False)
+        ):
+            return True
+    return False
+
+
+def _is_protected_writable_root(path: Path) -> bool:
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError:
+        resolved = path
+    temporary_roots = (Path("/tmp"), Path(tempfile.gettempdir()))
+    if any(resolved == root.resolve(strict=False) for root in temporary_roots):
+        return True
+    return any(
+        resolved == root.resolve(strict=False)
+        or resolved.is_relative_to(root.resolve(strict=False))
+        for root in _PROTECTED_WRITABLE_ROOTS
+    )
+
+
 def sandboxed_process_argv(
     argv: str | list[str],
     *,
@@ -1865,6 +1914,7 @@ def sandboxed_process_argv(
     writable_roots: tuple[Path, ...] = (),
     readonly_bindings: tuple[tuple[Path, Path], ...] = (),
     allow_implicit_executable_bindings: bool = True,
+    path: str | None = None,
     address_space_bytes: int = _PROCESS_ADDRESS_SPACE_BYTES_LIMIT,
     file_size_bytes: int = _PROCESS_FILE_SIZE_BYTES_LIMIT,
     open_file_limit: int = _PROCESS_OPEN_FILE_LIMIT,
@@ -1876,6 +1926,10 @@ def sandboxed_process_argv(
     bubblewrap = _trusted_system_executable("bwrap")
     if not bubblewrap:
         return argv, False
+    if any(_is_protected_writable_root(path) for path in writable_roots):
+        raise AlbertError(
+            "Writable process roots cannot override protected sandbox roots."
+        )
     bounded_argv = _resource_bounded_process_argv(
         argv,
         address_space_bytes=address_space_bytes,
@@ -1906,21 +1960,17 @@ def sandboxed_process_argv(
         "/tmp",
         ]
     )
-    executable = shutil.which(argv[0]) if argv else None
+    executable = shutil.which(argv[0], path=path) if argv else None
     executable_bindings: set[tuple[Path, Path]] = set()
     if executable:
         executable_entry = Path(executable).absolute()
-        if executable_entry.is_relative_to(Path("/tmp")):
+        if _path_is_under_private_tmp(executable_entry):
             if executable_entry.is_symlink():
                 raise AlbertError(
                     f"Executable {executable_entry} under /tmp must not be a symlink."
                 )
-            resolved_tmp = Path("/tmp").resolve()
             executable_path = executable_entry.resolve()
-            if not (
-                executable_path == resolved_tmp
-                or executable_path.is_relative_to(resolved_tmp)
-            ):
+            if not _path_is_under_private_tmp(executable_path):
                 raise AlbertError(
                     f"Executable {executable_entry} must resolve inside /tmp."
                 )
@@ -1945,23 +1995,19 @@ def sandboxed_process_argv(
             if token.startswith("-"):
                 continue
             candidate = Path(token)
-            if candidate.is_absolute() and candidate.is_relative_to(Path("/tmp")):
+            if candidate.is_absolute() and _path_is_under_private_tmp(candidate):
                 candidate_entry = candidate.absolute()
                 if candidate_entry.is_symlink():
                     raise AlbertError(
                         f"Interpreter script {candidate_entry} under /tmp must not be a symlink."
                     )
                 candidate_source = candidate_entry.resolve()
-                resolved_tmp = Path("/tmp").resolve()
-                if not (
-                    candidate_source == resolved_tmp
-                    or candidate_source.is_relative_to(resolved_tmp)
-                ):
+                if not _path_is_under_private_tmp(candidate_source):
                     raise AlbertError(
                         f"Interpreter script {candidate_entry} must resolve inside /tmp."
                     )
                 if candidate_source.exists():
-                    if not candidate_source.is_file():
+                    if not candidate_source.is_file() or candidate_source.is_symlink():
                         raise AlbertError(
                             f"Interpreter script {candidate_entry} must be a regular file."
                         )
@@ -3282,6 +3328,10 @@ class AlbertMission:
                 raise ExecutionReplayConflict(
                     f"Local Agent execution receipt {receipt.request_id} changed its boundary."
                 )
+            if existing != receipt.to_dict(include_output=False):
+                raise ExecutionReplayConflict(
+                    f"Local Agent execution receipt {receipt.request_id} changed its durable result."
+                )
             return
         if len(latest.execution_receipts) >= _EXECUTION_RECEIPT_HISTORY_LIMIT:
             raise AlbertError("Local Agent execution receipt history is full.")
@@ -3293,7 +3343,42 @@ class AlbertMission:
         """Recover completed host receipts that missed session projection."""
 
         journal = ExecutionJournal(self.runtime_dir / "execution-receipts.json")
-        for request, receipt in journal.inspect_records():
+        records = journal.inspect_records()
+        records_by_request_id = {
+            request.request_id: (request, receipt) for request, receipt in records
+        }
+        for session in self.sessions.values():
+            for persisted in session.execution_receipts:
+                request_id = persisted.get("request_id")
+                record = records_by_request_id.get(request_id)
+                if record is None:
+                    raise AlbertError(
+                        "Local Agent execution receipt is not bound to a durable request."
+                    )
+                request, receipt = record
+                if receipt.to_dict(include_output=False) != persisted:
+                    raise AlbertError(
+                        "Local Agent execution receipt projection disagrees with its durable receipt."
+                    )
+                if request.effect != "local-agent" or not isinstance(
+                    request.authority, LocalAgentExecutionAuthority
+                ):
+                    raise AlbertError(
+                        "Local Agent execution receipt authority is invalid"
+                    )
+                authority = request.authority
+                if (
+                    authority.mission_id != self.mission_id
+                    or authority.session_id != session.session_id
+                    or authority.runner_operation_id != session.runner_operation_id
+                    or authority.worktree_identity != session.worktree_identity
+                    or request.working_directory != str(session.worktree_path.resolve())
+                    or authority.session_revision > session.revision
+                ):
+                    raise AlbertError(
+                        "Local Agent execution receipt session boundary is invalid"
+                    )
+        for request, receipt in records:
             if request.effect != "local-agent" or receipt.status == "executing":
                 continue
             if not isinstance(request.authority, LocalAgentExecutionAuthority):
@@ -4087,8 +4172,9 @@ class AlbertMission:
             command_argv,
             working_directory=self.target_repo,
             readable_roots=(self.target_repo,),
+            path=sanitized_process_environment().get("PATH"),
         )
-        if os.name == "posix" and isinstance(command_argv, list) and not sandboxed:
+        if not sandboxed or not isinstance(governed_argv, list):
             raise AlbertError(
                 "Router command sandbox unavailable: bubblewrap (bwrap) is required."
             )
@@ -5113,6 +5199,31 @@ class AlbertMission:
             records = journal.inspect_records()
         except Exception:
             return True
+        records_by_request_id = {
+            request.request_id: (request, receipt) for request, receipt in records
+        }
+        for persisted in session.execution_receipts:
+            request_id = persisted.get("request_id")
+            record = records_by_request_id.get(request_id)
+            if record is None:
+                return True
+            request, receipt = record
+            if receipt.to_dict(include_output=False) != persisted:
+                return True
+            authority = request.authority
+            if (
+                request.effect != "local-agent"
+                or not isinstance(authority, LocalAgentExecutionAuthority)
+                or authority.mission_id != self.mission_id
+                or authority.session_id != session.session_id
+                or authority.runner_operation_id != session.runner_operation_id
+                or authority.worktree_identity != session.worktree_identity
+                or request.working_directory != str(session.worktree_path.resolve())
+                or authority.session_revision > session.revision
+            ):
+                return True
+            if receipt.status in {"executing", "outcome-unknown"}:
+                return True
         for request, receipt in records:
             authority = request.authority
             if (
@@ -13960,6 +14071,115 @@ class AlbertMission:
             return value.decode("utf-8", errors="replace")
         return value
 
+    def _local_execution_request_id(
+        self,
+        session: LocalAgentSession,
+        effective_argv: tuple[str, ...],
+        execution_label: str,
+    ) -> str:
+        return "local-agent:" + sha256(
+            "\n".join(
+                (
+                    self.mission_id,
+                    session.session_id,
+                    session.runner_operation_id,
+                    execution_label,
+                    json.dumps(list(effective_argv), ensure_ascii=True),
+                    str(session.worktree_path.resolve()),
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def _record_local_preflight_failure(
+        self,
+        session: LocalAgentSession,
+        argv: str | list[str],
+        *,
+        input_text: str | None,
+        process_env: dict[str, str],
+        timeout_seconds: float,
+        output_limit_bytes: int,
+        effect_label: str,
+        public_exit_code: int,
+        error_message: str,
+        readable_roots: tuple[Path, ...] = (),
+    ) -> subprocess.CompletedProcess[str]:
+        """Durably record a deterministic failure before any child can start."""
+
+        if os.name != "posix":
+            return subprocess.CompletedProcess(
+                argv,
+                public_exit_code,
+                "",
+                error_message,
+            )
+        effective_argv = tuple(argv) if isinstance(argv, list) else (argv,)
+        worktree = str(session.worktree_path.resolve())
+        execution_request = ExecutionRequest(
+            request_id=self._local_execution_request_id(
+                session,
+                effective_argv,
+                effect_label.strip() or "process",
+            ),
+            effect="local-agent",
+            argv=effective_argv,
+            working_directory=worktree,
+            authority=LocalAgentExecutionAuthority(
+                mission_id=self.mission_id,
+                session_id=session.session_id,
+                session_revision=session.revision,
+                runner_operation_id=session.runner_operation_id,
+                worktree_identity=session.worktree_identity,
+                allowed_paths=tuple(
+                    value
+                    for value in session.task_packet.get("allowed_paths", [])
+                    if isinstance(value, str)
+                ),
+            ),
+            limits=ExecutionLimits(
+                timeout_seconds=timeout_seconds,
+                output_limit_bytes=output_limit_bytes,
+                address_space_bytes=_PROCESS_ADDRESS_SPACE_BYTES_LIMIT,
+                file_size_bytes=_PROCESS_FILE_SIZE_BYTES_LIMIT,
+                open_file_limit=_PROCESS_OPEN_FILE_LIMIT,
+                process_count_limit=_PROCESS_COUNT_LIMIT,
+                descendant_grace_seconds=_PROCESS_DESCENDANT_GRACE_SECONDS,
+            ),
+            sandbox=ExecutionSandbox(
+                mode="bubblewrap",
+                readable_roots=tuple(
+                    str(path.resolve()) for path in readable_roots if path.exists()
+                ),
+                writable_roots=(worktree,),
+            ),
+            environment=tuple(sorted(process_env.items())),
+            input_text=input_text,
+        )
+        journal = ExecutionJournal(self.runtime_dir / "execution-receipts.json")
+        receipt = journal.record_start_failed(
+            execution_request,
+            ExecutionReceipt.start_failed(
+                execution_request,
+                exit_code=127,
+                error_message=error_message,
+            ),
+        )
+        if receipt.status != "executing":
+            self._record_local_execution_receipt(session, receipt)
+        if receipt.reconciliation_required:
+            return subprocess.CompletedProcess(
+                argv,
+                1,
+                "",
+                receipt.error_message or error_message,
+            )
+        return subprocess.CompletedProcess(
+            argv,
+            public_exit_code,
+            receipt.stdout,
+            receipt.stderr or receipt.error_message or error_message,
+        )
+
     def _run_cancellable_process(
         self,
         session: LocalAgentSession,
@@ -13973,13 +14193,28 @@ class AlbertMission:
     ) -> subprocess.CompletedProcess[str]:
         self._raise_if_cancelled(session)
         process_env = sanitized_process_environment(env)
-        if isinstance(argv, list) and argv and "/" not in argv[0]:
+        if os.name != "posix":
+            return subprocess.CompletedProcess(
+                argv,
+                126,
+                "",
+                "Unable to start governed process: host execution is unsupported "
+                "on non-POSIX hosts.",
+            )
+        if isinstance(argv, list) and argv:
             if shutil.which(argv[0], path=process_env.get("PATH")) is None:
-                return subprocess.CompletedProcess(
+                return self._record_local_preflight_failure(
+                    session,
                     argv,
-                    127,
-                    "",
-                    f"Unable to start {argv[0]!r}: command not found in governed PATH.",
+                    input_text=input_text,
+                    process_env=process_env,
+                    timeout_seconds=timeout_seconds,
+                    output_limit_bytes=output_limit_bytes,
+                    effect_label=effect_label,
+                    public_exit_code=127,
+                    error_message=(
+                        f"Unable to start {argv[0]!r}: command not found in governed PATH."
+                    ),
                 )
         readable_roots = tuple(
             Path(value)
@@ -14023,20 +14258,43 @@ class AlbertMission:
                 destination = session.worktree_path / relative
                 if not destination.exists():
                     dependency_bindings.append((resolved_source, destination))
-        governed_argv, sandboxed = sandboxed_process_argv(
-            argv,
-            working_directory=session.worktree_path,
-            readable_roots=readable_roots,
-            writable_roots=(session.worktree_path,),
-            readonly_bindings=tuple(dependency_bindings),
-        )
-        if os.name == "posix" and isinstance(argv, list) and not sandboxed:
-            return subprocess.CompletedProcess(
+        try:
+            governed_argv, sandboxed = sandboxed_process_argv(
                 argv,
-                126,
-                "",
-                "Unable to start governed process: bubblewrap (bwrap) is required "
-                "for the writable-worktree filesystem boundary.",
+                working_directory=session.worktree_path,
+                readable_roots=readable_roots,
+                writable_roots=(session.worktree_path,),
+                readonly_bindings=tuple(dependency_bindings),
+                path=process_env.get("PATH"),
+            )
+        except AlbertError as exc:
+            return self._record_local_preflight_failure(
+                session,
+                argv,
+                input_text=input_text,
+                process_env=process_env,
+                timeout_seconds=timeout_seconds,
+                output_limit_bytes=output_limit_bytes,
+                effect_label=effect_label,
+                public_exit_code=126,
+                error_message=str(exc),
+                readable_roots=readable_roots,
+            )
+        if not sandboxed or not isinstance(governed_argv, list):
+            return self._record_local_preflight_failure(
+                session,
+                argv,
+                input_text=input_text,
+                process_env=process_env,
+                timeout_seconds=timeout_seconds,
+                output_limit_bytes=output_limit_bytes,
+                effect_label=effect_label,
+                public_exit_code=126,
+                error_message=(
+                    "Unable to start governed process: bubblewrap (bwrap) is required "
+                    "for the writable-worktree filesystem boundary."
+                ),
+                readable_roots=readable_roots,
             )
         governed_session = session.runner_pid is not None
         process_started = False
@@ -14047,18 +14305,11 @@ class AlbertMission:
             else (governed_argv,)
         )
         execution_label = effect_label.strip() or "process"
-        execution_request_id = "local-agent:" + sha256(
-            "\n".join(
-                (
-                    self.mission_id,
-                    session.session_id,
-                    session.runner_operation_id,
-                    execution_label,
-                    json.dumps(list(effective_argv), ensure_ascii=True),
-                    str(session.worktree_path.resolve()),
-                )
-            ).encode("utf-8")
-        ).hexdigest()
+        execution_request_id = self._local_execution_request_id(
+            session,
+            effective_argv,
+            execution_label,
+        )
         execution_request = ExecutionRequest(
             request_id=execution_request_id,
             effect="local-agent",

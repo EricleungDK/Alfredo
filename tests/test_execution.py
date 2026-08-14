@@ -122,6 +122,15 @@ class ExecutionContractTests(unittest.TestCase):
         self.assertEqual(shell.to_dict()["authority"]["kind"], "shell")
         self.assertEqual(local.to_dict()["authority"]["kind"], "local-agent")
 
+    def test_sandbox_rejects_protected_writable_roots(self) -> None:
+        for root in ("/etc", "/usr", "/dev", "/proc", "/tmp"):
+            with self.subTest(root=root):
+                with self.assertRaisesRegex(ValueError, "protected"):
+                    ExecutionSandbox(
+                        mode="bubblewrap",
+                        writable_roots=(str(Path(root).resolve()),),
+                    )
+
     def test_request_rejects_shell_execution_and_authority_mismatch(self) -> None:
         request = self._request()
         with self.assertRaisesRegex(ValueError, "shell execution is not allowed"):
@@ -186,6 +195,25 @@ class ExecutionContractTests(unittest.TestCase):
         self.assertEqual(receipt.status, "start-failed")
         self.assertIn("undeclared readonly", receipt.error_message)
         self.assertEqual(journal.inspect()[0].status, "start-failed")
+
+    def test_prepared_boundary_rejects_temporary_script_symlink(self) -> None:
+        real_script = self.root / "real-script.py"
+        real_script.write_text("print('bounded')\n", encoding="utf-8")
+        script_link = self.root / "script-link.py"
+        script_link.symlink_to(real_script)
+        request = self._request(request_id="shell:tmp-script-symlink")
+        unsafe = list(request.argv)
+        separator = unsafe.index("--")
+        unsafe[separator + 7 :] = ["python3", str(script_link)]
+        journal = ExecutionJournal(self.runtime / "execution-receipts.json")
+
+        receipt = ExecutionCoordinator(
+            journal,
+            PythonExecutionProvider(),
+        ).execute(request.with_updates(argv=tuple(unsafe)))
+
+        self.assertEqual(receipt.status, "start-failed")
+        self.assertIn("must not be a symlink", receipt.error_message)
 
     def test_exact_replay_returns_the_typed_receipt_without_rerunning_effect(
         self,
@@ -441,6 +469,20 @@ class ExecutionContractTests(unittest.TestCase):
         missing_schema.pop("schema_version")
         with self.assertRaises(ValueError):
             ExecutionReceipt.from_dict(missing_schema)
+
+    def test_receipt_rejects_impossible_terminal_exit_codes(self) -> None:
+        request = self._request()
+        receipt = ExecutionReceipt.completed(
+            request,
+            exit_code=0,
+            stdout="",
+            stderr="",
+        )
+        impossible = receipt.to_dict()
+        impossible["status"] = "failed"
+        impossible["exit_code"] = 0
+        with self.assertRaises(ValueError):
+            ExecutionReceipt.from_dict(impossible)
 
     def test_journal_rejects_raw_input_and_output_fields(self) -> None:
         request = self._request(request_id="shell:raw-journal")

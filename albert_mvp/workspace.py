@@ -1296,6 +1296,131 @@ class ShellTerminalService:
         self._reconcile_submission_audit(denied)
         return self._result_from_record(denied)
 
+    def _record_preflight_execution_failure(
+        self,
+        *,
+        terminal: dict[str, Any],
+        record: dict[str, Any],
+        record_index: int | None,
+        public_exit_code: int,
+        error_message: str,
+    ) -> ShellTerminalCommandResult:
+        """Persist a typed Shell start failure before any child can start."""
+
+        if os.name != "posix":
+            return self._finish_execution(
+                terminal=terminal,
+                record=record,
+                record_index=record_index,
+                exit_code=public_exit_code,
+                stdout="",
+                stderr=error_message,
+            )
+        working_directory = str(Path(record["working_directory"]).resolve())
+        try:
+            raw_argv = tuple(shlex.split(record["command"]))
+        except ValueError:
+            raw_argv = (str(record["command"]),)
+        if not raw_argv:
+            raw_argv = (str(record["command"]),)
+        execution_request = ExecutionRequest(
+            request_id=f"shell:{record['command_id']}",
+            effect="shell",
+            argv=raw_argv,
+            working_directory=working_directory,
+            authority=ShellExecutionAuthority(
+                mission_id=str(record["mission_id"]),
+                command_id=str(record["command_id"]),
+                correlation_id=str(record["correlation_id"]),
+                command=str(record["command"]),
+                classification=record["classification"],
+                requester=str(record["requester"]),
+                working_directory=working_directory,
+                requested_paths=tuple(record["requested_paths"]),
+                access_level=record.get("access_level", "read"),
+                approval_actor=str(record.get("approver", "")),
+            ),
+            limits=ExecutionLimits(
+                timeout_seconds=self._COMMAND_TIMEOUT_SECONDS,
+                output_limit_bytes=self._OUTPUT_BYTES_LIMIT,
+            ),
+            sandbox=ExecutionSandbox(
+                mode="bubblewrap",
+                readable_roots=(working_directory,),
+            ),
+            environment=tuple(sorted(sanitized_process_environment().items())),
+        )
+        attempt_record = {
+            **record,
+            "status": "executing",
+            "exit_code": None,
+            "executor_pid": os.getpid(),
+            "executor_identity": _process_identity(os.getpid()),
+            "execution_request_id": execution_request.request_id,
+            "execution_request_digest": execution_request.request_digest,
+        }
+        commands = list(terminal["commands"])
+        if record_index is None:
+            record_index = len(commands)
+            commands.append(attempt_record)
+        else:
+            commands[record_index] = attempt_record
+        attempt_terminal = {
+            **terminal,
+            "revision": terminal["revision"] + 1,
+            "commands": commands,
+        }
+        chronology_path = (
+            self._snapshots.preferences_path.parent / ".chronology-order.lock"
+        )
+        with _chronology_order_lock(chronology_path):
+            self._persist_terminal(
+                revision=attempt_terminal["revision"],
+                commands=commands,
+                grants=terminal["grants"],
+                grant_denials=terminal["grant_denials"],
+            )
+        journal = ExecutionJournal(
+            self._execution_journal_path_for_mission(str(record["mission_id"]))
+        )
+        receipt = journal.record_start_failed(
+            execution_request,
+            ExecutionReceipt.start_failed(
+                execution_request,
+                exit_code=127,
+                error_message=error_message,
+            ),
+        )
+        if receipt.status == "executing":
+            return ShellTerminalCommandResult(
+                command_id=record["command_id"],
+                correlation_id=record["correlation_id"],
+                classification=record["classification"],
+                status="executing",
+                exit_code=None,
+                stdout="",
+                stderr=(
+                    "Shell Terminal execution is still owned by a live provider; "
+                    "the command was not replayed."
+                ),
+            )
+        if receipt.reconciliation_required:
+            return self._finish_outcome_unknown(
+                terminal=attempt_terminal,
+                record=attempt_record,
+                record_index=record_index,
+                receipt=receipt,
+            )
+        return self._finish_execution(
+            terminal=attempt_terminal,
+            record=attempt_record,
+            record_index=record_index,
+            exit_code=public_exit_code,
+            stdout="",
+            stderr=receipt.error_message or error_message,
+            receipt=receipt,
+        )
+
     def _execute(
         self,
         *,
@@ -1305,30 +1430,46 @@ class ShellTerminalService:
     ) -> ShellTerminalCommandResult:
         bubblewrap = _trusted_system_executable("bwrap")
         if bubblewrap is None:
-            return self._finish_execution(
+            return self._record_preflight_execution_failure(
                 terminal=terminal,
                 record=record,
                 record_index=record_index,
-                exit_code=self._SANDBOX_UNAVAILABLE_EXIT_CODE,
-                stdout="",
-                stderr=(
+                public_exit_code=self._SANDBOX_UNAVAILABLE_EXIT_CODE,
+                error_message=(
                     "Shell Terminal sandbox unavailable: bubblewrap (bwrap) is required "
                     "for governed command execution; the command was not executed."
                 ),
             )
-        sandbox_argv, mount_error = self._sandbox_argv(
-            bubblewrap=bubblewrap,
-            terminal=terminal,
-            record=record,
-        )
+        try:
+            process_env = sanitized_process_environment()
+            sandbox_argv, mount_error = self._sandbox_argv(
+                bubblewrap=bubblewrap,
+                terminal=terminal,
+                record=record,
+                process_env=process_env,
+            )
+        except (AlbertError, ValueError) as exc:
+            sandbox_argv, mount_error = [], str(exc)
         if mount_error:
-            return self._finish_execution(
+            return self._record_preflight_execution_failure(
                 terminal=terminal,
                 record=record,
                 record_index=record_index,
-                exit_code=self._SANDBOX_UNAVAILABLE_EXIT_CODE,
-                stdout="",
-                stderr=mount_error,
+                public_exit_code=self._SANDBOX_UNAVAILABLE_EXIT_CODE,
+                error_message=mount_error,
+            )
+        try:
+            execution_sandbox = self._execution_sandbox_for_record(
+                terminal=terminal,
+                record=record,
+            )
+        except (AlbertError, ValueError) as exc:
+            return self._record_preflight_execution_failure(
+                terminal=terminal,
+                record=record,
+                record_index=record_index,
+                public_exit_code=self._SANDBOX_UNAVAILABLE_EXIT_CODE,
+                error_message=str(exc),
             )
         execution_request = ExecutionRequest(
             request_id=f"shell:{record['command_id']}",
@@ -1351,11 +1492,8 @@ class ShellTerminalService:
                 timeout_seconds=self._COMMAND_TIMEOUT_SECONDS,
                 output_limit_bytes=self._OUTPUT_BYTES_LIMIT,
             ),
-            sandbox=self._execution_sandbox_for_record(
-                terminal=terminal,
-                record=record,
-            ),
-            environment=tuple(sorted(sanitized_process_environment().items())),
+            sandbox=execution_sandbox,
+            environment=tuple(sorted(process_env.items())),
         )
         attempt_record = {
             **record,
@@ -1446,7 +1584,8 @@ class ShellTerminalService:
                 )
                 completion_is_durable = (
                     durable_record is not None
-                    and durable_record.get("status") in {"completed", "failed"}
+                    and durable_record.get("status")
+                    in {"completed", "failed", "outcome-unknown"}
                 )
             except Exception:
                 completion_is_durable = False
@@ -1480,10 +1619,17 @@ class ShellTerminalService:
         status: Literal["completed", "failed"] = (
             "completed" if exit_code == 0 else "failed"
         )
+        persisted_exit_code = (
+            receipt.exit_code
+            if receipt is not None
+            and receipt.status == "start-failed"
+            and receipt.exit_code is not None
+            else exit_code
+        )
         completed_record = {
             **record,
             "status": status,
-            "exit_code": exit_code,
+            "exit_code": persisted_exit_code,
             "executor_pid": None,
             "executor_identity": "",
         }
@@ -1931,12 +2077,19 @@ class ShellTerminalService:
         changed_records: list[dict[str, Any]] = []
         changed = False
         for index, record in enumerate(commands):
-            if record.get("status") not in {"executing", "outcome-unknown"}:
-                continue
+            has_request_marker = "execution_request_id" in record or (
+                "execution_request_digest" in record
+            )
             request_id = record.get("execution_request_id")
             request_digest = record.get("execution_request_digest")
-            if not isinstance(request_id, str) or not isinstance(request_digest, str):
+            if not has_request_marker:
                 continue
+            if not isinstance(request_id, str) or not isinstance(
+                request_digest, str
+            ):
+                raise WorkspacePersistenceError(
+                    "Shell Terminal execution record has an incomplete request boundary."
+                )
             mission_id = record.get("mission_id")
             if not isinstance(mission_id, str) or not mission_id.strip():
                 raise WorkspacePersistenceError(
@@ -1955,8 +2108,22 @@ class ShellTerminalService:
                 )
                 if journal_path.resolve() != legacy_path.resolve():
                     legacy = ExecutionJournal(legacy_path)
-                    legacy.reconcile()
                     for request, receipt in legacy.inspect_records():
+                        if receipt.status == "executing" and not _process_identity_is_live(
+                            receipt.owner_pid,
+                            receipt.owner_identity,
+                        ):
+                            receipt = ExecutionReceipt.unknown(
+                                request,
+                                error_message=(
+                                    "The legacy execution owner stopped before a typed "
+                                    "receipt was durably reconciled; inspect the effect."
+                                ),
+                                owner_pid=receipt.owner_pid,
+                                owner_identity=receipt.owner_identity,
+                                process_pid=receipt.process_pid,
+                                process_identity=receipt.process_identity,
+                            )
                         authority = request.authority
                         if (
                             request.request_id not in records_for_mission
@@ -1970,10 +2137,10 @@ class ShellTerminalService:
                 journal_records_by_mission[mission_id] = records_for_mission
             request_and_receipt = journal_records_by_mission[mission_id].get(request_id)
             if request_and_receipt is None:
-                continue
+                raise WorkspacePersistenceError(
+                    "Shell Terminal execution record has no matching durable receipt."
+                )
             request, receipt = request_and_receipt
-            if receipt.status == "executing":
-                continue
             if receipt.request_digest != request_digest:
                 raise WorkspacePersistenceError(
                     "Shell Terminal execution receipt does not match its request boundary."
@@ -1996,27 +2163,61 @@ class ShellTerminalService:
                 raise WorkspacePersistenceError(
                     "Shell Terminal execution receipt authority does not match its command."
                 )
+            if receipt.status == "executing":
+                if record.get("status") != "executing":
+                    raise WorkspacePersistenceError(
+                        "Shell Terminal terminal record disagrees with an executing receipt."
+                    )
+                continue
             if receipt.reconciliation_required:
+                expected_status = "outcome-unknown"
+                expected_exit_code = None
                 reconciled = {
                     **record,
-                    "status": "outcome-unknown",
-                    "exit_code": None,
+                    "status": expected_status,
+                    "exit_code": expected_exit_code,
                     "executor_pid": None,
                     "executor_identity": "",
                     "execution_receipt_id": receipt.receipt_id,
                     "execution_status": receipt.status,
                 }
             else:
-                exit_code = receipt.exit_code if receipt.exit_code is not None else 1
+                if receipt.status not in {
+                    "completed",
+                    "failed",
+                    "timed-out",
+                    "output-limit",
+                    "cancelled",
+                    "start-failed",
+                }:
+                    raise WorkspacePersistenceError(
+                        "Shell Terminal execution receipt has an invalid terminal status."
+                    )
+                expected_status = (
+                    "completed" if receipt.status == "completed" else "failed"
+                )
+                expected_exit_code = (
+                    receipt.exit_code if receipt.exit_code is not None else 1
+                )
                 reconciled = {
                     **record,
-                    "status": "completed" if exit_code == 0 else "failed",
-                    "exit_code": exit_code,
+                    "status": expected_status,
+                    "exit_code": expected_exit_code,
                     "executor_pid": None,
                     "executor_identity": "",
                     "execution_receipt_id": receipt.receipt_id,
                     "execution_status": receipt.status,
                 }
+            if record.get("status") != "executing":
+                if (
+                    record.get("status") != expected_status
+                    or record.get("exit_code") != expected_exit_code
+                    or record.get("execution_receipt_id") != receipt.receipt_id
+                    or record.get("execution_status") != receipt.status
+                ):
+                    raise WorkspacePersistenceError(
+                        "Shell Terminal terminal record disagrees with its typed receipt."
+                    )
             if reconciled != record:
                 commands[index] = reconciled
                 changed_records.append(reconciled)
@@ -2051,7 +2252,11 @@ class ShellTerminalService:
                 correlation_id=record["correlation_id"],
                 classification=record["classification"],
                 status=record["status"],
-                exit_code=record.get("exit_code"),
+                exit_code=(
+                    ShellTerminalService._SANDBOX_UNAVAILABLE_EXIT_CODE
+                    if record.get("execution_status") == "start-failed"
+                    else record.get("exit_code")
+                ),
                 stdout="",
                 stderr=(
                     "Shell Terminal recorded that execution started, but its final "
@@ -2144,6 +2349,7 @@ class ShellTerminalService:
         bubblewrap: str,
         terminal: dict[str, Any],
         record: dict[str, Any],
+        process_env: dict[str, str] | None = None,
     ) -> tuple[list[str], str]:
         requested_mounts, mount_error = self._sandbox_mounts(
             terminal=terminal,
@@ -2157,12 +2363,14 @@ class ShellTerminalService:
         writable_roots = tuple(
             path for path, access in requested_mounts.items() if access == "write"
         )
+        process_env = process_env or sanitized_process_environment()
         argv, sandboxed = sandboxed_process_argv(
             shlex.split(record["command"]),
             working_directory=Path(record["working_directory"]),
             readable_roots=readable_roots,
             writable_roots=writable_roots,
             allow_implicit_executable_bindings=False,
+            path=process_env.get("PATH"),
         )
         if not sandboxed or not isinstance(argv, list):
             return [], (
@@ -4024,10 +4232,12 @@ class AgentConsoleResponseService:
     def _run_controller_command(self, command: str, prompt: str) -> str:
         command_argv = shlex.split(command)
         target_repo = self._snapshots._primary_mission.target_repo
+        process_env = sanitized_process_environment()
         governed_argv, sandboxed = sandboxed_process_argv(
             command_argv,
             working_directory=target_repo,
             readable_roots=(target_repo,),
+            path=process_env.get("PATH"),
         )
         if not sandboxed:
             raise AlbertError(
@@ -4038,7 +4248,7 @@ class AgentConsoleResponseService:
                 governed_argv,
                 input_text=prompt,
                 cwd=target_repo,
-                env=sanitized_process_environment(),
+                env=process_env,
                 timeout_seconds=120,
                 output_limit_bytes=self._CONTROLLER_OUTPUT_BYTES_LIMIT,
             )

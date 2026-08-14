@@ -15,7 +15,6 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-import fcntl
 import hashlib
 import json
 import math
@@ -23,10 +22,16 @@ import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 from typing import Any, Callable, Literal, Mapping, Sequence
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - exercised only on unsupported hosts
+    fcntl = None
 
 
 EXECUTION_SCHEMA_VERSION = 1
@@ -50,6 +55,16 @@ _IMPLICIT_READONLY_ROOTS = {
     "/lib",
     "/lib64",
     "/etc",
+}
+_PROTECTED_WRITABLE_ROOTS = {
+    "/usr",
+    "/bin",
+    "/sbin",
+    "/lib",
+    "/lib64",
+    "/etc",
+    "/dev",
+    "/proc",
 }
 _IDENTITY_PATTERN = re.compile(r"^[A-Za-z0-9._:/=-]+$")
 _ENVIRONMENT_KEY_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -173,6 +188,49 @@ def _validate_paths(
     return tuple(result)
 
 
+def _is_protected_writable_path(value: str) -> bool:
+    path = Path(value)
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError:
+        resolved = path
+    temporary_roots = (Path("/tmp"), Path(tempfile.gettempdir()))
+    if any(
+        path == root or resolved == root.resolve(strict=False)
+        for root in temporary_roots
+    ):
+        return True
+    return any(
+        resolved == root
+        or resolved.is_relative_to(root)
+        for root in (
+            Path(item).resolve(strict=False) for item in _PROTECTED_WRITABLE_ROOTS
+        )
+    )
+
+
+def _is_under_private_tmp(path: Path) -> bool:
+    """Match OS temporary roots, including macOS's /private/tmp alias."""
+
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError:
+        resolved = path
+    for root in (Path("/tmp"), Path(tempfile.gettempdir())):
+        if path.is_relative_to(root) or resolved.is_relative_to(
+            root.resolve(strict=False)
+        ):
+            return True
+    return False
+
+
+def _is_regular_non_symlink(path: Path) -> bool:
+    try:
+        return stat.S_ISREG(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
 @dataclass(frozen=True)
 class ExecutionLimits:
     """Provider-enforced timeout, output, and inherited resource limits."""
@@ -279,6 +337,10 @@ class ExecutionSandbox:
         _validate_paths(
             self.writable_roots, label="execution writable roots", absolute=True
         )
+        if any(_is_protected_writable_path(path) for path in self.writable_roots):
+            raise ExecutionContractError(
+                "execution writable roots cannot override protected sandbox roots"
+            )
         if len(self.readonly_bindings) > _MAX_PATH_ENTRIES:
             raise ExecutionContractError("execution readonly bindings are too numerous")
         for binding in self.readonly_bindings:
@@ -423,6 +485,13 @@ def _validate_prepared_bubblewrap_argv(
         raise ExecutionContractError(
             "execution Bubblewrap host root cannot be writable"
         )
+    if any(
+        _is_protected_writable_path(destination)
+        for _source, destination in rw_bindings
+    ):
+        raise ExecutionContractError(
+            "execution Bubblewrap writable mount overrides a protected sandbox root"
+        )
     if any(source == "/" or destination == "/" for source, destination in ro_bindings):
         raise ExecutionContractError("execution Bubblewrap host root cannot be mounted")
 
@@ -455,17 +524,31 @@ def _validate_prepared_bubblewrap_argv(
     implicit_executable_paths: set[Path] = set()
     if implicit_command:
         command_executable = Path(implicit_command[0])
-        if command_executable.is_absolute():
-            implicit_executable_paths.add(command_executable.resolve(strict=False))
-        else:
-            resolved_executable = shutil.which(
-                implicit_command[0],
-                path=environment_path,
-            )
-            if resolved_executable:
-                implicit_executable_paths.add(
-                    Path(resolved_executable).resolve(strict=False)
-                )
+        resolved_executable: str | None = (
+            str(command_executable)
+            if command_executable.is_absolute()
+            else shutil.which(implicit_command[0], path=environment_path)
+        )
+        if resolved_executable:
+            executable_entry = Path(resolved_executable)
+            if _is_under_private_tmp(executable_entry):
+                if executable_entry.is_symlink():
+                    raise ExecutionContractError(
+                        "execution /tmp executable must not be a symlink"
+                    )
+                try:
+                    resolved_path = executable_entry.resolve(strict=True)
+                except OSError as exc:
+                    raise ExecutionContractError(
+                        "execution /tmp executable cannot be resolved"
+                    ) from exc
+                if not _is_under_private_tmp(resolved_path):
+                    raise ExecutionContractError(
+                        "execution /tmp executable escapes its private root"
+                    )
+                implicit_executable_paths.add(resolved_path)
+            else:
+                implicit_executable_paths.add(executable_entry.resolve(strict=False))
     implicit_script_path: Path | None = None
     if implicit_command and (
         Path(implicit_command[0]).name.casefold().startswith("python")
@@ -477,8 +560,27 @@ def _validate_prepared_bubblewrap_argv(
             if argument.startswith("-"):
                 continue
             candidate = Path(argument)
-            if candidate.is_absolute() and candidate.is_relative_to(Path("/tmp")):
-                implicit_script_path = candidate.resolve(strict=False)
+            if candidate.is_absolute() and _is_under_private_tmp(candidate):
+                if candidate.is_symlink():
+                    raise ExecutionContractError(
+                        "execution /tmp interpreter script must not be a symlink"
+                    )
+                if candidate.exists():
+                    if not _is_regular_non_symlink(candidate):
+                        raise ExecutionContractError(
+                            "execution /tmp interpreter script must be a regular file"
+                        )
+                    try:
+                        resolved_script = candidate.resolve(strict=True)
+                    except OSError as exc:
+                        raise ExecutionContractError(
+                            "execution /tmp interpreter script cannot be resolved"
+                        ) from exc
+                    if not _is_under_private_tmp(resolved_script):
+                        raise ExecutionContractError(
+                            "execution /tmp interpreter script escapes its private root"
+                        )
+                    implicit_script_path = resolved_script
             break
 
     def is_allowed_implicit_binding(binding: tuple[str, str]) -> bool:
@@ -487,21 +589,22 @@ def _validate_prepared_bubblewrap_argv(
             return True
         source_path = Path(source)
         destination_path = Path(destination)
-        if not source_path.is_file():
+        if not _is_regular_non_symlink(source_path):
+            return False
+        if destination_path.is_symlink() and _is_under_private_tmp(destination_path):
             return False
         try:
-            same_file = source_path.resolve(strict=True) == destination_path.resolve(
-                strict=False
-            )
+            source_resolved = source_path.resolve(strict=True)
+            destination_resolved = destination_path.resolve(strict=True)
         except OSError:
             return False
-        if not same_file:
+        if source_resolved != destination_resolved:
             return False
-        if destination_path.resolve(strict=False) in implicit_executable_paths:
+        if destination_resolved in implicit_executable_paths:
             return os.access(source_path, os.X_OK)
         return (
             implicit_script_path is not None
-            and destination_path.resolve(strict=False) == implicit_script_path
+            and destination_resolved == implicit_script_path
         )
 
     undeclared_readonly = set(ro_bindings) - expected_ro
@@ -715,7 +818,11 @@ class ExecutionRequest:
             raise ExecutionContractError("execution limits are invalid")
         if not isinstance(self.sandbox, ExecutionSandbox):
             raise ExecutionContractError("execution sandbox is invalid")
-        if os.name == "posix" and self.sandbox.mode != "bubblewrap":
+        if os.name != "posix":
+            raise ExecutionContractError(
+                "host execution is unsupported on non-POSIX hosts"
+            )
+        if self.sandbox.mode != "bubblewrap":
             raise ExecutionContractError("host effects require the Bubblewrap sandbox")
         if len(self.environment) > _MAX_ENVIRONMENT_ENTRIES:
             raise ExecutionContractError("execution environment is too large")
@@ -930,6 +1037,14 @@ class ExecutionReceipt:
                 or self.exit_code is None
             ):
                 raise ExecutionContractError("terminal receipt flags are invalid")
+        if self.status == "completed" and self.exit_code != 0:
+            raise ExecutionContractError("completed receipt exit code is invalid")
+        if self.status == "failed" and self.exit_code == 0:
+            raise ExecutionContractError("failed receipt exit code is invalid")
+        if self.status == "timed-out" and self.exit_code != 124:
+            raise ExecutionContractError("timed-out receipt exit code is invalid")
+        if self.status == "output-limit" and self.exit_code != 125:
+            raise ExecutionContractError("output-limit receipt exit code is invalid")
         for value, label in ((self.stdout, "stdout"), (self.stderr, "stderr")):
             if not isinstance(value, str) or "\0" in value:
                 raise ExecutionContractError(f"execution receipt {label} is invalid")
@@ -1104,6 +1219,8 @@ class ExecutionReceipt:
         *,
         error_message: str,
         effect_started: bool = True,
+        process_pid: int | None = None,
+        process_identity: str = "",
     ) -> "ExecutionReceipt":
         return cls._make(
             request,
@@ -1113,6 +1230,8 @@ class ExecutionReceipt:
             reconciliation_required=False,
             error_code="cancelled",
             error_message=error_message,
+            process_pid=process_pid,
+            process_identity=process_identity,
         )
 
     @classmethod
@@ -1391,6 +1510,10 @@ class ExecutionJournal:
 
     @contextmanager
     def _lock(self):
+        if fcntl is None:
+            raise ExecutionContractError(
+                "execution journal locking is unsupported on this host"
+            )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.lock_path.open("a+", encoding="utf-8") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
@@ -1515,10 +1638,101 @@ class ExecutionJournal:
                 ),
                 owner_pid=receipt.owner_pid,
                 owner_identity=receipt.owner_identity,
+                process_pid=receipt.process_pid,
+                process_identity=receipt.process_identity,
             )
             records[request.request_id] = self._record(request, unknown)
             self._write(payload)
             return unknown
+
+    def bind_process(
+        self,
+        request: ExecutionRequest,
+        *,
+        process_pid: int,
+        process_identity: str,
+    ) -> ExecutionReceipt:
+        """Durably bind child identity to the executing intent before capture setup."""
+
+        request.validate()
+        if (
+            not isinstance(process_pid, int)
+            or isinstance(process_pid, bool)
+            or process_pid <= 0
+            or not isinstance(process_identity, str)
+            or "\0" in process_identity
+        ):
+            raise ExecutionContractError("execution process identity is invalid")
+        with self._lock():
+            payload = self._read()
+            existing = payload["records"].get(request.request_id)
+            if existing is None:
+                raise ExecutionContractError(
+                    "execution intent is missing before process binding"
+                )
+            if existing.get("request_digest") != request.request_digest:
+                raise ExecutionReplayConflict(
+                    f"Execution request {request.request_id} was reused for a different effect."
+                )
+            current = ExecutionReceipt.from_dict(existing["receipt"])
+            if current.status != "executing":
+                return current
+            bound = replace(
+                current,
+                process_pid=process_pid,
+                process_identity=process_identity,
+            )
+            payload["records"][request.request_id] = self._record(request, bound)
+            self._write(payload)
+            return bound
+
+    def record_start_failed(
+        self,
+        request: ExecutionRequest,
+        receipt: ExecutionReceipt,
+    ) -> ExecutionReceipt:
+        """Atomically persist a deterministic pre-effect failure or existing result."""
+
+        request.validate()
+        if (
+            receipt.status != "start-failed"
+            or receipt.request_id != request.request_id
+            or receipt.request_digest != request.request_digest
+        ):
+            raise ExecutionContractError(
+                "execution start-failed receipt does not match request"
+            )
+        with self._lock():
+            payload = self._read()
+            records = payload["records"]
+            existing = records.get(request.request_id)
+            if existing is not None:
+                if existing.get("request_digest") != request.request_digest:
+                    raise ExecutionReplayConflict(
+                        f"Execution request {request.request_id} was reused for a different effect."
+                    )
+                current = ExecutionReceipt.from_dict(existing["receipt"])
+                if current.status == "executing" and not _owner_is_live(
+                    current.owner_pid,
+                    current.owner_identity,
+                ):
+                    current = ExecutionReceipt.unknown(
+                        request,
+                        error_message=(
+                            "The provider owner stopped before a typed execution receipt was "
+                            "durably reconciled; inspect the external effect before deciding."
+                        ),
+                        owner_pid=current.owner_pid,
+                        owner_identity=current.owner_identity,
+                        process_pid=current.process_pid,
+                        process_identity=current.process_identity,
+                    )
+                    records[request.request_id] = self._record(request, current)
+                    self._write(payload)
+                return current
+            records[request.request_id] = self._record(request, receipt)
+            self._write(payload)
+            return receipt
 
     def complete(self, request: ExecutionRequest, receipt: ExecutionReceipt) -> None:
         request.validate()
@@ -1567,6 +1781,8 @@ class ExecutionJournal:
                     ),
                     owner_pid=receipt.owner_pid,
                     owner_identity=receipt.owner_identity,
+                    process_pid=receipt.process_pid,
+                    process_identity=receipt.process_identity,
                 )
                 payload["records"][request_id] = self._record(request, unknown)
                 changed = True
@@ -1628,16 +1844,25 @@ class ExecutionCoordinator:
                 exit_code=127,
                 error_message=str(exc),
             )
-            existing = self.journal.claim(request)
-            if existing is not None:
-                return existing
-            self.journal.complete(request, receipt)
-            return receipt
+            return self.journal.record_start_failed(request, receipt)
         process_bound = False
+        process_pid: int | None = None
+        process_identity = ""
 
         def bind(process: Any, process_token: str = "") -> None:
-            nonlocal process_bound
+            nonlocal process_bound, process_pid, process_identity
             process_bound = True
+            process_pid = getattr(process, "pid", None)
+            process_identity = (
+                _process_identity(process_pid)
+                if isinstance(process_pid, int)
+                else ""
+            )
+            self.journal.bind_process(
+                request,
+                process_pid=process_pid,
+                process_identity=process_identity,
+            )
             if process_binding_started is not None:
                 process_binding_started(process, process_token)
 
@@ -1662,9 +1887,16 @@ class ExecutionCoordinator:
                     request,
                     error_message=str(exc),
                     effect_started=process_bound,
+                    process_pid=process_pid,
+                    process_identity=process_identity,
                 )
             elif process_bound:
-                receipt = ExecutionReceipt.unknown(request, error_message=str(exc))
+                receipt = ExecutionReceipt.unknown(
+                    request,
+                    error_message=str(exc),
+                    process_pid=process_pid,
+                    process_identity=process_identity,
+                )
             else:
                 receipt = ExecutionReceipt.start_failed(
                     request,
