@@ -4,20 +4,40 @@
 
 ## Active Orchestration Context
 
-<!-- refreshed 2026-08-15 for GitHub Issue #72 implementation -->
+<!-- refreshed 2026-08-15 for local integration and worktree cleanup -->
 
-- **Captured For Run**: `2026-08-15 - Implement GitHub Issue #72: shadow Rust execution receipts against Python.`
-- **Current Mission Focus**: `Add a production-equivalent Rust execution provider behind the Issue #71 versioned request/receipt boundary, with Python remaining the sole canonical writer and Rust eligibility failing closed on any parity, crash-cut, state-version, packaging, or release-gate failure.`
-- **Active Agent Focus**: `Codex root owns Issue #72 reconnaissance, TDD implementation, focused/full verification, documentation reconciliation, candidate commit, independent Standards, Spec, and Correctness/Risk review, review-fix loop, and authoritative ticket handoff. Preserve the mixed staged/unstaged Issue #69/#71 worktree and isolate only #72 changes.`
-- **Model Assignments (active run)**: `Codex root owns implementation and integration. Independent Standards, Spec, and Correctness/Risk reviewers will run in parallel after the candidate commit against fixed point 314ae4b and GitHub Issue #72.`
-- **Coordination State**: `The fixed point is local HEAD 314ae4b. GitHub Issue #72 (https://github.com/EricleungDK/Alfredo/issues/72) is OPEN with ready-for-agent, downstream of closed #71/#65 and under PRD #56. The candidate is local only; no push, PR creation, or unrelated tracker mutation is authorized.`
+- **Captured For Run**: `2026-08-15 - Reconcile the mixed Issue #69/#70/#71/#72 worktree into clean, reviewable local history ready for an explicitly authorized push.`
+- **Current Mission Focus**: `Preserve every recoverable user state, integrate the isolated Issue #69 commit with the Issue #72 mainline, remove stale-index inversions and superseded physical snapshots, verify the combined tree, and leave one clean feature branch without pushing.`
+- **Active Agent Focus**: `Codex root owns recovery inventory, isolated integration, scoped documentation reconciliation, combined verification, and final clean-state audit. No stash, branch, recovery ref, or unrelated file will be discarded.`
+- **Model Assignments (active run)**: `Codex root is the sole integration owner; no subagent is active.`
+- **Coordination State**: `The clean integration branch is feature/issues-69-72-integration, containing Issue #69 cherry-pick 8e3e5a6 on top of Issue #72 mainline 28c084b plus the integrated shadow-fixture repair 0697fe8 and this cleanup record. Local recovery refs preserve the former default index at a5103cf and physical worktree at 184706c; both pre-existing stashes remain. Main stays at 28c084b. No push, PR, force update, branch deletion, stash deletion, recovery-ref deletion, or remote mutation is authorized in this run.`
 - **Fixed Boundaries**: `Python authorizes, persists, and reconciles every effect and remains the only canonical writer. Rust is a shadow candidate only: it consumes the same versioned request, emits a typed receipt, never writes Python stores, never creates a product speed claim from reducer/sidecar/microbenchmark evidence, and cannot become eligible when parity, crash-cut, protocol/state-version, packaging, or release evidence fails.`
 - **Testing Seam Direction**: `Use public contract seams: the shared ExecutionRequest/ExecutionReceipt provider interface; the shadow cohort/store-hash guard; normalized receipt/process-outcome/structured-failure parity; production-equivalent fixture/stage admission; and fail-closed eligibility/fallback. Cover validation, launch, supervision, cancellation, sandboxing, resources, bounded output, timeout, cleanup, replay, and crash cuts through public behavior.`
-- **Current Implementation State**: `Rust execution.rs and the no-desktop alfredo-execution-provider JSONL binary are implemented, with Python execution_shadow.py providing store hashing, normalized parity, cohort admission, the Rust adapter, and eligibility persistence. Focused verification passes 8 Rust tests, 8 Python shadow tests, and the broader Issue #71/#72 Python execution set (24 tests). The actual Rust JSONL round-trip passes on the macOS host after building the provider.`
-- **Focused Evidence So Far**: `Rust formatting/build and the 8-test no-default execution suite pass. The Python shadow suite passes 8/8, the combined Issue #71/#72 execution set passes 24/24, Ruff passes on the new Python module/tests, and documentation standards remain Grade A at 98.0%.`
-- **Review State**: `Not started. Candidate review must compare the exact #72 diff from 314ae4b on Standards, Spec, and Correctness/Risk axes, then all findings must be fixed or evidenced before handoff.`
+- **Current Implementation State**: `Issues #69/#70/#71/#72 now coexist in one committed integration tree. The stale default index has been replaced by the integrated tree, and the integrated Issue #72 shadow fixture now uses Issue #71's hardened Bubblewrap/prlimit request and canonical receipt factory. This cleanup record and chronological report-index ordering are the final scoped cleanup changes.`
+- **Focused Evidence So Far**: `Inventory found no unmerged paths. The Issue #69 cherry-pick was conflict-free. Residual comparison identified superseded pre-hardening Issue #71 code/test blobs and stale documentation; all old bytes remain recoverable through 184706c. Combined Python execution tests pass 44 with 1 expected host skip; inference/qualification tests pass 69 with 1 expected host skip. Focused Ruff passes. Rust fmt, 9 execution tests, cargo check, and the no-default execution-provider build pass. Mission Control passes 147 tests, TypeScript typecheck, and the production build. git diff --check passes.`
+- **Review State**: `The integration/residual audit and test-driven compatibility repair are complete; no unclassified implementation change remains. The branch is ready for its final clean-state audit.`
 - **Pending Blockers**: `Packaged-release and Linux Bubblewrap evidence remain unverified on this Darwin host; macOS skips RLIMIT_AS because Darwin rejects that Linux resource primitive. These limits must keep Rust non-eligible and must not be converted into a speed or cutover claim.`
-- **Next Decisions / Actions**: `Finish additive documentation, run proportionate Rust/Python/frontend/toolchain checks, isolate a candidate commit, complete the review/fix loop, re-read live Issue #72, and post evidence without closing the ticket until the external packaging/release gates are verified.`
+- **Next Decisions / Actions**: `Confirm the clean feature branch and hand off its exact commit and recovery state. Do not push until separately authorized.`
+
+## Concurrent Orchestration Context (Issue #69 completion and integration)
+
+- **Captured For Run**: `2026-08-15 - Audit, harden, verify, and integrate GitHub Issue #69 local inference governance.`
+- **Current Mission Focus**: `Retain the deterministic Local Inference Profile, bounded Ollama HTTP adapter, one non-authoritative Local Inference Lease, runtime telemetry, and Mission Control projection contract implemented for Issue #69.`
+- **Coordination State**: `GitHub Issue #69 is CLOSED as COMPLETED. Original commit bdc41b4 remains on feature/issue-69-inference-governance; its conflict-free cherry-pick is 8e3e5a6 on feature/issues-69-72-integration. Evidence is recorded at https://github.com/EricleungDK/Alfredo/issues/69#issuecomment-5299330656. No push or PR was performed.`
+- **Current Implementation State**: `The adapter admits against a tokenizer-independent UTF-8 byte bound, sends raw prompts, requests explicit CPU/GPU placement, bounds response plus thinking output, requires complete Ollama timing/usage metrics, and resolves exact running-model digest and GPU/total-byte evidence from /api/ps before authority or resident affinity. Python remains authoritative.`
+- **Focused Evidence So Far**: `Issue #69 inference tests previously ran 23 with 22 passing and 1 expected Bubblewrap skip. The combined #69/#70 inference boundary ran 69 with 68 passing and the same skip. Mission Control App/style tests passed 147; TypeScript typecheck and production build passed; PyCompile, Ruff, Ruff format, and diff checks passed for the hardened files.`
+- **Pending Blockers**: `No Issue #69 product blocker remains. Live Ollama/GPU is an optional supported-machine smoke, not a closure prerequisite.`
+
+## Previous Orchestration Context (historical - Issue #70 implementation and ticket update)
+
+- **Captured For Run**: `2026-08-14 - Implement GitHub Issue #70: qualify and promote Local Inference Profiles.`
+- **Coordination State**: `Issue #70 is committed through 0f728b1 and CLOSED as COMPLETED. Verification evidence is recorded at https://github.com/EricleungDK/Alfredo/issues/70#issuecomment-5290522534.`
+- **Current Implementation State**: `Qualification accepts the governed fixture family and exact runtime/report/state schemas; promotion and rollback are durable, bounded, and fail closed.`
+
+## Previous Orchestration Context (historical - Issue #71 host execution)
+
+- **Captured For Run**: `2026-08-13 - Implement and harden the versioned host execution request/receipt seam.`
+- **Coordination State**: `Issue #71 is committed through 314ae4b and CLOSED. Its superseded physical snapshots remain only in recovery ref 184706c; the integration branch retains the committed hardened implementation.`
 
 ## Previous Orchestration Context (historical - resumed Issue #67 implementation)
 
