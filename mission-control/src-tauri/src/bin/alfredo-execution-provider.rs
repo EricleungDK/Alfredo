@@ -1,9 +1,9 @@
 use albert_mission_control::execution::{
     ExecutionReceipt, ExecutionRequest, RustExecutionProvider, StructuredFailure,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, BufReader, Write};
 
 #[derive(Serialize)]
 struct ProviderResponse {
@@ -12,6 +12,12 @@ struct ProviderResponse {
     receipt: Option<ExecutionReceipt>,
     #[serde(skip_serializing_if = "Option::is_none")]
     failure: Option<StructuredFailure>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderRequest {
+    request: Value,
 }
 
 fn failure(code: &str, message: String) -> StructuredFailure {
@@ -23,20 +29,19 @@ fn failure(code: &str, message: String) -> StructuredFailure {
 }
 
 fn response_for(input: Value, provider: &RustExecutionProvider) -> ProviderResponse {
-    let request_value = match input {
-        Value::Object(mut object) => object.remove("request").unwrap_or(Value::Null),
-        _ => Value::Null,
+    let request_value = match serde_json::from_value::<ProviderRequest>(input) {
+        Ok(envelope) => envelope.request,
+        Err(error) => {
+            return ProviderResponse {
+                ok: false,
+                receipt: None,
+                failure: Some(failure(
+                    "contract-failure",
+                    format!("execution provider envelope was invalid: {error}"),
+                )),
+            }
+        }
     };
-    if request_value.is_null() {
-        return ProviderResponse {
-            ok: false,
-            receipt: None,
-            failure: Some(failure(
-                "contract-failure",
-                "execution provider input must contain a request object".to_owned(),
-            )),
-        };
-    }
     let request = match ExecutionRequest::from_value(request_value) {
         Ok(request) => request,
         Err(error) => {
@@ -63,14 +68,34 @@ fn response_for(input: Value, provider: &RustExecutionProvider) -> ProviderRespo
 
 fn main() -> io::Result<()> {
     let stdin = io::stdin();
+    let mut input = BufReader::new(stdin.lock());
     let mut stdout = io::BufWriter::new(io::stdout().lock());
     let provider = RustExecutionProvider::new();
-    for line in stdin.lock().lines() {
-        let line = line?;
-        if line.trim().is_empty() {
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let bytes = input.read_until(b'\n', &mut line)?;
+        if bytes == 0 {
+            break;
+        }
+        if line.len() > albert_mission_control::execution::MAX_PROTOCOL_LINE_BYTES {
+            let response = ProviderResponse {
+                ok: false,
+                receipt: None,
+                failure: Some(failure(
+                    "contract-failure",
+                    "execution provider input line exceeds the bounded size".to_owned(),
+                )),
+            };
+            serde_json::to_writer(&mut stdout, &response)?;
+            stdout.write_all(b"\n")?;
+            stdout.flush()?;
             continue;
         }
-        let response = match serde_json::from_str::<Value>(&line) {
+        if line.iter().all(u8::is_ascii_whitespace) {
+            continue;
+        }
+        let response = match serde_json::from_slice::<Value>(&line) {
             Ok(input) => response_for(input, &provider),
             Err(error) => ProviderResponse {
                 ok: false,

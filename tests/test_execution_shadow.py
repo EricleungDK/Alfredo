@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from dataclasses import replace
@@ -19,22 +21,31 @@ from albert_mvp.execution_shadow import (
     CanonicalStoreHashGuard,
     RustEligibilityEvidence,
     RustEligibilityStore,
+    RustReleaseGateEvidence,
     RustShadowProvider,
     RustShadowProviderError,
     ShadowCohortDefinition,
     ShadowContractError,
     ShadowSampleMetadata,
     ShadowSampleRunner,
+    ShadowStageMark,
     compare_execution_receipts,
+    shadow_artifact_sha256,
 )
 
 
 class _StubRustProvider:
     provider_id = "rust-shadow"
 
-    def __init__(self, receipt: ExecutionReceipt, mutate: Path | None = None) -> None:
+    def __init__(
+        self,
+        receipt: ExecutionReceipt,
+        mutate: Path | None = None,
+        artifact: Path | None = None,
+    ) -> None:
         self.receipt = receipt
         self.mutate = mutate
+        self.command = (str(artifact),) if artifact is not None else ()
 
     def execute(self, request: ExecutionRequest) -> ExecutionReceipt:
         if self.mutate is not None:
@@ -46,8 +57,14 @@ class ExecutionShadowTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        self.worktree = self.root / "fixture-worktree"
-        self.worktree.mkdir()
+        self.fixture_root = self.root / "fixture"
+        self.worktree = self.fixture_root / "fixture-worktree"
+        self.worktree.mkdir(parents=True)
+        self.source_root = self.root / "source"
+        self.source_root.mkdir()
+        (self.source_root / "contract.json").write_text("source", encoding="utf-8")
+        self.artifact = self.root / "rust-provider"
+        self.artifact.write_text("verified provider", encoding="utf-8")
 
     def tearDown(self) -> None:
         self.tmp.cleanup()
@@ -100,23 +117,39 @@ class ExecutionShadowTests(unittest.TestCase):
         return ShadowCohortDefinition(
             cohort_id="cohort-shadow-1",
             fixture_id="fixture-execution-contract-v1",
-            fixture_root=str(self.root.resolve()),
-            fixture_sha256="a" * 64,
-            source_sha256="b" * 64,
-            artifact_sha256="c" * 64,
-            required_stages=("validation", "launch", "replay"),
+            fixture_root=str(self.fixture_root.resolve()),
+            fixture_sha256=shadow_artifact_sha256(self.fixture_root),
+            source_sha256=shadow_artifact_sha256(self.source_root),
+            artifact_sha256=shadow_artifact_sha256(self.artifact),
+            required_stages=("S1", "R1"),
+            source_root=str(self.source_root.resolve()),
+            artifact_path=str(self.artifact.resolve()),
         )
 
-    def _metadata(self, stage: str = "launch") -> ShadowSampleMetadata:
+    def _metadata(self, stage: str = "S1") -> ShadowSampleMetadata:
         return ShadowSampleMetadata(
             sample_id="sample-shadow-1",
             cohort_id="cohort-shadow-1",
             fixture_id="fixture-execution-contract-v1",
-            fixture_sha256="a" * 64,
-            source_sha256="b" * 64,
-            artifact_sha256="c" * 64,
-            fixture_root=str(self.root.resolve()),
+            fixture_sha256=shadow_artifact_sha256(self.fixture_root),
+            source_sha256=shadow_artifact_sha256(self.source_root),
+            artifact_sha256=shadow_artifact_sha256(self.artifact),
+            fixture_root=str(self.fixture_root.resolve()),
             stage=stage,
+        )
+
+    def _stage_marks(self, metadata: ShadowSampleMetadata) -> tuple[ShadowStageMark, ...]:
+        return tuple(
+            ShadowStageMark(
+                sample_id=metadata.sample_id,
+                cohort_id=metadata.cohort_id,
+                fixture_id=metadata.fixture_id,
+                stage=stage,
+                boundary=boundary,
+                outcome="pass",
+            )
+            for stage in self._cohort().required_stages
+            for boundary in ("start", "end")
         )
 
     def test_canonical_store_guard_allows_only_explicit_observation_records(self) -> None:
@@ -165,16 +198,26 @@ class ExecutionShadowTests(unittest.TestCase):
         canonical = self.root / "runtime.json"
         canonical.write_text("canonical", encoding="utf-8")
         runner = ShadowSampleRunner(
-            _StubRustProvider(python_receipt),
+            _StubRustProvider(python_receipt, artifact=self.artifact),
             self._cohort(),
             canonical_store_paths=(canonical,),
+            eligibility_store=RustEligibilityStore(
+                self.root / "shadow" / "rust-eligibility.json"
+            ),
         )
 
-        result = runner.run(request, python_receipt, self._metadata())
+        metadata = self._metadata()
+        result = runner.run(
+            request,
+            python_receipt,
+            metadata,
+            stage_marks=self._stage_marks(metadata),
+        )
 
         self.assertTrue(result.parity.passed)
         self.assertTrue(result.store_unchanged)
-        self.assertTrue(result.eligible)
+        self.assertFalse(result.eligible)
+        self.assertEqual(result.eligibility.disabled_reason, "packaging")
         self.assertEqual(result.failure_codes, ())
 
     def test_jsonl_rust_provider_matches_python_contract_fixture(self) -> None:
@@ -188,17 +231,42 @@ class ExecutionShadowTests(unittest.TestCase):
             binary = (Path.cwd() / binary).resolve()
         if not binary.exists():
             self.skipTest("build alfredo-execution-provider to run the cross-provider fixture")
-        fake_bwrap = self.worktree / "bwrap"
-        fake_bwrap.write_text(
-            "#!/bin/sh\nwhile [ \"$1\" != \"--\" ]; do shift; done\nshift\nexec \"$@\"\n",
-            encoding="utf-8",
+        bwrap = next(
+            (
+                candidate
+                for candidate in (
+                    Path("/usr/bin/bwrap"),
+                    Path("/usr/sbin/bwrap"),
+                    Path("/bin/bwrap"),
+                    Path("/sbin/bwrap"),
+                )
+                if candidate.is_file()
+            ),
+            None,
         )
-        fake_bwrap.chmod(0o755)
+        if bwrap is None:
+            self.skipTest("trusted Bubblewrap is required for the cross-provider fixture")
+        system_roots = [
+            str(Path(root).resolve())
+            for root in ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc")
+            if Path(root).exists()
+        ]
         request = self._request("shadow-jsonl-fixture").with_updates(
             argv=(
-                str(fake_bwrap),
+                str(bwrap),
                 "--die-with-parent",
                 "--new-session",
+                "--unshare-user",
+                "--unshare-pid",
+                "--tmpfs",
+                "/",
+                "--dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "--tmpfs",
+                "/tmp",
+                *(item for root in system_roots for item in ("--ro-bind", root, root)),
                 "--chdir",
                 str(self.worktree.resolve()),
                 "--bind",
@@ -231,6 +299,42 @@ class ExecutionShadowTests(unittest.TestCase):
             RustShadowProvider(failure_command).execute(request)
         self.assertEqual(raised.exception.code, "parity-failure")
 
+    def test_rust_provider_rejects_a_valid_receipt_from_a_crashed_process(self) -> None:
+        request = self._request("shadow-provider-nonzero")
+        python_receipt = self._python_receipt(request).to_dict()
+        response_text = json.dumps({"ok": True, "receipt": python_receipt})
+        script = (
+            f"import sys; print({response_text!r}); "
+            "sys.exit(7)"
+        )
+        crashed = RustShadowProvider((sys.executable, "-c", script)).execute(request)
+        self.assertEqual(crashed.status, "outcome-unknown")
+        self.assertTrue(crashed.reconciliation_required)
+
+    def test_rust_jsonl_validation_matches_python_unprepared_boundary_failure(self) -> None:
+        binary = Path(
+            os.environ.get(
+                "ALFREDO_RUST_EXECUTION_PROVIDER",
+                "mission-control/src-tauri/target/debug/alfredo-execution-provider",
+            )
+        )
+        if not binary.is_absolute():
+            binary = (Path.cwd() / binary).resolve()
+        if not binary.exists():
+            self.skipTest("build alfredo-execution-provider to run the contract fixture")
+        request = self._request("shadow-invalid-boundary").with_updates(
+            argv=("/bin/sh", "-c", "echo unsafe")
+        )
+        with self.assertRaises(ValueError):
+            PythonExecutionProvider(
+                executor=lambda *_args, **_kwargs: subprocess.CompletedProcess(
+                    [], 0, "", ""
+                )
+            ).execute(request)
+        with self.assertRaises(RustShadowProviderError) as raised:
+            RustShadowProvider((str(binary),)).execute(request)
+        self.assertEqual(raised.exception.code, "contract-failure")
+
     def test_shadow_sample_reports_parity_and_store_failures_explicitly(self) -> None:
         request = self._request()
         python_receipt = self._python_receipt(request)
@@ -243,12 +347,21 @@ class ExecutionShadowTests(unittest.TestCase):
             error_code="process-failed",
         )
         runner = ShadowSampleRunner(
-            _StubRustProvider(rust_receipt, mutate=canonical),
+            _StubRustProvider(rust_receipt, mutate=canonical, artifact=self.artifact),
             self._cohort(),
             canonical_store_paths=(canonical,),
+            eligibility_store=RustEligibilityStore(
+                self.root / "shadow" / "rust-eligibility.json"
+            ),
         )
 
-        result = runner.run(request, python_receipt, self._metadata())
+        metadata = self._metadata()
+        result = runner.run(
+            request,
+            python_receipt,
+            metadata,
+            stage_marks=self._stage_marks(metadata),
+        )
 
         self.assertFalse(result.parity.passed)
         self.assertFalse(result.store_unchanged)
@@ -263,23 +376,34 @@ class ExecutionShadowTests(unittest.TestCase):
             with self.subTest(kind=kind), self.assertRaisesRegex(
                 ShadowContractError, "production-equivalent"
             ):
-                ShadowCohortDefinition(
-                    cohort_id="cohort-shadow-1",
-                    fixture_id="fixture-execution-contract-v1",
-                    fixture_root=str(self.root.resolve()),
-                    fixture_sha256="a" * 64,
-                    source_sha256="b" * 64,
-                    artifact_sha256="c" * 64,
-                    required_stages=("launch",),
-                    evidence_kind=kind,
-                )
+                ShadowCohortDefinition(**{**self._cohort().__dict__, "evidence_kind": kind})
 
     def test_eligibility_requires_every_gate_and_disables_on_any_failure(self) -> None:
-        store = RustEligibilityStore(self.root / "shadow" / "eligibility.json")
+        store = RustEligibilityStore(self.root / "shadow" / "rust-eligibility.json")
+        provider_digest = shadow_artifact_sha256(self.artifact)
+        manifest = self.root / "package-manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "provider_path": str(self.artifact.resolve()),
+                    "provider_sha256": provider_digest,
+                    "release_gate": "verified",
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        release_evidence = RustReleaseGateEvidence.from_verified_artifacts(
+            provider_path=self.artifact,
+            package_manifest_path=manifest,
+        )
         passing = RustEligibilityEvidence.all_passed(
             sample_id="sample-shadow-1",
             cohort_id="cohort-shadow-1",
-            stages=("validation", "launch", "replay"),
+            stages=("S1", "R1"),
+            release_evidence=release_evidence,
         )
         enabled = store.record(passing)
         self.assertTrue(enabled.eligible)

@@ -20,7 +20,36 @@ const MAX_INPUT_BYTES: usize = 96_000;
 const MAX_OUTPUT_BYTES: usize = 8_000_000;
 const MAX_TIMEOUT_SECONDS: f64 = 3_600.0;
 const MAX_ENVIRONMENT_ENTRIES: usize = 128;
+const MAX_ENVIRONMENT_VALUE_BYTES: usize = 128_000;
+const MAX_ENVIRONMENT_TOTAL_BYTES: usize = 1_000_000;
 const MAX_PATH_ENTRIES: usize = 256;
+const MAX_ADDRESS_SPACE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const MAX_FILE_SIZE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_OPEN_FILE_LIMIT: u64 = 1_024;
+const MAX_PROCESS_COUNT_LIMIT: u64 = 256;
+const OUTPUT_MESSAGE_RESERVE: usize = 256;
+pub const MAX_PROTOCOL_LINE_BYTES: usize = 16 * 1024 * 1024;
+const TRUSTED_EXECUTABLE_ROOTS: [&str; 4] = ["/usr/bin", "/usr/sbin", "/bin", "/sbin"];
+const PROTECTED_READONLY_ROOTS: [&str; 7] =
+    ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/dev"];
+const ALLOWED_ENVIRONMENT_KEYS: [&str; 16] = [
+    "CI",
+    "COLORTERM",
+    "HOME",
+    "LANG",
+    "LC_ALL",
+    "LOGNAME",
+    "NO_COLOR",
+    "OLLAMA_HOST",
+    "PATH",
+    "PYTHONPATH",
+    "SHELL",
+    "TERM",
+    "TMPDIR",
+    "USER",
+    "ALBERT_SESSION_ID",
+    "ALBERT_TASK_PACKET",
+];
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -79,6 +108,16 @@ impl ExecutionLimits {
                 "execution resource limits must be positive",
             ));
         }
+        if self.address_space_bytes > MAX_ADDRESS_SPACE_BYTES
+            || self.file_size_bytes > MAX_FILE_SIZE_BYTES
+            || self.open_file_limit > MAX_OPEN_FILE_LIMIT
+            || self.process_count_limit > MAX_PROCESS_COUNT_LIMIT
+        {
+            return Err(StructuredFailure::new(
+                "contract-failure",
+                "execution resource limits exceed the bounded contract",
+            ));
+        }
         if !self.descendant_grace_seconds.is_finite()
             || self.descendant_grace_seconds < 0.0
             || self.descendant_grace_seconds > 60.0
@@ -109,7 +148,7 @@ impl ExecutionSandbox {
                 "execution sandbox mode is invalid",
             ));
         }
-        if cfg!(unix) && self.mode != "bubblewrap" {
+        if self.mode != "bubblewrap" {
             return Err(StructuredFailure::new(
                 "contract-failure",
                 "host effects require the Bubblewrap sandbox",
@@ -265,7 +304,6 @@ impl ExecutionAuthority {
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecutionRequest {
-    #[serde(default = "default_schema_version")]
     pub schema_version: u32,
     pub request_id: String,
     pub effect: String,
@@ -282,10 +320,6 @@ pub struct ExecutionRequest {
     pub input_sha256: Option<String>,
     #[serde(default)]
     pub shell: bool,
-}
-
-fn default_schema_version() -> u32 {
-    EXECUTION_SCHEMA_VERSION
 }
 
 impl ExecutionRequest {
@@ -356,6 +390,7 @@ impl ExecutionRequest {
                 "execution environment is too large",
             ));
         }
+        let mut environment_bytes: usize = 0;
         for (key, value) in &self.environment {
             if key.is_empty()
                 || !key.chars().enumerate().all(|(index, character)| {
@@ -363,10 +398,21 @@ impl ExecutionRequest {
                         || (index > 0 && (character == '_' || character.is_ascii_alphanumeric()))
                 })
                 || value.contains('\0')
+                || !ALLOWED_ENVIRONMENT_KEYS.contains(&key.as_str())
+                || value.as_bytes().len() > MAX_ENVIRONMENT_VALUE_BYTES
             {
                 return Err(StructuredFailure::new(
                     "contract-failure",
                     "execution environment is invalid",
+                ));
+            }
+            environment_bytes = environment_bytes
+                .saturating_add(key.as_bytes().len())
+                .saturating_add(value.as_bytes().len());
+            if environment_bytes > MAX_ENVIRONMENT_TOTAL_BYTES {
+                return Err(StructuredFailure::new(
+                    "contract-failure",
+                    "execution environment exceeds the bounded size",
                 ));
             }
         }
@@ -843,36 +889,34 @@ impl ProcessLauncher for SystemProcessLauncher {
         };
         if let Some(callback) = callbacks.process_started.as_mut() {
             if let Err(ControlSignal::Cancelled(message)) = callback(binding) {
-                terminate_child(&mut child, pid, request.limits.descendant_grace_seconds);
+                let (status, error_code, error_message) = match terminate_child(
+                    &mut child,
+                    pid,
+                    &identity,
+                    request.limits.descendant_grace_seconds,
+                ) {
+                    Ok(()) => (
+                        ProcessOutcomeStatus::Cancelled,
+                        "cancelled".to_owned(),
+                        message,
+                    ),
+                    Err(error) => (
+                        ProcessOutcomeStatus::Unknown,
+                        "cleanup-uncertain".to_owned(),
+                        error,
+                    ),
+                };
                 return Ok(ProcessOutcome {
-                    status: ProcessOutcomeStatus::Cancelled,
+                    status,
                     exit_code: None,
                     stdout: Vec::new(),
                     stderr: Vec::new(),
                     process_pid: Some(pid),
                     process_identity: identity,
                     effect_started: true,
-                    error_code: "cancelled".to_owned(),
-                    error_message: message,
+                    error_code,
+                    error_message,
                 });
-            }
-        }
-        if let Some(mut stdin) = child.stdin.take() {
-            if let Some(input) = &request.input_text {
-                if let Err(error) = stdin.write_all(input.as_bytes()) {
-                    if error.kind() != io::ErrorKind::BrokenPipe {
-                        terminate_child(&mut child, pid, request.limits.descendant_grace_seconds);
-                        return Err(LaunchError {
-                            failure: StructuredFailure::new(
-                                "provider-io-failure",
-                                format!("Rust execution provider could not write input: {error}"),
-                            ),
-                            effect_started: true,
-                            process_pid: Some(pid),
-                            process_identity: identity,
-                        });
-                    }
-                }
             }
         }
         let total_output = Arc::new(AtomicUsize::new(0));
@@ -887,7 +931,10 @@ impl ProcessLauncher for SystemProcessLauncher {
                 process_pid: Some(pid),
                 process_identity: identity.clone(),
             })?,
-            request.limits.output_limit_bytes,
+            request
+                .limits
+                .output_limit_bytes
+                .saturating_sub(OUTPUT_MESSAGE_RESERVE),
             total_output.clone(),
             output_limited.clone(),
         );
@@ -901,42 +948,101 @@ impl ProcessLauncher for SystemProcessLauncher {
                 process_pid: Some(pid),
                 process_identity: identity.clone(),
             })?,
-            request.limits.output_limit_bytes,
+            request
+                .limits
+                .output_limit_bytes
+                .saturating_sub(OUTPUT_MESSAGE_RESERVE),
             total_output,
             output_limited.clone(),
         );
+        let input_thread = child.stdin.take().map(|mut stdin| {
+            let input = request.input_text.clone();
+            thread::spawn(move || -> Result<(), String> {
+                if let Some(input) = input {
+                    if let Err(error) = stdin.write_all(input.as_bytes()) {
+                        if error.kind() != io::ErrorKind::BrokenPipe {
+                            return Err(format!(
+                                "Rust execution provider could not write input: {error}"
+                            ));
+                        }
+                    }
+                }
+                Ok(())
+            })
+        });
         let started = Instant::now();
         let mut final_status = None;
         let mut exit_code = None;
+        let mut leader_exited_at = None;
         loop {
             if let Some(callback) = callbacks.poll.as_mut() {
                 if let Err(ControlSignal::Cancelled(message)) = callback() {
-                    terminate_child(&mut child, pid, request.limits.descendant_grace_seconds);
+                    if let Err(error) = terminate_child(
+                        &mut child,
+                        pid,
+                        &identity,
+                        request.limits.descendant_grace_seconds,
+                    ) {
+                        final_status = Some((ProcessOutcomeStatus::Unknown, error));
+                        break;
+                    }
                     final_status = Some((ProcessOutcomeStatus::Cancelled, message));
                     break;
                 }
             }
             if output_limited.load(Ordering::Relaxed) {
-                terminate_child(&mut child, pid, request.limits.descendant_grace_seconds);
-                final_status = Some((
-                    ProcessOutcomeStatus::OutputLimit,
-                    "Process output exceeded the bounded output limit.".to_owned(),
-                ));
+                final_status = Some(match terminate_child(
+                    &mut child,
+                    pid,
+                    &identity,
+                    request.limits.descendant_grace_seconds,
+                ) {
+                    Ok(()) => (
+                        ProcessOutcomeStatus::OutputLimit,
+                        format!(
+                            "Process output exceeded the {}-byte aggregate limit and was terminated.",
+                            request.limits.output_limit_bytes
+                        ),
+                    ),
+                    Err(error) => (ProcessOutcomeStatus::Unknown, error),
+                });
                 break;
             }
             match child.try_wait() {
                 Ok(Some(status)) => {
                     exit_code = process_exit_code(status);
-                    break;
+                    if leader_exited_at.is_none() {
+                        leader_exited_at = Some(Instant::now());
+                    }
+                    if stdout.is_finished() && stderr.is_finished() {
+                        #[cfg(unix)]
+                        if process_group_is_live(pid) {
+                            // The leader exited but a descendant still owns the
+                            // process group; keep the bounded grace timer active.
+                        } else {
+                            break;
+                        }
+                        #[cfg(not(unix))]
+                        break;
+                    }
                 }
                 Ok(None) => {}
                 Err(error) => {
-                    terminate_child(&mut child, pid, request.limits.descendant_grace_seconds);
+                    let cleanup_error = terminate_child(
+                        &mut child,
+                        pid,
+                        &identity,
+                        request.limits.descendant_grace_seconds,
+                    )
+                    .err();
                     return Err(LaunchError {
                         failure: StructuredFailure::new(
                             "provider-wait-failure",
                             format!(
-                                "Rust execution provider could not observe the process: {error}"
+                                "Rust execution provider could not observe the process: {error}{}",
+                                cleanup_error
+                                    .map(|detail| format!("; cleanup: {detail}"))
+                                    .unwrap_or_default()
                             ),
                         ),
                         effect_started: true,
@@ -945,12 +1051,44 @@ impl ProcessLauncher for SystemProcessLauncher {
                     });
                 }
             }
+            if let Some(exited_at) = leader_exited_at {
+                if exited_at.elapsed().as_secs_f64() >= request.limits.descendant_grace_seconds {
+                    final_status = Some(match terminate_child(
+                        &mut child,
+                        pid,
+                        &identity,
+                        request.limits.descendant_grace_seconds,
+                    ) {
+                        Ok(()) => (
+                            ProcessOutcomeStatus::TimedOut,
+                            format!(
+                                "Process descendants timed out {:?} seconds after the leader exited and were terminated.",
+                                request.limits.descendant_grace_seconds
+                            ),
+                        ),
+                        Err(error) => (ProcessOutcomeStatus::Unknown, error),
+                    });
+                    break;
+                }
+            }
             if started.elapsed().as_secs_f64() >= request.limits.timeout_seconds {
-                terminate_child(&mut child, pid, request.limits.descendant_grace_seconds);
-                final_status = Some((
-                    ProcessOutcomeStatus::TimedOut,
-                    "Process timed out after the bounded timeout.".to_owned(),
-                ));
+                final_status = Some(
+                    match terminate_child(
+                        &mut child,
+                        pid,
+                        &identity,
+                        request.limits.descendant_grace_seconds,
+                    ) {
+                        Ok(()) => (
+                            ProcessOutcomeStatus::TimedOut,
+                            format!(
+                                "Process timed out after {:?} seconds.",
+                                request.limits.timeout_seconds
+                            ),
+                        ),
+                        Err(error) => (ProcessOutcomeStatus::Unknown, error),
+                    },
+                );
                 break;
             }
             thread::sleep(Duration::from_millis(5));
@@ -958,18 +1096,76 @@ impl ProcessLauncher for SystemProcessLauncher {
         if final_status.is_none() && exit_code.is_none() {
             exit_code = child.wait().ok().and_then(process_exit_code);
         }
-        let stdout = stdout.join().unwrap_or_default();
-        let stderr = stderr.join().unwrap_or_default();
-        let (status, error_message) = final_status.unwrap_or_else(|| {
+        let mut stdout = join_capture(stdout, "stdout").map_err(|error| LaunchError {
+            failure: StructuredFailure::new("provider-io-failure", error),
+            effect_started: true,
+            process_pid: Some(pid),
+            process_identity: identity.clone(),
+        })?;
+        let mut stderr = join_capture(stderr, "stderr").map_err(|error| LaunchError {
+            failure: StructuredFailure::new("provider-io-failure", error),
+            effect_started: true,
+            process_pid: Some(pid),
+            process_identity: identity.clone(),
+        })?;
+        if let Some(input_thread) = input_thread {
+            match input_thread.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    return Err(LaunchError {
+                        failure: StructuredFailure::new("provider-io-failure", error),
+                        effect_started: true,
+                        process_pid: Some(pid),
+                        process_identity: identity,
+                    });
+                }
+                Err(_) => {
+                    return Err(LaunchError {
+                        failure: StructuredFailure::new(
+                            "provider-io-failure",
+                            "Rust execution provider input thread failed.",
+                        ),
+                        effect_started: true,
+                        process_pid: Some(pid),
+                        process_identity: identity,
+                    });
+                }
+            }
+        }
+        let (mut status, mut error_message) = final_status.unwrap_or_else(|| {
             if output_limited.load(Ordering::Relaxed) {
                 (
                     ProcessOutcomeStatus::OutputLimit,
-                    "Process output exceeded the bounded output limit.".to_owned(),
+                    format!(
+                        "Process output exceeded the {}-byte aggregate limit and was terminated.",
+                        request.limits.output_limit_bytes
+                    ),
                 )
             } else {
                 (ProcessOutcomeStatus::Completed, String::new())
             }
         });
+        if std::str::from_utf8(&stdout).is_err() || std::str::from_utf8(&stderr).is_err() {
+            stdout.clear();
+            stderr.clear();
+            status = ProcessOutcomeStatus::OutputLimit;
+            error_message = "Process output was not valid UTF-8 and was rejected.".to_owned();
+        }
+        if !error_message.is_empty()
+            && matches!(
+                status,
+                ProcessOutcomeStatus::TimedOut | ProcessOutcomeStatus::OutputLimit
+            )
+        {
+            append_bounded_diagnostic(
+                &mut stderr,
+                &error_message,
+                request
+                    .limits
+                    .output_limit_bytes
+                    .saturating_sub(stdout.len()),
+            );
+        }
         Ok(ProcessOutcome {
             status,
             exit_code,
@@ -984,21 +1180,31 @@ impl ProcessLauncher for SystemProcessLauncher {
     }
 }
 
+fn append_bounded_diagnostic(output: &mut Vec<u8>, diagnostic: &str, budget: usize) {
+    let separator = if output.is_empty() { "" } else { "\n" };
+    let message = format!("{separator}{diagnostic}");
+    let available = budget.saturating_sub(output.len());
+    if message.len() <= available {
+        output.extend_from_slice(message.as_bytes());
+    } else if available > 0 {
+        output.extend_from_slice(&message.as_bytes()[..available]);
+    }
+}
+
 fn spawn_capture<R: Read + Send + 'static>(
     mut reader: R,
     limit: usize,
     total: Arc<AtomicUsize>,
     output_limited: Arc<AtomicBool>,
-) -> thread::JoinHandle<Vec<u8>> {
-    thread::spawn(move || {
+) -> thread::JoinHandle<io::Result<Vec<u8>>> {
+    thread::spawn(move || -> io::Result<Vec<u8>> {
         let mut output = Vec::new();
         let mut buffer = [0_u8; 4096];
         loop {
-            let count = match reader.read(&mut buffer) {
-                Ok(0) => break,
-                Ok(count) => count,
-                Err(_) => break,
-            };
+            let count = reader.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
             let prior = total.fetch_add(count, Ordering::Relaxed);
             let allowed = limit.saturating_sub(prior);
             output.extend_from_slice(&buffer[..count.min(allowed)]);
@@ -1007,39 +1213,145 @@ fn spawn_capture<R: Read + Send + 'static>(
                 break;
             }
         }
-        output
+        Ok(output)
     })
 }
 
-fn terminate_child(child: &mut Child, pid: u32, grace_seconds: f64) {
+fn join_capture(
+    handle: thread::JoinHandle<io::Result<Vec<u8>>>,
+    stream: &str,
+) -> Result<Vec<u8>, String> {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !handle.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(10));
+    }
+    if !handle.is_finished() {
+        return Err(format!(
+            "Rust execution provider {stream} capture did not drain"
+        ));
+    }
+    match handle.join() {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error)) => Err(format!(
+            "Rust execution provider could not read {stream}: {error}"
+        )),
+        Err(_) => Err(format!(
+            "Rust execution provider {stream} capture thread failed"
+        )),
+    }
+}
+
+fn terminate_child(
+    child: &mut Child,
+    pid: u32,
+    expected_identity: &str,
+    grace_seconds: f64,
+) -> Result<(), String> {
+    let leader_was_reaped = child
+        .try_wait()
+        .map_err(|error| format!("cleanup wait failed: {error}"))?
+        .is_some();
     #[cfg(unix)]
     {
-        unsafe {
-            let _ = libc::kill(-(pid as i32), libc::SIGTERM);
+        if !leader_was_reaped
+            && (expected_identity.is_empty() || process_identity(pid) != expected_identity)
+        {
+            return Err("process identity could not be verified for cleanup".to_owned());
+        }
+        let process_group = unsafe { libc::getpgid(pid as libc::pid_t) };
+        if !leader_was_reaped && process_group != pid as libc::pid_t {
+            return Err("process group identity could not be verified for cleanup".to_owned());
+        }
+        if !leader_was_reaped && unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGTERM) } != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(format!("cleanup SIGTERM failed: {error}"));
+            }
+        }
+        if leader_was_reaped && !process_group_is_live(pid) {
+            return Ok(());
+        }
+        if leader_was_reaped {
+            unsafe {
+                let _ = libc::kill(-(pid as libc::pid_t), libc::SIGTERM);
+            }
         }
     }
     #[cfg(not(unix))]
-    let _ = child.kill();
+    if child.kill().is_err() {
+        return Err("process cleanup failed".to_owned());
+    }
+
     let deadline = Instant::now() + Duration::from_secs_f64(grace_seconds.min(60.0));
     while Instant::now() < deadline {
-        let _ = child.try_wait();
+        if child
+            .try_wait()
+            .map_err(|error| format!("cleanup wait failed: {error}"))?
+            .is_some()
+        {
+            #[cfg(unix)]
+            if process_group_is_live(pid) {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            return Ok(());
+        }
+        #[cfg(unix)]
+        if !process_group_is_live(pid) {
+            return Ok(());
+        }
         thread::sleep(Duration::from_millis(10));
     }
+
     #[cfg(unix)]
     {
-        unsafe {
-            let _ = libc::kill(-(pid as i32), libc::SIGKILL);
+        if !leader_was_reaped && process_identity(pid) != expected_identity {
+            return Err("process identity changed before forced cleanup".to_owned());
+        }
+        if unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL) } != 0 {
+            let error = io::Error::last_os_error();
+            if error.raw_os_error() != Some(libc::ESRCH) {
+                return Err(format!("cleanup SIGKILL failed: {error}"));
+            }
         }
     }
-    let _ = child.kill();
-    let _ = child.wait();
+    #[cfg(not(unix))]
+    child
+        .kill()
+        .map_err(|error| format!("cleanup kill failed: {error}"))?;
+    let wait_deadline = Instant::now() + Duration::from_secs(1);
+    while Instant::now() < wait_deadline {
+        if child
+            .try_wait()
+            .map_err(|error| format!("cleanup wait failed: {error}"))?
+            .is_some()
+        {
+            #[cfg(unix)]
+            if process_group_is_live(pid) {
+                thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    Err("process cleanup did not prove quiescence".to_owned())
+}
+
+#[cfg(unix)]
+fn process_group_is_live(pid: u32) -> bool {
+    let result = unsafe { libc::kill(-(pid as libc::pid_t), 0) };
+    if result == 0 {
+        return true;
+    }
+    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 fn configure_process(command: &mut Command, limits: &ExecutionLimits) {
     #[cfg(unix)]
     {
+        let _ = limits;
         use std::os::unix::process::CommandExt;
-        let limits = limits.clone();
         unsafe {
             command.pre_exec(move || {
                 if libc::setpgid(0, 0) != 0 {
@@ -1049,36 +1361,10 @@ fn configure_process(command: &mut Command, limits: &ExecutionLimits) {
                         format!("setpgid failed: {error}"),
                     ));
                 }
-                #[cfg(not(target_os = "macos"))]
-                set_resource_limit(libc::RLIMIT_AS, limits.address_space_bytes).map_err(
-                    |error| io::Error::new(error.kind(), format!("RLIMIT_AS failed: {error}")),
-                )?;
-                set_resource_limit(libc::RLIMIT_FSIZE, limits.file_size_bytes).map_err(
-                    |error| io::Error::new(error.kind(), format!("RLIMIT_FSIZE failed: {error}")),
-                )?;
-                set_resource_limit(libc::RLIMIT_NOFILE, limits.open_file_limit).map_err(
-                    |error| io::Error::new(error.kind(), format!("RLIMIT_NOFILE failed: {error}")),
-                )?;
-                #[cfg(target_os = "linux")]
-                set_resource_limit(libc::RLIMIT_NPROC, limits.process_count_limit).map_err(
-                    |error| io::Error::new(error.kind(), format!("RLIMIT_NPROC failed: {error}")),
-                )?;
                 Ok(())
             });
         }
     }
-}
-
-#[cfg(unix)]
-fn set_resource_limit(resource: libc::c_int, value: u64) -> io::Result<()> {
-    let limit = libc::rlimit {
-        rlim_cur: value as libc::rlim_t,
-        rlim_max: value as libc::rlim_t,
-    };
-    if unsafe { libc::setrlimit(resource, &limit) } != 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
 }
 
 fn process_exit_code(status: std::process::ExitStatus) -> Option<i32> {
@@ -1199,51 +1485,338 @@ fn canonical_path(value: &str, label: &str) -> Result<String, StructuredFailure>
     Ok(value.to_owned())
 }
 
+fn is_trusted_helper(path: &str, name: &str) -> bool {
+    let candidate = Path::new(path);
+    if !candidate.is_absolute()
+        || candidate.file_name().and_then(|value| value.to_str()) != Some(name)
+        || !TRUSTED_EXECUTABLE_ROOTS
+            .iter()
+            .map(Path::new)
+            .any(|root| candidate.parent() == Some(root))
+    {
+        return false;
+    }
+    if candidate.exists() {
+        return candidate.is_file()
+            && fs::metadata(candidate)
+                .map(|metadata| {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::fs::PermissionsExt;
+                        metadata.permissions().mode() & 0o111 != 0
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        let _ = metadata;
+                        true
+                    }
+                })
+                .unwrap_or(false);
+    }
+    cfg!(test)
+}
+
+fn is_protected_root(path: &str) -> bool {
+    path == "/"
+        || PROTECTED_READONLY_ROOTS
+            .iter()
+            .map(Path::new)
+            .any(|root| Path::new(path).starts_with(root))
+}
+
+fn has_exact_pair(pairs: &[(String, String)], source: &str, destination: &str) -> bool {
+    pairs.iter().any(|(actual_source, actual_destination)| {
+        actual_source == source && actual_destination == destination
+    })
+}
+
+fn validate_resource_wrapper<'a>(
+    command: &'a [String],
+    limits: &ExecutionLimits,
+) -> Result<&'a [String], StructuredFailure> {
+    if command.is_empty() {
+        return Err(StructuredFailure::new(
+            "contract-failure",
+            "execution Bubblewrap command is empty",
+        ));
+    }
+    if !is_trusted_helper(&command[0], "prlimit") {
+        return Ok(command);
+    }
+    let expected = [
+        format!("--as={}", limits.address_space_bytes),
+        format!("--fsize={}", limits.file_size_bytes),
+        format!("--nofile={}", limits.open_file_limit),
+        format!("--nproc={}", limits.process_count_limit),
+    ];
+    if command.len() < expected.len() + 3
+        || command[1..5]
+            .iter()
+            .zip(expected.iter())
+            .any(|(actual, expected)| actual != expected)
+        || command[5] != "--"
+    {
+        return Err(StructuredFailure::new(
+            "contract-failure",
+            "execution prlimit wrapper does not match the request limits",
+        ));
+    }
+    Ok(&command[6..])
+}
+
+fn requires_resource_wrapper(limits: &ExecutionLimits) -> bool {
+    limits.address_space_bytes != MAX_ADDRESS_SPACE_BYTES
+        || limits.file_size_bytes != MAX_FILE_SIZE_BYTES
+        || limits.open_file_limit != MAX_OPEN_FILE_LIMIT
+        || limits.process_count_limit != MAX_PROCESS_COUNT_LIMIT
+}
+
 fn validate_prepared_argv(request: &ExecutionRequest) -> Result<(), StructuredFailure> {
-    if request.sandbox.mode == "none" && !cfg!(unix) {
-        return Ok(());
+    if request.sandbox.mode != "bubblewrap" {
+        return Err(StructuredFailure::new(
+            "contract-failure",
+            "execution provider requires the Bubblewrap sandbox",
+        ));
     }
     let executable = Path::new(&request.argv[0]);
-    if !executable.is_absolute()
-        || executable.file_name().and_then(|name| name.to_str()) != Some("bwrap")
-    {
+    canonical_path(&request.argv[0], "execution Bubblewrap executable")?;
+    if !is_trusted_helper(&request.argv[0], "bwrap") {
+        return Err(StructuredFailure::new(
+            "contract-failure",
+            "execution provider requires a trusted Bubblewrap executable",
+        ));
+    }
+    if executable.file_name().and_then(|name| name.to_str()) != Some("bwrap") {
         return Err(StructuredFailure::new(
             "contract-failure",
             "execution provider requires a prepared Bubblewrap argv",
         ));
     }
-    if !request
+    let separators: Vec<_> = request
         .argv
         .iter()
-        .any(|argument| argument == "--die-with-parent")
-        || !request
-            .argv
-            .iter()
-            .any(|argument| argument == "--new-session")
-        || !request.argv.iter().any(|argument| argument == "--")
+        .enumerate()
+        .filter_map(|(index, argument)| (argument == "--").then_some(index))
+        .collect();
+    if separators.len() != 1 || separators[0] <= 1 || separators[0] + 1 >= request.argv.len() {
+        return Err(StructuredFailure::new(
+            "contract-failure",
+            "execution Bubblewrap argv must contain one non-empty command boundary",
+        ));
+    }
+    let separator = separators[0];
+    let prefix = &request.argv[1..separator];
+    let mut readonly_mounts = Vec::new();
+    let mut writable_mounts = Vec::new();
+    let mut directories = Vec::new();
+    let mut chdir: Option<String> = None;
+    let mut flags = BTreeMap::<&str, usize>::new();
+    let mut index = 0;
+    while index < prefix.len() {
+        let argument = prefix[index].as_str();
+        match argument {
+            "--die-with-parent" | "--new-session" | "--unshare-user" | "--unshare-pid" => {
+                *flags.entry(argument).or_default() += 1;
+                index += 1;
+            }
+            "--tmpfs" => {
+                let value = prefix.get(index + 1).ok_or_else(|| {
+                    StructuredFailure::new(
+                        "contract-failure",
+                        "Bubblewrap tmpfs mount is incomplete",
+                    )
+                })?;
+                if value != "/" && value != "/tmp" {
+                    return Err(StructuredFailure::new(
+                        "contract-failure",
+                        "Bubblewrap tmpfs mount is outside the prepared boundary",
+                    ));
+                }
+                *flags
+                    .entry(if value == "/" {
+                        "--tmpfs:/"
+                    } else {
+                        "--tmpfs:/tmp"
+                    })
+                    .or_default() += 1;
+                index += 2;
+            }
+            "--dev" | "--proc" => {
+                let value = prefix.get(index + 1).ok_or_else(|| {
+                    StructuredFailure::new(
+                        "contract-failure",
+                        "Bubblewrap special mount is incomplete",
+                    )
+                })?;
+                let expected = if argument == "--dev" { "/dev" } else { "/proc" };
+                if value != expected {
+                    return Err(StructuredFailure::new(
+                        "contract-failure",
+                        "Bubblewrap special mount does not match the prepared boundary",
+                    ));
+                }
+                *flags.entry(argument).or_default() += 1;
+                index += 2;
+            }
+            "--ro-bind" | "--bind" => {
+                let source = prefix.get(index + 1).ok_or_else(|| {
+                    StructuredFailure::new("contract-failure", "Bubblewrap bind source is missing")
+                })?;
+                let destination = prefix.get(index + 2).ok_or_else(|| {
+                    StructuredFailure::new(
+                        "contract-failure",
+                        "Bubblewrap bind destination is missing",
+                    )
+                })?;
+                canonical_path(source, "Bubblewrap bind source")?;
+                canonical_path(destination, "Bubblewrap bind destination")?;
+                if argument == "--ro-bind" {
+                    readonly_mounts.push((source.clone(), destination.clone()));
+                } else {
+                    if is_protected_root(destination) {
+                        return Err(StructuredFailure::new(
+                            "contract-failure",
+                            "Bubblewrap writable mount crosses a protected root",
+                        ));
+                    }
+                    writable_mounts.push((source.clone(), destination.clone()));
+                }
+                index += 3;
+            }
+            "--dir" => {
+                let value = prefix.get(index + 1).ok_or_else(|| {
+                    StructuredFailure::new("contract-failure", "Bubblewrap directory is missing")
+                })?;
+                canonical_path(value, "Bubblewrap directory")?;
+                directories.push(value.clone());
+                index += 2;
+            }
+            "--chdir" => {
+                let value = prefix.get(index + 1).ok_or_else(|| {
+                    StructuredFailure::new(
+                        "contract-failure",
+                        "Bubblewrap working directory is missing",
+                    )
+                })?;
+                canonical_path(value, "Bubblewrap working directory")?;
+                if chdir.replace(value.clone()).is_some() {
+                    return Err(StructuredFailure::new(
+                        "contract-failure",
+                        "Bubblewrap working directory is duplicated",
+                    ));
+                }
+                index += 2;
+            }
+            _ => {
+                return Err(StructuredFailure::new(
+                    "contract-failure",
+                    format!("unsupported Bubblewrap option: {argument}"),
+                ));
+            }
+        }
+    }
+    for flag in [
+        "--die-with-parent",
+        "--new-session",
+        "--unshare-user",
+        "--unshare-pid",
+    ] {
+        if flags.get(flag).copied() != Some(1) {
+            return Err(StructuredFailure::new(
+                "contract-failure",
+                "execution Bubblewrap argv must retain the complete process boundary",
+            ));
+        }
+    }
+    if flags.get("--tmpfs:/").copied() != Some(1)
+        || flags.get("--tmpfs:/tmp").copied() != Some(1)
+        || flags.get("--dev").copied() != Some(1)
+        || flags.get("--proc").copied() != Some(1)
+        || chdir.as_deref() != Some(request.working_directory.as_str())
     {
         return Err(StructuredFailure::new(
             "contract-failure",
-            "execution Bubblewrap argv must retain process supervision",
+            "execution Bubblewrap argv does not match the prepared namespace boundary",
         ));
     }
-    let mut required = request
-        .sandbox
-        .readable_roots
-        .iter()
-        .chain(request.sandbox.writable_roots.iter())
-        .chain(
-            request
-                .sandbox
-                .readonly_bindings
-                .iter()
-                .flat_map(|(source, destination)| [source, destination]),
-        )
-        .chain(std::iter::once(&request.working_directory));
-    if required.any(|path| !request.argv.iter().any(|argument| argument == path)) {
+    let writable_roots: std::collections::HashSet<_> =
+        request.sandbox.writable_roots.iter().collect();
+    for root in &request.sandbox.writable_roots {
+        if is_protected_root(root) || !has_exact_pair(&writable_mounts, root, root) {
+            return Err(StructuredFailure::new(
+                "contract-failure",
+                "execution Bubblewrap argv does not match writable roots",
+            ));
+        }
+    }
+    for root in &request.sandbox.readable_roots {
+        if !writable_roots.contains(root) && !has_exact_pair(&readonly_mounts, root, root) {
+            return Err(StructuredFailure::new(
+                "contract-failure",
+                "execution Bubblewrap argv does not match readable roots",
+            ));
+        }
+    }
+    for (source, destination) in &request.sandbox.readonly_bindings {
+        if !has_exact_pair(&readonly_mounts, source, destination) {
+            return Err(StructuredFailure::new(
+                "contract-failure",
+                "execution Bubblewrap argv does not match readonly bindings",
+            ));
+        }
+    }
+    for (source, destination) in &readonly_mounts {
+        let system_mount =
+            source == destination && PROTECTED_READONLY_ROOTS.iter().any(|root| source == root);
+        let declared_mount = request
+            .sandbox
+            .readable_roots
+            .iter()
+            .any(|root| root == source && root == destination)
+            || request.sandbox.readonly_bindings.iter().any(
+                |(expected_source, expected_destination)| {
+                    expected_source == source && expected_destination == destination
+                },
+            );
+        if !system_mount && !declared_mount {
+            let command =
+                validate_resource_wrapper(&request.argv[separator + 1..], &request.limits)?;
+            let implicit = command.iter().any(|argument| argument == destination)
+                && !is_protected_root(destination)
+                && source == destination;
+            if !implicit {
+                return Err(StructuredFailure::new(
+                    "contract-failure",
+                    "execution Bubblewrap argv contains an undeclared host read",
+                ));
+            }
+        }
+    }
+    for directory in directories {
+        let command = validate_resource_wrapper(&request.argv[separator + 1..], &request.limits)?;
+        if !command
+            .iter()
+            .any(|argument| argument.starts_with(&format!("{directory}/")))
+        {
+            return Err(StructuredFailure::new(
+                "contract-failure",
+                "execution Bubblewrap directory is not bound to an approved executable",
+            ));
+        }
+    }
+    let command = validate_resource_wrapper(&request.argv[separator + 1..], &request.limits)?;
+    if command.is_empty() {
         return Err(StructuredFailure::new(
             "contract-failure",
-            "execution Bubblewrap argv does not match its filesystem boundary",
+            "execution Bubblewrap command is empty",
+        ));
+    }
+    if requires_resource_wrapper(&request.limits)
+        && !is_trusted_helper(&request.argv[separator + 1], "prlimit")
+    {
+        return Err(StructuredFailure::new(
+            "contract-failure",
+            "custom execution resource limits require the trusted prlimit wrapper",
         ));
     }
     Ok(())
@@ -1290,7 +1863,7 @@ fn canonical_json(value: &Value) -> String {
     match value {
         Value::Null => "null".to_owned(),
         Value::Bool(value) => value.to_string(),
-        Value::Number(value) => value.to_string(),
+        Value::Number(value) => canonical_number(value),
         Value::String(value) => json_string(value),
         Value::Array(values) => format!(
             "[{}]",
@@ -1313,6 +1886,20 @@ fn canonical_json(value: &Value) -> String {
             )
         }
     }
+}
+
+fn canonical_number(value: &serde_json::Number) -> String {
+    let raw = value.to_string();
+    let (mantissa, exponent) = raw
+        .split_once('e')
+        .or_else(|| raw.split_once('E'))
+        .unwrap_or((&raw, ""));
+    if exponent.is_empty() {
+        return raw;
+    }
+    let exponent_value = exponent.parse::<i32>().unwrap_or(0);
+    let sign = if exponent_value < 0 { '-' } else { '+' };
+    format!("{mantissa}e{sign}{:02}", exponent_value.unsigned_abs())
 }
 
 fn utc_timestamp() -> String {
@@ -1342,8 +1929,6 @@ fn utc_timestamp() -> String {
 }
 
 fn process_identity(pid: u32) -> String {
-    #[cfg(not(target_os = "linux"))]
-    let _ = pid;
     #[cfg(target_os = "linux")]
     {
         let path = format!("/proc/{pid}/stat");
@@ -1354,6 +1939,26 @@ fn process_identity(pid: u32) -> String {
                     return format!("linux:{pid}:{}", fields[19]);
                 }
             }
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::zeroed();
+        let size = unsafe {
+            libc::proc_pidinfo(
+                pid as libc::c_int,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int,
+            )
+        };
+        if size == std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int {
+            let info = unsafe { info.assume_init() };
+            return format!(
+                "macos:{pid}:{}:{}",
+                info.pbi_start_tvsec, info.pbi_start_tvusec
+            );
         }
     }
     String::new()
@@ -1368,7 +1973,7 @@ mod tests {
         let request = test_request("shadow-rust-digest");
         assert_eq!(
             request.request_digest().unwrap(),
-            "0d22c22ce1b06f197714ced7e14e442f28dfe43c0c6137d00b9d64d2bcf40795"
+            "182958c421e4f229fad1c86f3d360f92488695d07f829ecb195d720aa252423f"
         );
         let receipt = RustExecutionProvider::with_test_outcome(ProcessOutcome {
             status: ProcessOutcomeStatus::Completed,
@@ -1406,6 +2011,37 @@ mod tests {
             "-c".to_owned(),
             "echo unsafe".to_owned(),
         ];
+        assert!(RustExecutionProvider::validate_request(&request).is_err());
+    }
+
+    #[test]
+    fn request_schema_resources_and_undeclared_mounts_fail_closed() {
+        let request = test_request("shadow-rust-schema");
+        let mut value = serde_json::to_value(&request).expect("request should encode");
+        value
+            .as_object_mut()
+            .expect("request should be an object")
+            .remove("schema_version");
+        assert!(ExecutionRequest::from_value(value).is_err());
+
+        let mut request = test_request("shadow-rust-resource");
+        request.limits.address_space_bytes = MAX_ADDRESS_SPACE_BYTES + 1;
+        assert!(request.validate().is_err());
+
+        let mut request = test_request("shadow-rust-mount");
+        let separator = request
+            .argv
+            .iter()
+            .position(|argument| argument == "--")
+            .expect("test request should have a command boundary");
+        request.argv.splice(
+            separator..separator,
+            [
+                "--ro-bind".to_owned(),
+                "/tmp/undeclared-shadow-read".to_owned(),
+                "/tmp/undeclared-shadow-read".to_owned(),
+            ],
+        );
         assert!(RustExecutionProvider::validate_request(&request).is_err());
     }
 
@@ -1489,6 +2125,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn system_launcher_closes_stdin_and_captures_completed_output() {
+        if trusted_bwrap_path().is_none() {
+            return;
+        }
         let (request, root) = system_test_request(
             "shadow-rust-system-complete",
             vec!["/usr/bin/printf".to_owned(), "same output".to_owned()],
@@ -1514,6 +2153,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn system_launcher_enforces_timeout_and_output_limits() {
+        if trusted_bwrap_path().is_none() {
+            return;
+        }
         let (timeout_request, timeout_root) = system_test_request(
             "shadow-rust-system-timeout",
             vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 2".to_owned()],
@@ -1562,6 +2204,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn system_launcher_cancels_after_process_binding_and_cleans_up() {
+        if trusted_bwrap_path().is_none() {
+            return;
+        }
         let (request, root) = system_test_request(
             "shadow-rust-system-cancel",
             vec!["/bin/sh".to_owned(), "-c".to_owned(), "sleep 2".to_owned()],
@@ -1598,8 +2243,6 @@ mod tests {
         command: Vec<String>,
         limits: ExecutionLimits,
     ) -> (ExecutionRequest, PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
-
         let root = std::env::temp_dir().join(format!(
             "alfredo-execution-shadow-{}-{}",
             std::process::id(),
@@ -1608,30 +2251,41 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).expect("system fixture root should be created");
         let root = fs::canonicalize(root).expect("system fixture root should be canonical");
-        let bwrap = root.join("bwrap");
-        fs::write(
-            &bwrap,
-            "#!/bin/sh\nwhile [ \"$1\" != \"--\" ]; do shift; done\nshift\nexec \"$@\"\n",
-        )
-        .expect("test Bubblewrap shim should be written");
-        let mut permissions = fs::metadata(&bwrap)
-            .expect("test Bubblewrap shim should be readable")
-            .permissions();
-        permissions.set_mode(0o755);
-        fs::set_permissions(&bwrap, permissions)
-            .expect("test Bubblewrap shim should be executable");
+        let bwrap = trusted_bwrap_path().expect("test Bubblewrap should be available");
         let root = root.to_string_lossy().into_owned();
         let mut argv = vec![
-            bwrap.to_string_lossy().into_owned(),
+            bwrap,
             "--die-with-parent".to_owned(),
             "--new-session".to_owned(),
-            "--chdir".to_owned(),
-            root.clone(),
+            "--unshare-user".to_owned(),
+            "--unshare-pid".to_owned(),
+            "--tmpfs".to_owned(),
+            "/".to_owned(),
+            "--dev".to_owned(),
+            "/dev".to_owned(),
+            "--proc".to_owned(),
+            "/proc".to_owned(),
+            "--tmpfs".to_owned(),
+            "/tmp".to_owned(),
+        ];
+        for system_root in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"] {
+            let path = Path::new(system_root);
+            if path.exists() {
+                let resolved = fs::canonicalize(path)
+                    .expect("system root should have a canonical path")
+                    .to_string_lossy()
+                    .into_owned();
+                argv.extend(["--ro-bind".to_owned(), resolved.clone(), resolved]);
+            }
+        }
+        argv.extend([
             "--bind".to_owned(),
             root.clone(),
             root.clone(),
+            "--chdir".to_owned(),
+            root.clone(),
             "--".to_owned(),
-        ];
+        ]);
         argv.extend(command);
         let request = ExecutionRequest {
             schema_version: EXECUTION_SCHEMA_VERSION,
@@ -1662,6 +2316,15 @@ mod tests {
         (request, PathBuf::from(root))
     }
 
+    #[cfg(unix)]
+    fn trusted_bwrap_path() -> Option<String> {
+        TRUSTED_EXECUTABLE_ROOTS
+            .iter()
+            .map(|root| Path::new(root).join("bwrap"))
+            .find(|path| path.is_file())
+            .map(|path| path.to_string_lossy().into_owned())
+    }
+
     fn test_request(request_id: &str) -> ExecutionRequest {
         let working_directory = "/private/tmp/alfredo-shadow-fixture".to_owned();
         ExecutionRequest {
@@ -1672,6 +2335,16 @@ mod tests {
                 "/usr/bin/bwrap".to_owned(),
                 "--die-with-parent".to_owned(),
                 "--new-session".to_owned(),
+                "--unshare-user".to_owned(),
+                "--unshare-pid".to_owned(),
+                "--tmpfs".to_owned(),
+                "/".to_owned(),
+                "--dev".to_owned(),
+                "/dev".to_owned(),
+                "--proc".to_owned(),
+                "/proc".to_owned(),
+                "--tmpfs".to_owned(),
+                "/tmp".to_owned(),
                 "--chdir".to_owned(),
                 working_directory.clone(),
                 "--bind".to_owned(),
