@@ -24,8 +24,10 @@ name = "albert_mission_control"
 path = "src/lib.rs"
 
 [dependencies]
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tauri = { version = "2", default-features = false, optional = true , features = [] }
 
 [build-dependencies]

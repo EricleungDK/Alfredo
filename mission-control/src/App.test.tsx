@@ -10,7 +10,7 @@ import {
 } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { App, isExactAdHocDelegationBoundary } from "./App";
-import { MissionExecutionTree } from "./MissionExecutionTree";
+import { LocalInferenceOverview, MissionExecutionTree } from "./MissionExecutionTree";
 import type { MissionExecutionTreeProjection } from "./workstation-projection";
 import type {
   AdHocDelegationProposalRequest,
@@ -36,6 +36,9 @@ import type {
   WorkingContextCurationRequest,
   WorkingContextProjection,
   WorkstationActionRequest,
+  LocalInferenceProjection,
+  LocalInferenceReceiptProjection,
+  LocalInferenceSessionProjection,
 } from "./contracts";
 import type { SessionOutputSubscriptionState, WorkspaceClient } from "./workspace-client";
 
@@ -79,6 +82,108 @@ const snapshot: WorkspaceSnapshot = {
 
 const client: WorkspaceClient = {
   loadSnapshot: async () => ({ kind: "ready", snapshot }),
+};
+
+const nonAuthoritativeInferenceReceipt: LocalInferenceReceiptProjection = {
+  schema_version: 1,
+  request_id: "inference-turn:tree-0001",
+  mission_id: "command-deck",
+  session_id: "session-ISS-TREE-1",
+  turn_kind: "worker",
+  recorded_at: "2026-08-13T08:00:03Z",
+  outcome: "timed-out",
+  authoritative: false,
+  profile: {
+    profile_id: "worker-v1",
+    version: 1,
+    model: "qwen3:14b",
+    model_digest: "sha256:qwen3-tree",
+    keep_alive: "10m",
+    context_budget: 4096,
+    output_budget: 512,
+    thinking: false,
+    sampling: { temperature: 0.2, top_p: 0.9 },
+    schema: {
+      type: "object",
+      required: ["answer"],
+      properties: { answer: { type: "string" } },
+      additionalProperties: false,
+    },
+    quantization: "Q4_K_M",
+    residency: "normal",
+    processor_placement: "gpu",
+    qualified: true,
+    priority: 60,
+    queue_limit: 8,
+    max_queue_wait_seconds: 30,
+    timeout_seconds: 120,
+    max_output_bytes: 4096,
+  },
+  admission: {
+    admitted: true,
+    prompt_tokens: 64,
+    output_headroom: 4032,
+    context_budget: 4096,
+    output_budget: 512,
+  },
+  timings: {
+    load_ms: 8.4,
+    prompt_evaluation_ms: 13.1,
+    first_token_ms: 21.7,
+    decoding_ms: null,
+  },
+  usage: { prompt_tokens: 64, output_tokens: 12, output_bytes: 48 },
+  lease: {
+    lease_id: "lease:tree-0001",
+    request_id: "inference-turn:tree-0001",
+    mission_id: "command-deck",
+    session_id: "session-ISS-TREE-1",
+    model: "qwen3:14b",
+    model_digest: "sha256:qwen3-tree",
+    residency: "normal",
+    priority: 60,
+    sequence: 2,
+    resident_match: true,
+    model_swap: false,
+  },
+  error: "Local model response exceeded the bounded timeout.",
+};
+
+const queuedInferenceProjection: LocalInferenceProjection = {
+  turn_count: 2,
+  last_turn: nonAuthoritativeInferenceReceipt,
+  lease: {
+    schema_version: 1,
+    active: null,
+    queued: [
+      {
+        lease_id: "lease:queued-0001",
+        request_id: "inference-turn:queued-0001",
+        mission_id: "command-deck",
+        session_id: "session-ISS-TREE-1",
+        model: "qwen3:14b",
+        model_digest: "sha256:qwen3-tree",
+        residency: "normal",
+        priority: 90,
+        sequence: 4,
+        enqueued_at: "2026-08-13T08:00:04Z",
+      },
+    ],
+    resident: {
+      model: "qwen3:14b",
+      digest: "sha256:qwen3-tree",
+      residency: "normal",
+      updated_at: "2026-08-13T07:59:59Z",
+    },
+    audit: [],
+    next_sequence: 5,
+  },
+};
+
+const sessionInferenceProjection: LocalInferenceSessionProjection = {
+  state: "non-authoritative",
+  turn_count: 1,
+  last: nonAuthoritativeInferenceReceipt,
 };
 
 const stylesSource = readFileSync(`${process.cwd()}/src/styles.css`, "utf8");
@@ -328,6 +433,7 @@ test("renders the canonical Mission Execution Tree and scopes detailed output to
       ...snapshot.mission_board,
       issue_count: 1,
       ordered_issue_ids: ["ISS-TREE"],
+      inference: queuedInferenceProjection,
       issue_slices: [
         appIssueSlice({
           issue_id: "ISS-TREE",
@@ -359,6 +465,10 @@ test("renders the canonical Mission Execution Tree and scopes detailed output to
             commands_run: ["npm test -- --run MissionExecutionTree"],
             test_results: "Tree tests pass.",
             evidence_correlation_id: "evidence:command-deck:session-ISS-TREE-1",
+            supervision_receipt_id: "supervision-receipt:tree-recovery",
+            supervision_outcome: "recovered",
+            automatic_recovery_count: 1,
+            inference: sessionInferenceProjection,
           },
         ],
         attention: [],
@@ -376,6 +486,11 @@ test("renders the canonical Mission Execution Tree and scopes detailed output to
   );
 
   const tree = await screen.findByRole("region", { name: "Mission Execution Tree" });
+  const inferenceOverview = screen.getByRole("region", { name: "Local Inference telemetry" });
+  expect(within(inferenceOverview).getByText("Queued")).toBeVisible();
+  expect(within(inferenceOverview).getByText("1 waiting")).toBeVisible();
+  expect(within(inferenceOverview).getByText("No model result entered governance")).toBeVisible();
+  expect(within(inferenceOverview).getByText("qwen3:14b · sha256:qwen3-tree")).toBeVisible();
   expect(within(tree).getByText("1 Issue Slices")).toBeVisible();
   expect(within(tree).getByText("1 Local Agent sessions")).toBeVisible();
   const issueNode = within(tree).getByRole("treeitem", {
@@ -406,6 +521,21 @@ test("renders the canonical Mission Execution Tree and scopes detailed output to
     "Tree tests pass.",
   );
   expect(within(inspector).getByText("mission-control/src/MissionExecutionTree.tsx")).toBeVisible();
+  expect(
+    within(inspector).getByText(
+      "Supervision receipt: supervision-receipt:tree-recovery · recovered",
+    ),
+  ).toBeVisible();
+  expect(within(inspector).getByText("Automatic recovery: 1 of 1 used")).toBeVisible();
+  const inferenceTelemetry = within(inspector).getByRole("region", {
+    name: "Local Inference telemetry for this session",
+  });
+  expect(within(inferenceTelemetry).getByText("Non-authoritative outcome")).toBeVisible();
+  expect(within(inferenceTelemetry).getByText("qwen3:14b")).toBeVisible();
+  expect(within(inferenceTelemetry).getByText("sha256:qwen3-tree")).toBeVisible();
+  expect(within(inferenceTelemetry).getByText(/Context \/ output/).parentElement).toHaveTextContent(
+    "4096 / 512 tokens",
+  );
   expect(subscribeToSessionOutput).toHaveBeenCalledTimes(1);
   expect(outputHandler).toBeDefined();
   expect(within(inspector).getByText("Subscribing…")).toBeVisible();
@@ -483,6 +613,307 @@ test("renders the canonical Mission Execution Tree and scopes detailed output to
     screen.queryByRole("region", { name: "session-ISS-TREE-1 execution inspector" }),
   ).not.toBeInTheDocument();
   await waitFor(() => expect(sessionNode).toHaveFocus());
+});
+
+test("archives a completed Issue Slice only after an acknowledged Mission Work action", async () => {
+  const archiveSnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    revision: 18,
+    active_mission: { id: "command-deck", title: "Command Deck Mission", issue_count: 1 },
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_count: 1,
+      ordered_issue_ids: ["ISS-ARCHIVE"],
+      ready_issue_ids: [],
+      approved_issue_ids: [],
+      issue_slices: [
+        appIssueSlice({
+          issue_id: "ISS-ARCHIVE",
+          title: "Retain accepted execution history",
+          lifecycle: "Complete",
+          progress: "Evidence accepted and PR-ready",
+          evidence: {
+            state: "accepted",
+            changed_files: ["src/history.ts"],
+            commands_run: ["npm test -- archive"],
+            test_results: "Accepted evidence is retained.",
+            risks: "None recorded.",
+            artifact_links: [],
+          },
+        }),
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [],
+        attention: [],
+      },
+    ],
+  };
+  const submitWorkstationAction = vi.fn(async (request: WorkstationActionRequest) => ({
+    kind: "acknowledged" as const,
+    acknowledgement: {
+      correlation_id: request.correlation_id,
+      outcome: "acknowledged" as const,
+      revision: 19,
+      action_type: "issue-archive" as const,
+      issue_id: "ISS-ARCHIVE",
+      session_id: "",
+      effect_summary:
+        "Mission Commander archived ISS-ARCHIVE; its sessions, evidence, and Activity Journal history remain inspectable.",
+    },
+  }));
+
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => ({ kind: "ready", snapshot: archiveSnapshot }),
+        submitWorkstationAction,
+      }}
+    />,
+  );
+
+  const inspector = await openExecutionInspector("ISS-ARCHIVE", "issue-slice");
+  const archive = within(inspector).getByRole("button", { name: "Archive completed Issue Slice" });
+  expect(archive).toHaveAccessibleDescription(
+    /archives the completed ISS-ARCHIVE subtree from active Mission Work while retaining its identity, sessions, Evidence Packages, and Activity Journal history/,
+  );
+  expect(screen.queryByText(/Mission Commander archived ISS-ARCHIVE/)).not.toBeInTheDocument();
+
+  fireEvent.click(archive);
+
+  await waitFor(() =>
+    expect(submitWorkstationAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action_type: "issue-archive",
+        target: { kind: "issue-slice", id: "ISS-ARCHIVE" },
+        issue_id: "ISS-ARCHIVE",
+        expected_revision: 18,
+      }),
+    ),
+  );
+  expect(await within(inspector).findByText(/Mission Commander archived ISS-ARCHIVE/)).toBeVisible();
+});
+
+test("requires exact-session confirmation before submitting a typed retirement discard", async () => {
+  const sessionId = "session-ISS-RETIRE-1";
+  const retirementSnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    revision: 31,
+    active_mission: { id: "command-deck", title: "Command Deck Mission", issue_count: 1 },
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_count: 1,
+      ordered_issue_ids: ["ISS-RETIRE"],
+      ready_issue_ids: [],
+      approved_issue_ids: [],
+      issue_slices: [
+        appIssueSlice({
+          issue_id: "ISS-RETIRE",
+          title: "Retire retained worktree",
+          lifecycle: "Complete",
+          progress: "Retirement is blocked on retained worktree cleanup",
+          sessions: [
+            {
+              session_id: sessionId,
+              assigned_agent: "qwen-coder-local",
+              role: "local-agent",
+              provider: "ollama",
+              model: "qwen3.6:27b",
+              status: "reviewed",
+              stale: false,
+              disconnected: false,
+              operation_status: "completed",
+              failure: "",
+            },
+          ],
+        }),
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [
+          {
+            session_id: sessionId,
+            issue_id: "ISS-RETIRE",
+            assigned_agent: "qwen-coder-local",
+            status: "reviewed",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+            session_revision: 9,
+            retirement_phase: "retirement-blocked",
+            retirement_blocked_reason: "Retained worktree still has open handles.",
+            retirement_runner_boundary: { runner_operation_id: "retire-operation-9" },
+            preservation_budget: { state: "verified", reserved_bytes: 33554432 },
+            retirement_record: {
+              manifest_sha256: "b".repeat(64),
+              snapshot_bytes: 4096,
+              pinned: false,
+              payload_disposition: "retained",
+            },
+            retirement_actions: {
+              retry: true,
+              inspect: true,
+              export: true,
+              discard: true,
+            },
+          },
+        ],
+        attention: [],
+      },
+    ],
+  };
+  const submitWorkstationAction = vi.fn(async (request: WorkstationActionRequest) => ({
+    kind: "acknowledged" as const,
+    acknowledgement: {
+      correlation_id: request.correlation_id,
+      outcome: "acknowledged" as const,
+      revision: 32,
+      action_type: "retirement-discard" as const,
+      issue_id: "ISS-RETIRE",
+      session_id: sessionId,
+      effect_summary: `Mission Commander discarded retained worktree ${sessionId}.`,
+    },
+  }));
+
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => ({ kind: "ready", snapshot: retirementSnapshot }),
+        submitWorkstationAction,
+      }}
+    />,
+  );
+
+  const inspector = await openExecutionInspector(sessionId);
+  expect(
+    within(inspector).getByRole("heading", { name: "Retirement Unit Inspection" }),
+  ).toBeVisible();
+  expect(within(inspector).getByText("Retained worktree still has open handles.")).toBeVisible();
+  expect(within(inspector).getByText(/retire-operation-9/)).toBeVisible();
+  expect(within(inspector).getByText("32 MiB")).toBeVisible();
+  expect(within(inspector).getByRole("heading", { name: "Retirement Record" })).toBeVisible();
+  const discard = within(inspector).getByRole("button", { name: "Discard Retained Worktree" });
+  expect(discard).toHaveClass("action--danger");
+  expect(discard).toBeDisabled();
+
+  fireEvent.change(
+    within(inspector).getByRole("textbox", { name: "Discard Retained Worktree reason" }),
+    { target: { value: "The retained payload was exported and reviewed." } },
+  );
+  fireEvent.change(
+    within(inspector).getByRole("textbox", { name: "Discard Retained Worktree confirmation" }),
+    { target: { value: "wrong-session" } },
+  );
+  expect(discard).toBeDisabled();
+  fireEvent.change(
+    within(inspector).getByRole("textbox", { name: "Discard Retained Worktree confirmation" }),
+    { target: { value: sessionId } },
+  );
+  expect(discard).toBeEnabled();
+  fireEvent.click(discard);
+
+  await waitFor(() =>
+    expect(submitWorkstationAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action_type: "retirement-discard",
+        actor: "mission-commander",
+        expected_revision: 9,
+        target: { kind: "agent-session", id: sessionId },
+        mission_id: "command-deck",
+        issue_id: "ISS-RETIRE",
+        session_id: sessionId,
+        reason: "The retained payload was exported and reviewed.",
+        confirmation: sessionId,
+      }),
+    ),
+  );
+});
+
+test("restores an archived Issue Slice only after an acknowledged Mission Work action", async () => {
+  const archivedSnapshot: WorkspaceSnapshot = {
+    ...snapshot,
+    revision: 21,
+    active_mission: { id: "command-deck", title: "Command Deck Mission", issue_count: 1 },
+    mission_board: {
+      ...snapshot.mission_board,
+      issue_count: 1,
+      ordered_issue_ids: ["ISS-ARCHIVE"],
+      ready_issue_ids: [],
+      approved_issue_ids: [],
+      issue_slices: [
+        appIssueSlice({
+          issue_id: "ISS-ARCHIVE",
+          title: "Retained accepted execution history",
+          lifecycle: "Complete",
+          progress: "History retained outside active work",
+        }),
+      ],
+    },
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [],
+        attention: [],
+        archived_issue_ids: ["ISS-ARCHIVE"],
+      },
+    ],
+  };
+  const submitWorkstationAction = vi.fn(async (request: WorkstationActionRequest) => ({
+    kind: "acknowledged" as const,
+    acknowledgement: {
+      correlation_id: request.correlation_id,
+      outcome: "acknowledged" as const,
+      revision: 22,
+      action_type: "issue-restore" as const,
+      issue_id: "ISS-ARCHIVE",
+      session_id: "",
+      effect_summary:
+        "Mission Commander restored ISS-ARCHIVE to active Mission Work with its sessions, evidence, and Activity Journal history intact.",
+    },
+  }));
+
+  render(
+    <App
+      client={{
+        loadSnapshot: async () => ({ kind: "ready", snapshot: archivedSnapshot }),
+        submitWorkstationAction,
+      }}
+    />,
+  );
+
+  const inspector = await openExecutionInspector("ISS-ARCHIVE", "issue-slice");
+  const restore = within(inspector).getByRole("button", { name: "Restore Issue Slice" });
+  expect(restore).toHaveAccessibleDescription(
+    /restores the retained ISS-ARCHIVE subtree to active Mission Work with its identity, sessions, Evidence Packages, and Activity Journal history intact/,
+  );
+  expect(screen.queryByText(/Mission Commander restored ISS-ARCHIVE/)).not.toBeInTheDocument();
+
+  fireEvent.click(restore);
+
+  await waitFor(() =>
+    expect(submitWorkstationAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action_type: "issue-restore",
+        target: { kind: "issue-slice", id: "ISS-ARCHIVE" },
+        issue_id: "ISS-ARCHIVE",
+        expected_revision: 21,
+      }),
+    ),
+  );
+  expect(await within(inspector).findByText(/Mission Commander restored ISS-ARCHIVE/)).toBeVisible();
 });
 
 test("keeps Issue Slice, Ad Hoc Delegation, and Repair disclosure separately operable", () => {
@@ -7238,6 +7669,18 @@ test.each([
       review_outcome: repairActionAvailable ? "Needs repair" : "",
       review_next_action: repairActionAvailable ? "same-local-agent-repair" : "",
       repair_action_available: repairActionAvailable,
+      repair_task_packet: repairActionAvailable
+        ? {
+            issue_id: issueId,
+            goal: `Repair ${issueId}`,
+            acceptance_criteria: ["The failed acceptance assertion passes."],
+            allowed_paths: ["src", "tests"],
+            command_policy: { npm: "auto-allowed" },
+            evidence_requirements: ["Record the repaired test result."],
+            assigned_agent: "repair-worker",
+            review_reason: "The reviewed result misses its acceptance assertion.",
+          }
+        : null,
     });
     const withSessions = (
       revision: number,
@@ -7369,6 +7812,21 @@ test.each([
       name: "Launch repair",
     });
     expect(launch).toBeEnabled();
+    expect(launch).toHaveAccessibleDescription(
+      /queues exactly one canonical repair session for .* from its inherited review task packet; it does not run inline or duplicate the prior session/,
+    );
+    const repairPreview = within(repairInspector).getByRole("region", {
+      name: "Inherited repair task packet",
+    });
+    expect(repairPreview).toHaveTextContent(`GoalRepair ${issueId}`);
+    expect(repairPreview).toHaveTextContent("AcceptanceThe failed acceptance assertion passes.");
+    expect(repairPreview).toHaveTextContent("Allowed pathssrc, tests");
+    expect(repairPreview).toHaveTextContent("Command policynpm: auto-allowed");
+    expect(repairPreview).toHaveTextContent("Evidence requiredRecord the repaired test result.");
+    expect(repairPreview).toHaveTextContent("Assigned Local Agentrepair-worker");
+    expect(repairPreview).toHaveTextContent(
+      "Review reasonThe reviewed result misses its acceptance assertion.",
+    );
     fireEvent.click(launch);
     fireEvent.click(launch);
 

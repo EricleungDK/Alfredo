@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import codecs
 from contextlib import contextmanager, nullcontext
+import ctypes
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 import difflib
+import errno
 from hashlib import sha1, sha256
 import fcntl
 import json
+import math
 import os
 from pathlib import Path, PurePosixPath
 import re
@@ -15,12 +18,14 @@ import secrets
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
 import time
 from typing import Any, Callable
+import unicodedata
 from urllib.parse import quote
 
 from .agents import (
@@ -32,6 +37,29 @@ from .agents import (
     load_agent_registry,
 )
 from .capabilities import CapabilityCatalogService, SKILL_NAME_PATTERN
+from .execution import (
+    ExecutionCoordinator,
+    ExecutionJournal,
+    ExecutionLimits,
+    ExecutionReceipt,
+    ExecutionReplayConflict,
+    ExecutionRequest,
+    ExecutionSandbox,
+    LocalAgentExecutionAuthority,
+    PythonExecutionProvider,
+    _is_protected_writable_path,
+    _is_under_private_tmp,
+)
+from .inference import (
+    LocalInferenceAdapter,
+    LocalInferenceLease,
+    LocalInferenceProfile,
+)
+from .retirement import (
+    RetirementSnapshotError,
+    RetirementSnapshotStore,
+    SnapshotRequest,
+)
 
 
 _REPOSITORY_CONTEXT_LIMIT = 24_000
@@ -47,6 +75,7 @@ _MODEL_COMMAND_TIMEOUT_SECONDS = 120
 _MODEL_AGENT_ITERATION_LIMIT = 3
 _MODEL_FEEDBACK_LIMIT = 8_000
 _MODEL_PROCESS_OUTPUT_BYTES_LIMIT = 3_000_000
+_INFERENCE_RECEIPT_BYTES_LIMIT = 512_000
 _RUNNER_COMMAND_TIMEOUT_SECONDS = 600
 _PROCESS_OUTPUT_BYTES_LIMIT = 1_000_000
 _PROCESS_OUTPUT_LIMIT_EXIT_STATUS = 125
@@ -56,6 +85,7 @@ _PROCESS_FILE_SIZE_BYTES_LIMIT = 2 * 1024 * 1024 * 1024
 _PROCESS_OPEN_FILE_LIMIT = 1_024
 _PROCESS_COUNT_LIMIT = 256
 _PROCESS_DESCENDANT_GRACE_SECONDS = 1.0
+_EXECUTION_RECEIPT_HISTORY_LIMIT = 128
 _GIT_SNAPSHOT_TIMEOUT_SECONDS = 30
 _GIT_SNAPSHOT_BYTES_LIMIT = 8_000_000
 _GIT_COMMAND_OUTPUT_BYTES_LIMIT = 64_000
@@ -78,16 +108,65 @@ _REVIEW_BASELINE_FILE_LIMIT = 256
 _REVIEW_BASELINE_FILE_BYTES_LIMIT = _REVIEW_DIFF_BYTES_LIMIT
 _REVIEW_BASELINE_TOTAL_BYTES_LIMIT = 8_000_000
 _WORKTREE_PREPARATION_SCHEMA_VERSION = 1
+_RETIREMENT_UNIT_SCHEMA_VERSION = 1
+_PRESERVATION_BUDGET_BYTES = 32 * 1024 * 1024
+_DEFAULT_RETENTION_GRACE_SECONDS = 72 * 60 * 60
+_DEFAULT_SNAPSHOT_STORAGE_RETENTION_SECONDS = 30 * 24 * 60 * 60
+_DEFAULT_SNAPSHOT_STORAGE_BUDGET_BYTES = 5 * 1024 * 1024 * 1024
+_RETIREMENT_RETRY_BACKOFF_SECONDS = 0.05
+_RETIREMENT_EXPORT_STAGE_ATTEMPT_LIMIT = 2
+_RETIREMENT_EXPORT_MARKER_BYTES_LIMIT = 64 * 1024
+_RETIREMENT_EXPORT_OWNER_BYTES_LIMIT = 16 * 1024
+_RETIREMENT_EXPORT_OWNER_COUNT_LIMIT = 10_000
+_RETIREMENT_EXPORT_LEGACY_INTENT_FIELDS = frozenset(
+    {
+        "claim_revision",
+        "correlation_id",
+        "destination",
+        "expected_revision",
+        "export_kind",
+        "manifest_sha256",
+    }
+)
 _GIT_NOT_REPOSITORY_MESSAGE = (
     "fatal: not a git repository (or any of the parent directories): .git"
 )
+
+_DELEGATION_INFERENCE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "complexity": {"type": "string"},
+        "recommended_agent": {"type": "string"},
+        "requires_approval": {"type": "boolean"},
+        "reason": {"type": "string"},
+    },
+    "required": ["complexity", "recommended_agent", "reason"],
+    "additionalProperties": False,
+}
+_MODEL_FILE_PLAN_INFERENCE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "files": {"type": "array"},
+        "commands": {"type": "array"},
+    },
+    "required": ["files"],
+    "additionalProperties": False,
+}
+
+
+@dataclass(frozen=True)
+class _RetirementExportDestinationLease:
+    digest: str
+    lock_root: Path
+
+
 _GIT_NOT_REPOSITORY_BOUNDARY_PATTERN = re.compile(
     r"fatal: not a git repository \(or any parent up to mount point .+\)\n"
     r"Stopping at filesystem boundary "
     r"\(GIT_DISCOVERY_ACROSS_FILESYSTEM not set\)\."
 )
 _SKILL_INSTRUCTION_LIMIT = 12_000
-_ABANDONED_RUNNER_RECOVERY_LIMIT = 3
 _TEXT_SOURCE_SUFFIXES = {
     ".c",
     ".cc",
@@ -523,17 +602,17 @@ class _SessionOutputRecorder:
                 pass
 
 
-def _process_token_pids(process_token: str) -> set[int]:
-    """Return live Linux processes that inherited one bounded-run token."""
+def _probe_process_token_pids(process_token: str) -> tuple[set[int], bool]:
+    """Return token-bound processes and whether their absence was observable."""
 
     if os.name != "posix" or not process_token or not Path("/proc").is_dir():
-        return set()
+        return set(), False
     marker = f"ALFREDO_PROCESS_TOKEN={process_token}".encode("utf-8")
     matches: set[int] = set()
     try:
         entries = os.scandir("/proc")
     except OSError:
-        return matches
+        return matches, False
     with entries:
         for entry in entries:
             if not entry.name.isdigit():
@@ -544,19 +623,129 @@ def _process_token_pids(process_token: str) -> set[int]:
                     Path(entry.path) / "environ",
                     1_000_000,
                 )
-            except OSError:
+            except FileNotFoundError:
                 continue
+            except OSError:
+                # hidepid, sandbox, and transient I/O restrictions make an
+                # absence claim unavailable; supervision must not collapse
+                # that uncertainty into proof of quiescence.
+                return matches, False
             if marker in payload.split(b"\0"):
                 matches.add(pid)
+    return matches, True
+
+
+def _process_token_pids(process_token: str) -> set[int]:
+    """Return observable live processes that inherited one bounded-run token."""
+
+    matches, _absence_observable = _probe_process_token_pids(process_token)
     return matches
+
+
+def _darwin_process_identity_probe(pid: int) -> tuple[str, str]:
+    """Probe a Darwin PID without treating an unavailable probe as absence."""
+
+    if sys.platform != "darwin" or pid <= 0:
+        return "unavailable", ""
+    for executable in ("/bin/ps", "/usr/bin/ps"):
+        try:
+            result = subprocess.run(
+                [executable, "-p", str(pid), "-o", "lstart="],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=0.5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        started_at = result.stdout.strip()
+        if result.returncode == 0 and started_at:
+            return "live", f"darwin:{pid}:{started_at}"
+        if result.returncode == 1:
+            return "absent", ""
+        return "unavailable", ""
+    return "unavailable", ""
+
+
+def _darwin_process_identity_state(pid: int, expected_identity: str) -> str:
+    state, actual_identity = _darwin_process_identity_probe(pid)
+    if state != "live":
+        return state
+    if expected_identity and actual_identity == expected_identity:
+        return "same"
+    return "reused"
+
+
+def _darwin_process_group_probe(process_group_id: int) -> tuple[str, set[int]]:
+    """Enumerate a Darwin process group without trusting killpg existence probes."""
+
+    if sys.platform != "darwin" or process_group_id <= 0:
+        return "unavailable", set()
+    for executable in ("/bin/ps", "/usr/bin/ps"):
+        try:
+            result = subprocess.run(
+                [executable, "-axo", "pid=,pgid=,lstart="],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=0.5,
+            )
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode != 0:
+            continue
+        group_pids: set[int] = set()
+        for line in result.stdout.splitlines():
+            fields = line.strip().split(None, 2)
+            if not fields:
+                continue
+            if len(fields) < 2:
+                return "unavailable", set()
+            try:
+                pid = int(fields[0])
+                process_group = int(fields[1])
+            except ValueError:
+                return "unavailable", set()
+            if pid <= 0 or process_group <= 0:
+                return "unavailable", set()
+            if process_group == process_group_id:
+                group_pids.add(pid)
+        return ("live" if group_pids else "absent"), group_pids
+    return "unavailable", set()
 
 
 def _process_group_is_live(
     process: subprocess.Popen[Any],
     process_token: str = "",
+    process_identity: str = "",
 ) -> bool:
     if os.name != "posix":
         return process.poll() is None
+    # Once Popen.poll() has reaped the leader, its numeric PID may be reused.
+    # Never probe or signal that old process-group number again; descendants
+    # are tracked by the inherited random token instead.
+    if process.poll() is not None:
+        token_pids = _process_token_pids(process_token)
+        if token_pids:
+            return True
+        if sys.platform == "darwin":
+            state = _darwin_process_identity_state(process.pid, process_identity)
+            if state in {"same", "reused"}:
+                # A live or reused PID is uncertainty, never proof that the
+                # bounded process tree is gone.
+                return True
+            if state == "absent":
+                group_state, _group_pids = _darwin_process_group_probe(process.pid)
+                if group_state != "unavailable":
+                    return group_state == "live"
+            try:
+                os.getpgid(process.pid)
+            except ProcessLookupError:
+                return False
+            except PermissionError:
+                return True
+            return True
+        return False
     try:
         os.killpg(process.pid, 0)
     except ProcessLookupError:
@@ -570,9 +759,20 @@ def _signal_process_group(
     process: subprocess.Popen[Any],
     signal_number: int,
     process_token: str = "",
+    process_identity: str = "",
 ) -> None:
     try:
-        if os.name == "posix":
+        can_signal_reaped_darwin_group = (
+            os.name == "posix"
+            and sys.platform == "darwin"
+            and process.poll() is not None
+            and _darwin_process_identity_state(process.pid, process_identity)
+            == "absent"
+            and _darwin_process_group_probe(process.pid)[0] == "live"
+        )
+        if os.name == "posix" and (
+            process.poll() is None or can_signal_reaped_darwin_group
+        ):
             os.killpg(process.pid, signal_number)
         elif process.poll() is None:
             if signal_number == signal.SIGTERM:
@@ -592,23 +792,47 @@ def _signal_process_group(
 def _terminate_process_group(
     process: subprocess.Popen[Any],
     process_token: str = "",
+    process_identity: str = "",
 ) -> None:
-    _signal_process_group(process, signal.SIGTERM, process_token)
+    _signal_process_group(
+        process,
+        signal.SIGTERM,
+        process_token,
+        process_identity,
+    )
     deadline = time.monotonic() + 1.0
     while (
-        _process_group_is_live(process, process_token)
+        _process_group_is_live(process, process_token, process_identity)
         and time.monotonic() < deadline
     ):
         process.poll()
         time.sleep(0.02)
-    if _process_group_is_live(process, process_token):
-        _signal_process_group(process, signal.SIGKILL, process_token)
+    if _process_group_is_live(process, process_token, process_identity):
+        _signal_process_group(
+            process,
+            signal.SIGKILL,
+            process_token,
+            process_identity,
+        )
     if process.poll() is None:
         try:
             process.wait(timeout=1)
         except subprocess.TimeoutExpired:
-            _signal_process_group(process, signal.SIGKILL, process_token)
+            _signal_process_group(
+                process,
+                signal.SIGKILL,
+                process_token,
+                process_identity,
+            )
             process.wait(timeout=1)
+    if process.poll() is not None and _process_group_is_live(
+        process,
+        process_token,
+        process_identity,
+    ):
+        raise AlbertError(
+            "Unable to verify that the bounded process group was terminated."
+        )
 
 
 def _trusted_system_executable(name: str) -> str | None:
@@ -637,7 +861,14 @@ def _trusted_system_executable(name: str) -> str | None:
     return None
 
 
-def _resource_bounded_process_argv(argv: str | list[str]) -> str | list[str]:
+def _resource_bounded_process_argv(
+    argv: str | list[str],
+    *,
+    address_space_bytes: int = _PROCESS_ADDRESS_SPACE_BYTES_LIMIT,
+    file_size_bytes: int = _PROCESS_FILE_SIZE_BYTES_LIMIT,
+    open_file_limit: int = _PROCESS_OPEN_FILE_LIMIT,
+    process_count_limit: int = _PROCESS_COUNT_LIMIT,
+) -> str | list[str]:
     """Apply inherited host resource limits without unsafe pre-exec callbacks."""
 
     if os.name != "posix" or not isinstance(argv, list):
@@ -649,20 +880,37 @@ def _resource_bounded_process_argv(argv: str | list[str]) -> str | list[str]:
         )
     return [
         prlimit,
-        f"--as={_PROCESS_ADDRESS_SPACE_BYTES_LIMIT}",
-        f"--fsize={_PROCESS_FILE_SIZE_BYTES_LIMIT}",
-        f"--nofile={_PROCESS_OPEN_FILE_LIMIT}",
-        f"--nproc={_PROCESS_COUNT_LIMIT}",
+        f"--as={address_space_bytes}",
+        f"--fsize={file_size_bytes}",
+        f"--nofile={open_file_limit}",
+        f"--nproc={process_count_limit}",
         "--",
         *argv,
     ]
 
 
-def _process_isolated_argv(argv: str | list[str]) -> str | list[str]:
+def _process_isolated_argv(
+    argv: str | list[str],
+    *,
+    address_space_bytes: int = _PROCESS_ADDRESS_SPACE_BYTES_LIMIT,
+    file_size_bytes: int = _PROCESS_FILE_SIZE_BYTES_LIMIT,
+    open_file_limit: int = _PROCESS_OPEN_FILE_LIMIT,
+    process_count_limit: int = _PROCESS_COUNT_LIMIT,
+    descendant_grace_seconds: float = _PROCESS_DESCENDANT_GRACE_SECONDS,
+) -> str | list[str]:
     """Place raw POSIX children in a kill-on-exit PID namespace."""
 
     if os.name != "posix" or not isinstance(argv, list):
-        return _resource_bounded_process_argv(argv)
+        resource_limits = {}
+        if address_space_bytes != _PROCESS_ADDRESS_SPACE_BYTES_LIMIT:
+            resource_limits["address_space_bytes"] = address_space_bytes
+        if file_size_bytes != _PROCESS_FILE_SIZE_BYTES_LIMIT:
+            resource_limits["file_size_bytes"] = file_size_bytes
+        if open_file_limit != _PROCESS_OPEN_FILE_LIMIT:
+            resource_limits["open_file_limit"] = open_file_limit
+        if process_count_limit != _PROCESS_COUNT_LIMIT:
+            resource_limits["process_count_limit"] = process_count_limit
+        return _resource_bounded_process_argv(argv, **resource_limits)
     bubblewrap = _trusted_system_executable("bwrap")
     if bubblewrap is None:
         raise AlbertError(
@@ -678,7 +926,16 @@ def _process_isolated_argv(argv: str | list[str]) -> str | list[str]:
         # sandboxed_process_argv places prlimit inside the new namespaces so its
         # per-UID process limit cannot prevent Bubblewrap from creating them.
         return argv
-    bounded = _resource_bounded_process_argv(argv)
+    resource_limits = {}
+    if address_space_bytes != _PROCESS_ADDRESS_SPACE_BYTES_LIMIT:
+        resource_limits["address_space_bytes"] = address_space_bytes
+    if file_size_bytes != _PROCESS_FILE_SIZE_BYTES_LIMIT:
+        resource_limits["file_size_bytes"] = file_size_bytes
+    if open_file_limit != _PROCESS_OPEN_FILE_LIMIT:
+        resource_limits["open_file_limit"] = open_file_limit
+    if process_count_limit != _PROCESS_COUNT_LIMIT:
+        resource_limits["process_count_limit"] = process_count_limit
+    bounded = _resource_bounded_process_argv(argv, **resource_limits)
     assert isinstance(bounded, list)
     supervisor = Path(__file__).with_name("process_supervisor.py")
     return [
@@ -697,7 +954,7 @@ def _process_isolated_argv(argv: str | list[str]) -> str | list[str]:
         "--",
         sys.executable,
         str(supervisor),
-        str(_PROCESS_DESCENDANT_GRACE_SECONDS),
+        str(descendant_grace_seconds),
         "--",
         *bounded,
     ]
@@ -711,7 +968,15 @@ def _run_bounded_process(
     env: dict[str, str] | None = None,
     timeout_seconds: float,
     output_limit_bytes: int = _PROCESS_OUTPUT_BYTES_LIMIT,
+    address_space_bytes: int = _PROCESS_ADDRESS_SPACE_BYTES_LIMIT,
+    file_size_bytes: int = _PROCESS_FILE_SIZE_BYTES_LIMIT,
+    open_file_limit: int = _PROCESS_OPEN_FILE_LIMIT,
+    process_count_limit: int = _PROCESS_COUNT_LIMIT,
+    descendant_grace_seconds: float = _PROCESS_DESCENDANT_GRACE_SECONDS,
     process_started: Callable[[subprocess.Popen[bytes]], None] | None = None,
+    process_binding_started: (
+        Callable[[subprocess.Popen[bytes], str], None] | None
+    ) = None,
     poll_callback: Callable[[], None] | None = None,
     output_callback: Callable[[str, bytes], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
@@ -720,8 +985,19 @@ def _run_bounded_process(
     process_token = secrets.token_hex(16)
     process_env = sanitized_process_environment(env)
     process_env["ALFREDO_PROCESS_TOKEN"] = process_token
+    isolation_limits = {}
+    if address_space_bytes != _PROCESS_ADDRESS_SPACE_BYTES_LIMIT:
+        isolation_limits["address_space_bytes"] = address_space_bytes
+    if file_size_bytes != _PROCESS_FILE_SIZE_BYTES_LIMIT:
+        isolation_limits["file_size_bytes"] = file_size_bytes
+    if open_file_limit != _PROCESS_OPEN_FILE_LIMIT:
+        isolation_limits["open_file_limit"] = open_file_limit
+    if process_count_limit != _PROCESS_COUNT_LIMIT:
+        isolation_limits["process_count_limit"] = process_count_limit
+    if descendant_grace_seconds != _PROCESS_DESCENDANT_GRACE_SECONDS:
+        isolation_limits["descendant_grace_seconds"] = descendant_grace_seconds
     process = subprocess.Popen(
-        _process_isolated_argv(argv),
+        _process_isolated_argv(argv, **isolation_limits),
         cwd=cwd,
         stdin=subprocess.PIPE if input_text is not None else None,
         stdout=subprocess.PIPE,
@@ -730,8 +1006,8 @@ def _run_bounded_process(
         shell=False,
         start_new_session=True,
     )
-    capture = _BoundedProcessCapture(output_limit_bytes, output_callback=output_callback)
-    capture.start(process)
+    process_identity = _process_identity(process.pid)
+    capture: _BoundedProcessCapture | None = None
     input_thread: threading.Thread | None = None
 
     def deliver_input() -> None:
@@ -749,6 +1025,14 @@ def _run_bounded_process(
                 pass
 
     try:
+        if process_binding_started is not None:
+            process_binding_started(process, process_token)
+        capture = _BoundedProcessCapture(
+            output_limit_bytes,
+            output_callback=output_callback,
+        )
+        capture.start(process)
+        assert capture is not None
         if process_started is not None:
             process_started(process)
         started = time.monotonic()
@@ -756,6 +1040,7 @@ def _run_bounded_process(
             input_thread = threading.Thread(target=deliver_input, daemon=True)
             input_thread.start()
         exit_status: int | None = None
+        bounded_outcome = ""
         extra_stderr = ""
         leader_exited_at: float | None = None
         while True:
@@ -765,20 +1050,34 @@ def _run_bounded_process(
                 leader_exited_at = now
             if capture.exceeded.is_set():
                 exit_status = _PROCESS_OUTPUT_LIMIT_EXIT_STATUS
+                bounded_outcome = "output-limit"
                 extra_stderr = (
                     "Process output exceeded the "
                     f"{output_limit_bytes}-byte aggregate limit and was terminated."
                 )
-                _terminate_process_group(process, process_token)
+                _terminate_process_group(
+                    process,
+                    process_token,
+                    process_identity,
+                )
                 break
             if now - started >= timeout_seconds:
                 exit_status = 124
+                bounded_outcome = "timed-out"
                 extra_stderr = f"Process timed out after {timeout_seconds} seconds."
-                _terminate_process_group(process, process_token)
+                _terminate_process_group(
+                    process,
+                    process_token,
+                    process_identity,
+                )
                 break
             if poll_callback is not None:
                 poll_callback()
-            group_live = _process_group_is_live(process, process_token)
+            group_live = _process_group_is_live(
+                process,
+                process_token,
+                process_identity,
+            )
             if (
                 leader_status is not None
                 and capture.drained.is_set()
@@ -787,26 +1086,36 @@ def _run_bounded_process(
                 break
             if (
                 leader_exited_at is not None
-                and now - leader_exited_at >= _PROCESS_DESCENDANT_GRACE_SECONDS
+                and now - leader_exited_at >= descendant_grace_seconds
             ):
                 exit_status = 124
+                bounded_outcome = "timed-out"
                 extra_stderr = (
                     "Process descendants timed out "
-                    f"{_PROCESS_DESCENDANT_GRACE_SECONDS} seconds after the leader "
+                    f"{descendant_grace_seconds} seconds after the leader "
                     "exited and were terminated."
                 )
-                _terminate_process_group(process, process_token)
+                _terminate_process_group(
+                    process,
+                    process_token,
+                    process_identity,
+                )
                 break
             time.sleep(0.02)
         if exit_status is not None:
             capture.wait_for_eof(1.0)
         if capture.exceeded.is_set():
             exit_status = _PROCESS_OUTPUT_LIMIT_EXIT_STATUS
+            bounded_outcome = "output-limit"
             extra_stderr = (
                 "Process output exceeded the "
                 f"{output_limit_bytes}-byte aggregate limit and was terminated."
             )
-            _terminate_process_group(process, process_token)
+            _terminate_process_group(
+                process,
+                process_token,
+                process_identity,
+            )
             capture.wait_for_eof(1.0)
         stdout, stderr = capture.finish(
             extra_stderr=extra_stderr,
@@ -823,17 +1132,31 @@ def _run_bounded_process(
             )
             if exit_status is None:
                 exit_status = _PROCESS_OUTPUT_LIMIT_EXIT_STATUS
+                bounded_outcome = "output-limit"
         if input_thread is not None:
             input_thread.join(timeout=1)
-        return subprocess.CompletedProcess(
+        completed = subprocess.CompletedProcess(
             argv,
             process.returncode if exit_status is None else exit_status,
             stdout,
             stderr,
         )
+        if bounded_outcome:
+            completed.albert_outcome = bounded_outcome
+        return completed
     except BaseException:
-        _terminate_process_group(process, process_token)
-        capture.finish()
+        try:
+            _terminate_process_group(
+                process,
+                process_token,
+                process_identity,
+            )
+        except BaseException:
+            # Preserve the original provider/cancellation exception when the
+            # cleanup probe itself is unavailable or contradictory.
+            pass
+        if capture is not None:
+            capture.finish()
         if input_thread is not None:
             input_thread.join(timeout=1)
         raise
@@ -850,6 +1173,108 @@ def _runtime_identity_path(path: Path) -> str:
     if re.match(r"^/mnt/[A-Za-z](?:/|$)", value):
         return value.casefold()
     return value
+
+
+def _host_normalized_path_parts(path: Path) -> tuple[str, ...]:
+    """Return conservative host-normalized parts for an already-bound path."""
+
+    candidate = PurePosixPath(_runtime_identity_path(path))
+    if sys.platform == "darwin":
+        return tuple(
+            unicodedata.normalize("NFD", part).casefold()
+            for part in candidate.parts
+        )
+    if os.name == "nt":
+        return tuple(part.casefold() for part in candidate.parts)
+    return candidate.parts
+
+
+def _path_is_within_boundary(path: Path, boundary: Path) -> bool:
+    """Compare one resolved path to a boundary using conservative host aliases."""
+
+    candidate_parts = _host_normalized_path_parts(path.resolve(strict=False))
+    root_parts = _host_normalized_path_parts(boundary.resolve(strict=False))
+    return candidate_parts[: len(root_parts)] == root_parts
+
+
+def _rename_directory_noreplace_at(
+    source_parent_fd: int,
+    source_name: str,
+    destination_parent_fd: int,
+    destination_name: str,
+) -> None:
+    """Atomically publish one sibling directory without replacement."""
+
+    if (
+        not source_name
+        or not destination_name
+        or Path(source_name).name != source_name
+        or Path(destination_name).name != destination_name
+    ):
+        raise AlbertError("Retirement export publication name is invalid.")
+    libc = ctypes.CDLL(None, use_errno=True)
+    source = os.fsencode(source_name)
+    destination = os.fsencode(destination_name)
+    if sys.platform.startswith("linux"):
+        renameat2 = getattr(libc, "renameat2", None)
+        if renameat2 is None:
+            raise AlbertError(
+                "Exclusive retirement export publication is unsupported on this host."
+            )
+        renameat2.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        renameat2.restype = ctypes.c_int
+        result = renameat2(
+            source_parent_fd,
+            source,
+            destination_parent_fd,
+            destination,
+            1,  # RENAME_NOREPLACE
+        )
+    elif sys.platform == "darwin":
+        renameatx_np = getattr(libc, "renameatx_np", None)
+        if renameatx_np is None:
+            raise AlbertError(
+                "Exclusive retirement export publication is unsupported on this host."
+            )
+        renameatx_np.argtypes = (
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        )
+        renameatx_np.restype = ctypes.c_int
+        result = renameatx_np(
+            source_parent_fd,
+            source,
+            destination_parent_fd,
+            destination,
+            0x00000004,  # RENAME_EXCL
+        )
+    else:
+        raise AlbertError(
+            "Exclusive retirement export publication is unsupported on this host."
+        )
+    if result == 0:
+        return
+    error_number = ctypes.get_errno()
+    if error_number in {errno.EEXIST, errno.ENOTEMPTY}:
+        raise FileExistsError(
+            error_number,
+            "Retirement export destination already exists.",
+            destination_name,
+        )
+    raise OSError(
+        error_number,
+        os.strerror(error_number),
+        f"{source_name} -> {destination_name}",
+    )
 
 
 def _git_metadata_exists(root: Path) -> bool:
@@ -875,10 +1300,725 @@ def _positive_pid(value: Any) -> int | None:
     return None
 
 
+def _optional_positive_pid(data: dict[str, Any], field_name: str) -> int | None:
+    if field_name not in data or data[field_name] is None:
+        return None
+    value = data[field_name]
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise AlbertError(f"Local Agent session {field_name} is invalid")
+    return value
+
+
+def _optional_session_string(data: dict[str, Any], field_name: str) -> str:
+    if field_name not in data:
+        return ""
+    value = data[field_name]
+    if not isinstance(value, str):
+        raise AlbertError(f"Local Agent session {field_name} is invalid")
+    return value
+
+
+def _optional_nonnegative_int(data: dict[str, Any], field_name: str) -> int:
+    if field_name not in data:
+        return 0
+    value = data[field_name]
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise AlbertError(f"Local Agent session {field_name} is invalid")
+    return value
+
+
+def _validated_preservation_budget(raw: Any) -> dict[str, Any]:
+    if raw is None:
+        return {
+            "schema_version": _RETIREMENT_UNIT_SCHEMA_VERSION,
+            "state": "reserved",
+            "bound": True,
+            "reserved_bytes": _PRESERVATION_BUDGET_BYTES,
+            "reserved_at": "legacy-migration",
+        }
+    if not isinstance(raw, dict):
+        raise AlbertError("Local Agent Preservation Budget is invalid")
+    if (
+        raw.get("schema_version") != _RETIREMENT_UNIT_SCHEMA_VERSION
+        or raw.get("state") not in {"reserved", "verified", "discarded"}
+        or not isinstance(raw.get("bound"), bool)
+        or not isinstance(raw.get("reserved_bytes"), int)
+        or isinstance(raw.get("reserved_bytes"), bool)
+        or raw["reserved_bytes"] <= 0
+        or not isinstance(raw.get("reserved_at"), str)
+        or not raw["reserved_at"].strip()
+        or (raw["state"] == "reserved" and raw["bound"] is not True)
+        or (raw["state"] in {"verified", "discarded"} and raw["bound"] is not False)
+    ):
+        raise AlbertError("Local Agent Preservation Budget is invalid")
+    verified_at = raw.get("verified_at")
+    if verified_at is not None and (
+        not isinstance(verified_at, str) or not verified_at.strip()
+    ):
+        raise AlbertError("Local Agent Preservation Budget verification is invalid")
+    return dict(raw)
+
+
+def _validated_snapshot_payload_record(raw: Any) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise AlbertError("Snapshot Payload record is invalid")
+    if not raw:
+        return {}
+    if raw.get("schema_version") != _RETIREMENT_UNIT_SCHEMA_VERSION:
+        raise AlbertError(
+            "Snapshot Payload record is invalid: Retirement Snapshot unit boundary "
+            "schema does not match."
+        )
+    required_strings = (
+        "manifest_path",
+        "manifest_sha256",
+        "payload_path",
+        "worktree_identity",
+    )
+    required_sizes = ("payload_bytes", "manifest_bytes", "snapshot_bytes")
+    if (
+        raw.get("verified") is not True
+        or any(
+            not isinstance(raw.get(field_name), str)
+            or not raw[field_name].strip()
+            for field_name in required_strings
+        )
+        or not re.fullmatch(r"[0-9a-f]{64}", raw["manifest_sha256"])
+        or any(
+            not isinstance(raw.get(field_name), int)
+            or isinstance(raw.get(field_name), bool)
+            or raw[field_name] < 0
+            for field_name in required_sizes
+        )
+        or raw["snapshot_bytes"]
+        != raw["payload_bytes"] + raw["manifest_bytes"]
+        or not isinstance(raw.get("session_revision"), int)
+        or isinstance(raw.get("session_revision"), bool)
+        or raw["session_revision"] < 0
+    ):
+        raise AlbertError("Snapshot Payload record is invalid")
+    payload_path = Path(raw["payload_path"])
+    manifest_path = Path(raw["manifest_path"])
+    if (
+        not payload_path.is_absolute()
+        or not manifest_path.is_absolute()
+        or manifest_path != payload_path / "manifest.json"
+    ):
+        raise AlbertError("Snapshot Payload record is invalid")
+
+    storage_fields = {
+        "mission_id",
+        "session_id",
+        "terminal_status",
+        "created_at",
+        "expires_at",
+        "pinned",
+        "payload_disposition",
+        "reclaimed_at",
+        "reclamation_reason",
+    }
+    if storage_fields.intersection(raw):
+        if (
+            not storage_fields.issubset(raw)
+            or any(
+                not isinstance(raw.get(field_name), str)
+                or not raw[field_name].strip()
+                for field_name in (
+                    "mission_id",
+                    "session_id",
+                    "terminal_status",
+                    "created_at",
+                    "expires_at",
+                )
+            )
+            or not isinstance(raw.get("pinned"), bool)
+            or raw.get("payload_disposition") not in {"retained", "reclaimed"}
+            or not isinstance(raw.get("reclaimed_at"), str)
+            or not isinstance(raw.get("reclamation_reason"), str)
+        ):
+            raise AlbertError("Snapshot Payload record is invalid")
+        try:
+            created_at = datetime.fromisoformat(raw["created_at"])
+            expires_at = datetime.fromisoformat(raw["expires_at"])
+        except ValueError as exc:
+            raise AlbertError("Snapshot Payload record is invalid") from exc
+        if (
+            created_at.tzinfo is None
+            or expires_at.tzinfo is None
+            or expires_at < created_at
+            or (
+                raw["payload_disposition"] == "retained"
+                and (raw["reclaimed_at"] or raw["reclamation_reason"])
+            )
+            or (
+                raw["payload_disposition"] == "reclaimed"
+                and (
+                    raw["pinned"]
+                    or not raw["reclaimed_at"].strip()
+                    or not raw["reclamation_reason"].strip()
+                )
+            )
+        ):
+            raise AlbertError("Snapshot Payload record is invalid")
+        if raw["reclaimed_at"]:
+            try:
+                reclaimed_at = datetime.fromisoformat(raw["reclaimed_at"])
+            except ValueError as exc:
+                raise AlbertError("Snapshot Payload record is invalid") from exc
+            if reclaimed_at.tzinfo is None:
+                raise AlbertError("Snapshot Payload record is invalid")
+    return dict(raw)
+
+
+def _validated_retirement_action_receipt(
+    correlation_id: str,
+    raw: Any,
+) -> dict[str, Any]:
+    actions = {"snapshot-pin", "export", "retry", "discard"}
+    if (
+        not isinstance(correlation_id, str)
+        or not correlation_id.strip()
+        or not isinstance(raw, dict)
+        or raw.get("action") not in actions
+        or not isinstance(raw.get("expected_revision"), int)
+        or isinstance(raw.get("expected_revision"), bool)
+        or raw["expected_revision"] < 0
+        or not isinstance(raw.get("result_revision"), int)
+        or isinstance(raw.get("result_revision"), bool)
+        or raw["result_revision"] <= raw["expected_revision"]
+        or not isinstance(raw.get("recorded_at"), str)
+        or not raw["recorded_at"].strip()
+        or any(
+            not isinstance(raw.get(field_name), str)
+            or not raw[field_name].strip()
+            for field_name in ("mission_id", "session_id")
+        )
+    ):
+        raise AlbertError("Retirement Unit action receipt is invalid")
+    try:
+        recorded_at = datetime.fromisoformat(raw["recorded_at"])
+    except ValueError as exc:
+        raise AlbertError("Retirement Unit action receipt is invalid") from exc
+    if recorded_at.tzinfo is None:
+        raise AlbertError("Retirement Unit action receipt is invalid")
+    action = raw["action"]
+    if action == "snapshot-pin" and not isinstance(raw.get("pinned"), bool):
+        raise AlbertError("Retirement Unit action receipt is invalid")
+    if action == "export" and (
+        not isinstance(raw.get("destination"), str)
+        or not Path(raw["destination"]).is_absolute()
+        or not isinstance(raw.get("manifest_sha256"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", raw["manifest_sha256"])
+    ):
+        raise AlbertError("Retirement Unit action receipt is invalid")
+    if action == "retry" and raw.get("result_phase") not in {
+        "preserved",
+        "grace",
+        "retiring",
+        "preservation-blocked",
+        "retirement-blocked",
+        "retired",
+    }:
+        raise AlbertError("Retirement Unit action receipt is invalid")
+    if action == "discard" and any(
+        not isinstance(raw.get(field_name), str) or not raw[field_name].strip()
+        for field_name in ("confirmation", "reason")
+    ):
+        raise AlbertError("Retirement Unit action receipt is invalid")
+    return dict(raw)
+
+
+def _validated_retirement_unit(raw: Any) -> dict[str, Any]:
+    if raw is None:
+        return {
+            "schema_version": _RETIREMENT_UNIT_SCHEMA_VERSION,
+            "phase": "active",
+            "runner_boundary": {},
+            "snapshot": {},
+            "preservation_intent": {},
+            "preservation_receipt": {},
+            "blocked_reason": "",
+            "retirement_attempts": 0,
+            "removal_kind": "",
+            "retired_at": "",
+            "action_receipts": {},
+        }
+    if not isinstance(raw, dict):
+        raise AlbertError("Local Agent Retirement Unit state is invalid")
+    if (
+        raw.get("schema_version") != _RETIREMENT_UNIT_SCHEMA_VERSION
+        or raw.get("phase")
+        not in {
+            "active",
+            "preserving",
+            "preserved",
+            "grace",
+            "retiring",
+            "retired",
+            "preservation-blocked",
+            "retirement-blocked",
+        }
+        or not isinstance(raw.get("runner_boundary"), dict)
+        or not isinstance(raw.get("snapshot"), dict)
+        or not isinstance(raw.get("preservation_intent", {}), dict)
+        or not isinstance(raw.get("preservation_receipt", {}), dict)
+        or not isinstance(raw.get("action_receipts", {}), dict)
+        or not all(
+            isinstance(correlation_id, str)
+            and correlation_id.strip()
+            and isinstance(receipt, dict)
+            for correlation_id, receipt in raw.get("action_receipts", {}).items()
+        )
+        or not isinstance(raw.get("discard_intent", {}), dict)
+        or not isinstance(raw.get("export_intent", {}), dict)
+        or not isinstance(raw.get("retry_intent", {}), dict)
+        or not isinstance(raw.get("blocked_reason"), str)
+    ):
+        raise AlbertError("Local Agent Retirement Unit state is invalid")
+    retirement_attempts = raw.get("retirement_attempts", 0)
+    if (
+        not isinstance(retirement_attempts, int)
+        or isinstance(retirement_attempts, bool)
+        or retirement_attempts < 0
+        or retirement_attempts > 3
+        or not isinstance(raw.get("removal_kind", ""), str)
+        or not isinstance(raw.get("retired_at", ""), str)
+    ):
+        raise AlbertError("Local Agent Retirement Unit state is invalid")
+    runner_boundary = raw["runner_boundary"]
+    for field_name in (
+        "runner_operation_id",
+        "owner_identity",
+        "process_group_identity",
+        "process_token",
+        "owner_released_at",
+        "owner_release_operation_id",
+        "owner_lease_path",
+        "owner_lease_token",
+        "mission_id",
+        "session_id",
+    ):
+        if field_name in runner_boundary and not isinstance(
+            runner_boundary[field_name], str
+        ):
+            raise AlbertError("Local Agent Retirement Unit runner boundary is invalid")
+    for field_name in ("owner_pid", "process_group_pid"):
+        if field_name in runner_boundary and runner_boundary[field_name] is not None:
+            value = runner_boundary[field_name]
+            if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+                raise AlbertError(
+                    "Local Agent Retirement Unit runner boundary is invalid"
+                )
+    intent = raw.get("preservation_intent", {})
+    snapshot = _validated_snapshot_payload_record(raw["snapshot"])
+    if raw["phase"] in {
+        "preserved",
+        "grace",
+        "retiring",
+        "retirement-blocked",
+    } and not snapshot:
+        raise AlbertError("Preserved Retirement Unit snapshot is missing")
+    if raw["phase"] == "preserving" and not intent:
+        raise AlbertError("Preserving Retirement Unit intent is missing")
+    if raw["phase"] == "grace":
+        for field_name in ("grace_started_at", "grace_expires_at"):
+            value = raw.get(field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise AlbertError("Retirement Unit grace boundary is invalid")
+            try:
+                parsed = datetime.fromisoformat(value)
+            except ValueError as exc:
+                raise AlbertError("Retirement Unit grace boundary is invalid") from exc
+            if parsed.tzinfo is None:
+                raise AlbertError("Retirement Unit grace boundary is invalid")
+    if raw["phase"] in {"retiring", "retired"} and raw.get(
+        "removal_kind", ""
+    ) not in {
+        "git-worktree",
+        "git-registration",
+        "managed-directory",
+        "managed-absence",
+        "retained-worktree-discard",
+    }:
+        raise AlbertError("Retirement Unit removal boundary is invalid")
+    if raw["phase"] == "retired" and (
+        not isinstance(raw.get("retired_at"), str) or not raw["retired_at"].strip()
+    ):
+        raise AlbertError("Retirement Unit retired boundary is invalid")
+    receipt = raw.get("preservation_receipt", {})
+    if intent and (
+        not isinstance(intent.get("correlation_id"), str)
+        or not intent["correlation_id"].strip()
+        or not isinstance(intent.get("expected_revision"), int)
+        or isinstance(intent.get("expected_revision"), bool)
+        or intent["expected_revision"] < 0
+        or not isinstance(intent.get("claim_revision"), int)
+        or isinstance(intent.get("claim_revision"), bool)
+        or intent["claim_revision"] < 0
+    ):
+        raise AlbertError("Retirement Unit preservation intent is invalid")
+    if receipt and (
+        not isinstance(receipt.get("correlation_id"), str)
+        or not receipt["correlation_id"].strip()
+        or not isinstance(receipt.get("expected_revision"), int)
+        or isinstance(receipt.get("expected_revision"), bool)
+        or receipt["expected_revision"] < 0
+        or not isinstance(receipt.get("result_revision"), int)
+        or isinstance(receipt.get("result_revision"), bool)
+        or receipt["result_revision"] < 0
+        or not isinstance(receipt.get("manifest_sha256"), str)
+        or not receipt["manifest_sha256"]
+    ):
+        raise AlbertError("Retirement Unit preservation receipt is invalid")
+    discard_intent = raw.get("discard_intent", {})
+    discard_manifest: dict[str, Any] | None = None
+    if discard_intent.get("discard_kind") == "retained-worktree":
+        try:
+            discard_manifest = (
+                RetirementSnapshotStore.validated_retained_worktree_manifest(
+                    discard_intent.get("tree_manifest")
+                )
+            )
+        except RetirementSnapshotError as exc:
+            raise AlbertError("Retained Worktree Discard intent is invalid") from exc
+    if discard_intent and (
+        any(
+            not isinstance(discard_intent.get(field_name), str)
+            or not discard_intent[field_name].strip()
+            for field_name in ("correlation_id", "confirmation", "reason")
+        )
+        or not isinstance(discard_intent.get("expected_revision"), int)
+        or isinstance(discard_intent.get("expected_revision"), bool)
+        or discard_intent["expected_revision"] < 0
+        or not isinstance(discard_intent.get("claim_revision"), int)
+        or isinstance(discard_intent.get("claim_revision"), bool)
+        or discard_intent["claim_revision"] < 0
+        or discard_intent.get("discard_kind", "snapshot-backed")
+        not in {"snapshot-backed", "retained-worktree", "managed-absence"}
+        or (
+            discard_intent.get("discard_kind") == "retained-worktree"
+            and (
+                not isinstance(discard_intent.get("tree_sha256"), str)
+                or not re.fullmatch(r"[0-9a-f]{64}", discard_intent["tree_sha256"])
+                or any(
+                    not isinstance(discard_intent.get(field_name), int)
+                    or isinstance(discard_intent.get(field_name), bool)
+                    or discard_intent[field_name] < 0
+                    for field_name in ("root_device", "root_inode")
+                )
+                or not isinstance(
+                    discard_intent.get("exclude_git_metadata"), bool
+                )
+                or discard_intent.get("direct_removal_kind")
+                not in {"git-worktree", "managed-directory"}
+                or not isinstance(
+                    discard_intent.get("remove_git_registration"), bool
+                )
+                or discard_manifest is None
+                or discard_manifest["tree_sha256"]
+                != discard_intent.get("tree_sha256")
+            )
+        )
+    ):
+        raise AlbertError("Retained Worktree Discard intent is invalid")
+    export_intent = raw.get("export_intent", {})
+    legacy_export_intent = bool(
+        export_intent
+        and set(export_intent) == _RETIREMENT_EXPORT_LEGACY_INTENT_FIELDS
+    )
+    export_intent_fields = {
+        "claim_revision",
+        "correlation_id",
+        "destination",
+        "destination_lock_sha256",
+        "destination_name",
+        "destination_parent",
+        "expected_revision",
+        "export_kind",
+        "claimed_at",
+        "manifest_sha256",
+        "parent_device",
+        "parent_inode",
+        "runtime_root",
+        "runtime_root_device",
+        "runtime_root_inode",
+        "source_boundary",
+        "source_device",
+        "source_inode",
+        "source_present",
+        "stage_attempt",
+        "stage_anchor_device",
+        "stage_anchor_inode",
+        "stage_name",
+        "stage_root_device",
+        "stage_root_inode",
+        "stage_state",
+    }
+    if legacy_export_intent and (
+        any(
+            not isinstance(export_intent.get(field_name), str)
+            or not export_intent[field_name].strip()
+            for field_name in (
+                "correlation_id",
+                "destination",
+                "manifest_sha256",
+            )
+        )
+        or not Path(export_intent["destination"]).is_absolute()
+        or not re.fullmatch(r"[0-9a-f]{64}", export_intent["manifest_sha256"])
+        or not isinstance(export_intent.get("expected_revision"), int)
+        or isinstance(export_intent.get("expected_revision"), bool)
+        or export_intent["expected_revision"] < 0
+        or not isinstance(export_intent.get("claim_revision"), int)
+        or isinstance(export_intent.get("claim_revision"), bool)
+        or export_intent["claim_revision"] < 0
+        or export_intent.get("export_kind")
+        not in {"snapshot-payload", "retained-worktree"}
+    ):
+        raise AlbertError("Retirement export intent is invalid")
+    if export_intent and not legacy_export_intent and (
+        set(export_intent) != export_intent_fields
+        or any(
+            not isinstance(export_intent.get(field_name), str)
+            or not export_intent[field_name].strip()
+            for field_name in (
+                "correlation_id",
+                "destination",
+                "destination_lock_sha256",
+                "destination_name",
+                "destination_parent",
+                "claimed_at",
+                "manifest_sha256",
+                "runtime_root",
+                "source_boundary",
+                "stage_name",
+            )
+        )
+        or not Path(export_intent["destination"]).is_absolute()
+        or not Path(export_intent["destination_parent"]).is_absolute()
+        or not Path(export_intent["runtime_root"]).is_absolute()
+        or not Path(export_intent["source_boundary"]).is_absolute()
+        or Path(export_intent["destination"]).parent
+        != Path(export_intent["destination_parent"])
+        or Path(export_intent["destination"]).name
+        != export_intent["destination_name"]
+        or Path(export_intent["destination_name"]).name
+        != export_intent["destination_name"]
+        or not re.fullmatch(
+            r"\.alfredo-retirement-export\.[0-9a-f]{32}\.stage",
+            export_intent["stage_name"],
+        )
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", export_intent["destination_lock_sha256"]
+        )
+        or not re.fullmatch(r"[0-9a-f]{64}", export_intent["manifest_sha256"])
+        or not isinstance(export_intent.get("expected_revision"), int)
+        or isinstance(export_intent.get("expected_revision"), bool)
+        or export_intent["expected_revision"] < 0
+        or not isinstance(export_intent.get("claim_revision"), int)
+        or isinstance(export_intent.get("claim_revision"), bool)
+        or export_intent["claim_revision"] < 0
+        or export_intent.get("export_kind")
+        not in {"snapshot-payload", "retained-worktree"}
+        or any(
+            not isinstance(export_intent.get(field_name), int)
+            or isinstance(export_intent.get(field_name), bool)
+            or export_intent[field_name] < 0
+            for field_name in (
+                "parent_device",
+                "runtime_root_device",
+                "source_device",
+                "stage_anchor_device",
+                "stage_root_device",
+            )
+        )
+        or any(
+            not isinstance(export_intent.get(field_name), int)
+            or isinstance(export_intent.get(field_name), bool)
+            or export_intent[field_name] <= 0
+            for field_name in (
+                "parent_inode",
+                "runtime_root_inode",
+            )
+        )
+        or not isinstance(export_intent.get("stage_anchor_inode"), int)
+        or isinstance(export_intent.get("stage_anchor_inode"), bool)
+        or export_intent["stage_anchor_inode"] < 0
+        or not isinstance(export_intent.get("stage_root_inode"), int)
+        or isinstance(export_intent.get("stage_root_inode"), bool)
+        or export_intent["stage_root_inode"] < 0
+        or not isinstance(export_intent.get("source_inode"), int)
+        or isinstance(export_intent.get("source_inode"), bool)
+        or export_intent["source_inode"] < 0
+        or not isinstance(export_intent.get("source_present"), bool)
+        or export_intent["source_present"]
+        != (export_intent["source_inode"] > 0)
+        or not isinstance(export_intent.get("stage_attempt"), int)
+        or isinstance(export_intent.get("stage_attempt"), bool)
+        or not 1
+        <= export_intent["stage_attempt"]
+        <= _RETIREMENT_EXPORT_STAGE_ATTEMPT_LIMIT
+        or export_intent.get("stage_state") not in {"reserved", "bound"}
+        or (
+            export_intent["stage_state"] == "reserved"
+            and any(
+                export_intent[field_name] != 0
+                for field_name in (
+                    "stage_anchor_device",
+                    "stage_anchor_inode",
+                    "stage_root_device",
+                    "stage_root_inode",
+                )
+            )
+        )
+        or (
+            export_intent["stage_state"] == "bound"
+            and (
+                export_intent["stage_anchor_inode"] <= 0
+                or export_intent["stage_root_inode"] <= 0
+            )
+        )
+    ):
+        raise AlbertError("Retirement export intent is invalid")
+    if export_intent and not legacy_export_intent:
+        try:
+            export_started_at = datetime.fromisoformat(export_intent["claimed_at"])
+        except ValueError as exc:
+            raise AlbertError("Retirement export intent is invalid") from exc
+        if export_started_at.tzinfo is None:
+            raise AlbertError("Retirement export intent is invalid")
+    retry_intent = raw.get("retry_intent", {})
+    if retry_intent and (
+        not isinstance(retry_intent.get("correlation_id"), str)
+        or not retry_intent["correlation_id"].strip()
+        or retry_intent.get("origin_phase")
+        not in {"preservation-blocked", "retirement-blocked"}
+        or not isinstance(retry_intent.get("expected_revision"), int)
+        or isinstance(retry_intent.get("expected_revision"), bool)
+        or retry_intent["expected_revision"] < 0
+        or not isinstance(retry_intent.get("claim_revision"), int)
+        or isinstance(retry_intent.get("claim_revision"), bool)
+        or retry_intent["claim_revision"] < 0
+    ):
+        raise AlbertError("Retirement retry intent is invalid")
+    action_receipts = {
+        correlation_id: _validated_retirement_action_receipt(
+            correlation_id,
+            action_receipt,
+        )
+        for correlation_id, action_receipt in raw.get("action_receipts", {}).items()
+    }
+    validated = dict(raw)
+    validated["snapshot"] = snapshot
+    validated["action_receipts"] = action_receipts
+    return validated
+
+
+def _validated_runner_result(data: dict[str, Any]) -> dict[str, Any]:
+    raw = data.get("runner_result", {})
+    if not isinstance(raw, dict):
+        raise AlbertError("Local Agent session runner_result is invalid")
+    if not raw:
+        return {}
+    required_strings = (
+        "mission_id",
+        "session_id",
+        "runner_operation_id",
+        "worktree_identity",
+        "status",
+        "runner_ended_at",
+        "evidence_correlation_id",
+        "digest",
+    )
+    if any(
+        not isinstance(raw.get(field_name), str)
+        for field_name in required_strings
+    ):
+        raise AlbertError("Local Agent session runner_result boundary is invalid")
+    if not all(
+        raw[field_name].strip()
+        for field_name in (
+            "mission_id",
+            "session_id",
+            "runner_operation_id",
+            "worktree_identity",
+            "status",
+            "runner_ended_at",
+            "digest",
+        )
+    ):
+        raise AlbertError("Local Agent session runner_result identity is invalid")
+    exit_status = raw.get("runner_exit_status")
+    evidence = raw.get("evidence")
+    artifacts = raw.get("artifacts")
+    if (
+        (exit_status is not None and (
+            not isinstance(exit_status, int) or isinstance(exit_status, bool)
+        ))
+        or not isinstance(raw.get("evidence_valid"), bool)
+        or (evidence is not None and not isinstance(evidence, dict))
+        or not isinstance(artifacts, dict)
+        or any(
+            not isinstance(key, str) or not isinstance(value, str)
+            for key, value in artifacts.items()
+        )
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", raw["digest"])
+    ):
+        raise AlbertError("Local Agent session runner_result payload is invalid")
+    if raw["status"] not in {"completed", "evidence-ready", "failed"}:
+        raise AlbertError("Local Agent session runner_result status is invalid")
+    if (
+        raw["session_id"] != data.get("session_id")
+        or raw["runner_operation_id"] != data.get("runner_operation_id")
+        or raw["worktree_identity"] != data.get("worktree_identity")
+    ):
+        raise AlbertError("Local Agent session runner_result boundary is invalid")
+    digest_payload = {key: value for key, value in raw.items() if key != "digest"}
+    expected_digest = "sha256:" + sha256(
+        json.dumps(
+            digest_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if raw["digest"] != expected_digest:
+        raise AlbertError("Local Agent session runner_result digest is invalid")
+    return dict(raw)
+
+
+def _validated_execution_receipts(data: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = data.get("execution_receipts", [])
+    if not isinstance(raw, list) or len(raw) > _EXECUTION_RECEIPT_HISTORY_LIMIT:
+        raise AlbertError("Local Agent execution receipt history is invalid")
+    receipts: list[dict[str, Any]] = []
+    seen_request_ids: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            raise AlbertError("Local Agent execution receipt history is invalid")
+        if "stdout" in item or "stderr" in item:
+            raise AlbertError(
+                "Local Agent execution receipt history must not contain raw output"
+            )
+        try:
+            receipt = ExecutionReceipt.from_dict(item)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AlbertError("Local Agent execution receipt is invalid") from exc
+        if receipt.effect != "local-agent" or receipt.status == "executing":
+            raise AlbertError("Local Agent execution receipt authority is invalid")
+        if receipt.request_id in seen_request_ids:
+            raise AlbertError("Local Agent execution receipt identity is duplicated")
+        seen_request_ids.add(receipt.request_id)
+        receipts.append(receipt.to_dict(include_output=False))
+    return receipts
+
+
 def _process_identity(pid: int) -> str:
-    """Return a Linux PID start identity so PID reuse cannot impersonate a runner."""
+    """Return a PID start identity so PID reuse cannot impersonate a runner."""
     if pid <= 0:
         return ""
+    if sys.platform == "darwin":
+        state, identity = _darwin_process_identity_probe(pid)
+        return identity if state == "live" else ""
     stat_path = Path(f"/proc/{pid}/stat")
     try:
         remainder = stat_path.read_text(encoding="utf-8").rsplit(")", 1)[1].split()
@@ -926,6 +2066,11 @@ def sandboxed_process_argv(
     writable_roots: tuple[Path, ...] = (),
     readonly_bindings: tuple[tuple[Path, Path], ...] = (),
     allow_implicit_executable_bindings: bool = True,
+    path: str | None = None,
+    address_space_bytes: int = _PROCESS_ADDRESS_SPACE_BYTES_LIMIT,
+    file_size_bytes: int = _PROCESS_FILE_SIZE_BYTES_LIMIT,
+    open_file_limit: int = _PROCESS_OPEN_FILE_LIMIT,
+    process_count_limit: int = _PROCESS_COUNT_LIMIT,
 ) -> tuple[str | list[str], bool]:
     """Wrap a child command in a minimal bubblewrap filesystem view."""
     if os.name != "posix" or not isinstance(argv, list):
@@ -933,7 +2078,17 @@ def sandboxed_process_argv(
     bubblewrap = _trusted_system_executable("bwrap")
     if not bubblewrap:
         return argv, False
-    bounded_argv = _resource_bounded_process_argv(argv)
+    if any(_is_protected_writable_path(str(path)) for path in writable_roots):
+        raise AlbertError(
+            "Writable process roots cannot override protected sandbox roots."
+        )
+    bounded_argv = _resource_bounded_process_argv(
+        argv,
+        address_space_bytes=address_space_bytes,
+        file_size_bytes=file_size_bytes,
+        open_file_limit=open_file_limit,
+        process_count_limit=process_count_limit,
+    )
     assert isinstance(bounded_argv, list)
     command = [
         bubblewrap,
@@ -957,21 +2112,17 @@ def sandboxed_process_argv(
         "/tmp",
         ]
     )
-    executable = shutil.which(argv[0]) if argv else None
+    executable = shutil.which(argv[0], path=path) if argv else None
     executable_bindings: set[tuple[Path, Path]] = set()
     if executable:
         executable_entry = Path(executable).absolute()
-        if executable_entry.is_relative_to(Path("/tmp")):
+        if _is_under_private_tmp(executable_entry):
             if executable_entry.is_symlink():
                 raise AlbertError(
                     f"Executable {executable_entry} under /tmp must not be a symlink."
                 )
-            resolved_tmp = Path("/tmp").resolve()
             executable_path = executable_entry.resolve()
-            if not (
-                executable_path == resolved_tmp
-                or executable_path.is_relative_to(resolved_tmp)
-            ):
+            if not _is_under_private_tmp(executable_path):
                 raise AlbertError(
                     f"Executable {executable_entry} must resolve inside /tmp."
                 )
@@ -996,23 +2147,19 @@ def sandboxed_process_argv(
             if token.startswith("-"):
                 continue
             candidate = Path(token)
-            if candidate.is_absolute() and candidate.is_relative_to(Path("/tmp")):
+            if candidate.is_absolute() and _is_under_private_tmp(candidate):
                 candidate_entry = candidate.absolute()
                 if candidate_entry.is_symlink():
                     raise AlbertError(
                         f"Interpreter script {candidate_entry} under /tmp must not be a symlink."
                     )
                 candidate_source = candidate_entry.resolve()
-                resolved_tmp = Path("/tmp").resolve()
-                if not (
-                    candidate_source == resolved_tmp
-                    or candidate_source.is_relative_to(resolved_tmp)
-                ):
+                if not _is_under_private_tmp(candidate_source):
                     raise AlbertError(
                         f"Interpreter script {candidate_entry} must resolve inside /tmp."
                     )
                 if candidate_source.exists():
-                    if not candidate_source.is_file():
+                    if not candidate_source.is_file() or candidate_source.is_symlink():
                         raise AlbertError(
                             f"Interpreter script {candidate_entry} must be a regular file."
                         )
@@ -1239,8 +2386,43 @@ class LocalAgentSession:
     runner_pid: int | None = None
     runner_identity: str = ""
     runner_process_pid: int | None = None
+    runner_process_identity: str = ""
+    runner_process_token: str = ""
+    runner_operation_id: str = ""
+    worktree_identity: str = ""
+    revision: int = 0
+    automatic_recovery_count: int = 0
+    supervision_receipt_id: str = ""
+    runner_result: dict[str, Any] = field(default_factory=dict)
+    execution_receipts: list[dict[str, Any]] = field(default_factory=list)
     cancel_requested_at: str = ""
     cancel_reason: str = ""
+    preservation_budget: dict[str, Any] = field(default_factory=dict)
+    retirement: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not self.preservation_budget:
+            self.preservation_budget = {
+                "schema_version": _RETIREMENT_UNIT_SCHEMA_VERSION,
+                "state": "reserved",
+                "bound": True,
+                "reserved_bytes": _PRESERVATION_BUDGET_BYTES,
+                "reserved_at": _utc_now(),
+            }
+        if not self.retirement:
+            self.retirement = {
+                "schema_version": _RETIREMENT_UNIT_SCHEMA_VERSION,
+                "phase": "active",
+                "runner_boundary": {},
+                "snapshot": {},
+                "preservation_intent": {},
+                "preservation_receipt": {},
+                "blocked_reason": "",
+                "retirement_attempts": 0,
+                "removal_kind": "",
+                "retired_at": "",
+                "action_receipts": {},
+            }
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1263,8 +2445,19 @@ class LocalAgentSession:
             "runner_pid": self.runner_pid,
             "runner_identity": self.runner_identity,
             "runner_process_pid": self.runner_process_pid,
+            "runner_process_identity": self.runner_process_identity,
+            "runner_process_token": self.runner_process_token,
+            "runner_operation_id": self.runner_operation_id,
+            "worktree_identity": self.worktree_identity,
+            "revision": self.revision,
+            "automatic_recovery_count": self.automatic_recovery_count,
+            "supervision_receipt_id": self.supervision_receipt_id,
+            "runner_result": self.runner_result,
+            "execution_receipts": self.execution_receipts,
             "cancel_requested_at": self.cancel_requested_at,
             "cancel_reason": self.cancel_reason,
+            "preservation_budget": self.preservation_budget,
+            "retirement": self.retirement,
         }
 
     @classmethod
@@ -1277,7 +2470,9 @@ class LocalAgentSession:
             and not data.get("evidence")
         ):
             status = "queued"
-        return cls(
+        runner_result = _validated_runner_result(data)
+        execution_receipts = _validated_execution_receipts(data)
+        session = cls(
             session_id=data["session_id"],
             issue_id=data["issue_id"],
             assigned_agent=data["assigned_agent"],
@@ -1294,11 +2489,121 @@ class LocalAgentSession:
             runner_ended_at=data.get("runner_ended_at", ""),
             repository_snapshot=dict(data.get("repository_snapshot", {})),
             baseline_fingerprints=dict(data.get("baseline_fingerprints", {})),
-            runner_pid=_positive_pid(data.get("runner_pid")),
-            runner_identity=str(data.get("runner_identity", "")),
-            runner_process_pid=_positive_pid(data.get("runner_process_pid")),
+            runner_pid=_optional_positive_pid(data, "runner_pid"),
+            runner_identity=_optional_session_string(data, "runner_identity"),
+            runner_process_pid=_optional_positive_pid(data, "runner_process_pid"),
+            runner_process_identity=_optional_session_string(
+                data,
+                "runner_process_identity",
+            ),
+            runner_process_token=_optional_session_string(
+                data,
+                "runner_process_token",
+            ),
+            runner_operation_id=_optional_session_string(
+                data,
+                "runner_operation_id",
+            ),
+            worktree_identity=_optional_session_string(data, "worktree_identity"),
+            revision=_optional_nonnegative_int(data, "revision"),
+            automatic_recovery_count=_optional_nonnegative_int(
+                data,
+                "automatic_recovery_count",
+            ),
+            supervision_receipt_id=_optional_session_string(
+                data,
+                "supervision_receipt_id",
+            ),
+            runner_result=runner_result,
+            execution_receipts=execution_receipts,
             cancel_requested_at=str(data.get("cancel_requested_at", "")),
             cancel_reason=str(data.get("cancel_reason", "")),
+            preservation_budget=_validated_preservation_budget(
+                data.get("preservation_budget")
+            ),
+            retirement=_validated_retirement_unit(data.get("retirement")),
+        )
+        receipt = session.retirement.get("preservation_receipt", {})
+        snapshot = session.retirement.get("snapshot", {})
+        retirement_phase = session.retirement.get("phase")
+        if receipt and (
+            retirement_phase
+            not in {"preserved", "grace", "retiring", "retired", "retirement-blocked"}
+            or (
+                retirement_phase == "preserved"
+                and (
+                    not isinstance(receipt.get("result_revision"), int)
+                    or receipt.get("result_revision") > session.revision
+                )
+            )
+            or receipt.get("manifest_sha256") != snapshot.get("manifest_sha256")
+        ):
+            raise AlbertError("Retirement Unit preservation receipt does not match its exact result.")
+        for action_receipt in session.retirement.get("action_receipts", {}).values():
+            if (
+                action_receipt["session_id"] != session.session_id
+                or action_receipt["result_revision"] > session.revision
+                or (
+                    action_receipt["action"] == "discard"
+                    and action_receipt["confirmation"] != session.session_id
+                )
+            ):
+                raise AlbertError("Retirement Unit action receipt is invalid")
+        return session
+
+
+@dataclass(frozen=True)
+class RunnerObservation:
+    source_id: str
+    source_incarnation: str
+    sequence: int
+    mission_id: str
+    session_id: str
+    session_revision: int
+    runner_operation_id: str
+    owner_signal: str
+    process_group_signal: str
+    worktree_identity: str
+    result_signal: str
+    result_digest: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "source_id": self.source_id,
+            "source_incarnation": self.source_incarnation,
+            "sequence": self.sequence,
+            "mission_id": self.mission_id,
+            "session_id": self.session_id,
+            "session_revision": self.session_revision,
+            "runner_operation_id": self.runner_operation_id,
+            "owner_signal": self.owner_signal,
+            "process_group_signal": self.process_group_signal,
+            "worktree_identity": self.worktree_identity,
+            "result_signal": self.result_signal,
+            "result_digest": self.result_digest,
+        }
+
+
+@dataclass(frozen=True)
+class SupervisionReceipt:
+    receipt_id: str
+    correlation_id: str
+    outcome: str
+    effect: str
+    mission_id: str
+    session_id: str
+    attention_id: str = ""
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SupervisionReceipt":
+        return cls(
+            receipt_id=str(data["receipt_id"]),
+            correlation_id=str(data["correlation_id"]),
+            outcome=str(data["outcome"]),
+            effect=str(data["effect"]),
+            mission_id=str(data["mission_id"]),
+            session_id=str(data["session_id"]),
+            attention_id=str(data.get("attention_id", "")),
         )
 
 
@@ -1391,6 +2696,15 @@ class AlbertMission:
         allow_empty_tracker: bool = False,
         issues_dir: Path | None = None,
         agent_availability_snapshot: dict[str, tuple[str, str]] | None = None,
+        retirement_quiescence_probe: (
+            Callable[[dict[str, Any]], tuple[str, str]] | None
+        ) = None,
+        retention_grace_seconds: int = _DEFAULT_RETENTION_GRACE_SECONDS,
+        snapshot_storage_retention_seconds: int = (
+            _DEFAULT_SNAPSHOT_STORAGE_RETENTION_SECONDS
+        ),
+        snapshot_storage_budget_bytes: int = _DEFAULT_SNAPSHOT_STORAGE_BUDGET_BYTES,
+        inference_opener: Callable[..., Any] | None = None,
     ):
         self.target_repo = target_repo.resolve()
         self.tracker_dir = tracker_dir.resolve()
@@ -1400,6 +2714,31 @@ class AlbertMission:
         self.agent_config_path = (agent_config_path or (self.target_repo / ".albert" / "agents.json")).resolve()
         self.allow_empty_tracker = allow_empty_tracker
         self.agent_availability_snapshot = agent_availability_snapshot
+        self.retirement_quiescence_probe = retirement_quiescence_probe
+        if (
+            not isinstance(retention_grace_seconds, int)
+            or isinstance(retention_grace_seconds, bool)
+            or retention_grace_seconds < 0
+        ):
+            raise AlbertError("Retention Grace Period must be a non-negative integer.")
+        self.retention_grace_seconds = retention_grace_seconds
+        if (
+            not isinstance(snapshot_storage_retention_seconds, int)
+            or isinstance(snapshot_storage_retention_seconds, bool)
+            or snapshot_storage_retention_seconds < 0
+        ):
+            raise AlbertError(
+                "Snapshot Payload retention must be a non-negative integer."
+            )
+        if (
+            not isinstance(snapshot_storage_budget_bytes, int)
+            or isinstance(snapshot_storage_budget_bytes, bool)
+            or snapshot_storage_budget_bytes <= 0
+        ):
+            raise AlbertError("Snapshot Storage Budget must be a positive integer.")
+        self.snapshot_storage_retention_seconds = snapshot_storage_retention_seconds
+        self.snapshot_storage_budget_bytes = snapshot_storage_budget_bytes
+        self.inference_opener = inference_opener
         identity_paths = [
             _runtime_identity_path(path)
             for path in (self.target_repo, self.tracker_dir, self.issues_dir)
@@ -1415,6 +2754,13 @@ class AlbertMission:
         self.delegations: dict[str, DelegationDecision] = {}
         self.command_policy: dict[str, str] = {}
         self.workstation_actions: dict[str, dict[str, Any]] = {}
+        self.archived_issue_ids: set[str] = set()
+        self.supervision: dict[str, Any] = self._empty_supervision_state()
+        self.retirement_storage: dict[str, Any] = (
+            self._empty_retirement_storage_state()
+        )
+        self.inference_turns: list[dict[str, Any]] = []
+        self._workspace_preferences_path: Path | None = None
         self.timeline: list[str] = []
         self.agent_registry = AgentRegistry(agents=[], source_path=self.agent_config_path)
         self._evidence_activity_recorder: (
@@ -1430,6 +2776,627 @@ class AlbertMission:
     @property
     def runtime_path(self) -> Path:
         return self.runtime_dir / "runtime.json"
+
+    @staticmethod
+    def _empty_supervision_state() -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "observers": {},
+            "attentions": {},
+            "intents": {},
+            "receipts": {},
+        }
+
+    @staticmethod
+    def _empty_retirement_storage_state() -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "reclamation_count": 0,
+            "reclaimed_bytes": 0,
+            "recent_reclamations": [],
+            "reclamation_intents": {},
+            "attention": {},
+        }
+
+    def _ensure_snapshot_storage_metadata(
+        self,
+        session: LocalAgentSession,
+    ) -> bool:
+        """Upgrade one verified pre-storage-policy record without weakening retention."""
+
+        snapshot = session.retirement.get("snapshot", {})
+        if not snapshot:
+            return False
+        if "mission_id" in snapshot:
+            if (
+                snapshot.get("mission_id") != self.mission_id
+                or snapshot.get("session_id") != session.session_id
+            ):
+                raise AlbertError("Snapshot Payload record authority is invalid")
+            return False
+
+        created_at: datetime | None = None
+        for candidate in (
+            session.preservation_budget.get("verified_at"),
+            session.preservation_budget.get("reserved_at"),
+        ):
+            if not isinstance(candidate, str):
+                continue
+            try:
+                parsed = datetime.fromisoformat(candidate)
+            except ValueError:
+                continue
+            if parsed.tzinfo is not None:
+                created_at = parsed.astimezone(timezone.utc)
+                break
+        if created_at is None:
+            try:
+                modified_at = Path(snapshot["manifest_path"]).stat().st_mtime
+            except OSError as exc:
+                raise AlbertError(
+                    "Legacy Snapshot Payload retention time cannot be established."
+                ) from exc
+            created_at = datetime.fromtimestamp(modified_at, tz=timezone.utc)
+        expires_at = datetime.fromtimestamp(
+            created_at.timestamp() + self.snapshot_storage_retention_seconds,
+            tz=timezone.utc,
+        )
+        snapshot.update(
+            {
+                "mission_id": self.mission_id,
+                "session_id": session.session_id,
+                "terminal_status": session.status,
+                "created_at": created_at.isoformat(),
+                "expires_at": expires_at.isoformat(),
+                "pinned": False,
+                "payload_disposition": "retained",
+                "reclaimed_at": "",
+                "reclamation_reason": "",
+            }
+        )
+        return True
+
+    def _validate_snapshot_payload_authority(
+        self,
+        session: LocalAgentSession,
+    ) -> None:
+        snapshot = session.retirement.get("snapshot", {})
+        if not snapshot:
+            return
+        expected_payload = self.runtime_dir / "retirement" / "payloads" / session.session_id
+        if (
+            _runtime_identity_path(Path(snapshot["payload_path"]).resolve(strict=False))
+            != _runtime_identity_path(expected_payload.resolve(strict=False))
+            or _runtime_identity_path(
+                Path(snapshot["manifest_path"]).resolve(strict=False)
+            )
+            != _runtime_identity_path(
+                (expected_payload / "manifest.json").resolve(strict=False)
+            )
+            or (
+                "mission_id" in snapshot
+                and (
+                    snapshot.get("mission_id") != self.mission_id
+                    or snapshot.get("session_id") != session.session_id
+                )
+            )
+        ):
+            raise AlbertError("Snapshot Payload record authority is invalid")
+
+    @classmethod
+    def _retirement_storage_from_payload(cls, data: dict[str, Any]) -> dict[str, Any]:
+        raw = data.get("retirement_storage")
+        if raw is None:
+            return cls._empty_retirement_storage_state()
+
+        def timestamp_is_valid(value: Any) -> bool:
+            if not isinstance(value, str) or not value.strip():
+                return False
+            try:
+                parsed = datetime.fromisoformat(value)
+            except ValueError:
+                return False
+            return parsed.tzinfo is not None
+
+        if (
+            not isinstance(raw, dict)
+            or set(raw)
+            != {
+                "schema_version",
+                "reclamation_count",
+                "reclaimed_bytes",
+                "recent_reclamations",
+                "reclamation_intents",
+                "attention",
+            }
+            or not isinstance(raw.get("schema_version"), int)
+            or isinstance(raw.get("schema_version"), bool)
+            or raw["schema_version"] != 1
+            or not isinstance(raw.get("reclamation_count"), int)
+            or isinstance(raw.get("reclamation_count"), bool)
+            or raw["reclamation_count"] < 0
+            or not isinstance(raw.get("reclaimed_bytes"), int)
+            or isinstance(raw.get("reclaimed_bytes"), bool)
+            or raw["reclaimed_bytes"] < 0
+            or not isinstance(raw.get("recent_reclamations"), list)
+            or len(raw["recent_reclamations"]) > 64
+            or not isinstance(raw.get("reclamation_intents"), dict)
+            or not isinstance(raw.get("attention"), dict)
+        ):
+            raise AlbertError("Snapshot storage state is invalid")
+        recent_reclamations = raw["recent_reclamations"]
+        if (
+            not all(
+                isinstance(item, dict)
+                and set(item)
+                == {"session_id", "reclaimed_at", "snapshot_bytes", "reason"}
+                and isinstance(item.get("session_id"), str)
+                and bool(item["session_id"].strip())
+                and timestamp_is_valid(item.get("reclaimed_at"))
+                and isinstance(item.get("snapshot_bytes"), int)
+                and not isinstance(item.get("snapshot_bytes"), bool)
+                and item["snapshot_bytes"] >= 0
+                and item.get("reason") == "retention-expired-capacity-reclamation"
+                for item in recent_reclamations
+            )
+            or len(
+                {
+                    item["session_id"]
+                    for item in recent_reclamations
+                    if isinstance(item, dict) and "session_id" in item
+                }
+            )
+            != len(recent_reclamations)
+            or raw["reclamation_count"] < len(recent_reclamations)
+            or raw["reclaimed_bytes"]
+            < sum(item["snapshot_bytes"] for item in recent_reclamations)
+        ):
+            raise AlbertError("Snapshot storage state is invalid")
+        reclamation_intents = raw["reclamation_intents"]
+        reclamation_intent_fields = {
+            "session_id",
+            "manifest_sha256",
+            "payload_path",
+            "snapshot_bytes",
+            "claimed_at",
+        }
+        if not all(
+            isinstance(session_id, str)
+            and session_id.strip()
+            and isinstance(intent, dict)
+            and frozenset(intent)
+            in {
+                frozenset(reclamation_intent_fields),
+                frozenset(
+                    reclamation_intent_fields
+                    | {"root_device", "root_inode"}
+                ),
+            }
+            and intent.get("session_id") == session_id
+            and isinstance(intent.get("manifest_sha256"), str)
+            and bool(re.fullmatch(r"[0-9a-f]{64}", intent["manifest_sha256"]))
+            and isinstance(intent.get("payload_path"), str)
+            and Path(intent["payload_path"]).is_absolute()
+            and isinstance(intent.get("snapshot_bytes"), int)
+            and not isinstance(intent.get("snapshot_bytes"), bool)
+            and intent["snapshot_bytes"] >= 0
+            and timestamp_is_valid(intent.get("claimed_at"))
+            and (
+                "root_device" not in intent
+                or (
+                    isinstance(intent.get("root_device"), int)
+                    and not isinstance(intent.get("root_device"), bool)
+                    and intent["root_device"] >= 0
+                    and isinstance(intent.get("root_inode"), int)
+                    and not isinstance(intent.get("root_inode"), bool)
+                    and intent["root_inode"] >= 0
+                    and (
+                        intent["root_inode"] > 0
+                        or intent["root_device"] == 0
+                    )
+                )
+            )
+            for session_id, intent in reclamation_intents.items()
+        ):
+            raise AlbertError("Snapshot storage state is invalid")
+        attention = raw["attention"]
+        if attention:
+            common_attention_valid = bool(
+                attention.get("active") is True
+                and isinstance(attention.get("message"), str)
+                and attention["message"].strip()
+                and timestamp_is_valid(attention.get("recorded_at"))
+            )
+            if attention.get("code") == "snapshot-reclamation-failed":
+                attention_valid = bool(
+                    common_attention_valid
+                    and set(attention)
+                    == {
+                        "active",
+                        "code",
+                        "session_id",
+                        "message",
+                        "recorded_at",
+                    }
+                    and isinstance(attention.get("session_id"), str)
+                    and attention["session_id"].strip()
+                )
+            elif attention.get("code") == "snapshot-storage-exhausted":
+                attention_valid = bool(
+                    common_attention_valid
+                    and set(attention)
+                    == {
+                        "active",
+                        "code",
+                        "message",
+                        "required_bytes",
+                        "committed_bytes",
+                        "budget_bytes",
+                        "recorded_at",
+                    }
+                    and all(
+                        isinstance(attention.get(field_name), int)
+                        and not isinstance(attention.get(field_name), bool)
+                        and attention[field_name] >= 0
+                        for field_name in (
+                            "required_bytes",
+                            "committed_bytes",
+                            "budget_bytes",
+                        )
+                    )
+                )
+            else:
+                attention_valid = False
+            if not attention_valid:
+                raise AlbertError("Snapshot storage state is invalid")
+        return {
+            "schema_version": 1,
+            "reclamation_count": raw["reclamation_count"],
+            "reclaimed_bytes": raw["reclaimed_bytes"],
+            "recent_reclamations": [
+                dict(item) for item in raw["recent_reclamations"]
+            ],
+            "reclamation_intents": {
+                session_id: dict(intent)
+                for session_id, intent in reclamation_intents.items()
+            },
+            "attention": dict(attention),
+        }
+
+    @classmethod
+    def _validated_supervision_state(cls, raw: Any) -> dict[str, Any]:
+        """Copy and validate the durable supervision ledger container."""
+
+        if not isinstance(raw, dict) or raw.get("schema_version") != 1:
+            raise AlbertError("Mission supervision state is invalid")
+        for field_name in ("observers", "attentions", "intents", "receipts"):
+            collection = raw.get(field_name)
+            if not isinstance(collection, dict) or not all(
+                isinstance(key, str)
+                and key.strip()
+                and isinstance(value, dict)
+                for key, value in collection.items()
+            ):
+                raise AlbertError("Mission supervision state is invalid")
+        for source_id, observer in raw["observers"].items():
+            cursor = observer.get("cursor")
+            observer_receipts = observer.get("receipts")
+            if (
+                not isinstance(observer.get("incarnation"), str)
+                or not observer["incarnation"].strip()
+                or not isinstance(cursor, int)
+                or isinstance(cursor, bool)
+                or cursor < 0
+                or not isinstance(observer_receipts, dict)
+                or any(
+                    not isinstance(sequence, str)
+                    or not sequence.isdigit()
+                    or not isinstance(receipt_id, str)
+                    or not receipt_id.strip()
+                    for sequence, receipt_id in observer_receipts.items()
+                )
+            ):
+                raise AlbertError(
+                    f"Mission supervision observer state is invalid: {source_id}"
+                )
+        cls._validate_supervision_records(
+            raw["receipts"],
+            required_strings=(
+                "receipt_id",
+                "correlation_id",
+                "outcome",
+                "effect",
+                "mission_id",
+                "session_id",
+            ),
+            identity_field="receipt_id",
+        )
+        cls._validate_supervision_records(
+            raw["attentions"],
+            required_strings=(
+                "attention_id",
+                "incident_id",
+                "mission_id",
+                "session_id",
+                "kind",
+                "detail",
+                "next_effect",
+                "disposition",
+                "receipt_id",
+            ),
+            identity_field="attention_id",
+        )
+        cls._validate_supervision_records(
+            raw["intents"],
+            required_strings=(
+                "intent_id",
+                "attention_id",
+                "receipt_id",
+                "effect",
+                "status",
+                "mission_id",
+                "session_id",
+            ),
+            identity_field="intent_id",
+        )
+        if any(
+            receipt["outcome"]
+            not in {
+                "no-change",
+                "attention-recorded",
+                "recovered",
+                "result-reconciled",
+                "decision-needed",
+            }
+            or receipt["effect"]
+            not in {
+                "none",
+                "recover-same-session",
+                "reconcile-result",
+                "mission-commander-decision",
+            }
+            for receipt in raw["receipts"].values()
+        ):
+            raise AlbertError("Mission supervision receipt outcome is invalid")
+        if any(
+            attention["next_effect"]
+            not in {
+                "recover-same-session",
+                "reconcile-result",
+                "mission-commander-decision",
+            }
+            or attention["disposition"] not in {"open", "resolved"}
+            for attention in raw["attentions"].values()
+        ):
+            raise AlbertError("Mission supervision attention state is invalid")
+        if any(
+            intent["effect"]
+            not in {"recover-same-session", "reconcile-result"}
+            or intent["status"] not in {"pending", "applied", "blocked"}
+            for intent in raw["intents"].values()
+        ):
+            raise AlbertError("Mission supervision intent state is invalid")
+        receipts = raw["receipts"]
+        attentions = raw["attentions"]
+        for observer in raw["observers"].values():
+            cursor = observer["cursor"]
+            expected_sequences = {str(sequence) for sequence in range(1, cursor + 1)}
+            if set(observer["receipts"]) != expected_sequences or any(
+                receipt_id not in receipts
+                for receipt_id in observer["receipts"].values()
+            ):
+                raise AlbertError(
+                    "Mission supervision observer receipt chain is invalid"
+                )
+        for receipt_id, receipt in receipts.items():
+            attention_id = receipt.get("attention_id", "")
+            if not isinstance(attention_id, str) or (
+                receipt["effect"] == "none" and attention_id
+            ) or (
+                receipt["effect"] != "none"
+                and (
+                    not attention_id
+                    or attention_id not in attentions
+                    or attentions[attention_id]["receipt_id"] != receipt_id
+                )
+            ):
+                raise AlbertError(
+                    "Mission supervision receipt attention chain is invalid"
+                )
+        for intent in raw["intents"].values():
+            revision = intent.get("session_revision")
+            result_signal = intent.get("result_signal")
+            result_digest = intent.get("result_digest")
+            if (
+                intent["receipt_id"] not in receipts
+                or intent["attention_id"] not in attentions
+                or attentions[intent["attention_id"]]["receipt_id"]
+                != intent["receipt_id"]
+                or not isinstance(revision, int)
+                or isinstance(revision, bool)
+                or revision < 0
+                or any(
+                    not isinstance(intent.get(field_name), str)
+                    for field_name in (
+                        "runner_operation_id",
+                        "runner_identity",
+                        "runner_process_identity",
+                        "worktree_identity",
+                        "result_signal",
+                        "result_digest",
+                    )
+                )
+                or any(
+                    intent.get(field_name) is not None
+                    and (
+                        not isinstance(intent[field_name], int)
+                        or isinstance(intent[field_name], bool)
+                        or intent[field_name] <= 0
+                    )
+                    for field_name in ("runner_pid", "runner_process_pid")
+                )
+                or result_signal not in {"absent", "exact-valid"}
+                or (result_signal == "exact-valid" and not result_digest)
+                or (result_signal == "absent" and result_digest)
+            ):
+                raise AlbertError("Mission supervision intent boundary is invalid")
+        return json.loads(json.dumps(raw))
+
+    @staticmethod
+    def _validate_supervision_records(
+        records: dict[str, dict[str, Any]],
+        *,
+        required_strings: tuple[str, ...],
+        identity_field: str,
+    ) -> None:
+        for record_id, record in records.items():
+            if record.get(identity_field) != record_id or any(
+                not isinstance(record.get(field_name), str)
+                or not record[field_name].strip()
+                for field_name in required_strings
+            ):
+                raise AlbertError(
+                    f"Mission supervision {identity_field} record is invalid: {record_id}"
+                )
+
+    def _supervision_from_payload(self, data: dict[str, Any]) -> dict[str, Any]:
+        raw = data.get("supervision", self._empty_supervision_state())
+        supervision = self._validated_supervision_state(raw)
+        self._validate_supervision_semantics(
+            supervision,
+            data.get("sessions", {}),
+        )
+        return supervision
+
+    def _validate_supervision_semantics(
+        self,
+        supervision: dict[str, Any],
+        raw_sessions: Any,
+    ) -> None:
+        """Reject well-shaped records that contradict their causal boundary."""
+
+        if not isinstance(raw_sessions, dict) or any(
+            not isinstance(session_id, str)
+            or not session_id.strip()
+            or not isinstance(raw_session, dict)
+            for session_id, raw_session in raw_sessions.items()
+        ):
+            raise AlbertError("Mission supervision session boundary is invalid")
+        for session_id, raw_session in raw_sessions.items():
+            result = raw_session.get("runner_result", {})
+            if isinstance(result, dict) and result and (
+                result.get("mission_id") != self.mission_id
+                or result.get("session_id") != session_id
+            ):
+                raise AlbertError("Mission runner result identity is invalid")
+
+        receipts = supervision["receipts"]
+        attentions = supervision["attentions"]
+        intents = supervision["intents"]
+        allowed_receipt_outcomes = {
+            "none": {"no-change"},
+            "recover-same-session": {"attention-recorded", "recovered"},
+            "reconcile-result": {"attention-recorded", "result-reconciled"},
+            "mission-commander-decision": {"decision-needed"},
+        }
+        for receipt_id, receipt in receipts.items():
+            effect = receipt["effect"]
+            session_id = receipt["session_id"]
+            attention_id = receipt.get("attention_id", "")
+            if (
+                receipt["mission_id"] != self.mission_id
+                or session_id not in raw_sessions
+                or receipt["outcome"] not in allowed_receipt_outcomes[effect]
+            ):
+                raise AlbertError("Mission supervision receipt boundary is invalid")
+            if effect == "none":
+                continue
+            attention = attentions.get(attention_id)
+            if not isinstance(attention, dict) or (
+                attention["mission_id"] != self.mission_id
+                or attention["session_id"] != session_id
+                or attention["next_effect"] != effect
+            ):
+                raise AlbertError("Mission supervision attention boundary is invalid")
+
+        referenced_attention_ids = {
+            str(receipt.get("attention_id", ""))
+            for receipt in receipts.values()
+            if receipt.get("attention_id")
+        }
+        if set(attentions) != referenced_attention_ids:
+            raise AlbertError("Mission supervision attention ownership is invalid")
+
+        intents_by_receipt: dict[str, list[dict[str, Any]]] = {}
+        for intent in intents.values():
+            receipt = receipts[intent["receipt_id"]]
+            attention = attentions[intent["attention_id"]]
+            status = intent["status"]
+            effect = intent["effect"]
+            expected_projection_effect = (
+                "mission-commander-decision" if status == "blocked" else effect
+            )
+            if (
+                intent["mission_id"] != self.mission_id
+                or intent["session_id"] not in raw_sessions
+                or receipt["mission_id"] != intent["mission_id"]
+                or attention["mission_id"] != intent["mission_id"]
+                or receipt["session_id"] != intent["session_id"]
+                or attention["session_id"] != intent["session_id"]
+                or receipt["effect"] != expected_projection_effect
+                or attention["next_effect"] != expected_projection_effect
+                or (
+                    effect == "recover-same-session"
+                    and (
+                        intent["result_signal"] != "absent"
+                        or bool(intent["result_digest"])
+                    )
+                )
+                or (
+                    effect == "reconcile-result"
+                    and (
+                        intent["result_signal"] != "exact-valid"
+                        or not intent["result_digest"]
+                    )
+                )
+            ):
+                raise AlbertError("Mission supervision intent semantics are invalid")
+            if status == "pending":
+                raw_session = raw_sessions[intent["session_id"]]
+                boundary_fields = (
+                    ("revision", "session_revision"),
+                    ("runner_operation_id", "runner_operation_id"),
+                    ("runner_pid", "runner_pid"),
+                    ("runner_identity", "runner_identity"),
+                    ("runner_process_pid", "runner_process_pid"),
+                    ("runner_process_identity", "runner_process_identity"),
+                    ("worktree_identity", "worktree_identity"),
+                )
+                if any(
+                    raw_session.get(session_field) != intent.get(intent_field)
+                    for session_field, intent_field in boundary_fields
+                ):
+                    raise AlbertError(
+                        "Mission supervision pending intent boundary is invalid"
+                    )
+            intents_by_receipt.setdefault(intent["receipt_id"], []).append(intent)
+
+        for receipt_id, receipt in receipts.items():
+            intent_count = len(intents_by_receipt.get(receipt_id, []))
+            if receipt["effect"] in {"recover-same-session", "reconcile-result"}:
+                if intent_count != 1:
+                    raise AlbertError("Mission supervision receipt intent is invalid")
+            elif intent_count:
+                linked_intent = intents_by_receipt[receipt_id][0]
+                if not (
+                    receipt["effect"] == "mission-commander-decision"
+                    and intent_count == 1
+                    and linked_intent["status"] == "blocked"
+                ):
+                    raise AlbertError("Mission supervision receipt intent is invalid")
+
+    def supervision_state(self) -> dict[str, Any]:
+        return json.loads(json.dumps(self.supervision))
 
     def _start_session_output(self, session: LocalAgentSession) -> None:
         recorder = _SessionOutputRecorder(
@@ -1455,7 +3422,141 @@ class AlbertMission:
         if recorder is not None:
             recorder.record(stream_name, payload)
 
-    def load(self) -> "AlbertMission":
+    def _record_local_execution_receipt(
+        self,
+        session: LocalAgentSession,
+        receipt: ExecutionReceipt,
+    ) -> None:
+        """Project one redacted host receipt into the canonical session."""
+
+        if receipt.effect != "local-agent" or receipt.status == "executing":
+            raise AlbertError("Local Agent execution receipt cannot be projected.")
+        journal = ExecutionJournal(self.runtime_dir / "execution-receipts.json")
+        journal_record = next(
+            (
+                (request, stored_receipt)
+                for request, stored_receipt in journal.inspect_records()
+                if request.request_id == receipt.request_id
+            ),
+            None,
+        )
+        if journal_record is None:
+            raise AlbertError(
+                "Local Agent execution receipt is not bound to a durable request."
+            )
+        request, stored_receipt = journal_record
+        if (
+            request.effect != "local-agent"
+            or stored_receipt.to_dict(include_output=False)
+            != receipt.to_dict(include_output=False)
+            or not isinstance(request.authority, LocalAgentExecutionAuthority)
+        ):
+            raise AlbertError("Local Agent execution receipt authority is invalid")
+        authority = request.authority
+        if (
+            authority.mission_id != self.mission_id
+            or authority.session_id != session.session_id
+            or request.working_directory != str(session.worktree_path.resolve())
+        ):
+            raise AlbertError("Local Agent execution receipt session boundary is invalid")
+        latest = self._refresh_persisted_session(session.session_id)
+        if (
+            authority.runner_operation_id != latest.runner_operation_id
+            or authority.worktree_identity != latest.worktree_identity
+            or authority.session_revision > latest.revision
+        ):
+            raise ExecutionReplayConflict(
+                f"Local Agent execution receipt {receipt.request_id} has a changed session boundary."
+            )
+        if latest.runner_operation_id != session.runner_operation_id:
+            raise ExecutionReplayConflict(
+                f"Local Agent execution receipt {receipt.request_id} has a stale runner operation."
+            )
+        if latest.worktree_identity != session.worktree_identity:
+            raise ExecutionReplayConflict(
+                f"Local Agent execution receipt {receipt.request_id} has a changed Worktree Identity."
+            )
+        for existing in latest.execution_receipts:
+            if existing.get("request_id") != receipt.request_id:
+                continue
+            if existing.get("request_digest") != receipt.request_digest:
+                raise ExecutionReplayConflict(
+                    f"Local Agent execution receipt {receipt.request_id} changed its boundary."
+                )
+            if existing != receipt.to_dict(include_output=False):
+                raise ExecutionReplayConflict(
+                    f"Local Agent execution receipt {receipt.request_id} changed its durable result."
+                )
+            return
+        if len(latest.execution_receipts) >= _EXECUTION_RECEIPT_HISTORY_LIMIT:
+            raise AlbertError("Local Agent execution receipt history is full.")
+        latest.execution_receipts.append(receipt.to_dict(include_output=False))
+        persisted = self._persist_session_update(latest)
+        session.__dict__.update(persisted.__dict__)
+
+    def _reconcile_local_execution_receipts(self) -> None:
+        """Recover completed host receipts that missed session projection."""
+
+        journal = ExecutionJournal(self.runtime_dir / "execution-receipts.json")
+        records = journal.inspect_records()
+        records_by_request_id = {
+            request.request_id: (request, receipt) for request, receipt in records
+        }
+        for session in self.sessions.values():
+            for persisted in session.execution_receipts:
+                request_id = persisted.get("request_id")
+                record = records_by_request_id.get(request_id)
+                if record is None:
+                    raise AlbertError(
+                        "Local Agent execution receipt is not bound to a durable request."
+                    )
+                request, receipt = record
+                if receipt.to_dict(include_output=False) != persisted:
+                    raise AlbertError(
+                        "Local Agent execution receipt projection disagrees with its durable receipt."
+                    )
+                if request.effect != "local-agent" or not isinstance(
+                    request.authority, LocalAgentExecutionAuthority
+                ):
+                    raise AlbertError(
+                        "Local Agent execution receipt authority is invalid"
+                    )
+                authority = request.authority
+                if (
+                    authority.mission_id != self.mission_id
+                    or authority.session_id != session.session_id
+                    or authority.runner_operation_id != session.runner_operation_id
+                    or authority.worktree_identity != session.worktree_identity
+                    or request.working_directory != str(session.worktree_path.resolve())
+                    or authority.session_revision > session.revision
+                ):
+                    raise AlbertError(
+                        "Local Agent execution receipt session boundary is invalid"
+                    )
+        for request, receipt in records:
+            if request.effect != "local-agent" or receipt.status == "executing":
+                continue
+            if not isinstance(request.authority, LocalAgentExecutionAuthority):
+                raise AlbertError("Local Agent execution receipt authority is invalid")
+            authority = request.authority
+            if authority.mission_id != self.mission_id:
+                raise AlbertError("Local Agent execution receipt Mission is invalid")
+            session = self.sessions.get(authority.session_id)
+            if session is None:
+                raise AlbertError(
+                    "Local Agent execution receipt references an unknown session"
+                )
+            if (
+                authority.runner_operation_id != session.runner_operation_id
+                or authority.worktree_identity != session.worktree_identity
+                or authority.session_revision > session.revision
+            ):
+                raise AlbertError(
+                    "Local Agent execution receipt session boundary is invalid"
+                )
+            self._record_local_execution_receipt(session, receipt)
+
+    def load(self, *, perform_startup_effects: bool = True) -> "AlbertMission":
         self.agent_registry = load_agent_registry(self.agent_config_path)
         if self.agent_availability_snapshot is not None:
             refreshed_agents: list[AgentConfig] = []
@@ -1491,15 +3592,59 @@ class AlbertMission:
         self.issues = self._load_issues()
         runtime_exists = self.runtime_path.exists()
         self._load_runtime()
-        if runtime_exists:
+        if runtime_exists and perform_startup_effects:
+            ExecutionJournal(self.runtime_dir / "execution-receipts.json").reconcile()
+            self._reconcile_local_execution_receipts()
             self._reconcile_abandoned_sessions()
-        else:
+            self._reconcile_retirement_units()
+            self._reclaim_snapshot_payloads(
+                required_bytes=_PRESERVATION_BUDGET_BYTES,
+                reclaim_all_expired=True,
+                raise_on_exhaustion=False,
+            )
+        elif not runtime_exists and perform_startup_effects:
             self._persist()
         return self
+
+    def _reconcile_retirement_units(self) -> None:
+        """Resume deterministic retirement effects during Mission startup."""
+
+        for session_id in sorted(self.sessions):
+            session = self.sessions[session_id]
+            phase = session.retirement.get("phase", "active")
+            if phase in {
+                "preservation-blocked",
+                "retirement-blocked",
+                "retired",
+            }:
+                continue
+            review = self._latest_review_for_session(session_id)
+            eligible = (
+                phase in {"preserving", "preserved", "grace", "retiring"}
+                or session.status in {"failed", "cancelled"}
+                or bool(
+                    review
+                    and review.outcome
+                    in {"Approved", "Approved with limitations", "Rejected"}
+                )
+            )
+            if not eligible:
+                continue
+            try:
+                self.reconcile_retirement_unit(session_id)
+            except (AlbertError, OSError):
+                latest = self._refresh_persisted_session(session_id)
+                if latest.retirement.get("phase") not in {
+                    "preservation-blocked",
+                    "retirement-blocked",
+                    "retiring",
+                }:
+                    raise
 
     def board_summary(self) -> dict[str, Any]:
         ordered = self.ordered_issue_ids()
         ready = [issue_id for issue_id in ordered if self._issue_launch_eligible(self.issues[issue_id])]
+        storage = self.retirement_storage_inspection()
         return {
             "prd_title": self.prd_title,
             "issue_count": len(self.issues),
@@ -1507,6 +3652,43 @@ class AlbertMission:
             "ready_issue_ids": ready,
             "approved_issue_ids": [issue_id for issue_id in ordered if self.issues[issue_id].review_state == "approved"],
             "issue_slices": [self._issue_summary(issue_id) for issue_id in ordered],
+            "retirement_storage": {
+                "payload_bytes": storage["usage"]["payload_bytes"],
+                "reserved_bytes": storage["usage"]["reserved_bytes"],
+                "budget_bytes": storage["policy"]["budget_bytes"],
+                "retained_payloads": storage["counts"]["retained_payloads"],
+                "pinned_payloads": storage["counts"]["pinned_payloads"],
+                "blocker_count": len(storage["blockers"]),
+            },
+            "inference": {
+                "turn_count": len(self.inference_turns),
+                "last_turn": (
+                    self._public_inference_receipt(self.inference_turns[-1])
+                    if self.inference_turns
+                    else None
+                ),
+                "lease": self.inference_lease_state(),
+            },
+        }
+
+    @staticmethod
+    def _public_inference_receipt(receipt: dict[str, Any]) -> dict[str, Any]:
+        """Project bounded receipt metadata without prompt or stream contents."""
+
+        return {
+            "request_id": receipt.get("request_id", ""),
+            "mission_id": receipt.get("mission_id", ""),
+            "session_id": receipt.get("session_id", ""),
+            "turn_kind": receipt.get("turn_kind", ""),
+            "recorded_at": receipt.get("recorded_at", ""),
+            "outcome": receipt.get("outcome", ""),
+            "authoritative": bool(receipt.get("authoritative", False)),
+            "profile": receipt.get("profile", {}),
+            "admission": receipt.get("admission", {}),
+            "timings": receipt.get("timings", {}),
+            "usage": receipt.get("usage", {}),
+            "lease": receipt.get("lease", {}),
+            "error": receipt.get("error", ""),
         }
 
     def _issue_summary(self, issue_id: str) -> dict[str, Any]:
@@ -1654,10 +3836,35 @@ class AlbertMission:
             "disconnected": disconnected,
             "operation_status": self._session_operation_status(session, disconnected),
             "failure": self._session_failure(session),
+            "inference": self._session_inference_summary(session),
             "evidence": self._evidence_summary(
                 evidence,
                 accepted=evidence_accepted,
             ),
+        }
+
+    def _session_inference_summary(self, session: LocalAgentSession) -> dict[str, Any]:
+        turns = [
+            item
+            for item in self.inference_turns
+            if item.get("session_id") == session.session_id
+        ]
+        if not turns:
+            return {"state": "none", "turn_count": 0, "last": None}
+        last = turns[-1]
+        return {
+            "state": "authoritative" if last.get("authoritative") else "non-authoritative",
+            "turn_count": len(turns),
+            "last": {
+                "request_id": last.get("request_id", ""),
+                "outcome": last.get("outcome", ""),
+                "profile": last.get("profile", {}),
+                "timings": last.get("timings", {}),
+                "usage": last.get("usage", {}),
+                "lease": last.get("lease", {}),
+                "error": last.get("error", ""),
+                "authoritative": bool(last.get("authoritative", False)),
+            },
         }
 
     @staticmethod
@@ -1819,7 +4026,7 @@ class AlbertMission:
             "model": issue.assigned_agent or issue.suggested_agent,
         }
 
-    def _model_assignment(self, issue: IssueSlice, sessions: list[dict[str, Any]]) -> dict[str, str]:
+    def _model_assignment(self, issue: IssueSlice, sessions: list[dict[str, Any]]) -> dict[str, Any]:
         agent = self.agent_registry.find(issue.assigned_agent)
         if agent:
             role = agent.role
@@ -1845,7 +4052,7 @@ class AlbertMission:
         if latest:
             operation_status = str(latest.get("operation_status", "idle"))
             failure = str(latest.get("failure", ""))
-        return {
+        assignment: dict[str, Any] = {
             "agent_id": issue.assigned_agent,
             "role": role,
             "provider": provider,
@@ -1855,6 +4062,9 @@ class AlbertMission:
             "operation_status": operation_status,
             "failure": failure,
         }
+        if agent is not None and agent.inference_profile:
+            assignment["inference_profile"] = dict(agent.inference_profile)
+        return assignment
 
     def _assignment_available(self, issue: IssueSlice) -> bool:
         agent = self.agent_registry.find(issue.assigned_agent)
@@ -2128,6 +4338,7 @@ class AlbertMission:
             policy = self.classify_command(runner_command)
             if policy != "auto-allowed":
                 raise LaunchBlockedError(f"{issue_id} command runner policy is {policy}; auto-allowed is required.")
+        self._admit_retirement_unit()
         session_id = f"session-{issue_id}-{len(self.sessions) + 1}"
         worktree_path = self._session_worktree_path(session_id)
         task_packet = {
@@ -2164,40 +4375,61 @@ class AlbertMission:
         if issue.review_state != "approved":
             raise LaunchBlockedError(f"{issue_id} must be approved before routing.")
         router = self._router_agent()
-        command = self._runner_command(router)
-        if command and self.classify_command(command) != "auto-allowed":
-            raise LaunchBlockedError(f"{issue_id} router command policy is {self.classify_command(command)}; auto-allowed is required.")
         prompt = self._delegation_prompt(issue, router)
-        command_argv = _command_invocation(command)
-        governed_argv, sandboxed = sandboxed_process_argv(
-            command_argv,
-            working_directory=self.target_repo,
-            readable_roots=(self.target_repo,),
-        )
-        if os.name == "posix" and isinstance(command_argv, list) and not sandboxed:
-            raise AlbertError(
-                "Router command sandbox unavailable: bubblewrap (bwrap) is required."
+        if router.runner == "ollama" and not router.command:
+            result = self._run_profile_inference(
+                agent_config=router,
+                prompt=prompt,
+                mission_id=self.mission_id,
+                session_id=f"issue:{issue.id}",
+                turn_kind="routing",
+                schema=_DELEGATION_INFERENCE_SCHEMA,
+                validator=_parse_delegation_decision,
             )
-        try:
-            completed = _run_bounded_process(
-                governed_argv,
-                input_text=prompt,
-                cwd=self.target_repo,
-                env=sanitized_process_environment(),
-                timeout_seconds=_MODEL_COMMAND_TIMEOUT_SECONDS,
+            if not result.authoritative:
+                raise AlbertError(
+                    f"Local inference {result.receipt.get('outcome', 'failed')}: "
+                    f"{result.receipt.get('error', 'result was not authoritative')}"
+                )
+            data = result.value
+        else:
+            # An explicit command is a compatibility/test harness override. The
+            # normal Ollama registry path above is always the bounded HTTP adapter.
+            command = self._runner_command(router)
+            if command and self.classify_command(command) != "auto-allowed":
+                raise LaunchBlockedError(f"{issue_id} router command policy is {self.classify_command(command)}; auto-allowed is required.")
+            command_argv = _command_invocation(command)
+            process_env = sanitized_process_environment()
+            governed_argv, sandboxed = sandboxed_process_argv(
+                command_argv,
+                working_directory=self.target_repo,
+                readable_roots=(self.target_repo,),
+                path=process_env.get("PATH"),
             )
-        except OSError as exc:
-            raise AlbertError(f"Router command failed: {exc}") from exc
-        exit_status = completed.returncode
-        output = completed.stdout
-        stderr = completed.stderr
-        if exit_status == 124:
-            raise AlbertError(stderr)
-        if exit_status == _PROCESS_OUTPUT_LIMIT_EXIT_STATUS:
-            raise AlbertError(stderr)
-        if exit_status != 0:
-            raise AlbertError(f"Router command exited {exit_status}: {stderr.strip()}")
-        data = _parse_delegation_decision(output)
+            if not sandboxed or not isinstance(governed_argv, list):
+                raise AlbertError(
+                    "Router command sandbox unavailable: bubblewrap (bwrap) is required."
+                )
+            try:
+                completed = _run_bounded_process(
+                    governed_argv,
+                    input_text=prompt,
+                    cwd=self.target_repo,
+                    env=process_env,
+                    timeout_seconds=_MODEL_COMMAND_TIMEOUT_SECONDS,
+                )
+            except OSError as exc:
+                raise AlbertError(f"Router command failed: {exc}") from exc
+            exit_status = completed.returncode
+            output = completed.stdout
+            stderr = completed.stderr
+            if exit_status == 124:
+                raise AlbertError(stderr)
+            if exit_status == _PROCESS_OUTPUT_LIMIT_EXIT_STATUS:
+                raise AlbertError(stderr)
+            if exit_status != 0:
+                raise AlbertError(f"Router command exited {exit_status}: {stderr.strip()}")
+            data = _parse_delegation_decision(output)
         recommended_agent = data["recommended_agent"]
         agent = self.agent_registry.find(recommended_agent)
         if not agent:
@@ -2253,6 +4485,8 @@ class AlbertMission:
         allowed_paths: list[str] | None = None,
         command_policy: dict[str, str] | None = None,
         workstation_action: dict[str, str] | None = None,
+        manual_retry_reason: str = "",
+        expected_revision: int | None = None,
     ) -> LocalAgentSession:
         with self._session_launch_lock():
             self._load_runtime()
@@ -2263,6 +4497,8 @@ class AlbertMission:
                 allowed_paths=allowed_paths,
                 command_policy=command_policy,
                 workstation_action=workstation_action,
+                manual_retry_reason=manual_retry_reason,
+                expected_revision=expected_revision,
             )
 
     def _launch_repair(
@@ -2273,8 +4509,21 @@ class AlbertMission:
         allowed_paths: list[str] | None = None,
         command_policy: dict[str, str] | None = None,
         workstation_action: dict[str, str] | None = None,
+        manual_retry_reason: str = "",
+        expected_revision: int | None = None,
     ) -> LocalAgentSession:
         prior_session = self._session(session_id)
+        if expected_revision is None:
+            expected_revision = prior_session.revision
+        self._require_lifecycle_revision(prior_session, expected_revision)
+        prior_retirement_phase = prior_session.retirement.get("phase", "active")
+        if prior_retirement_phase == "active":
+            self._require_active_retirement_unit(prior_session, "launch repair")
+        elif prior_retirement_phase not in {"preserved", "grace", "retired"}:
+            raise LaunchBlockedError(
+                f"{session_id} cannot launch repair while its Retirement Unit "
+                f"phase is {prior_retirement_phase}."
+            )
         issue = self.issues.get(prior_session.issue_id)
         is_ad_hoc = (
             issue is None
@@ -2283,7 +4532,15 @@ class AlbertMission:
         if issue is None and not is_ad_hoc:
             raise AlbertError(f"Unknown Issue Slice: {prior_session.issue_id}")
         review = self._latest_review_for_session(session_id)
-        if not review or review.next_action not in {"same-local-agent-repair", "fresh-local-agent-repair"}:
+        repairable_review = bool(
+            review
+            and review.next_action
+            in {"same-local-agent-repair", "fresh-local-agent-repair"}
+        )
+        manual_retry = (
+            prior_session.status == "failed" and bool(manual_retry_reason.strip())
+        )
+        if not repairable_review and not manual_retry:
             raise LaunchBlockedError(f"{session_id} does not have a repairable Frontier review.")
         existing_repair = next(
             (
@@ -2370,9 +4627,15 @@ class AlbertMission:
             issue.assigned_agent = assigned_agent
         repair_context = {
             "prior_session_id": prior_session.session_id,
-            "review_outcome": review.outcome,
-            "review_reason": review.reason,
-            "next_action": review.next_action,
+            "review_outcome": review.outcome if review is not None else "",
+            "review_reason": (
+                review.reason if review is not None else manual_retry_reason.strip()
+            ),
+            "next_action": (
+                review.next_action
+                if review is not None
+                else "mission-commander-manual-retry"
+            ),
             "prior_evidence": prior_session.evidence.to_dict() if prior_session.evidence else None,
             "prior_artifacts": prior_session.artifacts,
         }
@@ -2422,6 +4685,7 @@ class AlbertMission:
         ):
             if field_name in prior_session.task_packet:
                 task_packet[field_name] = prior_session.task_packet[field_name]
+        self._admit_retirement_unit()
         session = LocalAgentSession(
             session_id=repair_session_id,
             issue_id=prior_session.issue_id,
@@ -2430,6 +4694,52 @@ class AlbertMission:
             task_packet=task_packet,
             status="queued",
         )
+        if prior_retirement_phase == "active":
+            preservation_correlation = (
+                "retirement-preserve:repair:"
+                + sha256(
+                    (
+                        f"{self.mission_id}\n{prior_session.session_id}\n"
+                        f"{prior_session.revision}\n{repair_session_id}"
+                    ).encode()
+                ).hexdigest()
+            )
+            prior_session = self.preserve_retirement_unit(
+                prior_session.session_id,
+                expected_revision=prior_session.revision,
+                correlation_id=preservation_correlation,
+            )
+        snapshot = prior_session.retirement.get("snapshot", {})
+        snapshot_revision = int(snapshot.get("session_revision", prior_session.revision))
+        snapshot_store = self._retirement_snapshot_store(
+            prior_session,
+            snapshot_revision,
+        )
+        reconstruction_root = self.runtime_dir / "retirement" / "repair-reconstruction"
+        reconstruction_root.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            dir=reconstruction_root,
+            prefix=f"{prior_session.session_id}.",
+        ) as temporary_name:
+            materialized = snapshot_store.materialize(snapshot, Path(temporary_name))
+            repair_overlay = self._stage_prior_session_state(
+                session,
+                prior_worktree=materialized,
+                source_kind="verified-retirement-snapshot",
+            )
+        session.repository_snapshot["repair_overlay"] = repair_overlay
+        repair_context["retirement_snapshot_sha256"] = snapshot["manifest_sha256"]
+        retired_prior = self._retire_preserved_unit(prior_session.session_id)
+        if retired_prior.retirement.get("phase") != "retired":
+            reason = str(retired_prior.retirement.get("blocked_reason", "")).strip()
+            raise LaunchBlockedError(
+                f"{session_id} cannot launch repair until its prior Retirement Unit "
+                "is safely retired"
+                + (f": {reason}" if reason else ".")
+            )
+        repair_context["retired_prior_revision"] = retired_prior.revision
+        retired_prior.revision += 1
+        self.sessions[retired_prior.session_id] = retired_prior
         self.sessions[repair_session_id] = session
         self._record(
             f"{prior_session.issue_id} repair queued as {repair_session_id} "
@@ -2438,9 +4748,18 @@ class AlbertMission:
         self._persist()
         return session
 
-    def run_session(self, session_id: str) -> LocalAgentSession:
+    def run_session(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int | None = None,
+    ) -> LocalAgentSession:
         """Claim and execute one persisted queued Local Agent session."""
         session = self._session(session_id)
+        if expected_revision is None:
+            expected_revision = session.revision
+        self._require_lifecycle_revision(session, expected_revision)
+        self._require_active_retirement_unit(session, "begin execution")
         if session.status != "queued":
             raise LaunchBlockedError(
                 f"{session_id} cannot run from {session.status}; queued is required."
@@ -2476,17 +4795,25 @@ class AlbertMission:
             session.status = "failed"
             session.runner_exit_status = 1
             session.runner_ended_at = _utc_now()
+            self._remember_never_started_runner_boundary(
+                session,
+                event_at=session.runner_ended_at,
+            )
             session.runner_pid = None
             session.runner_identity = ""
             session.runner_process_pid = None
+            session.runner_process_identity = ""
+            session.runner_process_token = ""
             session.task_packet["runner_failure"] = str(exc)
-            self._persist_session_update(
+            persisted_failure = self._persist_session_update(
                 session,
                 expected_statuses={"queued"},
                 timeline_message=(
                     f"{session.issue_id} runner preflight failed for {session_id}: {exc}"
                 ),
             )
+            self._record_typed_recovery_failure(persisted_failure)
+            self.reconcile_retirement_unit(persisted_failure.session_id)
             raise
 
         session.status = "running"
@@ -2494,16 +4821,42 @@ class AlbertMission:
         session.runner_ended_at = ""
         session.runner_pid = os.getpid()
         session.runner_identity = _process_identity(session.runner_pid)
+        raw_attempt = session.task_packet.get("runner_attempt_count", 0)
+        attempt = (
+            raw_attempt
+            if isinstance(raw_attempt, int) and not isinstance(raw_attempt, bool)
+            else 0
+        ) + 1
+        session.task_packet["runner_attempt_count"] = attempt
+        operation_payload = (
+            f"{self.mission_id}\n{session.session_id}\n{attempt}\n"
+            f"{session.runner_pid}\n{session.runner_identity}"
+        )
+        session.runner_operation_id = (
+            "runner-operation:" + sha256(operation_payload.encode("utf-8")).hexdigest()
+        )
+        # The orchestrator process owns the lifecycle operation, but it is not
+        # itself the spawned runner process group. Keep the child boundary
+        # empty until the process-start callback records an exact binding.
         session.runner_process_pid = None
+        session.runner_process_identity = ""
+        session.runner_process_token = ""
+        session.runner_result = {}
         session.cancel_requested_at = ""
         session.cancel_reason = ""
         session.task_packet.pop("runner_failure", None)
+        self._remember_retirement_runner_boundary(session)
+        self._acquire_retirement_runner_owner(session)
         started_message = f"{session.issue_id} runner started for {session_id}."
-        self._persist_session_update(
-            session,
-            expected_statuses={"queued"},
-            timeline_message=started_message,
-        )
+        try:
+            self._persist_session_update(
+                session,
+                expected_statuses={"queued"},
+                timeline_message=started_message,
+            )
+        except Exception:
+            self._release_retirement_runner_owner(session)
+            raise
         try:
             try:
                 # Journal creation is part of runner start, not an optional UI
@@ -2513,6 +4866,11 @@ class AlbertMission:
                 self._start_session_output(session)
                 self._raise_if_cancelled(session)
                 self._ensure_session_worktree(session)
+                session.worktree_identity = self._worktree_identity_for_session(session)
+                if not session.worktree_identity:
+                    raise AlbertError(
+                        f"{session_id} managed Worktree Identity could not be proven."
+                    )
                 persisted = self._persist_session_update(session)
                 if persisted.status == "cancelled":
                     raise SessionCancelledError(
@@ -2526,13 +4884,16 @@ class AlbertMission:
                 else:
                     self._run_ollama_agent(session, agent_config)
                 self._raise_if_cancelled(session)
+                self._persist_runner_result_candidate(session)
             except SessionCancelledError:
-                return self._refresh_persisted_session(session_id)
+                cancelled = self._finalize_cancelled_runner_owner_release(session)
+                return self.reconcile_retirement_unit(cancelled.session_id)
             except Exception as exc:
                 try:
                     self._raise_if_cancelled(session)
                 except SessionCancelledError:
-                    return self._refresh_persisted_session(session_id)
+                    cancelled = self._finalize_cancelled_runner_owner_release(session)
+                    return self.reconcile_retirement_unit(cancelled.session_id)
                 session.status = "failed"
                 session.runner_exit_status = (
                     session.runner_exit_status
@@ -2540,9 +4901,12 @@ class AlbertMission:
                     else 1
                 )
                 session.runner_ended_at = session.runner_ended_at or _utc_now()
+                self._release_retirement_runner_owner(session)
                 session.runner_pid = None
                 session.runner_identity = ""
                 session.runner_process_pid = None
+                session.runner_process_identity = ""
+                session.runner_process_token = ""
                 session.task_packet["runner_failure"] = str(exc)
                 failure_message = f"{session.issue_id} runner failed for {session_id}: {exc}"
                 persisted = self._persist_session_update(
@@ -2550,15 +4914,21 @@ class AlbertMission:
                     timeline_message=failure_message,
                 )
                 if persisted.status == "cancelled":
-                    return persisted
+                    cancelled = self._finalize_cancelled_runner_owner_release(session)
+                    return self.reconcile_retirement_unit(cancelled.session_id)
+                self._record_typed_recovery_failure(persisted)
+                self.reconcile_retirement_unit(persisted.session_id)
                 raise AlbertError(f"{session_id} runner failed: {exc}") from exc
 
             session.runner_ended_at = session.runner_ended_at or _utc_now()
             if session.status == "running":
                 session.status = "completed"
+            self._release_retirement_runner_owner(session)
             session.runner_pid = None
             session.runner_identity = ""
             session.runner_process_pid = None
+            session.runner_process_identity = ""
+            session.runner_process_token = ""
             finished_message = (
                 f"{session.issue_id} runner finished for {session_id} "
                 f"with status {session.status}."
@@ -2567,6 +4937,9 @@ class AlbertMission:
                 session,
                 timeline_message=finished_message,
             )
+            persisted = self._record_typed_recovery_failure(persisted)
+            if persisted.status == "failed":
+                persisted = self.reconcile_retirement_unit(persisted.session_id)
             if (
                 persisted.evidence is not None
                 and persisted.evidence_valid
@@ -2581,7 +4954,789 @@ class AlbertMission:
         finally:
             self._finish_session_output(session_id)
 
+    @staticmethod
+    def _runner_result_digest(candidate: dict[str, Any]) -> str:
+        payload = json.dumps(
+            candidate,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return "sha256:" + sha256(payload).hexdigest()
+
+    def _record_typed_recovery_failure(
+        self,
+        failed_session: LocalAgentSession,
+    ) -> LocalAgentSession:
+        if (
+            failed_session.status != "failed"
+            or failed_session.automatic_recovery_count < 1
+        ):
+            return failed_session
+        incident_payload = (
+            f"{self.mission_id}\n{failed_session.session_id}\n"
+            f"{failed_session.runner_operation_id}\n{failed_session.revision}\n"
+            "automatic-recovery-failed"
+        )
+        incident_id = sha256(incident_payload.encode("utf-8")).hexdigest()
+        receipt_id = f"supervision-receipt:{incident_id[:24]}"
+        attention_id = f"runner-attention:{incident_id[:24]}"
+        correlation_id = f"supervise:{incident_id}"
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            supervision = self._supervision_from_payload(data)
+            existing = supervision.setdefault("receipts", {}).get(receipt_id)
+            raw_latest = data.get("sessions", {}).get(failed_session.session_id)
+            if not isinstance(raw_latest, dict):
+                raise AlbertError(
+                    f"Unknown Local Agent session: {failed_session.session_id}"
+                )
+            latest = LocalAgentSession.from_dict(raw_latest)
+            if isinstance(existing, dict):
+                self.sessions[latest.session_id] = latest
+                self.supervision = supervision
+                return latest
+            if (
+                latest.status != "failed"
+                or latest.automatic_recovery_count < 1
+                or latest.revision != failed_session.revision
+                or latest.runner_operation_id != failed_session.runner_operation_id
+            ):
+                return latest
+            detail = (
+                "The one automatic recovery returned a failed runner outcome; "
+                "further automation is disabled until the Mission Commander decides."
+            )
+            supervision.setdefault("attentions", {})[attention_id] = {
+                "attention_id": attention_id,
+                "incident_id": incident_id,
+                "mission_id": self.mission_id,
+                "session_id": latest.session_id,
+                "kind": "automatic-recovery-failed",
+                "detail": detail,
+                "next_effect": "mission-commander-decision",
+                "disposition": "open",
+                "receipt_id": receipt_id,
+            }
+            supervision["receipts"][receipt_id] = {
+                "receipt_id": receipt_id,
+                "correlation_id": correlation_id,
+                "outcome": "decision-needed",
+                "effect": "mission-commander-decision",
+                "mission_id": self.mission_id,
+                "session_id": latest.session_id,
+                "attention_id": attention_id,
+            }
+            latest.revision += 1
+            latest.supervision_receipt_id = receipt_id
+            data["sessions"][latest.session_id] = latest.to_dict()
+            data["supervision"] = supervision
+            data.setdefault("timeline", []).append(
+                f"{latest.issue_id} automatic recovery returned failure for "
+                f"{latest.session_id}; Mission Commander decision required under "
+                f"receipt {receipt_id}."
+            )
+            self._write_runtime_payload(data)
+            self.sessions[latest.session_id] = latest
+            self.timeline = list(data.get("timeline", []))
+            self.supervision = supervision
+            return latest
+
+    def _persist_runner_result_candidate(
+        self,
+        completed_session: LocalAgentSession,
+    ) -> LocalAgentSession:
+        """Persist one typed runner result before canonical terminal reconciliation."""
+
+        if completed_session.status not in {"completed", "evidence-ready", "failed"}:
+            raise AlbertError("Runner result candidate must be terminal.")
+        candidate = {
+            "mission_id": self.mission_id,
+            "session_id": completed_session.session_id,
+            "runner_operation_id": completed_session.runner_operation_id,
+            "worktree_identity": completed_session.worktree_identity,
+            "status": completed_session.status,
+            "runner_exit_status": completed_session.runner_exit_status,
+            "runner_ended_at": completed_session.runner_ended_at or _utc_now(),
+            "evidence": (
+                completed_session.evidence.to_dict()
+                if completed_session.evidence is not None
+                else None
+            ),
+            "evidence_valid": completed_session.evidence_valid,
+            "evidence_correlation_id": completed_session.evidence_correlation_id,
+            "artifacts": dict(completed_session.artifacts),
+        }
+        candidate["digest"] = self._runner_result_digest(candidate)
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_latest = data.get("sessions", {}).get(completed_session.session_id)
+            if not isinstance(raw_latest, dict):
+                raise AlbertError(
+                    f"Unknown Local Agent session: {completed_session.session_id}"
+                )
+            latest = LocalAgentSession.from_dict(raw_latest)
+            if (
+                latest.status != "running"
+                or latest.revision != completed_session.revision
+                or latest.runner_operation_id != completed_session.runner_operation_id
+                or latest.worktree_identity != completed_session.worktree_identity
+            ):
+                raise LaunchBlockedError(
+                    "Runner result no longer matches the canonical session boundary."
+                )
+            latest.runner_result = candidate
+            latest.revision += 1
+            data["sessions"][latest.session_id] = latest.to_dict()
+            self._write_runtime_payload(data)
+            self.sessions[latest.session_id] = latest
+            completed_session.runner_result = candidate
+            completed_session.revision = latest.revision
+            return latest
+
+    def observe_runner(self, observation: RunnerObservation) -> SupervisionReceipt:
+        """Reconcile one advisory runner event without granting it Mission authority."""
+
+        string_fields = {
+            "source identity": observation.source_id,
+            "source incarnation": observation.source_incarnation,
+            "Mission identity": observation.mission_id,
+            "session identity": observation.session_id,
+        }
+        for field_name, value in string_fields.items():
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value.encode("utf-8")) > 4_096
+            ):
+                raise AlbertError(
+                    f"Runner observation {field_name} must be a bounded non-empty string."
+                )
+        for value, boundary_name in (
+            (observation.runner_operation_id, "runner operation identity"),
+            (observation.worktree_identity, "Worktree Identity"),
+        ):
+            if not isinstance(value, str) or len(value.encode("utf-8")) > 4_096:
+                raise AlbertError(
+                    f"Runner observation {boundary_name} is invalid."
+                )
+        if (
+            not isinstance(observation.sequence, int)
+            or isinstance(observation.sequence, bool)
+            or observation.sequence <= 0
+        ):
+            raise AlbertError("Runner observation sequence must be positive.")
+        if (
+            not isinstance(observation.session_revision, int)
+            or isinstance(observation.session_revision, bool)
+            or observation.session_revision < 0
+        ):
+            raise AlbertError("Runner observation session revision is invalid.")
+        if observation.owner_signal not in {"live-exact", "absent", "reused", "unavailable"}:
+            raise AlbertError("Runner observation owner signal is invalid.")
+        if observation.process_group_signal not in {
+            "live-exact",
+            "absent",
+            "reused",
+            "unavailable",
+        }:
+            raise AlbertError("Runner observation process-group signal is invalid.")
+        if observation.result_signal not in {
+            "absent",
+            "exact-valid",
+            "invalid",
+            "unavailable",
+        }:
+            raise AlbertError("Runner observation result signal is invalid.")
+        if (
+            not isinstance(observation.result_digest, str)
+            or len(observation.result_digest.encode("utf-8")) > 4_096
+            or (observation.result_signal == "exact-valid" and not observation.result_digest)
+            or (observation.result_signal != "exact-valid" and observation.result_digest)
+        ):
+            raise AlbertError("Runner observation result boundary is invalid.")
+        if observation.mission_id != self.mission_id:
+            raise AlbertError("Runner observation Mission identity does not match.")
+
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_session = data.get("sessions", {}).get(observation.session_id)
+            if not isinstance(raw_session, dict):
+                raise AlbertError(
+                    f"Unknown Local Agent session: {observation.session_id}"
+                )
+            session = LocalAgentSession.from_dict(raw_session)
+            if (
+                observation.owner_signal == "live-exact"
+                and observation.process_group_signal == "live-exact"
+                and observation.result_signal == "absent"
+            ):
+                finding_kind = "healthy"
+            elif (
+                observation.owner_signal == "absent"
+                and observation.process_group_signal == "absent"
+                and observation.result_signal == "absent"
+            ):
+                finding_kind = "dead-owner"
+            elif (
+                observation.owner_signal == "absent"
+                and observation.process_group_signal == "absent"
+                and observation.result_signal == "exact-valid"
+                and bool(observation.result_digest)
+            ):
+                finding_kind = "result-unreconciled"
+            else:
+                finding_kind = "ambiguous-runner-state"
+            incident_payload = json.dumps(
+                {
+                    "mission_id": observation.mission_id,
+                    "session_id": observation.session_id,
+                    "session_revision": observation.session_revision,
+                    "runner_operation_id": observation.runner_operation_id,
+                    "worktree_identity": observation.worktree_identity,
+                    "finding_kind": finding_kind,
+                    "owner_signal": observation.owner_signal,
+                    "process_group_signal": observation.process_group_signal,
+                    "result_signal": observation.result_signal,
+                    "result_digest": observation.result_digest,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            incident_id = sha256(incident_payload.encode("utf-8")).hexdigest()
+            correlation_id = f"supervise:{incident_id}"
+            receipt_id = f"supervision-receipt:{incident_id[:24]}"
+            supervision = self._supervision_from_payload(data)
+            observers = supervision.setdefault("observers", {})
+            receipts = supervision.setdefault("receipts", {})
+            observer = observers.get(observation.source_id)
+            if observer is None:
+                observer = {
+                    "incarnation": observation.source_incarnation,
+                    "cursor": 0,
+                    "receipts": {},
+                }
+            if not isinstance(observer, dict):
+                raise AlbertError("Runner observer state is invalid.")
+            if observer.get("incarnation") != observation.source_incarnation:
+                if observation.sequence != 1:
+                    raise AlbertError(
+                        "A new runner observer incarnation must begin at sequence 1."
+                    )
+                observer = {
+                    "incarnation": observation.source_incarnation,
+                    "cursor": 0,
+                    "receipts": {},
+                }
+            cursor = observer.get("cursor", 0)
+            observer_receipts = observer.setdefault("receipts", {})
+            if not isinstance(cursor, int) or isinstance(cursor, bool) or cursor < 0:
+                raise AlbertError("Runner observer cursor is invalid.")
+            if observation.sequence <= cursor:
+                replay_id = observer_receipts.get(str(observation.sequence))
+                replay = receipts.get(replay_id) if isinstance(replay_id, str) else None
+                if not isinstance(replay, dict) or replay.get("correlation_id") != correlation_id:
+                    raise AlbertError(
+                        "Runner observation sequence was already used for a different boundary."
+                    )
+                self.supervision = supervision
+                return SupervisionReceipt.from_dict(replay)
+            if observation.sequence != cursor + 1:
+                raise AlbertError(
+                    f"Runner observer cursor gap: expected {cursor + 1}, "
+                    f"received {observation.sequence}."
+                )
+
+            exact_canonical_boundary = (
+                session.status == "running"
+                and session.revision == observation.session_revision
+                and session.runner_operation_id == observation.runner_operation_id
+                and session.worktree_identity == observation.worktree_identity
+            )
+            healthy = (
+                exact_canonical_boundary
+                and finding_kind == "healthy"
+            )
+            if healthy:
+                effect = "none"
+            elif (
+                exact_canonical_boundary
+                and finding_kind == "dead-owner"
+            ):
+                effect = "recover-same-session"
+            elif (
+                exact_canonical_boundary
+                and finding_kind == "result-unreconciled"
+            ):
+                effect = "reconcile-result"
+            else:
+                effect = "mission-commander-decision"
+            existing_receipt = receipts.get(receipt_id)
+            if isinstance(existing_receipt, dict):
+                observer["cursor"] = observation.sequence
+                observer_receipts[str(observation.sequence)] = receipt_id
+                observers[observation.source_id] = observer
+                data["supervision"] = supervision
+                self._write_runtime_payload(data)
+                self.supervision = supervision
+                return SupervisionReceipt.from_dict(existing_receipt)
+
+            receipt = SupervisionReceipt(
+                receipt_id=receipt_id,
+                correlation_id=correlation_id,
+                outcome=(
+                    "no-change"
+                    if healthy
+                    else "decision-needed"
+                    if effect == "mission-commander-decision"
+                    else "attention-recorded"
+                ),
+                effect=effect,
+                mission_id=self.mission_id,
+                session_id=session.session_id,
+                attention_id=(
+                    "" if healthy else f"runner-attention:{incident_id[:24]}"
+                ),
+            )
+            receipt_payload = {
+                "receipt_id": receipt.receipt_id,
+                "correlation_id": receipt.correlation_id,
+                "outcome": receipt.outcome,
+                "effect": receipt.effect,
+                "mission_id": receipt.mission_id,
+                "session_id": receipt.session_id,
+                "attention_id": receipt.attention_id,
+            }
+            receipts[receipt_id] = receipt_payload
+            if not healthy:
+                attention = {
+                    "attention_id": receipt.attention_id,
+                    "incident_id": incident_id,
+                    "mission_id": self.mission_id,
+                    "session_id": session.session_id,
+                    "kind": finding_kind,
+                    "detail": (
+                        "Exact runner and process group are absent with no result; "
+                        "one same-session recovery is pending exact proof."
+                        if effect == "recover-same-session"
+                        else "An exact durable runner result is pending canonical reconciliation."
+                        if effect == "reconcile-result"
+                        else "Runner evidence is ambiguous; automatic recovery is blocked."
+                    ),
+                    "next_effect": effect,
+                    "disposition": "open",
+                    "receipt_id": receipt_id,
+                }
+                supervision.setdefault("attentions", {})[receipt.attention_id] = attention
+                if effect in {"recover-same-session", "reconcile-result"}:
+                    intent_id = f"runner-intent:{incident_id[:24]}"
+                    supervision.setdefault("intents", {})[intent_id] = {
+                        "intent_id": intent_id,
+                        "attention_id": receipt.attention_id,
+                        "receipt_id": receipt_id,
+                        "effect": effect,
+                        "status": "pending",
+                        "mission_id": self.mission_id,
+                        "session_id": session.session_id,
+                        "session_revision": session.revision,
+                        "runner_operation_id": session.runner_operation_id,
+                        "runner_pid": session.runner_pid,
+                        "runner_identity": session.runner_identity,
+                        "runner_process_pid": session.runner_process_pid,
+                        "runner_process_identity": session.runner_process_identity,
+                        "worktree_identity": session.worktree_identity,
+                        "result_signal": observation.result_signal,
+                        "result_digest": observation.result_digest,
+                    }
+                else:
+                    session.revision += 1
+                    session.supervision_receipt_id = receipt_id
+                    data["sessions"][session.session_id] = session.to_dict()
+            observer["cursor"] = observation.sequence
+            observer_receipts[str(observation.sequence)] = receipt_id
+            observers[observation.source_id] = observer
+            data["supervision"] = supervision
+            self._write_runtime_payload(data)
+            if effect == "mission-commander-decision":
+                self.sessions[session.session_id] = session
+            self.supervision = supervision
+        if receipt.effect in {"recover-same-session", "reconcile-result"}:
+            return self._apply_supervision_intent(receipt.receipt_id)
+        return receipt
+
+    @staticmethod
+    def _probe_process_identity(pid: int | None, expected_identity: str) -> str:
+        if pid is None or not expected_identity:
+            return "unavailable"
+        if not Path("/proc").is_dir():
+            return "unavailable"
+        stat_path = Path(f"/proc/{pid}/stat")
+        if not stat_path.exists():
+            return "absent"
+        actual_identity = _process_identity(pid)
+        if not actual_identity:
+            return "unavailable"
+        return "live-exact" if actual_identity == expected_identity else "reused"
+
+    def _probe_runner_boundary(self, session: LocalAgentSession) -> tuple[str, str]:
+        owner = self._probe_process_identity(
+            session.runner_pid,
+            session.runner_identity,
+        )
+        process_group = self._probe_process_identity(
+            session.runner_process_pid,
+            session.runner_process_identity,
+        )
+        if process_group == "absent" and session.runner_process_token:
+            token_pids, absence_observable = _probe_process_token_pids(
+                session.runner_process_token
+            )
+            if token_pids:
+                process_group = "live-exact"
+            elif not absence_observable:
+                process_group = "unavailable"
+        if (
+            (
+                process_group == "absent"
+                or (
+                    process_group == "unavailable"
+                    and not session.runner_process_token
+                )
+            )
+            and os.name == "posix"
+            and session.runner_process_pid is not None
+        ):
+            try:
+                os.killpg(session.runner_process_pid, 0)
+            except ProcessLookupError:
+                process_group = "absent"
+            except PermissionError:
+                process_group = "unavailable"
+            else:
+                # A live group after its recorded leader identity disappeared is
+                # contradictory or reused, never exact quiescence proof.
+                process_group = (
+                    "live-exact" if process_group == "live-exact" else "reused"
+                )
+        return owner, process_group
+
+    def _local_execution_needs_reconciliation(
+        self,
+        session: LocalAgentSession,
+    ) -> bool:
+        """Block automatic runner recovery while a host effect is uncertain."""
+
+        journal = ExecutionJournal(self.runtime_dir / "execution-receipts.json")
+        try:
+            journal.reconcile()
+            records = journal.inspect_records()
+        except Exception:
+            return True
+        records_by_request_id = {
+            request.request_id: (request, receipt) for request, receipt in records
+        }
+        for persisted in session.execution_receipts:
+            request_id = persisted.get("request_id")
+            record = records_by_request_id.get(request_id)
+            if record is None:
+                return True
+            request, receipt = record
+            if receipt.to_dict(include_output=False) != persisted:
+                return True
+            authority = request.authority
+            if (
+                request.effect != "local-agent"
+                or not isinstance(authority, LocalAgentExecutionAuthority)
+                or authority.mission_id != self.mission_id
+                or authority.session_id != session.session_id
+                or authority.runner_operation_id != session.runner_operation_id
+                or authority.worktree_identity != session.worktree_identity
+                or request.working_directory != str(session.worktree_path.resolve())
+                or authority.session_revision > session.revision
+            ):
+                return True
+            if receipt.status in {"executing", "outcome-unknown"}:
+                return True
+        for request, receipt in records:
+            authority = request.authority
+            if (
+                request.effect == "local-agent"
+                and isinstance(authority, LocalAgentExecutionAuthority)
+                and authority.mission_id == self.mission_id
+                and authority.session_id == session.session_id
+                and receipt.status in {"executing", "outcome-unknown"}
+            ):
+                return True
+        return False
+
+    def _apply_supervision_intent(self, receipt_id: str) -> SupervisionReceipt:
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            supervision = self._supervision_from_payload(data)
+            receipts = supervision.get("receipts", {})
+            receipt_payload = receipts.get(receipt_id)
+            if not isinstance(receipt_payload, dict):
+                raise AlbertError(f"Unknown supervision receipt: {receipt_id}")
+            intents = supervision.get("intents", {})
+            intent = next(
+                (
+                    item
+                    for item in intents.values()
+                    if isinstance(item, dict) and item.get("receipt_id") == receipt_id
+                ),
+                None,
+            )
+            if intent is None or intent.get("status") == "applied":
+                self.supervision = supervision
+                return SupervisionReceipt.from_dict(receipt_payload)
+            raw_session = data.get("sessions", {}).get(intent.get("session_id"))
+            if not isinstance(raw_session, dict):
+                raise AlbertError("Supervision intent session is unavailable")
+            session = LocalAgentSession.from_dict(raw_session)
+            owner_signal, group_signal = self._probe_runner_boundary(session)
+            current_worktree_identity = self._worktree_identity_for_session(session)
+            exact_boundary = (
+                intent.get("mission_id") == self.mission_id
+                and session.session_id == intent.get("session_id")
+                and session.status == "running"
+                and session.revision == intent.get("session_revision")
+                and session.runner_operation_id == intent.get("runner_operation_id")
+                and session.runner_pid == intent.get("runner_pid")
+                and session.runner_identity == intent.get("runner_identity")
+                and session.runner_process_pid == intent.get("runner_process_pid")
+                and session.runner_process_identity
+                == intent.get("runner_process_identity")
+                and bool(session.worktree_identity)
+                and session.worktree_identity == intent.get("worktree_identity")
+                and current_worktree_identity == session.worktree_identity
+                and owner_signal == "absent"
+                and group_signal == "absent"
+            )
+            identity_boundary = exact_boundary
+            effect = intent.get("effect")
+            if effect == "recover-same-session":
+                if self._local_execution_needs_reconciliation(session):
+                    return self._fail_closed_supervision_intent(
+                        data,
+                        supervision,
+                        intent,
+                        receipt_payload,
+                        "An uncertain Local Agent host effect requires reconciliation "
+                        "before automatic runner recovery.",
+                    )
+                runner_boundary = session.retirement.get("runner_boundary", {})
+                has_owner_lease = bool(
+                    runner_boundary.get("owner_lease_path")
+                    or runner_boundary.get("owner_lease_token")
+                )
+                if (
+                    identity_boundary
+                    and has_owner_lease
+                    and not self._release_retirement_runner_owner(session)
+                ):
+                    return self._fail_closed_supervision_intent(
+                        data,
+                        supervision,
+                        intent,
+                        receipt_payload,
+                        "The stopped runner's exact owner lease could not be released "
+                        "before recovery.",
+                    )
+                repeated_failed_recovery = (
+                    identity_boundary
+                    and session.automatic_recovery_count >= 1
+                    and session.evidence is None
+                    and not session.evidence_correlation_id
+                    and not session.runner_result
+                    and intent.get("result_signal") == "absent"
+                )
+                if repeated_failed_recovery:
+                    session.status = "failed"
+                    session.revision += 1
+                    session.runner_ended_at = _utc_now()
+                    session.runner_exit_status = 1
+                    session.supervision_receipt_id = receipt_id
+                    session.runner_pid = None
+                    session.runner_identity = ""
+                    session.runner_process_pid = None
+                    session.runner_process_identity = ""
+                    session.runner_process_token = ""
+                    session.evidence_valid = False
+                    session.task_packet["runner_failure"] = (
+                        "The one automatic recovery failed; further automation is "
+                        "disabled until the Mission Commander decides the next action."
+                    )
+                    data["sessions"][session.session_id] = session.to_dict()
+                    intent["status"] = "blocked"
+                    attention = supervision.get("attentions", {}).get(
+                        intent.get("attention_id")
+                    )
+                    if isinstance(attention, dict):
+                        attention["kind"] = "automatic-recovery-failed"
+                        attention["detail"] = session.task_packet["runner_failure"]
+                        attention["next_effect"] = "mission-commander-decision"
+                    receipt_payload["outcome"] = "decision-needed"
+                    receipt_payload["effect"] = "mission-commander-decision"
+                    data.setdefault("timeline", []).append(
+                        f"{session.issue_id} automatic recovery failed for "
+                        f"{session.session_id}; Mission Commander decision required "
+                        f"under receipt {receipt_id}."
+                    )
+                    data["supervision"] = supervision
+                    self._write_runtime_payload(data)
+                    self.sessions[session.session_id] = session
+                    self.timeline = list(data.get("timeline", []))
+                    self.supervision = supervision
+                    return SupervisionReceipt.from_dict(receipt_payload)
+                exact_boundary = (
+                    exact_boundary
+                    and session.automatic_recovery_count == 0
+                    and session.evidence is None
+                    and not session.evidence_correlation_id
+                    and not session.runner_result
+                    and intent.get("result_signal") == "absent"
+                )
+            elif effect == "reconcile-result":
+                candidate = session.runner_result
+                candidate_without_digest = (
+                    {key: value for key, value in candidate.items() if key != "digest"}
+                    if isinstance(candidate, dict)
+                    else {}
+                )
+                candidate_digest = (
+                    candidate.get("digest") if isinstance(candidate, dict) else ""
+                )
+                exact_boundary = (
+                    exact_boundary
+                    and bool(candidate_without_digest)
+                    and candidate_digest == intent.get("result_digest")
+                    and candidate_digest
+                    == self._runner_result_digest(candidate_without_digest)
+                    and candidate.get("mission_id") == self.mission_id
+                    and candidate.get("session_id") == session.session_id
+                    and candidate.get("runner_operation_id")
+                    == session.runner_operation_id
+                    and candidate.get("worktree_identity")
+                    == session.worktree_identity
+                )
+            else:
+                exact_boundary = False
+            if not exact_boundary:
+                return self._fail_closed_supervision_intent(
+                    data,
+                    supervision,
+                    intent,
+                    receipt_payload,
+                    "Exact runner, process-group, Mission, session, revision, "
+                    "Worktree Identity, and result-absence proof did not all hold.",
+                )
+
+            if effect == "recover-same-session":
+                session.status = "queued"
+                session.automatic_recovery_count = 1
+                session.runner_started_at = ""
+                session.runner_ended_at = ""
+                session.runner_exit_status = None
+                session.task_packet["runner_failure"] = (
+                    "The prior runner and process group stopped without a valid result; "
+                    "one automatic same-session recovery was queued."
+                )
+                outcome = "recovered"
+                timeline_message = (
+                    f"{session.issue_id} automatic runner recovery queued for "
+                    f"{session.session_id}; receipt {receipt_id}."
+                )
+            else:
+                candidate = session.runner_result
+                session.status = str(candidate["status"])
+                session.runner_exit_status = candidate.get("runner_exit_status")
+                session.runner_ended_at = str(candidate.get("runner_ended_at", ""))
+                session.evidence = EvidencePackage.from_dict(candidate.get("evidence"))
+                session.evidence_valid = bool(candidate.get("evidence_valid", False))
+                session.evidence_correlation_id = str(
+                    candidate.get("evidence_correlation_id", "")
+                )
+                session.artifacts = dict(candidate.get("artifacts", {}))
+                outcome = "result-reconciled"
+                timeline_message = (
+                    f"{session.issue_id} late runner result reconciled for "
+                    f"{session.session_id}; receipt {receipt_id}."
+                )
+            session.revision += 1
+            session.supervision_receipt_id = receipt_id
+            session.runner_pid = None
+            session.runner_identity = ""
+            session.runner_process_pid = None
+            session.runner_process_identity = ""
+            session.runner_process_token = ""
+            data["sessions"][session.session_id] = session.to_dict()
+            intent["status"] = "applied"
+            attention = supervision.get("attentions", {}).get(intent.get("attention_id"))
+            if isinstance(attention, dict):
+                attention["disposition"] = "resolved"
+            receipt_payload["outcome"] = outcome
+            data.setdefault("timeline", []).append(timeline_message)
+            data["supervision"] = supervision
+            self._write_runtime_payload(data)
+            self.sessions[session.session_id] = session
+            self.timeline = list(data.get("timeline", []))
+            self.supervision = supervision
+            return SupervisionReceipt.from_dict(receipt_payload)
+
+    def _fail_closed_supervision_intent(
+        self,
+        data: dict[str, Any],
+        supervision: dict[str, Any],
+        intent: dict[str, Any],
+        receipt_payload: dict[str, Any],
+        detail: str,
+    ) -> SupervisionReceipt:
+        intent["status"] = "blocked"
+        attention = supervision.get("attentions", {}).get(intent.get("attention_id"))
+        if isinstance(attention, dict):
+            attention["kind"] = "recovery-blocked"
+            attention["detail"] = detail
+            attention["next_effect"] = "mission-commander-decision"
+        receipt_payload["outcome"] = "decision-needed"
+        receipt_payload["effect"] = "mission-commander-decision"
+        raw_session = data.get("sessions", {}).get(intent.get("session_id"))
+        if not isinstance(raw_session, dict):
+            raise AlbertError("Supervision intent session is unavailable")
+        session = LocalAgentSession.from_dict(raw_session)
+        session.revision += 1
+        session.supervision_receipt_id = str(receipt_payload["receipt_id"])
+        data["sessions"][session.session_id] = session.to_dict()
+        data["supervision"] = supervision
+        self._write_runtime_payload(data)
+        self.sessions[session.session_id] = session
+        self.supervision = supervision
+        return SupervisionReceipt.from_dict(receipt_payload)
+
     def launch_headless_work(
+        self,
+        *,
+        work_kind: str,
+        agent_id: str,
+        prompt: str = "",
+        review_session_id: str = "",
+        allowed_paths: list[str] | None = None,
+        command_policy: dict[str, str] | None = None,
+    ) -> LocalAgentSession:
+        with self._session_launch_lock():
+            self._load_runtime()
+            session = self._queue_headless_work(
+                work_kind=work_kind,
+                agent_id=agent_id,
+                prompt=prompt,
+                review_session_id=review_session_id,
+                allowed_paths=allowed_paths,
+                command_policy=command_policy,
+            )
+        return self.run_session(
+            session.session_id,
+            expected_revision=session.revision,
+        )
+
+    def _queue_headless_work(
         self,
         *,
         work_kind: str,
@@ -2650,23 +5805,17 @@ class AlbertMission:
         }
         if review_context is not None:
             task_packet["review_context"] = review_context
+        self._admit_retirement_unit()
         session = LocalAgentSession(
             session_id=session_id,
             issue_id=work_id,
             assigned_agent=agent_id,
             worktree_path=worktree_path,
             task_packet=task_packet,
+            status="queued",
         )
         self.sessions[session_id] = session
-        self._attach_selected_skill(session)
-        self._ensure_session_worktree(session)
-        if agent_config.runner == "fake":
-            self._run_fake_agent(session)
-        elif agent_config.runner == "command":
-            self._run_command_agent(session, agent_config)
-        elif agent_config.runner == "ollama":
-            self._run_ollama_agent(session, agent_config)
-        self._record(f"{work_id} launched as {session_id}.")
+        self._record(f"{work_id} queued as {session_id} with preservation reserved.")
         self._persist()
         return session
 
@@ -2766,45 +5915,195 @@ class AlbertMission:
             return f"ollama run {agent_config.model} --think=false --nowordwrap --format json"
         return ""
 
-    def record_evidence(self, session_id: str, evidence: EvidencePackage) -> None:
-        session = self._session(session_id)
+    def _inference_profile_for(
+        self,
+        agent_config: AgentConfig,
+        *,
+        turn_kind: str,
+        schema: Any,
+    ) -> LocalInferenceProfile:
+        """Resolve one exact versioned Profile for a model turn."""
+
+        defaults = {
+            "profile_id": f"{agent_config.id}-v1",
+            "version": 1,
+            "model": agent_config.model,
+            "context_budget": 16_384 if turn_kind == "worker" else 8_192,
+            "output_budget": 2_048 if turn_kind == "worker" else 1_024,
+            "keep_alive": "10m" if turn_kind == "worker" else "5m",
+            "thinking": False,
+            "sampling": {"temperature": 0.2, "top_p": 0.9},
+            "schema": schema,
+            "quantization": "auto",
+            "residency": "normal",
+            "processor_placement": "gpu",
+            "qualified": True,
+            "priority": 60 if turn_kind == "routing" else 50,
+            "queue_limit": 8,
+            "max_queue_wait_seconds": 30.0,
+            "timeout_seconds": float(_MODEL_COMMAND_TIMEOUT_SECONDS),
+            "max_output_bytes": _MODEL_PROCESS_OUTPUT_BYTES_LIMIT,
+        }
+        configured = dict(agent_config.inference_profile)
+        defaults.update(configured)
+        defaults["model"] = agent_config.model
+        defaults["profile_id"] = configured.get(
+            "profile_id", f"{agent_config.id}-v1"
+        )
+        defaults["schema"] = schema
+        try:
+            return LocalInferenceProfile.from_dict(defaults)
+        except ValueError as exc:
+            raise AlbertError(
+                f"Agent {agent_config.id} has an invalid Local Inference Profile: {exc}"
+            ) from exc
+
+    def _record_inference_receipt(self, receipt: dict[str, Any]) -> None:
+        """Persist one bounded non-authoritative or completed model-turn receipt."""
+
+        if receipt.get("mission_id") != self.mission_id:
+            raise AlbertError("Local Inference receipt Mission attribution is invalid")
+        request_id = receipt.get("request_id")
+        if not isinstance(request_id, str) or not request_id.strip():
+            raise AlbertError("Local Inference receipt request identity is invalid")
+        if receipt.get("schema_version") != 1 or not isinstance(
+            receipt.get("authoritative"), bool
+        ):
+            raise AlbertError("Local Inference receipt schema is invalid")
+        self._validate_inference_turn(receipt)
+        try:
+            encoded_receipt = json.dumps(
+                receipt,
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise AlbertError("Local Inference receipt schema is invalid") from exc
+        if len(encoded_receipt.encode("utf-8")) > _INFERENCE_RECEIPT_BYTES_LIMIT:
+            raise AlbertError("Local Inference receipt exceeds the bounded size")
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            turns = data.get("inference_turns", [])
+            if not isinstance(turns, list):
+                raise AlbertError("Mission inference turn ledger is invalid")
+            existing = next(
+                (
+                    item
+                    for item in turns
+                    if isinstance(item, dict) and item.get("request_id") == request_id
+                ),
+                None,
+            )
+            if existing is not None:
+                if existing != receipt:
+                    raise AlbertError(
+                        "Local Inference request id was already used for a different turn"
+                    )
+                self.inference_turns = [dict(item) for item in turns]
+                return
+            turns = [*turns, json.loads(encoded_receipt)][-128:]
+            data["inference_turns"] = turns
+            self._write_runtime_payload(data)
+            self.inference_turns = [dict(item) for item in turns]
+
+    def inference_lease_state(self) -> dict[str, Any]:
+        """Return the bounded scheduler projection without invoking a model."""
+
+        return LocalInferenceLease.inspect(self.runtime_root)
+
+    def _run_profile_inference(
+        self,
+        *,
+        agent_config: AgentConfig,
+        prompt: str,
+        mission_id: str,
+        session_id: str,
+        turn_kind: str,
+        schema: Any,
+        validator: Callable[[str], Any],
+        cancellation_requested: Callable[[], bool] | None = None,
+    ) -> Any:
+        profile = self._inference_profile_for(
+            agent_config,
+            turn_kind=turn_kind,
+            schema=schema,
+        )
+        result = LocalInferenceAdapter(
+            runtime_root=self.runtime_root,
+            opener=self.inference_opener,
+        ).infer(
+            prompt=prompt,
+            profile=profile,
+            mission_id=mission_id,
+            session_id=session_id,
+            turn_kind=turn_kind,
+            validator=validator,
+            cancellation_requested=cancellation_requested,
+        )
+        self._record_inference_receipt(result.receipt)
+        return result
+
+    def record_evidence(
+        self,
+        session_id: str,
+        evidence: EvidencePackage,
+        *,
+        expected_revision: int | None = None,
+    ) -> None:
         missing = evidence.missing_fields()
         if missing:
             raise EvidenceValidationError(f"Evidence Package is missing: {', '.join(missing)}")
-        unsafe_links = [
-            link
-            for link in evidence.artifact_links
-            if not self._artifact_link_is_safe_for_review(session, link)
-        ]
-        if unsafe_links:
-            raise EvidenceValidationError(
-                "Evidence Package contains an unsafe artifact link: "
-                + ", ".join(unsafe_links)
+        request_revision = (
+            self._session(session_id).revision
+            if expected_revision is None
+            else expected_revision
+        )
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_session = data.get("sessions", {}).get(session_id)
+            if not isinstance(raw_session, dict):
+                in_memory = self.sessions.get(session_id)
+                if in_memory is None:
+                    raise AlbertError(f"Unknown Local Agent session: {session_id}")
+                raw_session = in_memory.to_dict()
+            session = LocalAgentSession.from_dict(raw_session)
+            self._require_lifecycle_revision(session, request_revision)
+            self._require_active_retirement_unit(session, "record evidence")
+            unsafe_links = [
+                link
+                for link in evidence.artifact_links
+                if not self._artifact_link_is_safe_for_review(session, link)
+            ]
+            if unsafe_links:
+                raise EvidenceValidationError(
+                    "Evidence Package contains an unsafe artifact link: "
+                    + ", ".join(unsafe_links)
+                )
+            correlation_id = f"evidence:{self.mission_id}:{session_id}"
+            if session.evidence_correlation_id:
+                if (
+                    session.evidence_correlation_id == correlation_id
+                    and session.evidence == evidence
+                    and session.evidence_valid
+                ):
+                    self.sessions[session_id] = session
+                    return
+                raise AlbertError(
+                    "Evidence correlation id was already used for a different package: "
+                    f"{correlation_id}"
+                )
+            session.evidence = evidence
+            session.evidence_valid = True
+            session.evidence_correlation_id = correlation_id
+            session.status = "evidence-ready"
+            session.revision += 1
+            data["sessions"][session_id] = session.to_dict()
+            data.setdefault("timeline", []).append(
+                f"{session.issue_id} evidence package validated for {session_id}."
             )
-        correlation_id = f"evidence:{self.mission_id}:{session_id}"
-        if session.evidence_correlation_id:
-            if (
-                session.evidence_correlation_id == correlation_id
-                and session.evidence == evidence
-                and session.evidence_valid
-            ):
-                if self._evidence_activity_recorder is not None:
-                    self._evidence_activity_recorder(
-                        self.mission_id,
-                        session,
-                        evidence,
-                    )
-                return
-            raise AlbertError(
-                f"Evidence correlation id was already used for a different package: "
-                f"{correlation_id}"
-            )
-        session.evidence = evidence
-        session.evidence_valid = True
-        session.evidence_correlation_id = correlation_id
-        session.status = "evidence-ready"
-        self._record(f"{session.issue_id} evidence package validated for {session_id}.")
-        self._persist()
+            self._write_runtime_payload(data)
+            self.sessions[session_id] = session
+            self.timeline = list(data.get("timeline", []))
         if self._evidence_activity_recorder is not None:
             self._evidence_activity_recorder(self.mission_id, session, evidence)
 
@@ -2814,19 +6113,34 @@ class AlbertMission:
         *,
         reason: str,
         workstation_action: dict[str, Any] | None = None,
+        expected_revision: int | None = None,
     ) -> LocalAgentSession:
         if not reason.strip():
             raise AlbertError("Session cancellation requires a reason.")
+        if expected_revision is None:
+            expected_revision = self._session(session_id).revision
         with self._runtime_lock(exclusive=True):
             data = self._read_runtime_payload()
             session_data = data.get("sessions", {}).get(session_id)
             if not isinstance(session_data, dict):
                 raise AlbertError(f"Unknown Local Agent session: {session_id}")
             session = LocalAgentSession.from_dict(session_data)
+            self._require_lifecycle_revision(session, expected_revision)
+            self._require_active_retirement_unit(session, "cancel")
             if session.status not in {"queued", "launched", "running"}:
                 raise AlbertError(
                     f"{session_id} cannot be cancelled from {session.status}."
                 )
+            never_started = bool(
+                session.status in {"queued", "launched"}
+                and not session.runner_started_at
+                and not session.runner_operation_id
+                and session.runner_pid is None
+                and session.runner_process_pid is None
+                and not session.runner_identity
+                and not session.runner_process_identity
+                and not session.runner_process_token
+            )
             workstation_actions = self._merge_workstation_action_ledgers(
                 data.get("workstation_actions", {}),
                 {},
@@ -2843,9 +6157,17 @@ class AlbertMission:
             session.cancel_requested_at = _utc_now()
             session.cancel_reason = reason.strip()
             session.runner_ended_at = session.runner_ended_at or session.cancel_requested_at
+            if never_started:
+                self._remember_never_started_runner_boundary(
+                    session,
+                    event_at=session.cancel_requested_at,
+                )
             session.runner_pid = None
             session.runner_identity = ""
             session.runner_process_pid = None
+            session.runner_process_identity = ""
+            session.runner_process_token = ""
+            session.revision += 1
             data["sessions"][session_id] = session.to_dict()
             data["workstation_actions"] = workstation_actions
             timeline = list(data.get("timeline", []))
@@ -2857,7 +6179,183 @@ class AlbertMission:
         self.sessions[session_id] = session
         self.workstation_actions = workstation_actions
         self.timeline = timeline
-        return session
+        if not never_started:
+            return session
+        try:
+            return self.reconcile_retirement_unit(session_id)
+        except LaunchBlockedError:
+            latest = self._refresh_persisted_session(session_id)
+            if latest.retirement.get("phase") == "active":
+                return self.reconcile_retirement_unit(session_id)
+            return latest
+
+    def _archive_issue_from_workstation(
+        self,
+        issue_id: str,
+        *,
+        workstation_action: dict[str, Any] | None = None,
+        expected_revision: int | None = None,
+    ) -> IssueSlice:
+        """Archive one evidence-accepted Issue Slice without removing its history."""
+        return self._set_issue_archived(
+            issue_id,
+            archived=True,
+            workstation_action=workstation_action,
+            expected_revision=expected_revision,
+        )
+
+    def _restore_archived_issue_from_workstation(
+        self,
+        issue_id: str,
+        *,
+        workstation_action: dict[str, Any] | None = None,
+        expected_revision: int | None = None,
+    ) -> IssueSlice:
+        """Restore one retained Issue Slice subtree to the active Mission Work tree."""
+        return self._set_issue_archived(
+            issue_id,
+            archived=False,
+            workstation_action=workstation_action,
+            expected_revision=expected_revision,
+        )
+
+    def _set_issue_archived(
+        self,
+        issue_id: str,
+        *,
+        archived: bool,
+        workstation_action: dict[str, Any] | None,
+        expected_revision: int | None,
+    ) -> IssueSlice:
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            for candidate_id, runtime in data.get("issues", {}).items():
+                if candidate_id in self.issues and isinstance(runtime, dict):
+                    self.issues[candidate_id].apply_runtime(runtime)
+            issue = self._issue(issue_id)
+            current_archived = data.get("archived_issue_ids", [])
+            if (
+                not isinstance(current_archived, list)
+                or not all(isinstance(candidate, str) and candidate.strip() for candidate in current_archived)
+                or len(current_archived) != len(set(current_archived))
+                or any(candidate not in self.issues for candidate in current_archived)
+            ):
+                raise AlbertError("Mission archive state is invalid")
+            archived_ids = set(current_archived)
+            if archived:
+                if (
+                    issue.review_state not in {"pr-ready", "complete"}
+                    and issue.tracker_status.lower() != "merged"
+                ):
+                    raise AlbertError(
+                        f"{issue_id} must have accepted evidence or be tracker-merged before it can be archived."
+                    )
+                if issue_id in archived_ids:
+                    raise AlbertError(f"{issue_id} is already archived.")
+            elif issue_id not in archived_ids:
+                raise AlbertError(f"{issue_id} is not archived.")
+
+            workstation_actions = self._merge_workstation_action_ledgers(
+                data.get("workstation_actions", {}),
+                {},
+            )
+            if not isinstance(workstation_action, dict):
+                raise AlbertError(
+                    "Archive state changes require a correlated Workstation marker."
+                )
+            expected_action_type = "issue-archive" if archived else "issue-restore"
+            expected_request = {
+                "issue_id": issue_id,
+                "session_id": "",
+                "agent_id": "",
+                "reason": "",
+                "allowed_paths": [],
+                "command_policy": {},
+            }
+            if (
+                set(workstation_action)
+                != {
+                    "correlation_id",
+                    "action_type",
+                    "actor",
+                    "mission_id",
+                    "expected_revision",
+                    "target_kind",
+                    "target_id",
+                    "request",
+                }
+                or workstation_action.get("action_type") != expected_action_type
+                or workstation_action.get("actor") != "mission-commander"
+                or workstation_action.get("mission_id") != self.mission_id
+                or workstation_action.get("target_kind") != "issue-slice"
+                or workstation_action.get("target_id") != issue_id
+                or workstation_action.get("request") != expected_request
+                or not isinstance(expected_revision, int)
+                or isinstance(expected_revision, bool)
+                or expected_revision < 0
+                or workstation_action.get("expected_revision") != expected_revision
+            ):
+                raise AlbertError(
+                    "Archive state changes require a complete Workstation action boundary."
+                )
+            authoritative_revision = self._authoritative_workspace_revision()
+            if expected_revision != authoritative_revision:
+                raise AlbertError(
+                    "Archive state changes require the authoritative current "
+                    f"Workstation revision {authoritative_revision}."
+                )
+            correlation_id = workstation_action.get("correlation_id")
+            if not isinstance(correlation_id, str) or not correlation_id.strip():
+                raise AlbertError("Workstation action correlation id must not be empty")
+            workstation_actions = self._merge_workstation_action_ledgers(
+                workstation_actions,
+                {correlation_id: dict(workstation_action)},
+            )
+
+            if archived:
+                archived_ids.add(issue_id)
+                event = f"{issue_id} archived from Mission Work; history retained."
+            else:
+                archived_ids.remove(issue_id)
+                event = f"{issue_id} restored to Mission Work with history retained."
+            timeline = list(data.get("timeline", []))
+            timeline.append(event)
+            data["archived_issue_ids"] = sorted(archived_ids)
+            data["workstation_actions"] = workstation_actions
+            data["timeline"] = timeline
+            self._write_runtime_payload(data)
+
+        self.archived_issue_ids = archived_ids
+        self.workstation_actions = workstation_actions
+        self.timeline = timeline
+        return issue
+
+    def _authoritative_workspace_revision(self) -> int:
+        preferences_path = self._workspace_preferences_path
+        if not isinstance(preferences_path, Path):
+            raise AlbertError(
+                "Archive state changes require a bound authoritative Workstation store."
+            )
+        if not preferences_path.exists():
+            return 1
+        try:
+            preferences = json.loads(
+                preferences_path.read_text(encoding="utf-8")
+            )
+            revision = preferences.get("revision")
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise AlbertError(
+                "Archive state changes could not read authoritative Workstation state."
+            ) from exc
+        if (
+            not isinstance(revision, int)
+            or isinstance(revision, bool)
+            or revision < 1
+        ):
+            raise AlbertError(
+                "Archive state changes found an invalid authoritative Workstation revision."
+            )
+        return revision
 
     def record_frontier_review(
         self,
@@ -2869,14 +6367,19 @@ class AlbertMission:
         limitations: list[str] | None = None,
         allowed_session_statuses: set[str] | None = None,
         workspace_action: dict[str, Any] | None = None,
+        expected_revision: int | None = None,
     ) -> ReviewDecision:
         outcome = _normalize_review_outcome(outcome)
+        if expected_revision is None:
+            expected_revision = self._session(session_id).revision
         with self._runtime_lock(exclusive=True):
             data = self._read_runtime_payload()
             raw_session = data.get("sessions", {}).get(session_id)
             if not isinstance(raw_session, dict):
                 raise AlbertError(f"Unknown Local Agent session: {session_id}")
             session = LocalAgentSession.from_dict(raw_session)
+            self._require_lifecycle_revision(session, expected_revision)
+            self._require_active_retirement_unit(session, "record review")
             self.sessions[session_id] = session
             for issue_id, runtime in data.get("issues", {}).items():
                 if issue_id in self.issues and isinstance(runtime, dict):
@@ -2924,6 +6427,7 @@ class AlbertMission:
             )
             self.reviews.append(decision)
             session.status = "reviewed"
+            session.revision += 1
             issue = self.issues.get(session.issue_id)
             if outcome in {"Approved", "Approved with limitations"}:
                 session.cleanup_eligible = True
@@ -2954,7 +6458,9 @@ class AlbertMission:
             data["command_policy"] = self.command_policy
             data["timeline"] = self.timeline
             self._write_runtime_payload(data)
-            return decision
+        if outcome in {"Approved", "Approved with limitations", "Rejected"}:
+            self.reconcile_retirement_unit(session_id)
+        return decision
 
     def generate_mission_records(self) -> Path:
         mission_dir = self.target_repo / "docs" / "missions" / self.mission_id
@@ -3180,6 +6686,13 @@ class AlbertMission:
             session_id: LocalAgentSession.from_dict(session)
             for session_id, session in data.get("sessions", {}).items()
         }
+        for session in self.sessions.values():
+            self._validate_snapshot_payload_authority(session)
+            if any(
+                receipt["mission_id"] != self.mission_id
+                for receipt in session.retirement.get("action_receipts", {}).values()
+            ):
+                raise AlbertError("Retirement Unit action receipt is invalid")
         self.reviews = [ReviewDecision.from_dict(item) for item in data.get("reviews", [])]
         self.delegations = {
             issue_id: DelegationDecision.from_dict(item)
@@ -3190,70 +6703,271 @@ class AlbertMission:
             {},
             data.get("workstation_actions", {}),
         )
+        archived = data.get("archived_issue_ids", [])
+        if (
+            not isinstance(archived, list)
+            or not all(isinstance(issue_id, str) and issue_id.strip() for issue_id in archived)
+            or len(archived) != len(set(archived))
+            or any(issue_id not in self.issues for issue_id in archived)
+        ):
+            raise AlbertError("Mission archive state is invalid")
+        self.archived_issue_ids = set(archived)
+        self.supervision = self._supervision_from_payload(data)
+        self.retirement_storage = self._retirement_storage_from_payload(data)
+        raw_inference_turns = data.get("inference_turns", [])
+        if not isinstance(raw_inference_turns, list) or len(raw_inference_turns) > 128:
+            raise AlbertError("Mission inference turn ledger is invalid")
+        self.inference_turns = []
+        for item in raw_inference_turns:
+            self._validate_inference_turn(item)
+            self.inference_turns.append(dict(item))
         self.timeline = list(data.get("timeline", []))
 
-    def _reconcile_abandoned_sessions(self) -> None:
-        """Recover durable running sessions whose owning process no longer exists."""
-        with self._runtime_lock(exclusive=True):
-            data = self._read_runtime_payload()
-            sessions = data.get("sessions", {})
-            if not isinstance(sessions, dict):
-                return
-            changed = False
-            timeline = list(data.get("timeline", []))
-            for session_id, raw_session in sessions.items():
-                if not isinstance(raw_session, dict):
-                    continue
-                session = LocalAgentSession.from_dict(raw_session)
-                if session.status != "running" or _process_identity_is_live(
-                    session.runner_pid,
-                    session.runner_identity,
+    def _validate_inference_turn(self, item: Any) -> None:
+        if not isinstance(item, dict):
+            raise AlbertError("Mission inference turn ledger is invalid")
+        required_fields = {
+            "schema_version",
+            "request_id",
+            "mission_id",
+            "session_id",
+            "turn_kind",
+            "recorded_at",
+            "profile",
+            "admission",
+            "outcome",
+            "authoritative",
+            "timings",
+            "usage",
+            "lease",
+        }
+        if set(item) - (required_fields | {"error"}) or not required_fields.issubset(item):
+            raise AlbertError("Mission inference turn ledger is invalid")
+        required_strings = (
+            "request_id",
+            "mission_id",
+            "session_id",
+            "turn_kind",
+            "recorded_at",
+            "outcome",
+        )
+        if any(
+            not isinstance(item.get(field_name), str)
+            or not item[field_name].strip()
+            for field_name in required_strings
+        ):
+            raise AlbertError("Mission inference turn ledger is invalid")
+        if (
+            item["mission_id"] != self.mission_id
+            or item.get("schema_version") != 1
+            or not isinstance(item.get("authoritative"), bool)
+            or not isinstance(item.get("profile"), dict)
+            or not isinstance(item.get("admission"), dict)
+            or not isinstance(item.get("timings"), dict)
+            or not isinstance(item.get("usage"), dict)
+            or not isinstance(item.get("lease"), dict)
+            or item["outcome"]
+            not in {
+                "completed",
+                "rejected-over-budget",
+                "profile-not-qualified",
+                "metadata-error",
+                "digest-mismatch",
+                "partial-stream",
+                "malformed-stream",
+                "malformed-output",
+                "oversized-output",
+                "timed-out",
+                "cancelled",
+                "transport-error",
+                "queue-full",
+                "lease-timeout",
+                "lease-lost",
+                "ledger-invalid",
+            }
+            or item["authoritative"] != (item["outcome"] == "completed")
+        ):
+            raise AlbertError("Mission inference turn ledger is invalid")
+        try:
+            recorded_at = datetime.fromisoformat(
+                item["recorded_at"].removesuffix("Z")
+                + ("+00:00" if item["recorded_at"].endswith("Z") else "")
+            )
+            if recorded_at.tzinfo is None:
+                raise ValueError("timestamp must include timezone")
+        except ValueError as exc:
+            raise AlbertError("Mission inference turn ledger is invalid") from exc
+        try:
+            profile = LocalInferenceProfile.from_dict(item["profile"])
+        except (ValueError, TypeError, RecursionError) as exc:
+            raise AlbertError("Mission inference turn Profile is invalid") from exc
+        if set(item["admission"]) != {
+            "admitted",
+            "prompt_tokens",
+            "output_headroom",
+            "context_budget",
+            "output_budget",
+        } or set(item["timings"]) != {
+            "load_ms",
+            "prompt_evaluation_ms",
+            "first_token_ms",
+            "decoding_ms",
+        } or set(item["usage"]) != {"prompt_tokens", "output_tokens", "output_bytes"}:
+            raise AlbertError("Mission inference receipt shape is invalid")
+        if item["profile"] != profile.to_dict():
+            raise AlbertError("Mission inference turn Profile is not canonical")
+        admission = item["admission"]
+        if (
+            not isinstance(admission.get("admitted"), bool)
+            or not isinstance(admission.get("prompt_tokens"), int)
+            or isinstance(admission["prompt_tokens"], bool)
+            or admission["prompt_tokens"] < 0
+            or not isinstance(admission.get("output_headroom"), int)
+            or isinstance(admission["output_headroom"], bool)
+            or not isinstance(admission.get("context_budget"), int)
+            or isinstance(admission["context_budget"], bool)
+            or not isinstance(admission.get("output_budget"), int)
+            or isinstance(admission["output_budget"], bool)
+            or admission["context_budget"] != profile.context_budget
+            or admission["output_budget"] != profile.output_budget
+            or admission["output_headroom"]
+            != admission["context_budget"] - admission["prompt_tokens"]
+        ):
+            raise AlbertError("Mission inference admission record is invalid")
+        for value in item["timings"].values():
+            if value is not None and (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(float(value))
+                or value < 0
+            ):
+                raise AlbertError("Mission inference timing record is invalid")
+        usage = item["usage"]
+        if (
+            usage.get("prompt_tokens") is not None
+            and (
+                not isinstance(usage.get("prompt_tokens"), int)
+                or isinstance(usage["prompt_tokens"], bool)
+                or usage["prompt_tokens"] < 0
+            )
+        ):
+            raise AlbertError("Mission inference usage record is invalid")
+        for field_name in ("output_tokens", "output_bytes"):
+            value = usage.get(field_name)
+            if (
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+                or value > _MODEL_PROCESS_OUTPUT_BYTES_LIMIT * 8
+            ):
+                raise AlbertError("Mission inference usage record is invalid")
+        lease = item["lease"]
+        if lease:
+            lease_fields = {
+                "lease_id",
+                "request_id",
+                "mission_id",
+                "session_id",
+                "model",
+                "model_digest",
+                "residency",
+                "priority",
+                "sequence",
+                "enqueued_at",
+                "started_at",
+                "resident_match",
+                "model_swap",
+            }
+            if set(lease) != lease_fields:
+                raise AlbertError("Mission inference lease record is invalid")
+            for field_name in (
+                "lease_id",
+                "request_id",
+                "mission_id",
+                "session_id",
+                "model",
+                "model_digest",
+                "residency",
+                "enqueued_at",
+                "started_at",
+            ):
+                if not isinstance(lease[field_name], str):
+                    raise AlbertError("Mission inference lease record is invalid")
+            for field_name in ("priority", "sequence"):
+                if (
+                    not isinstance(lease[field_name], int)
+                    or isinstance(lease[field_name], bool)
+                    or lease[field_name] < 0
                 ):
-                    continue
-                raw_count = session.task_packet.get("abandoned_runner_recovery_count", 0)
-                recovery_count = (
-                    raw_count
-                    if isinstance(raw_count, int) and not isinstance(raw_count, bool)
-                    else 0
-                ) + 1
-                session.task_packet["abandoned_runner_recovery_count"] = recovery_count
-                session.task_packet["runner_failure"] = (
-                    "The prior runner process ended without recording a terminal state."
-                )
-                session.runner_pid = None
-                session.runner_identity = ""
-                session.runner_process_pid = None
-                if recovery_count <= _ABANDONED_RUNNER_RECOVERY_LIMIT:
-                    session.status = "queued"
-                    session.runner_started_at = ""
-                    session.runner_ended_at = ""
-                    session.runner_exit_status = None
-                    timeline.append(
-                        f"{session.issue_id} recovered abandoned runner for {session_id}; "
-                        f"requeued attempt {recovery_count} of "
-                        f"{_ABANDONED_RUNNER_RECOVERY_LIMIT}."
-                    )
-                else:
-                    session.status = "failed"
-                    session.runner_ended_at = _utc_now()
-                    session.runner_exit_status = 1
-                    session.evidence_valid = False
-                    timeline.append(
-                        f"{session.issue_id} abandoned runner for {session_id} exceeded "
-                        "the automatic recovery limit and was marked failed."
-                    )
-                sessions[session_id] = session.to_dict()
-                changed = True
-            if changed:
-                data["sessions"] = sessions
-                data["timeline"] = timeline
-                self._write_runtime_payload(data)
-                self.sessions = {
-                    session_id: LocalAgentSession.from_dict(raw_session)
-                    for session_id, raw_session in sessions.items()
-                    if isinstance(raw_session, dict)
+                    raise AlbertError("Mission inference lease record is invalid")
+            for field_name in ("resident_match", "model_swap"):
+                if not isinstance(lease[field_name], bool):
+                    raise AlbertError("Mission inference lease record is invalid")
+        if "error" in item and not isinstance(item["error"], str):
+            raise AlbertError("Mission inference error record is invalid")
+
+    def _reconcile_abandoned_sessions(self) -> None:
+        """Run token-free startup reconciliation through the durable ledger."""
+
+        pending_receipts = [
+            str(intent.get("receipt_id"))
+            for intent in self.supervision.get("intents", {}).values()
+            if isinstance(intent, dict)
+            and intent.get("status") == "pending"
+            and isinstance(intent.get("receipt_id"), str)
+        ]
+        for receipt_id in pending_receipts:
+            self._apply_supervision_intent(receipt_id)
+
+        observer = self.supervision.get("observers", {}).get(
+            "startup-reconciliation",
+            {},
+        )
+        cursor = observer.get("cursor", 0) if isinstance(observer, dict) else 0
+        sequence = cursor + 1 if isinstance(cursor, int) and cursor >= 0 else 1
+        for session in sorted(self.sessions.values(), key=lambda item: item.session_id):
+            if session.status != "running":
+                continue
+            owner_signal, process_group_signal = self._probe_runner_boundary(session)
+            if (
+                owner_signal == "live-exact"
+                and process_group_signal == "live-exact"
+                and not session.runner_result
+            ):
+                # A healthy reconciliation sweep is deliberately silent and does
+                # not manufacture an observer event or durable user-facing record.
+                continue
+            result_signal = "absent"
+            result_digest = ""
+            if session.runner_result:
+                candidate = session.runner_result
+                candidate_without_digest = {
+                    key: value for key, value in candidate.items() if key != "digest"
                 }
-                self.timeline = timeline
+                result_digest = str(candidate.get("digest", ""))
+                result_signal = (
+                    "exact-valid"
+                    if result_digest
+                    and result_digest == self._runner_result_digest(candidate_without_digest)
+                    else "invalid"
+                )
+            self.observe_runner(
+                RunnerObservation(
+                    source_id="startup-reconciliation",
+                    source_incarnation="canonical-v1",
+                    sequence=sequence,
+                    mission_id=self.mission_id,
+                    session_id=session.session_id,
+                    session_revision=session.revision,
+                    runner_operation_id=session.runner_operation_id,
+                    owner_signal=owner_signal,
+                    process_group_signal=process_group_signal,
+                    worktree_identity=session.worktree_identity,
+                    result_signal=result_signal,
+                    result_digest=result_digest,
+                )
+            )
+            sequence += 1
 
     def _runtime_payload(self) -> dict[str, Any]:
         return {
@@ -3266,6 +6980,10 @@ class AlbertMission:
             "delegations": {issue_id: decision.to_dict() for issue_id, decision in self.delegations.items()},
             "command_policy": self.command_policy,
             "workstation_actions": self.workstation_actions,
+            "archived_issue_ids": sorted(self.archived_issue_ids),
+            "supervision": self.supervision,
+            "retirement_storage": self.retirement_storage,
+            "inference_turns": self.inference_turns[-128:],
             "timeline": self.timeline,
         }
 
@@ -3296,6 +7014,34 @@ class AlbertMission:
                     latest.get("workstation_actions", {}),
                     self.workstation_actions,
                 )
+                latest_archived = latest.get("archived_issue_ids", [])
+                if not isinstance(latest_archived, list) or not all(
+                    isinstance(issue_id, str) for issue_id in latest_archived
+                ):
+                    raise AlbertError("Mission archive state is invalid")
+                # Archive transitions are written through _set_issue_archived while
+                # holding this same lock.  A generic persist from a stale mission
+                # instance must not revive an Issue Slice another instance restored.
+                # Preserve the latest canonical archive state here instead.
+                data["archived_issue_ids"] = sorted(latest_archived)
+                data["supervision"] = self._supervision_from_payload(latest)
+                data["retirement_storage"] = self._retirement_storage_from_payload(
+                    latest
+                )
+                latest_inference_turns = latest.get("inference_turns", [])
+                if not isinstance(latest_inference_turns, list):
+                    raise AlbertError("Mission inference turn ledger is invalid")
+                merged_inference_turns: list[dict[str, Any]] = []
+                for item in [*latest_inference_turns, *data.get("inference_turns", [])]:
+                    if not isinstance(item, dict):
+                        raise AlbertError("Mission inference turn ledger is invalid")
+                    self._validate_inference_turn(item)
+                    if not any(
+                        existing.get("request_id") == item.get("request_id")
+                        for existing in merged_inference_turns
+                    ):
+                        merged_inference_turns.append(item)
+                data["inference_turns"] = merged_inference_turns[-128:]
             self._write_runtime_payload(data)
         reconciled_sessions: dict[str, LocalAgentSession] = {}
         for session_id, session_data in data["sessions"].items():
@@ -3307,12 +7053,17 @@ class AlbertMission:
                     session_data
                 )
         self.sessions = reconciled_sessions
+        for session in self.sessions.values():
+            self._validate_snapshot_payload_authority(session)
         self.timeline = list(data["timeline"])
         self.command_policy = dict(data["command_policy"])
         self.workstation_actions = {
             correlation_id: dict(marker)
             for correlation_id, marker in data["workstation_actions"].items()
         }
+        self.archived_issue_ids = set(data.get("archived_issue_ids", []))
+        self.supervision = self._supervision_from_payload(data)
+        self.retirement_storage = self._retirement_storage_from_payload(data)
 
     @staticmethod
     def _merge_workstation_action_ledgers(
@@ -3387,12 +7138,18 @@ class AlbertMission:
         latest_data: dict[str, Any],
         proposed_data: dict[str, Any],
     ) -> dict[str, Any]:
-        latest_status = LocalAgentSession.from_dict(latest_data).status
-        proposed_status = LocalAgentSession.from_dict(proposed_data).status
+        latest_session = LocalAgentSession.from_dict(latest_data)
+        proposed_session = LocalAgentSession.from_dict(proposed_data)
+        latest_status = latest_session.status
+        proposed_status = proposed_session.status
         if latest_status == "cancelled":
             return latest_data
         if proposed_status == "cancelled":
             return proposed_data
+        if proposed_session.revision > latest_session.revision:
+            return proposed_data
+        if proposed_session.revision < latest_session.revision:
+            return latest_data
         lifecycle_rank = {
             "queued": 0,
             "launched": 0,
@@ -3432,6 +7189,572 @@ class AlbertMission:
             finally:
                 fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
+    @contextmanager
+    def _retirement_effect_lock(self, session_id: str):
+        lock_root = self.runtime_dir / "retirement" / "locks"
+        lock_root.mkdir(parents=True, exist_ok=True)
+        lock_name = sha256(session_id.encode()).hexdigest() + ".lock"
+        with (lock_root / lock_name).open("a+", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    @staticmethod
+    def _retirement_export_lock_digest(destination: Path) -> str:
+        identity = json.dumps(
+            _host_normalized_path_parts(destination),
+            ensure_ascii=True,
+            separators=(",", ":"),
+        )
+        return sha256(identity.encode("ascii")).hexdigest()
+
+    @contextmanager
+    def _retirement_export_destination_lock(self, destination: Path):
+        """Hold one nonblocking cross-session lock through export receipt."""
+
+        lock_root = self.runtime_root / ".retirement-export-locks"
+        lock_root.mkdir(parents=True, exist_ok=True)
+        lock_digest = self._retirement_export_lock_digest(destination)
+        lock_path = lock_root / f"{lock_digest}.lock"
+        flags = (
+            os.O_RDWR
+            | os.O_CREAT
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        lock_fd = os.open(lock_path, flags, 0o600)
+        try:
+            lock_status = os.fstat(lock_fd)
+            if not stat.S_ISREG(lock_status.st_mode):
+                raise AlbertError(
+                    "Retirement export destination lock boundary is invalid."
+                )
+            try:
+                fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                    raise AlbertError(
+                        "Retirement export destination is already being claimed."
+                    ) from exc
+                raise
+            try:
+                yield _RetirementExportDestinationLease(
+                    digest=lock_digest,
+                    lock_root=lock_root,
+                )
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+    def _retirement_export_owner_identity(
+        self,
+        *,
+        destination: Path,
+        session_id: str,
+        correlation_id: str,
+        expected_revision: int,
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": 1,
+            "project_key": self.project_key,
+            "mission_id": self.mission_id,
+            "session_id": session_id,
+            "correlation_id": correlation_id,
+            "expected_revision": expected_revision,
+            "destination": str(destination),
+            "destination_lock_sha256": (
+                self._retirement_export_lock_digest(destination)
+            ),
+        }
+
+    @staticmethod
+    def _retirement_export_owner_name(identity: dict[str, Any]) -> str:
+        session_payload = json.dumps(
+            {
+                "project_key": identity["project_key"],
+                "mission_id": identity["mission_id"],
+                "session_id": identity["session_id"],
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        request_payload = json.dumps(
+            identity,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        return (
+            f"{identity['destination_lock_sha256']}."
+            f"{sha256(session_payload).hexdigest()}."
+            f"{sha256(request_payload).hexdigest()}.owner"
+        )
+
+    def _retirement_export_owner_directories(self) -> list[str]:
+        lock_root = self.runtime_root / ".retirement-export-locks"
+        if not lock_root.exists():
+            return []
+        names: list[str] = []
+        pattern = re.compile(
+            r"[0-9a-f]{64}\.[0-9a-f]{64}\.[0-9a-f]{64}\.owner"
+        )
+        try:
+            with os.scandir(lock_root) as iterator:
+                for entry in iterator:
+                    if not entry.name.endswith(".owner"):
+                        continue
+                    if (
+                        len(names) >= _RETIREMENT_EXPORT_OWNER_COUNT_LIMIT
+                        or pattern.fullmatch(entry.name) is None
+                    ):
+                        raise AlbertError(
+                            "Retirement export owner registry is invalid."
+                        )
+                    status = entry.stat(follow_symlinks=False)
+                    if not stat.S_ISDIR(status.st_mode):
+                        raise AlbertError(
+                            "Retirement export owner registry is invalid."
+                        )
+                    names.append(entry.name)
+        except OSError as exc:
+            raise AlbertError(
+                "Retirement export owner registry is unavailable."
+            ) from exc
+        return sorted(names)
+
+    def _claim_retirement_export_destination_directory(
+        self,
+        lease: _RetirementExportDestinationLease,
+        *,
+        destination: Path,
+        session_id: str,
+        correlation_id: str,
+        expected_revision: int,
+        claimed_at: str | None = None,
+    ) -> dict[str, Any]:
+        """Atomically persist one permanent hash-bound destination owner."""
+
+        identity = self._retirement_export_owner_identity(
+            destination=destination,
+            session_id=session_id,
+            correlation_id=correlation_id,
+            expected_revision=expected_revision,
+        )
+        if identity["destination_lock_sha256"] != lease.digest:
+            raise AlbertError(
+                "Retirement export destination lock identity changed."
+            )
+        owner_claimed_at = claimed_at or _utc_now()
+        try:
+            parsed_claimed_at = datetime.fromisoformat(owner_claimed_at)
+        except ValueError as exc:
+            raise AlbertError(
+                "Retirement export destination owner is invalid."
+            ) from exc
+        owner = {**identity, "claimed_at": owner_claimed_at}
+        encoded_owner = json.dumps(
+            owner,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("ascii")
+        if (
+            parsed_claimed_at.tzinfo is None
+            or len(encoded_owner) > _RETIREMENT_EXPORT_OWNER_BYTES_LIMIT
+        ):
+            raise AlbertError(
+                "Retirement export destination owner is invalid or exceeds its "
+                "byte bound."
+            )
+        owner_name = self._retirement_export_owner_name(identity)
+        destination_prefix = f"{lease.digest}."
+        owner_names = self._retirement_export_owner_directories()
+        conflicts = [
+            name
+            for name in owner_names
+            if name.startswith(destination_prefix) and name != owner_name
+        ]
+        if conflicts:
+            raise AlbertError(
+                "Retirement export destination is already durably claimed."
+            )
+        if owner_name in owner_names:
+            return owner
+        if len(owner_names) >= _RETIREMENT_EXPORT_OWNER_COUNT_LIMIT:
+            raise AlbertError(
+                "Retirement export owner registry capacity is exhausted."
+            )
+        directory_fd = self._open_retirement_export_directory(lease.lock_root)
+        try:
+            try:
+                os.mkdir(owner_name, mode=0o700, dir_fd=directory_fd)
+            except FileExistsError:
+                pass
+            owner_fd = self._open_retirement_export_directory(
+                owner_name,
+                dir_fd=directory_fd,
+            )
+            try:
+                if os.listdir(owner_fd):
+                    raise AlbertError(
+                        "Retirement export destination owner boundary changed."
+                    )
+                os.fchmod(owner_fd, 0o700)
+                os.fsync(owner_fd)
+            finally:
+                os.close(owner_fd)
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+        return owner
+
+    def _retirement_export_session_has_unfinished_directory_owner(
+        self,
+        session: LocalAgentSession,
+        *,
+        permitted_owner_name: str = "",
+    ) -> bool:
+        session_identity = self._retirement_export_owner_identity(
+            destination=self.runtime_root / ".owner-session-placeholder",
+            session_id=session.session_id,
+            correlation_id="owner-session-placeholder",
+            expected_revision=0,
+        )
+        session_name = self._retirement_export_owner_name(session_identity)
+        session_digest = session_name.split(".")[1]
+        completed_owner_names: set[str] = set()
+        for correlation_id, receipt in session.retirement.get(
+            "action_receipts", {}
+        ).items():
+            if not isinstance(receipt, dict) or receipt.get("action") != "export":
+                continue
+            repository = Path(receipt["destination"])
+            identity = self._retirement_export_owner_identity(
+                destination=repository.parent,
+                session_id=session.session_id,
+                correlation_id=correlation_id,
+                expected_revision=receipt["expected_revision"],
+            )
+            completed_owner_names.add(
+                self._retirement_export_owner_name(identity)
+            )
+        for owner_name in self._retirement_export_owner_directories():
+            if owner_name.split(".")[1] != session_digest:
+                continue
+            if owner_name == permitted_owner_name:
+                continue
+            if owner_name not in completed_owner_names:
+                return True
+        return False
+
+    @staticmethod
+    def _open_retirement_export_directory(
+        path: Path | str,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(path, flags, dir_fd=dir_fd)
+        status = os.fstat(descriptor)
+        if not stat.S_ISDIR(status.st_mode):
+            os.close(descriptor)
+            raise AlbertError("Retirement export directory boundary is invalid.")
+        return descriptor
+
+    @staticmethod
+    def _bound_retirement_export_directory_path(descriptor: int) -> Path:
+        expected = os.fstat(descriptor)
+        if sys.platform.startswith("linux"):
+            descriptor_path = Path("/proc/self/fd") / str(descriptor)
+            try:
+                raw_path = os.readlink(descriptor_path)
+                if raw_path.endswith(" (deleted)"):
+                    raise AlbertError(
+                        "Bound retirement export directory was removed."
+                    )
+                path = Path(raw_path)
+                current = path.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise AlbertError(
+                    "Bound retirement export directory is unavailable."
+                ) from exc
+        elif sys.platform == "darwin" and hasattr(fcntl, "F_GETPATH"):
+            try:
+                raw_path = fcntl.fcntl(
+                    descriptor,
+                    fcntl.F_GETPATH,
+                    b"\0" * 1024,
+                ).split(b"\0", 1)[0]
+                path = Path(os.fsdecode(raw_path))
+                current = path.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise AlbertError(
+                    "Bound retirement export directory is unavailable."
+                ) from exc
+        else:
+            raise AlbertError(
+                "Bound retirement export directories are unsupported on this host."
+            )
+        if (current.st_dev, current.st_ino) != (
+            expected.st_dev,
+            expected.st_ino,
+        ):
+            raise AlbertError("Bound retirement export directory changed.")
+        return path
+
+    @staticmethod
+    def _publish_retirement_export_noreplace(
+        source_parent_fd: int,
+        source_name: str,
+        destination_parent_fd: int,
+        destination_name: str,
+        expected_source_device: int,
+        expected_source_inode: int,
+    ) -> None:
+        """Publish one expected directory, restoring a substituted source."""
+
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        try:
+            source_fd = os.open(source_name, flags, dir_fd=source_parent_fd)
+        except OSError as exc:
+            raise AlbertError(
+                "Retirement export staging source is unavailable."
+            ) from exc
+        try:
+            source_status = os.fstat(source_fd)
+            if (
+                not stat.S_ISDIR(source_status.st_mode)
+                or (source_status.st_dev, source_status.st_ino)
+                != (expected_source_device, expected_source_inode)
+            ):
+                raise AlbertError(
+                    "Retirement export staging source identity changed."
+                )
+            _rename_directory_noreplace_at(
+                source_parent_fd,
+                source_name,
+                destination_parent_fd,
+                destination_name,
+            )
+            try:
+                published_fd = os.open(
+                    destination_name,
+                    flags,
+                    dir_fd=destination_parent_fd,
+                )
+            except OSError as exc:
+                raise AlbertError(
+                    "Retirement export publication is unavailable."
+                ) from exc
+            try:
+                published_status = os.fstat(published_fd)
+                if (published_status.st_dev, published_status.st_ino) == (
+                    expected_source_device,
+                    expected_source_inode,
+                ):
+                    return
+                try:
+                    _rename_directory_noreplace_at(
+                        destination_parent_fd,
+                        destination_name,
+                        source_parent_fd,
+                        source_name,
+                    )
+                    restored_status = os.stat(
+                        source_name,
+                        dir_fd=source_parent_fd,
+                        follow_symlinks=False,
+                    )
+                    os.fsync(source_parent_fd)
+                    os.fsync(destination_parent_fd)
+                except OSError as exc:
+                    raise AlbertError(
+                        "Retirement export publication source changed and could "
+                        "not be restored."
+                    ) from exc
+                if (
+                    not stat.S_ISDIR(restored_status.st_mode)
+                    or (restored_status.st_dev, restored_status.st_ino)
+                    != (published_status.st_dev, published_status.st_ino)
+                ):
+                    raise AlbertError(
+                        "Retirement export substituted source restoration failed."
+                    )
+                raise AlbertError(
+                    "Retirement export staging source changed during publication."
+                )
+            finally:
+                os.close(published_fd)
+        finally:
+            os.close(source_fd)
+
+    @staticmethod
+    def _read_retirement_export_marker(root_fd: int) -> dict[str, Any]:
+        """Read one stable, bounded, no-follow export marker."""
+
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(
+            "retirement-export.json",
+            flags,
+            dir_fd=root_fd,
+        )
+        try:
+            before = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_size > _RETIREMENT_EXPORT_MARKER_BYTES_LIMIT
+            ):
+                raise AlbertError(
+                    "Retirement export recovery marker is invalid."
+                )
+            payload = bytearray()
+            while len(payload) <= _RETIREMENT_EXPORT_MARKER_BYTES_LIMIT:
+                chunk = os.read(descriptor, 64 * 1024)
+                if not chunk:
+                    break
+                payload.extend(chunk)
+            after = os.fstat(descriptor)
+            if (
+                len(payload) > _RETIREMENT_EXPORT_MARKER_BYTES_LIMIT
+                or (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
+                )
+                != (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    after.st_mtime_ns,
+                    after.st_ctime_ns,
+                )
+            ):
+                raise AlbertError(
+                    "Retirement export recovery marker changed."
+                )
+        finally:
+            os.close(descriptor)
+        marker = json.loads(bytes(payload).decode("utf-8"))
+        if not isinstance(marker, dict):
+            raise AlbertError("Retirement export recovery marker is invalid.")
+        return marker
+
+    @staticmethod
+    def _write_retirement_export_marker_exclusive(
+        stage_fd: int,
+        marker_path: Path,
+        content: str,
+    ) -> None:
+        """Create one private-stage marker without replacing any entry."""
+
+        if marker_path.name != "retirement-export.json":
+            raise AlbertError("Retirement export marker path is invalid.")
+        flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        descriptor = os.open(marker_path.name, flags, 0o600, dir_fd=stage_fd)
+        try:
+            payload = content.encode("utf-8")
+            if len(payload) > _RETIREMENT_EXPORT_MARKER_BYTES_LIMIT:
+                raise AlbertError("Retirement export marker exceeds its byte bound.")
+            written = 0
+            while written < len(payload):
+                count = os.write(descriptor, payload[written:])
+                if count <= 0:
+                    raise OSError("Retirement export marker write did not progress.")
+                written += count
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        os.fsync(stage_fd)
+
+    @classmethod
+    def _durably_sync_retirement_export_tree(cls, root_fd: int) -> None:
+        """Flush one no-follow directory tree from files through its root."""
+
+        try:
+            with os.scandir(root_fd) as iterator:
+                entries = sorted(iterator, key=lambda entry: os.fsencode(entry.name))
+        except OSError as exc:
+            raise AlbertError(
+                "Retirement export durability scan could not inspect its tree."
+            ) from exc
+        for entry in entries:
+            try:
+                before = entry.stat(follow_symlinks=False)
+            except OSError as exc:
+                raise AlbertError(
+                    "Retirement export durability boundary changed."
+                ) from exc
+            if stat.S_ISLNK(before.st_mode):
+                continue
+            if stat.S_ISDIR(before.st_mode):
+                child_fd = cls._open_retirement_export_directory(
+                    entry.name,
+                    dir_fd=root_fd,
+                )
+                try:
+                    current = os.fstat(child_fd)
+                    if (current.st_dev, current.st_ino) != (
+                        before.st_dev,
+                        before.st_ino,
+                    ):
+                        raise AlbertError(
+                            "Retirement export durability boundary changed."
+                        )
+                    cls._durably_sync_retirement_export_tree(child_fd)
+                finally:
+                    os.close(child_fd)
+                continue
+            if not stat.S_ISREG(before.st_mode):
+                raise AlbertError(
+                    "Retirement export durability tree contains an unsupported entry."
+                )
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+            )
+            descriptor = os.open(entry.name, flags, dir_fd=root_fd)
+            try:
+                current = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(current.st_mode)
+                    or (current.st_dev, current.st_ino)
+                    != (before.st_dev, before.st_ino)
+                ):
+                    raise AlbertError(
+                        "Retirement export durability boundary changed."
+                    )
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+        os.fsync(root_fd)
+
     def _read_runtime_payload(self) -> dict[str, Any]:
         if not self.runtime_path.exists():
             raise AlbertError("mission runtime does not exist")
@@ -3456,8 +7779,17 @@ class AlbertMission:
                 delete=False,
             ) as temporary:
                 temporary.write(payload)
+                temporary.flush()
+                os.fsync(temporary.fileno())
                 temporary_path = Path(temporary.name)
             temporary_path.replace(self.runtime_path)
+            directory_fd = self._open_retirement_export_directory(
+                self.runtime_dir
+            )
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         finally:
             if temporary_path is not None and temporary_path.exists():
                 temporary_path.unlink()
@@ -3485,6 +7817,12 @@ class AlbertMission:
                 self.sessions[session.session_id] = latest
                 self.timeline = list(data.get("timeline", []))
                 return latest
+            if latest.revision != session.revision:
+                raise LaunchBlockedError(
+                    f"{session.session_id} lifecycle revision is stale; expected "
+                    f"{latest.revision}, received {session.revision}."
+                )
+            session.revision = latest.revision + 1
             sessions[session.session_id] = session.to_dict()
             timeline = list(data.get("timeline", []))
             if timeline_message:
@@ -3502,6 +7840,7 @@ class AlbertMission:
             if not isinstance(session_data, dict):
                 raise AlbertError(f"Unknown Local Agent session: {session_id}")
             session = LocalAgentSession.from_dict(session_data)
+            self._validate_snapshot_payload_authority(session)
         self.sessions[session_id] = session
         return session
 
@@ -3516,6 +7855,8 @@ class AlbertMission:
         session.runner_pid = None
         session.runner_identity = ""
         session.runner_process_pid = None
+        session.runner_process_identity = ""
+        session.runner_process_token = ""
         session.cancel_requested_at = latest.cancel_requested_at
         session.cancel_reason = latest.cancel_reason
         raise SessionCancelledError(
@@ -3647,6 +7988,4295 @@ class AlbertMission:
             raise AlbertError(f"unsafe session worktree path for {session_id!r}")
         return worktree_path
 
+    def current_worktree_identity(self, session_id: str) -> str:
+        """Return an exact managed-path identity, or empty when ownership is unclear."""
+
+        return self._worktree_identity_for_session(self._session(session_id))
+
+    @staticmethod
+    def _require_lifecycle_revision(
+        session: LocalAgentSession,
+        expected_revision: int | None,
+    ) -> None:
+        if (
+            not isinstance(expected_revision, int)
+            or isinstance(expected_revision, bool)
+            or expected_revision < 0
+            or session.revision != expected_revision
+        ):
+            raise LaunchBlockedError(
+                f"{session.session_id} lifecycle revision is stale; expected "
+                f"{session.revision}, received {expected_revision}."
+            )
+
+    @staticmethod
+    def _require_active_retirement_unit(
+        session: LocalAgentSession,
+        action: str,
+    ) -> None:
+        phase = session.retirement.get("phase", "active")
+        if phase != "active":
+            raise LaunchBlockedError(
+                f"{session.session_id} cannot {action} while its Retirement Unit "
+                f"phase is {phase}."
+            )
+        budget = session.preservation_budget
+        if (
+            budget.get("state") != "reserved"
+            or budget.get("bound") is not True
+            or budget.get("reserved_bytes") != _PRESERVATION_BUDGET_BYTES
+        ):
+            raise LaunchBlockedError(
+                f"{session.session_id} cannot {action} without its bound "
+                "Preservation Budget."
+            )
+
+    def _remember_retirement_runner_boundary(
+        self,
+        session: LocalAgentSession,
+    ) -> None:
+        previous = session.retirement.get("runner_boundary", {})
+        session.retirement["runner_boundary"] = {
+            "mission_id": self.mission_id,
+            "session_id": session.session_id,
+            "runner_operation_id": session.runner_operation_id,
+            "owner_pid": session.runner_pid,
+            "owner_identity": session.runner_identity,
+            "process_group_pid": session.runner_process_pid,
+            "process_group_identity": session.runner_process_identity,
+            "process_token": session.runner_process_token,
+            "owner_lease_path": previous.get("owner_lease_path", ""),
+            "owner_lease_token": previous.get("owner_lease_token", ""),
+        }
+
+    def _remember_never_started_runner_boundary(
+        self,
+        session: LocalAgentSession,
+        *,
+        event_at: str,
+    ) -> None:
+        if (
+            session.runner_started_at
+            or session.runner_operation_id
+            or session.runner_pid is not None
+            or session.runner_process_pid is not None
+            or session.runner_identity
+            or session.runner_process_identity
+            or session.runner_process_token
+        ):
+            return
+        operation_id = "never-started:" + sha256(
+            f"{self.mission_id}\n{session.session_id}\n{session.revision}".encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        session.retirement["runner_boundary"] = {
+            "mission_id": self.mission_id,
+            "session_id": session.session_id,
+            "runner_operation_id": operation_id,
+            "owner_pid": None,
+            "owner_identity": "",
+            "process_group_pid": None,
+            "process_group_identity": "",
+            "process_token": "",
+            "owner_released_at": event_at,
+            "owner_release_operation_id": operation_id,
+        }
+
+    def _retirement_runner_owner_lease_path(self, session_id: str) -> Path:
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", session_id):
+            raise AlbertError(f"unsafe session id {session_id!r}")
+        lease_root = self.runtime_dir / "runner-leases"
+        return lease_root / f"{session_id}.json"
+
+    def _acquire_retirement_runner_owner(self, session: LocalAgentSession) -> None:
+        lease_path = self._retirement_runner_owner_lease_path(session.session_id)
+        lease_path.parent.mkdir(parents=True, exist_ok=True)
+        lease_token = sha256(
+            f"{session.runner_operation_id}\n{lease_path}".encode("utf-8")
+        ).hexdigest()
+        payload = {
+            "mission_id": self.mission_id,
+            "session_id": session.session_id,
+            "runner_operation_id": session.runner_operation_id,
+            "lease_token": lease_token,
+        }
+        try:
+            with lease_path.open("x", encoding="utf-8") as handle:
+                json.dump(payload, handle, sort_keys=True)
+        except FileExistsError as exc:
+            raise LaunchBlockedError(
+                f"{session.session_id} already has a supervising runner owner lease."
+            ) from exc
+        boundary = session.retirement["runner_boundary"]
+        boundary["owner_lease_path"] = str(lease_path)
+        boundary["owner_lease_token"] = lease_token
+
+    def _release_retirement_runner_owner(
+        self,
+        session: LocalAgentSession,
+    ) -> bool:
+        """Record an exact per-operation owner release after runner effects stop."""
+
+        boundary = session.retirement.get("runner_boundary", {})
+        if (
+            not session.runner_operation_id
+            or boundary.get("runner_operation_id") != session.runner_operation_id
+        ):
+            return False
+        lease_path = self._retirement_runner_owner_lease_path(session.session_id)
+        if boundary.get("owner_lease_path") != str(lease_path):
+            return False
+        try:
+            lease_payload = json.loads(lease_path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(lease_payload, dict)
+                or lease_payload.get("mission_id") != self.mission_id
+                or lease_payload.get("session_id") != session.session_id
+                or lease_payload.get("runner_operation_id")
+                != session.runner_operation_id
+                or lease_payload.get("lease_token")
+                != boundary.get("owner_lease_token")
+            ):
+                return False
+            lease_path.unlink()
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return False
+        boundary["owner_released_at"] = _utc_now()
+        boundary["owner_release_operation_id"] = session.runner_operation_id
+        session.retirement["runner_boundary"] = boundary
+        return True
+
+    def _finalize_cancelled_runner_owner_release(
+        self,
+        runner_session: LocalAgentSession,
+    ) -> LocalAgentSession:
+        self._release_retirement_runner_owner(runner_session)
+        released_boundary = runner_session.retirement.get("runner_boundary", {})
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_latest = data.get("sessions", {}).get(runner_session.session_id)
+            if not isinstance(raw_latest, dict):
+                raise AlbertError(
+                    f"Unknown Local Agent session: {runner_session.session_id}"
+                )
+            latest = LocalAgentSession.from_dict(raw_latest)
+            if (
+                latest.status == "cancelled"
+                and latest.runner_operation_id == runner_session.runner_operation_id
+                and released_boundary.get("owner_release_operation_id")
+                == runner_session.runner_operation_id
+            ):
+                latest.retirement["runner_boundary"] = dict(released_boundary)
+                latest.revision += 1
+                data["sessions"][latest.session_id] = latest.to_dict()
+                data.setdefault("timeline", []).append(
+                    f"{latest.issue_id} supervising runner released for cancelled "
+                    f"session {latest.session_id}."
+                )
+                self._write_runtime_payload(data)
+                self.timeline = list(data.get("timeline", []))
+            self.sessions[latest.session_id] = latest
+            return latest
+
+    def _probe_retirement_quiescence(
+        self,
+        boundary: dict[str, Any],
+    ) -> tuple[str, str]:
+        if self.retirement_quiescence_probe is not None:
+            result = self.retirement_quiescence_probe(dict(boundary))
+            if (
+                not isinstance(result, tuple)
+                or len(result) != 2
+                or result[0]
+                not in {"live-exact", "absent", "reused", "unavailable"}
+                or result[1]
+                not in {"live-exact", "absent", "reused", "unavailable"}
+            ):
+                raise AlbertError("Retirement quiescence probe returned invalid evidence.")
+            return result
+        release_is_exact = (
+            bool(boundary.get("owner_released_at"))
+            and boundary.get("owner_release_operation_id")
+            == boundary.get("runner_operation_id")
+        )
+        lease_path_value = boundary.get("owner_lease_path")
+        lease_token = boundary.get("owner_lease_token")
+        owner_signal = "unavailable"
+        if isinstance(lease_path_value, str) and isinstance(lease_token, str):
+            expected_lease = (
+                self._retirement_runner_owner_lease_path(boundary["session_id"])
+                if boundary.get("mission_id") == self.mission_id
+                and isinstance(boundary.get("session_id"), str)
+                and boundary.get("session_id")
+                else None
+            )
+            lease_path = Path(lease_path_value)
+            if expected_lease is None or lease_path != expected_lease:
+                owner_signal = "reused"
+            elif not lease_path.exists() and release_is_exact:
+                owner_signal = "absent"
+            elif lease_path.exists():
+                try:
+                    lease_payload = json.loads(lease_path.read_text(encoding="utf-8"))
+                    owner_signal = (
+                        "live-exact"
+                        if isinstance(lease_payload, dict)
+                        and lease_payload.get("lease_token") == lease_token
+                        and lease_payload.get("runner_operation_id")
+                        == boundary.get("runner_operation_id")
+                        else "reused"
+                    )
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    owner_signal = "unavailable"
+        probe_session = LocalAgentSession(
+            session_id="retirement-probe",
+            issue_id="retirement-probe",
+            assigned_agent="retirement-probe",
+            worktree_path=self.runtime_dir,
+            task_packet={},
+            runner_pid=boundary.get("owner_pid"),
+            runner_identity=str(boundary.get("owner_identity", "")),
+            runner_process_pid=boundary.get("process_group_pid"),
+            runner_process_identity=str(
+                boundary.get("process_group_identity", "")
+            ),
+            runner_process_token=str(boundary.get("process_token", "")),
+        )
+        pid_owner_signal, process_group_signal = self._probe_runner_boundary(probe_session)
+        if not boundary.get("owner_lease_path"):
+            owner_signal = pid_owner_signal
+        if (
+            release_is_exact
+            and boundary.get("owner_pid") is None
+            and not boundary.get("owner_identity")
+            and not boundary.get("owner_lease_path")
+        ):
+            owner_signal = "absent"
+        if (
+            release_is_exact
+            and boundary.get("process_group_pid") is None
+            and not boundary.get("process_group_identity")
+            and not boundary.get("process_token")
+        ):
+            process_group_signal = "absent"
+        return owner_signal, process_group_signal
+
+    def preserve_retirement_unit(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int,
+        correlation_id: str,
+        defer_if_not_quiescent: bool = False,
+    ) -> LocalAgentSession:
+        with self._retirement_effect_lock(session_id):
+            return self._preserve_retirement_unit_locked(
+                session_id,
+                expected_revision=expected_revision,
+                correlation_id=correlation_id,
+                defer_if_not_quiescent=defer_if_not_quiescent,
+            )
+
+    def _preserve_retirement_unit_locked(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int,
+        correlation_id: str,
+        defer_if_not_quiescent: bool,
+    ) -> LocalAgentSession:
+        """Claim, capture, and prove one Retirement Snapshot without deleting work."""
+
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_session = data.get("sessions", {}).get(session_id)
+            if not isinstance(raw_session, dict):
+                raise AlbertError(f"Unknown Local Agent session: {session_id}")
+            session = LocalAgentSession.from_dict(raw_session)
+            if not correlation_id.strip():
+                raise AlbertError("Retirement preservation correlation id is required.")
+            receipt = session.retirement.get("preservation_receipt", {})
+            if receipt:
+                if (
+                    receipt.get("correlation_id") == correlation_id
+                    and receipt.get("expected_revision") == expected_revision
+                    and receipt.get("result_revision") == session.revision
+                    and receipt.get("manifest_sha256")
+                    == session.retirement.get("snapshot", {}).get(
+                        "manifest_sha256"
+                    )
+                    and session.retirement.get("phase") == "preserved"
+                ):
+                    return session
+                if receipt.get("correlation_id") == correlation_id:
+                    raise AlbertError(
+                        "Retirement preservation correlation id was reused for a "
+                        "different request."
+                    )
+            intent = session.retirement.get("preservation_intent", {})
+            recovering = session.retirement.get("phase") == "preserving"
+            if recovering:
+                if (
+                    intent.get("correlation_id") != correlation_id
+                    or intent.get("expected_revision") != expected_revision
+                    or intent.get("claim_revision") != session.revision
+                ):
+                    raise LaunchBlockedError(
+                        f"{session_id} has a different preservation effect in progress."
+                    )
+                claim_revision = session.revision
+            else:
+                if any(
+                    session.retirement.get(intent_name)
+                    for intent_name in (
+                        "discard_intent",
+                        "export_intent",
+                    )
+                ) or self._retirement_export_session_has_unfinished_directory_owner(
+                    session
+                ):
+                    raise LaunchBlockedError(
+                        f"{session_id} has a Retirement Unit action in progress."
+                    )
+                self._require_lifecycle_revision(session, expected_revision)
+                self._require_active_retirement_unit(session, "begin preservation")
+            if session.status not in {
+                "completed",
+                "evidence-ready",
+                "failed",
+                "cancelled",
+                "reviewed",
+            }:
+                raise LaunchBlockedError(
+                    f"{session_id} is not terminal enough for preservation: "
+                    f"{session.status}."
+                )
+            current_identity = self._worktree_identity_for_session(session)
+            if (
+                not current_identity
+                or not current_identity.startswith(
+                    ("managed-git:", "managed-directory:", "managed-absence:")
+                )
+                or (
+                    bool(session.worktree_identity)
+                    and current_identity != session.worktree_identity
+                )
+            ):
+                self._block_retirement_preservation(
+                    data,
+                    session,
+                    "Worktree Identity did not agree across stored, managed, canonical, "
+                    "and Git registration boundaries.",
+                )
+                raise LaunchBlockedError(
+                    f"{session_id} Worktree Identity is ambiguous; preservation is blocked."
+                )
+            if not session.worktree_identity:
+                session.worktree_identity = current_identity
+            boundary = session.retirement.get("runner_boundary", {})
+            owner_signal, process_group_signal = self._probe_retirement_quiescence(
+                boundary
+            )
+            if owner_signal != "absent" or process_group_signal != "absent":
+                if defer_if_not_quiescent and "live-exact" in {
+                    owner_signal,
+                    process_group_signal,
+                }:
+                    return session
+                self._block_retirement_preservation(
+                    data,
+                    session,
+                    "Runner Quiescence was not independently corroborated: "
+                    f"owner={owner_signal}, process-group={process_group_signal}.",
+                )
+                raise LaunchBlockedError(
+                    f"{session_id} Runner Quiescence is unproven; preservation is blocked."
+                )
+            if not recovering:
+                session.retirement["phase"] = "preserving"
+                session.retirement["blocked_reason"] = ""
+                session.revision += 1
+                claim_revision = session.revision
+                session.retirement["preservation_intent"] = {
+                    "correlation_id": correlation_id,
+                    "expected_revision": expected_revision,
+                    "claim_revision": claim_revision,
+                }
+                data["sessions"][session_id] = session.to_dict()
+                data.setdefault("timeline", []).append(
+                    f"{session.issue_id} preservation claimed for {session_id} at "
+                    f"lifecycle revision {claim_revision}."
+                )
+                self._write_runtime_payload(data)
+                self.sessions[session_id] = session
+                self.timeline = list(data.get("timeline", []))
+
+        store = self._retirement_snapshot_store(session, claim_revision)
+        try:
+            snapshot = (
+                store.recover_published()
+                if recovering and store.payload_root.exists()
+                else store.capture()
+            )
+        except (OSError, RetirementSnapshotError) as exc:
+            with self._runtime_lock(exclusive=True):
+                data = self._read_runtime_payload()
+                raw_latest = data.get("sessions", {}).get(session_id)
+                if not isinstance(raw_latest, dict):
+                    raise AlbertError(f"Unknown Local Agent session: {session_id}") from exc
+                latest = LocalAgentSession.from_dict(raw_latest)
+                if (
+                    latest.revision == claim_revision
+                    and latest.retirement.get("phase") == "preserving"
+                ):
+                    self._block_retirement_preservation(data, latest, str(exc))
+            raise AlbertError(f"{session_id} preservation failed: {exc}") from exc
+
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_latest = data.get("sessions", {}).get(session_id)
+            if not isinstance(raw_latest, dict):
+                raise AlbertError(f"Unknown Local Agent session: {session_id}")
+            latest = LocalAgentSession.from_dict(raw_latest)
+            if (
+                latest.revision != claim_revision
+                or latest.retirement.get("phase") != "preserving"
+                or self._worktree_identity_for_session(latest)
+                != latest.worktree_identity
+            ):
+                reason = (
+                    "Lifecycle or Worktree Identity boundary changed during "
+                    "preservation publication."
+                )
+                try:
+                    store.quarantine_publication(snapshot)
+                except (OSError, RetirementSnapshotError) as exc:
+                    reason += f" Snapshot quarantine also failed: {exc}"
+                self._block_retirement_preservation(data, latest, reason)
+                raise LaunchBlockedError(
+                    f"{session_id} lifecycle boundary changed during preservation."
+                )
+            created_at = datetime.now(timezone.utc)
+            expires_at = datetime.fromtimestamp(
+                created_at.timestamp() + self.snapshot_storage_retention_seconds,
+                tz=timezone.utc,
+            )
+            snapshot.update(
+                {
+                    "mission_id": self.mission_id,
+                    "session_id": latest.session_id,
+                    "terminal_status": latest.status,
+                    "created_at": created_at.isoformat(),
+                    "expires_at": expires_at.isoformat(),
+                    "pinned": False,
+                    "payload_disposition": "retained",
+                    "reclaimed_at": "",
+                    "reclamation_reason": "",
+                }
+            )
+            latest.retirement["phase"] = "preserved"
+            latest.retirement["snapshot"] = snapshot
+            latest.retirement["blocked_reason"] = ""
+            latest.preservation_budget["state"] = "verified"
+            latest.preservation_budget["bound"] = False
+            latest.preservation_budget["verified_at"] = _utc_now()
+            latest.revision += 1
+            latest.retirement["preservation_receipt"] = {
+                "correlation_id": correlation_id,
+                "expected_revision": expected_revision,
+                "result_revision": latest.revision,
+                "manifest_sha256": snapshot["manifest_sha256"],
+            }
+            latest.retirement["preservation_intent"] = {}
+            data["sessions"][session_id] = latest.to_dict()
+            data.setdefault("timeline", []).append(
+                f"{latest.issue_id} Retirement Snapshot verified for {session_id}."
+            )
+            self._write_runtime_payload(data)
+            self.sessions[session_id] = latest
+            self.timeline = list(data.get("timeline", []))
+            return latest
+
+    def set_retirement_snapshot_pin(
+        self,
+        session_id: str,
+        *,
+        pinned: bool,
+        expected_revision: int,
+        correlation_id: str,
+    ) -> LocalAgentSession:
+        """Pin or unpin one retained Snapshot Payload through an exact receipt."""
+
+        if not isinstance(pinned, bool):
+            raise AlbertError("Snapshot Payload pin state must be boolean.")
+        if not correlation_id.strip():
+            raise AlbertError("Snapshot Payload pin correlation id is required.")
+        with (
+            self._retirement_effect_lock(session_id),
+            self._runtime_lock(exclusive=True),
+        ):
+            data = self._read_runtime_payload()
+            raw_session = data.get("sessions", {}).get(session_id)
+            if not isinstance(raw_session, dict):
+                raise AlbertError(f"Unknown Local Agent session: {session_id}")
+            session = LocalAgentSession.from_dict(raw_session)
+            receipts = session.retirement.setdefault("action_receipts", {})
+            existing = receipts.get(correlation_id)
+            if correlation_id in receipts:
+                if (
+                    existing.get("action") == "snapshot-pin"
+                    and existing.get("mission_id") == self.mission_id
+                    and existing.get("session_id") == session_id
+                    and existing.get("expected_revision") == expected_revision
+                    and existing.get("pinned") is pinned
+                    and isinstance(existing.get("result_revision"), int)
+                    and not isinstance(existing.get("result_revision"), bool)
+                    and existing["result_revision"] <= session.revision
+                ):
+                    result = session
+                else:
+                    raise AlbertError("Retirement action correlation id was reused for a different request.")
+            else:
+                if any(
+                    session.retirement.get(intent_name)
+                    for intent_name in (
+                        "discard_intent",
+                        "export_intent",
+                        "retry_intent",
+                    )
+                ) or self._retirement_export_session_has_unfinished_directory_owner(
+                    session
+                ):
+                    raise LaunchBlockedError(
+                        f"{session_id} has a Retirement Unit action in progress."
+                    )
+                self._require_lifecycle_revision(session, expected_revision)
+                self._ensure_snapshot_storage_metadata(session)
+                snapshot = session.retirement.get("snapshot", {})
+                if not snapshot or snapshot.get("payload_disposition", "retained") != "retained":
+                    raise LaunchBlockedError(f"{session_id} does not have a retained Snapshot Payload to pin.")
+                session.retirement["snapshot"]["pinned"] = pinned
+                session.revision += 1
+                receipts[correlation_id] = {
+                    "action": "snapshot-pin",
+                    "mission_id": self.mission_id,
+                    "session_id": session_id,
+                    "expected_revision": expected_revision,
+                    "result_revision": session.revision,
+                    "pinned": pinned,
+                    "recorded_at": _utc_now(),
+                }
+                data["sessions"][session_id] = session.to_dict()
+                if not pinned:
+                    self._refresh_snapshot_storage_attention_after_policy_change(
+                        data
+                    )
+                data.setdefault("timeline", []).append(
+                    f"{session.issue_id} Snapshot Payload for {session_id} {'pinned' if pinned else 'unpinned'}."
+                )
+                self._write_runtime_payload(data)
+                self.sessions[session_id] = session
+                self.timeline = list(data.get("timeline", []))
+                result = session
+        return result
+
+    def _refresh_snapshot_storage_attention_after_policy_change(
+        self,
+        data: dict[str, Any],
+    ) -> None:
+        """Clear protected-exhaustion attention once admission can reclaim enough."""
+
+        storage = self._retirement_storage_from_payload(data)
+        attention = storage.get("attention", {})
+        if attention.get("code") != "snapshot-storage-exhausted":
+            return
+        required_bytes = attention.get("required_bytes")
+        if (
+            not isinstance(required_bytes, int)
+            or isinstance(required_bytes, bool)
+            or required_bytes < 0
+        ):
+            return
+        sessions = [
+            LocalAgentSession.from_dict(raw)
+            for raw in data.get("sessions", {}).values()
+            if isinstance(raw, dict)
+        ]
+        retained_usage = sum(
+            int(session.retirement.get("snapshot", {}).get("snapshot_bytes", 0))
+            for session in sessions
+            if session.retirement.get("snapshot", {}).get(
+                "payload_disposition", "retained"
+            )
+            == "retained"
+        )
+        reserved_usage = sum(
+            int(session.preservation_budget.get("reserved_bytes", 0))
+            for session in sessions
+            if session.preservation_budget.get("bound") is True
+        )
+        now = datetime.now(timezone.utc)
+        reclaimable_bytes = 0
+        for session in sessions:
+            snapshot = session.retirement.get("snapshot", {})
+            if (
+                not snapshot
+                or snapshot.get("payload_disposition", "retained") != "retained"
+                or snapshot.get("pinned") is True
+                or session.retirement.get("phase") != "retired"
+            ):
+                continue
+            try:
+                expires = datetime.fromisoformat(str(snapshot.get("expires_at", "")))
+            except ValueError:
+                continue
+            if expires.tzinfo is not None and expires.astimezone(timezone.utc) <= now:
+                reclaimable_bytes += int(snapshot.get("snapshot_bytes", 0))
+        if (
+            retained_usage
+            + reserved_usage
+            + required_bytes
+            - reclaimable_bytes
+            <= self.snapshot_storage_budget_bytes
+        ):
+            storage["attention"] = {}
+            data["retirement_storage"] = storage
+            self.retirement_storage = storage
+
+    def retirement_storage_inspection(self) -> dict[str, Any]:
+        """Return deterministic read-only Snapshot Payload details."""
+
+        if self.runtime_path.exists():
+            with self._runtime_lock(exclusive=False):
+                data = self._read_runtime_payload()
+        else:
+            data = {
+                "sessions": {},
+                "retirement_storage": dict(self.retirement_storage),
+            }
+        sessions = {
+            session_id: LocalAgentSession.from_dict(raw)
+            for session_id, raw in data.get("sessions", {}).items()
+            if isinstance(raw, dict)
+        }
+        storage = self._retirement_storage_from_payload(data)
+        now = datetime.now(timezone.utc)
+        records: list[dict[str, Any]] = []
+        reserved_bytes = 0
+        for session in sessions.values():
+            if session.preservation_budget.get("bound") is True:
+                reserved_bytes += int(
+                    session.preservation_budget.get("reserved_bytes", 0)
+                )
+            self._ensure_snapshot_storage_metadata(session)
+            snapshot = session.retirement.get("snapshot", {})
+            if not snapshot:
+                continue
+            disposition = str(snapshot.get("payload_disposition", "retained"))
+            expires_at = str(snapshot.get("expires_at", ""))
+            try:
+                expires = datetime.fromisoformat(expires_at)
+                if expires.tzinfo is None:
+                    raise ValueError
+                expired = expires.astimezone(timezone.utc) <= now
+            except ValueError:
+                expired = False
+            records.append(
+                {
+                    "mission_id": self.mission_id,
+                    "session_id": session.session_id,
+                    "phase": session.retirement.get("phase", "active"),
+                    "worktree_identity": snapshot.get("worktree_identity", ""),
+                    "manifest_sha256": snapshot.get("manifest_sha256", ""),
+                    "snapshot_bytes": int(snapshot.get("snapshot_bytes", 0)),
+                    "created_at": str(snapshot.get("created_at", "")),
+                    "expires_at": expires_at,
+                    "expired": expired,
+                    "pinned": snapshot.get("pinned") is True,
+                    "payload_disposition": disposition,
+                    "reclaimed_at": str(snapshot.get("reclaimed_at", "")),
+                    "reclamation_reason": str(
+                        snapshot.get("reclamation_reason", "")
+                    ),
+                }
+            )
+        retained = [
+            record
+            for record in records
+            if record["payload_disposition"] == "retained"
+        ]
+        usage_bytes = sum(record["snapshot_bytes"] for record in retained)
+        largest = sorted(
+            retained,
+            key=lambda record: (-record["snapshot_bytes"], record["session_id"]),
+        )[:10]
+        expiry = sorted(
+            (
+                record
+                for record in retained
+                if record["expires_at"] and not record["pinned"]
+            ),
+            key=lambda record: (record["expires_at"], record["session_id"]),
+        )
+        attention = storage.get("attention", {})
+        return {
+            "schema_version": 1,
+            "policy": {
+                "retention_seconds": self.snapshot_storage_retention_seconds,
+                "budget_bytes": self.snapshot_storage_budget_bytes,
+            },
+            "usage": {
+                "payload_bytes": usage_bytes,
+                "reserved_bytes": reserved_bytes,
+                "committed_bytes": usage_bytes + reserved_bytes,
+                "available_bytes": max(
+                    0,
+                    self.snapshot_storage_budget_bytes
+                    - usage_bytes
+                    - reserved_bytes,
+                ),
+            },
+            "counts": {
+                "records": len(records),
+                "retained_payloads": len(retained),
+                "reclaimed_payloads": sum(
+                    record["payload_disposition"] == "reclaimed"
+                    for record in records
+                ),
+                "pinned_payloads": sum(record["pinned"] for record in retained),
+                "expired_eligible_payloads": sum(
+                    record["expired"]
+                    and not record["pinned"]
+                    and record["phase"] == "retired"
+                    for record in retained
+                ),
+            },
+            "expiry": expiry,
+            "largest_payloads": largest,
+            "reclamation": {
+                "count": storage["reclamation_count"],
+                "bytes": storage["reclaimed_bytes"],
+                "recent": list(storage["recent_reclamations"]),
+            },
+            "blockers": [dict(attention)] if attention.get("active") else [],
+        }
+
+    def inspect_retirement_unit(self, session_id: str) -> dict[str, Any]:
+        session = self._refresh_persisted_session(session_id)
+        phase = str(session.retirement.get("phase", "active"))
+        blocked = phase in {"preservation-blocked", "retirement-blocked"}
+        snapshot = dict(session.retirement.get("snapshot", {}))
+        retained_snapshot = bool(
+            snapshot
+            and snapshot.get("verified") is True
+            and snapshot.get("payload_disposition", "retained") == "retained"
+        )
+        expected_path = self._session_worktree_path(session_id)
+        retained_source_available = bool(
+            phase == "preservation-blocked"
+            and not session.worktree_path.is_symlink()
+            and session.worktree_path.is_dir()
+            and _runtime_identity_path(
+                session.worktree_path.resolve(strict=False)
+            )
+            == _runtime_identity_path(expected_path)
+            and _runtime_identity_path(
+                session.worktree_path.resolve(strict=False)
+            )
+            != _runtime_identity_path(self.target_repo)
+        )
+        runner_quiescent = False
+        if blocked:
+            owner_signal, process_group_signal = self._probe_retirement_quiescence(
+                session.retirement.get("runner_boundary", {})
+            )
+            runner_quiescent = (
+                owner_signal == "absent" and process_group_signal == "absent"
+            )
+        return {
+            "schema_version": 1,
+            "mission_id": self.mission_id,
+            "session_id": session.session_id,
+            "session_revision": session.revision,
+            "phase": phase,
+            "terminal_status": session.status,
+            "blocked_reason": str(session.retirement.get("blocked_reason", "")),
+            "worktree_path": str(session.worktree_path),
+            "worktree_identity": session.worktree_identity,
+            "runner_boundary": dict(session.retirement.get("runner_boundary", {})),
+            "preservation_budget": dict(session.preservation_budget),
+            "retirement_record": snapshot,
+            "actions": {
+                "retry": blocked,
+                "inspect": True,
+                "export": blocked
+                and (
+                    retained_snapshot
+                    or (retained_source_available and runner_quiescent)
+                ),
+                "discard": blocked and runner_quiescent,
+            },
+        }
+
+    def export_retirement_unit(
+        self,
+        session_id: str,
+        *,
+        destination: Path,
+        expected_revision: int,
+        correlation_id: str,
+    ) -> dict[str, Any]:
+        """Materialize one blocked unit from its exact retained material."""
+
+        if not correlation_id.strip():
+            raise AlbertError("Retirement export correlation id is required.")
+        requested_destination = Path(destination)
+        if not requested_destination.is_absolute():
+            requested_destination = Path.cwd() / requested_destination
+        if (
+            not requested_destination.name
+            or requested_destination.name in {".", ".."}
+        ):
+            raise AlbertError("Retirement export destination name is invalid.")
+        if _path_is_within_boundary(
+            requested_destination,
+            self.runtime_root,
+        ):
+            raise AlbertError(
+                "Retirement export destination must be outside app-private runtime "
+                "storage."
+            )
+        try:
+            destination = (
+                requested_destination.parent.resolve(strict=True)
+                / requested_destination.name
+            )
+        except OSError as exc:
+            raise AlbertError(
+                "Retirement export destination parent must be an existing directory."
+            ) from exc
+        with (
+            self._retirement_effect_lock(session_id),
+            self._retirement_export_destination_lock(destination) as destination_lease,
+        ):
+            lock_digest = destination_lease.digest
+            parent_fd: int | None = None
+            try:
+                with self._runtime_lock(exclusive=True):
+                    data = self._read_runtime_payload()
+                    raw_session = data.get("sessions", {}).get(session_id)
+                    if not isinstance(raw_session, dict):
+                        raise AlbertError(
+                            f"Unknown Local Agent session: {session_id}"
+                        )
+                    session = LocalAgentSession.from_dict(raw_session)
+                    requested_owner_identity = (
+                        self._retirement_export_owner_identity(
+                            destination=destination,
+                            session_id=session_id,
+                            correlation_id=correlation_id,
+                            expected_revision=expected_revision,
+                        )
+                    )
+                    requested_owner_name = self._retirement_export_owner_name(
+                        requested_owner_identity
+                    )
+                    if self._retirement_export_session_has_unfinished_directory_owner(
+                        session,
+                        permitted_owner_name=requested_owner_name,
+                    ):
+                        raise LaunchBlockedError(
+                            f"{session_id} has a different durable export owner."
+                        )
+                    if any(
+                        session.retirement.get(intent_name)
+                        for intent_name in ("discard_intent", "retry_intent")
+                    ):
+                        raise LaunchBlockedError(
+                            f"{session_id} has a different Retirement Unit action "
+                            "in progress."
+                        )
+                    receipts = session.retirement.setdefault(
+                        "action_receipts", {}
+                    )
+                    existing = receipts.get(correlation_id)
+                    if correlation_id in receipts:
+                        if (
+                            existing.get("action") == "export"
+                            and existing.get("mission_id") == self.mission_id
+                            and existing.get("session_id") == session_id
+                            and existing.get("expected_revision")
+                            == expected_revision
+                            and existing.get("destination")
+                            == str(destination / "repository")
+                            and isinstance(existing.get("result_revision"), int)
+                            and not isinstance(
+                                existing.get("result_revision"), bool
+                            )
+                            and existing["result_revision"] <= session.revision
+                        ):
+                            return dict(existing)
+                        raise AlbertError(
+                            "Retirement action correlation id was reused for a "
+                            "different request."
+                        )
+
+                    source_boundary = session.worktree_path.resolve(strict=False)
+                    if _path_is_within_boundary(destination, self.runtime_root):
+                        raise AlbertError(
+                            "Retirement export destination must be outside "
+                            "app-private runtime storage."
+                        )
+                    if _path_is_within_boundary(destination, source_boundary):
+                        raise AlbertError(
+                            "Retirement export destination must be outside the "
+                            "Retained Worktree."
+                        )
+                    export_intent = session.retirement.get("export_intent", {})
+                    legacy_export_intent = bool(
+                        export_intent
+                        and set(export_intent)
+                        == _RETIREMENT_EXPORT_LEGACY_INTENT_FIELDS
+                    )
+                    resuming_intent = bool(
+                        export_intent
+                        and export_intent.get("correlation_id") == correlation_id
+                        and export_intent.get("expected_revision")
+                        == expected_revision
+                        and export_intent.get("destination") == str(destination)
+                        and export_intent.get("claim_revision") == session.revision
+                    )
+                    if export_intent and not resuming_intent:
+                        raise AlbertError(
+                            "Retirement export already has a different durable intent."
+                        )
+                    if not resuming_intent:
+                        self._require_lifecycle_revision(
+                            session, expected_revision
+                        )
+                    if session.retirement.get("phase", "active") not in {
+                        "preservation-blocked",
+                        "retirement-blocked",
+                    }:
+                        raise LaunchBlockedError(
+                            f"{session_id} is not a blocked Retirement Unit."
+                        )
+
+                    try:
+                        parent_fd = self._open_retirement_export_directory(
+                            destination.parent
+                        )
+                    except OSError as exc:
+                        raise AlbertError(
+                            "Retirement export destination parent must be an "
+                            "existing directory."
+                        ) from exc
+                    bound_parent = (
+                        self._bound_retirement_export_directory_path(parent_fd)
+                    )
+                    parent_status = os.fstat(parent_fd)
+                    try:
+                        named_parent_status = destination.parent.stat(
+                            follow_symlinks=False
+                        )
+                    except OSError as exc:
+                        raise AlbertError(
+                            "Retirement export destination parent changed."
+                        ) from exc
+                    if (
+                        not stat.S_ISDIR(named_parent_status.st_mode)
+                        or (named_parent_status.st_dev, named_parent_status.st_ino)
+                        != (parent_status.st_dev, parent_status.st_ino)
+                        or _host_normalized_path_parts(bound_parent)
+                        != _host_normalized_path_parts(destination.parent)
+                    ):
+                        raise AlbertError(
+                            "Retirement export destination parent changed."
+                        )
+                    bound_destination = bound_parent / destination.name
+                    if _path_is_within_boundary(
+                        bound_destination, self.runtime_root
+                    ):
+                        raise AlbertError(
+                            "Retirement export destination must be outside "
+                            "app-private runtime storage."
+                        )
+                    if _path_is_within_boundary(
+                        bound_destination, source_boundary
+                    ):
+                        raise AlbertError(
+                            "Retirement export destination must be outside the "
+                            "Retained Worktree."
+                        )
+
+                    runtime_root = self.runtime_root.resolve(strict=True)
+                    runtime_root_status = runtime_root.stat(
+                        follow_symlinks=False
+                    )
+                    snapshot = session.retirement.get("snapshot", {})
+                    retained_snapshot = bool(
+                        snapshot
+                        and snapshot.get("verified") is True
+                        and snapshot.get(
+                            "payload_disposition", "retained"
+                        )
+                        == "retained"
+                    )
+                    export_kind = str(
+                        export_intent.get("export_kind", "")
+                    ) or (
+                        "snapshot-payload"
+                        if retained_snapshot
+                        else "retained-worktree"
+                    )
+                    if export_kind not in {
+                        "snapshot-payload",
+                        "retained-worktree",
+                    }:
+                        raise AlbertError(
+                            "Retirement export intent kind is invalid."
+                        )
+                    if export_kind == "snapshot-payload" and not retained_snapshot:
+                        raise LaunchBlockedError(
+                            f"{session_id} does not have a retained verified "
+                            "payload to export."
+                        )
+                    if (
+                        export_kind == "retained-worktree"
+                        and session.retirement.get("phase")
+                        != "preservation-blocked"
+                    ):
+                        raise LaunchBlockedError(
+                            f"{session_id} does not have a blocked Retained "
+                            "Worktree to export."
+                        )
+
+                    try:
+                        destination_status = os.stat(
+                            destination.name,
+                            dir_fd=parent_fd,
+                            follow_symlinks=False,
+                        )
+                    except FileNotFoundError:
+                        destination_status = None
+                    if not resuming_intent and destination_status is not None:
+                        raise AlbertError(
+                            "Retirement export destination must not exist."
+                        )
+
+                    store: RetirementSnapshotStore | None = None
+                    retained_manifest: dict[str, Any] | None = None
+                    legacy_retained_projection: dict[str, Any] | None = None
+                    exclude_git_metadata = session.worktree_identity.startswith(
+                        "managed-git:"
+                    )
+                    source_present = False
+                    source_device = 0
+                    source_inode = 0
+                    if export_kind == "snapshot-payload":
+                        snapshot_revision = int(
+                            snapshot.get("session_revision", session.revision)
+                        )
+                        store = self._retirement_snapshot_store(
+                            session, snapshot_revision
+                        )
+                        manifest_sha256 = str(snapshot["manifest_sha256"])
+                        if (
+                            legacy_export_intent
+                            and manifest_sha256
+                            != export_intent["manifest_sha256"]
+                        ):
+                            raise AlbertError(
+                                "Legacy retirement export intent no longer matches "
+                                "its snapshot."
+                            )
+                    else:
+                        expected_path = self._session_worktree_path(session_id)
+                        if (
+                            _runtime_identity_path(source_boundary)
+                            != _runtime_identity_path(expected_path)
+                            or _runtime_identity_path(source_boundary)
+                            == _runtime_identity_path(self.target_repo)
+                        ):
+                            raise LaunchBlockedError(
+                                "Retained Worktree export requires the exact managed "
+                                "path and cannot target the Coding Workspace."
+                            )
+                        source_present = bool(
+                            session.worktree_path.exists()
+                            or session.worktree_path.is_symlink()
+                        )
+                        if not source_present and not resuming_intent:
+                            raise LaunchBlockedError(
+                                "Retained Worktree is unavailable for export."
+                            )
+                        owner_signal, process_group_signal = (
+                            self._probe_retirement_quiescence(
+                                session.retirement.get("runner_boundary", {})
+                            )
+                        )
+                        if (
+                            owner_signal != "absent"
+                            or process_group_signal != "absent"
+                        ):
+                            raise LaunchBlockedError(
+                                "Runner Quiescence was not independently "
+                                "corroborated for export: "
+                                f"owner={owner_signal}, "
+                                f"process-group={process_group_signal}."
+                            )
+                        if source_present:
+                            source_status = session.worktree_path.stat(
+                                follow_symlinks=False
+                            )
+                            if not stat.S_ISDIR(source_status.st_mode):
+                                raise AlbertError(
+                                    "Retained Worktree export source boundary changed."
+                                )
+                            source_device = source_status.st_dev
+                            source_inode = source_status.st_ino
+                            retained_manifest = (
+                                RetirementSnapshotStore.retained_worktree_manifest(
+                                    session.worktree_path,
+                                    exclude_git_metadata=exclude_git_metadata,
+                                )
+                            )
+                            source_after = session.worktree_path.stat(
+                                follow_symlinks=False
+                            )
+                            if (source_after.st_dev, source_after.st_ino) != (
+                                source_device,
+                                source_inode,
+                            ):
+                                raise AlbertError(
+                                    "Retained Worktree export source boundary changed."
+                                )
+                            manifest_sha256 = str(
+                                retained_manifest[
+                                    "materialized_tree_sha256"
+                                ]
+                            )
+                            if legacy_export_intent:
+                                legacy_retained_projection = RetirementSnapshotStore.legacy_retained_worktree_manifest_projection(
+                                    retained_manifest,
+                                    exclude_git_metadata=exclude_git_metadata,
+                                )
+                                if (
+                                    legacy_retained_projection["tree_sha256"]
+                                    != export_intent["manifest_sha256"]
+                                ):
+                                    raise AlbertError(
+                                        "Legacy retirement export intent no longer "
+                                        "matches its retained worktree."
+                                    )
+                        else:
+                            manifest_sha256 = str(
+                                export_intent["manifest_sha256"]
+                            )
+
+                    def verify_legacy_repository(repository_fd: int) -> None:
+                        if export_kind == "snapshot-payload":
+                            if store is None:
+                                raise AlbertError(
+                                    "Retirement Snapshot export store is missing."
+                                )
+                            store.verify_materialized_repository_in_directory(
+                                snapshot,
+                                repository_fd,
+                            )
+                            return
+                        actual_manifest = RetirementSnapshotStore.retained_worktree_manifest_from_directory(
+                            repository_fd,
+                            exclude_git_metadata=False,
+                        )
+                        actual_projection = RetirementSnapshotStore.legacy_retained_worktree_manifest_projection(
+                            actual_manifest,
+                            exclude_git_metadata=False,
+                        )
+                        if (
+                            actual_projection["tree_sha256"]
+                            != export_intent["manifest_sha256"]
+                            or (
+                                legacy_retained_projection is not None
+                                and actual_projection
+                                != legacy_retained_projection
+                            )
+                        ):
+                            raise RetirementSnapshotError(
+                                "Legacy Retained Worktree exported repository "
+                                "content is invalid."
+                            )
+
+                    def verify_legacy_complete_root(
+                        root_fd: int,
+                        root_device: int,
+                        root_inode: int,
+                    ) -> dict[str, Any]:
+                        root_status = os.fstat(root_fd)
+                        if (
+                            not stat.S_ISDIR(root_status.st_mode)
+                            or (root_status.st_dev, root_status.st_ino)
+                            != (root_device, root_inode)
+                            or set(os.listdir(root_fd))
+                            != {"repository", "retirement-export.json"}
+                        ):
+                            raise AlbertError(
+                                "Legacy retirement export destination is incomplete "
+                                "or changed."
+                            )
+                        marker_before = self._read_retirement_export_marker(root_fd)
+                        expected_marker = {
+                            "schema_version": 1,
+                            "mission_id": self.mission_id,
+                            "session_id": session_id,
+                            "correlation_id": correlation_id,
+                            "expected_revision": expected_revision,
+                            "manifest_sha256": export_intent["manifest_sha256"],
+                            "export_kind": export_kind,
+                        }
+                        exported_at = marker_before.get("exported_at")
+                        if (
+                            set(marker_before)
+                            != {*expected_marker, "exported_at"}
+                            or any(
+                                marker_before.get(field_name) != value
+                                for field_name, value in expected_marker.items()
+                            )
+                            or not isinstance(exported_at, str)
+                            or not exported_at.strip()
+                        ):
+                            raise AlbertError(
+                                "Legacy retirement export recovery marker is invalid."
+                            )
+                        try:
+                            parsed_exported_at = datetime.fromisoformat(exported_at)
+                        except ValueError as exc:
+                            raise AlbertError(
+                                "Legacy retirement export recovery marker is invalid."
+                            ) from exc
+                        if parsed_exported_at.tzinfo is None:
+                            raise AlbertError(
+                                "Legacy retirement export recovery marker is invalid."
+                            )
+                        repository_fd = self._open_retirement_export_directory(
+                            "repository",
+                            dir_fd=root_fd,
+                        )
+                        try:
+                            repository_before = os.fstat(repository_fd)
+                            verify_legacy_repository(repository_fd)
+                            repository_after = os.fstat(repository_fd)
+                        finally:
+                            os.close(repository_fd)
+                        root_after = os.fstat(root_fd)
+                        if (
+                            (root_after.st_dev, root_after.st_ino)
+                            != (root_device, root_inode)
+                            or (repository_after.st_dev, repository_after.st_ino)
+                            != (repository_before.st_dev, repository_before.st_ino)
+                            or set(os.listdir(root_fd))
+                            != {"repository", "retirement-export.json"}
+                            or self._read_retirement_export_marker(root_fd)
+                            != marker_before
+                        ):
+                            raise AlbertError(
+                                "Legacy retirement export destination changed."
+                            )
+                        return marker_before
+
+                    legacy_published_identity: tuple[int, int] | None = None
+                    legacy_published_marker: dict[str, Any] | None = None
+                    if legacy_export_intent and destination_status is not None:
+                        if not stat.S_ISDIR(destination_status.st_mode):
+                            raise AlbertError(
+                                "Legacy retirement export destination is incomplete "
+                                "or changed."
+                            )
+                        legacy_fd = self._open_retirement_export_directory(
+                            destination.name,
+                            dir_fd=parent_fd,
+                        )
+                        try:
+                            legacy_status = os.fstat(legacy_fd)
+                            if (legacy_status.st_dev, legacy_status.st_ino) != (
+                                destination_status.st_dev,
+                                destination_status.st_ino,
+                            ):
+                                raise AlbertError(
+                                    "Legacy retirement export destination changed."
+                                )
+                            legacy_published_marker = verify_legacy_complete_root(
+                                legacy_fd,
+                                legacy_status.st_dev,
+                                legacy_status.st_ino,
+                            )
+                            legacy_published_identity = (
+                                legacy_status.st_dev,
+                                legacy_status.st_ino,
+                            )
+                        finally:
+                            os.close(legacy_fd)
+
+                    destination_owner = (
+                        self._claim_retirement_export_destination_directory(
+                            destination_lease,
+                            destination=destination,
+                            session_id=session_id,
+                            correlation_id=correlation_id,
+                            expected_revision=expected_revision,
+                            claimed_at=(
+                                str(legacy_published_marker["exported_at"])
+                                if legacy_published_marker is not None
+                                else (
+                                    str(export_intent["claimed_at"])
+                                    if resuming_intent
+                                    and not legacy_export_intent
+                                    else None
+                                )
+                            ),
+                        )
+                    )
+
+                    def stage_name_for(attempt: int) -> str:
+                        if not 1 <= attempt <= _RETIREMENT_EXPORT_STAGE_ATTEMPT_LIMIT:
+                            raise AlbertError(
+                                "Retirement export staging attempts are exhausted."
+                            )
+                        stage_token = sha256(
+                            (
+                                f"{lock_digest}\0{self.project_key}\0"
+                                f"{self.mission_id}\0{session_id}\0"
+                                f"{correlation_id}\0{expected_revision}\0{attempt}"
+                            ).encode("utf-8")
+                        ).hexdigest()[:32]
+                        return (
+                            ".alfredo-retirement-export."
+                            f"{stage_token}.stage"
+                        )
+
+                    def reserved_intent_for(
+                        *,
+                        claim_revision: int,
+                        claimed_at: str,
+                    ) -> dict[str, Any]:
+                        return {
+                            "claim_revision": claim_revision,
+                            "correlation_id": correlation_id,
+                            "destination": str(destination),
+                            "destination_lock_sha256": lock_digest,
+                            "destination_name": destination.name,
+                            "destination_parent": str(destination.parent),
+                            "expected_revision": expected_revision,
+                            "export_kind": export_kind,
+                            "claimed_at": claimed_at,
+                            "manifest_sha256": manifest_sha256,
+                            "parent_device": parent_status.st_dev,
+                            "parent_inode": parent_status.st_ino,
+                            "runtime_root": str(runtime_root),
+                            "runtime_root_device": runtime_root_status.st_dev,
+                            "runtime_root_inode": runtime_root_status.st_ino,
+                            "source_boundary": str(source_boundary),
+                            "source_device": source_device,
+                            "source_inode": source_inode,
+                            "source_present": source_present,
+                            "stage_attempt": 1,
+                            "stage_anchor_device": 0,
+                            "stage_anchor_inode": 0,
+                            "stage_name": stage_name_for(1),
+                            "stage_root_device": 0,
+                            "stage_root_inode": 0,
+                            "stage_state": "reserved",
+                        }
+
+                    if resuming_intent and not legacy_export_intent:
+                        if (
+                            export_intent["claimed_at"]
+                            != destination_owner["claimed_at"]
+                            or
+                            export_intent["destination_lock_sha256"]
+                            != lock_digest
+                            or export_intent["destination_name"]
+                            != destination.name
+                            or export_intent["destination_parent"]
+                            != str(destination.parent)
+                            or export_intent["parent_device"]
+                            != parent_status.st_dev
+                            or export_intent["parent_inode"]
+                            != parent_status.st_ino
+                            or export_intent["runtime_root"]
+                            != str(runtime_root)
+                            or export_intent["runtime_root_device"]
+                            != runtime_root_status.st_dev
+                            or export_intent["runtime_root_inode"]
+                            != runtime_root_status.st_ino
+                            or export_intent["source_boundary"]
+                            != str(source_boundary)
+                        ):
+                            raise AlbertError(
+                                "Retirement export durable boundary changed."
+                            )
+                        if (
+                            export_kind == "snapshot-payload"
+                            and manifest_sha256
+                            != snapshot.get("manifest_sha256")
+                        ):
+                            raise AlbertError(
+                                "Retirement export intent no longer matches its "
+                                "snapshot."
+                            )
+                        if export_kind == "retained-worktree" and source_present:
+                            if (
+                                source_present
+                                and (
+                                    export_intent["source_device"],
+                                    export_intent["source_inode"],
+                                )
+                                != (source_device, source_inode)
+                            ):
+                                raise AlbertError(
+                                    "Retirement export source identity changed."
+                                )
+                            if (
+                                retained_manifest is not None
+                                and retained_manifest[
+                                    "materialized_tree_sha256"
+                                ]
+                                != export_intent["manifest_sha256"]
+                            ):
+                                raise AlbertError(
+                                    "Retirement export intent no longer matches its "
+                                    "retained worktree."
+                                )
+                        manifest_sha256 = str(
+                            export_intent["manifest_sha256"]
+                        )
+                        claim_revision = int(
+                            export_intent["claim_revision"]
+                        )
+                    elif (
+                        resuming_intent
+                        and legacy_published_identity is not None
+                    ):
+                        manifest_sha256 = str(
+                            export_intent["manifest_sha256"]
+                        )
+                        claim_revision = int(
+                            export_intent["claim_revision"]
+                        )
+                    elif resuming_intent:
+                        if (
+                            export_kind == "snapshot-payload"
+                            and manifest_sha256
+                            != export_intent["manifest_sha256"]
+                        ):
+                            raise AlbertError(
+                                "Legacy retirement export intent no longer matches "
+                                "its snapshot."
+                            )
+                        if export_kind == "retained-worktree":
+                            if not source_present:
+                                raise AlbertError(
+                                    "Legacy retirement export source is unavailable "
+                                    "for safe recovery."
+                                )
+                            if legacy_retained_projection is None:
+                                raise AlbertError(
+                                    "Legacy retirement export intent no longer "
+                                    "matches its retained worktree."
+                                )
+                        claim_revision = int(
+                            export_intent["claim_revision"]
+                        )
+                        export_intent = reserved_intent_for(
+                            claim_revision=claim_revision,
+                            claimed_at=destination_owner["claimed_at"],
+                        )
+                        session.retirement["export_intent"] = export_intent
+                        data["sessions"][session_id] = session.to_dict()
+                        self._write_runtime_payload(data)
+                        self.sessions[session_id] = session
+                    else:
+                        session.revision += 1
+                        claim_revision = session.revision
+                        export_intent = reserved_intent_for(
+                            claim_revision=claim_revision,
+                            claimed_at=destination_owner["claimed_at"],
+                        )
+                        session.retirement["export_intent"] = export_intent
+                        data["sessions"][session_id] = session.to_dict()
+                        self._write_runtime_payload(data)
+                        self.sessions[session_id] = session
+
+                if legacy_published_identity is not None:
+                    with self._runtime_lock(exclusive=True):
+                        data = self._read_runtime_payload()
+                        raw_latest = data.get("sessions", {}).get(session_id)
+                        if not isinstance(raw_latest, dict):
+                            raise AlbertError(
+                                f"Unknown Local Agent session: {session_id}"
+                            )
+                        latest = LocalAgentSession.from_dict(raw_latest)
+                        if (
+                            latest.revision != claim_revision
+                            or latest.retirement.get("export_intent", {})
+                            != export_intent
+                        ):
+                            raise LaunchBlockedError(
+                                f"{session_id} lifecycle boundary changed during "
+                                "legacy export recovery."
+                            )
+                        if parent_fd is None:
+                            raise AlbertError(
+                                "Legacy retirement export parent is unavailable."
+                            )
+                        current_parent = (
+                            self._bound_retirement_export_directory_path(parent_fd)
+                        )
+                        current_parent_status = os.fstat(parent_fd)
+                        named_parent_status = destination.parent.stat(
+                            follow_symlinks=False
+                        )
+                        if (
+                            not stat.S_ISDIR(named_parent_status.st_mode)
+                            or (
+                                current_parent_status.st_dev,
+                                current_parent_status.st_ino,
+                            )
+                            != (parent_status.st_dev, parent_status.st_ino)
+                            or (
+                                named_parent_status.st_dev,
+                                named_parent_status.st_ino,
+                            )
+                            != (parent_status.st_dev, parent_status.st_ino)
+                            or _host_normalized_path_parts(current_parent)
+                            != _host_normalized_path_parts(destination.parent)
+                            or _path_is_within_boundary(
+                                current_parent / destination.name,
+                                runtime_root,
+                            )
+                            or _path_is_within_boundary(
+                                current_parent / destination.name,
+                                source_boundary,
+                            )
+                        ):
+                            raise AlbertError(
+                                "Legacy retirement export parent boundary changed."
+                            )
+                        current_runtime = self.runtime_root.resolve(strict=True)
+                        current_runtime_status = current_runtime.stat(
+                            follow_symlinks=False
+                        )
+                        if (
+                            str(current_runtime) != str(runtime_root)
+                            or (
+                                current_runtime_status.st_dev,
+                                current_runtime_status.st_ino,
+                            )
+                            != (
+                                runtime_root_status.st_dev,
+                                runtime_root_status.st_ino,
+                            )
+                        ):
+                            raise AlbertError(
+                                "Legacy retirement export runtime boundary changed."
+                            )
+                        if export_kind == "retained-worktree" and source_present:
+                            current_source = source_boundary.stat(
+                                follow_symlinks=False
+                            )
+                            if (
+                                not stat.S_ISDIR(current_source.st_mode)
+                                or (current_source.st_dev, current_source.st_ino)
+                                != (source_device, source_inode)
+                                or _host_normalized_path_parts(
+                                    source_boundary.resolve(strict=False)
+                                )
+                                != _host_normalized_path_parts(
+                                    session.worktree_path.resolve(strict=False)
+                                )
+                            ):
+                                raise AlbertError(
+                                    "Legacy retirement export source boundary changed."
+                                )
+                        elif export_kind == "retained-worktree" and (
+                            source_boundary.exists()
+                            or source_boundary.is_symlink()
+                        ):
+                            raise AlbertError(
+                                "Legacy retirement export source boundary changed."
+                            )
+                        final_fd = self._open_retirement_export_directory(
+                            destination.name,
+                            dir_fd=parent_fd,
+                        )
+                        try:
+                            final_status = os.fstat(final_fd)
+                            if (final_status.st_dev, final_status.st_ino) != (
+                                legacy_published_identity
+                            ):
+                                raise AlbertError(
+                                    "Legacy retirement export destination changed."
+                                )
+                            if verify_legacy_complete_root(
+                                final_fd,
+                                final_status.st_dev,
+                                final_status.st_ino,
+                            ) != legacy_published_marker:
+                                raise AlbertError(
+                                    "Legacy retirement export destination changed."
+                                )
+                            self._durably_sync_retirement_export_tree(final_fd)
+                            if verify_legacy_complete_root(
+                                final_fd,
+                                final_status.st_dev,
+                                final_status.st_ino,
+                            ) != legacy_published_marker:
+                                raise AlbertError(
+                                    "Legacy retirement export destination changed."
+                                )
+                        finally:
+                            os.close(final_fd)
+                        os.fsync(parent_fd)
+                        latest.revision += 1
+                        latest.retirement["export_intent"] = {}
+                        receipt = {
+                            "action": "export",
+                            "mission_id": self.mission_id,
+                            "session_id": session_id,
+                            "expected_revision": expected_revision,
+                            "result_revision": latest.revision,
+                            "destination": str(destination / "repository"),
+                            "manifest_sha256": manifest_sha256,
+                            "recorded_at": _utc_now(),
+                        }
+                        latest.retirement.setdefault("action_receipts", {})[
+                            correlation_id
+                        ] = receipt
+                        data["sessions"][session_id] = latest.to_dict()
+                        data.setdefault("timeline", []).append(
+                            f"{latest.issue_id} blocked Retirement Unit "
+                            f"{session_id} exported."
+                        )
+                        self._write_runtime_payload(data)
+                        self.sessions[session_id] = latest
+                        self.timeline = list(data.get("timeline", []))
+                        return receipt
+
+                def assert_bound_source() -> None:
+                    if export_kind != "retained-worktree":
+                        return
+                    if export_intent["source_present"] is not True:
+                        raise AlbertError(
+                            "Retirement export source boundary is unavailable."
+                        )
+                    source = Path(export_intent["source_boundary"])
+                    try:
+                        source_status = source.stat(follow_symlinks=False)
+                    except OSError as exc:
+                        raise AlbertError(
+                            "Retirement export source boundary changed."
+                        ) from exc
+                    if (
+                        not stat.S_ISDIR(source_status.st_mode)
+                        or (source_status.st_dev, source_status.st_ino)
+                        != (
+                            export_intent["source_device"],
+                            export_intent["source_inode"],
+                        )
+                        or _host_normalized_path_parts(
+                            source.resolve(strict=False)
+                        )
+                        != _host_normalized_path_parts(source_boundary)
+                    ):
+                        raise AlbertError(
+                            "Retirement export source boundary changed."
+                        )
+
+                def assert_bound_parent() -> Path:
+                    assert parent_fd is not None
+                    current_parent = (
+                        self._bound_retirement_export_directory_path(parent_fd)
+                    )
+                    current_status = os.fstat(parent_fd)
+                    try:
+                        named_status = destination.parent.stat(
+                            follow_symlinks=False
+                        )
+                    except OSError as exc:
+                        raise AlbertError(
+                            "Retirement export destination parent changed."
+                        ) from exc
+                    if (
+                        not stat.S_ISDIR(named_status.st_mode)
+                        or (named_status.st_dev, named_status.st_ino)
+                        != (
+                            export_intent["parent_device"],
+                            export_intent["parent_inode"],
+                        )
+                        or (current_status.st_dev, current_status.st_ino)
+                        != (named_status.st_dev, named_status.st_ino)
+                        or _host_normalized_path_parts(current_parent)
+                        != _host_normalized_path_parts(
+                            Path(export_intent["destination_parent"])
+                        )
+                    ):
+                        raise AlbertError(
+                            "Retirement export destination parent boundary changed."
+                        )
+                    current_destination = current_parent / destination.name
+                    if _path_is_within_boundary(
+                        current_destination, Path(export_intent["runtime_root"])
+                    ):
+                        raise AlbertError(
+                            "Retirement export destination entered app-private "
+                            "runtime storage."
+                        )
+                    if _path_is_within_boundary(
+                        current_destination,
+                        Path(export_intent["source_boundary"]),
+                    ):
+                        raise AlbertError(
+                            "Retirement export destination entered the Retained "
+                            "Worktree."
+                        )
+                    current_runtime = self.runtime_root.resolve(strict=True)
+                    runtime_status = current_runtime.stat(
+                        follow_symlinks=False
+                    )
+                    if (
+                        str(current_runtime) != export_intent["runtime_root"]
+                        or (runtime_status.st_dev, runtime_status.st_ino)
+                        != (
+                            export_intent["runtime_root_device"],
+                            export_intent["runtime_root_inode"],
+                        )
+                    ):
+                        raise AlbertError(
+                            "Retirement export runtime boundary changed."
+                        )
+                    assert_bound_source()
+                    return current_parent
+
+                def bind_reserved_stage() -> None:
+                    nonlocal export_intent, session
+                    if export_intent["stage_state"] == "bound":
+                        return
+                    if export_intent["stage_state"] != "reserved":
+                        raise AlbertError(
+                            "Retirement export staging state is invalid."
+                        )
+                    assert parent_fd is not None
+                    assert_bound_parent()
+                    try:
+                        os.mkdir(
+                            export_intent["stage_name"],
+                            mode=0o700,
+                            dir_fd=parent_fd,
+                        )
+                    except FileExistsError:
+                        pass
+                    anchor_fd = self._open_retirement_export_directory(
+                        export_intent["stage_name"],
+                        dir_fd=parent_fd,
+                    )
+                    payload_fd: int | None = None
+                    try:
+                        anchor_entries = set(os.listdir(anchor_fd))
+                        if not anchor_entries:
+                            os.mkdir("payload", mode=0o700, dir_fd=anchor_fd)
+                        elif anchor_entries != {"payload"}:
+                            raise AlbertError(
+                                "Retirement export reserved staging anchor contains "
+                                "unclaimed data."
+                            )
+                        payload_fd = self._open_retirement_export_directory(
+                            "payload",
+                            dir_fd=anchor_fd,
+                        )
+                        if os.listdir(payload_fd):
+                            raise AlbertError(
+                                "Retirement export reserved staging payload contains "
+                                "unclaimed data."
+                            )
+                        os.fchmod(anchor_fd, 0o700)
+                        os.fchmod(payload_fd, 0o700)
+                        anchor_status = os.fstat(anchor_fd)
+                        payload_status = os.fstat(payload_fd)
+                        os.fsync(payload_fd)
+                        os.fsync(anchor_fd)
+                        os.fsync(parent_fd)
+                    finally:
+                        if payload_fd is not None:
+                            os.close(payload_fd)
+                        os.close(anchor_fd)
+
+                    bound_intent = dict(export_intent)
+                    bound_intent.update(
+                        {
+                            "stage_anchor_device": anchor_status.st_dev,
+                            "stage_anchor_inode": anchor_status.st_ino,
+                            "stage_root_device": payload_status.st_dev,
+                            "stage_root_inode": payload_status.st_ino,
+                            "stage_state": "bound",
+                        }
+                    )
+                    with self._runtime_lock(exclusive=True):
+                        update_data = self._read_runtime_payload()
+                        raw_latest = update_data.get("sessions", {}).get(
+                            session_id
+                        )
+                        if not isinstance(raw_latest, dict):
+                            raise AlbertError(
+                                f"Unknown Local Agent session: {session_id}"
+                            )
+                        latest = LocalAgentSession.from_dict(raw_latest)
+                        if (
+                            latest.revision != claim_revision
+                            or latest.retirement.get("export_intent", {})
+                            != export_intent
+                        ):
+                            raise LaunchBlockedError(
+                                f"{session_id} lifecycle boundary changed during "
+                                "export staging."
+                            )
+                        latest.retirement["export_intent"] = bound_intent
+                        update_data["sessions"][session_id] = latest.to_dict()
+                        self._write_runtime_payload(update_data)
+                        self.sessions[session_id] = latest
+                        session = latest
+                        export_intent = bound_intent
+
+                def verify_exported_repository(repository_fd: int) -> None:
+                    if export_kind == "snapshot-payload":
+                        if store is None:
+                            raise AlbertError(
+                                "Retirement Snapshot export store is missing."
+                            )
+                        store.verify_materialized_repository_in_directory(
+                            snapshot,
+                            repository_fd,
+                        )
+                        return
+                    if retained_manifest is None:
+                        raise RetirementSnapshotError(
+                            "Retained Worktree recovery manifest is unavailable."
+                        )
+                    RetirementSnapshotStore.verify_retained_worktree_in_directory(
+                        repository_fd,
+                        retained_manifest,
+                    )
+
+                def read_expected_marker(
+                    root_fd: int,
+                    root_device: int,
+                    root_inode: int,
+                ) -> dict[str, Any]:
+                    marker = self._read_retirement_export_marker(root_fd)
+                    expected = {
+                        "schema_version": 1,
+                        "mission_id": self.mission_id,
+                        "session_id": session_id,
+                        "correlation_id": correlation_id,
+                        "expected_revision": expected_revision,
+                        "manifest_sha256": manifest_sha256,
+                        "export_kind": export_kind,
+                        "stage_name": export_intent["stage_name"],
+                        "stage_root_device": root_device,
+                        "stage_root_inode": root_inode,
+                        "exported_at": export_intent["claimed_at"],
+                    }
+                    if (
+                        set(marker) != set(expected)
+                        or any(
+                            marker.get(field_name) != value
+                            for field_name, value in expected.items()
+                        )
+                    ):
+                        raise AlbertError(
+                            "Retirement export recovery marker is invalid."
+                        )
+                    return marker
+
+                def exact_root_entries(root_fd: int) -> set[str]:
+                    try:
+                        return set(os.listdir(root_fd))
+                    except OSError as exc:
+                        raise AlbertError(
+                            "Retirement export root could not be inspected."
+                        ) from exc
+
+                def verify_complete_root(
+                    root_fd: int,
+                    root_device: int,
+                    root_inode: int,
+                ) -> None:
+                    status = os.fstat(root_fd)
+                    if (
+                        not stat.S_ISDIR(status.st_mode)
+                        or (status.st_dev, status.st_ino)
+                        != (root_device, root_inode)
+                        or exact_root_entries(root_fd)
+                        != {"repository", "retirement-export.json"}
+                    ):
+                        raise AlbertError(
+                            "Retirement export destination boundary changed."
+                        )
+                    marker_before = read_expected_marker(
+                        root_fd, root_device, root_inode
+                    )
+                    repository_fd = self._open_retirement_export_directory(
+                        "repository",
+                        dir_fd=root_fd,
+                    )
+                    try:
+                        repository_before = os.fstat(repository_fd)
+                        verify_exported_repository(repository_fd)
+                        repository_after = os.fstat(repository_fd)
+                    finally:
+                        os.close(repository_fd)
+                    after = os.fstat(root_fd)
+                    if (
+                        (after.st_dev, after.st_ino)
+                        != (root_device, root_inode)
+                        or (repository_after.st_dev, repository_after.st_ino)
+                        != (repository_before.st_dev, repository_before.st_ino)
+                        or exact_root_entries(root_fd)
+                        != {"repository", "retirement-export.json"}
+                        or read_expected_marker(
+                            root_fd,
+                            root_device,
+                            root_inode,
+                        )
+                        != marker_before
+                    ):
+                        raise AlbertError(
+                            "Retirement export destination boundary changed."
+                        )
+
+                def open_claimed_stage() -> tuple[int, int]:
+                    assert parent_fd is not None
+                    if export_intent["stage_state"] != "bound":
+                        raise AlbertError(
+                            "Retirement export staging identity is not bound."
+                        )
+                    anchor_fd = self._open_retirement_export_directory(
+                        export_intent["stage_name"],
+                        dir_fd=parent_fd,
+                    )
+                    anchor_status = os.fstat(anchor_fd)
+                    if (anchor_status.st_dev, anchor_status.st_ino) != (
+                        export_intent["stage_anchor_device"],
+                        export_intent["stage_anchor_inode"],
+                    ):
+                        os.close(anchor_fd)
+                        raise AlbertError(
+                            "Retirement export staging anchor identity changed."
+                        )
+                    try:
+                        if set(os.listdir(anchor_fd)) != {"payload"}:
+                            raise AlbertError(
+                                "Retirement export staging anchor changed."
+                            )
+                        payload_fd = self._open_retirement_export_directory(
+                            "payload",
+                            dir_fd=anchor_fd,
+                        )
+                    except BaseException:
+                        os.close(anchor_fd)
+                        raise
+                    payload_status = os.fstat(payload_fd)
+                    if (payload_status.st_dev, payload_status.st_ino) != (
+                        export_intent["stage_root_device"],
+                        export_intent["stage_root_inode"],
+                    ):
+                        os.close(payload_fd)
+                        os.close(anchor_fd)
+                        raise AlbertError(
+                            "Retirement export staging payload identity changed."
+                        )
+                    return anchor_fd, payload_fd
+
+                def advance_stage() -> None:
+                    nonlocal export_intent, session
+                    attempt = int(export_intent["stage_attempt"]) + 1
+                    if attempt > _RETIREMENT_EXPORT_STAGE_ATTEMPT_LIMIT:
+                        raise AlbertError(
+                            "Retirement export staging recovery attempts are "
+                            "exhausted; retained staging data was preserved."
+                        )
+                    assert_bound_parent()
+                    reserved_intent = dict(export_intent)
+                    reserved_intent.update(
+                        {
+                            "stage_attempt": attempt,
+                            "stage_anchor_device": 0,
+                            "stage_anchor_inode": 0,
+                            "stage_name": stage_name_for(attempt),
+                            "stage_root_device": 0,
+                            "stage_root_inode": 0,
+                            "stage_state": "reserved",
+                        }
+                    )
+                    with self._runtime_lock(exclusive=True):
+                        update_data = self._read_runtime_payload()
+                        raw_latest = update_data.get("sessions", {}).get(
+                            session_id
+                        )
+                        if not isinstance(raw_latest, dict):
+                            raise AlbertError(
+                                f"Unknown Local Agent session: {session_id}"
+                            )
+                        latest = LocalAgentSession.from_dict(raw_latest)
+                        latest_intent = latest.retirement.get(
+                            "export_intent", {}
+                        )
+                        if (
+                            latest.revision != claim_revision
+                            or latest_intent != export_intent
+                        ):
+                            raise LaunchBlockedError(
+                                f"{session_id} lifecycle boundary changed during "
+                                "export recovery."
+                            )
+                        latest.retirement["export_intent"] = reserved_intent
+                        update_data["sessions"][session_id] = latest.to_dict()
+                        self._write_runtime_payload(update_data)
+                        self.sessions[session_id] = latest
+                        session = latest
+                        export_intent = reserved_intent
+                    bind_reserved_stage()
+
+                assert parent_fd is not None
+                try:
+                    bind_reserved_stage()
+                except (OSError, AlbertError):
+                    if not resuming_intent:
+                        raise
+                    advance_stage()
+                assert_bound_parent()
+                try:
+                    public_status = os.stat(
+                        destination.name,
+                        dir_fd=parent_fd,
+                        follow_symlinks=False,
+                    )
+                except FileNotFoundError:
+                    public_status = None
+
+                materialized = destination / "repository"
+                if public_status is not None:
+                    if (
+                        not stat.S_ISDIR(public_status.st_mode)
+                        or (public_status.st_dev, public_status.st_ino)
+                        != (
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        )
+                    ):
+                        raise AlbertError(
+                            "Retirement export destination is owned by another "
+                            "publisher."
+                        )
+                    public_fd = self._open_retirement_export_directory(
+                        destination.name,
+                        dir_fd=parent_fd,
+                    )
+                    try:
+                        public_after = os.fstat(public_fd)
+                        if (public_after.st_dev, public_after.st_ino) != (
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        ):
+                            raise AlbertError(
+                                "Retirement export destination boundary changed."
+                            )
+                        verify_complete_root(
+                            public_fd,
+                            public_after.st_dev,
+                            public_after.st_ino,
+                        )
+                        self._durably_sync_retirement_export_tree(public_fd)
+                        verify_complete_root(
+                            public_fd,
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        )
+                    finally:
+                        os.close(public_fd)
+                else:
+                    anchor_fd: int | None = None
+                    payload_fd: int | None = None
+                    stage_state = "invalid"
+                    try:
+                        anchor_fd, payload_fd = open_claimed_stage()
+                        entries = exact_root_entries(payload_fd)
+                        if not entries:
+                            stage_state = "empty"
+                        elif entries == {"repository"}:
+                            repository_fd = (
+                                self._open_retirement_export_directory(
+                                    "repository",
+                                    dir_fd=payload_fd,
+                                )
+                            )
+                            try:
+                                verify_exported_repository(repository_fd)
+                            finally:
+                                os.close(repository_fd)
+                            stage_state = "repository"
+                        elif entries == {
+                            "repository",
+                            "retirement-export.json",
+                        }:
+                            verify_complete_root(
+                                payload_fd,
+                                export_intent["stage_root_device"],
+                                export_intent["stage_root_inode"],
+                            )
+                            stage_state = "complete"
+                    except (
+                        OSError,
+                        UnicodeError,
+                        json.JSONDecodeError,
+                        RetirementSnapshotError,
+                        AlbertError,
+                    ):
+                        if not resuming_intent:
+                            raise
+                    finally:
+                        if payload_fd is not None:
+                            os.close(payload_fd)
+                        if anchor_fd is not None:
+                            os.close(anchor_fd)
+
+                    if stage_state == "invalid":
+                        advance_stage()
+                        anchor_fd, payload_fd = open_claimed_stage()
+                        stage_state = "empty"
+                    else:
+                        anchor_fd, payload_fd = open_claimed_stage()
+                    try:
+                        if stage_state == "empty":
+                            if export_kind == "snapshot-payload":
+                                if store is None:
+                                    raise AlbertError(
+                                        "Retirement Snapshot export store is missing."
+                                    )
+                                store.materialize_into_directory(
+                                    snapshot,
+                                    payload_fd,
+                                )
+                            else:
+                                if retained_manifest is None:
+                                    raise RetirementSnapshotError(
+                                        "Retained Worktree is unavailable for "
+                                        "export recovery."
+                                    )
+                                RetirementSnapshotStore.materialize_retained_worktree_into_directory(
+                                    session.worktree_path,
+                                    payload_fd,
+                                    retained_manifest,
+                                    exclude_git_metadata=exclude_git_metadata,
+                                )
+                            if exact_root_entries(payload_fd) != {"repository"}:
+                                raise AlbertError(
+                                    "Retirement export private stage changed during "
+                                    "materialization."
+                                )
+                            repository_fd = (
+                                self._open_retirement_export_directory(
+                                    "repository",
+                                    dir_fd=payload_fd,
+                                )
+                            )
+                            try:
+                                verify_exported_repository(repository_fd)
+                            finally:
+                                os.close(repository_fd)
+                            stage_state = "repository"
+                        if stage_state == "repository":
+                            marker = {
+                                "schema_version": 1,
+                                "mission_id": self.mission_id,
+                                "session_id": session_id,
+                                "correlation_id": correlation_id,
+                                "expected_revision": expected_revision,
+                                "manifest_sha256": manifest_sha256,
+                                "export_kind": export_kind,
+                                "stage_name": export_intent["stage_name"],
+                                "stage_root_device": export_intent[
+                                    "stage_root_device"
+                                ],
+                                "stage_root_inode": export_intent[
+                                    "stage_root_inode"
+                                ],
+                                "exported_at": export_intent["claimed_at"],
+                            }
+                            self._write_retirement_export_marker_exclusive(
+                                payload_fd,
+                                Path("retirement-export.json"),
+                                json.dumps(
+                                    marker, indent=2, sort_keys=True
+                                )
+                                + "\n",
+                            )
+                        verify_complete_root(
+                            payload_fd,
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        )
+                        self._durably_sync_retirement_export_tree(payload_fd)
+                        verify_complete_root(
+                            payload_fd,
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        )
+                        assert_bound_parent()
+                        self._publish_retirement_export_noreplace(
+                            anchor_fd,
+                            "payload",
+                            parent_fd,
+                            destination.name,
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        )
+                        os.fsync(anchor_fd)
+                        os.fsync(parent_fd)
+                        if os.listdir(anchor_fd):
+                            raise AlbertError(
+                                "Retirement export staging anchor changed during "
+                                "publication."
+                            )
+                        verify_complete_root(
+                            payload_fd,
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        )
+                    finally:
+                        os.close(payload_fd)
+                        os.close(anchor_fd)
+
+                    published_fd = self._open_retirement_export_directory(
+                        destination.name,
+                        dir_fd=parent_fd,
+                    )
+                    try:
+                        published_status = os.fstat(published_fd)
+                        if (
+                            published_status.st_dev,
+                            published_status.st_ino,
+                        ) != (
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        ):
+                            raise AlbertError(
+                                "Retirement export publication identity changed."
+                            )
+                        verify_complete_root(
+                            published_fd,
+                            published_status.st_dev,
+                            published_status.st_ino,
+                        )
+                    finally:
+                        os.close(published_fd)
+
+                with self._runtime_lock(exclusive=True):
+                    data = self._read_runtime_payload()
+                    raw_latest = data.get("sessions", {}).get(session_id)
+                    if not isinstance(raw_latest, dict):
+                        raise AlbertError(
+                            f"Unknown Local Agent session: {session_id}"
+                        )
+                    latest = LocalAgentSession.from_dict(raw_latest)
+                    if (
+                        latest.revision != claim_revision
+                        or latest.retirement.get("export_intent", {})
+                        != export_intent
+                    ):
+                        raise LaunchBlockedError(
+                            f"{session_id} lifecycle boundary changed during export."
+                        )
+                    assert_bound_parent()
+                    final_fd = self._open_retirement_export_directory(
+                        destination.name,
+                        dir_fd=parent_fd,
+                    )
+                    try:
+                        final_status = os.fstat(final_fd)
+                        if (final_status.st_dev, final_status.st_ino) != (
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        ):
+                            raise AlbertError(
+                                "Retirement export destination boundary changed."
+                            )
+                        verify_complete_root(
+                            final_fd,
+                            final_status.st_dev,
+                            final_status.st_ino,
+                        )
+                        self._durably_sync_retirement_export_tree(final_fd)
+                        verify_complete_root(
+                            final_fd,
+                            export_intent["stage_root_device"],
+                            export_intent["stage_root_inode"],
+                        )
+                    finally:
+                        os.close(final_fd)
+                    latest.revision += 1
+                    latest.retirement["export_intent"] = {}
+                    receipt = {
+                        "action": "export",
+                        "mission_id": self.mission_id,
+                        "session_id": session_id,
+                        "expected_revision": expected_revision,
+                        "result_revision": latest.revision,
+                        "destination": str(materialized),
+                        "manifest_sha256": manifest_sha256,
+                        "recorded_at": _utc_now(),
+                    }
+                    latest.retirement.setdefault("action_receipts", {})[
+                        correlation_id
+                    ] = receipt
+                    data["sessions"][session_id] = latest.to_dict()
+                    data.setdefault("timeline", []).append(
+                        f"{latest.issue_id} blocked Retirement Unit {session_id} "
+                        "exported."
+                    )
+                    self._write_runtime_payload(data)
+                    self.sessions[session_id] = latest
+                    self.timeline = list(data.get("timeline", []))
+                    return receipt
+            except (
+                OSError,
+                UnicodeError,
+                json.JSONDecodeError,
+                RetirementSnapshotError,
+            ) as exc:
+                raise AlbertError(
+                    f"{session_id} retirement export failed: {exc}"
+                ) from exc
+            finally:
+                if parent_fd is not None:
+                    os.close(parent_fd)
+
+    def retry_retirement_unit(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int,
+        correlation_id: str,
+    ) -> LocalAgentSession:
+        """Authorize one fresh bounded attempt for an exact blocked unit."""
+
+        if not correlation_id.strip():
+            raise AlbertError("Retirement retry correlation id is required.")
+        with self._retirement_effect_lock(session_id):
+            with self._runtime_lock(exclusive=True):
+                data = self._read_runtime_payload()
+                raw_session = data.get("sessions", {}).get(session_id)
+                if not isinstance(raw_session, dict):
+                    raise AlbertError(f"Unknown Local Agent session: {session_id}")
+                session = LocalAgentSession.from_dict(raw_session)
+                receipts = session.retirement.setdefault("action_receipts", {})
+                existing = receipts.get(correlation_id)
+                if correlation_id in receipts:
+                    if (
+                        existing.get("action") == "retry"
+                        and existing.get("mission_id") == self.mission_id
+                        and existing.get("session_id") == session_id
+                        and existing.get("expected_revision") == expected_revision
+                        and isinstance(existing.get("result_revision"), int)
+                        and not isinstance(existing.get("result_revision"), bool)
+                        and existing["result_revision"] <= session.revision
+                    ):
+                        return session
+                    raise AlbertError(
+                        "Retirement action correlation id was reused for a different request."
+                    )
+                if any(
+                    session.retirement.get(intent_name)
+                    for intent_name in ("discard_intent", "export_intent")
+                ) or self._retirement_export_session_has_unfinished_directory_owner(
+                    session
+                ):
+                    raise LaunchBlockedError(
+                        f"{session_id} has a different Retirement Unit action in progress."
+                    )
+                retry_intent = session.retirement.get("retry_intent", {})
+                resuming_intent = bool(
+                    retry_intent
+                    and retry_intent.get("correlation_id") == correlation_id
+                    and retry_intent.get("expected_revision") == expected_revision
+                )
+                if retry_intent and not resuming_intent:
+                    raise AlbertError(
+                        "Retirement retry already has a different durable intent."
+                    )
+                if resuming_intent:
+                    origin_phase = str(retry_intent["origin_phase"])
+                else:
+                    self._require_lifecycle_revision(session, expected_revision)
+                    origin_phase = str(session.retirement.get("phase"))
+                    if origin_phase not in {
+                        "preservation-blocked",
+                        "retirement-blocked",
+                    }:
+                        raise LaunchBlockedError(
+                            f"{session_id} is not a blocked Retirement Unit."
+                        )
+                    if origin_phase == "retirement-blocked":
+                        snapshot = session.retirement.get("snapshot", {})
+                        if (
+                            snapshot.get("payload_disposition", "retained")
+                            != "retained"
+                        ):
+                            raise LaunchBlockedError(
+                                f"{session_id} Snapshot Payload is not retained for retry."
+                            )
+                        session.retirement["phase"] = "preserved"
+                    else:
+                        session.retirement["phase"] = "active"
+                        session.retirement["snapshot"] = {}
+                        session.retirement["preservation_intent"] = {}
+                    session.retirement["retirement_attempts"] = 0
+                    session.retirement["blocked_reason"] = ""
+                    session.retirement["retry_intent"] = {
+                        "correlation_id": correlation_id,
+                        "expected_revision": expected_revision,
+                        "origin_phase": origin_phase,
+                    }
+                    session.revision += 1
+                    session.retirement["retry_intent"][
+                        "claim_revision"
+                    ] = session.revision
+                    data["sessions"][session_id] = session.to_dict()
+                    data.setdefault("timeline", []).append(
+                        f"{session.issue_id} explicit retirement retry authorized "
+                        f"for {session_id}."
+                    )
+                    self._write_runtime_payload(data)
+                    self.sessions[session_id] = session
+                    self.timeline = list(data.get("timeline", []))
+
+            current = self._refresh_persisted_session(session_id)
+            current_phase = str(current.retirement.get("phase", "active"))
+            if origin_phase == "retirement-blocked" and current_phase in {
+                "preserved",
+                "grace",
+                "retiring",
+            }:
+                self._retire_with_short_retry_locked(session_id)
+            elif origin_phase == "preservation-blocked":
+                if current_phase == "active":
+                    preservation_correlation = (
+                        "retirement-retry-preserve:" + sha256(correlation_id.encode("utf-8")).hexdigest()
+                    )
+                    try:
+                        current = self._preserve_retirement_unit_locked(
+                            session_id,
+                            expected_revision=current.revision,
+                            correlation_id=preservation_correlation,
+                            defer_if_not_quiescent=False,
+                        )
+                    except (AlbertError, LaunchBlockedError):
+                        current = self._refresh_persisted_session(session_id)
+                        if current.retirement.get("phase") != "preservation-blocked":
+                            raise
+                else:
+                    current = self._refresh_persisted_session(session_id)
+                if current.retirement.get("phase") == "preserved":
+                    review = self._latest_review_for_session(session_id)
+                    if current.status == "failed" or bool(review and review.outcome == "Rejected"):
+                        self._enter_retention_grace(session_id)
+                    elif current.status == "cancelled" or bool(
+                        review and review.outcome in {"Approved", "Approved with limitations"}
+                    ):
+                        self._retire_with_short_retry_locked(session_id)
+
+            with self._runtime_lock(exclusive=True):
+                data = self._read_runtime_payload()
+                raw_result = data.get("sessions", {}).get(session_id)
+                if not isinstance(raw_result, dict):
+                    raise AlbertError(f"Unknown Local Agent session: {session_id}")
+                result = LocalAgentSession.from_dict(raw_result)
+                result_phase = str(result.retirement.get("phase", "active"))
+                if result_phase not in {
+                    "preserved",
+                    "grace",
+                    "retiring",
+                    "preservation-blocked",
+                    "retirement-blocked",
+                    "retired",
+                }:
+                    raise AlbertError(f"{session_id} retirement retry produced an invalid phase.")
+                result.revision += 1
+                result.retirement["retry_intent"] = {}
+                result.retirement.setdefault("action_receipts", {})[
+                    correlation_id
+                ] = {
+                    "action": "retry",
+                    "mission_id": self.mission_id,
+                    "session_id": session_id,
+                    "expected_revision": expected_revision,
+                    "result_revision": result.revision,
+                    "result_phase": result_phase,
+                    "recorded_at": _utc_now(),
+                }
+                data["sessions"][session_id] = result.to_dict()
+                self._write_runtime_payload(data)
+                self.sessions[session_id] = result
+                return result
+
+    def discard_retained_worktree(
+        self,
+        session_id: str,
+        *,
+        expected_revision: int,
+        correlation_id: str,
+        confirmation: str,
+        reason: str,
+    ) -> LocalAgentSession:
+        """Irreversibly discard one exact blocked and independently quiesced worktree."""
+
+        if confirmation != session_id:
+            raise AlbertError(
+                "Retained Worktree Discard confirmation must equal the exact session id."
+            )
+        if not correlation_id.strip() or not reason.strip():
+            raise AlbertError(
+                "Retained Worktree Discard requires correlation and an explicit reason."
+            )
+        with self._retirement_effect_lock(session_id):
+            with self._runtime_lock(exclusive=True):
+                data = self._read_runtime_payload()
+                raw_session = data.get("sessions", {}).get(session_id)
+                if not isinstance(raw_session, dict):
+                    raise AlbertError(f"Unknown Local Agent session: {session_id}")
+                session = LocalAgentSession.from_dict(raw_session)
+                receipts = session.retirement.setdefault("action_receipts", {})
+                existing = receipts.get(correlation_id)
+                if correlation_id in receipts:
+                    if (
+                        existing.get("action") == "discard"
+                        and existing.get("mission_id") == self.mission_id
+                        and existing.get("session_id") == session_id
+                        and existing.get("expected_revision") == expected_revision
+                        and existing.get("confirmation") == confirmation
+                        and existing.get("reason") == reason.strip()
+                        and isinstance(existing.get("result_revision"), int)
+                        and not isinstance(existing.get("result_revision"), bool)
+                        and existing["result_revision"] <= session.revision
+                    ):
+                        return session
+                    raise AlbertError(
+                        "Retirement action correlation id was reused for a different request."
+                    )
+                if any(
+                    session.retirement.get(intent_name)
+                    for intent_name in ("export_intent", "retry_intent")
+                ) or self._retirement_export_session_has_unfinished_directory_owner(
+                    session
+                ):
+                    raise LaunchBlockedError(
+                        f"{session_id} has a different Retirement Unit action in progress."
+                    )
+                discard_intent = session.retirement.get("discard_intent", {})
+                resuming_intent = bool(
+                    discard_intent
+                    and discard_intent.get("correlation_id") == correlation_id
+                    and discard_intent.get("expected_revision") == expected_revision
+                    and discard_intent.get("confirmation") == confirmation
+                    and discard_intent.get("reason") == reason.strip()
+                    and discard_intent.get("claim_revision") == session.revision
+                )
+                if discard_intent and not resuming_intent:
+                    raise AlbertError(
+                        "Retained Worktree Discard already has a different durable intent."
+                    )
+                if not resuming_intent:
+                    self._require_lifecycle_revision(session, expected_revision)
+                retirement_phase = str(session.retirement.get("phase", "active"))
+                if retirement_phase not in {
+                    "preservation-blocked",
+                    "retirement-blocked",
+                }:
+                    raise LaunchBlockedError(
+                        f"{session_id} is not a blocked Retirement Unit."
+                    )
+                if session.status not in {
+                    "completed",
+                    "evidence-ready",
+                    "failed",
+                    "cancelled",
+                    "reviewed",
+                }:
+                    raise LaunchBlockedError(
+                        f"{session_id} is not terminal enough for discard."
+                    )
+                expected_path = self._session_worktree_path(session_id)
+                if (
+                    _runtime_identity_path(session.worktree_path.resolve(strict=False))
+                    != _runtime_identity_path(expected_path)
+                    or _runtime_identity_path(session.worktree_path.resolve(strict=False))
+                    == _runtime_identity_path(self.target_repo)
+                ):
+                    raise LaunchBlockedError(
+                        "Retained Worktree Discard requires the exact managed path and "
+                        "cannot target the Coding Workspace."
+                    )
+                owner_signal, process_group_signal = self._probe_retirement_quiescence(
+                    session.retirement.get("runner_boundary", {})
+                )
+                if owner_signal != "absent" or process_group_signal != "absent":
+                    raise LaunchBlockedError(
+                        "Runner Quiescence was not independently corroborated for "
+                        f"discard: owner={owner_signal}, "
+                        f"process-group={process_group_signal}."
+                    )
+                if resuming_intent:
+                    claim_revision = int(discard_intent["claim_revision"])
+                else:
+                    new_discard_intent: dict[str, Any] = {
+                        "correlation_id": correlation_id,
+                        "expected_revision": expected_revision,
+                        "confirmation": confirmation,
+                        "reason": reason.strip(),
+                    }
+                    if retirement_phase == "preservation-blocked":
+                        path = session.worktree_path
+                        if path.exists() or path.is_symlink():
+                            if path.is_symlink() or not path.is_dir():
+                                raise LaunchBlockedError(
+                                    "Retained Worktree Discard source boundary is invalid."
+                                )
+                            path_status = path.stat(follow_symlinks=False)
+                            exclude_git_metadata = session.worktree_identity.startswith(
+                                "managed-git:"
+                            )
+                            tree_manifest = (
+                                RetirementSnapshotStore.retained_worktree_manifest(
+                                    path,
+                                    exclude_git_metadata=exclude_git_metadata,
+                                )
+                            )
+                            direct_removal_kind = "managed-directory"
+                            if exclude_git_metadata:
+                                try:
+                                    current_identity = self._worktree_identity_for_session(
+                                        session
+                                    )
+                                except AlbertError:
+                                    current_identity = ""
+                                if current_identity == session.worktree_identity:
+                                    direct_removal_kind = "git-worktree"
+                            remove_git_registration = bool(
+                                direct_removal_kind == "managed-directory"
+                                and exclude_git_metadata
+                                and self._git_worktree_registration_present(session)
+                            )
+                            new_discard_intent.update(
+                                {
+                                    "discard_kind": "retained-worktree",
+                                    "tree_sha256": tree_manifest["tree_sha256"],
+                                    "tree_manifest": tree_manifest,
+                                    "root_device": path_status.st_dev,
+                                    "root_inode": path_status.st_ino,
+                                    "exclude_git_metadata": exclude_git_metadata,
+                                    "direct_removal_kind": direct_removal_kind,
+                                    "remove_git_registration": remove_git_registration,
+                                }
+                            )
+                        else:
+                            new_discard_intent["discard_kind"] = "managed-absence"
+                    else:
+                        new_discard_intent["discard_kind"] = "snapshot-backed"
+                    session.retirement["discard_intent"] = new_discard_intent
+                    session.revision += 1
+                    claim_revision = session.revision
+                    session.retirement["discard_intent"][
+                        "claim_revision"
+                    ] = claim_revision
+                    data["sessions"][session_id] = session.to_dict()
+                    data.setdefault("timeline", []).append(
+                        f"{session.issue_id} irreversible Retained Worktree Discard "
+                        f"claimed for {session_id}."
+                    )
+                    self._write_runtime_payload(data)
+                    self.sessions[session_id] = session
+                    self.timeline = list(data.get("timeline", []))
+
+            path = session.worktree_path
+            effect_path = self._retirement_removal_effect_path(session_id)
+            try:
+                discard_kind = str(
+                    session.retirement.get("discard_intent", {}).get(
+                        "discard_kind", "snapshot-backed"
+                    )
+                )
+                if discard_kind == "retained-worktree":
+                    removal_kind = self._discard_unpreserved_retained_worktree(
+                        session,
+                        session.retirement["discard_intent"],
+                    )
+                    self._verify_retirement_removal(session, removal_kind)
+                elif discard_kind == "managed-absence":
+                    if (
+                        path.exists()
+                        or path.is_symlink()
+                        or effect_path.exists()
+                        or effect_path.is_symlink()
+                    ):
+                        raise AlbertError(
+                            "Retained Worktree appeared after absence was claimed."
+                        )
+                    removal_kind = "managed-absence"
+                    self._verify_retirement_removal(session, removal_kind)
+                else:
+                    removal_kind = self._discard_snapshot_backed_worktree(
+                        session,
+                    )
+                    self._verify_retirement_removal(session, removal_kind)
+            except (OSError, AlbertError, RetirementSnapshotError) as exc:
+                with self._runtime_lock(exclusive=True):
+                    data = self._read_runtime_payload()
+                    raw_latest = data.get("sessions", {}).get(session_id)
+                    if isinstance(raw_latest, dict):
+                        latest = LocalAgentSession.from_dict(raw_latest)
+                        if latest.revision == claim_revision:
+                            latest.retirement["blocked_reason"] = str(exc)
+                            data["sessions"][session_id] = latest.to_dict()
+                            self._write_runtime_payload(data)
+                            self.sessions[session_id] = latest
+                raise
+
+            with self._runtime_lock(exclusive=True):
+                data = self._read_runtime_payload()
+                raw_latest = data.get("sessions", {}).get(session_id)
+                if not isinstance(raw_latest, dict):
+                    raise AlbertError(f"Unknown Local Agent session: {session_id}")
+                latest = LocalAgentSession.from_dict(raw_latest)
+                if latest.revision != claim_revision:
+                    raise LaunchBlockedError(
+                        f"{session_id} lifecycle boundary changed during discard."
+                    )
+                discarded_at = _utc_now()
+                latest.retirement["phase"] = "retired"
+                latest.retirement["retired_at"] = discarded_at
+                latest.retirement["discarded_at"] = discarded_at
+                latest.retirement["discard_reason"] = reason.strip()
+                latest.retirement["removal_kind"] = "retained-worktree-discard"
+                latest.retirement["blocked_reason"] = ""
+                latest.retirement["discard_intent"] = {}
+                if latest.preservation_budget.get("bound") is True:
+                    latest.preservation_budget["state"] = "discarded"
+                    latest.preservation_budget["bound"] = False
+                    latest.preservation_budget["discarded_at"] = discarded_at
+                latest.revision += 1
+                latest.retirement.setdefault("action_receipts", {})[
+                    correlation_id
+                ] = {
+                    "action": "discard",
+                    "mission_id": self.mission_id,
+                    "session_id": session_id,
+                    "expected_revision": expected_revision,
+                    "result_revision": latest.revision,
+                    "confirmation": confirmation,
+                    "reason": reason.strip(),
+                    "recorded_at": discarded_at,
+                }
+                data["sessions"][session_id] = latest.to_dict()
+                data.setdefault("timeline", []).append(
+                    f"{latest.issue_id} Retained Worktree {session_id} explicitly discarded."
+                )
+                self._write_runtime_payload(data)
+                self.sessions[session_id] = latest
+                self.timeline = list(data.get("timeline", []))
+                return latest
+
+    def _discard_unpreserved_retained_worktree(
+        self,
+        session: LocalAgentSession,
+        intent: dict[str, Any],
+    ) -> str:
+        """Delete only the exact retained tree fingerprint claimed by discard."""
+
+        path = session.worktree_path
+        effect_path = self._retirement_removal_effect_path(session.session_id)
+        removal_kind = str(intent["direct_removal_kind"])
+        exclude_git_metadata = bool(intent["exclude_git_metadata"])
+        claimed_manifest = (
+            RetirementSnapshotStore.validated_retained_worktree_manifest(
+                intent["tree_manifest"]
+            )
+        )
+
+        def assert_claimed_tree(candidate: Path, *, allow_partial: bool) -> None:
+            if candidate.is_symlink() or not candidate.is_dir():
+                raise AlbertError(
+                    "Retained Worktree Discard source boundary changed."
+                )
+            status = candidate.stat(follow_symlinks=False)
+            if (
+                status.st_dev != intent["root_device"]
+                or status.st_ino != intent["root_inode"]
+            ):
+                raise AlbertError(
+                    "Retained Worktree Discard root identity changed."
+                )
+            manifest = RetirementSnapshotStore.retained_worktree_manifest(
+                candidate,
+                exclude_git_metadata=exclude_git_metadata,
+            )
+            if allow_partial:
+                claimed_entries = claimed_manifest["entries"]
+
+                def matches_claimed_record(
+                    relative_value: str,
+                    record: dict[str, Any],
+                ) -> bool:
+                    claimed = claimed_entries.get(relative_value)
+                    if claimed == record:
+                        return True
+                    return bool(
+                        isinstance(claimed, dict)
+                        and claimed.get("kind") == "directory"
+                        and record.get("kind") == "directory"
+                        and set(claimed) == {"kind", "mode"}
+                        and set(record) == {"kind", "mode"}
+                        and record["mode"] == claimed["mode"] | 0o700
+                    )
+
+                claimed_root_mode = claimed_manifest["root_mode"]
+                matches_claimed_subset = all(
+                    matches_claimed_record(relative_value, record)
+                    for relative_value, record in manifest["entries"].items()
+                ) and manifest["root_mode"] in {
+                    claimed_root_mode,
+                    claimed_root_mode | 0o700,
+                }
+            else:
+                matches_claimed_subset = manifest == claimed_manifest
+            if not matches_claimed_subset:
+                raise AlbertError(
+                    "Retained Worktree Discard content changed after authorization."
+                )
+
+        def remove_claimed_git_registration() -> None:
+            if not intent["remove_git_registration"]:
+                return
+            if self._git_worktree_registration_present_at(effect_path):
+                self._remove_retirement_git_registration(effect_path, force=True)
+            elif self._git_worktree_registration_present(session):
+                self._remove_retirement_git_registration(path, force=True)
+            if self._git_worktree_registration_present_at(
+                effect_path
+            ) or self._git_worktree_registration_present(session):
+                raise AlbertError(
+                    "Exact Git worktree discard registration remains."
+                )
+
+        path_present = path.exists() or path.is_symlink()
+        effect_present = effect_path.exists() or effect_path.is_symlink()
+        if path_present and effect_present:
+            raise AlbertError(
+                "Retained Worktree Discard found both original and effect paths."
+            )
+        if not path_present and not effect_present:
+            if removal_kind == "git-worktree":
+                if self._git_worktree_registration_present_at(effect_path):
+                    self._remove_retirement_git_registration(effect_path, force=True)
+                elif self._git_worktree_registration_present(session):
+                    self._remove_retirement_git_registration(path, force=True)
+            remove_claimed_git_registration()
+            return removal_kind
+
+        if path_present:
+            assert_claimed_tree(path, allow_partial=False)
+            if removal_kind == "git-worktree":
+                if self._worktree_identity_for_session(session) != session.worktree_identity:
+                    raise AlbertError(
+                        "Retained Worktree Discard Git identity changed after authorization."
+                    )
+            self._assert_no_open_retirement_handles(path)
+            effect_path.parent.mkdir(parents=True, exist_ok=True)
+            if removal_kind == "git-worktree":
+                completed = _run_bounded_process(
+                    [
+                        "git",
+                        "-C",
+                        str(self.target_repo),
+                        "worktree",
+                        "move",
+                        str(path),
+                        str(effect_path),
+                    ],
+                    timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+                    output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
+                )
+                if completed.returncode != 0:
+                    reason = (
+                        self._subprocess_output_text(completed.stderr).strip()
+                        or self._subprocess_output_text(completed.stdout).strip()
+                        or f"exit {completed.returncode}"
+                    )
+                    raise AlbertError(
+                        f"exact Git worktree discard isolation failed: {reason}"
+                    )
+            else:
+                path.replace(effect_path)
+
+        if path.exists() or path.is_symlink():
+            raise AlbertError(
+                "Retained Worktree appeared after its discard effect began."
+            )
+        assert_claimed_tree(effect_path, allow_partial=effect_present)
+        self._assert_no_open_retirement_handles(effect_path)
+        RetirementSnapshotStore.prepare_retained_worktree_removal(
+            effect_path,
+            claimed_manifest,
+        )
+        RetirementSnapshotStore.remove_retained_worktree(
+            effect_path,
+            claimed_manifest,
+            expected_root_device=int(intent["root_device"]),
+            expected_root_inode=int(intent["root_inode"]),
+        )
+        if removal_kind == "git-worktree":
+            if self._git_worktree_registration_present_at(effect_path):
+                self._remove_retirement_git_registration(
+                    effect_path,
+                    force=True,
+                )
+            elif self._git_worktree_registration_present(session):
+                self._remove_retirement_git_registration(path, force=True)
+            if self._git_worktree_registration_present_at(
+                effect_path
+            ) or self._git_worktree_registration_present(session):
+                raise AlbertError(
+                    "Exact Git worktree discard registration remains."
+                )
+        remove_claimed_git_registration()
+        return removal_kind
+
+    def _discard_snapshot_backed_worktree(
+        self,
+        session: LocalAgentSession,
+    ) -> str:
+        path = session.worktree_path
+        effect_path = self._retirement_removal_effect_path(session.session_id)
+        path_present = path.exists() or path.is_symlink()
+        effect_present = effect_path.exists() or effect_path.is_symlink()
+        if path_present and effect_present:
+            raise AlbertError(
+                "Retained Worktree Discard found both original and effect paths."
+            )
+        if path_present:
+            current_identity = self._worktree_identity_for_session(session)
+            if current_identity != session.worktree_identity:
+                raise AlbertError(
+                    "Retained Worktree Discard identity changed before deletion."
+                )
+        removal_kind = str(session.retirement.get("removal_kind", ""))
+        if removal_kind not in {
+            "git-worktree",
+            "git-registration",
+            "managed-directory",
+            "managed-absence",
+        }:
+            if session.worktree_identity.startswith("managed-git:"):
+                removal_kind = "git-worktree"
+            elif session.worktree_identity.startswith("managed-directory:"):
+                removal_kind = "managed-directory"
+            else:
+                removal_kind = "managed-absence"
+        if removal_kind != "managed-absence":
+            snapshot_revision = int(
+                session.retirement["snapshot"].get(
+                    "session_revision",
+                    session.revision,
+                )
+            )
+            store = self._retirement_snapshot_store(
+                session,
+                snapshot_revision,
+            )
+            if removal_kind == "managed-directory" and path_present:
+                store.prepare_managed_directory_removal(
+                    session.retirement["snapshot"],
+                    worktree_path=path,
+                )
+            elif removal_kind == "git-worktree" and path_present:
+                self._assert_no_open_retirement_handles(path)
+                store.prepare_git_non_force_removal(
+                    session.retirement["snapshot"],
+                    worktree_path=path,
+                )
+            self._remove_retirement_worktree(session, removal_kind)
+        return removal_kind
+
+    def _admit_retirement_unit(self) -> None:
+        self._reclaim_snapshot_payloads(required_bytes=_PRESERVATION_BUDGET_BYTES)
+
+    def _reclaim_snapshot_payloads(
+        self,
+        *,
+        required_bytes: int,
+        reclaim_all_expired: bool = False,
+        raise_on_exhaustion: bool = True,
+    ) -> None:
+        """Reclaim expired unpinned retired payloads until one reservation fits."""
+
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_sessions = data.setdefault("sessions", {})
+            sessions = {
+                session_id: LocalAgentSession.from_dict(raw)
+                for session_id, raw in raw_sessions.items()
+                if isinstance(raw, dict)
+            }
+            storage = self._retirement_storage_from_payload(data)
+            changed = False
+            for session_id, session in sessions.items():
+                if self._ensure_snapshot_storage_metadata(session):
+                    raw_sessions[session_id] = session.to_dict()
+                    changed = True
+            retained_usage = sum(
+                int(session.retirement.get("snapshot", {}).get("snapshot_bytes", 0))
+                for session in sessions.values()
+                if session.retirement.get("snapshot", {}).get(
+                    "payload_disposition", "retained"
+                )
+                == "retained"
+            )
+            reserved_usage = sum(
+                int(session.preservation_budget.get("reserved_bytes", 0))
+                for session in sessions.values()
+                if session.preservation_budget.get("bound") is True
+            )
+            now = datetime.now(timezone.utc)
+            eligible: list[tuple[datetime, str, LocalAgentSession]] = []
+            reclamation_failed = False
+            for session in sessions.values():
+                snapshot = session.retirement.get("snapshot", {})
+                if (
+                    not snapshot
+                    or snapshot.get("payload_disposition", "retained") != "retained"
+                    or snapshot.get("pinned") is True
+                    or session.retirement.get("phase") != "retired"
+                ):
+                    continue
+                try:
+                    expires = datetime.fromisoformat(str(snapshot.get("expires_at", "")))
+                    created = datetime.fromisoformat(str(snapshot.get("created_at", "")))
+                    if expires.tzinfo is None or created.tzinfo is None:
+                        raise ValueError
+                except ValueError:
+                    continue
+                if expires.astimezone(timezone.utc) <= now:
+                    eligible.append(
+                        (created.astimezone(timezone.utc), session.session_id, session)
+                    )
+            eligible.sort(key=lambda item: (item[0], item[1]))
+            for _created, session_id, session in eligible:
+                pending_intent = storage["reclamation_intents"].get(session_id)
+                if (
+                    retained_usage + reserved_usage + required_bytes
+                    <= self.snapshot_storage_budget_bytes
+                    and pending_intent is None
+                    and not reclaim_all_expired
+                ):
+                    break
+                snapshot = session.retirement["snapshot"]
+                snapshot_revision = int(
+                    snapshot.get("session_revision", session.revision)
+                )
+                store = self._retirement_snapshot_store(session, snapshot_revision)
+                expected_intent = {
+                    "session_id": session_id,
+                    "manifest_sha256": snapshot["manifest_sha256"],
+                    "payload_path": snapshot["payload_path"],
+                    "snapshot_bytes": int(snapshot["snapshot_bytes"]),
+                }
+                if pending_intent is not None and any(
+                    pending_intent.get(field_name) != value
+                    for field_name, value in expected_intent.items()
+                ):
+                    storage["attention"] = {
+                        "active": True,
+                        "code": "snapshot-reclamation-failed",
+                        "session_id": session_id,
+                        "message": (
+                            "Snapshot Payload reclamation intent no longer matches "
+                            "the compact Retirement Record."
+                        ),
+                        "recorded_at": _utc_now(),
+                    }
+                    continue
+                try:
+                    expected_parent = (
+                        self.runtime_dir / "retirement" / "payloads"
+                    ).resolve(strict=False)
+                    if (
+                        store.payload_root.parent.resolve(strict=False)
+                        != expected_parent
+                    ):
+                        raise RetirementSnapshotError(
+                            "Snapshot Payload reclamation boundary is invalid."
+                        )
+                    payload_present = (
+                        store.payload_root.exists() or store.payload_root.is_symlink()
+                    )
+                    if (
+                        store.payload_root.is_symlink()
+                        or (payload_present and not store.payload_root.is_dir())
+                    ):
+                        raise RetirementSnapshotError(
+                            "Snapshot Payload reclamation boundary is invalid."
+                        )
+                    if pending_intent is None or "root_inode" not in pending_intent:
+                        if payload_present:
+                            root_device, root_inode = (
+                                store.verified_payload_root_identity(snapshot)
+                            )
+                        else:
+                            root_device, root_inode = 0, 0
+                        pending_intent = {
+                            **(
+                                pending_intent
+                                if pending_intent is not None
+                                else {
+                                    **expected_intent,
+                                    "claimed_at": _utc_now(),
+                                }
+                            ),
+                            "root_device": root_device,
+                            "root_inode": root_inode,
+                        }
+                        storage["reclamation_intents"][session_id] = pending_intent
+                        data["retirement_storage"] = storage
+                        self._write_runtime_payload(data)
+                    root_device = int(pending_intent["root_device"])
+                    root_inode = int(pending_intent["root_inode"])
+                    payload_present = (
+                        store.payload_root.exists() or store.payload_root.is_symlink()
+                    )
+                    if root_inode == 0 and payload_present:
+                        raise RetirementSnapshotError(
+                            "Snapshot Payload appeared after reclamation absence was "
+                            "claimed."
+                        )
+                    reclaimed_bytes = int(snapshot["snapshot_bytes"])
+                    if payload_present and root_inode > 0:
+                        store.reclaim_verified_payload(
+                            snapshot,
+                            expected_root_device=root_device,
+                            expected_root_inode=root_inode,
+                        )
+                    if store.payload_root.exists() or store.payload_root.is_symlink():
+                        raise RetirementSnapshotError(
+                            "Snapshot Payload remained after reclamation."
+                        )
+                except (OSError, RetirementSnapshotError) as exc:
+                    reclamation_failed = True
+                    storage["attention"] = {
+                        "active": True,
+                        "code": "snapshot-reclamation-failed",
+                        "session_id": session_id,
+                        "message": str(exc),
+                        "recorded_at": _utc_now(),
+                    }
+                    continue
+                reclaimed_at = _utc_now()
+                snapshot["payload_disposition"] = "reclaimed"
+                snapshot["reclaimed_at"] = reclaimed_at
+                snapshot["reclamation_reason"] = "retention-expired-capacity-reclamation"
+                session.revision += 1
+                raw_sessions[session_id] = session.to_dict()
+                retained_usage -= reclaimed_bytes
+                storage["reclamation_intents"].pop(session_id, None)
+                storage["reclamation_count"] += 1
+                storage["reclaimed_bytes"] += reclaimed_bytes
+                storage["recent_reclamations"] = [
+                    *storage["recent_reclamations"],
+                    {
+                        "session_id": session_id,
+                        "reclaimed_at": reclaimed_at,
+                        "snapshot_bytes": reclaimed_bytes,
+                        "reason": "retention-expired-capacity-reclamation",
+                    },
+                ][-64:]
+                data.setdefault("timeline", []).append(
+                    f"{session.issue_id} expired Snapshot Payload reclaimed for "
+                    f"{session_id}; compact Retirement Record retained."
+                )
+                data["retirement_storage"] = storage
+                self._write_runtime_payload(data)
+                changed = True
+            committed = retained_usage + reserved_usage + required_bytes
+            if committed > self.snapshot_storage_budget_bytes:
+                storage["attention"] = {
+                    "active": True,
+                    "code": "snapshot-storage-exhausted",
+                    "message": (
+                        "Snapshot Storage Budget is exhausted by protected or pinned "
+                        "payloads and bound Preservation Budgets."
+                    ),
+                    "required_bytes": required_bytes,
+                    "committed_bytes": retained_usage + reserved_usage,
+                    "budget_bytes": self.snapshot_storage_budget_bytes,
+                    "recorded_at": _utc_now(),
+                }
+                data["retirement_storage"] = storage
+                self._write_runtime_payload(data)
+                self.retirement_storage = storage
+                self.sessions = {
+                    session_id: LocalAgentSession.from_dict(raw)
+                    for session_id, raw in raw_sessions.items()
+                }
+                self.timeline = list(data.get("timeline", []))
+                if raise_on_exhaustion:
+                    raise LaunchBlockedError(storage["attention"]["message"])
+                return
+            if storage.get("attention", {}).get("code") == "snapshot-storage-exhausted":
+                storage["attention"] = {}
+                changed = True
+            elif (
+                storage.get("attention", {}).get("code")
+                == "snapshot-reclamation-failed"
+                and not reclamation_failed
+                and not storage["reclamation_intents"]
+            ):
+                storage["attention"] = {}
+                changed = True
+            if changed:
+                data["retirement_storage"] = storage
+                self._write_runtime_payload(data)
+            self.retirement_storage = storage
+            self.sessions = {
+                session_id: LocalAgentSession.from_dict(raw)
+                for session_id, raw in raw_sessions.items()
+            }
+            self.timeline = list(data.get("timeline", []))
+
+    def reconcile_retirement_unit(self, session_id: str) -> LocalAgentSession:
+        """Advance one eligible Retirement Unit without repeating proven effects."""
+
+        session = self._refresh_persisted_session(session_id)
+        phase = session.retirement.get("phase", "active")
+        if phase == "retired":
+            return session
+        if phase == "preserving":
+            intent = session.retirement.get("preservation_intent", {})
+            session = self.preserve_retirement_unit(
+                session_id,
+                expected_revision=int(intent.get("expected_revision", -1)),
+                correlation_id=str(intent.get("correlation_id", "")),
+            )
+            phase = session.retirement.get("phase", "active")
+        if phase == "active":
+            review = self._latest_review_for_session(session_id)
+            accepted = bool(
+                review
+                and review.outcome in {"Approved", "Approved with limitations"}
+            )
+            failed = session.status == "failed" or bool(
+                review and review.outcome == "Rejected"
+            )
+            if not accepted and session.status != "cancelled" and not failed:
+                return session
+            correlation_payload = (
+                f"{self.mission_id}\n{session_id}\n{session.revision}\n"
+                "automatic-retirement-preservation"
+            )
+            correlation_id = (
+                "retirement-preserve:auto:"
+                + sha256(correlation_payload.encode("utf-8")).hexdigest()
+            )
+            session = self.preserve_retirement_unit(
+                session_id,
+                expected_revision=session.revision,
+                correlation_id=correlation_id,
+                defer_if_not_quiescent=True,
+            )
+            phase = session.retirement.get("phase", "active")
+        if phase == "preserved":
+            review = self._latest_review_for_session(session_id)
+            if session.status == "failed" or bool(
+                review and review.outcome == "Rejected"
+            ):
+                return self._enter_retention_grace(session_id)
+            if session.status == "cancelled" or bool(
+                review
+                and review.outcome in {"Approved", "Approved with limitations"}
+            ):
+                return self._retire_with_short_retry(session_id)
+            return session
+        if phase == "grace":
+            expires_at = session.retirement.get("grace_expires_at")
+            try:
+                expires = datetime.fromisoformat(str(expires_at))
+            except ValueError as exc:
+                raise AlbertError(
+                    f"{session_id} Retention Grace Period is invalid."
+                ) from exc
+            if expires.tzinfo is None:
+                raise AlbertError(
+                    f"{session_id} Retention Grace Period is invalid."
+                )
+            if datetime.now(timezone.utc) < expires.astimezone(timezone.utc):
+                return session
+            return self._retire_with_short_retry(session_id)
+        if phase == "retiring":
+            return self._retire_with_short_retry(session_id)
+        return session
+
+    def _retire_with_short_retry(self, session_id: str) -> LocalAgentSession:
+        with self._retirement_effect_lock(session_id):
+            return self._retire_with_short_retry_locked(session_id)
+
+    def _retire_with_short_retry_locked(self, session_id: str) -> LocalAgentSession:
+        before = self._refresh_persisted_session(session_id)
+        result = self._retire_preserved_unit_locked(session_id)
+        if (
+            int(before.retirement.get("retirement_attempts", 0)) == 0
+            and result.retirement.get("phase") == "retiring"
+            and result.retirement.get("retirement_attempts") == 1
+        ):
+            time.sleep(_RETIREMENT_RETRY_BACKOFF_SECONDS)
+            return self._retire_preserved_unit_locked(session_id)
+        return result
+
+    def _enter_retention_grace(self, session_id: str) -> LocalAgentSession:
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_session = data.get("sessions", {}).get(session_id)
+            if not isinstance(raw_session, dict):
+                raise AlbertError(f"Unknown Local Agent session: {session_id}")
+            session = LocalAgentSession.from_dict(raw_session)
+            if session.retirement.get("phase") == "grace":
+                return session
+            if session.retirement.get("phase") != "preserved":
+                raise LaunchBlockedError(
+                    f"{session_id} requires verified preservation before grace."
+                )
+            started = datetime.now(timezone.utc)
+            expires = datetime.fromtimestamp(
+                started.timestamp() + self.retention_grace_seconds,
+                tz=timezone.utc,
+            )
+            session.retirement["phase"] = "grace"
+            session.retirement["grace_started_at"] = started.isoformat()
+            session.retirement["grace_expires_at"] = expires.isoformat()
+            session.retirement["blocked_reason"] = ""
+            session.revision += 1
+            data["sessions"][session_id] = session.to_dict()
+            data.setdefault("timeline", []).append(
+                f"{session.issue_id} Retention Grace Period began for {session_id}; "
+                f"expires {expires.isoformat()}."
+            )
+            self._write_runtime_payload(data)
+            self.sessions[session_id] = session
+            self.timeline = list(data.get("timeline", []))
+            return session
+
+    def _retire_preserved_unit(self, session_id: str) -> LocalAgentSession:
+        with self._retirement_effect_lock(session_id):
+            return self._retire_preserved_unit_locked(session_id)
+
+    def _retire_preserved_unit_locked(self, session_id: str) -> LocalAgentSession:
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_session = data.get("sessions", {}).get(session_id)
+            if not isinstance(raw_session, dict):
+                raise AlbertError(f"Unknown Local Agent session: {session_id}")
+            session = LocalAgentSession.from_dict(raw_session)
+            phase = session.retirement.get("phase")
+            if phase == "retired":
+                return session
+            if phase not in {"preserved", "grace", "retiring"}:
+                raise LaunchBlockedError(
+                    f"{session_id} requires a verified Retirement Snapshot before removal."
+                )
+            snapshot_revision = int(
+                session.retirement["snapshot"].get(
+                    "session_revision",
+                    session.revision,
+                )
+            )
+            store = self._retirement_snapshot_store(session, snapshot_revision)
+            try:
+                snapshot_verified = store.verify(session.retirement["snapshot"])
+            except (OSError, RetirementSnapshotError) as exc:
+                snapshot_verified = False
+                verification_reason = str(exc)
+            else:
+                verification_reason = ""
+            if not snapshot_verified:
+                self._block_retirement_removal(
+                    data,
+                    session,
+                    "Retirement Snapshot verification failed before removal: "
+                    + verification_reason,
+                    terminal=True,
+                )
+                return session
+            removal_kind = str(session.retirement.get("removal_kind", ""))
+            path_absent = not (
+                session.worktree_path.exists() or session.worktree_path.is_symlink()
+            )
+            effect_path = self._retirement_removal_effect_path(session.session_id)
+            effect_path_present = effect_path.exists() or effect_path.is_symlink()
+            if not path_absent and effect_path_present:
+                self._block_retirement_removal(
+                    data,
+                    session,
+                    "Retirement path changed after its isolated removal effect began.",
+                    terminal=True,
+                )
+                return session
+            try:
+                registration_present = bool(
+                    path_absent
+                    and (
+                        phase == "retiring"
+                        or session.worktree_identity.startswith("managed-absence:")
+                    )
+                    and removal_kind in {"", "git-worktree", "git-registration"}
+                    and (
+                        self._git_worktree_registration_present(session)
+                        or self._git_worktree_registration_present_at(effect_path)
+                    )
+                )
+            except (AlbertError, OSError) as exc:
+                self._block_retirement_removal(
+                    data,
+                    session,
+                    f"Git worktree registration inspection failed: {exc}",
+                    terminal=True,
+                )
+                return session
+            effect_already_absent = (
+                phase == "retiring"
+                and path_absent
+                and not effect_path_present
+                and not registration_present
+            )
+            current_identity = self._worktree_identity_for_session(session)
+            if not path_absent and current_identity != session.worktree_identity:
+                self._block_retirement_removal(
+                    data,
+                    session,
+                    "Worktree Identity changed before physical retirement.",
+                    terminal=True,
+                )
+                return session
+            absence_only = bool(
+                path_absent
+                and session.worktree_identity.startswith("managed-absence:")
+                and current_identity == session.worktree_identity
+                and not registration_present
+            )
+            if (
+                path_absent
+                and phase != "retiring"
+                and not absence_only
+                and not registration_present
+            ):
+                self._block_retirement_removal(
+                    data,
+                    session,
+                    "Retirement path disappeared before a removal effect was claimed.",
+                    terminal=True,
+                )
+                return session
+            if not removal_kind:
+                if current_identity.startswith("managed-git:"):
+                    removal_kind = "git-worktree"
+                elif current_identity.startswith("managed-directory:"):
+                    removal_kind = "managed-directory"
+                elif registration_present:
+                    removal_kind = "git-registration"
+                else:
+                    removal_kind = "managed-absence"
+            if removal_kind not in {
+                "git-worktree",
+                "git-registration",
+                "managed-directory",
+                "managed-absence",
+            }:
+                self._block_retirement_removal(
+                    data,
+                    session,
+                    "Physical retirement removal kind is invalid.",
+                    terminal=True,
+                )
+                return session
+            if effect_already_absent:
+                claim_revision = session.revision
+            else:
+                if int(session.retirement.get("retirement_attempts", 0)) >= 3:
+                    self._block_retirement_removal(
+                        data,
+                        session,
+                        "Physical retirement exhausted its three-attempt boundary.",
+                        terminal=True,
+                    )
+                    return session
+                session.retirement["phase"] = "retiring"
+                session.retirement["retirement_attempts"] = int(
+                    session.retirement.get("retirement_attempts", 0)
+                ) + 1
+                session.retirement["removal_kind"] = removal_kind
+                session.retirement["blocked_reason"] = ""
+                session.revision += 1
+                claim_revision = session.revision
+                data["sessions"][session_id] = session.to_dict()
+                data.setdefault("timeline", []).append(
+                    f"{session.issue_id} physical retirement attempt "
+                    f"{session.retirement['retirement_attempts']}/3 claimed for "
+                    f"{session_id}."
+                )
+                self._write_runtime_payload(data)
+                self.sessions[session_id] = session
+                self.timeline = list(data.get("timeline", []))
+
+        try:
+            if not effect_already_absent and not absence_only:
+                self._remove_retirement_worktree(session, removal_kind)
+            self._verify_retirement_removal(session, removal_kind)
+        except (OSError, AlbertError, RetirementSnapshotError) as exc:
+            with self._runtime_lock(exclusive=True):
+                data = self._read_runtime_payload()
+                raw_latest = data.get("sessions", {}).get(session_id)
+                if not isinstance(raw_latest, dict):
+                    raise AlbertError(f"Unknown Local Agent session: {session_id}") from exc
+                latest = LocalAgentSession.from_dict(raw_latest)
+                if (
+                    latest.revision == claim_revision
+                    and latest.retirement.get("phase") == "retiring"
+                ):
+                    self._block_retirement_removal(data, latest, str(exc))
+                    return latest
+            raise
+
+        with self._runtime_lock(exclusive=True):
+            data = self._read_runtime_payload()
+            raw_latest = data.get("sessions", {}).get(session_id)
+            if not isinstance(raw_latest, dict):
+                raise AlbertError(f"Unknown Local Agent session: {session_id}")
+            latest = LocalAgentSession.from_dict(raw_latest)
+            if (
+                latest.revision != claim_revision
+                or latest.retirement.get("phase") != "retiring"
+            ):
+                raise LaunchBlockedError(
+                    f"{session_id} lifecycle boundary changed during physical retirement."
+                )
+            latest.retirement["phase"] = "retired"
+            latest.retirement["retired_at"] = _utc_now()
+            latest.retirement["blocked_reason"] = ""
+            latest.revision += 1
+            data["sessions"][session_id] = latest.to_dict()
+            data.setdefault("timeline", []).append(
+                f"{latest.issue_id} Retirement Unit {session_id} retired."
+            )
+            self._write_runtime_payload(data)
+            self.sessions[session_id] = latest
+            self.timeline = list(data.get("timeline", []))
+            return latest
+
+    def _git_worktree_registration_present(
+        self,
+        session: LocalAgentSession,
+    ) -> bool:
+        return self._git_worktree_registration_present_at(session.worktree_path)
+
+    def _git_worktree_registration_present_at(self, path: Path) -> bool:
+        completed = _run_bounded_process(
+            [
+                "git",
+                "-C",
+                str(self.target_repo),
+                "worktree",
+                "list",
+                "--porcelain",
+                "-z",
+            ],
+            timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+            output_limit_bytes=_GIT_PATH_OUTPUT_BYTES_LIMIT,
+        )
+        if completed.returncode != 0:
+            raise AlbertError("Git worktree registration could not be inspected.")
+        expected = _runtime_identity_path(path)
+        return any(
+            field_value.startswith("worktree ")
+            and _runtime_identity_path(
+                Path(field_value.removeprefix("worktree ")).resolve(strict=False)
+            )
+            == expected
+            for block in completed.stdout.split("\0\0")
+            for field_value in block.split("\0")
+        )
+
+    def _retirement_removal_effect_path(self, session_id: str) -> Path:
+        name = sha256(session_id.encode()).hexdigest() + ".worktree"
+        return self.runtime_dir / "retirement" / "removal-effects" / name
+
+    def _assert_no_open_retirement_handles(self, effect_path: Path) -> None:
+        canonical_effect = effect_path.resolve(strict=True)
+        if sys.platform.startswith("linux"):
+            current_uid = os.getuid()
+            for process_root in Path("/proc").iterdir():
+                if not process_root.name.isdigit():
+                    continue
+                try:
+                    status = (process_root / "status").read_text(
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise AlbertError(
+                        "Open-handle inspection was unavailable before retirement."
+                    ) from exc
+                uid_line = next(
+                    (line for line in status.splitlines() if line.startswith("Uid:")),
+                    "",
+                )
+                uid_values = uid_line.split()[1:]
+                if not uid_values or int(uid_values[0]) != current_uid:
+                    continue
+                for boundary_name in ("cwd", "root"):
+                    try:
+                        boundary_target = os.readlink(process_root / boundary_name)
+                    except FileNotFoundError:
+                        continue
+                    except OSError as exc:
+                        raise AlbertError(
+                            "Open-handle inspection was unavailable before retirement."
+                        ) from exc
+                    boundary_path = Path(
+                        boundary_target.removesuffix(" (deleted)")
+                    ).resolve(strict=False)
+                    if boundary_path == canonical_effect or boundary_path.is_relative_to(
+                        canonical_effect
+                    ):
+                        raise AlbertError(
+                            "Retirement removal is blocked while an exact managed path "
+                            "is a process filesystem boundary."
+                        )
+                try:
+                    mappings = (process_root / "maps").read_text(
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise AlbertError(
+                        "Open-handle inspection was unavailable before retirement."
+                    ) from exc
+                for mapping in mappings.splitlines():
+                    fields = mapping.split(maxsplit=5)
+                    if len(fields) < 6 or len(fields[1]) != 4:
+                        continue
+                    permissions = fields[1]
+                    mapped_value = fields[5].removesuffix(" (deleted)")
+                    if permissions[1] != "w" or permissions[3] != "s":
+                        continue
+                    mapped_path = Path(mapped_value)
+                    if not mapped_path.is_absolute():
+                        continue
+                    canonical_mapping = mapped_path.resolve(strict=False)
+                    if canonical_mapping == canonical_effect or canonical_mapping.is_relative_to(
+                        canonical_effect
+                    ):
+                        raise AlbertError(
+                            "Retirement removal is blocked while an exact managed path "
+                            "has a writable shared mapping."
+                        )
+                try:
+                    descriptors = list((process_root / "fd").iterdir())
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    raise AlbertError(
+                        "Open-handle inspection was unavailable before retirement."
+                    ) from exc
+                for descriptor in descriptors:
+                    try:
+                        target = os.readlink(descriptor)
+                    except FileNotFoundError:
+                        continue
+                    except OSError as exc:
+                        raise AlbertError(
+                            "Open-handle inspection was unavailable before retirement."
+                        ) from exc
+                    target_path = Path(target.removesuffix(" (deleted)"))
+                    if not target_path.is_absolute():
+                        continue
+                    canonical_target = target_path.resolve(strict=False)
+                    if canonical_target == canonical_effect or canonical_target.is_relative_to(
+                        canonical_effect
+                    ):
+                        raise AlbertError(
+                            "Retirement removal is blocked while an exact managed path "
+                            "has an open process handle."
+                        )
+            return
+        if sys.platform == "darwin":
+            lsof = shutil.which("lsof")
+            if not lsof:
+                raise AlbertError(
+                    "Open-handle inspection was unavailable before retirement."
+                )
+            completed = _run_bounded_process(
+                [lsof, "-Fn", "-xf", "+D", str(canonical_effect)],
+                timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+                output_limit_bytes=_GIT_PATH_OUTPUT_BYTES_LIMIT,
+            )
+            if any(line.startswith("n") for line in completed.stdout.splitlines()):
+                raise AlbertError(
+                    "Retirement removal is blocked while an exact managed path "
+                    "has an open process handle."
+                )
+            if completed.returncode == 1 and not completed.stderr.strip():
+                return
+            if completed.returncode != 0:
+                raise AlbertError(
+                    "Open-handle inspection was unavailable before retirement."
+                )
+            return
+        raise AlbertError("Open-handle inspection is unsupported on this host.")
+
+    def _remove_retirement_git_registration(
+        self,
+        path: Path,
+        *,
+        force: bool = False,
+    ) -> None:
+        command = [
+            "git",
+            "-C",
+            str(self.target_repo),
+            "worktree",
+            "remove",
+        ]
+        if force:
+            command.append("--force")
+        command.append(str(path))
+        completed = _run_bounded_process(
+            command,
+            timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+            output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
+        )
+        if completed.returncode != 0:
+            reason = (
+                self._subprocess_output_text(completed.stderr).strip()
+                or self._subprocess_output_text(completed.stdout).strip()
+                or f"exit {completed.returncode}"
+            )
+            raise AlbertError(
+                "exact Git worktree registration removal failed: " + reason
+            )
+
+    def _restore_retirement_git_marker(self, path: Path) -> None:
+        completed = _run_bounded_process(
+            [
+                "git",
+                "-C",
+                str(self.target_repo),
+                "rev-parse",
+                "--path-format=absolute",
+                "--git-common-dir",
+            ],
+            timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+            output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
+        )
+        if completed.returncode != 0:
+            reason = (
+                self._subprocess_output_text(completed.stderr).strip()
+                or self._subprocess_output_text(completed.stdout).strip()
+                or f"exit {completed.returncode}"
+            )
+            raise AlbertError(f"Git worktree administration lookup failed: {reason}")
+        common_dir = Path(self._subprocess_output_text(completed.stdout).strip())
+        try:
+            common_dir = common_dir.resolve(strict=True)
+        except OSError as exc:
+            raise AlbertError("Git worktree administration path is unavailable.") from exc
+        worktrees_dir = common_dir / "worktrees"
+        try:
+            candidates = list(worktrees_dir.iterdir())
+        except OSError as exc:
+            raise AlbertError("Git worktree administration path is unavailable.") from exc
+        if len(candidates) > 10_000:
+            raise AlbertError("Git worktree administration exceeded its path limit.")
+        expected_gitdir = _runtime_identity_path(path / ".git")
+        matches: list[Path] = []
+        for candidate in candidates:
+            gitdir = candidate / "gitdir"
+            if candidate.is_symlink() or not candidate.is_dir() or gitdir.is_symlink():
+                continue
+            try:
+                value = gitdir.read_text(encoding="utf-8").strip()
+            except (OSError, UnicodeError):
+                continue
+            if len(value.encode("utf-8")) > 4_096:
+                continue
+            registered = Path(value)
+            if not registered.is_absolute():
+                registered = candidate / registered
+            if _runtime_identity_path(registered.resolve(strict=False)) == expected_gitdir:
+                matches.append(candidate.resolve(strict=True))
+        if len(matches) != 1:
+            raise AlbertError("Exact Git worktree administration could not be proven.")
+        try:
+            with (path / ".git").open("x", encoding="utf-8") as marker:
+                marker.write(f"gitdir: {matches[0]}\n")
+        except OSError as exc:
+            raise AlbertError("Git worktree marker recovery failed.") from exc
+
+    def _repair_retirement_git_backpointer(
+        self,
+        *,
+        original_path: Path,
+        effect_path: Path,
+    ) -> None:
+        completed = _run_bounded_process(
+            [
+                "git",
+                "-C",
+                str(self.target_repo),
+                "worktree",
+                "repair",
+                str(effect_path),
+            ],
+            timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+            output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
+        )
+        if completed.returncode != 0:
+            reason = (
+                self._subprocess_output_text(completed.stderr).strip()
+                or self._subprocess_output_text(completed.stdout).strip()
+                or f"exit {completed.returncode}"
+            )
+            raise AlbertError(f"exact Git worktree back-pointer repair failed: {reason}")
+        if self._git_worktree_registration_present_at(
+            original_path
+        ) or not self._git_worktree_registration_present_at(effect_path):
+            raise AlbertError("Exact Git worktree back-pointer repair was not verified.")
+
+    def _remove_retirement_worktree(
+        self,
+        session: LocalAgentSession,
+        removal_kind: str,
+    ) -> None:
+        path = session.worktree_path
+        effect_path = self._retirement_removal_effect_path(session.session_id)
+        path_present = path.exists() or path.is_symlink()
+        effect_present = effect_path.exists() or effect_path.is_symlink()
+        if path_present and effect_present:
+            raise AlbertError(
+                "Retirement path changed after its isolated removal effect began."
+            )
+        effect_path.parent.mkdir(parents=True, exist_ok=True)
+        if removal_kind == "git-registration":
+            if path_present or effect_present:
+                raise AlbertError(
+                    "Registration-only retirement requires both managed paths absent."
+                )
+            if self._git_worktree_registration_present_at(effect_path):
+                self._remove_retirement_git_registration(effect_path)
+            elif self._git_worktree_registration_present(session):
+                self._remove_retirement_git_registration(path)
+            return
+        if removal_kind == "git-worktree":
+            if path_present:
+                completed = _run_bounded_process(
+                    [
+                        "git",
+                        "-C",
+                        str(self.target_repo),
+                        "worktree",
+                        "move",
+                        str(path),
+                        str(effect_path),
+                    ],
+                    timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+                    output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
+                )
+                if completed.returncode != 0:
+                    reason = (
+                        self._subprocess_output_text(completed.stderr).strip()
+                        or self._subprocess_output_text(completed.stdout).strip()
+                        or f"exit {completed.returncode}"
+                    )
+                    raise AlbertError(
+                        f"exact Git worktree isolation failed: {reason}"
+                    )
+                effect_present = True
+            elif not effect_present:
+                if self._git_worktree_registration_present_at(effect_path):
+                    self._remove_retirement_git_registration(effect_path)
+                elif self._git_worktree_registration_present(session):
+                    self._remove_retirement_git_registration(path)
+                return
+            if path.exists() or path.is_symlink():
+                raise AlbertError(
+                    "Retirement path changed after its isolated removal effect began."
+                )
+            original_registered = self._git_worktree_registration_present(session)
+            effect_registered = self._git_worktree_registration_present_at(effect_path)
+            if original_registered and effect_registered:
+                raise AlbertError("Git worktree retirement registration is ambiguous.")
+            if original_registered:
+                self._repair_retirement_git_backpointer(
+                    original_path=path,
+                    effect_path=effect_path,
+                )
+            if not (effect_path / ".git").exists():
+                if self._git_worktree_registration_present_at(effect_path):
+                    self._restore_retirement_git_marker(effect_path)
+                elif any(effect_path.iterdir()):
+                    raise AlbertError(
+                        "Partial Git worktree removal could not be proven safe."
+                    )
+                else:
+                    effect_path.rmdir()
+                    return
+            snapshot_revision = int(
+                session.retirement["snapshot"].get(
+                    "session_revision",
+                    session.revision,
+                )
+            )
+            self._retirement_snapshot_store(
+                session,
+                snapshot_revision,
+            ).prepare_git_non_force_removal(
+                session.retirement["snapshot"],
+                worktree_path=effect_path,
+            )
+            if path.exists() or path.is_symlink():
+                raise AlbertError(
+                    "Retirement path changed during its isolated removal effect."
+                )
+            self._assert_no_open_retirement_handles(effect_path)
+            completed = _run_bounded_process(
+                [
+                    "git",
+                    "-C",
+                    str(self.target_repo),
+                    "worktree",
+                    "remove",
+                    str(effect_path),
+                ],
+                timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+                output_limit_bytes=_GIT_COMMAND_OUTPUT_BYTES_LIMIT,
+            )
+            if completed.returncode != 0:
+                reason = (
+                    self._subprocess_output_text(completed.stderr).strip()
+                    or self._subprocess_output_text(completed.stdout).strip()
+                    or f"exit {completed.returncode}"
+                )
+                raise AlbertError(
+                    f"exact non-force Git worktree removal failed: {reason}"
+                )
+            return
+        if removal_kind != "managed-directory":
+            raise AlbertError("Retirement removal kind is invalid.")
+        expected = self._session_worktree_path(session.session_id)
+        if path_present:
+            if (
+                path.is_symlink()
+                or _runtime_identity_path(path.resolve(strict=True))
+                != _runtime_identity_path(expected)
+                or _runtime_identity_path(path.resolve(strict=True))
+                == _runtime_identity_path(self.target_repo)
+            ):
+                raise AlbertError("Managed directory retirement boundary is invalid.")
+            path.replace(effect_path)
+            effect_present = True
+        elif not effect_present:
+            return
+        if path.exists() or path.is_symlink():
+            raise AlbertError(
+                "Retirement path changed after its isolated removal effect began."
+            )
+        snapshot_revision = int(
+            session.retirement["snapshot"].get(
+                "session_revision",
+                session.revision,
+            )
+        )
+        self._retirement_snapshot_store(
+            session,
+            snapshot_revision,
+        ).prepare_managed_directory_removal(
+            session.retirement["snapshot"],
+            worktree_path=effect_path,
+        )
+        if path.exists() or path.is_symlink():
+            raise AlbertError(
+                "Retirement path changed during its isolated removal effect."
+            )
+        self._assert_no_open_retirement_handles(effect_path)
+        shutil.rmtree(effect_path)
+
+    def _verify_retirement_removal(
+        self,
+        session: LocalAgentSession,
+        removal_kind: str,
+    ) -> None:
+        if session.worktree_path.exists() or session.worktree_path.is_symlink():
+            raise AlbertError("Retirement path remains after physical removal.")
+        effect_path = self._retirement_removal_effect_path(session.session_id)
+        if effect_path.exists() or effect_path.is_symlink():
+            raise AlbertError("Retirement removal effect remains after physical removal.")
+        if removal_kind not in {"git-worktree", "git-registration"}:
+            return
+        completed = _run_bounded_process(
+            [
+                "git",
+                "-C",
+                str(self.target_repo),
+                "worktree",
+                "list",
+                "--porcelain",
+                "-z",
+            ],
+            timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+            output_limit_bytes=_GIT_PATH_OUTPUT_BYTES_LIMIT,
+        )
+        if completed.returncode != 0:
+            raise AlbertError("Git worktree registration absence could not be verified.")
+        expected_paths = {
+            _runtime_identity_path(session.worktree_path),
+            _runtime_identity_path(effect_path),
+        }
+        for block in completed.stdout.split("\0\0"):
+            for worktree_field in block.split("\0"):
+                if worktree_field.startswith("worktree ") and _runtime_identity_path(
+                    Path(worktree_field.removeprefix("worktree ")).resolve(strict=False)
+                ) in expected_paths:
+                    raise AlbertError(
+                        "Git worktree registration remains after physical removal."
+                    )
+
+    def _block_retirement_removal(
+        self,
+        data: dict[str, Any],
+        session: LocalAgentSession,
+        reason: str,
+        *,
+        terminal: bool = False,
+    ) -> None:
+        attempts = int(session.retirement.get("retirement_attempts", 0))
+        exhausted = terminal or attempts >= 3
+        session.retirement["phase"] = (
+            "retirement-blocked" if exhausted else "retiring"
+        )
+        session.retirement["blocked_reason"] = reason
+        session.revision += 1
+        data["sessions"][session.session_id] = session.to_dict()
+        data.setdefault("timeline", []).append(
+            f"{session.issue_id} retirement "
+            f"{'blocked' if exhausted else 'attempt failed'} for "
+            f"{session.session_id}: {reason}"
+        )
+        self._write_runtime_payload(data)
+        self.sessions[session.session_id] = session
+        self.timeline = list(data.get("timeline", []))
+
+    def verify_retirement_snapshot(self, session_id: str) -> bool:
+        session = self._refresh_persisted_session(session_id)
+        if session.retirement.get("phase") not in {
+            "preserved",
+            "grace",
+            "retiring",
+            "retired",
+            "retirement-blocked",
+        }:
+            raise LaunchBlockedError(
+                f"{session_id} does not have a verified Retirement Snapshot."
+            )
+        store = self._retirement_snapshot_store(
+            session,
+            int(session.retirement["snapshot"].get("session_revision", session.revision)),
+        )
+        try:
+            return store.verify(session.retirement["snapshot"])
+        except (OSError, RetirementSnapshotError) as exc:
+            raise AlbertError(
+                f"{session_id} Retirement Snapshot integrity verification failed: {exc}"
+            ) from exc
+
+    def _block_retirement_preservation(
+        self,
+        data: dict[str, Any],
+        session: LocalAgentSession,
+        reason: str,
+    ) -> None:
+        session.retirement["phase"] = "preservation-blocked"
+        session.retirement["blocked_reason"] = reason
+        session.retirement["snapshot"] = {}
+        session.revision += 1
+        data["sessions"][session.session_id] = session.to_dict()
+        data.setdefault("timeline", []).append(
+            f"{session.issue_id} preservation blocked for {session.session_id}: {reason}"
+        )
+        self._write_runtime_payload(data)
+        self.sessions[session.session_id] = session
+        self.timeline = list(data.get("timeline", []))
+
+    def _retirement_snapshot_store(
+        self,
+        session: LocalAgentSession,
+        snapshot_revision: int,
+    ) -> RetirementSnapshotStore:
+        request = SnapshotRequest(
+            mission_id=self.mission_id,
+            session_id=session.session_id,
+            session_revision=snapshot_revision,
+            worktree_path=session.worktree_path,
+            worktree_identity=session.worktree_identity,
+            runtime_dir=self.runtime_dir,
+            target_repo=self.target_repo,
+            repository_snapshot=dict(session.repository_snapshot),
+            baseline_fingerprints=dict(session.baseline_fingerprints),
+            evidence_correlation_id=session.evidence_correlation_id,
+            evidence_valid=session.evidence_valid,
+            artifacts=dict(session.artifacts),
+            terminal_status=session.status,
+            reserved_bytes=int(session.preservation_budget["reserved_bytes"]),
+        )
+
+        def run_git(
+            cwd: Path,
+            arguments: list[str],
+            input_text: str | None,
+            output_limit: int,
+        ) -> tuple[int, str, str]:
+            completed = _run_bounded_process(
+                ["git", "-C", str(cwd), *arguments],
+                input_text=input_text,
+                timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+                output_limit_bytes=output_limit,
+            )
+            return completed.returncode, completed.stdout, completed.stderr
+
+        return RetirementSnapshotStore(request, run_git)
+
+    def _worktree_identity_for_session(self, session: LocalAgentSession) -> str:
+        session_id = session.session_id
+        expected_path = self._session_worktree_path(session_id)
+        if not session.worktree_path.exists() and not session.worktree_path.is_symlink():
+            canonical_absent = session.worktree_path.resolve(strict=False)
+            if (
+                session.status
+                in {"completed", "evidence-ready", "failed", "cancelled", "reviewed"}
+                and _runtime_identity_path(canonical_absent)
+                == _runtime_identity_path(expected_path)
+            ):
+                payload = (
+                    f"absence\n{self.mission_id}\n{session_id}\n{canonical_absent}"
+                )
+                return "managed-absence:" + sha256(payload.encode()).hexdigest()
+            return ""
+        try:
+            canonical_path = session.worktree_path.resolve(strict=True)
+        except OSError:
+            return ""
+        if (
+            session.worktree_path.is_symlink()
+            or not canonical_path.is_dir()
+            or _runtime_identity_path(canonical_path)
+            != _runtime_identity_path(expected_path)
+            or _runtime_identity_path(canonical_path)
+            == _runtime_identity_path(self.target_repo)
+        ):
+            return ""
+
+        git_pointer = canonical_path / ".git"
+        if not git_pointer.exists():
+            payload = f"directory\n{self.mission_id}\n{session_id}\n{canonical_path}"
+            return "managed-directory:" + sha256(payload.encode("utf-8")).hexdigest()
+        if git_pointer.is_symlink() or not git_pointer.is_file():
+            return ""
+        try:
+            pointer_text = git_pointer.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            return ""
+        if len(pointer_text.encode("utf-8")) > 4_096 or not pointer_text.startswith(
+            "gitdir: "
+        ):
+            return ""
+        admin_value = pointer_text.removeprefix("gitdir: ").strip()
+        admin_path = Path(admin_value)
+        if not admin_path.is_absolute():
+            admin_path = git_pointer.parent / admin_path
+        try:
+            admin_path = admin_path.resolve(strict=True)
+            registration = (admin_path / "gitdir").read_text(encoding="utf-8").strip()
+            registered_pointer = Path(registration).resolve(strict=True)
+        except (OSError, UnicodeError):
+            return ""
+        if (
+            _runtime_identity_path(registered_pointer)
+            != _runtime_identity_path(git_pointer)
+            or admin_path.name != canonical_path.name
+        ):
+            return ""
+        try:
+            registered = _run_bounded_process(
+                [
+                    "git",
+                    "-C",
+                    str(self.target_repo),
+                    "worktree",
+                    "list",
+                    "--porcelain",
+                    "-z",
+                ],
+                timeout_seconds=_GIT_SNAPSHOT_TIMEOUT_SECONDS,
+                output_limit_bytes=_GIT_PATH_OUTPUT_BYTES_LIMIT,
+            )
+        except OSError:
+            return ""
+        if registered.returncode != 0:
+            return ""
+        registered_paths: list[str] = []
+        for block in registered.stdout.split("\0\0"):
+            fields = [field for field in block.split("\0") if field]
+            worktree_fields = [
+                field.removeprefix("worktree ")
+                for field in fields
+                if field.startswith("worktree ")
+            ]
+            if len(worktree_fields) != 1:
+                continue
+            try:
+                registered_path = Path(worktree_fields[0]).resolve(strict=True)
+            except OSError:
+                return ""
+            if (
+                _runtime_identity_path(registered_path)
+                == _runtime_identity_path(canonical_path)
+            ):
+                registered_paths.append(_runtime_identity_path(registered_path))
+        if registered_paths != [_runtime_identity_path(canonical_path)]:
+            return ""
+        payload = (
+            f"git-worktree\n{self.mission_id}\n{session_id}\n"
+            f"{canonical_path}\n{admin_path}"
+        )
+        return "managed-git:" + sha256(payload.encode("utf-8")).hexdigest()
+
     def _prepare_session_worktree(self, session_id: str) -> Path:
         worktree_path = self._session_worktree_path(session_id)
         if worktree_path.exists():
@@ -3714,6 +12344,9 @@ class AlbertMission:
                 "source_files_skipped_count": skipped_count,
                 "source_scan_limit": _DIRECTORY_SOURCE_SCAN_LIMIT,
             }
+            pre_staged_repair = session.repository_snapshot.get("repair_overlay")
+            if isinstance(pre_staged_repair, dict):
+                repository_snapshot["repair_overlay"] = dict(pre_staged_repair)
             self._capture_and_persist_worktree_baseline(
                 session,
                 repository_snapshot,
@@ -3956,6 +12589,9 @@ class AlbertMission:
                 },
                 **untracked_snapshot,
             }
+            pre_staged_repair = session.repository_snapshot.get("repair_overlay")
+            if isinstance(pre_staged_repair, dict):
+                repository_snapshot["repair_overlay"] = dict(pre_staged_repair)
             session.repository_snapshot = repository_snapshot
             self._persist_worktree_preparation(session)
 
@@ -4093,6 +12729,9 @@ class AlbertMission:
     def _stage_prior_session_state(
         self,
         session: LocalAgentSession,
+        *,
+        prior_worktree: Path | None = None,
+        source_kind: str = "retained-worktree",
     ) -> dict[str, Any]:
         repair_context = session.task_packet.get("repair_context")
         if not isinstance(repair_context, dict):
@@ -4110,7 +12749,7 @@ class AlbertMission:
                 f"{session.session_id} repair context references unknown session "
                 f"{prior_session_id}."
             )
-        prior_worktree = self._session_worktree_path(prior_session_id)
+        prior_worktree = prior_worktree or self._session_worktree_path(prior_session_id)
         if not prior_worktree.exists():
             raise AlbertError(
                 f"{session.session_id} cannot inherit missing prior session worktree "
@@ -4276,6 +12915,7 @@ class AlbertMission:
         return {
             "schema_version": 1,
             "state": "pending",
+            "source": source_kind,
             "prior_session_id": prior_session_id,
             "manifest_artifact": str(manifest_path),
             "manifest_sha256": sha256(manifest_payload).hexdigest(),
@@ -5548,6 +14188,7 @@ class AlbertMission:
                 session,
                 _command_invocation(command),
                 env=env,
+                effect_label="runner-command",
             )
             self._raise_if_cancelled(session)
             exit_status = completed.returncode
@@ -5620,17 +14261,43 @@ class AlbertMission:
             output_path = artifact_dir / f"ollama-output{suffix}.txt"
             stderr_path = artifact_dir / f"ollama-stderr{suffix}.log"
             self._write(prompt_path, prompt)
+            inference_result = None
             try:
-                completed = self._run_cancellable_process(
-                    session,
-                    _command_invocation(command),
-                    input_text=prompt,
-                    output_limit_bytes=_MODEL_PROCESS_OUTPUT_BYTES_LIMIT,
-                )
-                self._raise_if_cancelled(session)
-                exit_status = completed.returncode
-                stdout = completed.stdout
-                stderr = completed.stderr
+                if agent_config.command:
+                    completed = self._run_cancellable_process(
+                        session,
+                        _command_invocation(command),
+                        input_text=prompt,
+                        output_limit_bytes=_MODEL_PROCESS_OUTPUT_BYTES_LIMIT,
+                        effect_label=f"model-inference-round-{iteration}",
+                    )
+                    self._raise_if_cancelled(session)
+                    exit_status = completed.returncode
+                    stdout = completed.stdout
+                    stderr = completed.stderr
+                else:
+                    def inference_cancel_requested() -> bool:
+                        try:
+                            self._raise_if_cancelled(session)
+                        except SessionCancelledError:
+                            return True
+                        return False
+
+                    inference_result = self._run_profile_inference(
+                        agent_config=agent_config,
+                        prompt=prompt,
+                        mission_id=self.mission_id,
+                        session_id=session.session_id,
+                        turn_kind="worker",
+                        schema=_MODEL_FILE_PLAN_INFERENCE_SCHEMA,
+                        validator=_parse_model_file_plan,
+                        cancellation_requested=inference_cancel_requested,
+                    )
+                    if inference_result.receipt.get("outcome") == "cancelled":
+                        self._raise_if_cancelled(session)
+                    exit_status = 0 if inference_result.authoritative else 1
+                    stdout = inference_result.raw_output
+                    stderr = str(inference_result.receipt.get("error", ""))
             except FileNotFoundError as exc:
                 exit_status = 127
                 stdout = ""
@@ -5645,6 +14312,23 @@ class AlbertMission:
                 "output": str(output_path),
                 "stderr": str(stderr_path),
             }
+            if inference_result is not None:
+                inference_receipt_path = artifact_dir / (
+                    f"inference-receipt-round-{iteration:02d}.json"
+                )
+                self._write(
+                    inference_receipt_path,
+                    json.dumps(
+                        inference_result.receipt,
+                        indent=2,
+                        sort_keys=True,
+                    )
+                    + "\n",
+                )
+                round_result["inference_receipt"] = str(inference_receipt_path)
+                session.artifacts[
+                    f"inference_round_{iteration:02d}"
+                ] = str(inference_receipt_path)
             round_results.append(round_result)
             round_key = f"ollama_round_{iteration:02d}"
             session.artifacts.update(
@@ -5669,13 +14353,24 @@ class AlbertMission:
                     f"Ollama command exited {exit_status}; inspect stderr artifact."
                 )
                 break
-            try:
-                plan = _parse_model_file_plan(stdout)
-            except AlbertError as exc:
-                session.status = "failed"
-                overall_exit_status = 1
-                known_risk = f"Malformed Ollama output: {exc}"
-                break
+            if inference_result is not None:
+                if not inference_result.authoritative:
+                    session.status = "failed"
+                    overall_exit_status = 1
+                    known_risk = (
+                        f"Local inference {inference_result.receipt.get('outcome', 'failed')}: "
+                        f"{inference_result.receipt.get('error', 'result was not authoritative')}"
+                    )
+                    break
+                plan = inference_result.value
+            else:
+                try:
+                    plan = _parse_model_file_plan(stdout)
+                except AlbertError as exc:
+                    session.status = "failed"
+                    overall_exit_status = 1
+                    known_risk = f"Malformed Ollama output: {exc}"
+                    break
             command_specs, rejected_command = self._preflight_model_commands(
                 session,
                 plan["commands"],
@@ -5891,6 +14586,7 @@ class AlbertMission:
                     session,
                     argv,
                     timeout_seconds=_MODEL_COMMAND_TIMEOUT_SECONDS,
+                    effect_label=f"planned-command-{iteration}-{index}",
                 )
                 self._raise_if_cancelled(session)
                 exit_status = completed.returncode
@@ -5993,6 +14689,144 @@ class AlbertMission:
             return value.decode("utf-8", errors="replace")
         return value
 
+    def _local_execution_request_id(
+        self,
+        session: LocalAgentSession,
+        effective_argv: tuple[str, ...],
+        execution_label: str,
+    ) -> str:
+        return "local-agent:" + sha256(
+            "\n".join(
+                (
+                    self.mission_id,
+                    session.session_id,
+                    session.runner_operation_id,
+                    execution_label,
+                    json.dumps(list(effective_argv), ensure_ascii=True),
+                    str(session.worktree_path.resolve()),
+                )
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def _build_local_execution_request(
+        self,
+        session: LocalAgentSession,
+        effective_argv: tuple[str, ...],
+        *,
+        execution_label: str,
+        input_text: str | None,
+        process_env: dict[str, str],
+        timeout_seconds: float,
+        output_limit_bytes: int,
+        readable_roots: tuple[Path, ...] = (),
+        readonly_bindings: tuple[tuple[Path, Path], ...] = (),
+        sandbox_mode: str = "bubblewrap",
+    ) -> ExecutionRequest:
+        worktree = str(session.worktree_path.resolve())
+        return ExecutionRequest(
+            request_id=self._local_execution_request_id(
+                session,
+                effective_argv,
+                execution_label.strip() or "process",
+            ),
+            effect="local-agent",
+            argv=effective_argv,
+            working_directory=worktree,
+            authority=LocalAgentExecutionAuthority(
+                mission_id=self.mission_id,
+                session_id=session.session_id,
+                session_revision=session.revision,
+                runner_operation_id=session.runner_operation_id,
+                worktree_identity=session.worktree_identity,
+                allowed_paths=tuple(
+                    value
+                    for value in session.task_packet.get("allowed_paths", [])
+                    if isinstance(value, str)
+                ),
+            ),
+            limits=ExecutionLimits(
+                timeout_seconds=timeout_seconds,
+                output_limit_bytes=output_limit_bytes,
+                address_space_bytes=_PROCESS_ADDRESS_SPACE_BYTES_LIMIT,
+                file_size_bytes=_PROCESS_FILE_SIZE_BYTES_LIMIT,
+                open_file_limit=_PROCESS_OPEN_FILE_LIMIT,
+                process_count_limit=_PROCESS_COUNT_LIMIT,
+                descendant_grace_seconds=_PROCESS_DESCENDANT_GRACE_SECONDS,
+            ),
+            sandbox=ExecutionSandbox(
+                mode=sandbox_mode,
+                readable_roots=tuple(
+                    str(path.resolve()) for path in readable_roots if path.exists()
+                ),
+                writable_roots=(worktree,),
+                readonly_bindings=tuple(
+                    (str(source.resolve()), str(destination.resolve(strict=False)))
+                    for source, destination in readonly_bindings
+                ),
+            ),
+            environment=tuple(sorted(process_env.items())),
+            input_text=input_text,
+        )
+
+    def _record_local_preflight_failure(
+        self,
+        session: LocalAgentSession,
+        argv: str | list[str],
+        *,
+        input_text: str | None,
+        process_env: dict[str, str],
+        timeout_seconds: float,
+        output_limit_bytes: int,
+        effect_label: str,
+        public_exit_code: int,
+        error_message: str,
+        readable_roots: tuple[Path, ...] = (),
+    ) -> subprocess.CompletedProcess[str]:
+        """Durably record a deterministic failure before any child can start."""
+
+        if os.name != "posix":
+            return subprocess.CompletedProcess(
+                argv,
+                public_exit_code,
+                "",
+                error_message,
+            )
+        effective_argv = tuple(argv) if isinstance(argv, list) else (argv,)
+        execution_request = self._build_local_execution_request(
+            session,
+            effective_argv,
+            execution_label=effect_label,
+            input_text=input_text,
+            process_env=process_env,
+            timeout_seconds=timeout_seconds,
+            output_limit_bytes=output_limit_bytes,
+            readable_roots=readable_roots,
+        )
+        journal = ExecutionJournal(self.runtime_dir / "execution-receipts.json")
+        receipt = journal.record_start_failed(
+            execution_request,
+            ExecutionReceipt.start_failed(
+                execution_request,
+                exit_code=127,
+                error_message=error_message,
+            ),
+        )
+        if receipt.status != "executing":
+            self._record_local_execution_receipt(session, receipt)
+        if receipt.reconciliation_required:
+            return subprocess.CompletedProcess(
+                argv,
+                1,
+                "",
+                receipt.error_message or error_message,
+            )
+        return subprocess.CompletedProcess(
+            argv,
+            public_exit_code,
+            receipt.stdout,
+            receipt.stderr or receipt.error_message or error_message,
+        )
+
     def _run_cancellable_process(
         self,
         session: LocalAgentSession,
@@ -6002,16 +14836,32 @@ class AlbertMission:
         env: dict[str, str] | None = None,
         timeout_seconds: float = _RUNNER_COMMAND_TIMEOUT_SECONDS,
         output_limit_bytes: int = _PROCESS_OUTPUT_BYTES_LIMIT,
+        effect_label: str = "",
     ) -> subprocess.CompletedProcess[str]:
         self._raise_if_cancelled(session)
         process_env = sanitized_process_environment(env)
-        if isinstance(argv, list) and argv and "/" not in argv[0]:
+        if os.name != "posix":
+            return subprocess.CompletedProcess(
+                argv,
+                126,
+                "",
+                "Unable to start governed process: host execution is unsupported "
+                "on non-POSIX hosts.",
+            )
+        if isinstance(argv, list) and argv:
             if shutil.which(argv[0], path=process_env.get("PATH")) is None:
-                return subprocess.CompletedProcess(
+                return self._record_local_preflight_failure(
+                    session,
                     argv,
-                    127,
-                    "",
-                    f"Unable to start {argv[0]!r}: command not found in governed PATH.",
+                    input_text=input_text,
+                    process_env=process_env,
+                    timeout_seconds=timeout_seconds,
+                    output_limit_bytes=output_limit_bytes,
+                    effect_label=effect_label,
+                    public_exit_code=127,
+                    error_message=(
+                        f"Unable to start {argv[0]!r}: command not found in governed PATH."
+                    ),
                 )
         readable_roots = tuple(
             Path(value)
@@ -6055,28 +14905,76 @@ class AlbertMission:
                 destination = session.worktree_path / relative
                 if not destination.exists():
                     dependency_bindings.append((resolved_source, destination))
-        governed_argv, sandboxed = sandboxed_process_argv(
-            argv,
-            working_directory=session.worktree_path,
-            readable_roots=readable_roots,
-            writable_roots=(session.worktree_path,),
-            readonly_bindings=tuple(dependency_bindings),
-        )
-        if os.name == "posix" and isinstance(argv, list) and not sandboxed:
-            return subprocess.CompletedProcess(
+        try:
+            governed_argv, sandboxed = sandboxed_process_argv(
                 argv,
-                126,
-                "",
-                "Unable to start governed process: bubblewrap (bwrap) is required "
-                "for the writable-worktree filesystem boundary.",
+                working_directory=session.worktree_path,
+                readable_roots=readable_roots,
+                writable_roots=(session.worktree_path,),
+                readonly_bindings=tuple(dependency_bindings),
+                path=process_env.get("PATH"),
+            )
+        except AlbertError as exc:
+            return self._record_local_preflight_failure(
+                session,
+                argv,
+                input_text=input_text,
+                process_env=process_env,
+                timeout_seconds=timeout_seconds,
+                output_limit_bytes=output_limit_bytes,
+                effect_label=effect_label,
+                public_exit_code=126,
+                error_message=str(exc),
+                readable_roots=readable_roots,
+            )
+        if not sandboxed or not isinstance(governed_argv, list):
+            return self._record_local_preflight_failure(
+                session,
+                argv,
+                input_text=input_text,
+                process_env=process_env,
+                timeout_seconds=timeout_seconds,
+                output_limit_bytes=output_limit_bytes,
+                effect_label=effect_label,
+                public_exit_code=126,
+                error_message=(
+                    "Unable to start governed process: bubblewrap (bwrap) is required "
+                    "for the writable-worktree filesystem boundary."
+                ),
+                readable_roots=readable_roots,
             )
         governed_session = session.runner_pid is not None
         process_started = False
 
-        def record_process_start(process: subprocess.Popen[bytes]) -> None:
+        effective_argv = (
+            tuple(governed_argv)
+            if isinstance(governed_argv, list)
+            else (governed_argv,)
+        )
+        execution_label = effect_label.strip() or "process"
+        execution_request = self._build_local_execution_request(
+            session,
+            effective_argv,
+            execution_label=execution_label,
+            input_text=input_text,
+            process_env=process_env,
+            timeout_seconds=timeout_seconds,
+            output_limit_bytes=output_limit_bytes,
+            readable_roots=readable_roots,
+            readonly_bindings=tuple(dependency_bindings),
+            sandbox_mode="bubblewrap" if os.name == "posix" else "none",
+        )
+
+        def record_process_start(
+            process: subprocess.Popen[bytes],
+            process_token: str,
+        ) -> None:
             nonlocal process_started
             process_started = True
             session.runner_process_pid = process.pid
+            session.runner_process_identity = _process_identity(process.pid)
+            session.runner_process_token = process_token
+            self._remember_retirement_runner_boundary(session)
             if governed_session:
                 persisted = self._persist_session_update(session)
                 if persisted.status == "cancelled":
@@ -6084,29 +14982,88 @@ class AlbertMission:
                         f"{session.session_id} cancelled before runner process startup"
                     )
 
+        execution_journal = ExecutionJournal(
+            self.runtime_dir / "execution-receipts.json"
+        )
         try:
-            return _run_bounded_process(
-                governed_argv,
-                input_text=input_text,
-                cwd=session.worktree_path,
-                env=process_env,
-                timeout_seconds=timeout_seconds,
-                output_limit_bytes=output_limit_bytes,
-                process_started=record_process_start,
+            receipt = ExecutionCoordinator(
+                execution_journal,
+                PythonExecutionProvider(executor=_run_bounded_process),
+            ).execute(
+                execution_request,
+                process_binding_started=record_process_start,
                 poll_callback=lambda: self._raise_if_cancelled(session),
                 output_callback=lambda stream_name, payload: self._record_session_output(
                     session.session_id,
                     stream_name,
                     payload,
                 ),
+                authorize=lambda request: self._authorize_local_execution_request(
+                    request,
+                    session,
+                ),
+                exception_status=lambda exc: (
+                    "cancelled"
+                    if isinstance(exc, SessionCancelledError)
+                    else "outcome-unknown"
+                ),
             )
+            if receipt.status != "executing":
+                self._record_local_execution_receipt(session, receipt)
+            if receipt.status == "executing":
+                raise AlbertError(
+                    f"{session.session_id} host effect {execution_label} is already executing; "
+                    "the effect was not replayed."
+                )
+            if receipt.reconciliation_required:
+                raise AlbertError(
+                    f"{session.session_id} host effect {execution_label} has an uncertain "
+                    f"outcome and requires reconciliation: {receipt.error_message}"
+                )
+            return subprocess.CompletedProcess(
+                argv,
+                receipt.exit_code if receipt.exit_code is not None else 1,
+                receipt.stdout,
+                receipt.stderr or receipt.error_message,
+            )
+        except BaseException:
+            try:
+                for request, receipt in execution_journal.inspect_records():
+                    if (
+                        request.request_id == execution_request.request_id
+                        and receipt.status != "executing"
+                    ):
+                        self._record_local_execution_receipt(session, receipt)
+                        break
+            except Exception:
+                pass
+            raise
         finally:
-            if process_started:
-                session.runner_process_pid = None
-                if governed_session:
-                    persisted = self._persist_session_update(session)
-                    if persisted.status == "cancelled":
-                        session.status = "cancelled"
+            # Retain the last exact process-group binding until the canonical
+            # runner transition clears it. A late result or owner-loss probe
+            # needs that durable identity to prove quiescence independently.
+            if process_started and governed_session:
+                persisted = self._persist_session_update(session)
+                if persisted.status == "cancelled":
+                    session.status = "cancelled"
+
+    def _authorize_local_execution_request(
+        self,
+        request: ExecutionRequest,
+        session: LocalAgentSession,
+    ) -> None:
+        if request.effect != "local-agent" or request.authority.kind != "local-agent":
+            raise AlbertError("Local Agent execution request authority is invalid.")
+        authority = request.authority
+        if (
+            authority.mission_id != self.mission_id
+            or authority.session_id != session.session_id
+            or authority.session_revision != session.revision
+            or authority.runner_operation_id != session.runner_operation_id
+            or authority.worktree_identity != session.worktree_identity
+            or request.working_directory != str(session.worktree_path.resolve())
+        ):
+            raise AlbertError("Local Agent execution request does not match the active session.")
 
     def _ollama_prompt(self, session: LocalAgentSession, agent_config: AgentConfig) -> str:
         selected_skill = session.task_packet.get("selected_skill")
@@ -6558,6 +15515,7 @@ class AlbertMission:
                 session,
                 _command_invocation(agent_config.test_command),
                 env=env,
+                effect_label="agent-test-command",
             )
             self._raise_if_cancelled(session)
             exit_status = completed.returncode
@@ -6714,7 +15672,10 @@ class AlbertMission:
 
     @staticmethod
     def _lifecycle_satisfies_blocker(issue: IssueSlice) -> bool:
-        return issue.review_state in {"approved", "pr-ready", "complete"}
+        # Approval authorizes a Local Agent launch; it is not evidence that the
+        # dependency's work completed. Dependent work becomes eligible only
+        # after the blocker has an accepted reviewed outcome.
+        return issue.review_state in {"pr-ready", "complete"}
 
     def _next_actions_for_issue(self, issue: IssueSlice) -> list[str]:
         if issue.review_state == "complete":

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import codecs
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 import datetime as datetime_module
 from datetime import datetime, timedelta, timezone
 import fcntl
@@ -39,6 +39,17 @@ from .core import (
     sandboxed_process_argv,
     sanitized_process_environment,
     wayfinder_state_path,
+)
+from .execution import (
+    ExecutionCoordinator,
+    ExecutionJournal,
+    ExecutionLimits,
+    ExecutionReceipt,
+    ExecutionRequest,
+    ExecutionSandbox,
+    PythonExecutionProvider,
+    ShellExecutionAuthority,
+    _owner_is_live,
 )
 from .performance import measured_stage
 
@@ -274,6 +285,18 @@ class WorkspaceSessionSummary:
 
 
 @dataclass(frozen=True)
+class RepairTaskPacketPreview:
+    issue_id: str
+    goal: str
+    acceptance_criteria: tuple[str, ...]
+    allowed_paths: tuple[str, ...]
+    command_policy: dict[str, str]
+    evidence_requirements: tuple[str, ...]
+    assigned_agent: str
+    review_reason: str
+
+
+@dataclass(frozen=True)
 class MissionSessionSummary:
     session_id: str
     issue_id: str
@@ -298,8 +321,20 @@ class MissionSessionSummary:
     review_outcome: str
     review_next_action: str
     repair_action_available: bool
+    supervision_receipt_id: str = ""
+    supervision_outcome: str = ""
+    automatic_recovery_count: int = 0
+    repair_task_packet: RepairTaskPacketPreview | None = None
     work_kind: str = ""
     parent_session_id: str = ""
+    session_revision: int = 0
+    retirement_phase: str = "active"
+    retirement_blocked_reason: str = ""
+    retirement_runner_boundary: dict[str, Any] = field(default_factory=dict)
+    preservation_budget: dict[str, Any] = field(default_factory=dict)
+    retirement_record: dict[str, Any] | None = None
+    retirement_actions: dict[str, bool] = field(default_factory=dict)
+    inference: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -312,6 +347,8 @@ class WorkspaceQueueAttention:
         "issue-change-proposal",
         "frontier-confirmation",
         "ad-hoc-delegation",
+        "runner-supervision",
+        "retirement-storage",
     ]
     label: str
     queue_link: str
@@ -327,6 +364,7 @@ class WorkspaceMissionSummary:
     is_active: bool
     sessions: tuple[MissionSessionSummary, ...]
     attention: tuple[WorkspaceQueueAttention, ...]
+    archived_issue_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -526,16 +564,40 @@ class ShellTerminalService:
     def path_grant_requests_path(self) -> Path:
         return self._path_grant_requests_path
 
-    @_causal_chronology
+    def _execution_journal_path_for_mission(self, mission_id: str) -> Path:
+        mission = self._snapshots._missions.get(mission_id)
+        if mission is None:
+            raise WorkspacePersistenceError(
+                f"Shell Terminal command references unknown Mission: {mission_id}"
+            )
+        return mission.runtime_dir / "execution-receipts.json"
+
+    @contextmanager
+    def _chronology_then_terminal_lock(self):
+        chronology_path = (
+            self._snapshots.preferences_path.parent / ".chronology-order.lock"
+        )
+        with _chronology_order_lock(chronology_path):
+            with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+                yield
+
     def inspect(self) -> ShellTerminalProjection:
-        terminal = self._load_terminal()
+        with self._chronology_then_terminal_lock():
+            return self._inspect_locked()
+
+    def _inspect_locked(self) -> ShellTerminalProjection:
+        terminal = self._reconcile_execution_ledger(
+            self._load_terminal(), terminal_lock_held=True
+        )
         path_grant_requests = self._load_path_grant_requests()
         if any(
             record.get("status") == "executing"
             and self._projected_command_status(record) == "outcome-unknown"
             for record in terminal["commands"]
         ):
-            terminal = self._try_persist_orphaned_executions(terminal)
+            terminal = self._try_persist_orphaned_executions(
+                terminal, terminal_lock_held=True
+            )
         self._reconcile_terminal_audit(terminal)
         return ShellTerminalProjection(
             schema_version=1,
@@ -569,16 +631,23 @@ class ShellTerminalService:
             ),
         )
 
-    @_causal_chronology
     def reconcile_audit(self) -> None:
         """Repair missing command audit phases before unrelated chronology advances."""
-        terminal = self._load_terminal()
+        with self._chronology_then_terminal_lock():
+            return self._reconcile_audit_locked()
+
+    def _reconcile_audit_locked(self) -> None:
+        terminal = self._reconcile_execution_ledger(
+            self._load_terminal(), terminal_lock_held=True
+        )
         if any(
             record.get("status") == "executing"
             and self._projected_command_status(record) == "outcome-unknown"
             for record in terminal["commands"]
         ):
-            terminal = self._try_persist_orphaned_executions(terminal)
+            terminal = self._try_persist_orphaned_executions(
+                terminal, terminal_lock_held=True
+            )
         if any(
             record.get("status") == "executing"
             and self._projected_command_status(record) == "outcome-unknown"
@@ -608,7 +677,7 @@ class ShellTerminalService:
             raise AlbertError("Shell Terminal requester must not be empty")
         if access_level not in {"read", "write"}:
             raise AlbertError(f"Unknown Shell Terminal access level: {access_level}")
-        with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+        with self._chronology_then_terminal_lock():
             return self._submit_locked(
                 correlation_id=correlation_id,
                 command=command,
@@ -628,7 +697,9 @@ class ShellTerminalService:
         requester: str,
         access_level: Literal["read", "write"],
     ) -> ShellTerminalCommandResult:
-        terminal = self._load_terminal()
+        terminal = self._reconcile_execution_ledger(
+            self._load_terminal(), terminal_lock_held=True
+        )
         normalized_correlation_id = correlation_id.strip()
         normalized_working_directory = str(Path(working_directory).resolve())
         normalized_requested_paths = [
@@ -850,7 +921,7 @@ class ShellTerminalService:
             raise AlbertError(f"Unknown Additional Path Grant access level: {access_level}")
         if duration_seconds <= 0:
             raise AlbertError("Additional Path Grant duration must be positive")
-        with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+        with self._chronology_then_terminal_lock():
             return self._create_path_grant_locked(
                 correlation_id=correlation_id,
                 expected_revision=expected_revision,
@@ -870,7 +941,9 @@ class ShellTerminalService:
         duration_seconds: int,
         request_id: str,
     ) -> AdditionalPathGrant:
-        terminal = self._load_terminal()
+        terminal = self._reconcile_execution_ledger(
+            self._load_terminal(), terminal_lock_held=True
+        )
         normalized_correlation_id = correlation_id.strip()
         normalized_path = str(Path(path).resolve())
         normalized_request_id = request_id.strip()
@@ -989,7 +1062,7 @@ class ShellTerminalService:
             raise AlbertError("Additional Path Grant denial reason must not be empty")
         if not affected_action.strip():
             raise AlbertError("Additional Path Grant affected action must not be empty")
-        with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+        with self._chronology_then_terminal_lock():
             terminal = self._load_terminal()
             normalized_correlation_id = correlation_id.strip()
             normalized_request_id = request_id.strip()
@@ -1114,7 +1187,7 @@ class ShellTerminalService:
         command_id: str,
         approver: str,
     ) -> ShellTerminalCommandResult:
-        with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+        with self._chronology_then_terminal_lock():
             return self._approve_locked(command_id=command_id, approver=approver)
 
     def _approve_locked(
@@ -1123,7 +1196,9 @@ class ShellTerminalService:
         command_id: str,
         approver: str,
     ) -> ShellTerminalCommandResult:
-        terminal = self._load_terminal()
+        terminal = self._reconcile_execution_ledger(
+            self._load_terminal(), terminal_lock_held=True
+        )
         commands = list(terminal["commands"])
         index = next(
             (position for position, item in enumerate(commands) if item["command_id"] == command_id),
@@ -1171,7 +1246,7 @@ class ShellTerminalService:
             raise AlbertError("Only the Mission Commander can deny a Shell Terminal command.")
         if not reason.strip():
             raise AlbertError("Shell Terminal command denial requires a reason.")
-        with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+        with self._chronology_then_terminal_lock():
             return self._deny_locked(
                 command_id=command_id,
                 decider=decider,
@@ -1223,46 +1298,56 @@ class ShellTerminalService:
         self._reconcile_submission_audit(denied)
         return self._result_from_record(denied)
 
-    def _execute(
+    def _build_shell_execution_request(
+        self,
+        *,
+        record: dict[str, Any],
+        argv: tuple[str, ...],
+        sandbox: ExecutionSandbox,
+        process_env: dict[str, str],
+    ) -> ExecutionRequest:
+        working_directory = str(Path(record["working_directory"]).resolve())
+        return ExecutionRequest(
+            request_id=f"shell:{record['command_id']}",
+            effect="shell",
+            argv=argv,
+            working_directory=working_directory,
+            authority=ShellExecutionAuthority(
+                mission_id=str(record["mission_id"]),
+                command_id=str(record["command_id"]),
+                correlation_id=str(record["correlation_id"]),
+                command=str(record["command"]),
+                classification=record["classification"],
+                requester=str(record["requester"]),
+                working_directory=working_directory,
+                requested_paths=tuple(record["requested_paths"]),
+                access_level=record.get("access_level", "read"),
+                approval_actor=str(record.get("approver", "")),
+            ),
+            limits=ExecutionLimits(
+                timeout_seconds=self._COMMAND_TIMEOUT_SECONDS,
+                output_limit_bytes=self._OUTPUT_BYTES_LIMIT,
+            ),
+            sandbox=sandbox,
+            environment=tuple(sorted(process_env.items())),
+        )
+
+    def _persist_execution_attempt(
         self,
         *,
         terminal: dict[str, Any],
         record: dict[str, Any],
         record_index: int | None,
-    ) -> ShellTerminalCommandResult:
-        bubblewrap = _trusted_system_executable("bwrap")
-        if bubblewrap is None:
-            return self._finish_execution(
-                terminal=terminal,
-                record=record,
-                record_index=record_index,
-                exit_code=self._SANDBOX_UNAVAILABLE_EXIT_CODE,
-                stdout="",
-                stderr=(
-                    "Shell Terminal sandbox unavailable: bubblewrap (bwrap) is required "
-                    "for governed command execution; the command was not executed."
-                ),
-            )
-        sandbox_argv, mount_error = self._sandbox_argv(
-            bubblewrap=bubblewrap,
-            terminal=terminal,
-            record=record,
-        )
-        if mount_error:
-            return self._finish_execution(
-                terminal=terminal,
-                record=record,
-                record_index=record_index,
-                exit_code=self._SANDBOX_UNAVAILABLE_EXIT_CODE,
-                stdout="",
-                stderr=mount_error,
-            )
+        execution_request: ExecutionRequest,
+    ) -> tuple[dict[str, Any], dict[str, Any], int]:
         attempt_record = {
             **record,
             "status": "executing",
             "exit_code": None,
             "executor_pid": os.getpid(),
             "executor_identity": _process_identity(os.getpid()),
+            "execution_request_id": execution_request.request_id,
+            "execution_request_digest": execution_request.request_digest,
         }
         commands = list(terminal["commands"])
         if record_index is None:
@@ -1285,20 +1370,209 @@ class ShellTerminalService:
                 grants=terminal["grants"],
                 grant_denials=terminal["grant_denials"],
             )
-        try:
-            completed = _run_bounded_process(
-                sandbox_argv,
-                env=sanitized_process_environment(),
-                timeout_seconds=self._COMMAND_TIMEOUT_SECONDS,
-                output_limit_bytes=self._OUTPUT_BYTES_LIMIT,
+        return attempt_terminal, attempt_record, record_index
+
+    def _record_preflight_execution_failure(
+        self,
+        *,
+        terminal: dict[str, Any],
+        record: dict[str, Any],
+        record_index: int | None,
+        public_exit_code: int,
+        error_message: str,
+    ) -> ShellTerminalCommandResult:
+        """Persist a typed Shell start failure before any child can start."""
+
+        if os.name != "posix":
+            return self._finish_execution(
+                terminal=terminal,
+                record=record,
+                record_index=record_index,
+                exit_code=public_exit_code,
+                stdout="",
+                stderr=error_message,
             )
+        try:
+            raw_argv = tuple(shlex.split(record["command"]))
+        except ValueError:
+            raw_argv = (str(record["command"]),)
+        if not raw_argv:
+            raw_argv = (str(record["command"]),)
+        process_env = sanitized_process_environment()
+        execution_request = self._build_shell_execution_request(
+            record=record,
+            argv=raw_argv,
+            sandbox=ExecutionSandbox(
+                mode="bubblewrap",
+                readable_roots=(str(Path(record["working_directory"]).resolve()),),
+            ),
+            process_env=process_env,
+        )
+        attempt_terminal, attempt_record, record_index = (
+            self._persist_execution_attempt(
+                terminal=terminal,
+                record=record,
+                record_index=record_index,
+                execution_request=execution_request,
+            )
+        )
+        journal = ExecutionJournal(
+            self._execution_journal_path_for_mission(str(record["mission_id"]))
+        )
+        receipt = journal.record_start_failed(
+            execution_request,
+            ExecutionReceipt.start_failed(
+                execution_request,
+                exit_code=127,
+                error_message=error_message,
+            ),
+        )
+        if receipt.status == "executing":
+            return ShellTerminalCommandResult(
+                command_id=record["command_id"],
+                correlation_id=record["correlation_id"],
+                classification=record["classification"],
+                status="executing",
+                exit_code=None,
+                stdout="",
+                stderr=(
+                    "Shell Terminal execution is still owned by a live provider; "
+                    "the command was not replayed."
+                ),
+            )
+        if receipt.reconciliation_required:
+            return self._finish_outcome_unknown(
+                terminal=attempt_terminal,
+                record=attempt_record,
+                record_index=record_index,
+                receipt=receipt,
+            )
+        return self._finish_execution(
+            terminal=attempt_terminal,
+            record=attempt_record,
+            record_index=record_index,
+            exit_code=public_exit_code,
+            stdout="",
+            stderr=receipt.error_message or error_message,
+            receipt=receipt,
+        )
+
+    def _execute(
+        self,
+        *,
+        terminal: dict[str, Any],
+        record: dict[str, Any],
+        record_index: int | None,
+    ) -> ShellTerminalCommandResult:
+        bubblewrap = _trusted_system_executable("bwrap")
+        if bubblewrap is None:
+            return self._record_preflight_execution_failure(
+                terminal=terminal,
+                record=record,
+                record_index=record_index,
+                public_exit_code=self._SANDBOX_UNAVAILABLE_EXIT_CODE,
+                error_message=(
+                    "Shell Terminal sandbox unavailable: bubblewrap (bwrap) is required "
+                    "for governed command execution; the command was not executed."
+                ),
+            )
+        try:
+            process_env = sanitized_process_environment()
+            sandbox_argv, mount_error = self._sandbox_argv(
+                bubblewrap=bubblewrap,
+                terminal=terminal,
+                record=record,
+                process_env=process_env,
+            )
+        except (AlbertError, ValueError) as exc:
+            sandbox_argv, mount_error = [], str(exc)
+        if mount_error:
+            return self._record_preflight_execution_failure(
+                terminal=terminal,
+                record=record,
+                record_index=record_index,
+                public_exit_code=self._SANDBOX_UNAVAILABLE_EXIT_CODE,
+                error_message=mount_error,
+            )
+        try:
+            execution_sandbox = self._execution_sandbox_for_record(
+                terminal=terminal,
+                record=record,
+            )
+        except (AlbertError, ValueError) as exc:
+            return self._record_preflight_execution_failure(
+                terminal=terminal,
+                record=record,
+                record_index=record_index,
+                public_exit_code=self._SANDBOX_UNAVAILABLE_EXIT_CODE,
+                error_message=str(exc),
+            )
+        execution_request = self._build_shell_execution_request(
+            record=record,
+            argv=tuple(sandbox_argv),
+            sandbox=execution_sandbox,
+            process_env=process_env,
+        )
+        attempt_terminal, attempt_record, record_index = (
+            self._persist_execution_attempt(
+                terminal=terminal,
+                record=record,
+                record_index=record_index,
+                execution_request=execution_request,
+            )
+        )
+        try:
+            receipt = ExecutionCoordinator(
+                ExecutionJournal(
+                    self._execution_journal_path_for_mission(str(record["mission_id"]))
+                ),
+                PythonExecutionProvider(executor=_run_bounded_process),
+            ).execute(
+                execution_request,
+                authorize=lambda request: self._authorize_execution_request(request),
+            )
+            if receipt.status == "executing":
+                return ShellTerminalCommandResult(
+                    command_id=record["command_id"],
+                    correlation_id=record["correlation_id"],
+                    classification=record["classification"],
+                    status="executing",
+                    exit_code=None,
+                    stdout="",
+                    stderr=(
+                        "Shell Terminal execution is still owned by a live provider; "
+                        "the command was not replayed."
+                    ),
+                )
+            if receipt.reconciliation_required:
+                result = self._finish_outcome_unknown(
+                    terminal=attempt_terminal,
+                    record=attempt_record,
+                    record_index=record_index,
+                    receipt=receipt,
+                )
+                # Preserve the existing Shell Terminal transport failure contract
+                # while the durable canonical state and execution ledger retain the
+                # stronger typed uncertainty boundary. Exact retry returns the
+                # outcome-unknown record and never reaches this provider path again.
+                if receipt.status == "outcome-unknown":
+                    raise OSError(
+                        receipt.error_message
+                        or "Shell Terminal host effect outcome is unknown; reconciliation is required."
+                    )
+                return result
             return self._finish_execution(
                 terminal=attempt_terminal,
                 record=attempt_record,
                 record_index=record_index,
-                exit_code=completed.returncode,
-                stdout=completed.stdout,
-                stderr=completed.stderr,
+                exit_code=(
+                    self._SANDBOX_UNAVAILABLE_EXIT_CODE
+                    if receipt.status == "start-failed"
+                    else receipt.exit_code if receipt.exit_code is not None else 1
+                ),
+                stdout=receipt.stdout,
+                stderr=receipt.stderr or receipt.error_message,
+                receipt=receipt,
             )
         except BaseException:
             completion_is_durable = False
@@ -1310,7 +1584,8 @@ class ShellTerminalService:
                 )
                 completion_is_durable = (
                     durable_record is not None
-                    and durable_record.get("status") in {"completed", "failed"}
+                    and durable_record.get("status")
+                    in {"completed", "failed", "outcome-unknown"}
                 )
             except Exception:
                 completion_is_durable = False
@@ -1322,6 +1597,13 @@ class ShellTerminalService:
                 )
             raise
 
+    @staticmethod
+    def _authorize_execution_request(request: ExecutionRequest) -> None:
+        if request.effect != "shell" or request.authority.kind != "shell":
+            raise AlbertError("Shell Terminal execution request authority is invalid.")
+        if request.shell:
+            raise AlbertError("Shell Terminal execution request cannot enable shell parsing.")
+
     @_causal_chronology
     def _finish_execution(
         self,
@@ -1332,17 +1614,32 @@ class ShellTerminalService:
         exit_code: int,
         stdout: str,
         stderr: str,
+        receipt: ExecutionReceipt | None = None,
     ) -> ShellTerminalCommandResult:
         status: Literal["completed", "failed"] = (
             "completed" if exit_code == 0 else "failed"
         )
+        persisted_exit_code = (
+            receipt.exit_code
+            if receipt is not None
+            and receipt.status == "start-failed"
+            and receipt.exit_code is not None
+            else exit_code
+        )
         completed_record = {
             **record,
             "status": status,
-            "exit_code": exit_code,
+            "exit_code": persisted_exit_code,
             "executor_pid": None,
             "executor_identity": "",
         }
+        if receipt is not None:
+            completed_record.update(
+                {
+                    "execution_receipt_id": receipt.receipt_id,
+                    "execution_status": receipt.status,
+                }
+            )
         commands = list(terminal["commands"])
         if record_index is None:
             commands.append(completed_record)
@@ -1364,6 +1661,35 @@ class ShellTerminalService:
             stdout=stdout,
             stderr=stderr,
         )
+
+    @_causal_chronology
+    def _finish_outcome_unknown(
+        self,
+        *,
+        terminal: dict[str, Any],
+        record: dict[str, Any],
+        record_index: int,
+        receipt: ExecutionReceipt,
+    ) -> ShellTerminalCommandResult:
+        unknown = {
+            **record,
+            "status": "outcome-unknown",
+            "exit_code": None,
+            "executor_pid": None,
+            "executor_identity": "",
+            "execution_receipt_id": receipt.receipt_id,
+            "execution_status": receipt.status,
+        }
+        commands = list(terminal["commands"])
+        commands[record_index] = unknown
+        self._persist_terminal(
+            revision=terminal["revision"] + 1,
+            commands=commands,
+            grants=terminal["grants"],
+            grant_denials=terminal["grant_denials"],
+        )
+        self._reconcile_submission_audit(unknown)
+        return self._result_from_record(unknown)
 
     @_causal_chronology
     def _best_effort_mark_outcome_unknown(
@@ -1462,7 +1788,11 @@ class ShellTerminalService:
     def _try_persist_orphaned_executions(
         self,
         observed_terminal: dict[str, Any],
+        *,
+        terminal_lock_held: bool = False,
     ) -> dict[str, Any]:
+        if terminal_lock_held:
+            return self._persist_orphaned_executions_locked(self._load_terminal())
         lock_path = self._terminal_path.with_name(
             f".{self._terminal_path.name}.lock"
         )
@@ -1727,6 +2057,194 @@ class ShellTerminalService:
             journal.append("shell-command-outcome-unknown")
         return tuple(console), tuple(journal)
 
+    def _reconcile_execution_ledger(
+        self,
+        terminal: dict[str, Any],
+        *,
+        terminal_lock_held: bool = False,
+    ) -> dict[str, Any]:
+        """Project durable typed receipts into Shell's canonical command store."""
+
+        if not terminal_lock_held:
+            with WorkspaceSnapshotService._json_store_lock(self._terminal_path):
+                return self._reconcile_execution_ledger(
+                    self._load_terminal(), terminal_lock_held=True
+                )
+        journal_records_by_mission: dict[
+            str, dict[str, tuple[ExecutionRequest, ExecutionReceipt]]
+        ] = {}
+        commands = list(terminal["commands"])
+        changed_records: list[dict[str, Any]] = []
+        changed = False
+        for index, record in enumerate(commands):
+            has_request_marker = "execution_request_id" in record or (
+                "execution_request_digest" in record
+            )
+            request_id = record.get("execution_request_id")
+            request_digest = record.get("execution_request_digest")
+            if not has_request_marker:
+                continue
+            if not isinstance(request_id, str) or not isinstance(
+                request_digest, str
+            ):
+                raise WorkspacePersistenceError(
+                    "Shell Terminal execution record has an incomplete request boundary."
+                )
+            mission_id = record.get("mission_id")
+            if not isinstance(mission_id, str) or not mission_id.strip():
+                raise WorkspacePersistenceError(
+                    "Shell Terminal execution record has no Mission boundary."
+                )
+            if mission_id not in journal_records_by_mission:
+                journal_path = self._execution_journal_path_for_mission(mission_id)
+                journal = ExecutionJournal(journal_path)
+                journal.reconcile()
+                records_for_mission = {
+                    request.request_id: (request, receipt)
+                    for request, receipt in journal.inspect_records()
+                }
+                legacy_path = (
+                    self._snapshots.preferences_path.parent / "execution-receipts.json"
+                )
+                if journal_path.resolve() != legacy_path.resolve():
+                    legacy = ExecutionJournal(legacy_path)
+                    for request, receipt in legacy.inspect_records():
+                        if receipt.status == "executing" and not _owner_is_live(
+                            receipt.owner_pid,
+                            receipt.owner_identity,
+                        ):
+                            receipt = ExecutionReceipt.unknown(
+                                request,
+                                error_message=(
+                                    "The legacy execution owner stopped before a typed "
+                                    "receipt was durably reconciled; inspect the effect."
+                                ),
+                                owner_pid=receipt.owner_pid,
+                                owner_identity=receipt.owner_identity,
+                                process_pid=receipt.process_pid,
+                                process_identity=receipt.process_identity,
+                                started_at=receipt.started_at,
+                                ended_at=receipt.ended_at,
+                            )
+                        authority = request.authority
+                        if (
+                            request.request_id not in records_for_mission
+                            and isinstance(authority, ShellExecutionAuthority)
+                            and authority.mission_id == mission_id
+                        ):
+                            records_for_mission[request.request_id] = (
+                                request,
+                                receipt,
+                            )
+                journal_records_by_mission[mission_id] = records_for_mission
+            request_and_receipt = journal_records_by_mission[mission_id].get(request_id)
+            if request_and_receipt is None:
+                raise WorkspacePersistenceError(
+                    "Shell Terminal execution record has no matching durable receipt."
+                )
+            request, receipt = request_and_receipt
+            if receipt.request_digest != request_digest:
+                raise WorkspacePersistenceError(
+                    "Shell Terminal execution receipt does not match its request boundary."
+                )
+            authority = request.authority
+            if not isinstance(authority, ShellExecutionAuthority) or (
+                request.effect != "shell"
+                or authority.mission_id != mission_id
+                or authority.command_id != record.get("command_id")
+                or authority.correlation_id != record.get("correlation_id")
+                or authority.command != record.get("command")
+                or authority.classification != record.get("classification")
+                or authority.requester != record.get("requester")
+                or authority.working_directory != record.get("working_directory")
+                or authority.requested_paths != tuple(record.get("requested_paths", []))
+                or authority.access_level != record.get("access_level", "read")
+                or authority.approval_actor != record.get("approver", "")
+                or request.working_directory != record.get("working_directory")
+            ):
+                raise WorkspacePersistenceError(
+                    "Shell Terminal execution receipt authority does not match its command."
+                )
+            if receipt.status == "executing":
+                if record.get("status") != "executing":
+                    raise WorkspacePersistenceError(
+                        "Shell Terminal terminal record disagrees with an executing receipt."
+                    )
+                continue
+            if receipt.reconciliation_required:
+                expected_status = "outcome-unknown"
+                expected_exit_code = None
+                reconciled = {
+                    **record,
+                    "status": expected_status,
+                    "exit_code": expected_exit_code,
+                    "executor_pid": None,
+                    "executor_identity": "",
+                    "execution_receipt_id": receipt.receipt_id,
+                    "execution_status": receipt.status,
+                }
+            else:
+                if receipt.status not in {
+                    "completed",
+                    "failed",
+                    "timed-out",
+                    "output-limit",
+                    "cancelled",
+                    "start-failed",
+                }:
+                    raise WorkspacePersistenceError(
+                        "Shell Terminal execution receipt has an invalid terminal status."
+                    )
+                expected_status = (
+                    "completed" if receipt.status == "completed" else "failed"
+                )
+                expected_exit_code = (
+                    receipt.exit_code if receipt.exit_code is not None else 1
+                )
+                reconciled = {
+                    **record,
+                    "status": expected_status,
+                    "exit_code": expected_exit_code,
+                    "executor_pid": None,
+                    "executor_identity": "",
+                    "execution_receipt_id": receipt.receipt_id,
+                    "execution_status": receipt.status,
+                }
+            if record.get("status") != "executing":
+                if (
+                    record.get("status") != expected_status
+                    or record.get("exit_code") != expected_exit_code
+                    or record.get("execution_receipt_id") != receipt.receipt_id
+                    or record.get("execution_status") != receipt.status
+                ):
+                    raise WorkspacePersistenceError(
+                        "Shell Terminal terminal record disagrees with its typed receipt."
+                    )
+            if reconciled != record:
+                commands[index] = reconciled
+                changed_records.append(reconciled)
+                changed = True
+        if not changed:
+            return terminal
+        reconciled_terminal = {
+            **terminal,
+            "revision": terminal["revision"] + 1,
+            "commands": commands,
+        }
+        chronology_path = (
+            self._snapshots.preferences_path.parent / ".chronology-order.lock"
+        )
+        with _chronology_order_lock(chronology_path):
+            self._persist_terminal(
+                revision=reconciled_terminal["revision"],
+                commands=commands,
+                grants=terminal["grants"],
+                grant_denials=terminal["grant_denials"],
+            )
+        for record in changed_records:
+            self._reconcile_submission_audit(record)
+        return reconciled_terminal
+
     @staticmethod
     def _result_from_record(record: dict[str, Any]) -> ShellTerminalCommandResult:
         try:
@@ -1736,7 +2254,11 @@ class ShellTerminalService:
                 correlation_id=record["correlation_id"],
                 classification=record["classification"],
                 status=record["status"],
-                exit_code=record.get("exit_code"),
+                exit_code=(
+                    ShellTerminalService._SANDBOX_UNAVAILABLE_EXIT_CODE
+                    if record.get("execution_status") == "start-failed"
+                    else record.get("exit_code")
+                ),
                 stdout="",
                 stderr=(
                     "Shell Terminal recorded that execution started, but its final "
@@ -1752,20 +2274,19 @@ class ShellTerminalService:
                 "Shell Terminal command record cannot be replayed."
             ) from exc
 
-    def _sandbox_argv(
+    def _sandbox_mounts(
         self,
         *,
-        bubblewrap: str,
         terminal: dict[str, Any],
         record: dict[str, Any],
-    ) -> tuple[list[str], str]:
+    ) -> tuple[dict[Path, Literal["read", "write"]], str]:
         mission_id = str(record.get("mission_id", ""))
         if not mission_id:
             snapshot = self._snapshots.snapshot()
             mission_id = snapshot.active_mission.id if snapshot.active_mission else ""
         mission = self._snapshots._missions.get(mission_id)
         if mission is None:
-            return [], "Shell Terminal sandbox could not resolve the submitting Mission."
+            return {}, "Shell Terminal sandbox could not resolve the submitting Mission."
         workspace = mission.target_repo.resolve()
         requested_access = record.get("access_level", "read")
         requested_mounts: dict[Path, Literal["read", "write"]] = {
@@ -1785,29 +2306,73 @@ class ShellTerminalService:
             )
             if mount_access is None:
                 return (
-                    [],
+                    {},
                     "Shell Terminal sandbox refused an external path because its "
                     f"Additional Path Grant is missing or expired: {path}",
                 )
             if not path.exists():
                 return (
-                    [],
+                    {},
                     "Shell Terminal sandbox cannot mount an authorized path that does "
                     f"not exist: {path}",
                 )
             requested_mounts[path] = mount_access
+        return requested_mounts, ""
+
+    def _execution_sandbox_for_record(
+        self,
+        *,
+        terminal: dict[str, Any],
+        record: dict[str, Any],
+    ) -> ExecutionSandbox:
+        requested_mounts, mount_error = self._sandbox_mounts(
+            terminal=terminal,
+            record=record,
+        )
+        if mount_error:
+            raise AlbertError(mount_error)
+        return ExecutionSandbox(
+            mode="bubblewrap",
+            readable_roots=tuple(
+                str(path.resolve())
+                for path, access in requested_mounts.items()
+                if access == "read"
+            ),
+            writable_roots=tuple(
+                str(path.resolve())
+                for path, access in requested_mounts.items()
+                if access == "write"
+            ),
+        )
+
+    def _sandbox_argv(
+        self,
+        *,
+        bubblewrap: str,
+        terminal: dict[str, Any],
+        record: dict[str, Any],
+        process_env: dict[str, str] | None = None,
+    ) -> tuple[list[str], str]:
+        requested_mounts, mount_error = self._sandbox_mounts(
+            terminal=terminal,
+            record=record,
+        )
+        if mount_error:
+            return [], mount_error
         readable_roots = tuple(
             path for path, access in requested_mounts.items() if access == "read"
         )
         writable_roots = tuple(
             path for path, access in requested_mounts.items() if access == "write"
         )
+        process_env = process_env or sanitized_process_environment()
         argv, sandboxed = sandboxed_process_argv(
             shlex.split(record["command"]),
             working_directory=Path(record["working_directory"]),
             readable_roots=readable_roots,
             writable_roots=writable_roots,
             allow_implicit_executable_bindings=False,
+            path=process_env.get("PATH"),
         )
         if not sandboxed or not isinstance(argv, list):
             return [], (
@@ -2065,7 +2630,16 @@ class ShellTerminalService:
             raise ValueError("Shell Terminal requested_paths must be unique")
         if item.get("access_level", "read") not in {"read", "write"}:
             raise ValueError("Shell Terminal access_level is invalid")
-        for field_name in ("approver", "decider", "reason", "executor_identity"):
+        for field_name in (
+            "approver",
+            "decider",
+            "reason",
+            "executor_identity",
+            "execution_request_id",
+            "execution_request_digest",
+            "execution_receipt_id",
+            "execution_status",
+        ):
             if field_name in item and not isinstance(item[field_name], str):
                 raise ValueError(f"Shell Terminal command {field_name} must be a string")
         for field_name in ("executor_pid",):
@@ -2073,6 +2647,48 @@ class ShellTerminalService:
                 not isinstance(item[field_name], int) or isinstance(item[field_name], bool)
             ):
                 raise ValueError(f"Shell Terminal command {field_name} is invalid")
+        execution_request_id = item.get("execution_request_id")
+        execution_request_digest = item.get("execution_request_digest")
+        if (execution_request_id is None) != (execution_request_digest is None):
+            raise ValueError("Shell Terminal execution request identity is incomplete")
+        if execution_request_id is not None:
+            if (
+                not isinstance(execution_request_id, str)
+                or not execution_request_id.strip()
+                or not re.fullmatch(r"[A-Za-z0-9._:/=-]+", execution_request_id)
+                or not isinstance(execution_request_digest, str)
+                or re.fullmatch(r"[0-9a-f]{64}", execution_request_digest) is None
+            ):
+                raise ValueError("Shell Terminal execution request identity is invalid")
+        receipt_id = item.get("execution_receipt_id")
+        execution_status = item.get("execution_status")
+        if (receipt_id is None) != (execution_status is None):
+            raise ValueError("Shell Terminal execution receipt is incomplete")
+        if receipt_id is not None:
+            if (
+                not isinstance(receipt_id, str)
+                or not receipt_id.strip()
+                or not re.fullmatch(r"[A-Za-z0-9._:/=-]+", receipt_id)
+                or execution_status
+                not in {
+                    "completed",
+                    "failed",
+                    "cancelled",
+                    "timed-out",
+                    "output-limit",
+                    "start-failed",
+                    "outcome-unknown",
+                }
+            ):
+                raise ValueError("Shell Terminal execution receipt is invalid")
+        if receipt_id is not None and execution_request_id is None:
+            raise ValueError("Shell Terminal execution request is missing")
+        if (
+            execution_request_id is not None
+            and status in {"completed", "failed"}
+            and receipt_id is None
+        ):
+            raise ValueError("Shell Terminal terminal receipt is missing")
 
     @classmethod
     def _validate_terminal_grant(cls, item: object) -> None:
@@ -2653,7 +3269,15 @@ class AgentConsoleHistoryService:
         self._reject_transient_source(source)
         if not action_phase.startswith("shell-"):
             ShellTerminalService(self._snapshots).reconcile_audit()
-        snapshot = self._snapshots.snapshot()
+        snapshot = (
+            self._snapshots.snapshot()
+            if recorded_scope is None
+            or expected_revision is not None
+            or expected_scope is not None
+            else None
+        )
+        if snapshot is None and recorded_scope is None:
+            raise AlbertError("Agent Console recorded scope is required.")
         if expected_revision is not None and expected_revision != snapshot.revision:
             raise WorkspaceStaleActionError(
                 expected_revision=expected_revision,
@@ -2718,6 +3342,70 @@ class AgentConsoleHistoryService:
                 {"schema_version": 1, "messages": [asdict(item) for item in messages]},
             )
         return message
+
+    def reconcile_supervision_receipts(self) -> None:
+        """Project canonical non-healthy supervision receipts exactly once."""
+
+        for mission in self._snapshots._missions.values():
+            for raw_receipt in mission.supervision.get("receipts", {}).values():
+                if not isinstance(raw_receipt, dict):
+                    raise WorkspacePersistenceError(
+                        "Mission supervision receipt projection is invalid."
+                    )
+                outcome = raw_receipt.get("outcome")
+                if outcome in {"no-change", "attention-recorded"}:
+                    continue
+                if outcome not in {
+                    "recovered",
+                    "result-reconciled",
+                    "decision-needed",
+                }:
+                    raise WorkspacePersistenceError(
+                        "Mission supervision receipt outcome is invalid."
+                    )
+                correlation_id = raw_receipt.get("correlation_id")
+                session_id = raw_receipt.get("session_id")
+                receipt_id = raw_receipt.get("receipt_id")
+                if not all(
+                    isinstance(value, str) and value.strip()
+                    for value in (correlation_id, session_id, receipt_id)
+                ):
+                    raise WorkspacePersistenceError(
+                        "Mission supervision receipt identity is invalid."
+                    )
+                if outcome == "recovered":
+                    content = (
+                        f"Deterministic supervision proved runner and process-group "
+                        f"loss for {session_id} and queued one same-session/worktree "
+                        f"recovery. Receipt {receipt_id}."
+                    )
+                    phase = "runner-recovered"
+                    console_outcome: AgentConsoleOutcome = "acknowledged"
+                elif outcome == "result-reconciled":
+                    content = (
+                        f"Deterministic supervision reconciled the exact late result "
+                        f"for {session_id} instead of rerunning it. Receipt {receipt_id}."
+                    )
+                    phase = "runner-result-reconciled"
+                    console_outcome = "acknowledged"
+                else:
+                    content = (
+                        f"Deterministic supervision stopped automation for {session_id}; "
+                        "a Mission Commander decision is required. Choose manual Retry "
+                        "with a reason from Mission Work, or leave the session stopped. "
+                        f"Receipt {receipt_id}."
+                    )
+                    phase = "runner-decision-needed"
+                    console_outcome = "pending"
+                self.append(
+                    role="system",
+                    content=content,
+                    outcome=console_outcome,
+                    source="orchestrator",
+                    recorded_scope=self._mission_scope(mission.mission_id),
+                    correlation_id=correlation_id,
+                    action_phase=phase,
+                )
 
     def record_workstation_action(
         self,
@@ -3425,11 +4113,79 @@ class AgentConsoleResponseService:
                 ", ".join(f"{session.issue_id}: {session.status}" for session in sessions)
                 or "none"
             )
+            storage = snapshot.mission_board["retirement_storage"]
             return (
                 f"Controller: {controller}\n"
                 f"Workspace: {snapshot.workspace_session.status}\n"
                 f"Subagents: {session_summary}\n"
-                f"Ready work: {', '.join(ready) or 'none'}"
+                f"Ready work: {', '.join(ready) or 'none'}\n"
+                "Snapshot storage: "
+                f"{self._format_storage_bytes(storage['payload_bytes'])} payload + "
+                f"{self._format_storage_bytes(storage['reserved_bytes'])} reserved / "
+                f"{self._format_storage_bytes(storage['budget_bytes'])}; "
+                f"{storage['retained_payloads']} retained, "
+                f"{storage['pinned_payloads']} pinned, "
+                f"{storage['blocker_count']} blockers"
+            )
+        if command == "/storage":
+            inspection = self._snapshots.active_retirement_storage_inspection()
+            largest = inspection["largest_payloads"]
+            largest_rows = (
+                ", ".join(
+                    f"{item['session_id']} ({self._format_storage_bytes(item['snapshot_bytes'])})"
+                    for item in largest
+                )
+                or "none"
+            )
+            expiry = inspection["expiry"]
+            expiry_rows = (
+                ", ".join(
+                    f"{item['session_id']} at {item['expires_at']}" for item in expiry
+                )
+                or "none"
+            )
+            blockers = inspection["blockers"]
+            blocker_rows = (
+                "; ".join(str(item.get("message", item.get("code", "blocked"))) for item in blockers)
+                or "none"
+            )
+            recent_reclamation_rows = (
+                "\n".join(
+                    "- "
+                    f"Session: {item['session_id']}; "
+                    "Reclaimed bytes: "
+                    f"{self._format_storage_bytes(item['snapshot_bytes'])}; "
+                    f"Reclaimed at: {item['reclaimed_at']}; "
+                    f"Reason: {item['reason']}"
+                    for item in inspection["reclamation"]["recent"]
+                )
+                or "none"
+            )
+            retention_days = inspection["policy"]["retention_seconds"] / 86_400
+            retention_label = (
+                str(int(retention_days))
+                if retention_days.is_integer()
+                else f"{retention_days:.2f}"
+            )
+            return (
+                "Snapshot storage inspection\n"
+                f"Retention: {retention_label} days\n"
+                f"Budget: {self._format_storage_bytes(inspection['policy']['budget_bytes'])}\n"
+                f"Usage: {self._format_storage_bytes(inspection['usage']['payload_bytes'])} payload + "
+                f"{self._format_storage_bytes(inspection['usage']['reserved_bytes'])} reserved = "
+                f"{self._format_storage_bytes(inspection['usage']['committed_bytes'])} committed; "
+                f"{self._format_storage_bytes(inspection['usage']['available_bytes'])} available\n"
+                f"Records: {inspection['counts']['records']}; retained "
+                f"{inspection['counts']['retained_payloads']}; pinned "
+                f"{inspection['counts']['pinned_payloads']}; reclaimed "
+                f"{inspection['counts']['reclaimed_payloads']}; expired eligible "
+                f"{inspection['counts']['expired_eligible_payloads']}\n"
+                f"Expiry: {expiry_rows}\n"
+                f"Largest payloads: {largest_rows}\n"
+                f"Reclamation: {inspection['reclamation']['count']} payloads, "
+                f"{self._format_storage_bytes(inspection['reclamation']['bytes'])}\n"
+                f"Recent reclamations:\n{recent_reclamation_rows}\n"
+                f"Blockers: {blocker_rows}"
             )
         if command == "/run":
             if not argument:
@@ -3465,13 +4221,25 @@ class AgentConsoleResponseService:
             return f"Unknown Alfredo command: {command}. Type /help to see available commands."
         return f"{command} is handled by Alfredo's deterministic command path."
 
+    @staticmethod
+    def _format_storage_bytes(value: int) -> str:
+        if value >= 1024**3:
+            return f"{value / 1024**3:.2f} GiB"
+        if value >= 1024**2:
+            return f"{value / 1024**2:.2f} MiB"
+        if value >= 1024:
+            return f"{value / 1024:.2f} KiB"
+        return f"{value} B"
+
     def _run_controller_command(self, command: str, prompt: str) -> str:
         command_argv = shlex.split(command)
         target_repo = self._snapshots._primary_mission.target_repo
+        process_env = sanitized_process_environment()
         governed_argv, sandboxed = sandboxed_process_argv(
             command_argv,
             working_directory=target_repo,
             readable_roots=(target_repo,),
+            path=process_env.get("PATH"),
         )
         if not sandboxed:
             raise AlbertError(
@@ -3482,7 +4250,7 @@ class AgentConsoleResponseService:
                 governed_argv,
                 input_text=prompt,
                 cwd=target_repo,
-                env=sanitized_process_environment(),
+                env=process_env,
                 timeout_seconds=120,
                 output_limit_bytes=self._CONTROLLER_OUTPUT_BYTES_LIMIT,
             )
@@ -3787,6 +4555,12 @@ WorkstationActionType = Literal[
     "issue-retry",
     "session-cancel",
     "model-assignment-change",
+    "issue-archive",
+    "issue-restore",
+    "retirement-pin",
+    "retirement-retry",
+    "retirement-export",
+    "retirement-discard",
 ]
 
 
@@ -7624,6 +8398,7 @@ class ReviewWorkspaceService:
                 "correlation_id": correlation_id,
                 "request": request_payload,
             },
+            expected_revision=session.revision,
         )
         return self._acknowledge_review(
             correlation_id=correlation_id,
@@ -7840,6 +8615,12 @@ class WorkstationActionService:
         "issue-retry",
         "session-cancel",
         "model-assignment-change",
+        "issue-archive",
+        "issue-restore",
+        "retirement-pin",
+        "retirement-retry",
+        "retirement-export",
+        "retirement-discard",
     }
     _actors = {"mission-commander"}
 
@@ -7864,6 +8645,9 @@ class WorkstationActionService:
         reason: str = "",
         allowed_paths: list[str] | None = None,
         command_policy: dict[str, str] | None = None,
+        pin_state: bool | None = None,
+        destination: str = "",
+        confirmation: str = "",
     ) -> WorkstationActionAcknowledgement:
         snapshot = self._snapshots.snapshot()
         if not correlation_id.strip():
@@ -7891,6 +8675,25 @@ class WorkstationActionService:
             "allowed_paths": list(allowed_paths or []),
             "command_policy": dict(command_policy or {}),
         }
+        retirement_action = action_type in {
+            "retirement-pin",
+            "retirement-retry",
+            "retirement-export",
+            "retirement-discard",
+        }
+        if retirement_action:
+            request_payload.update(
+                {
+                    "expected_revision": expected_revision,
+                    "pin_state": pin_state,
+                    "destination": (
+                        str(Path(destination).resolve(strict=False))
+                        if destination
+                        else ""
+                    ),
+                    "confirmation": confirmation,
+                }
+            )
         request_boundary = {
             "action_type": action_type,
             "actor": actor,
@@ -7905,15 +8708,26 @@ class WorkstationActionService:
         )
         if replay is not None:
             return replay
-        canonical_action = self._canonical_action_for_correlation(
-            correlation_id=correlation_id,
-            request_boundary=request_boundary,
+        canonical_action = (
+            self._canonical_retirement_action_for_correlation(
+                correlation_id=correlation_id,
+                request_boundary=request_boundary,
+            )
+            if retirement_action
+            else self._canonical_action_for_correlation(
+                correlation_id=correlation_id,
+                request_boundary=request_boundary,
+            )
         )
         recovering_action = canonical_action is not None
         if not recovering_action and action_type in {"issue-launch", "issue-retry"}:
             WayfinderService(self._snapshots).ensure_gate_open()
         recovered_session = canonical_action[1] if canonical_action is not None else None
-        if not recovering_action and expected_revision != snapshot.revision:
+        if (
+            not recovering_action
+            and not retirement_action
+            and expected_revision != snapshot.revision
+        ):
             raise WorkspaceStaleActionError(
                 expected_revision=expected_revision,
                 current_revision=snapshot.revision,
@@ -7926,11 +8740,85 @@ class WorkstationActionService:
             "target_id": target_id,
             "request": request_payload,
         }
+        if action_type in {"issue-archive", "issue-restore"}:
+            workstation_action.update(
+                {
+                    "actor": actor,
+                    "mission_id": target_mission_id,
+                    "expected_revision": expected_revision,
+                }
+            )
 
         acknowledged_issue_id = issue_id
         acknowledged_session_id = session_id
         journal_actor: ActivityActor = "mission-commander"
-        if action_type == "issue-approve":
+        if retirement_action:
+            self._validate_session_target(
+                target_kind=target_kind,
+                target_id=target_id,
+                session_id=session_id,
+            )
+            prior_session = mission.sessions.get(session_id)
+            if prior_session is None:
+                raise AlbertError(f"Unknown Workstation session: {session_id}")
+            acknowledged_issue_id = issue_id or prior_session.issue_id
+            if acknowledged_issue_id != prior_session.issue_id:
+                raise AlbertError("issue id must match session issue id")
+            if recovering_action:
+                result_session = recovered_session or prior_session
+            elif action_type == "retirement-pin":
+                if not isinstance(pin_state, bool):
+                    raise AlbertError("Retirement pin requires a boolean pin state.")
+                result_session = mission.set_retirement_snapshot_pin(
+                    session_id,
+                    pinned=pin_state,
+                    expected_revision=expected_revision,
+                    correlation_id=correlation_id,
+                )
+            elif action_type == "retirement-retry":
+                result_session = mission.retry_retirement_unit(
+                    session_id,
+                    expected_revision=expected_revision,
+                    correlation_id=correlation_id,
+                )
+            elif action_type == "retirement-export":
+                if not destination:
+                    raise AlbertError("Retirement export requires a destination.")
+                mission.export_retirement_unit(
+                    session_id,
+                    destination=Path(destination),
+                    expected_revision=expected_revision,
+                    correlation_id=correlation_id,
+                )
+                result_session = mission._refresh_persisted_session(session_id)
+            else:
+                result_session = mission.discard_retained_worktree(
+                    session_id,
+                    expected_revision=expected_revision,
+                    correlation_id=correlation_id,
+                    confirmation=confirmation,
+                    reason=reason,
+                )
+            acknowledged_session_id = result_session.session_id
+            effect_summary = {
+                "retirement-pin": (
+                    f"Mission Commander {'pinned' if pin_state else 'unpinned'} "
+                    f"the retained Snapshot Payload for {session_id}."
+                ),
+                "retirement-retry": (
+                    f"Mission Commander retried Retirement Unit {session_id}; "
+                    f"its canonical phase is {result_session.retirement.get('phase')}."
+                ),
+                "retirement-export": (
+                    f"Mission Commander exported verified Retirement Unit {session_id} "
+                    f"to {Path(destination).resolve(strict=False) / 'repository'}."
+                ),
+                "retirement-discard": (
+                    f"Mission Commander irreversibly discarded Retained Worktree "
+                    f"{session_id} after exact safety proof."
+                ),
+            }[action_type]
+        elif action_type == "issue-approve":
             self._validate_issue_target(
                 target_kind=target_kind,
                 target_id=target_id,
@@ -8018,6 +8906,10 @@ class WorkstationActionService:
                     allowed_paths=allowed_paths if allowed_paths else None,
                     command_policy=command_policy if command_policy else None,
                     workstation_action=workstation_action,
+                    manual_retry_reason=(
+                        reason if review_workspace_repair is None else ""
+                    ),
+                    expected_revision=prior_session.revision,
                 )
             acknowledged_session_id = session.session_id
             effect_summary = (
@@ -8046,6 +8938,7 @@ class WorkstationActionService:
                     session_id,
                     reason=reason,
                     workstation_action=workstation_action,
+                    expected_revision=session.revision,
                 )
             )
             acknowledged_session_id = cancelled.session_id
@@ -8055,6 +8948,33 @@ class WorkstationActionService:
                 "the terminal cancelled state will be preserved."
             )
             journal_actor = "orchestrator"
+        elif action_type in {"issue-archive", "issue-restore"}:
+            self._validate_issue_target(
+                target_kind=target_kind,
+                target_id=target_id,
+                issue_id=issue_id,
+            )
+            if issue_id not in mission.issues:
+                raise AlbertError(f"Unknown Issue Slice: {issue_id}")
+            if not recovering_action:
+                if action_type == "issue-archive":
+                    mission._archive_issue_from_workstation(
+                        issue_id,
+                        workstation_action=workstation_action,
+                        expected_revision=expected_revision,
+                    )
+                else:
+                    mission._restore_archived_issue_from_workstation(
+                        issue_id,
+                        workstation_action=workstation_action,
+                        expected_revision=expected_revision,
+                    )
+            acknowledged_session_id = ""
+            effect_summary = (
+                f"Mission Commander archived {issue_id}; its sessions, evidence, and Activity Journal history remain inspectable."
+                if action_type == "issue-archive"
+                else f"Mission Commander restored {issue_id} to active Mission Work with its sessions, evidence, and Activity Journal history intact."
+            )
         else:
             self._validate_issue_target(
                 target_kind=target_kind,
@@ -8319,6 +9239,74 @@ class WorkstationActionService:
         if persisted_boundary != request_boundary:
             raise AlbertError(
                 "Workstation action correlation id was already used for a different "
+                "request boundary."
+            )
+        return mission, session
+
+    def _canonical_retirement_action_for_correlation(
+        self,
+        *,
+        correlation_id: str,
+        request_boundary: dict[str, Any],
+    ) -> tuple[AlbertMission, LocalAgentSession | None] | None:
+        matches: list[tuple[AlbertMission, LocalAgentSession]] = []
+        for mission in self._snapshots._missions.values():
+            if mission.runtime_path.exists():
+                with mission._runtime_lock(exclusive=False):
+                    mission._load_runtime()
+            for session in mission.sessions.values():
+                receipt = session.retirement.get("action_receipts", {}).get(
+                    correlation_id
+                )
+                if receipt is not None:
+                    matches.append((mission, session))
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise WorkspacePersistenceError(
+                f"Retirement action correlation id is not unique: {correlation_id}"
+            )
+        mission, session = matches[0]
+        receipt = session.retirement["action_receipts"][correlation_id]
+        action_type = str(request_boundary.get("action_type", ""))
+        expected_action = {
+            "retirement-pin": "snapshot-pin",
+            "retirement-retry": "retry",
+            "retirement-export": "export",
+            "retirement-discard": "discard",
+        }.get(action_type)
+        boundary_matches = bool(
+            expected_action
+            and receipt.get("action") == expected_action
+            and request_boundary.get("actor") == "mission-commander"
+            and request_boundary.get("mission_id") == mission.mission_id
+            and request_boundary.get("target_kind") == "agent-session"
+            and request_boundary.get("target_id") == session.session_id
+            and request_boundary.get("session_id") == session.session_id
+            and request_boundary.get("issue_id") in {"", session.issue_id}
+            and request_boundary.get("expected_revision")
+            == receipt.get("expected_revision")
+        )
+        if action_type == "retirement-pin":
+            boundary_matches = boundary_matches and (
+                request_boundary.get("pin_state") is receipt.get("pinned")
+            )
+        elif action_type == "retirement-export":
+            destination = request_boundary.get("destination")
+            boundary_matches = boundary_matches and bool(
+                isinstance(destination, str)
+                and destination
+                and receipt.get("destination")
+                == str(Path(destination) / "repository")
+            )
+        elif action_type == "retirement-discard":
+            boundary_matches = boundary_matches and (
+                request_boundary.get("confirmation") == receipt.get("confirmation")
+                and request_boundary.get("reason") == receipt.get("reason")
+            )
+        if not boundary_matches:
+            raise AlbertError(
+                "Retirement action correlation id was already used for a different "
                 "request boundary."
             )
         return mission, session
@@ -9810,14 +10798,27 @@ class WorkspaceSnapshotService:
         self._action_lock_target = mission.runtime_dir / "workspace-action-transaction"
         evidence_activity_recorder = ActivityJournalService(self).record_local_agent_evidence
         for item in all_missions:
+            item._workspace_preferences_path = self._preferences_path
             item._evidence_activity_recorder = evidence_activity_recorder
 
     @property
     def preferences_path(self) -> Path:
         return self._preferences_path
 
+    def active_retirement_storage_inspection(self) -> dict[str, Any]:
+        """Inspect storage for the Active Mission, never the primary fallback."""
+
+        preferences = self._load_preferences()
+        mission = self._missions.get(preferences["active_mission_id"])
+        if mission is None:
+            raise WorkspacePersistenceError(
+                "Workspace preferences reference an unknown Active Mission."
+            )
+        return mission.retirement_storage_inspection()
+
     @measured_stage("S6", workflows={"startup"})
     def snapshot(self) -> WorkspaceSnapshot:
+        AgentConsoleHistoryService(self).reconcile_supervision_receipts()
         preferences = self._load_preferences()
         active = self._missions.get(preferences["active_mission_id"])
         if active is None:
@@ -10225,6 +11226,22 @@ class WorkspaceSnapshotService:
                 mission,
                 session.session_id,
             )
+            repair_action_available = (
+                review_workspace_repair is not None
+                and WorkstationActionService._repair_child_for_session(
+                    mission,
+                    session.session_id,
+                )
+                is None
+            )
+            supervision_receipt = mission.supervision.get("receipts", {}).get(
+                session.supervision_receipt_id
+            )
+            supervision_outcome = (
+                str(supervision_receipt.get("outcome", ""))
+                if isinstance(supervision_receipt, dict)
+                else ""
+            )
             return MissionSessionSummary(
                 session_id=session.session_id,
                 issue_id=session.issue_id,
@@ -10271,13 +11288,18 @@ class WorkspaceSnapshotService:
                 review_correlation_id=review_correlation_id,
                 review_outcome=latest_review.outcome if latest_review else "",
                 review_next_action=latest_review.next_action if latest_review else "",
-                repair_action_available=(
-                    review_workspace_repair is not None
-                    and WorkstationActionService._repair_child_for_session(
+                repair_action_available=repair_action_available,
+                supervision_receipt_id=session.supervision_receipt_id,
+                supervision_outcome=supervision_outcome,
+                automatic_recovery_count=session.automatic_recovery_count,
+                repair_task_packet=(
+                    self._repair_task_packet_preview(
                         mission,
-                        session.session_id,
+                        session,
+                        review_workspace_repair,
                     )
-                    is None
+                    if repair_action_available and review_workspace_repair is not None
+                    else None
                 ),
                 work_kind=str(
                     session.task_packet.get(
@@ -10286,6 +11308,16 @@ class WorkspaceSnapshotService:
                     )
                 ),
                 parent_session_id=validated_parent_session_id(session),
+                session_revision=session.revision,
+                retirement_phase=str(session.retirement.get("phase", "active")),
+                retirement_blocked_reason=str(session.retirement.get("blocked_reason", "")),
+                retirement_runner_boundary=dict(session.retirement.get("runner_boundary", {})),
+                preservation_budget=dict(session.preservation_budget),
+                retirement_record=(
+                    dict(session.retirement["snapshot"]) if session.retirement.get("snapshot") else None
+                ),
+                retirement_actions=mission.inspect_retirement_unit(session.session_id)["actions"],
+                inference=dict(canonical.get("inference", {})),
             )
 
         sessions = tuple(
@@ -10321,6 +11353,35 @@ class WorkspaceSnapshotService:
                         entity_id=issue_id,
                     )
                 )
+        for raw_attention in mission.supervision.get("attentions", {}).values():
+            if not isinstance(raw_attention, dict):
+                raise WorkspacePersistenceError(
+                    "Mission supervision attention projection is invalid."
+                )
+            if raw_attention.get("disposition") != "open" or raw_attention.get(
+                "next_effect"
+            ) != "mission-commander-decision":
+                continue
+            session_id = raw_attention.get("session_id")
+            attention_id = raw_attention.get("attention_id")
+            detail = raw_attention.get("detail")
+            if not all(
+                isinstance(value, str) and value.strip()
+                for value in (session_id, attention_id, detail)
+            ):
+                raise WorkspacePersistenceError(
+                    "Mission supervision attention identity is invalid."
+                )
+            attention.append(
+                WorkspaceQueueAttention(
+                    attention_id=attention_id,
+                    mission_id=mission.mission_id,
+                    kind="runner-supervision",
+                    label=f"{session_id} supervision decision required: {detail}",
+                    queue_link=f"mission-work#session-{session_id}",
+                    entity_id=session_id,
+                )
+            )
         for item in WorkspaceQueueService(self).inspect(mission_id=mission.mission_id).items:
             if item.status != "pending":
                 continue
@@ -10345,6 +11406,26 @@ class WorkspaceSnapshotService:
                 )
             )
         board = mission.board_summary()
+        storage_attention = mission.retirement_storage.get("attention", {})
+        if storage_attention.get("active") is True:
+            attention.append(
+                WorkspaceQueueAttention(
+                    attention_id=(
+                        f"retirement-storage-{mission.mission_id}-"
+                        f"{storage_attention.get('code', 'attention')}"
+                    ),
+                    mission_id=mission.mission_id,
+                    kind="retirement-storage",
+                    label=str(
+                        storage_attention.get(
+                            "message",
+                            "Snapshot storage requires Mission Commander attention.",
+                        )
+                    ),
+                    queue_link="mission-work#retirement-storage",
+                    entity_id=mission.mission_id,
+                )
+            )
         return WorkspaceMissionSummary(
             id=mission.mission_id,
             title=mission.prd_title,
@@ -10352,6 +11433,53 @@ class WorkspaceSnapshotService:
             is_active=is_active,
             sessions=sessions,
             attention=tuple(attention),
+            archived_issue_ids=tuple(sorted(mission.archived_issue_ids)),
+        )
+
+    @staticmethod
+    def _repair_task_packet_preview(
+        mission: AlbertMission,
+        session: LocalAgentSession,
+        review: ReviewDecision,
+    ) -> RepairTaskPacketPreview:
+        issue = mission.issues.get(session.issue_id)
+        packet = session.task_packet
+        goal = issue.what_to_build if issue is not None else str(packet.get("goal", session.issue_id))
+        acceptance_criteria = (
+            issue.acceptance_criteria
+            if issue is not None
+            else [
+                item
+                for item in packet.get("acceptance_criteria", [])
+                if isinstance(item, str)
+            ]
+        )
+        evidence_requirements = (
+            issue.evidence_requirements or mission.default_evidence_requirements()
+            if issue is not None
+            else [
+                item
+                for item in packet.get("evidence_requirements", mission.default_evidence_requirements())
+                if isinstance(item, str)
+            ]
+        )
+        return RepairTaskPacketPreview(
+            issue_id=session.issue_id,
+            goal=goal,
+            acceptance_criteria=tuple(acceptance_criteria),
+            allowed_paths=tuple(
+                item for item in packet.get("allowed_paths", []) if isinstance(item, str)
+            ),
+            command_policy={
+                command: policy
+                for command, policy in packet.get("command_policy", {}).items()
+                if isinstance(command, str) and isinstance(policy, str)
+            }
+            if isinstance(packet.get("command_policy", {}), dict)
+            else {},
+            evidence_requirements=tuple(evidence_requirements),
+            assigned_agent=session.assigned_agent,
+            review_reason=review.reason,
         )
 
     @staticmethod
@@ -10386,8 +11514,16 @@ class WorkspaceSnapshotService:
                 delete=False,
             ) as temporary:
                 temporary.write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+                temporary.flush()
+                os.fsync(temporary.fileno())
                 temporary_path = Path(temporary.name)
             temporary_path.replace(path)
+            if os.name == "posix":
+                directory_fd = os.open(path.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
         finally:
             if temporary_path is not None and temporary_path.exists():
                 temporary_path.unlink()

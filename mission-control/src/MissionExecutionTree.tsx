@@ -22,7 +22,15 @@ import {
   workstationActionStateId,
   workstationActionTargetId,
 } from "./workstation-projection";
-import type { ReviewDecision, WorkspaceQueueDecision } from "./contracts";
+import type {
+  LocalInferenceLeaseEntry,
+  LocalInferenceProjection,
+  LocalInferenceReceiptProjection,
+  LocalInferenceSessionProjection,
+  ReviewDecision,
+  WorkspaceQueueDecision,
+} from "./contracts";
+import { RetirementInspectionDetails } from "./RetirementInspectionDetails";
 
 export type MissionExecutionOutputState = "unavailable" | "subscribing" | "subscribed" | "failed";
 
@@ -37,6 +45,8 @@ interface MissionExecutionOutputFailure {
 interface MissionExecutionActionDraft {
   readonly reason: string;
   readonly agentId: string;
+  readonly destination: string;
+  readonly confirmation: string;
 }
 
 interface MissionExecutionActionState {
@@ -90,6 +100,284 @@ export interface MissionExecutionTreeProps {
   ) => void;
   readonly onOpenView?: (view: string) => void;
   readonly agentOptions?: readonly { readonly id: string; readonly model?: string }[];
+}
+
+export interface LocalInferenceOverviewProps {
+  readonly projection?: LocalInferenceProjection;
+}
+
+export function LocalInferenceOverview({
+  projection,
+}: LocalInferenceOverviewProps): ReactElement {
+  const lease = projection?.lease;
+  const active = lease?.active ?? null;
+  const queued = lease?.queued ?? [];
+  const last = projection?.last_turn ?? null;
+  const status = active
+    ? "Running"
+    : queued.length > 0
+      ? "Queued"
+      : last
+        ? last.authoritative
+          ? "Complete"
+          : "Non-authoritative"
+        : "Idle";
+  const statusTone = active
+    ? "active"
+    : queued.length > 0
+      ? "queued"
+      : last?.authoritative
+        ? "complete"
+        : last
+          ? "failed"
+          : "idle";
+  const resident = lease?.resident ?? null;
+
+  return (
+    <section
+      className="local-inference-overview"
+      data-state={statusTone}
+      aria-label="Local Inference telemetry"
+    >
+      <header className="local-inference-overview__heading">
+        <div>
+          <span className="eyebrow">Instrumented runtime / bounded turns</span>
+          <h3>Local Inference</h3>
+          <p>
+            Profile admission, model identity, lease activity, and result authority stay visible
+            beside canonical Mission Work.
+          </p>
+        </div>
+        <span className={`local-inference-status local-inference-status--${statusTone}`}>
+          {status}
+        </span>
+      </header>
+
+      {!projection || !lease ? (
+        <p className="local-inference-empty">
+          No local inference telemetry is recorded for this Mission yet.
+        </p>
+      ) : (
+        <>
+          <dl className="local-inference-overview__facts">
+            <div>
+              <dt>Turn records</dt>
+              <dd>{projection.turn_count}</dd>
+            </div>
+            <div>
+              <dt>Resident model</dt>
+              <dd>
+                {resident
+                  ? `${resident.model} · ${resident.digest}`
+                  : "No qualified resident recorded"}
+              </dd>
+            </div>
+            <div>
+              <dt>Queue</dt>
+              <dd>{queued.length > 0 ? `${queued.length} waiting` : "Empty"}</dd>
+            </div>
+            <div>
+              <dt>Authority boundary</dt>
+              <dd>
+                {last?.authoritative
+                  ? "Complete schema-valid result"
+                  : last
+                    ? "No model result entered governance"
+                    : "No result recorded"}
+              </dd>
+            </div>
+          </dl>
+
+          {active ? (
+            <div className="local-inference-overview__lease" aria-label="Active local inference lease">
+              <div>
+                <strong>Active lease</strong>
+                <span>
+                  {active.model} · {active.model_digest} · {active.mission_id}/{active.session_id}
+                </span>
+              </div>
+              <small>
+                Priority {active.priority} · sequence {active.sequence} · {active.resident_match
+                  ? "qualified resident affinity"
+                  : "model placement may require a swap"}
+              </small>
+            </div>
+          ) : null}
+
+          {queued.length > 0 ? (
+            <div className="local-inference-overview__queue">
+              <div className="local-inference-overview__subheading">
+                <h4>Visible queue</h4>
+                <span>Priority, resident affinity, then FIFO</span>
+              </div>
+              <ol aria-label="Queued local inference requests">
+                {queued.map((entry) => (
+                  <li key={entry.lease_id}>
+                    <span>
+                      <strong>Priority {entry.priority}</strong> · {entry.model} · {entry.model_digest}
+                    </span>
+                    <small>
+                      {entry.mission_id}/{entry.session_id} · sequence {entry.sequence} · {leaseAffinity(entry, resident)}
+                    </small>
+                  </li>
+                ))}
+              </ol>
+            </div>
+          ) : null}
+
+          {last ? (
+            <LocalInferenceReceiptDetails receipt={last} compact />
+          ) : (
+            <p className="local-inference-empty">No completed or failed inference turn recorded.</p>
+          )}
+          <p className="local-inference-overview__boundary">
+            The lease serializes local model work only; Mission governance remains authoritative.
+          </p>
+        </>
+      )}
+    </section>
+  );
+}
+
+export function LocalInferenceTelemetry({
+  projection,
+}: {
+  readonly projection?: LocalInferenceSessionProjection;
+}): ReactElement {
+  return (
+    <section
+      className="mission-execution-inspector__section local-inference-telemetry"
+      aria-label="Local Inference telemetry for this session"
+    >
+      <div className="mission-execution-inspector__section-heading">
+        <h5>Local Inference telemetry</h5>
+        <span>
+          {projection?.state === "authoritative"
+            ? "Complete bounded result"
+            : projection?.state === "non-authoritative"
+              ? "Non-authoritative outcome"
+              : "No turn recorded"}
+        </span>
+      </div>
+      {!projection || projection.state === "none" || !projection.last ? (
+        <p className="local-inference-empty">
+          No local inference turn is recorded for this session.
+        </p>
+      ) : (
+        <LocalInferenceReceiptDetails receipt={projection.last} />
+      )}
+    </section>
+  );
+}
+
+function LocalInferenceReceiptDetails({
+  receipt,
+  compact = false,
+}: {
+  readonly receipt: LocalInferenceReceiptProjection;
+  readonly compact?: boolean;
+}): ReactElement {
+  const profile = receipt.profile;
+  return (
+    <div className={`local-inference-receipt${compact ? " local-inference-receipt--compact" : ""}`}>
+      <dl className="local-inference-receipt__facts">
+        <div><dt>Outcome</dt><dd>{localInferenceOutcomeLabel(receipt.outcome)}</dd></div>
+        <div><dt>Authority</dt><dd>{receipt.authoritative ? "Authoritative result" : "Non-authoritative"}</dd></div>
+        <div><dt>Model</dt><dd>{profile.model}</dd></div>
+        <div><dt>Exact digest</dt><dd>{profile.model_digest}</dd></div>
+        <div><dt>Profile</dt><dd>{profile.profile_id} · v{profile.version}</dd></div>
+        <div><dt>Keep-alive</dt><dd>{String(profile.keep_alive)}</dd></div>
+        <div><dt>Context / output</dt><dd>{profile.context_budget} / {profile.output_budget} tokens</dd></div>
+        <div><dt>Thinking / sampling</dt><dd>{profile.thinking ? "on" : "off"} · {samplingLabel(profile.sampling)}</dd></div>
+        <div><dt>Quantization</dt><dd>{profile.quantization}</dd></div>
+        <div><dt>Residency / placement</dt><dd>{profile.residency} / {profile.processor_placement}</dd></div>
+        <div><dt>Admission</dt><dd>{admissionLabel(receipt)}</dd></div>
+        <div><dt>Usage</dt><dd>{usageLabel(receipt)}</dd></div>
+        <div><dt>Timings</dt><dd>{timingsLabel(receipt.timings)}</dd></div>
+        <div><dt>Recorded</dt><dd>{receipt.recorded_at}</dd></div>
+      </dl>
+      <details className="local-inference-receipt__schema">
+        <summary>Declared schema and request identity</summary>
+        <p>
+          <span>Request</span> <code>{receipt.request_id}</code> · <span>Turn</span> <code>{receipt.turn_kind}</code>
+        </p>
+        <pre>{schemaLabel(profile.schema)}</pre>
+      </details>
+      {receipt.error ? <p className="local-inference-receipt__error">{receipt.error}</p> : null}
+    </div>
+  );
+}
+
+function localInferenceOutcomeLabel(outcome: string): string {
+  const labels: Readonly<Record<string, string>> = {
+    completed: "Completed · schema-valid",
+    "rejected-over-budget": "Rejected · output headroom unavailable",
+    "profile-not-qualified": "Rejected · profile not qualified",
+    "metadata-error": "Rejected · model metadata unavailable",
+    "digest-mismatch": "Rejected · digest mismatch",
+    "partial-stream": "Non-authoritative · partial stream",
+    "malformed-stream": "Non-authoritative · malformed stream",
+    "malformed-output": "Non-authoritative · malformed output",
+    "oversized-output": "Non-authoritative · oversized output",
+    "timed-out": "Non-authoritative · timed out",
+    cancelled: "Non-authoritative · cancelled",
+    "transport-error": "Non-authoritative · transport error",
+    "queue-full": "Non-authoritative · queue full",
+    "lease-timeout": "Non-authoritative · lease timeout",
+    "lease-lost": "Non-authoritative · lease lost",
+    "ledger-invalid": "Non-authoritative · ledger invalid",
+  };
+  return labels[outcome] ?? `Non-authoritative · ${outcome}`;
+}
+
+function leaseAffinity(
+  entry: LocalInferenceLeaseEntry,
+  resident: LocalInferenceProjection["lease"]["resident"],
+): string {
+  if (
+    resident &&
+    entry.residency === "normal" &&
+    entry.model === resident.model &&
+    entry.model_digest === resident.digest
+  ) {
+    return "qualified resident";
+  }
+  return "model swap candidate";
+}
+
+function samplingLabel(sampling: Readonly<Record<string, number>>): string {
+  return Object.entries(sampling)
+    .map(([key, value]) => `${key}=${value}`)
+    .join(", ") || "none";
+}
+
+function admissionLabel(receipt: LocalInferenceReceiptProjection): string {
+  const admission = receipt.admission;
+  return `${admission.admitted ? "admitted" : "rejected"} · ${admission.prompt_tokens} prompt / ${admission.output_headroom} headroom`;
+}
+
+function usageLabel(receipt: LocalInferenceReceiptProjection): string {
+  const usage = receipt.usage;
+  return `${usage.prompt_tokens ?? "?"} prompt / ${usage.output_tokens} output tokens · ${usage.output_bytes} bytes`;
+}
+
+function timingsLabel(timings: LocalInferenceReceiptProjection["timings"]): string {
+  return [
+    `load ${durationLabel(timings.load_ms)}`,
+    `prompt ${durationLabel(timings.prompt_evaluation_ms)}`,
+    `first ${durationLabel(timings.first_token_ms)}`,
+    `decode ${durationLabel(timings.decoding_ms)}`,
+  ].join(" · ");
+}
+
+function durationLabel(value: number | null): string {
+  return value === null ? "—" : `${value} ms`;
+}
+
+function schemaLabel(schema: LocalInferenceReceiptProjection["profile"]["schema"]): string {
+  if (schema === "json") return 'format: "json"';
+  const encoded = JSON.stringify(schema, null, 2) ?? "{}";
+  return encoded.length > 4_096 ? `${encoded.slice(0, 4_096)}\n… schema display truncated` : encoded;
 }
 
 export function MissionExecutionTree({
@@ -307,7 +595,7 @@ export function MissionExecutionTree({
                     : 1
                 }
                 aria-selected={selectedNodeId === node.id}
-                aria-label={`${node.kind === "agent-session" ? "Local Agent session" : node.kind} ${node.identity}; ${node.title}; ${nodeStateLabel(node.state)}; ${riskLabel(node.risk)}${node.lineage === "repair" ? "; Repair lineage" : ""}`}
+                aria-label={`${node.kind === "agent-session" ? "Local Agent session" : node.kind === "archive" ? "Archived work" : node.kind} ${node.identity}; ${node.title}; ${nodeStateLabel(node.state)}; ${riskLabel(node.risk)}${node.lineage === "repair" ? "; Repair lineage" : ""}`}
                 aria-expanded={node.child_ids.length > 0 ? expandedNodeIds.has(node.id) : undefined}
                 tabIndex={
                   focusedNodeId === node.id || (!focusedNodeId && node.id === visibleNodes[0]?.id)
@@ -332,7 +620,7 @@ export function MissionExecutionTree({
                 />
                 <span className="mission-execution-node__copy">
                   <span className="mission-execution-node__identity">
-                    {node.kind === "agent-session" ? "Local Agent session / " : `${node.kind} / `}
+                    {node.kind === "agent-session" ? "Local Agent session / " : node.kind === "archive" ? "Archived work / " : `${node.kind} / `}
                     {node.identity}
                   </span>
                   <strong>{node.title}</strong>
@@ -350,7 +638,7 @@ export function MissionExecutionTree({
                 <button
                   type="button"
                   className="mission-execution-node__disclosure"
-                  aria-label={`${expandedNodeIds.has(node.id) ? "Collapse" : "Expand"} ${node.kind === "agent-session" ? "Local Agent session" : node.kind === "issue-slice" ? "Issue Slice" : node.kind === "ad-hoc-delegation" ? "Ad Hoc Delegation" : "Mission"} ${node.identity}`}
+                  aria-label={`${expandedNodeIds.has(node.id) ? "Collapse" : "Expand"} ${node.kind === "agent-session" ? "Local Agent session" : node.kind === "issue-slice" ? "Issue Slice" : node.kind === "ad-hoc-delegation" ? "Ad Hoc Delegation" : node.kind === "archive" ? "Archived work" : "Mission"} ${node.identity}`}
                   aria-expanded={expandedNodeIds.has(node.id)}
                   onClick={() => toggleNode(node)}
                 >
@@ -551,6 +839,15 @@ function MissionExecutionInspector({
         ...(session.commands_run ?? []).map((command) => `Command observed: ${command}`),
         session.changed_files?.length ? `${session.changed_files.length} touched file(s) observed` : "",
         session.evidence_correlation_id ? "Evidence Package acknowledged" : "",
+        session.supervision_receipt_id
+          ? `Supervision receipt: ${session.supervision_receipt_id} · ${session.supervision_outcome || "recorded"}`
+          : "",
+        session.automatic_recovery_count
+          ? `Automatic recovery: ${session.automatic_recovery_count} of 1 used`
+          : "",
+        session.supervision_outcome === "decision-needed"
+          ? "Mission Commander decision required; further automatic recovery is disabled"
+          : "",
         session.review_outcome ? `Review Decision: ${session.review_outcome}` : "",
         session.review_next_action ? `Next governed action: ${session.review_next_action}` : "",
       ].filter(Boolean)
@@ -559,7 +856,7 @@ function MissionExecutionInspector({
         issue?.progress ? `Progress: ${issue.progress}` : "",
         evidence?.state ? `Evidence state: ${evidence.state}` : "",
       ].filter(Boolean);
-  const actions = card?.detail.governedActions ?? [];
+  const actions = node.governed_actions ?? card?.detail.governedActions ?? [];
   const evidenceLinks = card?.detail.evidenceLinks ?? [];
   const files = session?.changed_files !== undefined
     ? session.changed_files.map((path) => ({ path, status: "touched" }))
@@ -580,9 +877,9 @@ function MissionExecutionInspector({
     >
       <header className="mission-execution-inspector__heading">
         <div>
-          <span className="eyebrow">{node.kind === "agent-session" ? "Local Agent session" : node.kind === "ad-hoc-delegation" ? "Ad Hoc Delegation" : "Issue Slice"}</span>
+          <span className="eyebrow">{node.kind === "agent-session" ? "Local Agent session" : node.kind === "ad-hoc-delegation" ? "Ad Hoc Delegation" : node.kind === "archive" ? "Archived work" : "Issue Slice"}</span>
           <h4 id={headingId}>
-            {node.kind === "agent-session" ? "Local Agent session / " : `${node.kind} / `}
+            {node.kind === "agent-session" ? "Local Agent session / " : node.kind === "archive" ? "Archived work / " : `${node.kind} / `}
             {node.identity}
           </h4>
           <p>{node.title}</p>
@@ -605,6 +902,8 @@ function MissionExecutionInspector({
         <div><dt>Evidence risk</dt><dd>{issue?.evidence.risks.trim() || "None recorded."}</dd></div>
       </dl>
 
+      {session ? <LocalInferenceTelemetry projection={session.inference} /> : null}
+
       {node.kind === "issue-slice" && issue ? (
         <section className="mission-execution-inspector__section">
           <h5>Dependencies</h5>
@@ -615,6 +914,21 @@ function MissionExecutionInspector({
               ))}
             </ul>
           )}
+        </section>
+      ) : null}
+
+      {node.blocker_recommendations && node.blocker_recommendations.length > 0 ? (
+        <section className="mission-execution-inspector__section" aria-label="Blocker recommendations">
+          <h5>Blocker recommendations</h5>
+          {node.blocker_recommendations.map((recommendation) => (
+            <dl key={recommendation.blocker_id} className="mission-execution-inspector__blocker-recommendation">
+              <div><dt>Dependency</dt><dd>{recommendation.blocker_id} · {recommendation.title}</dd></div>
+              <div><dt>Rationale</dt><dd>{recommendation.rationale}</dd></div>
+              <div><dt>Proposed acceptance</dt><dd>{recommendation.proposed_acceptance}</dd></div>
+              <div><dt>Assigned actor</dt><dd>{recommendation.assigned_actor}</dd></div>
+              <div><dt>Dependency consequence</dt><dd>{recommendation.dependency_consequence}</dd></div>
+            </dl>
+          ))}
         </section>
       ) : null}
 
@@ -666,6 +980,14 @@ function MissionExecutionInspector({
           </button>
         ))}
       </section>
+
+      {card ? (
+        <RetirementInspectionDetails
+          detail={card.detail}
+          sectionClassName="mission-execution-inspector__section"
+          factsClassName="mission-execution-inspector__facts"
+        />
+      ) : null}
 
       {node.kind === "agent-session" ? (
         <section className="mission-execution-inspector__section mission-execution-inspector__output" aria-label={`${node.identity} detailed Local Agent output`}>
@@ -767,7 +1089,12 @@ function MissionExecutionGovernedAction({
   const actionKey = workstationActionKey(action);
   const isReview = action.actionType === "review-decision" && Boolean(action.sessionId && action.reviewDecision);
   const isQueue = action.actionType === "workspace-queue-decision" && Boolean(action.itemId && action.decision);
-  const draft = workstationActionDrafts?.[actionKey] ?? { reason: "", agentId: "" };
+  const draft = workstationActionDrafts?.[actionKey] ?? {
+    reason: "",
+    agentId: "",
+    destination: "",
+    confirmation: "",
+  };
   const reason = isReview && action.reviewDecision === "repair"
     ? reviewReasons?.[action.sessionId ?? ""] ?? ""
     : isQueue
@@ -780,12 +1107,18 @@ function MissionExecutionGovernedAction({
   const disabled = Boolean(action.disabledReason) ||
     Boolean(actionStatusId?.state === "pending") ||
     (action.requiresReason && !reason.trim()) ||
+    (action.requiresDestination && !draft.destination.trim()) ||
+    (action.requiresConfirmation && draft.confirmation.trim() !== targetId) ||
     (requiresAgent && !draft.agentId.trim());
   const consequence = workstationActionConsequence(action);
   const actionGuidance = action.disabledReason
     ? `Unavailable: ${action.disabledReason}`
     : action.requiresReason && !reason.trim()
       ? `Enter a reason to enable ${action.label}${targetId ? ` for ${targetId}` : ""}.`
+      : action.requiresDestination && !draft.destination.trim()
+        ? `Enter an export destination to enable ${action.label}${targetId ? ` for ${targetId}` : ""}.`
+        : action.requiresConfirmation && draft.confirmation.trim() !== targetId
+          ? `Enter the exact session id ${targetId} to enable ${action.label}.`
       : requiresAgent && !draft.agentId.trim()
         ? `Select an eligible local agent to enable ${action.label}${targetId ? ` for ${targetId}` : ""}.`
         : action.recoveryPath
@@ -822,6 +1155,20 @@ function MissionExecutionGovernedAction({
         <small id={guidanceId} className="mission-execution-inspector__action-recovery">
           {actionGuidance}
         </small>
+      ) : null}
+      {action.repairTaskPacket ? (
+        <section className="mission-execution-inspector__repair-preview" aria-label="Inherited repair task packet">
+          <strong>Inherited repair task packet</strong>
+          <dl>
+            <div><dt>Goal</dt><dd>{action.repairTaskPacket.goal}</dd></div>
+            <div><dt>Acceptance</dt><dd>{action.repairTaskPacket.acceptance_criteria.join(" · ") || "No acceptance criteria recorded."}</dd></div>
+            <div><dt>Allowed paths</dt><dd>{action.repairTaskPacket.allowed_paths.join(", ") || "No additional paths recorded."}</dd></div>
+            <div><dt>Command policy</dt><dd>{Object.entries(action.repairTaskPacket.command_policy).map(([command, policy]) => `${command}: ${policy}`).join(" · ") || "No command policy recorded."}</dd></div>
+            <div><dt>Evidence required</dt><dd>{action.repairTaskPacket.evidence_requirements.join(" · ") || "No evidence requirements recorded."}</dd></div>
+            <div><dt>Assigned Local Agent</dt><dd>{action.repairTaskPacket.assigned_agent}</dd></div>
+            <div><dt>Review reason</dt><dd>{action.repairTaskPacket.review_reason}</dd></div>
+          </dl>
+        </section>
       ) : null}
       {requiresAgent ? (
         <label>
@@ -860,11 +1207,42 @@ function MissionExecutionGovernedAction({
           />
         </label>
       ) : null}
+      {action.requiresDestination ? (
+        <label>
+          <span>Export destination</span>
+          <input
+            aria-label={`${action.label} destination`}
+            value={draft.destination}
+            onChange={(event) =>
+              onWorkstationActionDraftChange?.(actionKey, {
+                ...draft,
+                destination: event.target.value,
+              })
+            }
+          />
+        </label>
+      ) : null}
+      {action.requiresConfirmation ? (
+        <label>
+          <span>Confirm exact session id</span>
+          <input
+            aria-label={`${action.label} confirmation`}
+            value={draft.confirmation}
+            onChange={(event) =>
+              onWorkstationActionDraftChange?.(actionKey, {
+                ...draft,
+                confirmation: event.target.value,
+              })
+            }
+          />
+        </label>
+      ) : null}
       <button
         type="button"
         aria-label={action.label}
         aria-describedby={[consequenceId, actionGuidance ? guidanceId : ""].filter(Boolean).join(" ")}
         disabled={disabled}
+        className={action.actionType === "retirement-discard" ? "action--danger" : undefined}
         onClick={submit}
       >
         {action.label}

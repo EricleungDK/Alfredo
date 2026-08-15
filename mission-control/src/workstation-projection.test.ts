@@ -4,6 +4,7 @@ import {
   projectMissionExecutionTree,
   projectWorkstationCards,
   workstationActionConsequence,
+  type WorkstationGovernedAction,
 } from "./workstation-projection";
 
 const baseSnapshot: WorkspaceSnapshot = {
@@ -559,6 +560,145 @@ test("uses typed Ad Hoc identity instead of display labels or issue-id patterns"
   );
 });
 
+test("retains archived completed Issue Slice subtrees under a restorable Mission Work archive", () => {
+  const archivedSnapshot = {
+    ...baseSnapshot,
+    missions: [
+      {
+        ...baseSnapshot.missions![0],
+        archived_issue_ids: ["ISS-02"],
+      },
+    ],
+  } as WorkspaceSnapshot;
+
+  const projection = projectMissionExecutionTree(archivedSnapshot);
+  const node = (id: string) => projection.nodes.find((candidate) => candidate.id === id);
+
+  expect(node("archive:command-deck")).toMatchObject({
+    kind: "archive",
+    identity: "archived-work",
+    parent_id: "mission:command-deck",
+    child_ids: ["issue:command-deck:ISS-02"],
+  });
+  expect(node("issue:command-deck:ISS-02")).toMatchObject({
+    parent_id: "archive:command-deck",
+    archived: true,
+    child_ids: ["session:command-deck:session-ISS-02-1"],
+  });
+  expect(node("issue:command-deck:ISS-02")?.governed_actions).toContainEqual(
+    expect.objectContaining({ actionType: "issue-restore", label: "Restore Issue Slice" }),
+  );
+});
+
+test("previews the inherited canonical repair task packet before the single repair launch", () => {
+  const repairPacket = {
+    issue_id: "ISS-01",
+    goal: "Build the prompt-dominant shell.",
+    acceptance_criteria: ["Prompt shell renders."],
+    allowed_paths: ["mission-control/src"],
+    command_policy: { npm: "auto-allowed" },
+    evidence_requirements: ["Tests pass."],
+    assigned_agent: "qwen-coder-local",
+    review_reason: "The accessibility assertion is missing.",
+  };
+  const repairSnapshot = {
+    ...baseSnapshot,
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      issue_slices: [
+        {
+          ...baseSnapshot.mission_board.issue_slices![0],
+          lifecycle: "Needs repair",
+        },
+      ],
+    },
+    missions: [
+      {
+        ...baseSnapshot.missions![0],
+        sessions: [
+          {
+            ...baseSnapshot.missions![0].sessions[0],
+            repair_action_available: true,
+            repair_task_packet: repairPacket,
+          },
+        ],
+      },
+    ],
+  } as WorkspaceSnapshot;
+
+  const action = projectWorkstationCards(repairSnapshot)
+    .groups
+    .flatMap((group) => group.cards)
+    .find((card) => card.sessionId === "session-ISS-01-1")
+    ?.detail.governedActions.find((candidate) => candidate.label === "Launch repair") as
+      | WorkstationGovernedAction
+      | undefined;
+
+  expect(action?.repairTaskPacket).toEqual(repairPacket);
+  expect(workstationActionConsequence(action!)).toBe(
+    "Acknowledgement queues exactly one canonical repair session for session-ISS-01-1 from its inherited review task packet; it does not run inline or duplicate the prior session.",
+  );
+});
+
+test("explains why a blocked Issue Slice stays blocked until its exact dependency is accepted", () => {
+  const dependencySnapshot = {
+    ...baseSnapshot,
+    mission_board: {
+      ...baseSnapshot.mission_board,
+      ordered_issue_ids: ["ISS-BLOCKER", "ISS-BLOCKED"],
+      issue_slices: [
+        {
+          ...baseSnapshot.mission_board.issue_slices![0],
+          issue_id: "ISS-BLOCKER",
+          title: "Complete the prerequisite evidence",
+          lifecycle: "Needs repair",
+          accepted_boundary: {
+            ...baseSnapshot.mission_board.issue_slices![0].accepted_boundary,
+            acceptance_criteria: ["Accepted prerequisite evidence is recorded."],
+          },
+          model_assignment: {
+            ...baseSnapshot.mission_board.issue_slices![0].model_assignment,
+            agent_id: "dependency-worker",
+          },
+        },
+        {
+          ...baseSnapshot.mission_board.issue_slices![1],
+          issue_id: "ISS-BLOCKED",
+          title: "Start only after the prerequisite",
+          lifecycle: "Approved",
+          launch_eligible: false,
+          blockers: [
+            {
+              issue_id: "ISS-BLOCKER",
+              title: "Complete the prerequisite evidence",
+              lifecycle: "Needs repair",
+              satisfied: false,
+            },
+          ],
+        },
+      ],
+    },
+  } as WorkspaceSnapshot;
+
+  const blockedNode = projectMissionExecutionTree(dependencySnapshot).nodes.find(
+    (node) => node.id === "issue:command-deck:ISS-BLOCKED",
+  ) as
+    | { blocker_recommendations?: readonly unknown[] }
+    | undefined;
+
+  expect(blockedNode?.blocker_recommendations).toEqual([
+    {
+      blocker_id: "ISS-BLOCKER",
+      title: "Complete the prerequisite evidence",
+      rationale: "ISS-BLOCKED remains blocked because ISS-BLOCKER is Needs repair.",
+      proposed_acceptance: "Accepted prerequisite evidence is recorded.",
+      assigned_actor: "dependency-worker",
+      dependency_consequence:
+        "ISS-BLOCKED remains blocked until ISS-BLOCKER has an accepted reviewed outcome; creating or approving follow-up work does not unblock ISS-BLOCKED.",
+    },
+  ]);
+});
+
 test("describes governed action consequences independently of recovery guidance", () => {
   const action = projectWorkstationCards(baseSnapshot)
     .groups
@@ -591,6 +731,68 @@ test("keeps frontend-only pending intent separate from accepted workstation stat
   expect(projection.groups.flatMap((group) => group.cards).every((card) => card.acceptedRevision === 12)).toBe(
     true,
   );
+});
+
+test("projects failed runner supervision as a Mission Work decision", () => {
+  const snapshot: WorkspaceSnapshot = {
+    ...baseSnapshot,
+    missions: [
+      {
+        ...baseSnapshot.missions![0],
+        sessions: [
+          {
+            ...baseSnapshot.missions![0].sessions[0],
+            status: "failed",
+            supervision_receipt_id: "supervision-receipt:failed-recovery",
+            supervision_outcome: "decision-needed",
+            automatic_recovery_count: 1,
+          },
+        ],
+        attention: [
+          {
+            attention_id: "runner-attention:failed-recovery",
+            mission_id: "command-deck",
+            kind: "runner-supervision",
+            label: "Automatic runner recovery failed; Mission Commander decision required",
+            queue_link: "mission-work#session-ISS-01-1",
+            entity_id: "session-ISS-01-1",
+            queue_item_id: "",
+          },
+        ],
+      },
+    ],
+  };
+
+  const cards = projectWorkstationCards(snapshot).groups.flatMap((group) => group.cards);
+  const attention = cards.find(
+    (card) => card.id === "attention:command-deck:runner-attention:failed-recovery",
+  );
+  const session = projectMissionExecutionTree(snapshot).nodes.find(
+    (node) => node.id === "session:command-deck:session-ISS-01-1",
+  );
+
+  expect(attention).toMatchObject({
+    sessionId: "session-ISS-01-1",
+    issueId: "ISS-01",
+    status: "failed",
+    phase: "Supervision",
+    approvalBlockers: [],
+    nextAction: "Choose manual Retry with a reason, or leave the session stopped",
+  });
+  expect(attention?.detail.reviewState).toMatchObject({
+    lifecycle: "Decision required",
+  });
+  expect(attention?.detail.governedActions).toEqual([
+    expect.objectContaining({
+      label: "Retry",
+      actionType: "issue-retry",
+      requiresReason: true,
+      missionId: "command-deck",
+      sessionId: "session-ISS-01-1",
+      issueId: "ISS-01",
+    }),
+  ]);
+  expect(session).toMatchObject({ attention: true });
 });
 
 test("projects canonical review repair launches for Issue Slice and Ad Hoc sessions", () => {
@@ -2360,4 +2562,115 @@ test("sorts blocked and waiting approval cards above routine active work while p
     ["running", "active"],
     ["review-ready", "active"],
   ]);
+});
+
+test("projects blocked Retirement Records and snapshot-storage exhaustion as governed Mission Work", () => {
+  const snapshot: WorkspaceSnapshot = {
+    ...baseSnapshot,
+    revision: 31,
+    missions: [
+      {
+        id: "command-deck",
+        title: "Command Deck Mission",
+        issue_count: 1,
+        is_active: true,
+        sessions: [
+          {
+            session_id: "session-retirement-blocked",
+            issue_id: "ISS-01",
+            assigned_agent: "qwen-coder-local",
+            status: "reviewed",
+            role: "local-agent",
+            provider: "ollama",
+            model: "qwen3.6:27b",
+            session_revision: 9,
+            retirement_phase: "retirement-blocked",
+            retirement_blocked_reason: "Retained worktree still has open handles.",
+            retirement_record: {
+              manifest_sha256: "a".repeat(64),
+              worktree_identity: "managed:session-retirement-blocked",
+              snapshot_bytes: 2048,
+              created_at: "2026-08-10T10:00:00+00:00",
+              expires_at: "2026-09-09T10:00:00+00:00",
+              pinned: false,
+              payload_disposition: "retained",
+            },
+            retirement_actions: {
+              retry: true,
+              inspect: true,
+              export: true,
+              discard: true,
+            },
+          },
+          {
+            session_id: "session-preservation-blocked",
+            issue_id: "ISS-02",
+            assigned_agent: "frontier-reviewer",
+            status: "reviewed",
+            session_revision: 4,
+            retirement_phase: "preservation-blocked",
+            retirement_blocked_reason: "Runner Quiescence is not yet proven.",
+            retirement_runner_boundary: { runner_operation_id: "operation-4" },
+            preservation_budget: { state: "reserved", reserved_bytes: 33554432 },
+            retirement_actions: {
+              retry: true,
+              inspect: true,
+              export: true,
+              discard: true,
+            },
+          },
+        ],
+        attention: [
+          {
+            attention_id: "retirement-storage-command-deck",
+            mission_id: "command-deck",
+            kind: "retirement-storage",
+            label: "Storage Budget is exhausted by protected snapshot payloads",
+            queue_link: "mission-work#retirement-storage",
+            entity_id: "snapshot-storage",
+            queue_item_id: "",
+          },
+        ],
+      },
+    ],
+  };
+
+  const cards = projectWorkstationCards(snapshot).groups.flatMap((group) => group.cards);
+  const blocked = cards.find((card) => card.sessionId === "session-retirement-blocked");
+  const preservationBlocked = cards.find(
+    (card) => card.sessionId === "session-preservation-blocked",
+  );
+  const storage = cards.find((card) => card.currentTask === "retirement-storage");
+
+  expect(blocked?.detail.retirementRecord).toMatchObject({
+    manifest_sha256: "a".repeat(64),
+    payload_disposition: "retained",
+  });
+  expect(blocked?.detail.governedActions.map((action) => action.actionType)).toEqual([
+    "retirement-retry",
+    "retirement-export",
+    "retirement-discard",
+    "retirement-pin",
+  ]);
+  expect(
+    blocked?.detail.governedActions.filter((action) => action.actionType).map((action) => action.expectedRevision),
+  ).toEqual([9, 9, 9, 9]);
+  expect(
+    preservationBlocked?.detail.governedActions.some(
+      (action) => action.actionType === "retirement-export",
+    ),
+  ).toBe(true);
+  expect(preservationBlocked?.detail).toMatchObject({
+    retirementPhase: "preservation-blocked",
+    retirementBlockedReason: "Runner Quiescence is not yet proven.",
+    retirementRunnerBoundary: { runner_operation_id: "operation-4" },
+    preservationBudget: { state: "reserved", reserved_bytes: 33554432 },
+  });
+  expect(storage).toMatchObject({
+    status: "blocked",
+    phase: "Snapshot Storage",
+    attention: true,
+    nextAction: expect.stringContaining("Inspect /storage"),
+  });
+  expect(storage?.detail.governedActions).toEqual([]);
 });

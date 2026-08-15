@@ -1867,7 +1867,7 @@ None - can start immediately
         self.assertIsNone(persisted.runner_pid)
         self.assertIsNone(persisted.runner_process_pid)
 
-    def test_restart_requeues_abandoned_runner_and_caps_crash_recovery(self):
+    def test_restart_fails_closed_for_legacy_runner_without_exact_recovery_identity(self):
         config_path = self.write_agent_config(
             [
                 {
@@ -1881,35 +1881,27 @@ None - can start immediately
         mission = self.load_mission_with_agent_config(config_path)
         mission.assign_issue("ISS-01", "fake-local")
         mission.approve_issue("ISS-01")
-        recoverable = mission.launch_issue("ISS-01")
-        exhausted = mission.launch_issue("ISS-01")
-
-        for session, prior_recoveries in ((recoverable, 0), (exhausted, 3)):
-            session.status = "running"
-            session.runner_started_at = "2026-07-10T18:00:00Z"
-            session.runner_pid = 999_999_999
-            session.runner_identity = "linux:999999999:missing"
-            session.task_packet["abandoned_runner_recovery_count"] = prior_recoveries
-            mission._persist_session_update(
-                session,
-                expected_statuses={"queued"},
-            )
+        with patch.object(mission, "_validate_target_repository_boundary"):
+            legacy = mission.launch_issue("ISS-01")
+        legacy.status = "running"
+        legacy.runner_started_at = "2026-07-10T18:00:00Z"
+        legacy.runner_pid = 999_999_999
+        legacy.runner_identity = "linux:999999999:missing"
+        mission._persist_session_update(
+            legacy,
+            expected_statuses={"queued"},
+        )
 
         reloaded = self.load_mission_with_agent_config(config_path)
 
-        recovered = reloaded.sessions[recoverable.session_id]
-        self.assertEqual(recovered.status, "queued")
-        self.assertIsNone(recovered.runner_pid)
-        self.assertEqual(recovered.runner_identity, "")
-        self.assertEqual(
-            recovered.task_packet["abandoned_runner_recovery_count"],
-            1,
-        )
-        terminal = reloaded.sessions[exhausted.session_id]
-        self.assertEqual(terminal.status, "failed")
-        self.assertEqual(terminal.runner_exit_status, 1)
-        self.assertTrue(terminal.runner_ended_at)
-        self.assertIn("exceeded the automatic recovery limit", "\n".join(reloaded.timeline))
+        unchanged = reloaded.sessions[legacy.session_id]
+        self.assertEqual(unchanged.status, "running")
+        self.assertEqual(unchanged.runner_pid, 999_999_999)
+        attentions = reloaded.supervision_state()["attentions"]
+        self.assertEqual(len(attentions), 1)
+        attention = next(iter(attentions.values()))
+        self.assertEqual(attention["next_effect"], "mission-commander-decision")
+        self.assertEqual(attention["disposition"], "open")
 
     def test_cancel_terminates_active_command_process_before_post_cancel_write(self):
         script = self.root / "cancellable_runner.py"
@@ -2130,9 +2122,10 @@ None - can start immediately
 
         self.assertNotEqual(first.worktree_path, repair.worktree_path)
         self.assertEqual(repair.task_packet["allowed_paths"], ["src/app.py"])
-        self.assertIn(
-            "PRIOR_AGENT_BROKEN = True",
-            (first.worktree_path / "src" / "app.py").read_text(encoding="utf-8"),
+        self.assertFalse(first.worktree_path.exists())
+        self.assertEqual(
+            mission.sessions[first.session_id].retirement["phase"],
+            "retired",
         )
         self.assertEqual(
             (repair.worktree_path / "src" / "app.py").read_text(encoding="utf-8"),
@@ -2391,7 +2384,7 @@ None - can start immediately
         ):
             mission.run_session(repair.session_id)
 
-        prior_change.write_text("STATE = 'newer-prior'\n", encoding="utf-8")
+        self.assertFalse(prior_change.exists())
         recovered_mission = self.load_mission_with_agent_config(config_path)
         recovered = recovered_mission.sessions[repair.session_id]
         self.assertEqual(recovered.status, "queued")
@@ -2543,6 +2536,11 @@ None - can start immediately
         mission.sessions[prior_id] = prior
         mission._persist()
         mission._ensure_session_worktree(prior)
+        prior.worktree_identity = mission._worktree_identity_for_session(prior)
+        mission.retirement_quiescence_probe = lambda _boundary: (
+            "absent",
+            "absent",
+        )
         (prior.worktree_path / "src" / "ad_hoc.py").write_text(
             "STATE = 'first-pass'\n", encoding="utf-8"
         )
@@ -3872,6 +3870,7 @@ None - can start immediately
             session_id=session.session_id,
             outcome="Approved",
             reason="Evidence satisfies the slice.",
+            expected_revision=mission.sessions[session.session_id].revision,
         )
         reloaded = self.load_mission_with_agent_config(config_path)
 
@@ -3903,6 +3902,7 @@ None - can start immediately
             session_id=session.session_id,
             outcome="approved",
             reason="Evidence satisfies the slice.",
+            expected_revision=mission.sessions[session.session_id].revision,
         )
         reloaded = self.load_mission_with_agent_config(config_path)
 
@@ -3934,6 +3934,7 @@ None - can start immediately
                 session_id=session.session_id,
                 outcome="ship-it",
                 reason="Typo.",
+                expected_revision=mission.sessions[session.session_id].revision,
             )
 
     def test_tui_review_action_blocks_approval_without_valid_evidence(self):
@@ -3949,6 +3950,7 @@ None - can start immediately
                 session_id=session.session_id,
                 outcome="Approved",
                 reason="No evidence yet.",
+                expected_revision=mission.sessions[session.session_id].revision,
             )
 
     def test_tui_review_action_routes_needs_repair_and_rejections(self):
@@ -3975,6 +3977,7 @@ None - can start immediately
             session_id=session.session_id,
             outcome="Needs repair",
             reason="Acceptance detail missing.",
+            expected_revision=mission.sessions[session.session_id].revision,
         )
         first_reject = perform_tui_action(
             mission,
@@ -3983,6 +3986,7 @@ None - can start immediately
             session_id=session.session_id,
             outcome="Rejected",
             reason="Still incomplete.",
+            expected_revision=mission.sessions[session.session_id].revision,
         )
         second_reject = perform_tui_action(
             mission,
@@ -3991,6 +3995,7 @@ None - can start immediately
             session_id=session.session_id,
             outcome="Rejected",
             reason="Still incomplete.",
+            expected_revision=mission.sessions[session.session_id].revision,
         )
 
         self.assertEqual(repair.next_action, "same-local-agent-repair")
@@ -4061,6 +4066,7 @@ None - can start immediately
             "ISS-01",
             session_id=first_session.session_id,
             allowed_paths=["prototype"],
+            expected_revision=mission.sessions[first_session.session_id].revision,
         )
         reloaded = self.load_mission_with_agent_config(config_path)
 
@@ -4077,6 +4083,7 @@ None - can start immediately
                 "ISS-01",
                 session_id=first_session.session_id,
                 allowed_paths=["prototype"],
+                expected_revision=reloaded.sessions[first_session.session_id].revision,
             )
         self.assertEqual(
             list(self.load_mission_with_agent_config(config_path).sessions),
@@ -4122,6 +4129,9 @@ None - can start immediately
                         "ISS-01",
                         session_id=first_session.session_id,
                         allowed_paths=["prototype"],
+                        expected_revision=candidate.sessions[
+                            first_session.session_id
+                        ].revision,
                     )
                 )
             except BaseException as exc:  # pragma: no cover - asserted below
@@ -4138,9 +4148,9 @@ None - can start immediately
         self.assertEqual(results[0].session_id, "session-ISS-01-2")
         self.assertEqual(len(errors), 1)
         self.assertIsInstance(errors[0], LaunchBlockedError)
-        self.assertIn(
-            "Repair was already launched for session-ISS-01-1 as session-ISS-01-2",
+        self.assertRegex(
             str(errors[0]),
+            "Repair was already launched|lifecycle revision is stale",
         )
         reloaded = self.load_mission_with_agent_config(config_path)
         repair_children = [
@@ -4557,6 +4567,8 @@ None - can start immediately
                     "evidence",
                     *base_args,
                     session_id,
+                    "--expected-revision",
+                    str(self.load_mission().sessions[session_id].revision),
                     "--changed-file",
                     "src/app.py",
                     "--diff-summary",
@@ -4575,7 +4587,22 @@ None - can start immediately
             )[0],
             0,
         )
-        self.assertEqual(self.run_cli(["review", *base_args, session_id, "--outcome", "Approved", "--reason", "Meets criteria."])[0], 0)
+        self.assertEqual(
+            self.run_cli(
+                [
+                    "review",
+                    *base_args,
+                    session_id,
+                    "--expected-revision",
+                    str(self.load_mission().sessions[session_id].revision),
+                    "--outcome",
+                    "Approved",
+                    "--reason",
+                    "Meets criteria.",
+                ]
+            )[0],
+            0,
+        )
         self.assertEqual(self.run_cli(["records", *base_args])[0], 0)
 
         exit_code, output = self.run_cli(["pr", *base_args, "ISS-01"])

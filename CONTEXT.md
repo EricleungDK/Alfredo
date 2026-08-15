@@ -30,13 +30,45 @@ The Alfredo product posture in which the complete primary path from Mission form
 
 A versioned, empirically qualified combination of local model identity and inference boundaries for one Alfredo role, including context and output budgets, thinking and sampling mode, weight and cache precision, residency, and concurrency. Qualification is based on governed reviewed-outcome evidence rather than raw token speed, and a profile does not confer Mission authority.
 
+### Governed Qualification Fixture
+
+A stable, bounded workload used to compare Local Inference Profiles across discussion, routing, edits, repair, malformed output, policy violations, cancellation, long context, model swaps, and queued Local Agents. A fixture run produces observation metadata and reviewed outcomes through the existing Orchestrator boundary; it does not make model output authoritative by itself.
+
+### Qualification Report
+
+A bounded, repeatable record of governed fixture observations for one exact Local Inference Profile and runtime pin. It includes route/plan/evidence validity, accepted outcomes, repair and escalation cost, decomposed inference timings, and goal-to-reviewed-Evidence-Package latency. Prompts, raw streams, source-dependent plans, Evidence Packages, authority decisions, and outcomes are never reusable cache truth.
+
+### Runtime Pin
+
+The exact non-withdrawn runtime version plus binary and configuration SHA-256 identities used by a promoted Local Inference Profile. Promotion and rollback retain the pin so a later runtime change cannot silently reuse qualification evidence.
+
+### Prompt-Prefix Reuse
+
+An observation that the exact digest of a bounded prompt prefix was reused. Only digest-keyed deterministic context-source selection may be reused; changing any source invalidates the prefix, and no source-dependent plan, evidence, authority decision, or outcome is cached.
+
 ### Local Inference Lease
 
 A temporary scheduling claim on bounded local inference capacity for one controller or Local Agent model turn. It may order or delay inference and expose non-authoritative loading, prefill, and generation progress, but it does not authorize work or change accepted Mission state; the Orchestrator continues to own cancellation, session, evidence, and review authority.
 
+### Execution Request
+
+A schema-versioned, exact argv host-effect description prepared by Python after authorization. It binds either Local Agent session/runner authority or Shell command/approval authority to canonical paths, Bubblewrap and environment boundaries, bounded input, resource limits, timeout, and output limits. It is an effect request, not Mission policy or canonical state authority.
+
+### Execution Receipt
+
+A typed provider outcome for one Execution Request, including start/completion/failure, timeout, output-limit, cancellation, and explicit outcome-unknown states. Durable receipts retain process identity and output/input digests and byte counts while raw streams remain transient. An exact terminal receipt may be replayed without re-running the external effect; an uncertain receipt requires reconciliation before any decision. Local Agent and Shell project only redacted receipt metadata into their existing canonical records; the shared ledger never becomes Mission policy authority.
+
 ### Local Agent
 
 A coding worker powered primarily by a local model through Ollama or a governed local command. Local Agents receive task packets with acceptance criteria and allowed paths, work in isolated session worktrees, execute commands inside a minimal Bubblewrap filesystem view, and must return an Evidence Package. Controller/router identities are not manually assignable workers. Cancelled Local Agent work is terminal unsuccessful work, not completed work.
+
+### Runner Observation
+
+A bounded advisory statement from one identified observer incarnation and ordered cursor about an exact Mission, Local Agent session revision, runner operation, Worktree Identity, owner/process-group liveness, and result boundary. It has no authority by itself; the Orchestrator independently rechecks every recovery precondition before changing canonical state.
+
+### Local Agent Attention Record
+
+A durable, receipt-bound supervision incident written before observer cursor progress is acknowledged. It records the exact recovery or reconciliation intent, or a fail-closed Mission Commander decision when runner state is ambiguous. Semantic duplicate observations replay the same receipt.
 
 ### Retirement Unit
 
@@ -64,11 +96,11 @@ The compact durable manifest of a Retirement Unit's identity, content hashes, au
 
 ### Snapshot Payload
 
-The private, space-consuming content referenced by a Retirement Record that makes a Retirement Snapshot reconstructable. It follows bounded retention and storage-budget policy and may be explicitly pinned without changing the record.
+The private, space-consuming content referenced by a Retirement Record that makes a Retirement Snapshot reconstructable. It follows bounded retention and storage-budget policy. Explicit pin and unpin actions update the compact record's policy state and advance the owning session revision without changing the immutable snapshot manifest.
 
 ### Snapshot Storage Budget
 
-The configurable aggregate app-local capacity available for Snapshot Payloads. It reclaims eligible unpinned payloads oldest first and blocks new Retirement Units rather than silently deleting policy-protected payloads when exhausted.
+The configurable aggregate app-local capacity available for Snapshot Payloads and bound Preservation Budgets. It reclaims eligible expired unpinned payloads oldest first during admission and startup; an unpin policy mutation only makes the payload eligible and may clear stale protected-exhaustion attention without deleting bytes. It exposes deterministic read-only Active-Mission usage and blocker inspection, projects protected exhaustion as Mission Work attention, and blocks new Retirement Units rather than silently deleting policy-protected payloads when exhausted.
 
 ### Retention Grace Period
 
@@ -80,7 +112,7 @@ The terminal unsuccessful outcome of a Retirement Unit after a stop request has 
 
 ### Retirement Blocked
 
-The state of a quiesced Retirement Unit after bounded automatic retirement attempts cannot complete. Automatic retries stop, its worktree remains retained, and the Mission Commander may retry, inspect, export, or explicitly discard it.
+The state of a quiesced Retirement Unit after bounded automatic retirement attempts cannot complete. Automatic retries stop, its worktree remains retained, and the Mission Commander may use exact receipt-bound retry, inspection, verified export, or explicit discard actions.
 
 ### Retained Worktree Discard
 
@@ -172,11 +204,11 @@ The unified arrival-ordered prompt lane where the Mission Commander talks with A
 
 ### Mission Work
 
-The persistent secondary lane beside Agent Console. It projects the Mission Execution Tree and makes each Local Agent session inspectable for its assigned work, current activity, status, evidence, and next action.
+The persistent secondary lane beside Agent Console. It projects the Mission Execution Tree and makes each Local Agent session inspectable for its assigned work, current activity, status, evidence, and next action. Governed cancellation, review, repair, blocker explanation, and completed Issue Slice archive/restore actions state their consequence before submission and display accepted outcomes only after their exact canonical acknowledgement.
 
 ### Mission Execution Tree
 
-The work-centered supervision model for a Mission. It presents Issue Slices and Ad Hoc Delegations with directly inspectable Local Agent sessions, nested delegations, current activity, review or repair state, blockers, and next actions as one hierarchy.
+The work-centered supervision model for a Mission. It presents Issue Slices and Ad Hoc Delegations with directly inspectable Local Agent sessions, nested delegations, current activity, review or repair state, blockers, and next actions as one hierarchy. Completed archived Issue Slices appear under retained history without losing their canonical identity, evidence, Activity Journal links, or nested sessions.
 
 ### Operations Workspace
 

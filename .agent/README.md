@@ -1,6 +1,6 @@
 # Alfredo / Albert Project Documentation
 
-**Last Updated**: 2026-08-03
+**Last Updated**: 2026-08-13
 **Status**: Prompt-first Alfredo workstation with a persistent Apple-container canonical localhost environment, explicit Coding Workspace/Mission continuity, and receipt-bound conversational action truth; authenticated npm publication, registry-only install, and the documented human/release follow-up remain explicit
 
 ## Quick Start
@@ -38,7 +38,12 @@
 │   ├── 2026-06-16-gemma26-repair-loop-verification.md
 │   ├── 2026-06-18-qwen-controlled-delegation.md
 │   ├── 2026-07-11-alfredo-one-shot-workstation.md
-│   └── 2026-07-12-alfredo-install-queue-acceptance-correction.md
+│   ├── 2026-07-12-alfredo-install-queue-acceptance-correction.md
+│   ├── 2026-08-09-issue-67-retirement-lifecycle.md
+│   ├── 2026-08-09-issue-68-retirement-storage.md
+│   ├── 2026-08-13-issue-69-local-inference-governance.md
+│   ├── 2026-08-13-issue-70-inference-qualification.md
+│   └── 2026-08-13-issue-71-host-execution.md
 │
 └── README.md                      # This file
 ```
@@ -71,6 +76,15 @@
 - [Wayfinder Shared Understanding Gate](Reports/2026-08-03-wayfinder-shared-understanding-gate.md) records the Issue #60 canonical entry, gate, and projection contract.
 - [Functional localhost workstation diagnosis](Reports/2026-08-03-functional-localhost-workstation.md) records the browser/native launch root causes, development bridge boundary, macOS path correction, lifecycle/concurrency prevention, and verification.
 - [Persistent Apple container development environment](Reports/2026-08-03-apple-container-development-environment.md) records the named-container lifecycle, isolated volumes, loopback forwarding boundary, canonical health check, restart evidence, and agent handoff.
+- [Governed Mission Work actions](Reports/2026-08-06-issue-64-governed-mission-work-actions.md) records Issue #64's retained completed-history archive/restore, inherited repair preview, blocker truth, and validation evidence.
+- [Deterministic runner supervision](Reports/2026-08-09-issue-65-deterministic-runner-supervision.md) records Issue #65's advisory observation ledger, exact recovery boundary, receipt replay, healthy silence, and Mission Work decision projection.
+- [Retirement preservation proof](Reports/2026-08-09-issue-66-retirement-preservation.md) records Issue #66's pre-execution budget reservation, lifecycle lock, Worktree Identity and quiescence gates, manifest integrity, and clean-room reconstruction boundary.
+- [Retirement lifecycle](Reports/2026-08-09-issue-67-retirement-lifecycle.md) records Issue #67's outcome policy, passive grace, durable recovery phases, bounded removal attempts, exact Git/directory removal, and verified repair lineage.
+- [Retirement storage and blocked outcomes](Reports/2026-08-09-issue-68-retirement-storage.md) records Issue #68's aggregate Snapshot Storage Budget, retention/reclamation/pinning, deterministic inspection, and replay-safe retry/export/discard actions.
+- [Local Inference runtime governance](Reports/2026-08-13-issue-69-local-inference-governance.md) records Issue #69's versioned Profiles, raw byte-bounded Ollama HTTP seam, running-model digest/processor evidence, non-authoritative Lease, projections, and validation evidence.
+- [Local Inference Profile qualification and promotion](Reports/2026-08-13-issue-70-inference-qualification.md) records Issue #70's governed fixture family, reviewed-outcome/timing reports, bounded context and prefix measurements, exact runtime pinning, and rollback state.
+- [Versioned host execution request/receipt boundary](Reports/2026-08-13-issue-71-host-execution.md) records Issue #71's shared Python provider, effect-specific authority inputs, bounded process enforcement, exact replay, crash-cut uncertainty, and raw-output separation.
+- [Shadow Rust execution receipts](Reports/2026-08-15-issue-72-rust-shadow-execution.md) records Issue #72 Rust JSONL candidate, Python-owned store hash guard, normalized parity, production-equivalent cohorts, and fail-closed eligibility gates.
 - [Workspace selection and false-success diagnosis](Reports/2026-07-24-workspace-selection-false-success-diagnosis.md) records the defect and the receipt-truth blueprint resolved by Issue #59.
 - [Alfredo one-shot workstation correction](Reports/2026-07-11-alfredo-one-shot-workstation.md) remains the historical implementation report.
 - Historical implementation reports remain in [`Reports/`](Reports/) and are indexed from [project architecture](System/project_architecture.md#implementation-report-index).

@@ -3051,6 +3051,443 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(entry.action_type, "issue-launch")
         self.assertEqual(entry.correlation_id, "workstation-launch-1")
 
+    def test_workstation_retirement_actions_project_and_append_exact_audit_entries(
+        self,
+    ) -> None:
+        process_isolation = patch(
+            "albert_mvp.core._process_isolated_argv",
+            side_effect=lambda argv: argv,
+        )
+        process_isolation.start()
+        self.addCleanup(process_isolation.stop)
+        (self.target_repo / ".albert").mkdir()
+        (self.target_repo / ".albert" / "agents.json").write_text(
+            json.dumps(
+                {
+                    "agents": [
+                        {
+                            "id": "retirement-local",
+                            "role": "local-agent",
+                            "provider": "test-harness",
+                            "runner": "fake",
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+        (self.tracker / "issues" / "02-retirement.md").write_text(
+            ISSUE,
+            encoding="utf-8",
+        )
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+
+        def blocked_session(issue_id: str):
+            mission.assign_issue(issue_id, "retirement-local")
+            mission.approve_issue(issue_id)
+            completed = mission.run_session(mission.launch_issue(issue_id).session_id)
+            with patch.object(
+                mission,
+                "_remove_retirement_worktree",
+                side_effect=AlbertError("simulated exact removal failure"),
+            ):
+                mission.record_frontier_review(
+                    completed.session_id,
+                    "Approved",
+                    reason="Create a workstation-visible blocked Retirement Unit.",
+                    allowed_session_statuses={"evidence-ready"},
+                    expected_revision=completed.revision,
+                )
+                mission.reconcile_retirement_unit(completed.session_id)
+            return mission._refresh_persisted_session(completed.session_id)
+
+        first = blocked_session("ISS-01")
+        second = blocked_session("ISS-02")
+        projected = next(
+            session
+            for summary in snapshots.snapshot().missions
+            for session in summary.sessions
+            if session.session_id == first.session_id
+        )
+        self.assertEqual(projected.retirement_phase, "retirement-blocked")
+        self.assertTrue(projected.retirement_actions["export"])
+        self.assertEqual(
+            projected.retirement_record["manifest_sha256"],
+            first.retirement["snapshot"]["manifest_sha256"],
+        )
+
+        actions = WorkstationActionService(snapshots)
+        pinned = actions.submit(
+            correlation_id="workstation-retirement-pin",
+            action_type="retirement-pin",
+            actor="mission-commander",
+            expected_revision=first.revision,
+            target_kind="agent-session",
+            target_id=first.session_id,
+            mission_id=mission.mission_id,
+            issue_id=first.issue_id,
+            session_id=first.session_id,
+            pin_state=True,
+        )
+        after_pin = mission._refresh_persisted_session(first.session_id)
+        exported = actions.submit(
+            correlation_id="workstation-retirement-export",
+            action_type="retirement-export",
+            actor="mission-commander",
+            expected_revision=after_pin.revision,
+            target_kind="agent-session",
+            target_id=first.session_id,
+            mission_id=mission.mission_id,
+            issue_id=first.issue_id,
+            session_id=first.session_id,
+            destination=str(self.root / "workstation-retirement-export"),
+        )
+        after_export = mission._refresh_persisted_session(first.session_id)
+        discarded = actions.submit(
+            correlation_id="workstation-retirement-discard",
+            action_type="retirement-discard",
+            actor="mission-commander",
+            expected_revision=after_export.revision,
+            target_kind="agent-session",
+            target_id=first.session_id,
+            mission_id=mission.mission_id,
+            issue_id=first.issue_id,
+            session_id=first.session_id,
+            confirmation=first.session_id,
+            reason="Mission Commander accepts exact irreversible deletion.",
+        )
+        retried = actions.submit(
+            correlation_id="workstation-retirement-retry",
+            action_type="retirement-retry",
+            actor="mission-commander",
+            expected_revision=second.revision,
+            target_kind="agent-session",
+            target_id=second.session_id,
+            mission_id=mission.mission_id,
+            issue_id=second.issue_id,
+            session_id=second.session_id,
+        )
+        replayed_pin = WorkstationActionService(self.load_service()).submit(
+            correlation_id="workstation-retirement-pin",
+            action_type="retirement-pin",
+            actor="mission-commander",
+            expected_revision=first.revision,
+            target_kind="agent-session",
+            target_id=first.session_id,
+            mission_id=mission.mission_id,
+            issue_id=first.issue_id,
+            session_id=first.session_id,
+            pin_state=True,
+        )
+
+        self.assertEqual(replayed_pin, pinned)
+        self.assertEqual(exported.action_type, "retirement-export")
+        self.assertEqual(discarded.action_type, "retirement-discard")
+        self.assertEqual(retried.action_type, "retirement-retry")
+        retirement_entries = [
+            entry
+            for entry in ActivityJournalService(self.load_service()).inspect().entries
+            if entry.action_type.startswith("retirement-")
+        ]
+        self.assertEqual(
+            [entry.action_type for entry in retirement_entries],
+            [
+                "retirement-pin",
+                "retirement-export",
+                "retirement-discard",
+                "retirement-retry",
+            ],
+        )
+        self.assertTrue(
+            all(entry.actor == "mission-commander" for entry in retirement_entries)
+        )
+        self.assertTrue(
+            all(
+                any(
+                    entity.entity_type == "local-agent-session"
+                    for entity in entry.affected_entities
+                )
+                for entry in retirement_entries
+            )
+        )
+
+    def test_storage_inspection_resolves_the_active_mission(self) -> None:
+        primary = self.load_service()._primary_mission
+        secondary_tracker = self.root / "secondary-tracker"
+        (secondary_tracker / "issues").mkdir(parents=True)
+        (secondary_tracker / "PRD.md").write_text(
+            "# Secondary Storage Mission\n",
+            encoding="utf-8",
+        )
+        secondary = AlbertMission(
+            target_repo=self.target_repo,
+            tracker_dir=secondary_tracker,
+            runtime_root=self.runtime,
+            mission_id="secondary-storage",
+            allow_empty_tracker=True,
+            snapshot_storage_budget_bytes=64 * 1024 * 1024,
+        ).load()
+        snapshots = WorkspaceSnapshotService(primary, missions=(secondary,))
+        current = snapshots.snapshot()
+        snapshots.update_preferences(
+            active_mission_id=secondary.mission_id,
+            conversation_scope=current.conversation_scope,
+            operations_view=current.operations_view,
+        )
+
+        inspection = snapshots.active_retirement_storage_inspection()
+
+        self.assertEqual(inspection["policy"]["budget_bytes"], 64 * 1024 * 1024)
+
+    def test_active_session_projects_no_retirement_record(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        mission.assign_issue("ISS-01", "qwen-coder-local")
+        mission.approve_issue("ISS-01")
+        with patch(
+            "albert_mvp.core._process_isolated_argv",
+            side_effect=lambda argv: argv,
+        ):
+            launched = mission.launch_issue("ISS-01")
+
+        projected = next(
+            session
+            for summary in snapshots.snapshot().missions
+            for session in summary.sessions
+            if session.session_id == launched.session_id
+        )
+
+        self.assertEqual(projected.retirement_phase, "active")
+        self.assertIsNone(projected.retirement_record)
+
+    def test_workstation_action_archives_and_restores_a_completed_issue_without_losing_history(
+        self,
+    ) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        mission.issues["ISS-01"].review_state = "pr-ready"
+        mission.issues["ISS-01"].locked = True
+        mission._persist()
+
+        archived = WorkstationActionService(snapshots).submit(
+            correlation_id="workstation-archive-ISS-01-1",
+            action_type="issue-archive",
+            actor="mission-commander",
+            expected_revision=1,
+            target_kind="issue-slice",
+            target_id="ISS-01",
+            issue_id="ISS-01",
+        )
+
+        self.assertEqual(archived.action_type, "issue-archive")
+        self.assertEqual(archived.issue_id, "ISS-01")
+        self.assertEqual(archived.revision, 2)
+        self.assertEqual(
+            self.load_service().snapshot().missions[0].archived_issue_ids,
+            ("ISS-01",),
+        )
+        self.assertIn("ISS-01", self.load_service()._primary_mission.issues)
+        stale_archived_mission = self.load_service()._primary_mission
+
+        restored = WorkstationActionService(self.load_service()).submit(
+            correlation_id="workstation-restore-ISS-01-2",
+            action_type="issue-restore",
+            actor="mission-commander",
+            expected_revision=archived.revision,
+            target_kind="issue-slice",
+            target_id="ISS-01",
+            issue_id="ISS-01",
+        )
+
+        self.assertEqual(restored.action_type, "issue-restore")
+        self.assertEqual(restored.revision, 3)
+        self.assertEqual(
+            self.load_service().snapshot().missions[0].archived_issue_ids,
+            (),
+        )
+        stale_archived_mission._persist()
+        self.assertEqual(
+            self.load_service().snapshot().missions[0].archived_issue_ids,
+            (),
+        )
+        self.assertEqual(
+            [entry.action_type for entry in ActivityJournalService(self.load_service()).inspect().entries],
+            ["issue-archive", "issue-restore"],
+        )
+
+    def test_workstation_action_archives_a_tracker_merged_issue(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        mission.issues["ISS-01"].tracker_status = "merged"
+
+        acknowledgement = WorkstationActionService(snapshots).submit(
+            correlation_id="workstation-archive-merged-ISS-01-1",
+            action_type="issue-archive",
+            actor="mission-commander",
+            expected_revision=1,
+            target_kind="issue-slice",
+            target_id="ISS-01",
+            issue_id="ISS-01",
+        )
+
+        self.assertEqual(acknowledgement.action_type, "issue-archive")
+        self.assertEqual(
+            self.load_service().snapshot().missions[0].archived_issue_ids,
+            ("ISS-01",),
+        )
+
+    def test_archive_state_changes_require_a_correlated_workstation_marker(
+        self,
+    ) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        mission.issues["ISS-01"].review_state = "pr-ready"
+        mission.issues["ISS-01"].locked = True
+        mission._persist()
+
+        self.assertFalse(hasattr(mission, "archive_issue"))
+        self.assertFalse(hasattr(mission, "restore_archived_issue"))
+
+        with self.assertRaisesRegex(AlbertError, "correlated Workstation marker"):
+            mission._archive_issue_from_workstation(
+                "ISS-01",
+                workstation_action=None,
+            )
+        self.assertEqual(self.load_service().snapshot().missions[0].archived_issue_ids, ())
+
+        with self.assertRaisesRegex(AlbertError, "complete Workstation action boundary"):
+            mission._archive_issue_from_workstation(
+                "ISS-01",
+                workstation_action={"correlation_id": "forged-archive-marker"},
+            )
+        self.assertEqual(self.load_service().snapshot().missions[0].archived_issue_ids, ())
+
+        complete_marker = {
+            "correlation_id": "forged-complete-archive-marker",
+            "action_type": "issue-archive",
+            "actor": "mission-commander",
+            "mission_id": mission.mission_id,
+            "expected_revision": 1,
+            "target_kind": "issue-slice",
+            "target_id": "ISS-01",
+            "request": {
+                "issue_id": "ISS-01",
+                "session_id": "",
+                "agent_id": "",
+                "reason": "",
+                "allowed_paths": [],
+                "command_policy": {},
+            },
+        }
+        for field_name, forged_value, expected_revision in (
+            ("action_type", "issue-restore", 1),
+            ("target_id", "ISS-02", 1),
+            ("expected_revision", 2, 1),
+        ):
+            with self.subTest(field_name=field_name):
+                forged_marker = {**complete_marker, field_name: forged_value}
+                with self.assertRaisesRegex(
+                    AlbertError,
+                    "complete Workstation action boundary",
+                ):
+                    mission._archive_issue_from_workstation(
+                        "ISS-01",
+                        workstation_action=forged_marker,
+                        expected_revision=expected_revision,
+                    )
+        self.assertEqual(self.load_service().snapshot().missions[0].archived_issue_ids, ())
+
+        current = snapshots.snapshot()
+        advanced = snapshots.update_preferences(
+            active_mission_id=current.active_mission.id,
+            conversation_scope=current.conversation_scope,
+            operations_view=current.operations_view,
+        )
+        self.assertEqual(advanced.revision, 2)
+        with self.assertRaisesRegex(
+            AlbertError,
+            "authoritative current Workstation revision 2",
+        ):
+            mission._archive_issue_from_workstation(
+                "ISS-01",
+                workstation_action=complete_marker,
+                expected_revision=1,
+            )
+
+        archived = WorkstationActionService(self.load_service()).submit(
+            correlation_id="workstation-archive-marker-required",
+            action_type="issue-archive",
+            actor="mission-commander",
+            expected_revision=2,
+            target_kind="issue-slice",
+            target_id="ISS-01",
+            issue_id="ISS-01",
+        )
+        self.assertEqual(archived.revision, 3)
+
+        reloaded = self.load_service()._primary_mission
+        with self.assertRaisesRegex(AlbertError, "correlated Workstation marker"):
+            reloaded._restore_archived_issue_from_workstation(
+                "ISS-01",
+                workstation_action=None,
+            )
+        self.assertEqual(
+            self.load_service().snapshot().missions[0].archived_issue_ids,
+            ("ISS-01",),
+        )
+
+    def test_background_mission_archive_uses_the_primary_workstation_revision(
+        self,
+    ) -> None:
+        primary = self.load_service()._primary_mission
+        background_tracker = self.root / "background-archive-tracker"
+        (background_tracker / "issues").mkdir(parents=True)
+        (background_tracker / "PRD.md").write_text(
+            "# Background Archive Mission\n",
+            encoding="utf-8",
+        )
+        (background_tracker / "issues" / "01-background.md").write_text(
+            ISSUE,
+            encoding="utf-8",
+        )
+        background = AlbertMission(
+            target_repo=self.target_repo,
+            tracker_dir=background_tracker,
+            runtime_root=self.runtime,
+            mission_id="background-archive",
+            allow_empty_tracker=True,
+        ).load()
+        background.issues["ISS-01"].review_state = "pr-ready"
+        background.issues["ISS-01"].locked = True
+        background._persist()
+        snapshots = WorkspaceSnapshotService(primary, missions=(background,))
+        current = snapshots.snapshot()
+        advanced = snapshots.update_preferences(
+            active_mission_id=current.active_mission.id,
+            conversation_scope=current.conversation_scope,
+            operations_view=current.operations_view,
+        )
+
+        archived = WorkstationActionService(snapshots).submit(
+            correlation_id="background-archive-shared-revision",
+            action_type="issue-archive",
+            actor="mission-commander",
+            expected_revision=advanced.revision,
+            target_kind="issue-slice",
+            target_id="ISS-01",
+            mission_id=background.mission_id,
+            issue_id="ISS-01",
+        )
+
+        self.assertEqual(archived.revision, 3)
+        background_summary = next(
+            mission
+            for mission in snapshots.snapshot().missions
+            if mission.id == background.mission_id
+        )
+        self.assertEqual(background_summary.archived_issue_ids, ("ISS-01",))
+
     def test_live_agent_availability_snapshot_gates_projection_launch_and_runner_claim(
         self,
     ) -> None:
@@ -3167,6 +3604,38 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertIn("approved", acknowledgement.effect_summary)
         entry = ActivityJournalService(self.load_service()).inspect().entries[0]
         self.assertEqual(entry.action_type, "issue-approve")
+
+    def test_approved_follow_up_work_never_falsely_satisfies_a_blocking_dependency(self) -> None:
+        (self.tracker / "issues" / "02-dependent.md").write_text(
+            """Status: ready-for-agent
+Type: AFK
+
+## Parent
+
+PRD.md
+
+## What to build
+
+Wait for the accepted dependency.
+
+## Acceptance criteria
+
+- [ ] The original blocker remains canonical.
+
+## Blocked by
+
+- [ ] 01-restore.md
+""",
+            encoding="utf-8",
+        )
+        mission = self.load_service()._primary_mission
+        mission.approve_issue("ISS-01")
+        mission.approve_issue("ISS-02")
+
+        with self.assertRaisesRegex(AlbertError, "ISS-02 is blocked by ISS-01"):
+            mission.launch_issue("ISS-02")
+
+        self.assertFalse(mission.board_summary()["issue_slices"][1]["launch_eligible"])
 
     def test_workstation_action_rejects_stale_launch_without_mutating_sessions(self) -> None:
         snapshots = self.load_service()
@@ -3862,6 +4331,45 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         entries = ActivityJournalService(self.load_service()).inspect().entries
         self.assertEqual([entry.action_type for entry in entries[-2:]], ["issue-retry", "session-cancel"])
 
+    def test_snapshot_previews_the_exact_inherited_repair_task_packet(self) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        mission.approve_issue("ISS-01")
+        prior = LocalAgentSession(
+            session_id="session-ISS-01-preview",
+            issue_id="ISS-01",
+            assigned_agent="qwen-coder-local-1",
+            worktree_path=self.target_repo / ".alfredo" / "worktrees" / "preview",
+            task_packet={
+                "goal": "Restore the workspace session.",
+                "acceptance_criteria": ["The canonical snapshot is visible."],
+                "allowed_paths": ["src", "tests"],
+                "command_policy": {"npm": "auto-allowed"},
+                "evidence_requirements": ["Focused tests pass."],
+            },
+            status="failed",
+        )
+        mission.sessions[prior.session_id] = prior
+        mission._persist()
+        mission.record_frontier_review(
+            prior.session_id,
+            "Needs repair",
+            reason="The final accessibility assertion is missing.",
+        )
+
+        session = snapshots.snapshot().missions[0].sessions[0]
+
+        self.assertTrue(session.repair_action_available)
+        self.assertIsNotNone(session.repair_task_packet)
+        assert session.repair_task_packet is not None
+        self.assertEqual(session.repair_task_packet.issue_id, "ISS-01")
+        self.assertEqual(session.repair_task_packet.allowed_paths, ("src", "tests"))
+        self.assertEqual(session.repair_task_packet.command_policy, {"npm": "auto-allowed"})
+        self.assertEqual(
+            session.repair_task_packet.review_reason,
+            "The final accessibility assertion is missing.",
+        )
+
     def test_workstation_retry_inherits_paths_unless_explicit_governed_paths_are_sent(
         self,
     ) -> None:
@@ -4039,6 +4547,48 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertEqual(payload["action_type"], "issue-launch")
         self.assertEqual(payload["session_id"], "session-ISS-01-1")
         self.assertEqual(payload["revision"], 2)
+
+    def test_cli_archives_completed_issue_with_history_retained(self) -> None:
+        mission = self.load_service()._primary_mission
+        mission.issues["ISS-01"].review_state = "pr-ready"
+        mission.issues["ISS-01"].locked = True
+        mission._persist()
+        output = io.StringIO()
+
+        with redirect_stdout(output):
+            exit_code = main(
+                [
+                    "workstation-action",
+                    "--target-repo",
+                    str(self.target_repo),
+                    "--tracker-dir",
+                    str(self.tracker),
+                    "--runtime-root",
+                    str(self.runtime),
+                    "--mission-id",
+                    "command-deck",
+                    "--correlation-id",
+                    "workstation-cli-archive-1",
+                    "--expected-revision",
+                    "1",
+                    "--action-type",
+                    "issue-archive",
+                    "--actor",
+                    "mission-commander",
+                    "--target-kind",
+                    "issue-slice",
+                    "--target-id",
+                    "ISS-01",
+                    "--issue-id",
+                    "ISS-01",
+                ]
+            )
+
+        payload = json.loads(output.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(payload["action_type"], "issue-archive")
+        self.assertEqual(payload["issue_id"], "ISS-01")
+        self.assertIn("history remain inspectable", payload["effect_summary"])
 
     def test_cli_reports_stale_workstation_action_as_structured_json(self) -> None:
         snapshots = self.load_service()
@@ -7339,6 +7889,7 @@ class WorkspaceSnapshotTest(unittest.TestCase):
             session_id=prior.session_id,
             outcome="Needs repair",
             reason="The TUI review found an incomplete implementation.",
+            expected_revision=mission.sessions[prior.session_id].revision,
         )
 
         # Simulate a persisted review written before workspace-action metadata existed.
@@ -7422,6 +7973,8 @@ class WorkspaceSnapshotTest(unittest.TestCase):
                     "--mission-id",
                     "command-deck",
                     prior.session_id,
+                    "--expected-revision",
+                    str(prior.revision),
                     "--outcome",
                     "Needs repair",
                     "--reason",
@@ -10971,6 +11524,7 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         run.assert_not_called()
         self.assertIn("/skills [query]", help_message.message.content)
         self.assertIn("/run <command>", help_message.message.content)
+        self.assertIn("/storage", help_message.message.content)
         self.assertEqual(help_message.route.intent, "discussion")
         self.assertEqual(help_message.route.task_request, "")
         self.assertEqual(help_message.route.acceptance_criteria, ())
@@ -10990,7 +11544,26 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         )
         self.assertIn("Workspace: ready", status_message.message.content)
         self.assertIn("Ready work:", status_message.message.content)
+        self.assertIn("Snapshot storage:", status_message.message.content)
         self.assertEqual(status_message.route.intent, "discussion")
+
+        storage_prompt = history.append(
+            role="user",
+            content="/storage",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        storage_message = AgentConsoleResponseService(snapshots).respond(
+            message_id=storage_prompt.message_id,
+            expected_revision=1,
+            expected_scope=scope,
+        )
+        self.assertIn("Snapshot storage inspection", storage_message.message.content)
+        self.assertIn("Retention: 30 days", storage_message.message.content)
+        self.assertIn("Budget: 5.00 GiB", storage_message.message.content)
+        self.assertIn("Largest payloads: none", storage_message.message.content)
 
         snapshots._primary_mission.agent_registry.agents.append(
             workspace_module.AgentConfig(
@@ -11010,6 +11583,163 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertIn(
             "Controller: selected-status-controller", selected_status.message.content
         )
+
+    def test_storage_command_renders_complete_usage_and_count_totals(self) -> None:
+        mission = AlbertMission(
+            target_repo=self.target_repo,
+            tracker_dir=self.tracker,
+            runtime_root=self.runtime,
+            mission_id="command-deck",
+            allow_empty_tracker=True,
+            snapshot_storage_budget_bytes=8192,
+        ).load()
+        snapshots = WorkspaceSnapshotService(mission)
+        session_id = "retired-storage-session"
+        payload_path = mission.runtime_dir / "retirement" / "payloads" / session_id
+        stored_session = LocalAgentSession(
+            session_id=session_id,
+            issue_id="ISS-01",
+            assigned_agent="retirement-local",
+            worktree_path=self.root / "retired-storage-worktree",
+            task_packet={},
+            status="completed",
+            revision=3,
+            preservation_budget={
+                "schema_version": 1,
+                "state": "verified",
+                "bound": False,
+                "reserved_bytes": 32 * 1024 * 1024,
+                "reserved_at": "2026-08-09T08:00:00+00:00",
+                "verified_at": "2026-08-09T08:30:00+00:00",
+            },
+            retirement={
+                "schema_version": 1,
+                "phase": "retired",
+                "runner_boundary": {},
+                "snapshot": {
+                    "schema_version": 1,
+                    "verified": True,
+                    "manifest_path": str(payload_path / "manifest.json"),
+                    "manifest_sha256": "a" * 64,
+                    "payload_path": str(payload_path),
+                    "worktree_identity": "managed:retired-storage-session",
+                    "payload_bytes": 1024,
+                    "manifest_bytes": 512,
+                    "snapshot_bytes": 1536,
+                    "session_revision": 2,
+                    "mission_id": mission.mission_id,
+                    "session_id": session_id,
+                    "terminal_status": "completed",
+                    "created_at": "2026-08-09T08:30:00+00:00",
+                    "expires_at": "2026-08-10T08:30:00+00:00",
+                    "pinned": False,
+                    "payload_disposition": "retained",
+                    "reclaimed_at": "",
+                    "reclamation_reason": "",
+                },
+                "preservation_intent": {},
+                "preservation_receipt": {},
+                "blocked_reason": "",
+                "retirement_attempts": 0,
+                "removal_kind": "managed-directory",
+                "retired_at": "2026-08-09T09:00:00+00:00",
+                "action_receipts": {},
+            },
+        )
+        runtime = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        runtime["sessions"][session_id] = stored_session.to_dict()
+        mission.runtime_path.write_text(
+            json.dumps(runtime, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        scope = snapshots.snapshot().conversation_scope
+        prompt = AgentConsoleHistoryService(snapshots).append(
+            role="user",
+            content="/storage",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        response = AgentConsoleResponseService(snapshots).respond(
+            message_id=prompt.message_id,
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        self.assertIn(
+            "Usage: 1.50 KiB payload + 0 B reserved = 1.50 KiB committed; "
+            "6.50 KiB available",
+            response.message.content,
+        )
+        self.assertIn(
+            "Records: 1; retained 1; pinned 0; reclaimed 0; expired eligible 1",
+            response.message.content,
+        )
+
+    def test_storage_command_renders_every_recent_reclamation_with_labeled_fields(
+        self,
+    ) -> None:
+        snapshots = self.load_service()
+        mission = snapshots._primary_mission
+        runtime = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        runtime["retirement_storage"].update(
+            {
+                "reclamation_count": 3,
+                "reclaimed_bytes": 4096,
+                "recent_reclamations": [
+                    {
+                        "session_id": "retired-session-000001",
+                        "reclaimed_at": "2026-08-10T08:15:30+00:00",
+                        "snapshot_bytes": 1536,
+                        "reason": "retention-expired-capacity-reclamation",
+                    },
+                    {
+                        "session_id": "retired-session-000002",
+                        "reclaimed_at": "2026-08-10T09:45:00+00:00",
+                        "snapshot_bytes": 7,
+                        "reason": "retention-expired-capacity-reclamation",
+                    },
+                ],
+            }
+        )
+        mission.runtime_path.write_text(
+            json.dumps(runtime, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        scope = snapshots.snapshot().conversation_scope
+        prompt = AgentConsoleHistoryService(snapshots).append(
+            role="user",
+            content="/storage",
+            outcome="proposed",
+            source="mission-commander",
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        response = AgentConsoleResponseService(snapshots).respond(
+            message_id=prompt.message_id,
+            expected_revision=1,
+            expected_scope=scope,
+        )
+
+        first_row = (
+            "- Session: retired-session-000001; Reclaimed bytes: 1.50 KiB; "
+            "Reclaimed at: 2026-08-10T08:15:30+00:00; "
+            "Reason: retention-expired-capacity-reclamation"
+        )
+        second_row = (
+            "- Session: retired-session-000002; Reclaimed bytes: 7 B; "
+            "Reclaimed at: 2026-08-10T09:45:00+00:00; "
+            "Reason: retention-expired-capacity-reclamation"
+        )
+        content = response.message.content
+        self.assertIn("Reclamation: 3 payloads, 4.00 KiB", content)
+        self.assertIn("Recent reclamations:\n", content)
+        self.assertEqual(content.count(first_row), 1)
+        self.assertEqual(content.count(second_row), 1)
+        self.assertLess(content.index(first_row), content.index(second_row))
 
     def test_use_command_is_not_redispatched_after_skill_validation(self) -> None:
         skill = self.target_repo / ".agents" / "skills" / "diagnose" / "SKILL.md"

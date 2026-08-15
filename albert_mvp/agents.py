@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 from pathlib import Path
 from typing import Any
+
+from .inference import LocalInferenceProfile
 
 
 class AgentConfigError(Exception):
@@ -37,6 +39,7 @@ class AgentConfig:
     requires_approval: bool = False
     availability: str = "available"
     availability_reason: str = ""
+    inference_profile: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         data: dict[str, Any] = {
@@ -63,6 +66,10 @@ class AgentConfig:
             data["availability"] = self.availability
         if self.availability_reason:
             data["availability_reason"] = self.availability_reason
+        if self.inference_profile:
+            data["inference_profile"] = json.loads(
+                json.dumps(self.inference_profile, ensure_ascii=True)
+            )
         return data
 
     def summary(self) -> str:
@@ -198,12 +205,29 @@ def _parse_agent(path: Path, index: int, raw_agent: Any, seen: set[str]) -> Agen
     )
     availability = str(raw_agent.get("availability", "available")).strip() or "available"
     availability_reason = str(raw_agent.get("availability_reason", "")).strip()
+    raw_inference_profile = raw_agent.get("inference_profile", {})
+    if not isinstance(raw_inference_profile, dict):
+        raise AgentConfigError(
+            f"{path} agent entry {agent_id} field 'inference_profile' must be an object."
+        )
     if availability not in {"available", "unavailable", "disconnected"}:
         raise AgentConfigError(f"{path} agent entry {agent_id} has unknown availability {availability!r}.")
     if runner == "command" and not command:
         raise AgentConfigError(f"{path} agent entry {agent_id} is missing command.")
     if runner == "ollama" and not model:
         raise AgentConfigError(f"{path} agent entry {agent_id} is missing model.")
+    inference_profile: dict[str, Any] = {}
+    if raw_inference_profile:
+        try:
+            inference_profile = LocalInferenceProfile.from_dict(
+                raw_inference_profile,
+                model=model,
+                profile_id=f"{agent_id}-v1",
+            ).to_dict()
+        except ValueError as exc:
+            raise AgentConfigError(
+                f"{path} agent entry {agent_id} has an invalid inference_profile: {exc}"
+            ) from exc
     return AgentConfig(
         id=agent_id,
         role=role,
@@ -218,6 +242,7 @@ def _parse_agent(path: Path, index: int, raw_agent: Any, seen: set[str]) -> Agen
         requires_approval=requires_approval,
         availability=availability,
         availability_reason=availability_reason,
+        inference_profile=inference_profile,
     )
 
 

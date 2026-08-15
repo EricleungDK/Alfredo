@@ -21,8 +21,14 @@ from .core import (
     AlbertMission,
     EvidencePackage,
     EvidenceValidationError,
+    RunnerObservation,
     SharedUnderstandingGateError,
     WayfinderStatePersistenceError,
+)
+from .inference_qualification import (
+    PromotionError,
+    QualificationReportStore,
+    RuntimePin,
 )
 from .tui import build_tui_state, perform_tui_action, render_tui_state
 from .workspace import (
@@ -134,6 +140,47 @@ def build_parser() -> argparse.ArgumentParser:
         help="Return the versioned canonical Workspace Session snapshot as JSON.",
     )
     _add_common_args(workspace_snapshot)
+
+    qualification_inspect = subparsers.add_parser(
+        "inference-qualification",
+        help="Inspect bounded Local Inference Profile qualification reports and promotion state.",
+    )
+    _add_common_args(
+        qualification_inspect,
+        require_mission_state=False,
+        require_runtime_root=True,
+    )
+
+    qualification_promote = subparsers.add_parser(
+        "inference-qualification-promote",
+        help="Promote one promotion-ready Local Inference Profile report with an exact runtime pin.",
+    )
+    _add_common_args(
+        qualification_promote,
+        require_mission_state=False,
+        require_runtime_root=True,
+    )
+    qualification_promote.add_argument("--report-id", required=True)
+    qualification_promote.add_argument("--profile-id", required=True)
+    qualification_promote.add_argument("--runtime-id", required=True)
+    qualification_promote.add_argument("--runtime-version", required=True)
+    qualification_promote.add_argument("--binary-digest", required=True)
+    qualification_promote.add_argument("--configuration-digest", required=True)
+    qualification_promote.add_argument("--correlation-id", required=True)
+    qualification_promote.add_argument("--expected-revision", type=int, required=True)
+
+    qualification_rollback = subparsers.add_parser(
+        "inference-qualification-rollback",
+        help="Rollback one promoted Local Inference Profile to its retained prior pin.",
+    )
+    _add_common_args(
+        qualification_rollback,
+        require_mission_state=False,
+        require_runtime_root=True,
+    )
+    qualification_rollback.add_argument("--profile-id", required=True)
+    qualification_rollback.add_argument("--correlation-id", required=True)
+    qualification_rollback.add_argument("--expected-revision", type=int, required=True)
 
     coding_workspace_select = subparsers.add_parser(
         "coding-workspace-select",
@@ -505,6 +552,12 @@ def build_parser() -> argparse.ArgumentParser:
             "issue-retry",
             "session-cancel",
             "model-assignment-change",
+            "issue-archive",
+            "issue-restore",
+            "retirement-pin",
+            "retirement-retry",
+            "retirement-export",
+            "retirement-discard",
         ],
     )
     workstation_action.add_argument(
@@ -521,6 +574,13 @@ def build_parser() -> argparse.ArgumentParser:
     workstation_action.add_argument("--reason", default="")
     workstation_action.add_argument("--allowed-path", action="append", default=[])
     workstation_action.add_argument("--command-policy", action="append", default=[])
+    workstation_action.add_argument(
+        "--pin-state",
+        choices=["pinned", "unpinned"],
+        default="",
+    )
+    workstation_action.add_argument("--destination", default="")
+    workstation_action.add_argument("--confirmation", default="")
 
     workstation_session_run = subparsers.add_parser(
         "workstation-session-run",
@@ -529,6 +589,114 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_args(workstation_session_run)
     workstation_session_run.add_argument("--session-id", required=True)
     workstation_session_run.add_argument("--session-mission-id", default="")
+
+    runner_observe = subparsers.add_parser(
+        "runner-observe",
+        help="Reconcile one advisory Local Agent runner observation and return its receipt.",
+    )
+    _add_common_args(runner_observe)
+    runner_observe.add_argument("--source-id", required=True)
+    runner_observe.add_argument("--source-incarnation", required=True)
+    runner_observe.add_argument("--sequence", required=True, type=int)
+    runner_observe.add_argument("--observation-mission-id", required=True)
+    runner_observe.add_argument("--session-id", required=True)
+    runner_observe.add_argument("--session-revision", required=True, type=int)
+    runner_observe.add_argument("--runner-operation-id", required=True)
+    runner_observe.add_argument(
+        "--owner-signal",
+        required=True,
+        choices=["live-exact", "absent", "reused", "unavailable"],
+    )
+    runner_observe.add_argument(
+        "--process-group-signal",
+        required=True,
+        choices=["live-exact", "absent", "reused", "unavailable"],
+    )
+    runner_observe.add_argument("--worktree-identity", required=True)
+    runner_observe.add_argument(
+        "--result-signal",
+        required=True,
+        choices=["absent", "exact-valid", "invalid", "unavailable"],
+    )
+    runner_observe.add_argument("--result-digest", default="")
+
+    retirement_preserve = subparsers.add_parser(
+        "retirement-preserve",
+        help="Capture and verify one terminal Retirement Unit without removing its worktree.",
+    )
+    _add_common_args(retirement_preserve)
+    retirement_preserve.add_argument("--session-id", required=True)
+    retirement_preserve.add_argument("--session-mission-id", default="")
+    retirement_preserve.add_argument("--expected-revision", required=True, type=int)
+    retirement_preserve.add_argument("--correlation-id", required=True)
+
+    retirement_verify = subparsers.add_parser(
+        "retirement-verify",
+        help="Re-read and reconstruct one verified Retirement Snapshot.",
+    )
+    _add_common_args(retirement_verify)
+    retirement_verify.add_argument("--session-id", required=True)
+    retirement_verify.add_argument("--session-mission-id", default="")
+
+    retirement_storage = subparsers.add_parser(
+        "retirement-storage",
+        help="Return deterministic Snapshot Payload usage and policy inspection as JSON.",
+    )
+    _add_common_args(retirement_storage)
+
+    retirement_inspect = subparsers.add_parser(
+        "retirement-inspect",
+        help="Inspect one Retirement Unit and its available governed actions as JSON.",
+    )
+    _add_common_args(retirement_inspect)
+    retirement_inspect.add_argument("--session-id", required=True)
+    retirement_inspect.add_argument("--session-mission-id", default="")
+
+    retirement_pin = subparsers.add_parser(
+        "retirement-pin",
+        help="Pin or unpin one retained Snapshot Payload.",
+    )
+    _add_common_args(retirement_pin)
+    retirement_pin.add_argument("--session-id", required=True)
+    retirement_pin.add_argument("--session-mission-id", default="")
+    retirement_pin.add_argument(
+        "--pin-state", required=True, choices=["pinned", "unpinned"]
+    )
+    retirement_pin.add_argument("--expected-revision", required=True, type=int)
+    retirement_pin.add_argument("--correlation-id", required=True)
+
+    retirement_retry = subparsers.add_parser(
+        "retirement-retry",
+        help="Authorize one fresh bounded attempt for a blocked Retirement Unit.",
+    )
+    _add_common_args(retirement_retry)
+    retirement_retry.add_argument("--session-id", required=True)
+    retirement_retry.add_argument("--session-mission-id", default="")
+    retirement_retry.add_argument("--expected-revision", required=True, type=int)
+    retirement_retry.add_argument("--correlation-id", required=True)
+
+    retirement_export = subparsers.add_parser(
+        "retirement-export",
+        help="Export one blocked Retirement Unit from verified preserved material.",
+    )
+    _add_common_args(retirement_export)
+    retirement_export.add_argument("--session-id", required=True)
+    retirement_export.add_argument("--session-mission-id", default="")
+    retirement_export.add_argument("--destination", required=True)
+    retirement_export.add_argument("--expected-revision", required=True, type=int)
+    retirement_export.add_argument("--correlation-id", required=True)
+
+    retirement_discard = subparsers.add_parser(
+        "retirement-discard",
+        help="Irreversibly discard one exact blocked and quiesced retained worktree.",
+    )
+    _add_common_args(retirement_discard)
+    retirement_discard.add_argument("--session-id", required=True)
+    retirement_discard.add_argument("--session-mission-id", default="")
+    retirement_discard.add_argument("--expected-revision", required=True, type=int)
+    retirement_discard.add_argument("--correlation-id", required=True)
+    retirement_discard.add_argument("--confirmation", required=True)
+    retirement_discard.add_argument("--reason", required=True)
 
     mission_drafts = subparsers.add_parser(
         "mission-drafts",
@@ -598,6 +766,7 @@ def build_parser() -> argparse.ArgumentParser:
     tui_action.add_argument("--outcome", default="")
     tui_action.add_argument("--reason", default="")
     tui_action.add_argument("--failure-type", default="")
+    tui_action.add_argument("--expected-session-revision", type=int)
     tui_action.add_argument("--gh-available", action="store_true")
 
     show = subparsers.add_parser("show", help="Show one Issue Slice lifecycle detail.")
@@ -635,6 +804,7 @@ def build_parser() -> argparse.ArgumentParser:
     evidence = subparsers.add_parser("evidence", help="Record an Evidence Package for a Local Agent session.")
     _add_common_args(evidence)
     evidence.add_argument("session_id")
+    evidence.add_argument("--expected-revision", required=True, type=int)
     evidence.add_argument("--changed-file", action="append", default=[])
     evidence.add_argument("--diff-summary", required=True)
     evidence.add_argument("--command-run", action="append", default=[])
@@ -646,6 +816,7 @@ def build_parser() -> argparse.ArgumentParser:
     review = subparsers.add_parser("review", help="Record a Frontier Reviewer decision.")
     _add_common_args(review)
     review.add_argument("session_id")
+    review.add_argument("--expected-revision", required=True, type=int)
     review.add_argument("--outcome", required=True)
     review.add_argument("--reason", required=True)
     review.add_argument("--failure-type", default="")
@@ -662,15 +833,35 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _add_common_args(
-    parser: argparse.ArgumentParser, *, require_mission_state: bool = True
+    parser: argparse.ArgumentParser,
+    *,
+    require_mission_state: bool = True,
+    require_runtime_root: bool | None = None,
 ) -> None:
+    if require_runtime_root is None:
+        require_runtime_root = require_mission_state
     parser.add_argument("--target-repo", required=True)
     parser.add_argument("--tracker-dir", required=require_mission_state, default="")
     parser.add_argument("--issues-dir", default="")
-    parser.add_argument("--runtime-root", required=require_mission_state, default="")
+    parser.add_argument("--runtime-root", required=require_runtime_root, default="")
     parser.add_argument("--mission-id", default="mission-001")
     parser.add_argument("--agent-config", default="")
     parser.add_argument("--mission-catalog", default="")
+    parser.add_argument(
+        "--retention-grace-seconds",
+        type=int,
+        default=72 * 60 * 60,
+    )
+    parser.add_argument(
+        "--snapshot-storage-retention-seconds",
+        type=int,
+        default=30 * 24 * 60 * 60,
+    )
+    parser.add_argument(
+        "--snapshot-storage-budget-bytes",
+        type=int,
+        default=5 * 1024 * 1024 * 1024,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -861,6 +1052,21 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+    except PromotionError as exc:
+        print(
+            json.dumps(
+                {
+                    "error": {
+                        "code": "inference-qualification-failed",
+                        "message": str(exc),
+                        "recoverable": True,
+                    }
+                },
+                sort_keys=True,
+            ),
+            file=sys.stderr,
+        )
+        return 1
     except (AlbertError, AgentConfigError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1
@@ -902,6 +1108,40 @@ def _run(args: argparse.Namespace) -> int:
         ).inspect()
         print(json.dumps(projection.to_dict(), sort_keys=True))
         return 0
+    if args.command in {
+        "inference-qualification",
+        "inference-qualification-promote",
+        "inference-qualification-rollback",
+    }:
+        store = QualificationReportStore(Path(args.runtime_root))
+        if args.command == "inference-qualification":
+            print(json.dumps(store.inspect_reports(), sort_keys=True))
+            return 0
+        if args.command == "inference-qualification-promote":
+            try:
+                runtime_pin = RuntimePin(
+                    runtime_id=args.runtime_id,
+                    runtime_version=args.runtime_version,
+                    binary_digest=args.binary_digest,
+                    configuration_digest=args.configuration_digest,
+                )
+            except ValueError as exc:
+                raise PromotionError(str(exc)) from exc
+            state = store.promote(
+                profile_id=args.profile_id,
+                report_id=args.report_id,
+                runtime_pin=runtime_pin,
+                correlation_id=args.correlation_id,
+                expected_revision=args.expected_revision,
+            )
+        else:
+            state = store.rollback(
+                args.profile_id,
+                correlation_id=args.correlation_id,
+                expected_revision=args.expected_revision,
+            )
+        print(json.dumps(state, sort_keys=True))
+        return 0
     target_repo = Path(args.target_repo)
     registry_path = (
         Path(args.agent_config)
@@ -912,6 +1152,29 @@ def _run(args: argparse.Namespace) -> int:
         workspace_root=target_repo,
         registry_path=registry_path,
     )
+    read_only_load_commands = {
+        "activity-journal",
+        "agent-console-history",
+        "agent-console-message",
+        "agent-console-response",
+        "agents",
+        "board",
+        "mission-drafts",
+        "retirement-inspect",
+        "retirement-storage",
+        "retirement-verify",
+        "review-workspace",
+        "session-artifact",
+        "session-output",
+        "shell-terminal",
+        "show",
+        "tui",
+        "working-context",
+        "workspace-queue",
+        "workspace-snapshot",
+        "workspace-updates",
+    }
+    perform_startup_effects = args.command not in read_only_load_commands
     mission = AlbertMission(
         target_repo=target_repo,
         tracker_dir=Path(args.tracker_dir),
@@ -948,6 +1211,7 @@ def _run(args: argparse.Namespace) -> int:
             "workspace-queue-decision",
             "workstation-action",
             "workstation-session-run",
+            "runner-observe",
             "mission-drafts",
             "mission-draft-create",
             "mission-draft-update",
@@ -956,7 +1220,10 @@ def _run(args: argparse.Namespace) -> int:
         },
         issues_dir=Path(args.issues_dir) if args.issues_dir else None,
         agent_availability_snapshot=availability_snapshot,
-    ).load()
+        retention_grace_seconds=args.retention_grace_seconds,
+        snapshot_storage_retention_seconds=args.snapshot_storage_retention_seconds,
+        snapshot_storage_budget_bytes=args.snapshot_storage_budget_bytes,
+    ).load(perform_startup_effects=perform_startup_effects)
     workspace_commands = {
         "workspace-snapshot",
         "workspace-action",
@@ -983,6 +1250,10 @@ def _run(args: argparse.Namespace) -> int:
         "workspace-queue-decision",
         "workstation-action",
         "workstation-session-run",
+        "retirement-pin",
+        "retirement-retry",
+        "retirement-export",
+        "retirement-discard",
         "mission-drafts",
         "mission-draft-create",
         "mission-draft-update",
@@ -990,7 +1261,13 @@ def _run(args: argparse.Namespace) -> int:
         "mission-draft-abandon",
     }
     snapshots = (
-        _load_workspace_service(args, mission) if args.command in workspace_commands else None
+        _load_workspace_service(
+            args,
+            mission,
+            perform_startup_effects=perform_startup_effects,
+        )
+        if args.command in workspace_commands
+        else None
     )
     if args.command == "board":
         summary = mission.board_summary()
@@ -1303,6 +1580,9 @@ def _run(args: argparse.Namespace) -> int:
             reason=args.reason,
             allowed_paths=args.allowed_path,
             command_policy=_parse_command_policy(args.command_policy),
+            pin_state=(args.pin_state == "pinned" if args.pin_state else None),
+            destination=args.destination,
+            confirmation=args.confirmation,
         )
         print(json.dumps(asdict(acknowledgement), sort_keys=True))
         return 0
@@ -1312,13 +1592,123 @@ def _run(args: argparse.Namespace) -> int:
             session_id=args.session_id,
             mission_id=args.session_mission_id,
         )
-        session = mission_for_session.run_session(args.session_id)
+        session = mission_for_session.run_session(
+            args.session_id,
+            expected_revision=mission_for_session.sessions[args.session_id].revision,
+        )
         print(
             json.dumps(
                 _workstation_session_payload(mission_for_session, session),
                 sort_keys=True,
             )
         )
+        return 0
+    if args.command == "runner-observe":
+        if args.observation_mission_id != mission.mission_id:
+            raise AlbertError("Runner observation Mission identity does not match.")
+        receipt = mission.observe_runner(
+            RunnerObservation(
+                source_id=args.source_id,
+                source_incarnation=args.source_incarnation,
+                sequence=args.sequence,
+                mission_id=args.observation_mission_id,
+                session_id=args.session_id,
+                session_revision=args.session_revision,
+                runner_operation_id=args.runner_operation_id,
+                owner_signal=args.owner_signal,
+                process_group_signal=args.process_group_signal,
+                worktree_identity=args.worktree_identity,
+                result_signal=args.result_signal,
+                result_digest=args.result_digest,
+            )
+        )
+        print(json.dumps(asdict(receipt), sort_keys=True))
+        return 0
+    if args.command in {"retirement-preserve", "retirement-verify"}:
+        if args.session_mission_id and args.session_mission_id != mission.mission_id:
+            raise AlbertError("Retirement Unit Mission identity does not match.")
+        mission_for_session = mission
+        if args.session_id not in mission_for_session.sessions:
+            raise AlbertError(f"Unknown Local Agent session: {args.session_id}")
+        if args.command == "retirement-preserve":
+            session = mission_for_session.preserve_retirement_unit(
+                args.session_id,
+                expected_revision=args.expected_revision,
+                correlation_id=args.correlation_id,
+            )
+            verified = True
+        else:
+            session = mission_for_session.sessions[args.session_id]
+            verified = mission_for_session.verify_retirement_snapshot(
+                args.session_id
+            )
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "mission_id": mission_for_session.mission_id,
+                    "session_id": session.session_id,
+                    "session_revision": session.revision,
+                    "preservation_budget": session.preservation_budget,
+                    "retirement": session.retirement,
+                    "verified": verified,
+                },
+                sort_keys=True,
+            )
+        )
+        return 0
+    if args.command == "retirement-storage":
+        print(json.dumps(mission.retirement_storage_inspection(), sort_keys=True))
+        return 0
+    if args.command in {
+        "retirement-inspect",
+        "retirement-pin",
+        "retirement-retry",
+        "retirement-export",
+        "retirement-discard",
+    }:
+        if args.session_mission_id and args.session_mission_id != mission.mission_id:
+            raise AlbertError("Retirement Unit Mission identity does not match.")
+        if args.session_id not in mission.sessions:
+            raise AlbertError(f"Unknown Local Agent session: {args.session_id}")
+        if args.command == "retirement-inspect":
+            result = mission.inspect_retirement_unit(args.session_id)
+        else:
+            action_type = {
+                "retirement-pin": "retirement-pin",
+                "retirement-retry": "retirement-retry",
+                "retirement-export": "retirement-export",
+                "retirement-discard": "retirement-discard",
+            }[args.command]
+            WorkstationActionService(snapshots).submit(
+                correlation_id=args.correlation_id,
+                action_type=action_type,
+                actor="mission-commander",
+                expected_revision=args.expected_revision,
+                target_kind="agent-session",
+                target_id=args.session_id,
+                mission_id=mission.mission_id,
+                issue_id=mission.sessions[args.session_id].issue_id,
+                session_id=args.session_id,
+                reason=(args.reason if args.command == "retirement-discard" else ""),
+                pin_state=(
+                    args.pin_state == "pinned"
+                    if args.command == "retirement-pin"
+                    else None
+                ),
+                destination=(
+                    args.destination if args.command == "retirement-export" else ""
+                ),
+                confirmation=(
+                    args.confirmation if args.command == "retirement-discard" else ""
+                ),
+            )
+            if args.command == "retirement-export":
+                refreshed = mission._refresh_persisted_session(args.session_id)
+                result = refreshed.retirement["action_receipts"][args.correlation_id]
+            else:
+                result = mission.inspect_retirement_unit(args.session_id)
+        print(json.dumps(result, sort_keys=True))
         return 0
     if args.command == "mission-drafts":
         projection = MissionDraftService(snapshots).inspect(
@@ -1384,6 +1774,7 @@ def _run(args: argparse.Namespace) -> int:
             outcome=args.outcome,
             reason=args.reason,
             failure_type=args.failure_type,
+            expected_revision=args.expected_session_revision,
             gh_available=args.gh_available,
         )
         print(result.message)
@@ -1474,7 +1865,11 @@ def _run(args: argparse.Namespace) -> int:
             proposed_context_updates=args.context_updates,
             artifact_links=args.artifact_link,
         )
-        mission.record_evidence(args.session_id, evidence)
+        mission.record_evidence(
+            args.session_id,
+            evidence,
+            expected_revision=args.expected_revision,
+        )
         print(f"Evidence Package validated for {args.session_id}.")
         return 0
     if args.command == "review":
@@ -1483,6 +1878,7 @@ def _run(args: argparse.Namespace) -> int:
             args.outcome,
             reason=args.reason,
             failure_type=args.failure_type,
+            expected_revision=args.expected_revision,
         )
         print(f"{decision.issue_id} review: {decision.outcome}; next action {decision.next_action}.")
         return 0
@@ -1617,11 +2013,22 @@ def _workstation_session_payload(
         "runner_ended_at": session.runner_ended_at,
         "runner_exit_status": session.runner_exit_status,
         "evidence_valid": session.evidence_valid,
+        "inference": {
+            "turns": [
+                mission._public_inference_receipt(item)
+                for item in mission.inference_turns
+                if item.get("session_id") == session.session_id
+            ],
+            "lease": mission.inference_lease_state(),
+        },
     }
 
 
 def _load_workspace_service(
-    args: argparse.Namespace, primary: AlbertMission
+    args: argparse.Namespace,
+    primary: AlbertMission,
+    *,
+    perform_startup_effects: bool = True,
 ) -> WorkspaceSnapshotService:
     if not args.mission_catalog:
         return WorkspaceSnapshotService(primary)
@@ -1664,7 +2071,14 @@ def _load_workspace_service(
                     agent_config_path=primary.agent_config_path,
                     allow_empty_tracker=True,
                     agent_availability_snapshot=primary.agent_availability_snapshot,
-                ).load()
+                    retention_grace_seconds=primary.retention_grace_seconds,
+                    snapshot_storage_retention_seconds=(
+                        primary.snapshot_storage_retention_seconds
+                    ),
+                    snapshot_storage_budget_bytes=(
+                        primary.snapshot_storage_budget_bytes
+                    ),
+                ).load(perform_startup_effects=perform_startup_effects)
             )
         return WorkspaceSnapshotService(primary, missions=tuple(missions))
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
