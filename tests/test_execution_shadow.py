@@ -78,11 +78,27 @@ class ExecutionShadowTests(unittest.TestCase):
                 "/usr/bin/bwrap",
                 "--die-with-parent",
                 "--new-session",
+                "--unshare-user",
+                "--unshare-pid",
+                "--tmpfs",
+                "/",
+                "--dev",
+                "/dev",
+                "--proc",
+                "/proc",
+                "--tmpfs",
+                "/tmp",
                 "--chdir",
                 working_directory,
                 "--bind",
                 working_directory,
                 working_directory,
+                "--",
+                "/usr/bin/prlimit",
+                "--as=8589934592",
+                "--fsize=2147483648",
+                "--nofile=1024",
+                "--nproc=256",
                 "--",
                 "/bin/true",
             ),
@@ -340,11 +356,11 @@ class ExecutionShadowTests(unittest.TestCase):
         python_receipt = self._python_receipt(request)
         canonical = self.root / "runtime.json"
         canonical.write_text("canonical", encoding="utf-8")
-        rust_receipt = replace(
-            python_receipt,
-            status="failed",
+        rust_receipt = ExecutionReceipt.completed(
+            request,
             exit_code=17,
-            error_code="process-failed",
+            stdout=python_receipt.stdout,
+            stderr=python_receipt.stderr,
         )
         runner = ShadowSampleRunner(
             _StubRustProvider(rust_receipt, mutate=canonical, artifact=self.artifact),
