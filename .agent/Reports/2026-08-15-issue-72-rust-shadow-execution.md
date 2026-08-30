@@ -82,6 +82,6 @@ The initial 2026-08-15 Darwin evidence remains historical: 9 Rust tests passed, 
 
 ## Human acceptance and rollback
 
-Issue #72 remains `ready-for-human` until the Mission Commander reviews this evidence. No product cutover is part of this change: Issues #73 and #74 own effect-specific Rust cuts, and Issue #75 owns integrated packaged-workstation cutover/fallback verification. Any parity, store-integrity, crash, protocol, package, or release failure records a disabled reason and leaves Python authority unchanged.
+The Mission Commander accepted the verified packages and evidence on 2026-08-30. GitHub Issue #72 is closed as completed, its obsolete `ready-for-human` label is removed, and the final acceptance evidence is recorded in [the closure comment](https://github.com/EricleungDK/Alfredo/issues/72#issuecomment-5468848924). No product cutover is part of this change: Issues #73 and #74 own effect-specific Rust cuts, and Issue #75 owns integrated packaged-workstation cutover/fallback verification. Any parity, store-integrity, crash, protocol, package, or release failure records a disabled reason and leaves Python authority unchanged.
 
 Related architecture and protocol guidance is recorded in [project architecture](../System/project_architecture.md), [API/command boundaries](../System/api_endpoints.md), and the living [agent context](../Tasks/context.md).
