@@ -818,8 +818,8 @@ class ShadowSampleRunner:
         )
 
 
-class RustShadowProvider:
-    """Adapter for the Rust JSONL provider; never a canonical coordinator."""
+class RustProviderTransport:
+    """Bounded transport for the Rust JSONL provider; never a coordinator."""
 
     def __init__(
         self,
@@ -829,7 +829,7 @@ class RustShadowProvider:
         environment: Mapping[str, str] | None = None,
     ) -> None:
         if not command or any(not isinstance(part, str) or not part for part in command):
-            raise ShadowContractError("Rust shadow provider command is invalid")
+            raise ShadowContractError("Rust execution provider command is invalid")
         if (
             not isinstance(timeout_seconds, (int, float))
             or isinstance(timeout_seconds, bool)
@@ -837,7 +837,7 @@ class RustShadowProvider:
             or timeout_seconds <= 0
             or timeout_seconds > _MAX_PROVIDER_TIMEOUT_SECONDS
         ):
-            raise ShadowContractError("Rust shadow provider timeout is invalid")
+            raise ShadowContractError("Rust execution provider timeout is invalid")
         self.command = tuple(command)
         self.timeout_seconds = float(timeout_seconds)
         self.environment = dict(environment or {})
@@ -850,7 +850,7 @@ class RustShadowProvider:
             or len(value.encode("utf-8")) > _MAX_PROVIDER_OUTPUT_BYTES
             for key, value in self.environment.items()
         ):
-            raise ShadowContractError("Rust shadow provider environment is invalid")
+            raise ShadowContractError("Rust execution provider environment is invalid")
         self.provider_id = "rust-shadow"
 
     def execute(
@@ -872,7 +872,7 @@ class RustShadowProvider:
             or cancel_after_seconds > _MAX_PROVIDER_TIMEOUT_SECONDS
         ):
             raise ShadowContractError(
-                "Rust shadow provider cancellation control is invalid"
+                "Rust execution provider cancellation control is invalid"
             )
         envelope: dict[str, Any] = {
             "request": request.to_dict(include_input=True)
@@ -1086,11 +1086,25 @@ class RustShadowProvider:
             else:
                 returncode = None
         except OSError as exc:
+            if process is not None:
+                self._terminate(process)
+                return replace(
+                    ExecutionReceipt.unknown(
+                        request,
+                        error_message=(
+                            "Rust execution provider supervision failed after launch: "
+                            f"{exc}"
+                        ),
+                        process_pid=effect_binding.get("pid"),
+                        process_identity=effect_binding.get("identity", ""),
+                    ),
+                    provider=self.provider_id,
+                )
             return replace(
                 ExecutionReceipt.start_failed(
                     request,
                     exit_code=127,
-                    error_message=f"Rust shadow provider could not start: {exc}",
+                    error_message=f"Rust execution provider could not start: {exc}",
                 ),
                 provider=self.provider_id,
             )
@@ -1104,7 +1118,7 @@ class RustShadowProvider:
             return replace(
                 ExecutionReceipt.unknown(
                     request,
-                    error_message="Rust shadow provider timed out before a receipt was observed.",
+                    error_message="Rust execution provider timed out before a receipt was observed.",
                     process_pid=effect_binding.get("pid"),
                     process_identity=effect_binding.get("identity", ""),
                 ),
@@ -1115,14 +1129,14 @@ class RustShadowProvider:
         if output_overflow.is_set():
             raise RustShadowProviderError(
                 "rust-provider-output-limit",
-                "Rust shadow provider response exceeded its bounded output.",
+                "Rust execution provider response exceeded its bounded output.",
             )
         stdout = b"".join(stdout_buffer)
         if returncode != 0:
             return replace(
                 ExecutionReceipt.unknown(
                     request,
-                    error_message="Rust shadow provider exited before a trustworthy receipt was observed.",
+                    error_message="Rust execution provider exited before a trustworthy receipt was observed.",
                     process_pid=effect_binding.get("pid"),
                     process_identity=effect_binding.get("identity", ""),
                 ),
@@ -1135,7 +1149,7 @@ class RustShadowProvider:
                 ExecutionReceipt.unknown(
                     request,
                     error_message=(
-                        "Rust shadow provider crashed or returned invalid JSON: "
+                        "Rust execution provider crashed or returned invalid JSON: "
                         f"{exc}"
                     ),
                     process_pid=effect_binding.get("pid"),
@@ -1146,19 +1160,19 @@ class RustShadowProvider:
         if not isinstance(response, Mapping):
             raise RustShadowProviderError(
                 "rust-provider-contract-failure",
-                "Rust shadow provider response must be an object.",
+                "Rust execution provider response must be an object.",
             )
         if response.get("ok") is not True:
             failure = response.get("failure")
             if not isinstance(failure, Mapping):
                 raise RustShadowProviderError(
                     "rust-provider-contract-failure",
-                    "Rust shadow provider returned an invalid structured failure.",
+                    "Rust execution provider returned an invalid structured failure.",
                 )
             if set(failure) != {"code", "message", "recoverable"}:
                 raise RustShadowProviderError(
                     "rust-provider-contract-failure",
-                    "Rust shadow provider returned an invalid structured failure.",
+                    "Rust execution provider returned an invalid structured failure.",
                 )
             code = failure.get("code")
             message = failure.get("message")
@@ -1170,28 +1184,28 @@ class RustShadowProvider:
             ):
                 raise RustShadowProviderError(
                     "rust-provider-contract-failure",
-                    "Rust shadow provider returned an invalid structured failure.",
+                    "Rust execution provider returned an invalid structured failure.",
                 )
             raise RustShadowProviderError(code, message, recoverable)
         raw_receipt = response.get("receipt")
         if not isinstance(raw_receipt, Mapping):
             raise RustShadowProviderError(
                 "rust-provider-contract-failure",
-                "Rust shadow provider did not return a typed receipt.",
+                "Rust execution provider did not return a typed receipt.",
             )
         try:
             receipt = ExecutionReceipt.from_dict(raw_receipt)
         except Exception as exc:
             raise RustShadowProviderError(
                 "rust-provider-contract-failure",
-                f"Rust shadow provider returned an invalid receipt: {exc}",
+                f"Rust execution provider returned an invalid receipt: {exc}",
             ) from exc
         if receipt.request_id != request.request_id or receipt.request_digest != request.request_digest:
             raise RustShadowProviderError(
                 "rust-provider-contract-failure",
-                "Rust shadow receipt does not match the request identity.",
+                "Rust execution provider receipt does not match the request identity.",
             )
-        if effect_callback_failures:
+        if effect_callback_failures and receipt.status == "cancelled":
             raise effect_callback_failures[0]
         return replace(receipt, provider=self.provider_id)
 
@@ -1210,6 +1224,10 @@ class RustShadowProvider:
                     pass
         elif process.poll() is None:
             process.kill()
+
+
+class RustShadowProvider(RustProviderTransport):
+    """Backward-compatible name for non-authoritative shadow sampling."""
 
 
 @dataclass(frozen=True)
@@ -1876,6 +1894,53 @@ class RustEligibilityStore:
                 updated_at=_utc_now(),
             )
 
+    def _write_unlocked(self, decision: RustEligibilityDecision) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                dir=self.path.parent,
+                prefix=f".{self.path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as temporary:
+                json.dump(decision.to_dict(), temporary, indent=2, sort_keys=True)
+                temporary.write("\n")
+                temporary.flush()
+                os.fsync(temporary.fileno())
+                temporary_path = Path(temporary.name)
+            temporary_path.replace(self.path)
+            directory_fd = os.open(self.path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            if temporary_path is not None and temporary_path.exists():
+                temporary_path.unlink()
+
+    def disable(self, reason: str) -> RustEligibilityDecision:
+        """Persist a runtime circuit-breaker decision for the Rust candidate."""
+
+        normalized_reason = _validate_identity(
+            reason, label="Rust eligibility disabled reason"
+        )
+        with self._lock():
+            decision = self._read_unlocked()
+            if not decision.eligible:
+                return decision
+            next_decision = replace(
+                decision,
+                revision=decision.revision + 1,
+                eligible=False,
+                disabled_reason=normalized_reason,
+                updated_at=_utc_now(),
+            )
+            self._write_unlocked(next_decision)
+            return next_decision
+
     def record(self, evidence: RustEligibilityEvidence) -> RustEligibilityDecision:
         failed = list(evidence.failure_reasons)
         verified_release = False
@@ -1922,31 +1987,7 @@ class RustEligibilityStore:
                 evidence=effective_evidence,
                 updated_at=_utc_now(),
             )
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temporary_path: Path | None = None
-            try:
-                with tempfile.NamedTemporaryFile(
-                    mode="w",
-                    encoding="utf-8",
-                    dir=self.path.parent,
-                    prefix=f".{self.path.name}.",
-                    suffix=".tmp",
-                    delete=False,
-                ) as temporary:
-                    json.dump(next_decision.to_dict(), temporary, indent=2, sort_keys=True)
-                    temporary.write("\n")
-                    temporary.flush()
-                    os.fsync(temporary.fileno())
-                    temporary_path = Path(temporary.name)
-                temporary_path.replace(self.path)
-                directory_fd = os.open(self.path.parent, os.O_RDONLY)
-                try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
-            finally:
-                if temporary_path is not None and temporary_path.exists():
-                    temporary_path.unlink()
+            self._write_unlocked(next_decision)
         return next_decision
 
 
@@ -1956,6 +1997,7 @@ __all__ = [
     "RustEligibilityDecision",
     "RustEligibilityEvidence",
     "RustEligibilityStore",
+    "RustProviderTransport",
     "RustReleaseGateEvidence",
     "RustShadowProvider",
     "RustShadowProviderError",

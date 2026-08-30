@@ -51,6 +51,7 @@ from .execution import (
     _owner_is_live,
 )
 from .execution_cutover import shell_execution_provider_from_environment
+from .execution_shadow import RustEligibilityStore
 from .performance import measured_stage
 
 
@@ -571,6 +572,16 @@ class ShellTerminalService:
                 f"Shell Terminal command references unknown Mission: {mission_id}"
             )
         return mission.runtime_dir / "execution-receipts.json"
+
+    def _rust_eligibility_store_for_mission(
+        self, mission_id: str
+    ) -> RustEligibilityStore:
+        mission = self._snapshots._missions.get(mission_id)
+        if mission is None:
+            raise WorkspacePersistenceError(
+                f"Shell Terminal command references unknown Mission: {mission_id}"
+            )
+        return RustEligibilityStore.from_runtime_root(mission.runtime_root)
 
     @contextmanager
     def _chronology_then_terminal_lock(self):
@@ -1515,6 +1526,9 @@ class ShellTerminalService:
         )
         execution_provider = shell_execution_provider_from_environment(
             python_executor=_run_bounded_process,
+            eligibility_store=self._rust_eligibility_store_for_mission(
+                str(record["mission_id"])
+            ),
         )
         attempt_terminal, attempt_record, record_index = (
             self._persist_execution_attempt(

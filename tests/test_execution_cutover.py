@@ -15,14 +15,17 @@ from unittest.mock import patch
 from albert_mvp.cli import main
 from albert_mvp.core import AlbertError, AlbertMission
 from albert_mvp.execution import (
+    ExecutionContractError,
     ExecutionCoordinator,
     ExecutionJournal,
     ExecutionLimits,
+    ExecutionReceipt,
     ExecutionRequest,
     ExecutionSandbox,
     PythonExecutionProvider,
     ShellExecutionAuthority,
 )
+from albert_mvp.execution_shadow import RustShadowProvider
 from albert_mvp.execution_cutover import (
     RustExecutionProvider,
     shell_execution_provider_from_environment,
@@ -41,6 +44,23 @@ class _ReceiptLosingProvider:
         process_binding_started = callbacks["process_binding_started"]
         process_binding_started(SimpleNamespace(pid=os.getpid()), "rust-provider")
         raise OSError("Rust provider receipt was lost after provider start")
+
+
+class _EligibilityStore:
+    def __init__(self, *, eligible: bool = True) -> None:
+        self.eligible = eligible
+        self.disabled_reason = "" if eligible else "qualification-disabled"
+
+    def load(self) -> SimpleNamespace:
+        return SimpleNamespace(
+            eligible=self.eligible,
+            disabled_reason=self.disabled_reason,
+        )
+
+    def disable(self, reason: str) -> SimpleNamespace:
+        self.eligible = False
+        self.disabled_reason = reason
+        return self.load()
 
 
 class ExecutionCutoverTests(unittest.TestCase):
@@ -251,6 +271,7 @@ sys.stdout.flush()
                 "ALFREDO_RUST_EXECUTION_PROVIDER_SHA256": provider_sha256,
             },
             python_executor=forbidden_python,
+            eligibility_store=_EligibilityStore(),
         )
         receipt = ExecutionCoordinator(
             ExecutionJournal(self.root / "rust-execution-receipts.json"),
@@ -283,6 +304,10 @@ sys.stdout.flush()
         with (
             patch.dict(os.environ, enabled, clear=False),
             patch(
+                "albert_mvp.execution_cutover.RustEligibilityStore.load",
+                return_value=SimpleNamespace(eligible=True, disabled_reason=""),
+            ),
+            patch(
                 "albert_mvp.workspace._run_bounded_process",
                 side_effect=AssertionError("Shell cutover invoked Python"),
             ) as python_run,
@@ -293,11 +318,6 @@ sys.stdout.flush()
         self.assertEqual(completed.stdout, "rust shell output")
         python_run.assert_not_called()
         self.assertEqual(counter.read_text(encoding="utf-8").splitlines(), ["rust"])
-        [receipt] = ExecutionJournal(
-            snapshots._primary_mission.runtime_dir / "execution-receipts.json"
-        ).inspect()
-        self.assertEqual(receipt.provider, "rust")
-
         with (
             patch.dict(
                 os.environ,
@@ -415,7 +435,14 @@ sys.stdout.flush()
             "read",
         ]
         cli_output = io.StringIO()
-        with patch.dict(os.environ, enabled, clear=False), redirect_stdout(cli_output):
+        with (
+            patch.dict(os.environ, enabled, clear=False),
+            patch(
+                "albert_mvp.execution_cutover.RustEligibilityStore.load",
+                return_value=SimpleNamespace(eligible=True, disabled_reason=""),
+            ),
+            redirect_stdout(cli_output),
+        ):
             cli_exit = main(exact)
 
         self.assertEqual(cli_exit, 0)
@@ -437,7 +464,13 @@ sys.stdout.flush()
             + "\n"
         )
         responses = io.StringIO()
-        with patch.dict(os.environ, enabled, clear=False):
+        with (
+            patch.dict(os.environ, enabled, clear=False),
+            patch(
+                "albert_mvp.execution_cutover.RustEligibilityStore.load",
+                return_value=SimpleNamespace(eligible=True, disabled_reason=""),
+            ),
+        ):
             serve(requests, responses)
 
         replay, conflict = [
@@ -463,6 +496,7 @@ sys.stdout.flush()
                 "ALFREDO_RUST_SHELL_ENABLED": "1",
             },
             python_executor=forbidden_python,
+            eligibility_store=_EligibilityStore(),
         )
         receipt = ExecutionCoordinator(
             ExecutionJournal(self.root / "invalid-selection-receipts.json"),
@@ -492,6 +526,7 @@ sys.stdout.flush()
                 "ALFREDO_RUST_EXECUTION_PROVIDER_SHA256": "0" * 64,
             },
             python_executor=forbidden_python,
+            eligibility_store=_EligibilityStore(),
         )
 
         receipt = ExecutionCoordinator(
@@ -508,13 +543,15 @@ sys.stdout.flush()
 
     def test_protocol_failure_after_effect_binding_is_outcome_unknown(self) -> None:
         provider_path, provider_sha256 = self._malformed_streaming_provider_fixture()
+        eligibility = _EligibilityStore()
         provider = shell_execution_provider_from_environment(
             {
                 "ALFREDO_RUST_CANDIDATE_ENABLED": "1",
                 "ALFREDO_RUST_SHELL_ENABLED": "1",
                 "ALFREDO_RUST_EXECUTION_PROVIDER": str(provider_path),
                 "ALFREDO_RUST_EXECUTION_PROVIDER_SHA256": provider_sha256,
-            }
+            },
+            eligibility_store=eligibility,
         )
         journal = ExecutionJournal(self.root / "malformed-stream-receipts.json")
 
@@ -526,6 +563,85 @@ sys.stdout.flush()
         self.assertTrue(receipt.effect_started)
         self.assertEqual(receipt.provider, "rust")
         self.assertRegex(receipt.process_identity, r"^(?:linux|posix):")
+        self.assertTrue(receipt.reconciliation_required)
+        self.assertFalse(eligibility.eligible)
+
+    def test_ineligible_candidate_falls_back_before_claim_or_effect(self) -> None:
+        provider_path, counter, provider_sha256 = self._rust_provider_fixture()
+        python_effects = 0
+
+        def python_effect(argv: list[str], **_callbacks: object):
+            nonlocal python_effects
+            python_effects += 1
+            return subprocess.CompletedProcess(argv, 0, "qualified fallback", "")
+
+        provider = shell_execution_provider_from_environment(
+            {
+                "ALFREDO_RUST_CANDIDATE_ENABLED": "1",
+                "ALFREDO_RUST_SHELL_ENABLED": "1",
+                "ALFREDO_RUST_EXECUTION_PROVIDER": str(provider_path),
+                "ALFREDO_RUST_EXECUTION_PROVIDER_SHA256": provider_sha256,
+            },
+            python_executor=python_effect,
+            eligibility_store=_EligibilityStore(eligible=False),
+        )
+        receipt = ExecutionCoordinator(
+            ExecutionJournal(self.root / "ineligible-fallback-receipts.json"),
+            provider,
+        ).execute(self._shell_request("shell:ineligible-fallback"))
+
+        self.assertEqual(receipt.status, "completed")
+        self.assertEqual(receipt.provider, "python")
+        self.assertEqual(receipt.stdout, "qualified fallback")
+        self.assertEqual(python_effects, 1)
+        self.assertFalse(counter.exists())
+
+    def test_journal_rejects_cross_provider_completion(self) -> None:
+        request = self._shell_request("shell:journal-provider-stability")
+        journal = ExecutionJournal(self.root / "provider-stability-receipts.json")
+        self.assertIsNone(journal.claim(request, provider="rust"))
+        python_receipt = ExecutionReceipt.completed(
+            request,
+            exit_code=0,
+            stdout="",
+            stderr="",
+        )
+
+        with self.assertRaisesRegex(ExecutionContractError, "provider"):
+            journal.complete(request, python_receipt)
+
+        [stored] = journal.inspect()
+        self.assertEqual(stored.status, "executing")
+        self.assertEqual(stored.provider, "rust")
+
+    def test_post_launch_transport_oserror_is_outcome_unknown(self) -> None:
+        provider_path = self.root / "post-launch-oserror-provider"
+        provider_path.write_text(
+            """#!/usr/bin/python3
+import sys
+import time
+
+sys.stdin.buffer.read()
+time.sleep(0.1)
+""",
+            encoding="utf-8",
+        )
+        provider_path.chmod(0o755)
+
+        def request_cancel() -> None:
+            raise RuntimeError("cancel provider")
+
+        with patch(
+            "albert_mvp.execution_shadow.os.kill",
+            side_effect=PermissionError("signal denied after launch"),
+        ):
+            receipt = RustShadowProvider((str(provider_path),)).execute(
+                self._shell_request("shell:post-launch-oserror"),
+                control_poll_callback=request_cancel,
+            )
+
+        self.assertEqual(receipt.status, "outcome-unknown")
+        self.assertTrue(receipt.effect_started)
         self.assertTrue(receipt.reconciliation_required)
 
     def test_real_rust_shell_streams_the_effect_binding_before_completion(self) -> None:

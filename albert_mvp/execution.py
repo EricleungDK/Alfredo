@@ -1164,6 +1164,7 @@ class ExecutionReceipt:
         exit_code: int,
         stdout: str,
         stderr: str,
+        provider: str = "python",
     ) -> "ExecutionReceipt":
         return cls._make(
             request,
@@ -1173,6 +1174,7 @@ class ExecutionReceipt:
             stderr=stderr,
             effect_started=True,
             reconciliation_required=False,
+            provider=provider,
         )
 
     @classmethod
@@ -1797,6 +1799,10 @@ class ExecutionJournal:
                     f"Execution request {request.request_id} was reused for a different effect."
                 )
             current = ExecutionReceipt.from_dict(existing["receipt"])
+            if current.provider != receipt.provider:
+                raise ExecutionContractError(
+                    "execution receipt provider does not match the claimed provider"
+                )
             if current.status != "executing" and current.to_dict(
                 include_output=False
             ) != receipt.to_dict(include_output=False):
@@ -1948,19 +1954,12 @@ class ExecutionCoordinator:
                     process_identity=process_identity,
                     provider=provider_id,
                 )
-            elif process_bound:
+            else:
                 receipt = ExecutionReceipt.unknown(
                     request,
                     error_message=str(exc),
                     process_pid=process_pid,
                     process_identity=process_identity,
-                    provider=provider_id,
-                )
-            else:
-                receipt = ExecutionReceipt.start_failed(
-                    request,
-                    exit_code=127,
-                    error_message=str(exc),
                     provider=provider_id,
                 )
             try:

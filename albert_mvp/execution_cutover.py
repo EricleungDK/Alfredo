@@ -25,7 +25,11 @@ from .execution import (
     ExecutionRequest,
     PythonExecutionProvider,
 )
-from .execution_shadow import RustShadowProvider, RustShadowProviderError
+from .execution_shadow import (
+    RustEligibilityStore,
+    RustProviderTransport,
+    RustShadowProviderError,
+)
 
 
 RUST_CANDIDATE_ENABLED = "ALFREDO_RUST_CANDIDATE_ENABLED"
@@ -41,10 +45,17 @@ class RustExecutionProvider:
 
     provider_id = "rust"
 
-    def __init__(self, provider_path: Path, expected_sha256: str) -> None:
+    def __init__(
+        self,
+        provider_path: Path,
+        expected_sha256: str,
+        *,
+        eligibility_store: RustEligibilityStore | None = None,
+    ) -> None:
         self.provider_path = Path(provider_path)
         self.expected_sha256 = expected_sha256
-        self._transport = RustShadowProvider((str(self.provider_path),))
+        self.eligibility_store = eligibility_store
+        self._transport = RustProviderTransport((str(self.provider_path),))
 
     def _verify_artifact(self) -> None:
         if (
@@ -128,6 +139,8 @@ class RustExecutionProvider:
                 control_poll_callback=poll_callback,
             )
         except RustShadowProviderError as exc:
+            if self.eligibility_store is not None:
+                self.eligibility_store.disable(f"runtime-{exc.code}")
             # Once the provider subprocess accepted the request, a malformed or
             # lost response is not positive proof that no effect started.  Only
             # preflight validation and a typed start-failed receipt may make
@@ -157,6 +170,16 @@ class RustExecutionProvider:
                 provider=self.provider_id,
             )
         canonical_receipt = replace(receipt, provider=self.provider_id)
+        if (
+            self.eligibility_store is not None
+            and canonical_receipt.status == "outcome-unknown"
+            and canonical_receipt.error_message.startswith(
+                ("Rust execution provider ", "Rust shadow provider ")
+            )
+        ):
+            self.eligibility_store.disable(
+                "runtime-rust-provider-transport-failure"
+            )
         if output_callback is not None:
             if canonical_receipt.stdout:
                 output_callback("stdout", canonical_receipt.stdout.encode("utf-8"))
@@ -193,6 +216,7 @@ def shell_execution_provider_from_environment(
     environment: Mapping[str, str] | None = None,
     *,
     python_executor: ExecutionExecutor | None = None,
+    eligibility_store: RustEligibilityStore | None = None,
 ) -> ExecutionProvider:
     """Select exactly one Shell provider from the process launch boundary."""
 
@@ -209,9 +233,23 @@ def shell_execution_provider_from_environment(
         )
     if candidate_enabled == "0" or shell_enabled == "0":
         return PythonExecutionProvider(executor=python_executor)
+    if eligibility_store is None:
+        return _RejectedRustExecutionProvider(
+            "Rust execution qualification state is unavailable"
+        )
+    try:
+        eligibility = eligibility_store.load()
+    except Exception:
+        return PythonExecutionProvider(executor=python_executor)
+    if not eligibility.eligible:
+        return PythonExecutionProvider(executor=python_executor)
     provider_path = values.get(RUST_EXECUTION_PROVIDER, "")
     provider_sha256 = values.get(RUST_EXECUTION_PROVIDER_SHA256, "")
-    return RustExecutionProvider(Path(provider_path), provider_sha256)
+    return RustExecutionProvider(
+        Path(provider_path),
+        provider_sha256,
+        eligibility_store=eligibility_store,
+    )
 
 
 __all__ = [

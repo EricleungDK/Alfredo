@@ -663,6 +663,32 @@ class ExecutionShadowTests(unittest.TestCase):
         incomplete = replace(passing, stages_complete=False)
         self.assertFalse(store.record(incomplete).eligible)
 
+    def test_runtime_circuit_breaker_persistently_disables_eligible_rust(self) -> None:
+        store = RustEligibilityStore(self.root / "shadow" / "rust-eligibility.json")
+        manifest = self._verified_release_manifest()
+        release_evidence = RustReleaseGateEvidence.from_verified_artifacts(
+            provider_path=self.artifact,
+            package_manifest_path=manifest,
+        )
+        enabled = store.record(
+            RustEligibilityEvidence.all_passed(
+                sample_id="sample-runtime-breaker",
+                cohort_id="cohort-runtime-breaker",
+                stages=("S1", "R1"),
+                release_evidence=release_evidence,
+            )
+        )
+        self.assertTrue(enabled.eligible)
+
+        disabled = store.disable("runtime-rust-provider-contract-failure")
+
+        self.assertFalse(disabled.eligible)
+        self.assertEqual(
+            disabled.disabled_reason,
+            "runtime-rust-provider-contract-failure",
+        )
+        self.assertFalse(store.load().eligible)
+
     def test_release_evidence_rejects_a_synthetic_gate_manifest(self) -> None:
         manifest = self.root / "package-manifest.json"
         manifest.write_text(
