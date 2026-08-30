@@ -2235,6 +2235,36 @@ class RetirementPreservationTest(unittest.TestCase):
         self.assertTrue(blocked.preservation_budget["bound"])
         self.assertFalse(blocked.retirement.get("snapshot"))
 
+    def test_missing_legacy_runner_boundary_cannot_be_inferred_as_never_started(
+        self,
+    ) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        runtime = json.loads(mission.runtime_path.read_text(encoding="utf-8"))
+        raw_session = runtime["sessions"][completed.session_id]
+        raw_session["retirement"]["runner_boundary"] = {}
+        mission.runtime_path.write_text(
+            json.dumps(runtime, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        legacy = self.load_mission(quiescence=None, perform_startup_effects=False)
+        legacy_session = legacy.sessions[completed.session_id]
+
+        with self.assertRaisesRegex(LaunchBlockedError, "Runner Quiescence"):
+            legacy.preserve_retirement_unit(
+                completed.session_id,
+                expected_revision=legacy_session.revision,
+                correlation_id="preserve-missing-legacy-runner-boundary",
+            )
+
+        blocked = self.load_mission(
+            perform_startup_effects=False
+        ).sessions[completed.session_id]
+        self.assertEqual(blocked.retirement["phase"], "preservation-blocked")
+        self.assertEqual(blocked.retirement["runner_boundary"], {})
+        self.assertTrue(blocked.preservation_budget["bound"])
+        self.assertFalse(blocked.retirement.get("snapshot"))
+
     def test_late_lifecycle_race_quarantines_publication_and_blocks_unit(self) -> None:
         mission = self.load_mission()
         completed = self.completed_session(mission)
@@ -2835,6 +2865,16 @@ class RetirementPreservationTest(unittest.TestCase):
         )
         sandbox.start()
         self.addCleanup(sandbox.stop)
+        # This fixture intentionally substitutes raw argv for the prepared
+        # Bubblewrap command so the test can coordinate cancellation with the
+        # child directly. Keep the validator exception local to that fixture.
+        provider_validation = patch(
+            "albert_mvp.execution.PythonExecutionProvider.validate_request",
+            autospec=True,
+            side_effect=lambda _provider, request: request.validate(),
+        )
+        provider_validation.start()
+        self.addCleanup(provider_validation.stop)
         outcomes: list[str] = []
 
         def run() -> None:
@@ -5363,7 +5403,7 @@ class RetirementPreservationTest(unittest.TestCase):
         blocked = mission._refresh_persisted_session(completed.session_id)
         destination = self.root / "non-utf8-retained-export"
 
-        mission.export_retirement_unit(
+        self.load_mission().export_retirement_unit(
             completed.session_id,
             destination=destination,
             expected_revision=blocked.revision,
@@ -5386,8 +5426,9 @@ class RetirementPreservationTest(unittest.TestCase):
             os.readlink(os.path.join(exported_root, linkname)),
             link_target,
         )
-        after_export = mission._refresh_persisted_session(completed.session_id)
-        discarded = mission.discard_retained_worktree(
+        quiesced = self.load_mission()
+        after_export = quiesced._refresh_persisted_session(completed.session_id)
+        discarded = quiesced.discard_retained_worktree(
             completed.session_id,
             expected_revision=after_export.revision,
             correlation_id="discard-non-utf8-retained-tree",
@@ -6835,6 +6876,27 @@ class RetirementPreservationTest(unittest.TestCase):
         self.assertNotEqual(reviewed.retirement["phase"], "retired")
         self.assertEqual(late.read_text(encoding="utf-8"), "late unpreserved bytes\n")
 
+    @unittest.skipUnless(sys.platform.startswith("linux"), "Linux procfs contract")
+    def test_linux_handle_scan_fails_closed_for_inaccessible_live_process(self) -> None:
+        mission = self.load_mission()
+        completed = self.completed_session(mission)
+        original_readlink = os.readlink
+        inaccessible_boundary = Path(f"/proc/{os.getpid()}/cwd")
+
+        def readlink_with_isolated_process(path):
+            if Path(path) == inaccessible_boundary:
+                raise PermissionError(errno.EACCES, "access isolated", str(path))
+            return original_readlink(path)
+
+        with (
+            patch.object(os, "readlink", side_effect=readlink_with_isolated_process),
+            self.assertRaisesRegex(
+                AlbertError,
+                "Open-handle inspection was unavailable before retirement",
+            ),
+        ):
+            mission._assert_no_open_retirement_handles(completed.worktree_path)
+
     def test_non_git_retirement_blocks_an_open_handle_write_after_validation(
         self,
     ) -> None:
@@ -6943,7 +7005,7 @@ class RetirementPreservationTest(unittest.TestCase):
 
         retained = mission._refresh_persisted_session(completed.session_id)
         self.assertNotEqual(retained.retirement["phase"], "retired")
-        self.assertIn("process handle", retained.retirement["blocked_reason"])
+        self.assertIn("writable shared mapping", retained.retirement["blocked_reason"])
 
     def test_non_git_cleanup_resumes_after_partial_directory_removal(self) -> None:
         shutil.move(self.target_repo / ".git", self.root / "detached-target-git")

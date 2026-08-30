@@ -21,13 +21,18 @@ from albert_mvp.execution import (
     ExecutionSandbox,
     LocalAgentExecutionAuthority,
     PythonExecutionProvider,
+    ShellExecutionAuthority,
 )
+from albert_mvp.execution_cutover import shell_execution_provider_from_environment
 from albert_mvp.execution_shadow import (
     RustShadowProvider,
     RustShadowProviderError,
     compare_execution_receipts,
     normalize_structured_failure,
     shadow_artifact_sha256,
+)
+from albert_mvp.local_agent_execution_cutover import (
+    local_agent_execution_provider_from_environment,
 )
 
 
@@ -74,6 +79,7 @@ def _request(
     workspace: Path,
     request_id: str,
     command: tuple[str, ...],
+    effect: str = "local-agent",
     timeout_seconds: float = 5,
     output_limit_bytes: int = 4096,
     descendant_grace_seconds: float = 0.1,
@@ -85,7 +91,7 @@ def _request(
     )
     return ExecutionRequest(
         request_id=request_id,
-        effect="local-agent",
+        effect=effect,
         argv=(
             str(bwrap),
             "--die-with-parent",
@@ -116,12 +122,26 @@ def _request(
             *command,
         ),
         working_directory=str(workspace),
-        authority=LocalAgentExecutionAuthority(
-            mission_id="release-shadow-mission",
-            session_id="release-shadow-session",
-            session_revision=1,
-            runner_operation_id="runner:release-shadow-session:1",
-            worktree_identity="managed:release-shadow-session",
+        authority=(
+            LocalAgentExecutionAuthority(
+                mission_id="release-shadow-mission",
+                session_id="release-shadow-session",
+                session_revision=1,
+                runner_operation_id="runner:release-shadow-session:1",
+                worktree_identity="managed:release-shadow-session",
+            )
+            if effect == "local-agent"
+            else ShellExecutionAuthority(
+                mission_id="release-shadow-mission",
+                command_id=request_id,
+                correlation_id=f"correlation:{request_id}",
+                command=" ".join(command),
+                classification="auto-allowed",
+                requester="mission-commander",
+                working_directory=str(workspace),
+                requested_paths=(),
+                access_level="read",
+            )
         ),
         limits=limits,
         sandbox=ExecutionSandbox(
@@ -138,12 +158,25 @@ def _require_parity(
     *,
     expected_status: str,
     canonical_roots: tuple[Path, ...],
+    protocol: str | None = None,
 ) -> dict[str, str]:
     python_receipt = PythonExecutionProvider().execute(request)
+    process_bindings: list[tuple[int, str]] = []
     rust_receipt = _run_rust_sample(
         request.request_id,
         canonical_roots,
-        lambda: rust.execute(request),
+        lambda: rust.execute(
+            request,
+            **(
+                {
+                    "effect_process_started": lambda pid, identity: process_bindings.append(
+                        (pid, identity)
+                    )
+                }
+                if protocol == "current-streamed"
+                else {}
+            ),
+        ),
     )
     comparison = compare_execution_receipts(python_receipt, rust_receipt)
     if comparison.mismatches:
@@ -155,12 +188,21 @@ def _require_parity(
         raise RuntimeError(
             f"{request.request_id} returned {rust_receipt.status}, expected {expected_status}"
         )
-    return {
+    if protocol == "current-streamed" and process_bindings != [
+        (rust_receipt.process_pid, rust_receipt.process_identity)
+    ]:
+        raise RuntimeError(
+            f"{request.request_id} did not stream the exact effect process binding"
+        )
+    evidence = {
         "request_id": request.request_id,
         "request_sha256": request.request_digest,
         "status": rust_receipt.status,
         "store_unchanged": True,
     }
+    if protocol is not None:
+        evidence.update({"effect": request.effect, "protocol": protocol})
+    return evidence
 
 
 def _require_validation_parity(
@@ -349,6 +391,48 @@ def verify(
             rust,
             expected_status="completed",
             canonical_roots=governed_roots,
+            protocol="previous-one-response",
+        ),
+        _require_parity(
+            _request(
+                bwrap=bwrap,
+                system_roots=system_roots,
+                workspace=workspace,
+                request_id="packaged-shadow-local-agent-current",
+                command=("/usr/bin/printf", "packaged local agent stream"),
+            ),
+            rust,
+            expected_status="completed",
+            canonical_roots=governed_roots,
+            protocol="current-streamed",
+        ),
+        _require_parity(
+            _request(
+                bwrap=bwrap,
+                system_roots=system_roots,
+                workspace=workspace,
+                request_id="packaged-shadow-shell-previous",
+                command=("/usr/bin/printf", "packaged shell response"),
+                effect="shell",
+            ),
+            rust,
+            expected_status="completed",
+            canonical_roots=governed_roots,
+            protocol="previous-one-response",
+        ),
+        _require_parity(
+            _request(
+                bwrap=bwrap,
+                system_roots=system_roots,
+                workspace=workspace,
+                request_id="packaged-shadow-shell-current",
+                command=("/usr/bin/printf", "packaged shell stream"),
+                effect="shell",
+            ),
+            rust,
+            expected_status="completed",
+            canonical_roots=governed_roots,
+            protocol="current-streamed",
         ),
         _require_parity(
             _request(
@@ -616,6 +700,20 @@ def verify(
     suite_digest = hashlib.sha256(
         "\n".join(case["request_sha256"] for case in cases).encode("ascii")
     ).hexdigest()
+    shell_fallback = shell_execution_provider_from_environment(
+        {
+            "ALFREDO_RUST_CANDIDATE_ENABLED": "0",
+            "ALFREDO_RUST_SHELL_ENABLED": "1",
+        }
+    )
+    local_agent_fallback = local_agent_execution_provider_from_environment(
+        {"ALFREDO_RUST_LOCAL_AGENT_ENABLED": "0"}
+    )
+    if (
+        shell_fallback.provider_id != "python"
+        or local_agent_fallback.provider_id != "python"
+    ):
+        raise RuntimeError("explicit pre-effect Python fallback selection failed")
     return {
         "status": "pass",
         "request_id": "packaged-shadow-contract-suite",
@@ -625,6 +723,11 @@ def verify(
         "cohorts": cases,
         "canonical_store_roots": [str(root) for root in governed_roots],
         "store_unchanged": True,
+        "python_fallback": {
+            "selection_boundary": "pre-effect",
+            "shell": shell_fallback.provider_id,
+            "local_agent": local_agent_fallback.provider_id,
+        },
     }
 
 

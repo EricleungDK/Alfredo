@@ -536,6 +536,27 @@ class ExecutionShadowTests(unittest.TestCase):
         result = script["verify"](binary, self.worktree, (canonical_root,))
         cohorts = {case["request_id"]: case for case in result["cohorts"]}
 
+        self.assertEqual(
+            [
+                (case["effect"], case["protocol"])
+                for case in result["cohorts"]
+                if "protocol" in case
+            ],
+            [
+                ("local-agent", "previous-one-response"),
+                ("local-agent", "current-streamed"),
+                ("shell", "previous-one-response"),
+                ("shell", "current-streamed"),
+            ],
+        )
+        self.assertEqual(
+            result["python_fallback"],
+            {
+                "selection_boundary": "pre-effect",
+                "shell": "python",
+                "local_agent": "python",
+            },
+        )
         self.assertTrue(
             cohorts["packaged-shadow-timeout-cleanup"]["cleanup_verified"]
         )

@@ -25,6 +25,7 @@ from albert_mvp.core import (
     LaunchBlockedError,
     LocalAgentSession,
     LockedFieldError,
+    RunnerObservation,
 )
 from albert_mvp.tui import build_tui_state, perform_tui_action, render_tui_error, render_tui_state
 from albert_mvp.workspace import ReviewWorkspaceService, WorkspaceSnapshotService
@@ -101,14 +102,69 @@ class AlbertMvpTest(unittest.TestCase):
             mission_id="mission-001",
         ).load()
 
-    def load_mission_with_agent_config(self, config_path):
+    def load_mission_with_agent_config(
+        self,
+        config_path,
+        *,
+        perform_startup_effects=True,
+    ):
         return AlbertMission(
             target_repo=self.target_repo,
             tracker_dir=self.tracker,
             runtime_root=self.runtime,
             mission_id="mission-001",
             agent_config_path=config_path,
-        ).load()
+        ).load(perform_startup_effects=perform_startup_effects)
+
+    def recover_orphaned_session(self, mission, session):
+        with patch.object(
+            mission,
+            "_probe_runner_boundary",
+            return_value=("absent", "absent"),
+        ):
+            receipt = mission.observe_runner(
+                RunnerObservation(
+                    source_id="mvp-recovery-test",
+                    source_incarnation="test-run",
+                    sequence=1,
+                    mission_id=mission.mission_id,
+                    session_id=session.session_id,
+                    session_revision=session.revision,
+                    runner_operation_id=session.runner_operation_id,
+                    owner_signal="absent",
+                    process_group_signal="absent",
+                    worktree_identity=session.worktree_identity,
+                    result_signal="absent",
+                )
+            )
+        self.assertEqual(receipt.outcome, "recovered")
+        self.assertEqual(receipt.effect, "recover-same-session")
+        return mission.sessions[session.session_id]
+
+    def seal_crash_worktree_identity(self, mission, session_id):
+        crashed = mission._refresh_persisted_session(session_id)
+        crashed.worktree_identity = mission._worktree_identity_for_session(crashed)
+        self.assertTrue(crashed.worktree_identity)
+        if crashed.runner_pid is not None and not crashed.runner_identity:
+            crashed.runner_identity = f"simulated:{crashed.runner_pid}:test-run"
+        mission._remember_retirement_runner_boundary(crashed)
+        return mission._persist_session_update(
+            crashed,
+            expected_statuses={"running"},
+        )
+
+    @staticmethod
+    def seal_synthetic_never_started_boundary(mission, session):
+        """Persist explicit no-effect proof for legacy-style synthetic fixtures."""
+
+        mission._remember_never_started_runner_boundary(
+            session,
+            event_at="2026-08-30T00:00:00+00:00",
+        )
+        return mission._persist_session_update(
+            session,
+            expected_statuses={session.status},
+        )
 
     def test_loads_tracker_metadata_after_a_markdown_title_and_blank_line(self):
         (self.issues / "01-root.md").write_text(
@@ -442,6 +498,7 @@ None - can start immediately
         mission = self.load_mission()
         mission.approve_issue("ISS-01")
         session = mission.launch_issue("ISS-01")
+        session = self.seal_synthetic_never_started_boundary(mission, session)
         mission.record_evidence(
             session.session_id,
             EvidencePackage(
@@ -1640,14 +1697,20 @@ None - can start immediately
         observed_before_prepare = []
 
         def inspect_running_before_prepare(session):
-            reloaded = self.load_mission_with_agent_config(config_path)
+            reloaded = self.load_mission_with_agent_config(
+                config_path,
+                perform_startup_effects=False,
+            )
             observed_before_prepare.append(
                 (reloaded.sessions[session.session_id].status, session.worktree_path.exists())
             )
             real_prepare(session)
 
         def inspect_running_then_complete(session):
-            reloaded = self.load_mission_with_agent_config(config_path)
+            reloaded = self.load_mission_with_agent_config(
+                config_path,
+                perform_startup_effects=False,
+            )
             observed_statuses.append(reloaded.sessions[session.session_id].status)
             self.assertTrue(session.worktree_path.exists())
             real_runner(session)
@@ -1942,7 +2005,10 @@ None - can start immediately
         active = None
         observed_runner = None
         while time.monotonic() < deadline:
-            observed_runner = self.load_mission_with_agent_config(config_path)
+            observed_runner = self.load_mission_with_agent_config(
+                config_path,
+                perform_startup_effects=False,
+            )
             active = observed_runner.sessions[queued.session_id]
             if (
                 active.runner_process_pid is not None
@@ -2184,8 +2250,12 @@ None - can start immediately
         ):
             mission.run_session(repair.session_id)
 
+        self.seal_crash_worktree_identity(mission, repair.session_id)
+
         recovered_mission = self.load_mission_with_agent_config(config_path)
         recovered = recovered_mission.sessions[repair.session_id]
+        self.assertEqual(recovered.status, "running")
+        recovered = self.recover_orphaned_session(recovered_mission, recovered)
         self.assertEqual(recovered.status, "queued")
         self.assertEqual(
             recovered.repository_snapshot["preparation"]["state"],
@@ -2252,12 +2322,16 @@ None - can start immediately
         ):
             mission.run_session(repair.session_id)
 
+        self.seal_crash_worktree_identity(mission, repair.session_id)
+
         (self.target_repo / "src/app.py").write_text(
             "STATE = 'newer-parent-edit'\n",
             encoding="utf-8",
         )
         recovered_mission = self.load_mission_with_agent_config(config_path)
         recovered = recovered_mission.sessions[repair.session_id]
+        self.assertEqual(recovered.status, "running")
+        recovered = self.recover_orphaned_session(recovered_mission, recovered)
         self.assertEqual(recovered.status, "queued")
         self.assertTrue(recovered.repository_snapshot)
 
@@ -2313,9 +2387,13 @@ None - can start immediately
         ):
             mission.run_session(session.session_id)
 
+        self.seal_crash_worktree_identity(mission, session.session_id)
+
         untracked.write_text("STATE = 'newer-parent'\n", encoding="utf-8")
         recovered_mission = self.load_mission_with_agent_config(config_path)
         recovered = recovered_mission.sessions[session.session_id]
+        self.assertEqual(recovered.status, "running")
+        recovered = self.recover_orphaned_session(recovered_mission, recovered)
         self.assertEqual(recovered.status, "queued")
         self.assertEqual(
             recovered.repository_snapshot["preparation"]["state"],
@@ -2384,9 +2462,13 @@ None - can start immediately
         ):
             mission.run_session(repair.session_id)
 
+        self.seal_crash_worktree_identity(mission, repair.session_id)
+
         self.assertFalse(prior_change.exists())
         recovered_mission = self.load_mission_with_agent_config(config_path)
         recovered = recovered_mission.sessions[repair.session_id]
+        self.assertEqual(recovered.status, "running")
+        recovered = self.recover_orphaned_session(recovered_mission, recovered)
         self.assertEqual(recovered.status, "queued")
 
         completed = recovered_mission.run_session(repair.session_id)
@@ -2991,6 +3073,8 @@ None - can start immediately
 
         def guarded_scandir(path):
             handle = real_scandir(path)
+            if isinstance(path, int):
+                return handle
             if Path(path) == self.target_repo:
                 return ScandirGuard(handle)
             return handle
@@ -3415,12 +3499,12 @@ None - can start immediately
             "if child == 0 else os._exit(0)"
         )
 
-        with patch("albert_mvp.core._PROCESS_DESCENDANT_GRACE_SECONDS", 0.1):
-            completed = core_module._run_bounded_process(
-                [sys.executable, "-c", script],
-                cwd=self.target_repo,
-                timeout_seconds=1,
-            )
+        completed = core_module._run_bounded_process(
+            [sys.executable, "-c", script],
+            cwd=self.target_repo,
+            timeout_seconds=1,
+            descendant_grace_seconds=0.1,
+        )
         time.sleep(0.4)
 
         self.assertIn(completed.returncode, {0, 124})
@@ -3988,19 +4072,19 @@ None - can start immediately
             reason="Still incomplete.",
             expected_revision=mission.sessions[session.session_id].revision,
         )
-        second_reject = perform_tui_action(
-            mission,
-            "review",
-            "ISS-01",
-            session_id=session.session_id,
-            outcome="Rejected",
-            reason="Still incomplete.",
-            expected_revision=mission.sessions[session.session_id].revision,
-        )
+        with self.assertRaisesRegex(LaunchBlockedError, "Retirement Unit phase is grace"):
+            perform_tui_action(
+                mission,
+                "review",
+                "ISS-01",
+                session_id=session.session_id,
+                outcome="Rejected",
+                reason="Still incomplete.",
+                expected_revision=mission.sessions[session.session_id].revision,
+            )
 
         self.assertEqual(repair.next_action, "same-local-agent-repair")
         self.assertEqual(first_reject.next_action, "same-local-agent-repair")
-        self.assertEqual(second_reject.next_action, "fresh-local-agent-repair")
 
     def test_repair_launch_reuses_local_agent_with_frontier_feedback(self):
         config_path = self.write_agent_config(
@@ -4025,13 +4109,19 @@ None - can start immediately
         )
 
         self.assertIn("repair", mission.issue_detail("ISS-01")["next_actions"])
-        repair_session = mission.launch_repair(first_session.session_id, allowed_paths=["prototype"])
+        repair_session = mission.launch_repair(
+            first_session.session_id,
+            allowed_paths=["prototype", "FAKE_AGENT_RESULT.md"],
+        )
 
         repair_context = repair_session.task_packet["repair_context"]
         self.assertEqual(repair_session.session_id, "session-ISS-01-2")
         self.assertEqual(repair_session.issue_id, "ISS-01")
         self.assertEqual(repair_session.assigned_agent, "fake-local")
-        self.assertEqual(repair_session.task_packet["allowed_paths"], ["prototype"])
+        self.assertEqual(
+            repair_session.task_packet["allowed_paths"],
+            ["prototype", "FAKE_AGENT_RESULT.md"],
+        )
         self.assertEqual(repair_context["prior_session_id"], first_session.session_id)
         self.assertEqual(repair_context["review_outcome"], "Needs repair")
         self.assertEqual(repair_context["review_reason"], "Acceptance detail missing.")
@@ -4065,7 +4155,7 @@ None - can start immediately
             "repair",
             "ISS-01",
             session_id=first_session.session_id,
-            allowed_paths=["prototype"],
+            allowed_paths=["prototype", "FAKE_AGENT_RESULT.md"],
             expected_revision=mission.sessions[first_session.session_id].revision,
         )
         reloaded = self.load_mission_with_agent_config(config_path)
@@ -4082,7 +4172,7 @@ None - can start immediately
                 "repair",
                 "ISS-01",
                 session_id=first_session.session_id,
-                allowed_paths=["prototype"],
+                allowed_paths=["prototype", "FAKE_AGENT_RESULT.md"],
                 expected_revision=reloaded.sessions[first_session.session_id].revision,
             )
         self.assertEqual(
@@ -4128,7 +4218,7 @@ None - can start immediately
                         "repair",
                         "ISS-01",
                         session_id=first_session.session_id,
-                        allowed_paths=["prototype"],
+                        allowed_paths=["prototype", "FAKE_AGENT_RESULT.md"],
                         expected_revision=candidate.sessions[
                             first_session.session_id
                         ].revision,
@@ -4561,6 +4651,11 @@ None - can start immediately
         self.assertEqual(self.run_cli(["launch", *base_args, "ISS-01", "--allowed-path", "src"])[0], 0)
 
         session_id = "session-ISS-01-1"
+        launched = self.load_mission()
+        self.seal_synthetic_never_started_boundary(
+            launched,
+            launched.sessions[session_id],
+        )
         self.assertEqual(
             self.run_cli(
                 [
@@ -5126,8 +5221,27 @@ None - can start immediately
         mission.approve_issue("ISS-01")
         session = mission.launch_issue("ISS-01")
 
+        real_bounded_git_paths = AlbertMission._bounded_git_paths
+
+        def bounded_repository_listing(root, arguments, *, description, required=False):
+            if description == "repository file listing":
+                raise AlbertError(
+                    "repository file listing exceeds the 256-byte capture limit; "
+                    "narrow the workspace or exclude generated dependency trees before launching"
+                )
+            return real_bounded_git_paths(
+                root,
+                arguments,
+                description=description,
+                required=required,
+            )
+
         with (
-            patch("albert_mvp.core._GIT_PATH_OUTPUT_BYTES_LIMIT", 256),
+            patch.object(
+                AlbertMission,
+                "_bounded_git_paths",
+                side_effect=bounded_repository_listing,
+            ),
             self.assertRaisesRegex(
                 AlbertError,
                 "repository file listing exceeds the 256-byte capture limit",
@@ -6137,6 +6251,7 @@ None - can start immediately
         mission = self.load_mission()
         mission.approve_issue("ISS-01")
         session = mission.launch_issue("ISS-01")
+        session = self.seal_synthetic_never_started_boundary(mission, session)
         evidence = EvidencePackage(
             changed_files=["src/app.py"],
             diff_summary="Added mission board.",
@@ -6147,13 +6262,19 @@ None - can start immediately
         )
         mission.record_evidence(session.session_id, evidence)
 
-        first = mission.record_frontier_review(session.session_id, "Rejected", reason="Acceptance missing.")
-        second = mission.record_frontier_review(session.session_id, "Rejected", reason="Still missing.")
-        third = mission.record_frontier_review(session.session_id, "Rejected", reason="Architecture failure.", failure_type="architecture")
+        first = mission.record_frontier_review(
+            session.session_id,
+            "Rejected",
+            reason="Acceptance missing.",
+        )
+        with self.assertRaisesRegex(LaunchBlockedError, "Retirement Unit phase is grace"):
+            mission.record_frontier_review(
+                session.session_id,
+                "Rejected",
+                reason="Still missing.",
+            )
 
         self.assertEqual(first.next_action, "same-local-agent-repair")
-        self.assertEqual(second.next_action, "fresh-local-agent-repair")
-        self.assertEqual(third.next_action, "frontier-architect-revision")
 
     def test_mission_records_are_generated_without_bulky_evidence(self):
         mission = self.load_mission()
@@ -6188,6 +6309,7 @@ None - can start immediately
         mission = self.load_mission()
         mission.approve_issue("ISS-01")
         session = mission.launch_issue("ISS-01")
+        session = self.seal_synthetic_never_started_boundary(mission, session)
         mission.record_evidence(
             session.session_id,
             EvidencePackage(

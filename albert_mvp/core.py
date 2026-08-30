@@ -604,7 +604,11 @@ class _SessionOutputRecorder:
                 pass
 
 
-def _probe_process_token_pids(process_token: str) -> tuple[set[int], bool]:
+def _probe_process_token_pids(
+    process_token: str,
+    *,
+    not_before_linux_start_ticks: int | None = None,
+) -> tuple[set[int], bool]:
     """Return token-bound processes and whether their absence was observable."""
 
     if os.name != "posix" or not process_token or not Path("/proc").is_dir():
@@ -628,6 +632,32 @@ def _probe_process_token_pids(process_token: str) -> tuple[set[int], bool]:
             except FileNotFoundError:
                 continue
             except OSError:
+                try:
+                    status = (Path(entry.path) / "status").read_text(
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                except OSError:
+                    status = ""
+                state_line = next(
+                    (line for line in status.splitlines() if line.startswith("State:")),
+                    "",
+                )
+                state_values = state_line.split()[1:]
+                if state_values and state_values[0] in {"X", "Z"}:
+                    continue
+                if not_before_linux_start_ticks is not None:
+                    identity = _process_identity(pid).split(":")
+                    try:
+                        process_start_ticks = int(identity[2])
+                    except (IndexError, ValueError):
+                        process_start_ticks = not_before_linux_start_ticks
+                    if process_start_ticks < not_before_linux_start_ticks:
+                        # A process that predates the token-bound root could
+                        # not have inherited its freshly generated environment
+                        # marker. Later or unidentifiable inaccessible
+                        # processes remain uncertainty.
+                        continue
                 # hidepid, sandbox, and transient I/O restrictions make an
                 # absence claim unavailable; supervision must not collapse
                 # that uncertainty into proof of quiescence.
@@ -4815,7 +4845,13 @@ class AlbertMission:
                 ),
             )
             self._record_typed_recovery_failure(persisted_failure)
-            self.reconcile_retirement_unit(persisted_failure.session_id)
+            try:
+                self.reconcile_retirement_unit(persisted_failure.session_id)
+            except AlbertError as retirement_error:
+                exc.add_note(
+                    "Retirement reconciliation also blocked: "
+                    f"{retirement_error}"
+                )
             raise
 
         session.status = "running"
@@ -4919,7 +4955,13 @@ class AlbertMission:
                     cancelled = self._finalize_cancelled_runner_owner_release(session)
                     return self.reconcile_retirement_unit(cancelled.session_id)
                 self._record_typed_recovery_failure(persisted)
-                self.reconcile_retirement_unit(persisted.session_id)
+                try:
+                    self.reconcile_retirement_unit(persisted.session_id)
+                except AlbertError as retirement_error:
+                    exc.add_note(
+                        "Retirement reconciliation also blocked: "
+                        f"{retirement_error}"
+                    )
                 raise AlbertError(f"{session_id} runner failed: {exc}") from exc
 
             session.runner_ended_at = session.runner_ended_at or _utc_now()
@@ -5389,8 +5431,18 @@ class AlbertMission:
             session.runner_process_identity,
         )
         if process_group == "absent" and session.runner_process_token:
+            process_identity_parts = session.runner_process_identity.split(":")
+            try:
+                process_start_ticks = (
+                    int(process_identity_parts[2])
+                    if process_identity_parts[0] == "linux"
+                    else None
+                )
+            except (IndexError, ValueError):
+                process_start_ticks = None
             token_pids, absence_observable = _probe_process_token_pids(
-                session.runner_process_token
+                session.runner_process_token,
+                not_before_linux_start_ticks=process_start_ticks,
             )
             if token_pids:
                 process_group = "live-exact"
@@ -6089,23 +6141,24 @@ class AlbertMission:
                     and session.evidence_valid
                 ):
                     self.sessions[session_id] = session
-                    return
-                raise AlbertError(
-                    "Evidence correlation id was already used for a different package: "
-                    f"{correlation_id}"
+                else:
+                    raise AlbertError(
+                        "Evidence correlation id was already used for a different package: "
+                        f"{correlation_id}"
+                    )
+            else:
+                session.evidence = evidence
+                session.evidence_valid = True
+                session.evidence_correlation_id = correlation_id
+                session.status = "evidence-ready"
+                session.revision += 1
+                data["sessions"][session_id] = session.to_dict()
+                data.setdefault("timeline", []).append(
+                    f"{session.issue_id} evidence package validated for {session_id}."
                 )
-            session.evidence = evidence
-            session.evidence_valid = True
-            session.evidence_correlation_id = correlation_id
-            session.status = "evidence-ready"
-            session.revision += 1
-            data["sessions"][session_id] = session.to_dict()
-            data.setdefault("timeline", []).append(
-                f"{session.issue_id} evidence package validated for {session_id}."
-            )
-            self._write_runtime_payload(data)
-            self.sessions[session_id] = session
-            self.timeline = list(data.get("timeline", []))
+                self._write_runtime_payload(data)
+                self.sessions[session_id] = session
+                self.timeline = list(data.get("timeline", []))
         if self._evidence_activity_recorder is not None:
             self._evidence_activity_recorder(self.mission_id, session, evidence)
 
@@ -8393,7 +8446,9 @@ class AlbertMission:
                     f"owner={owner_signal}, process-group={process_group_signal}.",
                 )
                 raise LaunchBlockedError(
-                    f"{session_id} Runner Quiescence is unproven; preservation is blocked."
+                    f"{session_id} Runner Quiescence is unproven "
+                    f"(owner={owner_signal}, process-group={process_group_signal}); "
+                    "preservation is blocked."
                 )
             if not recovering:
                 session.retirement["phase"] = "preserving"
@@ -11441,11 +11496,20 @@ class AlbertMission:
             try:
                 registration_present = bool(
                     path_absent
+                    and self._target_git_root() is not None
                     and (
                         phase == "retiring"
                         or session.worktree_identity.startswith("managed-absence:")
                     )
-                    and removal_kind in {"", "git-worktree", "git-registration"}
+                    and (
+                        removal_kind in {"git-worktree", "git-registration"}
+                        or (
+                            not removal_kind
+                            and session.worktree_identity.startswith(
+                                ("managed-git:", "managed-absence:")
+                            )
+                        )
+                    )
                     and (
                         self._git_worktree_registration_present(session)
                         or self._git_worktree_registration_present_at(effect_path)
@@ -11630,6 +11694,44 @@ class AlbertMission:
         canonical_effect = effect_path.resolve(strict=True)
         if sys.platform.startswith("linux"):
             current_uid = os.getuid()
+
+            def process_is_no_longer_same_live_owner(process_root: Path) -> bool:
+                try:
+                    refreshed_status = (process_root / "status").read_text(
+                        encoding="utf-8",
+                        errors="replace",
+                    )
+                except FileNotFoundError:
+                    return True
+                except OSError as exc:
+                    return exc.errno == errno.ESRCH
+                refreshed_uid_line = next(
+                    (
+                        line
+                        for line in refreshed_status.splitlines()
+                        if line.startswith("Uid:")
+                    ),
+                    "",
+                )
+                refreshed_uid_values = refreshed_uid_line.split()[1:]
+                refreshed_state_line = next(
+                    (
+                        line
+                        for line in refreshed_status.splitlines()
+                        if line.startswith("State:")
+                    ),
+                    "",
+                )
+                refreshed_state_values = refreshed_state_line.split()[1:]
+                return bool(
+                    not refreshed_uid_values
+                    or int(refreshed_uid_values[0]) != current_uid
+                    or (
+                        refreshed_state_values
+                        and refreshed_state_values[0] in {"X", "Z"}
+                    )
+                )
+
             for process_root in Path("/proc").iterdir():
                 if not process_root.name.isdigit():
                     continue
@@ -11641,8 +11743,13 @@ class AlbertMission:
                 except FileNotFoundError:
                     continue
                 except OSError as exc:
+                    if exc.errno in {errno.EACCES, errno.ESRCH} and (
+                        process_is_no_longer_same_live_owner(process_root)
+                    ):
+                        continue
                     raise AlbertError(
-                        "Open-handle inspection was unavailable before retirement."
+                        "Open-handle inspection was unavailable before retirement: "
+                        f"{exc}"
                     ) from exc
                 uid_line = next(
                     (line for line in status.splitlines() if line.startswith("Uid:")),
@@ -11651,14 +11758,36 @@ class AlbertMission:
                 uid_values = uid_line.split()[1:]
                 if not uid_values or int(uid_values[0]) != current_uid:
                     continue
+                state_line = next(
+                    (line for line in status.splitlines() if line.startswith("State:")),
+                    "",
+                )
+                state_values = state_line.split()[1:]
+                if state_values and state_values[0] in {"X", "Z"}:
+                    # A dead or zombie task owns no filesystem boundaries,
+                    # mappings, or descriptors. Linux can report EACCES when
+                    # those already-released procfs links are inspected.
+                    continue
+                process_ended = False
                 for boundary_name in ("cwd", "root"):
                     try:
                         boundary_target = os.readlink(process_root / boundary_name)
                     except FileNotFoundError:
                         continue
                     except OSError as exc:
+                        if exc.errno in {errno.EACCES, errno.ESRCH} and (
+                            process_is_no_longer_same_live_owner(process_root)
+                        ):
+                            process_ended = True
+                            break
+                        process_identity = "; ".join(
+                            line
+                            for line in status.splitlines()
+                            if line.startswith(("Name:", "State:", "NSpid:"))
+                        )
                         raise AlbertError(
-                            "Open-handle inspection was unavailable before retirement."
+                            "Open-handle inspection was unavailable before retirement: "
+                            f"{exc} ({process_identity})"
                         ) from exc
                     boundary_path = Path(
                         boundary_target.removesuffix(" (deleted)")
@@ -11670,6 +11799,8 @@ class AlbertMission:
                             "Retirement removal is blocked while an exact managed path "
                             "is a process filesystem boundary."
                         )
+                if process_ended:
+                    continue
                 try:
                     mappings = (process_root / "maps").read_text(
                         encoding="utf-8",
@@ -11678,8 +11809,13 @@ class AlbertMission:
                 except FileNotFoundError:
                     continue
                 except OSError as exc:
+                    if exc.errno in {errno.EACCES, errno.ESRCH} and (
+                        process_is_no_longer_same_live_owner(process_root)
+                    ):
+                        continue
                     raise AlbertError(
-                        "Open-handle inspection was unavailable before retirement."
+                        "Open-handle inspection was unavailable before retirement: "
+                        f"{exc}"
                     ) from exc
                 for mapping in mappings.splitlines():
                     fields = mapping.split(maxsplit=5)
@@ -11705,8 +11841,13 @@ class AlbertMission:
                 except FileNotFoundError:
                     continue
                 except OSError as exc:
+                    if exc.errno in {errno.EACCES, errno.ESRCH} and (
+                        process_is_no_longer_same_live_owner(process_root)
+                    ):
+                        continue
                     raise AlbertError(
-                        "Open-handle inspection was unavailable before retirement."
+                        "Open-handle inspection was unavailable before retirement: "
+                        f"{exc}"
                     ) from exc
                 for descriptor in descriptors:
                     try:
@@ -11714,8 +11855,14 @@ class AlbertMission:
                     except FileNotFoundError:
                         continue
                     except OSError as exc:
+                        if exc.errno in {errno.EACCES, errno.ESRCH} and (
+                            process_is_no_longer_same_live_owner(process_root)
+                        ):
+                            process_ended = True
+                            break
                         raise AlbertError(
-                            "Open-handle inspection was unavailable before retirement."
+                            "Open-handle inspection was unavailable before retirement: "
+                            f"{exc}"
                         ) from exc
                     target_path = Path(target.removesuffix(" (deleted)"))
                     if not target_path.is_absolute():
@@ -11728,6 +11875,8 @@ class AlbertMission:
                             "Retirement removal is blocked while an exact managed path "
                             "has an open process handle."
                         )
+                if process_ended:
+                    continue
             return
         if sys.platform == "darwin":
             lsof = shutil.which("lsof")
@@ -12762,6 +12911,21 @@ class AlbertMission:
             prior_worktree,
             prior_session.baseline_fingerprints,
         )
+        if source_kind == "verified-retirement-snapshot":
+            # Snapshot materialization necessarily assigns fresh filesystem
+            # timestamps. Repair inheritance is about content, type, mode, and
+            # size; do not reinterpret timestamp-only drift as agent work.
+            changed_files = [
+                relative_path
+                for relative_path in changed_files
+                if not self._materialized_fingerprint_matches_baseline(
+                    self._worktree_file_fingerprint(
+                        prior_worktree,
+                        relative_path,
+                    ),
+                    prior_session.baseline_fingerprints.get(relative_path, "missing"),
+                )
+            ]
         if len(changed_files) > _REPAIR_INHERITED_FILE_LIMIT:
             raise AlbertError(
                 f"{session.session_id} prior session patch exceeds the "
@@ -14967,6 +15131,16 @@ class AlbertMission:
             sandbox_mode="bubblewrap" if os.name == "posix" else "none",
         )
 
+        def persist_runner_process_boundary() -> LocalAgentSession:
+            provisional_status = session.status
+            if provisional_status != "cancelled":
+                session.status = "running"
+            persisted = self._persist_session_update(session)
+            session.__dict__.update(persisted.__dict__)
+            if persisted.status != "cancelled":
+                session.status = provisional_status
+            return persisted
+
         def record_process_start(
             process: subprocess.Popen[bytes],
             process_token: str,
@@ -14978,7 +15152,7 @@ class AlbertMission:
             session.runner_process_token = process_token
             self._remember_retirement_runner_boundary(session)
             if governed_session:
-                persisted = self._persist_session_update(session)
+                persisted = persist_runner_process_boundary()
                 if persisted.status == "cancelled":
                     raise SessionCancelledError(
                         f"{session.session_id} cancelled before runner process startup"
@@ -15048,7 +15222,7 @@ class AlbertMission:
             # runner transition clears it. A late result or owner-loss probe
             # needs that durable identity to prove quiescence independently.
             if process_started and governed_session:
-                persisted = self._persist_session_update(session)
+                persisted = persist_runner_process_boundary()
                 if persisted.status == "cancelled":
                     session.status = "cancelled"
 
@@ -15624,6 +15798,23 @@ class AlbertMission:
             not any(part in ignored_parts for part in path.parts)
             and path.name not in ignored_names
             and path.suffix.casefold() not in ignored_suffixes
+        )
+
+    @staticmethod
+    def _materialized_fingerprint_matches_baseline(
+        current: str,
+        baseline: str,
+    ) -> bool:
+        if current == baseline:
+            return True
+        current_parts = current.split(":")
+        baseline_parts = baseline.split(":")
+        return (
+            len(current_parts) == 6
+            and len(baseline_parts) == 6
+            and current_parts[0] == baseline_parts[0] == "file"
+            and current_parts[1:3] == baseline_parts[1:3]
+            and current_parts[5] == baseline_parts[5]
         )
 
     @staticmethod

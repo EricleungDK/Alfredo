@@ -15,6 +15,7 @@ from albert_mvp.core import (
     EvidencePackage,
     LocalAgentSession,
     RunnerObservation,
+    _probe_process_token_pids,
     _process_identity,
 )
 from albert_mvp.workspace import (
@@ -649,6 +650,51 @@ class RunnerSupervisionTest(unittest.TestCase):
         self.assertEqual(owner, "absent")
         self.assertEqual(process_group, "unavailable")
 
+    def test_process_token_scan_only_excludes_provably_preexisting_or_dead_processes(
+        self,
+    ) -> None:
+        class ProcEntry:
+            name = "123"
+            path = "/proc/123"
+
+        class ProcEntries:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def __iter__(self):
+                return iter((ProcEntry(),))
+
+        def scan_with(*, status: str, identity: str):
+            with (
+                patch("albert_mvp.core.os.scandir", return_value=ProcEntries()),
+                patch(
+                    "albert_mvp.core._read_bounded_bytes",
+                    side_effect=PermissionError("inaccessible environment"),
+                ),
+                patch("albert_mvp.core.Path.read_text", return_value=status),
+                patch("albert_mvp.core._process_identity", return_value=identity),
+            ):
+                return _probe_process_token_pids(
+                    "fresh-runner-token",
+                    not_before_linux_start_ticks=100,
+                )
+
+        self.assertEqual(
+            scan_with(status="State:\tZ (zombie)\n", identity="linux:123:100"),
+            (set(), True),
+        )
+        self.assertEqual(
+            scan_with(status="State:\tS (sleeping)\n", identity="linux:123:99"),
+            (set(), True),
+        )
+        self.assertEqual(
+            scan_with(status="State:\tS (sleeping)\n", identity="linux:123:100"),
+            (set(), False),
+        )
+
     def test_unavailable_contradictory_and_worktree_mismatch_observations_fail_closed(
         self,
     ) -> None:
@@ -864,6 +910,13 @@ class RunnerSupervisionTest(unittest.TestCase):
         with (
             patch.object(
                 AlbertMission,
+                "_reconcile_abandoned_sessions",
+                side_effect=AssertionError(
+                    "runner-observe must preserve the submitted canonical boundary"
+                ),
+            ),
+            patch.object(
+                AlbertMission,
                 "_probe_runner_boundary",
                 return_value=("live-exact", "live-exact"),
             ),
@@ -871,6 +924,13 @@ class RunnerSupervisionTest(unittest.TestCase):
         ):
             self.assertEqual(main(observation_args), 0)
         with (
+            patch.object(
+                AlbertMission,
+                "_reconcile_abandoned_sessions",
+                side_effect=AssertionError(
+                    "runner-observe replay must not pre-reconcile the boundary"
+                ),
+            ),
             patch.object(
                 AlbertMission,
                 "_probe_runner_boundary",

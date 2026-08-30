@@ -31,9 +31,10 @@ function alfredoBinPath() {
 }
 
 function writeReleaseTracker(root: string) {
-  const workspace = resolve(root, "workspace");
-  const tracker = resolve(workspace, ".scratch", "alfredo-agent-workstation");
-  const issues = resolve(tracker, "issues");
+  const startingLocation = resolve(root, "projects");
+  const workspace = resolve(startingLocation, "workspace");
+  const tracker = resolve(workspace, ".agent", "issues");
+  const issues = tracker;
   const agentConfig = resolve(root, "agents.json");
   mkdirSync(issues, { recursive: true });
   writeFileSync(resolve(tracker, "PRD.md"), "# Alfredo Release Seam\n", "utf8");
@@ -56,6 +57,33 @@ function writeReleaseTracker(root: string) {
       "## Acceptance criteria",
       "",
       "- [ ] Release seam remains visible and governed.",
+      "",
+      "## Blocked by",
+      "",
+      "None - can start immediately",
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  writeFileSync(
+    resolve(issues, "02-runner-recovery.md"),
+    [
+      "Status: ready-for-agent",
+      "Type: AFK",
+      "Suggested agent: fake-local",
+      "Assigned agent: fake-local",
+      "",
+      "## Parent",
+      "",
+      "PRD.md",
+      "",
+      "## What to build",
+      "",
+      "Recover one exact dead-owner runner boundary and retire its result.",
+      "",
+      "## Acceptance criteria",
+      "",
+      "- [ ] The same session resumes once after an exact supervision receipt.",
       "",
       "## Blocked by",
       "",
@@ -91,7 +119,46 @@ function writeReleaseTracker(root: string) {
     )}\n`,
     "utf8",
   );
-  return { workspace, tracker, issues, agentConfig };
+  const repository = spawnSync("git", ["init", "--quiet", workspace], {
+    encoding: "utf8",
+  });
+  expect(repository.stderr).toBe("");
+  expect(repository.status).toBe(0);
+  const baseline = spawnSync(
+    "git",
+    [
+      "-C",
+      workspace,
+      "-c",
+      "user.name=Alfredo Release",
+      "-c",
+      "user.email=release@example.invalid",
+      "add",
+      ".",
+    ],
+    { encoding: "utf8" },
+  );
+  expect(baseline.stderr).toBe("");
+  expect(baseline.status).toBe(0);
+  const commit = spawnSync(
+    "git",
+    [
+      "-C",
+      workspace,
+      "-c",
+      "user.name=Alfredo Release",
+      "-c",
+      "user.email=release@example.invalid",
+      "commit",
+      "--quiet",
+      "-m",
+      "release fixture",
+    ],
+    { encoding: "utf8" },
+  );
+  expect(commit.stderr).toBe("");
+  expect(commit.status).toBe(0);
+  return { startingLocation, workspace, tracker, issues, agentConfig };
 }
 
 function createBackendClient(options: {
@@ -130,7 +197,7 @@ function createBackendClient(options: {
     "--runtime-root",
     options.runtimeRoot,
     "--mission-id",
-    "alfredo-release",
+    "agent-issues",
     "--agent-config",
     options.agentConfig,
   ];
@@ -175,6 +242,32 @@ function createBackendClient(options: {
           : []),
       ]),
     }),
+    generateConsoleResponse: async (request) => {
+      const response = backendJson([
+        "agent-console-response",
+        ...common,
+        "--message-id",
+        request.message_id,
+        "--expected-revision",
+        String(request.expected_revision),
+        "--scope-kind",
+        request.scope_kind,
+        "--scope-target",
+        request.scope_target,
+        "--scope-label",
+        request.scope_label,
+        ...(request.scope_mission_id
+          ? ["--scope-mission-id", request.scope_mission_id]
+          : []),
+        ...(request.agent_id ? ["--agent-id", request.agent_id] : []),
+      ]);
+      return {
+        kind: "message",
+        message: response.message,
+        route: response.route,
+        wayfinder: response.wayfinder,
+      };
+    },
     loadWorkspaceQueue: async () => ({
       kind: "workspace-queue",
       projection: backendJson(["workspace-queue", ...common]),
@@ -270,6 +363,39 @@ function createBackendClient(options: {
           : []),
       ]),
     }),
+    loadReviewWorkspace: async () => ({
+      kind: "review-workspace",
+      projection: backendJson(["review-workspace", ...common]),
+    }),
+    submitReviewDecision: async (request) => ({
+      kind: "acknowledged",
+      acknowledgement: backendJson([
+        "review-decision",
+        ...common,
+        "--correlation-id",
+        request.correlation_id,
+        "--expected-revision",
+        String(request.expected_revision),
+        "--action-type",
+        request.action_type,
+        "--actor",
+        request.actor,
+        "--target-kind",
+        request.target.kind,
+        "--target-id",
+        request.target.id,
+        "--session-id",
+        request.session_id,
+        ...(request.mission_id
+          ? ["--review-mission-id", request.mission_id]
+          : []),
+        "--decision",
+        request.decision,
+        "--reason",
+        request.reason,
+        ...(request.failure_type ? ["--failure-type", request.failure_type] : []),
+      ]),
+    }),
     submitAction: async (request) => {
       options.viewActions.push(request);
       const acknowledgement = backendJson([
@@ -315,9 +441,10 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
 
   try {
     const runtimeRoot = resolve(root, "runtime");
-    const { workspace, tracker, issues, agentConfig } = writeReleaseTracker(root);
+    const { startingLocation, workspace, tracker, issues, agentConfig } =
+      writeReleaseTracker(root);
     const launch = spawnSync(process.execPath, [alfredoBinPath(), "--agent", "fake-controller"], {
-      cwd: workspace,
+      cwd: startingLocation,
       encoding: "utf8",
       env: {
         ...process.env,
@@ -334,11 +461,11 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
       launch: "workstation",
       selected_agent: "fake-controller",
       selected_model: "deterministic-controller",
-      starting_location: workspace,
+      starting_location: startingLocation,
       workspace_selection: {
         schema_version: 1,
         phase: "selection-required",
-        starting_location: workspace,
+        starting_location: startingLocation,
         coding_workspace: null,
         active_mission: null,
       },
@@ -369,7 +496,7 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
       "--runtime-root",
       runtimeRoot,
       "--mission-id",
-      "alfredo-release",
+      "agent-issues",
       "--agent-config",
       agentConfig,
     ];
@@ -389,6 +516,91 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
       return result.stdout;
     };
     const runBackend = (args: readonly string[]) => JSON.parse(runBackendText(args));
+    type ReleaseMissionSession = {
+      session_id: string;
+      status: string;
+      session_revision?: number;
+      retirement_phase?: string;
+      retirement_blocked_reason?: string;
+      retirement_record?: { payload_disposition?: string } | null;
+      supervision_receipt_id?: string;
+      supervision_outcome?: string;
+      automatic_recovery_count?: number;
+    };
+    const missionSession = (
+      snapshot: { missions: readonly { sessions: readonly ReleaseMissionSession[] }[] },
+      sessionId: string,
+    ) => snapshot.missions.flatMap((mission) => mission.sessions)
+      .find((session) => session.session_id === sessionId);
+    const selectedWorkspace = runBackend([
+      "coding-workspace-select",
+      "--starting-location",
+      startingLocation,
+      "--workspace-path",
+      workspace,
+      "--selection-mode",
+      "existing",
+      "--runtime-root",
+      runtimeRoot,
+      "--correlation-id",
+      "release-workspace-select",
+    ]);
+    expect(selectedWorkspace).toMatchObject({
+      schema_version: 1,
+      coding_workspace: workspace,
+      active_mission: null,
+    });
+    const missionOptions = runBackend([
+      "mission-options",
+      "--starting-location",
+      startingLocation,
+      "--coding-workspace",
+      workspace,
+      "--runtime-root",
+      runtimeRoot,
+    ]);
+    expect(missionOptions.missions).toEqual([
+      { id: "agent-issues", title: "Alfredo Release Seam" },
+    ]);
+    const missionChoiceArgs = [
+      "mission-choice",
+      "--starting-location",
+      startingLocation,
+      "--coding-workspace",
+      workspace,
+      "--runtime-root",
+      runtimeRoot,
+      "--correlation-id",
+      "release-mission-resume",
+      "--expected-revision",
+      "1",
+      "--choice",
+      "resume",
+      "--mission-id",
+      "agent-issues",
+    ];
+    expect(runBackend(missionChoiceArgs)).toMatchObject({
+      outcome: "acknowledged",
+      active_mission: "agent-issues",
+      replayed: false,
+    });
+    expect(runBackend(missionChoiceArgs)).toMatchObject({
+      outcome: "acknowledged",
+      active_mission: "agent-issues",
+      replayed: true,
+    });
+    const restoredJourney = runBackend([
+      "workspace-context",
+      "--starting-location",
+      startingLocation,
+      "--runtime-root",
+      runtimeRoot,
+    ]);
+    expect(restoredJourney).toMatchObject({
+      phase: "workspace-ready",
+      coding_workspace: workspace,
+      active_mission: "agent-issues",
+    });
     runBackend([
       "agent-console-message",
       ...common,
@@ -438,9 +650,9 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
         schema_version: 1,
         selected_agent: launchPlan.selected_agent,
         selected_model: launchPlan.selected_model,
-        starting_location: workspace,
+        starting_location: startingLocation,
         coding_workspace: workspace,
-        active_mission: "release-smoke",
+        active_mission: "agent-issues",
         phase: "workspace-ready",
         runtime_root: launchPlan.runtime_root,
         recent_workspaces: launchPlan.recent_workspaces,
@@ -469,7 +681,29 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
     expect(screen.getByText("Launch the release seam verification.")).toBeVisible();
     expect(screen.getByText(/keep the action governed/)).toBeVisible();
 
-    fireEvent.change(screen.getByRole("textbox", { name: "Message Alfredo" }), {
+    const composer = screen.getByRole("textbox", { name: "Message Alfredo" });
+    fireEvent.change(composer, {
+      target: { value: "Start a new project for governed release planning." },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send prompt" }));
+    const wayfinderRoute = await screen.findByRole("status", { name: "Wayfinder route" });
+    expect(wayfinderRoute).toHaveTextContent("Wayfinder / Chart mode");
+    expect(wayfinderRoute).toHaveTextContent("Shared Understanding Gate pending");
+
+    fireEvent.change(composer, {
+      target: { value: "/wayfinder confirm" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send prompt" }));
+    await waitFor(() => {
+      expect(screen.getByRole("status", { name: "Wayfinder route" })).toHaveTextContent(
+        "Shared Understanding Gate open",
+      );
+    });
+    expect(
+      await screen.findByText(/Mission Commander receipt opened the Shared Understanding Gate/),
+    ).toBeVisible();
+
+    fireEvent.change(composer, {
       target: { value: "Please fix the release seam polling with a subagent" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Send prompt" }));
@@ -537,12 +771,12 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
     );
 
     await waitFor(() => expect(workstationActions[0]).toEqual({
-      correlation_id: "workstation-issue-approve-alfredo-release-ISS-01-1",
+      correlation_id: "workstation-issue-approve-agent-issues-ISS-01-1",
       action_type: "issue-approve",
       actor: "mission-commander",
       expected_revision: 1,
       target: { kind: "issue-slice", id: "ISS-01" },
-      mission_id: "alfredo-release",
+      mission_id: "agent-issues",
       issue_id: "ISS-01",
       session_id: undefined,
       agent_id: undefined,
@@ -562,12 +796,12 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
     await waitFor(() =>
       expect(workstationActions).toEqual([
         {
-          correlation_id: "workstation-issue-approve-alfredo-release-ISS-01-1",
+          correlation_id: "workstation-issue-approve-agent-issues-ISS-01-1",
           action_type: "issue-approve",
           actor: "mission-commander",
           expected_revision: 1,
           target: { kind: "issue-slice", id: "ISS-01" },
-          mission_id: "alfredo-release",
+          mission_id: "agent-issues",
           issue_id: "ISS-01",
           session_id: undefined,
           agent_id: undefined,
@@ -576,12 +810,12 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
           command_policy: {},
         },
         {
-          correlation_id: "workstation-issue-launch-alfredo-release-ISS-01-2",
+          correlation_id: "workstation-issue-launch-agent-issues-ISS-01-2",
           action_type: "issue-launch",
           actor: "mission-commander",
           expected_revision: 2,
           target: { kind: "issue-slice", id: "ISS-01" },
-          mission_id: "alfredo-release",
+          mission_id: "agent-issues",
           issue_id: "ISS-01",
           session_id: undefined,
           agent_id: undefined,
@@ -623,7 +857,203 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
     ]);
     expect(activityLoads.length).toBeGreaterThan(0);
 
+    fireEvent.click(screen.getByRole("button", { name: "Review" }));
+    const reviewWorkspace = await screen.findByRole("region", { name: "Review Workspace" });
+    expect(within(reviewWorkspace).getByText(trackedSessionId)).toBeVisible();
+    fireEvent.click(
+      within(reviewWorkspace).getByRole("button", { name: `Accept ${trackedSessionId}` }),
+    );
+    expect(
+      await screen.findByText(
+        /Orchestrator accepted workstation action: Issue Slice becomes Complete and PR-ready/,
+      ),
+    ).toBeVisible();
+    fireEvent.click(
+      within(reviewWorkspace).getByRole("button", {
+        name: "Accept session-ADHOC-000001-1",
+      }),
+    );
+    expect(await within(reviewWorkspace).findByText("No evidence awaiting review")).toBeVisible();
+
+    const reviewedSnapshot = runBackend(["workspace-snapshot", ...common]);
+    expect(
+      missionSession(reviewedSnapshot, trackedSessionId)?.retirement_blocked_reason,
+    ).toBe("");
+    expect(missionSession(reviewedSnapshot, trackedSessionId)).toMatchObject({
+      status: "reviewed",
+      retirement_phase: "retired",
+      retirement_record: { payload_disposition: "retained" },
+    });
+
+    const crashApproval = runBackend([
+      "workstation-action",
+      ...common,
+      "--correlation-id",
+      "release-recovery-approve",
+      "--expected-revision",
+      String(reviewedSnapshot.revision),
+      "--action-type",
+      "issue-approve",
+      "--actor",
+      "mission-commander",
+      "--target-kind",
+      "issue-slice",
+      "--target-id",
+      "ISS-02",
+      "--issue-id",
+      "ISS-02",
+    ]);
+    const crashLaunch = runBackend([
+      "workstation-action",
+      ...common,
+      "--correlation-id",
+      "release-recovery-launch",
+      "--expected-revision",
+      String(crashApproval.revision),
+      "--action-type",
+      "issue-launch",
+      "--actor",
+      "mission-commander",
+      "--target-kind",
+      "issue-slice",
+      "--target-id",
+      "ISS-02",
+      "--issue-id",
+      "ISS-02",
+      "--allowed-path",
+      "FAKE_AGENT_RESULT.md",
+    ]);
+    const recoverySessionId = crashLaunch.session_id as string;
+    expect(recoverySessionId).toBe("session-ISS-02-3");
+    const crashFixture = spawnSync(
+      "python3",
+      [
+        resolve(projectRoot, "scripts", "prepare-release-crash-fixture.py"),
+        ...common,
+        "--session-id",
+        recoverySessionId,
+      ],
+      {
+        cwd: repositoryRoot,
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PYTHONPATH: process.env.PYTHONPATH
+            ? `${repositoryRoot}:${process.env.PYTHONPATH}`
+            : repositoryRoot,
+        },
+      },
+    );
+    expect(crashFixture.stderr).toBe("");
+    expect(crashFixture.status).toBe(0);
+    const crashedBoundary = JSON.parse(crashFixture.stdout) as {
+      revision: number;
+      runner_operation_id: string;
+      runner_process_pid: number;
+      worktree_identity: string;
+    };
+    expect(crashedBoundary.runner_operation_id).toMatch(/^runner-operation:/);
+    expect(crashedBoundary.worktree_identity).toMatch(/^managed-git:/);
+    const observationArgs = [
+      "runner-observe",
+      ...common,
+      "--source-id",
+      "release-seam-observer",
+      "--source-incarnation",
+      "release-seam-boot",
+      "--sequence",
+      "1",
+      "--observation-mission-id",
+      "agent-issues",
+      "--session-id",
+      recoverySessionId,
+      "--session-revision",
+      String(crashedBoundary.revision),
+      "--runner-operation-id",
+      crashedBoundary.runner_operation_id,
+      "--owner-signal",
+      "absent",
+      "--process-group-signal",
+      "absent",
+      "--worktree-identity",
+      crashedBoundary.worktree_identity,
+      "--result-signal",
+      "absent",
+    ];
+    const recoveryReceipt = runBackend(observationArgs);
+    expect(recoveryReceipt).toMatchObject({
+      outcome: "recovered",
+      effect: "recover-same-session",
+      session_id: recoverySessionId,
+    });
+    expect(runBackend(observationArgs)).toEqual(recoveryReceipt);
+    const recoveredSnapshot = runBackend(["workspace-snapshot", ...common]);
+    expect(missionSession(recoveredSnapshot, recoverySessionId)).toMatchObject({
+      status: "queued",
+      supervision_receipt_id: recoveryReceipt.receipt_id,
+      supervision_outcome: "recovered",
+      automatic_recovery_count: 1,
+      retirement_phase: "active",
+    });
+
     first.unmount();
+    const recoveredRender = render(<App client={client} />);
+    const recoveredTree = await screen.findByRole("region", { name: "Mission Execution Tree" });
+    const recoveredTreeItem = within(recoveredTree).getByRole("treeitem", {
+      name: new RegExp(`Local Agent session ${recoverySessionId}`),
+    });
+    fireEvent.click(recoveredTreeItem);
+    const recoveredInspector = await screen.findByRole("region", {
+      name: `${recoverySessionId} execution inspector`,
+    });
+    expect(within(recoveredInspector).getByText(/Supervision receipt:/)).toHaveTextContent(
+      "recovered",
+    );
+    expect(within(recoveredInspector).getByText("Automatic recovery: 1 of 1 used")).toBeVisible();
+
+    let recoveryEvidenceSnapshot = runBackend(["workspace-snapshot", ...common]);
+    await waitFor(() => {
+      recoveryEvidenceSnapshot = runBackend(["workspace-snapshot", ...common]);
+      expect(missionSession(recoveryEvidenceSnapshot, recoverySessionId)?.status).toBe(
+        "evidence-ready",
+      );
+    }, { timeout: 10_000 });
+    const recoveryEvidence = missionSession(recoveryEvidenceSnapshot, recoverySessionId);
+    expect(recoveryEvidence?.session_revision).toBeTypeOf("number");
+    runBackend([
+      "review-decision",
+      ...common,
+      "--correlation-id",
+      "release-recovery-review",
+      "--expected-revision",
+      String(recoveryEvidence!.session_revision),
+      "--action-type",
+      "review-decision",
+      "--actor",
+      "mission-commander",
+      "--target-kind",
+      "agent-session",
+      "--target-id",
+      recoverySessionId,
+      "--session-id",
+      recoverySessionId,
+      "--review-mission-id",
+      "agent-issues",
+      "--decision",
+      "accept",
+      "--reason",
+      "The exact recovered session produced valid evidence.",
+    ]);
+    const retiredRecoverySnapshot = runBackend(["workspace-snapshot", ...common]);
+    expect(missionSession(retiredRecoverySnapshot, recoverySessionId)).toMatchObject({
+      status: "reviewed",
+      supervision_outcome: "recovered",
+      automatic_recovery_count: 1,
+      retirement_phase: "retired",
+      retirement_record: { payload_disposition: "retained" },
+    });
+
+    recoveredRender.unmount();
     render(<App client={client} />);
     const restoredTranscript = await screen.findByRole("region", { name: "Prompt Transcript" });
     expect(
@@ -669,20 +1099,23 @@ test("release seam covers launch intent, workstation action acknowledgement, jou
     expect(within(restoredTranscript).getByText(`Orchestrator accepted workstation action: Orchestrator queued ISS-01 as ${trackedSessionId}.`)).toBeVisible();
     expect(screen.getByRole("button", { name: "Open detail views" })).toBeVisible();
     expect(screen.queryByRole("region", { name: "Activity Journal" })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Open detail views" }));
-    const restoredJournal = await screen.findByRole("region", { name: "Activity Journal" });
-    expect(within(restoredJournal).getByText(`Orchestrator queued ISS-01 as ${trackedSessionId}.`)).toBeVisible();
-    const restoredAssignmentDetail = screen.getByRole("region", { name: "Issue Assignment Detail" });
-    expect(restoredAssignmentDetail).toHaveTextContent("ISS-01");
-    expect(restoredAssignmentDetail).toHaveTextContent("Release Seam");
+    const restoredTree = screen.getByRole("region", { name: "Mission Execution Tree" });
+    const restoredSession = within(restoredTree).getByRole("treeitem", {
+      name: new RegExp(`Local Agent session ${trackedSessionId}`),
+    });
+    expect(restoredSession).toBeVisible();
+    fireEvent.click(restoredSession);
+    const retirementInspector = await screen.findByRole("region", {
+      name: `${trackedSessionId} execution inspector`,
+    });
     expect(
-      within(screen.getByRole("region", { name: "Mission Execution Tree" })).getByRole(
-        "treeitem",
-        { name: new RegExp(`Local Agent session ${trackedSessionId}`) },
-      ),
+      within(retirementInspector).getByRole("heading", { name: "Retirement Record" }),
     ).toBeVisible();
+    expect(within(retirementInspector).getByText("Disposition").parentElement).toHaveTextContent(
+      "Retained",
+    );
     expect(screen.getByLabelText("Prompt status line")).toHaveTextContent("Workspace workspace");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
-}, 15_000);
+}, 75_000);

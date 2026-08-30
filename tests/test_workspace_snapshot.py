@@ -93,6 +93,29 @@ class WorkspaceSnapshotTest(unittest.TestCase):
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
+    @staticmethod
+    def synthetic_provider_validation():
+        """Validate schema only for tests that replace the prepared argv."""
+
+        return patch(
+            "albert_mvp.execution.PythonExecutionProvider.validate_request",
+            autospec=True,
+            side_effect=lambda _provider, request: request.validate(),
+        )
+
+    @staticmethod
+    def seal_synthetic_never_started_boundary(mission, session):
+        """Persist explicit no-effect proof for legacy-style synthetic fixtures."""
+
+        mission._remember_never_started_runner_boundary(
+            session,
+            event_at="2026-08-30T00:00:00+00:00",
+        )
+        return mission._persist_session_update(
+            session,
+            expected_statuses={session.status},
+        )
+
     def test_cli_returns_versioned_canonical_snapshot(self) -> None:
         output = io.StringIO()
 
@@ -204,7 +227,9 @@ class WorkspaceSnapshotTest(unittest.TestCase):
                 **{**request, "command": "python3 -m unittest discover"}
             )
 
-    def test_shell_terminal_completion_store_loss_never_reexecutes_command(self) -> None:
+    def test_shell_terminal_completion_store_loss_recovers_typed_receipt_without_reexecution(
+        self,
+    ) -> None:
         snapshots = self.load_service()
         terminal = ShellTerminalService(snapshots)
         request = {
@@ -231,6 +256,7 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         )
         with (
             patch.object(terminal, "_sandbox_argv", return_value=(["bwrap"], "")),
+            self.synthetic_provider_validation(),
             patch.object(
                 terminal,
                 "_persist_terminal",
@@ -249,24 +275,24 @@ class WorkspaceSnapshotTest(unittest.TestCase):
             replayed_again = ShellTerminalService(self.load_service()).submit(**request)
 
         self.assertEqual(replayed, replayed_again)
-        self.assertEqual(replayed.status, "outcome-unknown")
-        self.assertIsNone(replayed.exit_code)
+        self.assertEqual(replayed.status, "completed")
+        self.assertEqual(replayed.exit_code, 0)
         self.assertEqual(replayed.stdout, "")
-        self.assertIn("not be retried", replayed.stderr)
+        self.assertEqual(replayed.stderr, "")
         self.assertEqual(run.call_count, 1)
         replay_run.assert_not_called()
         persisted = ShellTerminalService(self.load_service()).inspect().commands
         self.assertEqual(len(persisted), 1)
-        self.assertEqual(persisted[0].status, "outcome-unknown")
+        self.assertEqual(persisted[0].status, "completed")
         history = AgentConsoleHistoryService(self.load_service()).history()
         self.assertEqual(
             [message.action_phase for message in history],
-            ["shell-outcome-unknown"],
+            ["shell-finished"],
         )
         journal = ActivityJournalService(self.load_service()).inspect()
         self.assertEqual(
             [entry.action_type for entry in journal.entries],
-            ["shell-command-outcome-unknown"],
+            ["shell-command-completed"],
         )
 
     def test_shell_terminal_post_start_oserror_is_outcome_unknown_and_never_reexecutes(
@@ -284,11 +310,14 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         }
 
         def effect_then_oserror(*args: object, **kwargs: object) -> subprocess.CompletedProcess:
+            process_binding_started = kwargs["process_binding_started"]
+            process_binding_started(type("StartedProcess", (), {"pid": os.getpid()})(), "")
             effect.write_text("effect happened", encoding="utf-8")
             raise OSError("simulated post-start transport failure")
 
         with (
             patch.object(terminal, "_sandbox_argv", return_value=(["bwrap"], "")),
+            self.synthetic_provider_validation(),
             patch(
                 "albert_mvp.workspace._run_bounded_process",
                 side_effect=effect_then_oserror,
@@ -404,6 +433,8 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         results: list[object] = []
 
         def blocked_process(*args: object, **kwargs: object) -> subprocess.CompletedProcess:
+            process_binding_started = kwargs["process_binding_started"]
+            process_binding_started(type("StartedProcess", (), {"pid": os.getpid()})(), "")
             execution_started.set()
             self.assertTrue(release_execution.wait(timeout=3))
             return subprocess.CompletedProcess(args=[], returncode=0, stdout="done", stderr="")
@@ -422,6 +453,7 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         with (
             patch.object(terminal, "_sandbox_argv", return_value=(["bwrap"], "")),
             patch("albert_mvp.workspace._run_bounded_process", side_effect=blocked_process),
+            self.synthetic_provider_validation(),
         ):
             worker = threading.Thread(target=submit)
             worker.start()
@@ -452,6 +484,7 @@ class WorkspaceSnapshotTest(unittest.TestCase):
 
         with (
             patch.object(terminal, "_sandbox_argv", return_value=(["bwrap"], "")),
+            self.synthetic_provider_validation(),
             patch(
                 "albert_mvp.workspace._run_bounded_process",
                 side_effect=KeyboardInterrupt("simulated process death"),
@@ -652,6 +685,7 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         )
         with (
             patch.object(terminal, "_sandbox_argv", return_value=(["bwrap"], "")),
+            self.synthetic_provider_validation(),
             patch("albert_mvp.workspace._run_bounded_process", return_value=completed) as run,
             patch.object(
                 AgentConsoleHistoryService,
@@ -874,7 +908,7 @@ class WorkspaceSnapshotTest(unittest.TestCase):
             ShellTerminalService,
             "_sandbox_argv",
             return_value=(noisy_command, ""),
-        ):
+        ), self.synthetic_provider_validation():
             result = ShellTerminalService(snapshots).submit(
                 correlation_id="terminal-bounded-output-1",
                 command=command,
@@ -915,7 +949,9 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         self.assertIn("not executed", result.stderr.lower())
         persisted = ShellTerminalService(self.load_service()).inspect().commands[0]
         self.assertEqual(persisted.status, "failed")
-        self.assertEqual(persisted.exit_code, 126)
+        # The Shell facade preserves its historical 126 mapping while the
+        # provider-neutral start-failed receipt uses protocol exit 127.
+        self.assertEqual(persisted.exit_code, 127)
 
     @unittest.skipUnless(shutil.which("bwrap"), "bubblewrap is not installed")
     def test_shell_terminal_does_not_inherit_sensitive_environment(self) -> None:
@@ -2336,10 +2372,7 @@ class WorkspaceSnapshotTest(unittest.TestCase):
         )
         mission = self.load_service()._primary_mission
         mission.approve_issue("ISS-01")
-        with (
-            patch.object(mission, "_validate_target_repository_boundary"),
-            patch.object(mission, "_ensure_session_worktree"),
-        ):
+        with patch.object(mission, "_validate_target_repository_boundary"):
             session = mission.launch_issue("ISS-01")
 
             with patch.object(
@@ -4291,6 +4324,10 @@ Wait for the accepted dependency.
         mission = snapshots._primary_mission
         mission.approve_issue("ISS-01")
         first_session = mission.launch_issue("ISS-01")
+        first_session = self.seal_synthetic_never_started_boundary(
+            mission,
+            first_session,
+        )
         mission.record_frontier_review(
             first_session.session_id,
             "Needs repair",
@@ -4377,6 +4414,10 @@ Wait for the accepted dependency.
         mission = snapshots._primary_mission
         mission.approve_issue("ISS-01")
         first_session = mission.launch_issue("ISS-01", allowed_paths=["src/app.py"])
+        first_session = self.seal_synthetic_never_started_boundary(
+            mission,
+            first_session,
+        )
         mission.record_frontier_review(
             first_session.session_id,
             "Needs repair",
@@ -4393,6 +4434,10 @@ Wait for the accepted dependency.
             issue_id="ISS-01",
             session_id=first_session.session_id,
             reason="Retry without changing authority.",
+        )
+        self.seal_synthetic_never_started_boundary(
+            mission,
+            mission.sessions[inherited.session_id],
         )
         mission.record_frontier_review(
             inherited.session_id,
@@ -4471,6 +4516,10 @@ Wait for the accepted dependency.
         first_session.status = "failed"
         first_session.runner_ended_at = "2026-07-11T10:00:00+00:00"
         mission._persist_session_update(first_session)
+        first_session = self.seal_synthetic_never_started_boundary(
+            mission,
+            first_session,
+        )
 
         with self.assertRaisesRegex(AlbertError, "Retry requires a reason"):
             workspace_module.WorkstationActionService(snapshots).submit(
@@ -5844,6 +5893,10 @@ Wait for the accepted dependency.
             decision="approve",
             reason="Approved for evidence review.",
         )
+        self.seal_synthetic_never_started_boundary(
+            mission,
+            mission.sessions["session-ADHOC-000001-1"],
+        )
         evidence = EvidencePackage(
             changed_files=["docs/smoke-tests.md"],
             diff_summary="Updated smoke-test notes.",
@@ -5935,6 +5988,10 @@ Wait for the accepted dependency.
             reason="Approve bounded receipt validation.",
         )
         session_id = "session-ADHOC-000001-1"
+        self.seal_synthetic_never_started_boundary(
+            mission,
+            mission.sessions[session_id],
+        )
         mission.record_evidence(
             session_id,
             EvidencePackage(
@@ -7666,6 +7723,7 @@ Wait for the accepted dependency.
         mission = self.load_service()._primary_mission
         mission.approve_issue("ISS-01")
         session = mission.launch_issue("ISS-01")
+        session = self.seal_synthetic_never_started_boundary(mission, session)
         mission.record_evidence(
             session.session_id,
             EvidencePackage(
@@ -7724,6 +7782,10 @@ Wait for the accepted dependency.
         repair_session.status = "failed"
         repair_session.runner_ended_at = "2026-07-11T10:00:00+00:00"
         mission._persist()
+        repair_session = self.seal_synthetic_never_started_boundary(
+            mission,
+            repair_session,
+        )
         service = ReviewWorkspaceService(WorkspaceSnapshotService(mission))
 
         with self.assertRaisesRegex(AlbertError, "Repair review decisions require a reason"):
@@ -7882,6 +7944,7 @@ Wait for the accepted dependency.
             allowed_paths=["src/app.py"],
             command_policy={"python3 -m unittest": "auto-allowed"},
         )
+        prior = self.seal_synthetic_never_started_boundary(mission, prior)
         perform_tui_action(
             mission,
             "review",
@@ -8140,6 +8203,7 @@ Wait for the accepted dependency.
         mission = self.load_service()._primary_mission
         mission.approve_issue("ISS-01")
         session = mission.launch_issue("ISS-01")
+        session = self.seal_synthetic_never_started_boundary(mission, session)
         mission.record_evidence(
             session.session_id,
             EvidencePackage(
@@ -8198,6 +8262,7 @@ Wait for the accepted dependency.
         mission = self.load_service()._primary_mission
         mission.approve_issue("ISS-01")
         session = mission.launch_issue("ISS-01")
+        session = self.seal_synthetic_never_started_boundary(mission, session)
         mission.record_evidence(
             session.session_id,
             EvidencePackage(
@@ -8609,6 +8674,7 @@ Wait for the accepted dependency.
         mission = snapshots._primary_mission
         mission.approve_issue("ISS-01")
         session = mission.launch_issue("ISS-01")
+        session = self.seal_synthetic_never_started_boundary(mission, session)
         mission.record_evidence(
             session.session_id,
             EvidencePackage(
@@ -9501,6 +9567,7 @@ Wait for the accepted dependency.
             runner_started_at="2026-06-25T10:00:00Z",
         )
         mission.sessions[session.session_id] = session
+        mission._persist()
 
         board = snapshots.snapshot().mission_board
         sync = next(issue for issue in board["issue_slices"] if issue["issue_id"] == "ISS-02")
@@ -12612,6 +12679,7 @@ Wait for the accepted dependency.
             approved=False,
         )
         primary.issues["ISS-01"].review_state = "needs-human-review"
+        primary._persist()
         background_tracker = self.root / "background-tracker"
         (background_tracker / "issues").mkdir(parents=True)
         (background_tracker / "PRD.md").write_text(
@@ -12656,14 +12724,14 @@ Wait for the accepted dependency.
         self.assertEqual(switched.workspace_session, before.workspace_session)
         self.assertEqual(switched.conversation_scope, before.conversation_scope)
         self.assertFalse(previous.is_active)
-        self.assertEqual(previous.sessions[0].status, "launched")
+        self.assertEqual(previous.sessions[0].status, "queued")
         self.assertEqual(previous.sessions[0].session_id, "session-ISS-01-1")
         self.assertEqual(previous.attention[0].kind, "delegation-approval")
         self.assertEqual(previous.attention[0].queue_link, "workspace-queue#delegation-command-deck-ISS-01")
         self.assertEqual(previous.attention[1].kind, "clarification")
         self.assertEqual(previous.attention[1].queue_link, "workspace-queue#clarification-command-deck-ISS-01")
         self.assertEqual(AgentConsoleHistoryService(snapshots).history(), history.history())
-        self.assertEqual(primary.sessions["session-ISS-01-1"].status, "launched")
+        self.assertEqual(primary.sessions["session-ISS-01-1"].status, "queued")
 
     def test_issue_scope_ownership_selects_shared_context_from_the_active_mission(self) -> None:
         primary = self.load_service()._mission
@@ -13100,7 +13168,7 @@ Wait for the accepted dependency.
         mission = self.load_service()._primary_mission
         mission.approve_issue("ISS-01")
         session = mission.launch_issue("ISS-01")
-        session.status = "failed"
+        session.status = "evidence-ready"
         session.runner_ended_at = "2026-07-11T10:00:00+00:00"
         mission._persist()
         services = [self.load_service(), self.load_service()]

@@ -46,7 +46,8 @@
 │   ├── 2026-08-13-issue-71-host-execution.md
 │   ├── 2026-08-15-issue-72-rust-shadow-execution.md
 │   ├── 2026-08-30-issue-73-local-agent-rust-cutover.md
-│   └── 2026-08-30-issue-74-shell-rust-cutover.md
+│   ├── 2026-08-30-issue-74-shell-rust-cutover.md
+│   └── 2026-08-30-issue-75-modernized-workstation-verification.md
 │
 └── README.md                      # This file
 ```
@@ -88,6 +89,7 @@
 - [Local Inference Profile qualification and promotion](Reports/2026-08-13-issue-70-inference-qualification.md) records Issue #70's governed fixture family, reviewed-outcome/timing reports, bounded context and prefix measurements, exact runtime pinning, and rollback state.
 - [Versioned host execution request/receipt boundary](Reports/2026-08-13-issue-71-host-execution.md) records Issue #71's shared Python provider, effect-specific authority inputs, bounded process enforcement, exact replay, crash-cut uncertainty, and raw-output separation.
 - [Shadow Rust execution receipts](Reports/2026-08-15-issue-72-rust-shadow-execution.md) records Issue #72 Rust JSONL candidate, Python-owned store hash guard, normalized parity, production-equivalent cohorts, and fail-closed eligibility gates.
+- [Modernized workstation verification](Reports/2026-08-30-issue-75-modernized-workstation-verification.md) records Issue #75's real-backend workstation journey, visible inference authority boundary, dual-protocol Rust/Python fallback matrix, performance/release gates, and explicitly open external acceptance.
 - [Local Agent Rust host-effect cutover](Reports/2026-08-30-issue-73-local-agent-rust-cutover.md) records Issue #73 provider selection, Python canonical authority, streamed effect binding, live cancellation, proof-gated fallback, provider-stable replay, and compatibility evidence.
 - [Shell Rust host-effect cutover](Reports/2026-08-30-issue-74-shell-rust-cutover.md) records Issue #74 Shell-specific provider selection, Python policy and canonical authority, live effect binding/cancellation, exact replay/conflict truth, package rollback, and compatibility evidence.
 - [Workspace selection and false-success diagnosis](Reports/2026-07-24-workspace-selection-false-success-diagnosis.md) records the defect and the receipt-truth blueprint resolved by Issue #59.

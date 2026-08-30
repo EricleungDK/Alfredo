@@ -752,7 +752,19 @@ class CapabilityCatalogTest(unittest.TestCase):
                 {
                     "name": "/status",
                     "usage": "/status",
-                    "description": "Show controller, subagent, and ready-work status.",
+                    "description": (
+                        "Show controller, subagent, ready-work, and snapshot-storage "
+                        "status."
+                    ),
+                    "category": "monitoring",
+                },
+                {
+                    "name": "/storage",
+                    "usage": "/storage",
+                    "description": (
+                        "Inspect Snapshot Payload usage, expiry, reclamation, and "
+                        "blockers."
+                    ),
                     "category": "monitoring",
                 },
             ],
@@ -1047,7 +1059,15 @@ class CapabilityCatalogTest(unittest.TestCase):
         self.assertEqual(payload["skills"][2]["source"], str(local_skill.resolve()))
         self.assertEqual(
             [command["name"] for command in payload["commands"]],
-            ["/help", "/skills", "/use", "/run", "/task", "/status"],
+            [
+                "/help",
+                "/skills",
+                "/use",
+                "/run",
+                "/task",
+                "/status",
+                "/storage",
+            ],
         )
         self.assertEqual(payload["agents"][0]["model"], "qwen:latest")
         self.assertEqual(payload["agents"][0]["availability"], "available")

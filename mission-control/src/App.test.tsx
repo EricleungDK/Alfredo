@@ -12,6 +12,10 @@ import { readFileSync } from "node:fs";
 import { App, isExactAdHocDelegationBoundary } from "./App";
 import { LocalInferenceOverview, MissionExecutionTree } from "./MissionExecutionTree";
 import type { MissionExecutionTreeProjection } from "./workstation-projection";
+
+// This 143-case jsdom file can exceed Vitest's worker deadline under full-suite
+// scheduling even when each recorded case completes in well under one second.
+vi.setConfig({ testTimeout: 15_000 });
 import type {
   AdHocDelegationProposalRequest,
   AdditionalPathGrantDenialRequest,
@@ -491,6 +495,13 @@ test("renders the canonical Mission Execution Tree and scopes detailed output to
   expect(within(inferenceOverview).getByText("1 waiting")).toBeVisible();
   expect(within(inferenceOverview).getByText("No model result entered governance")).toBeVisible();
   expect(within(inferenceOverview).getByText("qwen3:14b · sha256:qwen3-tree")).toBeVisible();
+  expect(within(inferenceOverview).getByText("lease:queued-0001")).toBeVisible();
+  expect(within(inferenceOverview).getByText("worker-v1 · v1")).toBeVisible();
+  expect(
+    within(inferenceOverview).getByText(
+      "The lease serializes local model work only; Mission governance remains authoritative.",
+    ),
+  ).toBeVisible();
   expect(within(tree).getByText("1 Issue Slices")).toBeVisible();
   expect(within(tree).getByText("1 Local Agent sessions")).toBeVisible();
   const issueNode = within(tree).getByRole("treeitem", {

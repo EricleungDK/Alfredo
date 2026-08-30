@@ -2,7 +2,10 @@ import "@testing-library/jest-dom/vitest";
 
 // Node 25 exposes an incomplete global localStorage when no persistence file was
 // configured. That value can shadow jsdom's Storage implementation in workers.
-if (typeof window.localStorage?.clear !== "function") {
+if (
+  typeof window !== "undefined" &&
+  typeof window.localStorage?.clear !== "function"
+) {
   const values = new Map<string, string>();
   const storage = Object.create(null) as Storage;
   Object.defineProperties(storage, {

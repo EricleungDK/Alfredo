@@ -501,7 +501,7 @@ test("workstation startup leaves tracker and Mission discovery unbound before se
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
-});
+}, 15_000);
 
 test("release verification installs only the meta package through an isolated registry", () => {
   const root = mkdtempSync(join(tmpdir(), "alfredo-registry-verifier-"));

@@ -17,6 +17,7 @@
 - Retirement lifecycle through Issue #68: every Retirement Unit has reserved preservation, exact quiescence/identity proof, verified snapshots, outcome-driven retirement, bounded Snapshot Payload retention and reclamation, deterministic storage inspection, and governed blocked retry/export/discard actions. See [the Issue #68 report](../Reports/2026-08-09-issue-68-retirement-storage.md).
 - Qualified Local Agent host effects through Issue #73: Python retains authorization, canonical Mission/session state, exact replay, and reconciliation while one integrity-bound Rust provider performs the prepared external effect; live child binding, cancellation, uncertainty, compatibility, and the explicit packaged Python fallback are covered by the [Issue #73 report](../Reports/2026-08-30-issue-73-local-agent-rust-cutover.md).
 - Qualified Shell host effects through Issue #74: Python retains command policy, approvals, Additional Path Grants, canonical Shell/audit state, exact replay, and reconciliation while one integrity-bound Rust provider performs the prepared external effect; independent rollback, transport compatibility, live child binding/cancellation, and uncertainty are covered by the [Issue #74 report](../Reports/2026-08-30-issue-74-shell-rust-cutover.md).
+- Integrated modernization verification through Issue #75: the production-equivalent Starting Location → Coding Workspace → Mission → Wayfinder → governed work → evidence/review → retirement → restart journey is executable against the real backend; Local Inference Profile/Lease identity remains visible without Mission authority; packaged Shell and Local Agent pass both protocol generations with explicit Python fallback; and the protected release workflow includes performance contracts/fixtures plus the installed selection-required marker boundary. See the [Issue #75 report](../Reports/2026-08-30-issue-75-modernized-workstation-verification.md).
 
 ## Current Follow-Up
 
@@ -29,7 +30,7 @@
 
 ```bash
 python3 -m unittest discover -s tests
-(cd mission-control && npm test -- --run && npm run typecheck && npm run build && npm run test:layout)
+(cd mission-control && npm test -- --run && npm run performance:fixtures && npm run test:performance && npm run typecheck && npm run build && npm run test:layout)
 (cd mission-control && npm run release:verify && npm run release:check)
 (cd mission-control/src-tauri && cargo fmt -- --check && cargo test)
 ```

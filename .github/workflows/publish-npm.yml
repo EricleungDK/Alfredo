@@ -85,6 +85,11 @@ jobs:
           npm run typecheck
           npm run build
 
+      - name: Verify performance evidence contracts and fixtures
+        run: |
+          npm run performance:fixtures
+          npm run test:performance
+
       - name: Install the release layout browser
         run: npx playwright install --with-deps chromium
 
@@ -266,8 +271,11 @@ jobs:
               if (
                 marker.schema_version !== 1 ||
                 marker.status !== "ready" ||
+                marker.phase !== "selection-required" ||
                 !Number.isInteger(marker.process_id) ||
-                marker.selected_workspace !== process.env.ALFREDO_SELECTED_WORKSPACE ||
+                marker.starting_location !== process.env.ALFREDO_SELECTED_WORKSPACE ||
+                marker.coding_workspace !== null ||
+                marker.active_mission !== null ||
                 marker.backend_root !== process.env.ALFREDO_EXPECTED_BACKEND_ROOT
               ) process.exit(1);
             '\''

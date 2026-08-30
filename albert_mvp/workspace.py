@@ -593,6 +593,26 @@ class ShellTerminalService:
                 yield
 
     def inspect(self) -> ShellTerminalProjection:
+        lock_path = self._terminal_path.with_name(f".{self._terminal_path.name}.lock")
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with lock_path.open("a+", encoding="utf-8") as lock_file:
+            try:
+                fcntl.flock(
+                    lock_file.fileno(),
+                    fcntl.LOCK_EX | fcntl.LOCK_NB,
+                )
+            except BlockingIOError:
+                # A live submit/decision already persisted its executing record
+                # before starting the effect. Atomic reads may project that
+                # canonical state without waiting for the terminal mutation
+                # lock; reconciliation and audit repair remain with the owner
+                # or the next unlocked inspection.
+                return self._terminal_projection(self._load_terminal())
+            finally:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+                except OSError:
+                    pass
         with self._chronology_then_terminal_lock():
             return self._inspect_locked()
 
@@ -600,7 +620,6 @@ class ShellTerminalService:
         terminal = self._reconcile_execution_ledger(
             self._load_terminal(), terminal_lock_held=True
         )
-        path_grant_requests = self._load_path_grant_requests()
         if any(
             record.get("status") == "executing"
             and self._projected_command_status(record) == "outcome-unknown"
@@ -610,6 +629,10 @@ class ShellTerminalService:
                 terminal, terminal_lock_held=True
             )
         self._reconcile_terminal_audit(terminal)
+        return self._terminal_projection(terminal)
+
+    def _terminal_projection(self, terminal: dict[str, Any]) -> ShellTerminalProjection:
+        path_grant_requests = self._load_path_grant_requests()
         return ShellTerminalProjection(
             schema_version=1,
             revision=terminal["revision"],
@@ -1538,11 +1561,12 @@ class ShellTerminalService:
                 execution_request=execution_request,
             )
         )
+        execution_journal = ExecutionJournal(
+            self._execution_journal_path_for_mission(str(record["mission_id"]))
+        )
         try:
             receipt = ExecutionCoordinator(
-                ExecutionJournal(
-                    self._execution_journal_path_for_mission(str(record["mission_id"]))
-                ),
+                execution_journal,
                 execution_provider,
             ).execute(
                 execution_request,
@@ -1606,6 +1630,19 @@ class ShellTerminalService:
                 )
             except Exception:
                 completion_is_durable = False
+            if not completion_is_durable:
+                try:
+                    completion_is_durable = any(
+                        durable_request.request_id == execution_request.request_id
+                        and durable_request.request_digest
+                        == execution_request.request_digest
+                        and durable_receipt.status != "executing"
+                        for durable_request, durable_receipt in (
+                            execution_journal.inspect_records()
+                        )
+                    )
+                except Exception:
+                    completion_is_durable = False
             if not completion_is_durable:
                 self._best_effort_mark_outcome_unknown(
                     terminal=attempt_terminal,

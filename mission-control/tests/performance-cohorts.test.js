@@ -7,6 +7,7 @@ import test from "node:test";
 import {
   compileStageMarks,
   loadFixtureFamily,
+  PERFORMANCE_PHASE_FAMILIES,
   readJsonLines,
   summarizeCohorts,
   writeJsonLines,
@@ -16,6 +17,19 @@ const fixtureManifest = resolve(
   import.meta.dirname,
   "../performance/fixtures/v1/manifest.json",
 );
+
+test("release evidence keeps workstation and model phase families separately attributable", () => {
+  assert.deepEqual(PERFORMANCE_PHASE_FAMILIES, {
+    launcher: ["S1"],
+    desktop: ["S2", "S4"],
+    react: ["S3", "S8", "S9", "R0", "R4", "R5", "R6"],
+    backend: ["S5", "S6", "R2"],
+    persistence: ["R2"],
+    transport: ["S5", "S7", "R1", "R3"],
+    rendered: ["S8", "S9", "R0", "R5", "R6"],
+    model: ["load_ms", "prompt_evaluation_ms", "first_token_ms", "decoding_ms"],
+  });
+});
 
 test("rendered metrics use one frontend clock from trusted R0 entry to the visible endpoint", () => {
   const identity = {
@@ -279,6 +293,37 @@ test("cohort report uses nearest-rank tails and paired deltas after required rep
   );
   assert.equal(warmCandidate.sample_count, 100);
   assert.equal(warmCandidate.p95_ms, 185);
+  assert.deepEqual(Object.keys(coldBaseline.phase_statistics), [
+    "launcher",
+    "desktop",
+    "react",
+    "backend",
+    "persistence",
+    "transport",
+    "rendered",
+    "model",
+  ]);
+  assert.deepEqual(coldBaseline.phase_statistics.launcher.S1, {
+    sample_count: 30,
+    p50_ms: 2,
+    p95_ms: 2,
+    min_ms: 2,
+    max_ms: 2,
+  });
+  assert.deepEqual(coldBaseline.phase_statistics.backend.S6, {
+    sample_count: 30,
+    p50_ms: 6,
+    p95_ms: 6,
+    min_ms: 6,
+    max_ms: 6,
+  });
+  assert.deepEqual(coldBaseline.phase_statistics.model.load_ms, {
+    sample_count: 0,
+    p50_ms: null,
+    p95_ms: null,
+    min_ms: null,
+    max_ms: null,
+  });
   assert.deepEqual(
     report.paired_deltas.map((item) => ({
       mode: item.mode,

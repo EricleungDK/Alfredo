@@ -49,6 +49,23 @@ Rendered Queue decisions record R0 through R6:
 Queue defer ends at R5. Queue approval retains R5 as the visible-result metric
 and waits separately for R6 before the sample is complete.
 
+The release contract also publishes a phase-family map so reports cannot give a
+backend candidate credit for unrelated time. Launcher (`S1`), desktop (`S2`,
+`S4`), React, backend authority, durable persistence (`R2`), bridge transport,
+and rendered endpoints remain separately attributable even where one stage
+belongs to more than one explanatory family. Every cohort report emits
+`phase_statistics` for the complete map, with sample count, p50, p95, minimum,
+and maximum for every stage; a stage with no qualifying samples remains explicit
+with a zero count and null durations. Model work is not folded into any desktop
+stage: Local Inference receipts separately expose `load_ms`,
+`prompt_evaluation_ms`, `first_token_ms`, and `decoding_ms` with exact Profile,
+model digest, and Lease identity. `npm run test:performance` enforces this map.
+
+No production candidate cohort has been run for Issue #75, so the modernization
+verification makes no latency or human-perceptible improvement claim. Such a
+claim still requires the minimum paired sample counts, every correctness gate,
+and the predeclared positive product-improvement threshold below.
+
 ## Fixture templates
 
 Validate the committed workload bytes:

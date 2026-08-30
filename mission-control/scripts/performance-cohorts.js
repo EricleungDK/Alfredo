@@ -60,6 +60,21 @@ export const STAGE_SOURCES = Object.freeze({
   R5: "react",
   R6: "react",
 });
+export const PERFORMANCE_PHASE_FAMILIES = Object.freeze({
+  launcher: Object.freeze(["S1"]),
+  desktop: Object.freeze(["S2", "S4"]),
+  react: Object.freeze(["S3", "S8", "S9", "R0", "R4", "R5", "R6"]),
+  backend: Object.freeze(["S5", "S6", "R2"]),
+  persistence: Object.freeze(["R2"]),
+  transport: Object.freeze(["S5", "S7", "R1", "R3"]),
+  rendered: Object.freeze(["S8", "S9", "R0", "R5", "R6"]),
+  model: Object.freeze([
+    "load_ms",
+    "prompt_evaluation_ms",
+    "first_token_ms",
+    "decoding_ms",
+  ]),
+});
 
 const FIXTURE_KINDS = Object.freeze([
   "minimal-ready",
@@ -426,6 +441,22 @@ function validateSample(record) {
       }
     }
   }
+  if (record.model_timings_ms !== undefined) {
+    if (
+      !record.model_timings_ms ||
+      typeof record.model_timings_ms !== "object" ||
+      Array.isArray(record.model_timings_ms)
+    ) {
+      failures.push("model_timings_ms is invalid");
+    } else {
+      for (const metric of PERFORMANCE_PHASE_FAMILIES.model) {
+        const duration = record.model_timings_ms[metric];
+        if (typeof duration !== "number" || !Number.isFinite(duration) || duration < 0) {
+          failures.push(`${metric} model timing is invalid`);
+        }
+      }
+    }
+  }
   try {
     requireCorrectness(record.correctness, "correctness");
   } catch (error) {
@@ -477,6 +508,39 @@ function nearestRank(values, percentile) {
   const ordered = [...values].sort((left, right) => left - right);
   const rank = Math.max(1, Math.ceil(percentile * ordered.length));
   return ordered[rank - 1];
+}
+
+function durationStatistics(values) {
+  return {
+    sample_count: values.length,
+    p50_ms: nearestRank(values, 0.5),
+    p95_ms: nearestRank(values, 0.95),
+    min_ms: values.length > 0 ? Math.min(...values) : null,
+    max_ms: values.length > 0 ? Math.max(...values) : null,
+  };
+}
+
+function phaseStatistics(validItems) {
+  return Object.fromEntries(
+    Object.entries(PERFORMANCE_PHASE_FAMILIES).map(([family, metrics]) => [
+      family,
+      Object.fromEntries(
+        metrics.map((metric) => {
+          const values = validItems
+            .map(({ record }) =>
+              family === "model"
+                ? record.model_timings_ms?.[metric]
+                : record.stage_durations_ms?.[metric],
+            )
+            .filter(
+              (duration) =>
+                typeof duration === "number" && Number.isFinite(duration) && duration >= 0,
+            );
+          return [metric, durationStatistics(values)];
+        }),
+      ),
+    ]),
+  );
 }
 
 function groupKey(record) {
@@ -557,6 +621,7 @@ export function summarizeCohorts(records, options = {}) {
         p95_ms: nearestRank(durations, 0.95),
         min_ms: durations.length > 0 ? Math.min(...durations) : null,
         max_ms: durations.length > 0 ? Math.max(...durations) : null,
+        phase_statistics: phaseStatistics(valid),
         failures: invalid.length,
         failure_records: invalid.map((item) => ({
           sample_id: item.record.sample_id ?? "",

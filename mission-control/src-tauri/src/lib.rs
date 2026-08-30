@@ -7339,6 +7339,7 @@ None - can start immediately
         let tracker_dir = root.join("tracker");
         let issues_dir = tracker_dir.join("issues");
         let runtime_root = root.join("runtime");
+        let agent_config = root.join("review-agents.json");
         fs::create_dir_all(&target_repo).expect("target repo");
         fs::create_dir_all(&issues_dir).expect("issues dir");
         fs::write(tracker_dir.join("PRD.md"), "# Review Decision Bridge\n").expect("PRD");
@@ -7347,6 +7348,19 @@ None - can start immediately
             "Status: approved\nType: AFK\n\n## Parent\n\nPRD.md\n\n## What to build\n\nReview through the desktop bridge.\n\n## Acceptance criteria\n\n- [ ] Review metadata reaches the backend.\n\n## Blocked by\n\nNone - can start immediately\n",
         )
         .expect("issue");
+        fs::write(
+            &agent_config,
+            r#"{
+                "agents": [{
+                    "id": "qwen-coder-local-1",
+                    "role": "local-agent",
+                    "provider": "test-harness",
+                    "runner": "fake",
+                    "model": "deterministic-fake"
+                }]
+            }"#,
+        )
+        .expect("agent registry");
         let config = BridgeConfig {
             python: "python3".to_owned(),
             backend_root: std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -7358,7 +7372,7 @@ None - can start immediately
             issues_dir: None,
             runtime_root,
             mission_id: "review-decision-bridge".to_owned(),
-            agent_config: None,
+            agent_config: Some(agent_config),
             mission_catalog: None,
         };
 
@@ -7386,37 +7400,22 @@ None - can start immediately
             },
         )
         .expect("launch should create a queued session");
-        let cancelled = execute_workstation_action(
+        let completed = execute_workstation_session_run(
             &config,
-            &WorkstationActionRequest {
-                correlation_id: "tauri-review-cancel-1".to_owned(),
-                action_type: "session-cancel".to_owned(),
-                actor: "mission-commander".to_owned(),
-                expected_revision: launch.revision,
-                target: WorkstationActionTarget {
-                    kind: "agent-session".to_owned(),
-                    id: launch.session_id.clone(),
-                },
+            &WorkstationSessionRunRequest {
                 mission_id: "review-decision-bridge".to_owned(),
-                issue_id: "ISS-01".to_owned(),
                 session_id: launch.session_id.clone(),
-                agent_id: String::new(),
-                reason: "Create terminal evidence for the bridge review.".to_owned(),
-                allowed_paths: Vec::new(),
-                command_policy: std::collections::BTreeMap::new(),
-                pin_state: None,
-                destination: String::new(),
-                confirmation: String::new(),
             },
         )
-        .expect("cancel should make the session reviewable");
+        .expect("runner should make the session reviewable");
+        assert!(completed.evidence_valid);
         let review = execute_review_decision(
             &config,
             &ReviewDecisionRequest {
                 correlation_id: "tauri-review-repair-1".to_owned(),
                 action_type: "review-decision".to_owned(),
                 actor: "mission-commander".to_owned(),
-                expected_revision: cancelled.revision,
+                expected_revision: launch.revision,
                 target: ReviewDecisionTarget {
                     kind: "agent-session".to_owned(),
                     id: launch.session_id.clone(),

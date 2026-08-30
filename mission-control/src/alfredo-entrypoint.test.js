@@ -16,6 +16,10 @@ import { fileURLToPath } from "node:url";
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(projectRoot, "..");
 
+// Subprocess-heavy launcher cases need a file-local worker budget when the
+// complete frontend suite is contending for process and filesystem resources.
+vi.setConfig({ testTimeout: 15_000 });
+
 function binPath(name) {
   const packageJson = JSON.parse(
     readFileSync(resolve(projectRoot, "package.json"), "utf8"),

@@ -1164,6 +1164,7 @@ def _run(args: argparse.Namespace) -> int:
         "retirement-storage",
         "retirement-verify",
         "review-workspace",
+        "runner-observe",
         "session-artifact",
         "session-output",
         "shell-terminal",

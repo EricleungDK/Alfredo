@@ -3,7 +3,30 @@ import { createHash } from "node:crypto";
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/;
 
 const EXPECTED_SHADOW_COHORTS = Object.freeze([
-  Object.freeze({ request_id: "packaged-shadow-completed", status: "completed" }),
+  Object.freeze({
+    request_id: "packaged-shadow-completed",
+    status: "completed",
+    effect: "local-agent",
+    protocol: "previous-one-response",
+  }),
+  Object.freeze({
+    request_id: "packaged-shadow-local-agent-current",
+    status: "completed",
+    effect: "local-agent",
+    protocol: "current-streamed",
+  }),
+  Object.freeze({
+    request_id: "packaged-shadow-shell-previous",
+    status: "completed",
+    effect: "shell",
+    protocol: "previous-one-response",
+  }),
+  Object.freeze({
+    request_id: "packaged-shadow-shell-current",
+    status: "completed",
+    effect: "shell",
+    protocol: "current-streamed",
+  }),
   Object.freeze({ request_id: "packaged-shadow-failed", status: "failed" }),
   Object.freeze({ request_id: "packaged-shadow-timeout-cleanup", status: "timed-out" }),
   Object.freeze({ request_id: "packaged-shadow-output-limit", status: "output-limit" }),
@@ -37,9 +60,16 @@ function validateShadowProviderParityEvidence(
     !Array.isArray(evidence.canonical_store_roots) ||
     JSON.stringify(evidence.canonical_store_roots) !== JSON.stringify(canonicalStoreRoots) ||
     !Array.isArray(evidence.cohorts) ||
-    evidence.cohorts.length !== EXPECTED_SHADOW_COHORTS.length
+    evidence.cohorts.length !== EXPECTED_SHADOW_COHORTS.length ||
+    evidence.python_fallback?.selection_boundary !== "pre-effect" ||
+    evidence.python_fallback?.shell !== "python" ||
+    evidence.python_fallback?.local_agent !== "python"
   ) {
-    throw new Error("Packaged shadow evidence does not match the exact contract.");
+    throw new Error(
+      evidence?.python_fallback
+        ? "Packaged shadow evidence does not match the exact contract."
+        : "Packaged shadow evidence lacks explicit Python fallback proof.",
+    );
   }
 
   for (const [index, expected] of EXPECTED_SHADOW_COHORTS.entries()) {
@@ -48,6 +78,8 @@ function validateShadowProviderParityEvidence(
       !cohort ||
       cohort.request_id !== expected.request_id ||
       cohort.status !== expected.status ||
+      (expected.effect && cohort.effect !== expected.effect) ||
+      (expected.protocol && cohort.protocol !== expected.protocol) ||
       typeof cohort.request_sha256 !== "string" ||
       !DIGEST_PATTERN.test(cohort.request_sha256) ||
       cohort.store_unchanged !== true

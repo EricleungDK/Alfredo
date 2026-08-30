@@ -195,6 +195,7 @@ export function LocalInferenceOverview({
                 <span>
                   {active.model} · {active.model_digest} · {active.mission_id}/{active.session_id}
                 </span>
+                <code>{active.lease_id}</code>
               </div>
               <small>
                 Priority {active.priority} · sequence {active.sequence} · {active.resident_match
@@ -216,6 +217,7 @@ export function LocalInferenceOverview({
                     <span>
                       <strong>Priority {entry.priority}</strong> · {entry.model} · {entry.model_digest}
                     </span>
+                    <code>{entry.lease_id}</code>
                     <small>
                       {entry.mission_id}/{entry.session_id} · sequence {entry.sequence} · {leaseAffinity(entry, resident)}
                     </small>
