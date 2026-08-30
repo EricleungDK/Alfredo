@@ -44,7 +44,7 @@ Issue #75 owns the integrated packaged-release verification of both cutovers and
 
 ## Independent review
 
-Standards and Spec reviews ran independently against fixed point `83aceb6`. Their findings drove the provider-stability, post-launch uncertainty, release-qualification, durable circuit-breaker, typed transport-failure, receipt-effect, regression-seam, and exact-evidence corrections recorded above. The final Spec recheck is clean; the final Standards recheck follows this exact evidence update.
+Standards and Spec reviews ran independently against fixed point `83aceb6`. Their findings drove the provider-stability, post-launch uncertainty, release-qualification, durable circuit-breaker, typed transport-failure, receipt-effect, regression-seam, and exact-evidence corrections recorded above. Both final rechecks are clean.
 
 ## Principal files
 
