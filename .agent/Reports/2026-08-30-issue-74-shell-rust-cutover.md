@@ -12,7 +12,7 @@
 
 Governed Shell Terminal effects can now use the qualified, integrity-bound packaged Rust execution provider. Python remains the sole authority for command classification, Frontier or Mission Commander approval, Additional Path Grants, canonical path and environment preparation, the Bubblewrap/resource boundary, durable request claim, exact correlation replay, Shell Terminal and audit state, and uncertainty reconciliation. Rust receives only the already-authorized `ExecutionRequest` and performs the prepared external process effect.
 
-The cutover has an independent `ALFREDO_RUST_SHELL_ENABLED` switch under `ALFREDO_RUST_CANDIDATE_ENABLED`. Packaged desktop launches enable both with the exact provider path and SHA-256, but Python selects Rust only while the persisted qualification decision remains eligible. Setting either switch to `0`, or loading an ineligible/corrupt qualification decision, selects the packaged Python provider before request validation or journal claim. Setting the global candidate plus both effect switches to `0` also makes desktop launch independent of the Rust artifact, so a damaged candidate cannot block the all-Python rollback.
+The cutover has an independent `ALFREDO_RUST_SHELL_ENABLED` switch under `ALFREDO_RUST_CANDIDATE_ENABLED`. Packaged desktop launches enable both with the exact provider path, verified SHA-256, and a release-qualified digest bound to those bytes. A clean runtime admits only that matching package identity; an existing shadow/release eligibility record must name the same digest, and a persisted runtime circuit breaker disables selection after a transport or contract regression. Setting either switch to `0`, or loading an ineligible/corrupt decision, selects the packaged Python provider before request validation or journal claim. Setting the global candidate plus both effect switches to `0` also makes desktop launch independent of the Rust artifact, so a damaged candidate cannot block the all-Python rollback.
 
 ## Safety contract
 
@@ -31,14 +31,14 @@ The npm backend inventory includes the shared provider cutover adapter. The inst
 
 ## Verification
 
-- `python3 -m unittest -q tests.test_execution_cutover tests.test_execution tests.test_execution_shadow tests.test_execution_integration` — 65 passed, including qualification gating/circuit breaking, cross-provider journal rejection, post-launch transport uncertainty, and real built-Rust Shell completion and cancellation.
+- `python3 -m unittest -q tests.test_execution_cutover tests.test_execution tests.test_execution_shadow tests.test_execution_integration` — 66 passed, including clean-runtime release qualification and digest binding, persisted circuit breaking, cross-provider journal rejection, typed post-launch transport uncertainty, and real built-Rust Shell completion and cancellation.
 - `npm test -- --run tests/build-npm-release.test.js tests/desktop-adapter.test.js` — 15 passed, including all-Python rollback with unusable Rust bytes and default-launch tamper rejection.
 - `npm test -- --run src/workspace-client.test.ts src/App.test.tsx` — WorkspaceClient passed 45/45 and all Shell Terminal React cases passed. Two unrelated App cases timed out in the combined run and passed 2/2 in isolation.
 - `npm run typecheck` — passed.
 - `cargo fmt --manifest-path mission-control/src-tauri/Cargo.toml -- --check` — passed.
 - `cargo test --manifest-path mission-control/src-tauri/Cargo.toml --no-default-features execution -- --nocapture` — 14 passed.
 - `cargo test --manifest-path mission-control/src-tauri/Cargo.toml --no-default-features` — 58/59 passed; the sole failure is the pre-existing retirement-review fixture, outside the execution cutover.
-- Full Python discovery reached 781 tests with 29 failures, 30 errors, and 2 skips across pre-existing retirement/capability fixture drift plus subprocess copies that could not import the concurrent still-untracked cutover modules. The isolated Issue #74 execution integration matrix is green at 65 tests.
+- Full Python discovery reached 781 tests with 29 failures, 30 errors, and 2 skips across pre-existing retirement/capability fixture drift plus subprocess copies that could not import the concurrent still-untracked cutover modules. The isolated Issue #74 execution integration matrix is green at 66 tests.
 
 Issue #75 owns the integrated packaged-release verification of both cutovers and does not change the authority boundary described here.
 

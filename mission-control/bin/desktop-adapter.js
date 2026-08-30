@@ -256,6 +256,9 @@ export function resolveDesktopAdapter(projectRoot, environment = process.env) {
       ALFREDO_RUST_EXECUTION_PROVIDER_SHA256: rustProviderRequired
         ? adapter.shadow_provider_sha256
         : "",
+      ALFREDO_RUST_EXECUTION_PROVIDER_QUALIFIED_SHA256: rustProviderRequired
+        ? adapter.shadow_provider_sha256
+        : "",
     },
   };
 }

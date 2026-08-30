@@ -37,6 +37,7 @@ _IDENTITY_PATTERN = re.compile(r"^[A-Za-z0-9._:/=-]+$")
 _MAX_STORE_BYTES = 64 * 1024 * 1024
 _MAX_PROVIDER_OUTPUT_BYTES = 16 * 1024 * 1024
 _MAX_PROVIDER_TIMEOUT_SECONDS = 3_600.0
+_RUST_PROVIDER_TRANSPORT_FAILURE = "rust-provider-transport-failure"
 _FORBIDDEN_EVIDENCE_KINDS = {"reducer", "sidecar", "microbenchmark"}
 _MAX_SHADOW_TREE_FILES = 4_096
 _MAX_SHADOW_TREE_BYTES = 128 * 1024 * 1024
@@ -862,6 +863,7 @@ class RustProviderTransport:
         | None = None,
         effect_process_started: Callable[[int, str], None] | None = None,
         control_poll_callback: Callable[[], None] | None = None,
+        transport_failure_callback: Callable[[str], None] | None = None,
     ) -> ExecutionReceipt:
         request.validate()
         if cancel_after_seconds is not None and (
@@ -924,6 +926,10 @@ class RustProviderTransport:
         protocol_failures: list[BaseException] = []
         effect_callback_failures: list[BaseException] = []
         effect_binding: dict[str, Any] = {}
+
+        def record_transport_failure() -> None:
+            if transport_failure_callback is not None:
+                transport_failure_callback(_RUST_PROVIDER_TRANSPORT_FAILURE)
 
         def drain(stream: Any, target: list[bytes]) -> None:
             nonlocal output_size
@@ -1088,6 +1094,7 @@ class RustProviderTransport:
         except OSError as exc:
             if process is not None:
                 self._terminate(process)
+                record_transport_failure()
                 return replace(
                     ExecutionReceipt.unknown(
                         request,
@@ -1115,6 +1122,7 @@ class RustProviderTransport:
             if writer_thread is not None:
                 writer_thread.join(timeout=2.0)
         if timed_out:
+            record_transport_failure()
             return replace(
                 ExecutionReceipt.unknown(
                     request,
@@ -1133,6 +1141,7 @@ class RustProviderTransport:
             )
         stdout = b"".join(stdout_buffer)
         if returncode != 0:
+            record_transport_failure()
             return replace(
                 ExecutionReceipt.unknown(
                     request,
@@ -1145,6 +1154,7 @@ class RustProviderTransport:
         try:
             response = json.loads(stdout.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            record_transport_failure()
             return replace(
                 ExecutionReceipt.unknown(
                     request,
@@ -1929,7 +1939,7 @@ class RustEligibilityStore:
         )
         with self._lock():
             decision = self._read_unlocked()
-            if not decision.eligible:
+            if self.path.exists() and not decision.eligible:
                 return decision
             next_decision = replace(
                 decision,
@@ -1940,6 +1950,32 @@ class RustEligibilityStore:
             )
             self._write_unlocked(next_decision)
             return next_decision
+
+    def allows_provider(
+        self,
+        provider_sha256: str,
+        packaged_qualified_sha256: str,
+    ) -> bool:
+        """Admit the release-bound provider unless a persisted gate disables it."""
+
+        if not all(
+            isinstance(value, str) and _DIGEST_PATTERN.fullmatch(value)
+            for value in (provider_sha256, packaged_qualified_sha256)
+        ):
+            return False
+        with self._lock():
+            if not self.path.exists():
+                return provider_sha256 == packaged_qualified_sha256
+            decision = self._read_unlocked()
+            release_evidence = (
+                decision.evidence.release_evidence
+                if decision.eligible and decision.evidence is not None
+                else None
+            )
+            return bool(
+                release_evidence is not None
+                and release_evidence.provider_sha256 == provider_sha256
+            )
 
     def record(self, evidence: RustEligibilityEvidence) -> RustEligibilityDecision:
         failed = list(evidence.failure_reasons)

@@ -36,6 +36,9 @@ RUST_CANDIDATE_ENABLED = "ALFREDO_RUST_CANDIDATE_ENABLED"
 RUST_SHELL_ENABLED = "ALFREDO_RUST_SHELL_ENABLED"
 RUST_EXECUTION_PROVIDER = "ALFREDO_RUST_EXECUTION_PROVIDER"
 RUST_EXECUTION_PROVIDER_SHA256 = "ALFREDO_RUST_EXECUTION_PROVIDER_SHA256"
+RUST_EXECUTION_PROVIDER_QUALIFIED_SHA256 = (
+    "ALFREDO_RUST_EXECUTION_PROVIDER_QUALIFIED_SHA256"
+)
 _DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _MAX_PROVIDER_BYTES = 64 * 1024 * 1024
 
@@ -108,6 +111,12 @@ class RustExecutionProvider:
 
         self._verify_artifact()
 
+    def _disable_runtime_candidate(self) -> None:
+        if self.eligibility_store is not None:
+            self.eligibility_store.disable(
+                "runtime-rust-provider-contract-failure"
+            )
+
     def execute(
         self,
         request: ExecutionRequest,
@@ -118,6 +127,7 @@ class RustExecutionProvider:
     ) -> ExecutionReceipt:
         self.validate_request(request)
         effect_binding: dict[str, int | str] = {}
+        transport_failure_codes: list[str] = []
 
         def bind_effect(process_pid: int, process_identity: str) -> None:
             effect_binding.update(
@@ -137,10 +147,10 @@ class RustExecutionProvider:
                 request,
                 effect_process_started=bind_effect,
                 control_poll_callback=poll_callback,
+                transport_failure_callback=transport_failure_codes.append,
             )
         except RustShadowProviderError as exc:
-            if self.eligibility_store is not None:
-                self.eligibility_store.disable(f"runtime-{exc.code}")
+            self._disable_runtime_candidate()
             # Once the provider subprocess accepted the request, a malformed or
             # lost response is not positive proof that no effect started.  Only
             # preflight validation and a typed start-failed receipt may make
@@ -160,6 +170,7 @@ class RustExecutionProvider:
             receipt.process_pid != int(effect_binding["pid"])
             or receipt.process_identity != str(effect_binding["identity"])
         ):
+            self._disable_runtime_candidate()
             return ExecutionReceipt.unknown(
                 request,
                 error_message=(
@@ -170,16 +181,8 @@ class RustExecutionProvider:
                 provider=self.provider_id,
             )
         canonical_receipt = replace(receipt, provider=self.provider_id)
-        if (
-            self.eligibility_store is not None
-            and canonical_receipt.status == "outcome-unknown"
-            and canonical_receipt.error_message.startswith(
-                ("Rust execution provider ", "Rust shadow provider ")
-            )
-        ):
-            self.eligibility_store.disable(
-                "runtime-rust-provider-transport-failure"
-            )
+        if transport_failure_codes:
+            self._disable_runtime_candidate()
         if output_callback is not None:
             if canonical_receipt.stdout:
                 output_callback("stdout", canonical_receipt.stdout.encode("utf-8"))
@@ -237,14 +240,20 @@ def shell_execution_provider_from_environment(
         return _RejectedRustExecutionProvider(
             "Rust execution qualification state is unavailable"
         )
-    try:
-        eligibility = eligibility_store.load()
-    except Exception:
-        return PythonExecutionProvider(executor=python_executor)
-    if not eligibility.eligible:
-        return PythonExecutionProvider(executor=python_executor)
     provider_path = values.get(RUST_EXECUTION_PROVIDER, "")
     provider_sha256 = values.get(RUST_EXECUTION_PROVIDER_SHA256, "")
+    packaged_qualified_sha256 = values.get(
+        RUST_EXECUTION_PROVIDER_QUALIFIED_SHA256, ""
+    )
+    try:
+        provider_allowed = eligibility_store.allows_provider(
+            provider_sha256,
+            packaged_qualified_sha256,
+        )
+    except Exception:
+        provider_allowed = False
+    if not provider_allowed:
+        return PythonExecutionProvider(executor=python_executor)
     return RustExecutionProvider(
         Path(provider_path),
         provider_sha256,
@@ -255,6 +264,7 @@ def shell_execution_provider_from_environment(
 __all__ = [
     "RUST_CANDIDATE_ENABLED",
     "RUST_EXECUTION_PROVIDER",
+    "RUST_EXECUTION_PROVIDER_QUALIFIED_SHA256",
     "RUST_EXECUTION_PROVIDER_SHA256",
     "RUST_SHELL_ENABLED",
     "RustExecutionProvider",

@@ -665,6 +665,9 @@ class ExecutionShadowTests(unittest.TestCase):
 
     def test_runtime_circuit_breaker_persistently_disables_eligible_rust(self) -> None:
         store = RustEligibilityStore(self.root / "shadow" / "rust-eligibility.json")
+        provider_sha256 = shadow_artifact_sha256(self.artifact)
+        self.assertTrue(store.allows_provider(provider_sha256, provider_sha256))
+        self.assertFalse(store.allows_provider(provider_sha256, "0" * 64))
         manifest = self._verified_release_manifest()
         release_evidence = RustReleaseGateEvidence.from_verified_artifacts(
             provider_path=self.artifact,
@@ -679,6 +682,8 @@ class ExecutionShadowTests(unittest.TestCase):
             )
         )
         self.assertTrue(enabled.eligible)
+        self.assertTrue(store.allows_provider(provider_sha256, provider_sha256))
+        self.assertFalse(store.allows_provider("0" * 64, "0" * 64))
 
         disabled = store.disable("runtime-rust-provider-contract-failure")
 
@@ -688,6 +693,7 @@ class ExecutionShadowTests(unittest.TestCase):
             "runtime-rust-provider-contract-failure",
         )
         self.assertFalse(store.load().eligible)
+        self.assertFalse(store.allows_provider(provider_sha256, provider_sha256))
 
     def test_release_evidence_rejects_a_synthetic_gate_manifest(self) -> None:
         manifest = self.root / "package-manifest.json"

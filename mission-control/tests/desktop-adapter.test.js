@@ -78,6 +78,8 @@ test("resolves an exact-version executable from the supported platform package",
         ALFREDO_RUST_LOCAL_AGENT_ENABLED: "1",
         ALFREDO_RUST_EXECUTION_PROVIDER: fixture.provider,
         ALFREDO_RUST_EXECUTION_PROVIDER_SHA256: fixture.providerSha256,
+        ALFREDO_RUST_EXECUTION_PROVIDER_QUALIFIED_SHA256:
+          fixture.providerSha256,
       },
     });
   } finally {
@@ -101,6 +103,7 @@ test("preserves explicit Rust fallback flags for the launched desktop", () => {
       ALFREDO_RUST_LOCAL_AGENT_ENABLED: "0",
       ALFREDO_RUST_EXECUTION_PROVIDER: "",
       ALFREDO_RUST_EXECUTION_PROVIDER_SHA256: "",
+      ALFREDO_RUST_EXECUTION_PROVIDER_QUALIFIED_SHA256: "",
     });
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });

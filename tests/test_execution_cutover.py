@@ -25,7 +25,7 @@ from albert_mvp.execution import (
     PythonExecutionProvider,
     ShellExecutionAuthority,
 )
-from albert_mvp.execution_shadow import RustShadowProvider
+from albert_mvp.execution_shadow import RustEligibilityStore, RustShadowProvider
 from albert_mvp.execution_cutover import (
     RustExecutionProvider,
     shell_execution_provider_from_environment,
@@ -56,6 +56,13 @@ class _EligibilityStore:
             eligible=self.eligible,
             disabled_reason=self.disabled_reason,
         )
+
+    def allows_provider(
+        self,
+        _provider_sha256: str,
+        _packaged_qualified_sha256: str,
+    ) -> bool:
+        return self.eligible
 
     def disable(self, reason: str) -> SimpleNamespace:
         self.eligible = False
@@ -269,6 +276,7 @@ sys.stdout.flush()
                 "ALFREDO_RUST_SHELL_ENABLED": "1",
                 "ALFREDO_RUST_EXECUTION_PROVIDER": str(provider_path),
                 "ALFREDO_RUST_EXECUTION_PROVIDER_SHA256": provider_sha256,
+                "ALFREDO_RUST_EXECUTION_PROVIDER_QUALIFIED_SHA256": provider_sha256,
             },
             python_executor=forbidden_python,
             eligibility_store=_EligibilityStore(),
@@ -298,15 +306,12 @@ sys.stdout.flush()
             "ALFREDO_RUST_SHELL_ENABLED": "1",
             "ALFREDO_RUST_EXECUTION_PROVIDER": str(provider_path),
             "ALFREDO_RUST_EXECUTION_PROVIDER_SHA256": provider_sha256,
+            "ALFREDO_RUST_EXECUTION_PROVIDER_QUALIFIED_SHA256": provider_sha256,
         }
 
         snapshots = self._snapshots()
         with (
             patch.dict(os.environ, enabled, clear=False),
-            patch(
-                "albert_mvp.execution_cutover.RustEligibilityStore.load",
-                return_value=SimpleNamespace(eligible=True, disabled_reason=""),
-            ),
             patch(
                 "albert_mvp.workspace._run_bounded_process",
                 side_effect=AssertionError("Shell cutover invoked Python"),
@@ -409,6 +414,7 @@ sys.stdout.flush()
             "ALFREDO_RUST_SHELL_ENABLED": "1",
             "ALFREDO_RUST_EXECUTION_PROVIDER": str(provider_path),
             "ALFREDO_RUST_EXECUTION_PROVIDER_SHA256": provider_sha256,
+            "ALFREDO_RUST_EXECUTION_PROVIDER_QUALIFIED_SHA256": provider_sha256,
         }
         common = [
             "--target-repo",
@@ -437,10 +443,6 @@ sys.stdout.flush()
         cli_output = io.StringIO()
         with (
             patch.dict(os.environ, enabled, clear=False),
-            patch(
-                "albert_mvp.execution_cutover.RustEligibilityStore.load",
-                return_value=SimpleNamespace(eligible=True, disabled_reason=""),
-            ),
             redirect_stdout(cli_output),
         ):
             cli_exit = main(exact)
@@ -466,10 +468,6 @@ sys.stdout.flush()
         responses = io.StringIO()
         with (
             patch.dict(os.environ, enabled, clear=False),
-            patch(
-                "albert_mvp.execution_cutover.RustEligibilityStore.load",
-                return_value=SimpleNamespace(eligible=True, disabled_reason=""),
-            ),
         ):
             serve(requests, responses)
 
@@ -524,6 +522,7 @@ sys.stdout.flush()
                 "ALFREDO_RUST_SHELL_ENABLED": "1",
                 "ALFREDO_RUST_EXECUTION_PROVIDER": str(provider_path),
                 "ALFREDO_RUST_EXECUTION_PROVIDER_SHA256": "0" * 64,
+                "ALFREDO_RUST_EXECUTION_PROVIDER_QUALIFIED_SHA256": "0" * 64,
             },
             python_executor=forbidden_python,
             eligibility_store=_EligibilityStore(),
@@ -550,6 +549,7 @@ sys.stdout.flush()
                 "ALFREDO_RUST_SHELL_ENABLED": "1",
                 "ALFREDO_RUST_EXECUTION_PROVIDER": str(provider_path),
                 "ALFREDO_RUST_EXECUTION_PROVIDER_SHA256": provider_sha256,
+                "ALFREDO_RUST_EXECUTION_PROVIDER_QUALIFIED_SHA256": provider_sha256,
             },
             eligibility_store=eligibility,
         )
@@ -581,6 +581,7 @@ sys.stdout.flush()
                 "ALFREDO_RUST_SHELL_ENABLED": "1",
                 "ALFREDO_RUST_EXECUTION_PROVIDER": str(provider_path),
                 "ALFREDO_RUST_EXECUTION_PROVIDER_SHA256": provider_sha256,
+                "ALFREDO_RUST_EXECUTION_PROVIDER_QUALIFIED_SHA256": provider_sha256,
             },
             python_executor=python_effect,
             eligibility_store=_EligibilityStore(eligible=False),
@@ -595,6 +596,42 @@ sys.stdout.flush()
         self.assertEqual(receipt.stdout, "qualified fallback")
         self.assertEqual(python_effects, 1)
         self.assertFalse(counter.exists())
+
+    def test_clean_runtime_accepts_only_the_release_qualified_provider_digest(
+        self,
+    ) -> None:
+        provider_path, counter, provider_sha256 = self._rust_provider_fixture()
+        store = RustEligibilityStore.from_runtime_root(self.runtime.resolve())
+        environment = {
+            "ALFREDO_RUST_CANDIDATE_ENABLED": "1",
+            "ALFREDO_RUST_SHELL_ENABLED": "1",
+            "ALFREDO_RUST_EXECUTION_PROVIDER": str(provider_path),
+            "ALFREDO_RUST_EXECUTION_PROVIDER_SHA256": provider_sha256,
+            "ALFREDO_RUST_EXECUTION_PROVIDER_QUALIFIED_SHA256": provider_sha256,
+        }
+        provider = shell_execution_provider_from_environment(
+            environment,
+            eligibility_store=store,
+        )
+        receipt = ExecutionCoordinator(
+            ExecutionJournal(self.root / "clean-qualified-receipts.json"),
+            provider,
+        ).execute(self._shell_request("shell:clean-qualified"))
+
+        self.assertEqual(receipt.provider, "rust")
+        self.assertEqual(receipt.status, "completed")
+        self.assertEqual(counter.read_text(encoding="utf-8").splitlines(), ["rust"])
+
+        rejected = shell_execution_provider_from_environment(
+            {
+                **environment,
+                "ALFREDO_RUST_EXECUTION_PROVIDER_QUALIFIED_SHA256": "0" * 64,
+            },
+            eligibility_store=RustEligibilityStore.from_runtime_root(
+                (self.root / "other-runtime").resolve()
+            ),
+        )
+        self.assertIsInstance(rejected, PythonExecutionProvider)
 
     def test_journal_rejects_cross_provider_completion(self) -> None:
         request = self._shell_request("shell:journal-provider-stability")
@@ -631,6 +668,7 @@ time.sleep(0.1)
         def request_cancel() -> None:
             raise RuntimeError("cancel provider")
 
+        transport_failures: list[str] = []
         with patch(
             "albert_mvp.execution_shadow.os.kill",
             side_effect=PermissionError("signal denied after launch"),
@@ -638,9 +676,14 @@ time.sleep(0.1)
             receipt = RustShadowProvider((str(provider_path),)).execute(
                 self._shell_request("shell:post-launch-oserror"),
                 control_poll_callback=request_cancel,
+                transport_failure_callback=transport_failures.append,
             )
 
         self.assertEqual(receipt.status, "outcome-unknown")
+        self.assertEqual(
+            transport_failures,
+            ["rust-provider-transport-failure"],
+        )
         self.assertTrue(receipt.effect_started)
         self.assertTrue(receipt.reconciliation_required)
 
