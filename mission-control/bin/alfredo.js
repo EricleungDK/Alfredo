@@ -847,6 +847,31 @@ function headlessContextArgs(selectedWorkspace) {
   ];
 }
 
+function headlessExecutionEnvironment(environment = process.env) {
+  if (repositoryLayoutAvailable) return {};
+  const candidateEnabled = environment.ALFREDO_RUST_CANDIDATE_ENABLED ?? "1";
+  const localAgentEnabled =
+    environment.ALFREDO_RUST_LOCAL_AGENT_ENABLED ?? "1";
+  if (![candidateEnabled, localAgentEnabled].every((value) => value === "0" || value === "1")) {
+    throw new Error(
+      "ALFREDO_RUST_CANDIDATE_ENABLED and ALFREDO_RUST_LOCAL_AGENT_ENABLED must be 0 or 1",
+    );
+  }
+  if (candidateEnabled === "0" || localAgentEnabled === "0") {
+    return {
+      ALFREDO_RUST_CANDIDATE_ENABLED: candidateEnabled,
+      ALFREDO_RUST_LOCAL_AGENT_ENABLED: localAgentEnabled,
+      ALFREDO_RUST_EXECUTION_PROVIDER: "",
+      ALFREDO_RUST_EXECUTION_PROVIDER_SHA256: "",
+    };
+  }
+  return resolveDesktopAdapter(projectRoot, {
+    ...environment,
+    ALFREDO_RUST_SHELL_ENABLED:
+      environment.ALFREDO_RUST_SHELL_ENABLED ?? "0",
+  }).environment;
+}
+
 function runHeadlessBackend(plan) {
   const backendArgs = [
     plan.launch === "headless-run" ? "headless-run" : "headless-review",
@@ -866,6 +891,7 @@ function runHeadlessBackend(plan) {
     encoding: "utf8",
     env: {
       ...process.env,
+      ...headlessExecutionEnvironment(),
       PYTHONPATH: process.env.PYTHONPATH
         ? `${backendRoot}${delimiter}${process.env.PYTHONPATH}`
         : backendRoot,

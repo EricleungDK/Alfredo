@@ -501,7 +501,7 @@ def verify(
         except (AttributeError, subprocess.TimeoutExpired):
             pass
         raise OSError(
-            "Rust shadow provider exited before a trustworthy receipt was observed."
+            "Rust execution provider exited before a trustworthy receipt was observed."
         )
 
     crash_journal = ExecutionJournal(workspace / "shadow-crash-receipts.json")

@@ -31,6 +31,7 @@ const expectedMetaPackFiles = [
   "bundled-backend/albert_mvp/core.py",
   "bundled-backend/albert_mvp/execution.py",
   "bundled-backend/albert_mvp/execution_cutover.py",
+  "bundled-backend/albert_mvp/local_agent_execution_cutover.py",
   "bundled-backend/albert_mvp/execution_shadow.py",
   "bundled-backend/albert_mvp/inference.py",
   "bundled-backend/albert_mvp/inference_qualification.py",
@@ -300,6 +301,65 @@ test("the npm-installed package exposes PATH launch backed by a shipped native d
         APPIMAGE_EXTRACT_AND_RUN: "1",
       },
     });
+
+    const headlessProbeRoot = writeBackendFixture(root, "headless-probe");
+    writeFileSync(
+      resolve(headlessProbeRoot, "albert_mvp", "__main__.py"),
+      [
+        "import json",
+        "import os",
+        "print(json.dumps({key: os.environ.get(key, '') for key in (",
+        "    'ALFREDO_RUST_CANDIDATE_ENABLED',",
+        "    'ALFREDO_RUST_LOCAL_AGENT_ENABLED',",
+        "    'ALFREDO_RUST_EXECUTION_PROVIDER',",
+        "    'ALFREDO_RUST_EXECUTION_PROVIDER_SHA256',",
+        ")}))",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const headlessCutover = spawnSync(
+      "alfredo",
+      ["run", "--agent", "headless-probe", "inspect provider environment"],
+      {
+        cwd: workspace,
+        encoding: "utf8",
+        env: withBackendOverride(headlessProbeRoot, {
+          PATH: installedPath,
+        }),
+      },
+    );
+    expect(headlessCutover.status, headlessCutover.stderr || headlessCutover.stdout).toBe(0);
+    expect(JSON.parse(headlessCutover.stdout)).toEqual({
+      ALFREDO_RUST_CANDIDATE_ENABLED: "1",
+      ALFREDO_RUST_LOCAL_AGENT_ENABLED: "1",
+      ALFREDO_RUST_EXECUTION_PROVIDER: shadowProvider,
+      ALFREDO_RUST_EXECUTION_PROVIDER_SHA256: createHash("sha256")
+        .update(readFileSync(shadowProvider))
+        .digest("hex"),
+    });
+
+    chmodSync(shadowProvider, 0o644);
+    const headlessFallback = spawnSync(
+      "alfredo",
+      ["run", "--agent", "headless-probe", "inspect fallback environment"],
+      {
+        cwd: workspace,
+        encoding: "utf8",
+        env: withBackendOverride(headlessProbeRoot, {
+          ALFREDO_RUST_LOCAL_AGENT_ENABLED: "0",
+          PATH: installedPath,
+        }),
+      },
+    );
+    expect(headlessFallback.status, headlessFallback.stderr || headlessFallback.stdout).toBe(0);
+    expect(JSON.parse(headlessFallback.stdout)).toEqual({
+      ALFREDO_RUST_CANDIDATE_ENABLED: "1",
+      ALFREDO_RUST_LOCAL_AGENT_ENABLED: "0",
+      ALFREDO_RUST_EXECUTION_PROVIDER: "",
+      ALFREDO_RUST_EXECUTION_PROVIDER_SHA256: "",
+    });
+    chmodSync(shadowProvider, 0o755);
 
     const exactNoArgumentLaunch = spawnSync("alfredo", [], {
       cwd: workspace,

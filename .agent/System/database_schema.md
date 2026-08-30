@@ -1,6 +1,6 @@
 # Persistence Schema
 
-**Last Updated:** 2026-08-15
+**Last Updated:** 2026-08-30
 
 Alfredo has no relational database and no database migration layer. Authoritative configuration begins in local Markdown/JSON files, while runtime projections are versioned JSON documents stored below the configured app-local runtime root. Each Python authority store listed below uses atomic sibling-file replacement; append or read-modify-write stores additionally use `flock`, and expected-revision action families share a cross-process coordinator lock.
 
@@ -98,4 +98,5 @@ No database indexes exist. Stores use stable ids and in-memory dictionaries/list
 - 2026-08-09 added Snapshot Payload retention metadata, pin/disposition fields, aggregate `retirement_storage`, reclamation intents/attention, strictly action-shaped correlated blocked-action receipts, retry/export/discard intents, and the `discarded` Preservation Budget outcome. Malformed action receipts fail closed during runtime load. Existing verified snapshots without storage fields remain readable and are conservatively upgraded from their preserved timestamps or immutable manifest metadata.
 
 - 2026-08-15 added the app-local Rust shadow eligibility record and production-equivalent cohort evidence. Missing or failed parity, store-integrity, crash-cut, state-version, packaging, release-gate, or stage evidence keeps Rust disabled.
+- 2026-08-30 cut qualified Local Agent effects over without adding or destructively converting a canonical store. Existing `ExecutionReceipt.provider` identity now remains stable across executing, terminal, cancellation, and uncertainty records; providerless version-1 receipts continue to decode as `python` and are not rewritten on read. The effect child's PID/start identity—not the Rust adapter PID—is persisted before completion. Exact completed or uncertain replay remains provider-free, and unresolved Rust receipts continue to block automatic Local Agent recovery for Mission Commander reconciliation.
 If a future workload outgrows bounded JSON stores, migration must preserve Orchestrator authority, expected-revision semantics, append order, Mission isolation, and artifact separation before replacing this design.

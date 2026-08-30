@@ -46,7 +46,6 @@ from .execution import (
     ExecutionRequest,
     ExecutionSandbox,
     LocalAgentExecutionAuthority,
-    PythonExecutionProvider,
     _is_protected_writable_path,
     _is_under_private_tmp,
 )
@@ -54,6 +53,9 @@ from .inference import (
     LocalInferenceAdapter,
     LocalInferenceLease,
     LocalInferenceProfile,
+)
+from .local_agent_execution_cutover import (
+    local_agent_execution_provider_from_environment,
 )
 from .retirement import (
     RetirementSnapshotError,
@@ -14985,10 +14987,13 @@ class AlbertMission:
         execution_journal = ExecutionJournal(
             self.runtime_dir / "execution-receipts.json"
         )
+        execution_provider = local_agent_execution_provider_from_environment(
+            python_executor=_run_bounded_process,
+        )
         try:
             receipt = ExecutionCoordinator(
                 execution_journal,
-                PythonExecutionProvider(executor=_run_bounded_process),
+                execution_provider,
             ).execute(
                 execution_request,
                 process_binding_started=record_process_start,
