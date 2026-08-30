@@ -113,11 +113,13 @@ test("repository correctness runner owns exactly the five fixed gates", () => {
   assert.deepEqual(
     GATE_STEPS.packaging.map((step) => step.argv.join(" ")),
     [
+      "cargo build --manifest-path src-tauri/Cargo.toml --release --no-default-features --bin alfredo-execution-provider",
       "npm run release:verify -- --artifact",
       "npm run release:verify",
       "npm run release:check",
     ],
   );
+  assert.equal(GATE_STEPS.packaging[1].append_shadow_provider_path, true);
   assert.equal(GATE_STEPS.rollback.length, 2);
   assert.equal(GATE_STEPS.crash_cut[0].argv.slice(3).length, 4);
   assert.equal(GATE_STEPS.rollback[0].use_artifact_executable, true);

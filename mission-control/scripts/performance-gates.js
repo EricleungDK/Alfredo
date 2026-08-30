@@ -79,8 +79,25 @@ export const GATE_STEPS = Object.freeze({
   packaging: Object.freeze([
     Object.freeze({
       cwd: missionControl,
+      argv: Object.freeze([
+        "cargo",
+        "build",
+        "--manifest-path",
+        "src-tauri/Cargo.toml",
+        "--release",
+        "--no-default-features",
+        "--bin",
+        "alfredo-execution-provider",
+      ]),
+      environment: Object.freeze({
+        CARGO_TARGET_DIR: resolve(missionControl, "src-tauri", "target"),
+      }),
+    }),
+    Object.freeze({
+      cwd: missionControl,
       argv: Object.freeze(["npm", "run", "release:verify", "--", "--artifact"]),
       append_artifact_path: true,
+      append_shadow_provider_path: true,
     }),
     Object.freeze({ cwd: missionControl, argv: Object.freeze(["npm", "run", "release:verify"]) }),
     Object.freeze({ cwd: missionControl, argv: Object.freeze(["npm", "run", "release:check"]) }),
@@ -152,9 +169,16 @@ function runStep(step, inputs) {
     ? inputs.artifact_path
     : declaredExecutable;
   const baseArgs = step.use_artifact_executable ? step.argv : declaredArgs;
-  const args = step.append_artifact_path
+  let args = step.append_artifact_path
     ? [...baseArgs, inputs.artifact_path]
     : baseArgs;
+  if (step.append_shadow_provider_path) {
+    args = [
+      ...args,
+      "--provider",
+      resolve(missionControl, "src-tauri", "target", "release", "alfredo-execution-provider"),
+    ];
+  }
   const result = spawnSync(executable, args, {
     cwd: step.cwd,
     env: { ...process.env, ...(step.environment ?? {}) },

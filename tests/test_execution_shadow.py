@@ -263,7 +263,7 @@ class ExecutionShadowTests(unittest.TestCase):
         if bwrap is None:
             self.skipTest("trusted Bubblewrap is required for the cross-provider fixture")
         system_roots = [
-            str(Path(root).resolve())
+            root
             for root in ("/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc")
             if Path(root).exists()
         ]
@@ -288,6 +288,12 @@ class ExecutionShadowTests(unittest.TestCase):
                 "--bind",
                 str(self.worktree.resolve()),
                 str(self.worktree.resolve()),
+                "--",
+                "/usr/bin/prlimit",
+                "--as=8589934592",
+                "--fsize=2147483648",
+                "--nofile=1024",
+                "--nproc=256",
                 "--",
                 "/usr/bin/printf",
                 "same output",

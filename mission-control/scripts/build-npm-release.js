@@ -34,8 +34,13 @@ const BACKEND_SOURCE_FILES = [
   "capabilities.py",
   "cli.py",
   "core.py",
+  "execution.py",
+  "execution_shadow.py",
+  "inference.py",
+  "inference_qualification.py",
   "performance.py",
   "process_supervisor.py",
+  "retirement.py",
   "server.py",
   "tui.py",
   "workspace.py",
@@ -99,6 +104,14 @@ export function validateTarget(target) {
   );
   if (dirname(relative(resolve("/tmp", "alfredo-catalog-check"), executable)) === ".") {
     throw new Error("Alfredo platform executable must live below a package subdirectory.");
+  }
+  const shadowProvider = resolveInside(
+    resolve("/tmp", "alfredo-catalog-check"),
+    target.shadow_provider,
+    "shadow provider",
+  );
+  if (dirname(relative(resolve("/tmp", "alfredo-catalog-check"), shadowProvider)) === ".") {
+    throw new Error("Alfredo shadow provider must live below a package subdirectory.");
   }
   if (typeof target.artifact_suffix !== "string" || !/^\.[A-Za-z0-9]+$/.test(target.artifact_suffix)) {
     throw new Error(`Invalid Alfredo artifact suffix: ${String(target.artifact_suffix)}`);
@@ -260,12 +273,30 @@ function findArtifact(target) {
   return candidates[0];
 }
 
+function findShadowProvider() {
+  const providerIndex = process.argv.indexOf("--provider");
+  if (providerIndex >= 0 && process.argv[providerIndex + 1]) {
+    const provider = resolve(process.argv[providerIndex + 1]);
+    regularSource(provider, "Rust shadow execution provider");
+    return provider;
+  }
+  const targetDirectoryIndex = process.argv.indexOf("--target-dir");
+  const cargoTargetDirectory =
+    targetDirectoryIndex >= 0 && process.argv[targetDirectoryIndex + 1]
+      ? resolve(process.argv[targetDirectoryIndex + 1])
+      : resolve(projectRoot, "src-tauri", "target");
+  const provider = resolve(cargoTargetDirectory, "release", "alfredo-execution-provider");
+  regularSource(provider, "Rust shadow execution provider");
+  return provider;
+}
+
 function build() {
   clean();
   try {
     assertVersionCoherence();
     const target = selectTarget();
     const artifact = findArtifact(target);
+    const shadowProvider = findShadowProvider();
     const metaRoot = resolve(releaseRoot, "alfredo-agent");
     const platformRoot = resolveInside(releaseRoot, target.package, "platform package");
     mkdirSync(resolve(metaRoot, "bin"), { recursive: true });
@@ -275,7 +306,13 @@ function build() {
       target.executable,
       "platform executable",
     );
+    const packagedShadowProvider = resolveInside(
+      platformRoot,
+      target.shadow_provider,
+      "packaged shadow provider",
+    );
     mkdirSync(dirname(platformExecutable), { recursive: true });
+    mkdirSync(dirname(packagedShadowProvider), { recursive: true });
 
     copyFileSync(resolve(projectRoot, "bin", "alfredo.js"), resolve(metaRoot, "bin", "alfredo.js"));
     copyFileSync(
@@ -319,7 +356,10 @@ function build() {
 
     copyFileSync(artifact, platformExecutable);
     chmodSync(platformExecutable, 0o755);
+    copyFileSync(shadowProvider, packagedShadowProvider);
+    chmodSync(packagedShadowProvider, 0o755);
     const executableSha256 = sha256File(platformExecutable);
+    const shadowProviderSha256 = sha256File(packagedShadowProvider);
     writeJson(resolve(platformRoot, "desktop.json"), {
       schema_version: 1,
       package: target.package,
@@ -330,6 +370,8 @@ function build() {
       format: "appimage",
       executable: target.executable,
       executable_sha256: executableSha256,
+      shadow_provider: target.shadow_provider,
+      shadow_provider_sha256: shadowProviderSha256,
     });
     writeJson(resolve(platformRoot, "package.json"), {
       ...packageMetadata(
@@ -348,7 +390,12 @@ function build() {
     );
 
     process.stdout.write(
-      `${JSON.stringify({ meta: metaRoot, platform: platformRoot, artifact: platformExecutable })}\n`,
+      `${JSON.stringify({
+        meta: metaRoot,
+        platform: platformRoot,
+        artifact: platformExecutable,
+        shadow_provider: packagedShadowProvider,
+      })}\n`,
     );
   } catch (error) {
     clean();

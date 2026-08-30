@@ -52,6 +52,21 @@ function tarballManifest(path) {
   }
 }
 
+function tarballFile(path, member) {
+  const extracted = spawnSync("tar", ["-xOf", path, `package/${member}`], {
+    encoding: null,
+    maxBuffer: 128 * 1024 * 1024,
+  });
+  if (extracted.status !== 0 || !extracted.stdout?.length) {
+    fail(
+      `${member} could not be read from ${path}: ${
+        extracted.stderr?.toString("utf8") || extracted.error?.message || "tar failed"
+      }`,
+    );
+  }
+  return extracted.stdout;
+}
+
 function checkedTarball(rootPath, entry, expected, version) {
   if (
     entry?.role !== expected.role ||
@@ -143,12 +158,47 @@ function checkVerifiedRelease({ allowFixture = false } = {}) {
   if (metaManifest.bin?.alfredo !== "bin/alfredo.js" || metaManifest.bin?.albert !== "bin/alfredo.js") {
     fail("meta tarball does not expose both verified CLI aliases");
   }
+  let adapterManifest;
+  try {
+    adapterManifest = JSON.parse(tarballFile(packages[0].path, "desktop.json").toString("utf8"));
+  } catch (error) {
+    fail(`platform tarball desktop.json is invalid: ${error.message}`);
+  }
+  const providerPath = "bin/alfredo-execution-provider";
+  const providerBytes = tarballFile(packages[0].path, providerPath);
+  const providerSha256 = createHash("sha256").update(providerBytes).digest("hex");
+  const expectedProviderContract = manifest.publishable
+    ? "python-rust-production-parity"
+    : "jsonl-structured-failure";
+  if (
+    adapterManifest.shadow_provider !== providerPath ||
+    adapterManifest.shadow_provider_sha256 !== providerSha256 ||
+    manifest.shadow_execution_provider?.package !== expectedPackages[0].name ||
+    manifest.shadow_execution_provider?.path !== providerPath ||
+    manifest.shadow_execution_provider?.sha256 !== providerSha256 ||
+    manifest.shadow_execution_provider?.contract !== expectedProviderContract ||
+    manifest.shadow_execution_provider?.verification !== "installed-package"
+  ) {
+    fail("Rust shadow provider is missing or does not match its verified package evidence");
+  }
+  if (
+    manifest.publishable &&
+    (typeof manifest.shadow_execution_provider.request_sha256 !== "string" ||
+      !/^[a-f0-9]{64}$/.test(manifest.shadow_execution_provider.request_sha256) ||
+      manifest.shadow_execution_provider.store_unchanged !== true)
+  ) {
+    fail("publishable Rust shadow provider lacks production parity and store-integrity evidence");
+  }
   return {
     status: "verified",
     publishable: Boolean(manifest.publishable),
     package_version: version,
     manifest: realpathSync(manifestPath),
     packages,
+    shadow_execution_provider: {
+      path: providerPath,
+      sha256: providerSha256,
+    },
   };
 }
 

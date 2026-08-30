@@ -8,7 +8,8 @@
       "package": "alfredo-agent-linux-x64-gnu",
       "artifact_directory": "release/bundle/appimage",
       "artifact_suffix": ".AppImage",
-      "executable": "bin/alfredo-desktop.AppImage"
+      "executable": "bin/alfredo-desktop.AppImage",
+      "shadow_provider": "bin/alfredo-execution-provider"
     }
   ]
 }

@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -21,6 +21,7 @@ const validTarget = {
   artifact_directory: "release/bundle/appimage",
   artifact_suffix: ".AppImage",
   executable: "bin/alfredo-desktop.AppImage",
+  shadow_provider: "bin/alfredo-execution-provider",
 };
 
 test("release target validation keeps catalog paths inside their boundaries", () => {
@@ -30,6 +31,9 @@ test("release target validation keeps catalog paths inside their boundaries", ()
   ).toThrow(/escapes its release boundary/);
   expect(() =>
     validateTarget({ ...validTarget, executable: "../../outside.AppImage" }),
+  ).toThrow(/escapes its release boundary/);
+  expect(() =>
+    validateTarget({ ...validTarget, shadow_provider: "../../outside-provider" }),
   ).toThrow(/escapes its release boundary/);
   expect(() =>
     validateTarget({ ...validTarget, executable: "alfredo-desktop.AppImage" }),
@@ -62,6 +66,16 @@ test("release version and backend allowlist checks fail closed", () => {
   expect(() => assertBackendSourceAllowlist(["__init__.py", "secret.py"])).toThrow(
     /allowlist is stale/,
   );
+});
+
+test("release backend allowlist matches every current Python module", () => {
+  const backendFiles = readdirSync(resolve(repositoryRoot, "albert_mvp"), {
+    withFileTypes: true,
+  })
+    .filter((entry) => entry.isFile() && entry.name.endsWith(".py"))
+    .map((entry) => entry.name);
+
+  expect(() => assertBackendSourceAllowlist(backendFiles)).not.toThrow();
 });
 
 test("manual npm promotion publishes the exact verified platform and meta tarballs with provenance", () => {

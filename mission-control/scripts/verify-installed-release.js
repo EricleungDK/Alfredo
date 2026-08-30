@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -35,8 +36,13 @@ const META_PACK_FILES = [
   "bundled-backend/albert_mvp/capabilities.py",
   "bundled-backend/albert_mvp/cli.py",
   "bundled-backend/albert_mvp/core.py",
+  "bundled-backend/albert_mvp/execution.py",
+  "bundled-backend/albert_mvp/execution_shadow.py",
+  "bundled-backend/albert_mvp/inference.py",
+  "bundled-backend/albert_mvp/inference_qualification.py",
   "bundled-backend/albert_mvp/performance.py",
   "bundled-backend/albert_mvp/process_supervisor.py",
+  "bundled-backend/albert_mvp/retirement.py",
   "bundled-backend/albert_mvp/server.py",
   "bundled-backend/albert_mvp/tui.py",
   "bundled-backend/albert_mvp/workspace.py",
@@ -47,6 +53,7 @@ const META_PACK_FILES = [
 const PLATFORM_PACK_FILES = [
   "README.md",
   "bin/alfredo-desktop.AppImage",
+  "bin/alfredo-execution-provider",
   "desktop.json",
   "package.json",
 ];
@@ -113,7 +120,7 @@ async function run(command, args, options = {}) {
   const child = spawn(command, args, {
     cwd: options.cwd ?? projectRoot,
     env: options.env ?? cleanEnvironment(),
-    stdio: ["ignore", "pipe", "pipe"],
+    stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     detached: process.platform !== "win32",
   });
   let stdout = "";
@@ -126,6 +133,7 @@ async function run(command, args, options = {}) {
   child.stderr.on("data", (chunk) => {
     stderr += chunk;
   });
+  if (options.input !== undefined) child.stdin.end(options.input);
   const closed = new Promise((fulfill) => {
     child.once("error", (error) => fulfill({ error, status: null, signal: null }));
     child.once("close", (status, signal) => fulfill({ error: null, status, signal }));
@@ -205,7 +213,12 @@ function packageDescriptor(packageRoot, tarball) {
   };
 }
 
-function preserveVerifiedArtifacts(metaDescriptor, platformDescriptor, fixtureArtifact) {
+function preserveVerifiedArtifacts(
+  metaDescriptor,
+  platformDescriptor,
+  fixtureArtifact,
+  shadowProviderEvidence,
+) {
   const verifiedRoot = resolve(releaseRoot, "verified");
   const stagingRoot = resolve(releaseRoot, `.verified-${process.pid}`);
   rmSync(stagingRoot, { recursive: true, force: true });
@@ -238,6 +251,7 @@ function preserveVerifiedArtifacts(metaDescriptor, platformDescriptor, fixtureAr
       install_spec: `${metaDescriptor.manifest.name}@${metaDescriptor.manifest.version}`,
       publish_order: packages.map((entry) => entry.name),
       packages,
+      shadow_execution_provider: shadowProviderEvidence,
     };
     writeFileSync(
       resolve(stagingRoot, "manifest.json"),
@@ -434,13 +448,28 @@ let registry;
 try {
   const artifactIndex = process.argv.indexOf("--artifact");
   const fixtureArtifact = artifactIndex >= 0 ? process.argv[artifactIndex + 1] : "";
+  const providerIndex = process.argv.indexOf("--provider");
+  const fixtureProvider = providerIndex >= 0 ? process.argv[providerIndex + 1] : "";
   if (artifactIndex >= 0 && !fixtureArtifact) {
     throw new Error("--artifact requires an executable fixture path.");
+  }
+  if (providerIndex >= 0 && !fixtureProvider) {
+    throw new Error("--provider requires an executable fixture path.");
+  }
+  if (Boolean(fixtureArtifact) !== Boolean(fixtureProvider)) {
+    throw new Error("Fixture verification requires both --artifact and --provider.");
   }
   if (fixtureArtifact) {
     await run(
       process.execPath,
-      [resolve(projectRoot, "scripts", "build-npm-release.js"), "build", "--artifact", fixtureArtifact],
+      [
+        resolve(projectRoot, "scripts", "build-npm-release.js"),
+        "build",
+        "--artifact",
+        fixtureArtifact,
+        "--provider",
+        fixtureProvider,
+      ],
       { label: "fixture npm release stage" },
     );
   } else {
@@ -522,6 +551,11 @@ try {
     "bin",
     "alfredo-desktop.AppImage",
   );
+  const shadowProvider = resolve(
+    installedPlatform,
+    "bin",
+    "alfredo-execution-provider",
+  );
   const metaManifest = JSON.parse(readFileSync(installedMetaManifestPath, "utf8"));
   const platformManifest = JSON.parse(
     readFileSync(installedPlatformManifestPath, "utf8"),
@@ -532,7 +566,10 @@ try {
   if (
     metaManifest.version !== platformManifest.version ||
     metaManifest.version !== adapterManifest.version ||
-    metaManifest.optionalDependencies?.[platformManifest.name] !== metaManifest.version
+    metaManifest.optionalDependencies?.[platformManifest.name] !== metaManifest.version ||
+    adapterManifest.shadow_provider !== "bin/alfredo-execution-provider" ||
+    typeof adapterManifest.shadow_provider_sha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(adapterManifest.shadow_provider_sha256)
   ) {
     throw new Error("Installed Alfredo package and adapter versions do not match.");
   }
@@ -617,6 +654,83 @@ try {
   if (adapterManifest.executable_sha256 !== digest) {
     throw new Error("Installed AppImage does not match the adapter manifest digest.");
   }
+  const shadowProviderEntry = lstatSync(shadowProvider);
+  if (shadowProviderEntry.isSymbolicLink() || !shadowProviderEntry.isFile()) {
+    throw new Error("Installed Rust shadow provider must be a regular non-symlink file.");
+  }
+  const realShadowProvider = realpathSync(shadowProvider);
+  assertInstalledPath(installedPlatform, realShadowProvider, "Installed Rust shadow provider");
+  const shadowProviderDigest = createHash("sha256")
+    .update(readFileSync(realShadowProvider))
+    .digest("hex");
+  if (adapterManifest.shadow_provider_sha256 !== shadowProviderDigest) {
+    throw new Error("Installed Rust shadow provider does not match the adapter manifest digest.");
+  }
+  const shadowProviderProbe = await run(realShadowProvider, [], {
+    cwd: workspace,
+    label: "installed Rust shadow provider JSONL contract probe",
+    env: cleanEnvironment({ PATH: "/usr/bin:/bin" }),
+    input: "{}\n",
+  });
+  let shadowProviderResponse;
+  try {
+    shadowProviderResponse = JSON.parse(shadowProviderProbe.stdout.trim());
+  } catch (error) {
+    throw new Error(`Installed Rust shadow provider returned invalid JSON: ${error.message}`);
+  }
+  if (
+    shadowProviderResponse.ok !== false ||
+    shadowProviderResponse.receipt !== undefined ||
+    shadowProviderResponse.failure?.code !== "contract-failure" ||
+    shadowProviderResponse.failure?.recoverable !== true ||
+    typeof shadowProviderResponse.failure?.message !== "string" ||
+    !shadowProviderResponse.failure.message
+  ) {
+    throw new Error(
+      `Installed Rust shadow provider returned an invalid structured failure: ${shadowProviderProbe.stdout}`,
+    );
+  }
+  let shadowProviderParity = null;
+  let shadowProviderContract = "jsonl-structured-failure";
+  if (!fixtureArtifact) {
+    const parityProbe = await run(
+      process.env.ALBERT_PYTHON ?? "python3",
+      [
+        resolve(projectRoot, "scripts", "verify-shadow-provider.py"),
+        "--provider",
+        realShadowProvider,
+        "--workspace",
+        workspace,
+      ],
+      {
+        cwd: workspace,
+        label: "installed Python/Rust production-shaped shadow parity probe",
+        env: cleanEnvironment({
+          PATH: "/usr/local/bin:/usr/bin:/bin",
+          PYTHONPATH: bundledBackend,
+          PYTHONDONTWRITEBYTECODE: "1",
+        }),
+      },
+    );
+    try {
+      shadowProviderParity = JSON.parse(parityProbe.stdout.trim());
+    } catch (error) {
+      throw new Error(`Installed Python/Rust parity probe returned invalid JSON: ${error.message}`);
+    }
+    if (
+      shadowProviderParity.status !== "pass" ||
+      shadowProviderParity.provider_sha256 !== shadowProviderDigest ||
+      shadowProviderParity.receipt_status !== "completed" ||
+      shadowProviderParity.store_unchanged !== true ||
+      typeof shadowProviderParity.request_sha256 !== "string" ||
+      !/^[a-f0-9]{64}$/.test(shadowProviderParity.request_sha256)
+    ) {
+      throw new Error(
+        `Installed Python/Rust parity probe returned invalid evidence: ${parityProbe.stdout}`,
+      );
+    }
+    shadowProviderContract = "python-rust-production-parity";
+  }
   const guiSmoke = fixtureArtifact
     ? { status: "not_run_fixture" }
     : await runGuiSmoke(
@@ -630,6 +744,15 @@ try {
     metaDescriptor,
     platformDescriptor,
     fixtureArtifact,
+    {
+      package: platformManifest.name,
+      path: adapterManifest.shadow_provider,
+      sha256: shadowProviderDigest,
+      contract: shadowProviderContract,
+      verification: "installed-package",
+      request_sha256: shadowProviderParity?.request_sha256 ?? null,
+      store_unchanged: shadowProviderParity?.store_unchanged ?? null,
+    },
   );
   process.stdout.write(
     `${JSON.stringify(
@@ -646,6 +769,10 @@ try {
         native_bytes: statSync(nativeExecutable).size,
         native_sha256: digest,
         native_version: nativeVersion.stdout.trim(),
+        shadow_provider_bytes: statSync(realShadowProvider).size,
+        shadow_provider_sha256: shadowProviderDigest,
+        shadow_provider_contract: shadowProviderContract,
+        shadow_provider_parity: shadowProviderParity,
         gui_smoke: guiSmoke,
         registry_tarballs_fetched: Object.fromEntries(
           descriptors.map((descriptor) => [descriptor.manifest.name, descriptor.tarballRequests]),

@@ -29,8 +29,13 @@ const expectedMetaPackFiles = [
   "bundled-backend/albert_mvp/capabilities.py",
   "bundled-backend/albert_mvp/cli.py",
   "bundled-backend/albert_mvp/core.py",
+  "bundled-backend/albert_mvp/execution.py",
+  "bundled-backend/albert_mvp/execution_shadow.py",
+  "bundled-backend/albert_mvp/inference.py",
+  "bundled-backend/albert_mvp/inference_qualification.py",
   "bundled-backend/albert_mvp/performance.py",
   "bundled-backend/albert_mvp/process_supervisor.py",
+  "bundled-backend/albert_mvp/retirement.py",
   "bundled-backend/albert_mvp/server.py",
   "bundled-backend/albert_mvp/tui.py",
   "bundled-backend/albert_mvp/workspace.py",
@@ -41,6 +46,7 @@ const expectedMetaPackFiles = [
 const expectedPlatformPackFiles = [
   "README.md",
   "bin/alfredo-desktop.AppImage",
+  "bin/alfredo-execution-provider",
   "desktop.json",
   "package.json",
 ].sort();
@@ -109,9 +115,11 @@ test("the npm-installed package exposes PATH launch backed by a shipped native d
   );
   const installedBinRoot = resolve(installPrefix, "bin");
   const nativeExecutable = resolve(installedPlatformRoot, "bin", "alfredo-desktop.AppImage");
+  const shadowProvider = resolve(installedPlatformRoot, "bin", "alfredo-execution-provider");
   const workspace = resolve(root, "workspace");
   const runtimeRoot = resolve(root, "runtime");
   const fixtureArtifact = resolve(root, "alfredo-desktop.AppImage");
+  const fixtureProvider = resolve(root, "alfredo-execution-provider");
   mkdirSync(packDestination, { recursive: true });
   mkdirSync(workspace, { recursive: true });
   try {
@@ -121,6 +129,12 @@ test("the npm-installed package exposes PATH launch backed by a shipped native d
       "utf8",
     );
     chmodSync(fixtureArtifact, 0o755);
+    writeFileSync(
+      fixtureProvider,
+      "#!/bin/sh\nwhile IFS= read -r _line; do\n  printf '%s\\n' '{\"ok\":false,\"failure\":{\"code\":\"contract-failure\",\"message\":\"fixture rejected invalid request\",\"recoverable\":true}}'\ndone\n",
+      "utf8",
+    );
+    chmodSync(fixtureProvider, 0o755);
     const built = spawnSync(
       process.execPath,
       [
@@ -128,6 +142,8 @@ test("the npm-installed package exposes PATH launch backed by a shipped native d
         "build",
         "--artifact",
         fixtureArtifact,
+        "--provider",
+        fixtureProvider,
       ],
       {
         cwd: projectRoot,
@@ -196,6 +212,7 @@ test("the npm-installed package exposes PATH launch backed by a shipped native d
     expect(installed.status, installed.stderr || installed.stdout).toBe(0);
 
     expect(existsSync(nativeExecutable)).toBe(true);
+    expect(existsSync(shadowProvider)).toBe(true);
     expect(existsSync(resolve(bundledBackendRoot, "albert_mvp", "__main__.py"))).toBe(true);
     expect(existsSync(resolve(bundledBackendRoot, ".albert", "agents.json"))).toBe(true);
     expect(existsSync(resolve(projectRoot, "bundled-backend"))).toBe(false);
@@ -300,6 +317,10 @@ test("the npm-installed package exposes PATH launch backed by a shipped native d
     chmodSync(nativeExecutable, 0o755);
     const adapterManifestPath = resolve(installedPlatformRoot, "desktop.json");
     const adapterManifest = JSON.parse(readFileSync(adapterManifestPath, "utf8"));
+    expect(adapterManifest.shadow_provider).toBe("bin/alfredo-execution-provider");
+    expect(adapterManifest.shadow_provider_sha256).toBe(
+      createHash("sha256").update(readFileSync(shadowProvider)).digest("hex"),
+    );
     writeFileSync(
       adapterManifestPath,
       `${JSON.stringify(
@@ -424,6 +445,7 @@ test("workstation startup leaves tracker and Mission discovery unbound before se
 test("release verification installs only the meta package through an isolated registry", () => {
   const root = mkdtempSync(join(tmpdir(), "alfredo-registry-verifier-"));
   const artifact = resolve(root, "alfredo-desktop.AppImage");
+  const provider = resolve(root, "alfredo-execution-provider");
   try {
     writeFileSync(
       artifact,
@@ -431,9 +453,21 @@ test("release verification installs only the meta package through an isolated re
       "utf8",
     );
     chmodSync(artifact, 0o755);
+    writeFileSync(
+      provider,
+      "#!/bin/sh\nwhile IFS= read -r _line; do\n  printf '%s\\n' '{\"ok\":false,\"failure\":{\"code\":\"contract-failure\",\"message\":\"fixture rejected invalid request\",\"recoverable\":true}}'\ndone\n",
+      "utf8",
+    );
+    chmodSync(provider, 0o755);
     const result = spawnSync(
       process.execPath,
-      [resolve(projectRoot, "scripts", "verify-installed-release.js"), "--artifact", artifact],
+      [
+        resolve(projectRoot, "scripts", "verify-installed-release.js"),
+        "--artifact",
+        artifact,
+        "--provider",
+        provider,
+      ],
       {
         cwd: projectRoot,
         encoding: "utf8",
@@ -442,6 +476,7 @@ test("release verification installs only the meta package through an isolated re
     );
     expect(result.status, result.stderr || result.stdout).toBe(0);
     const verification = JSON.parse(result.stdout);
+    const providerSha256 = createHash("sha256").update(readFileSync(provider)).digest("hex");
     expect(verification).toMatchObject({
       status: "pass",
       install_spec: "alfredo-agent@0.1.0",
@@ -451,6 +486,8 @@ test("release verification installs only the meta package through an isolated re
       package_version: "0.1.0",
       native_package: "alfredo-agent-linux-x64-gnu",
       native_version: "Alfredo Desktop 0.1.0",
+      shadow_provider_sha256: providerSha256,
+      shadow_provider_contract: "jsonl-structured-failure",
       registry_tarballs_fetched: {
         "alfredo-agent": 1,
         "alfredo-agent-linux-x64-gnu": 1,
@@ -472,6 +509,13 @@ test("release verification installs only the meta package through an isolated re
       package_version: "0.1.0",
       install_spec: "alfredo-agent@0.1.0",
       publish_order: ["alfredo-agent-linux-x64-gnu", "alfredo-agent"],
+      shadow_execution_provider: {
+        package: "alfredo-agent-linux-x64-gnu",
+        path: "bin/alfredo-execution-provider",
+        sha256: providerSha256,
+        contract: "jsonl-structured-failure",
+        verification: "installed-package",
+      },
     });
     expect(manifest.packages.map((entry) => entry.name)).toEqual([
       "alfredo-agent-linux-x64-gnu",
@@ -498,6 +542,10 @@ test("release verification installs only the meta package through an isolated re
         { role: "platform", name: "alfredo-agent-linux-x64-gnu" },
         { role: "meta", name: "alfredo-agent" },
       ],
+      shadow_execution_provider: {
+        path: "bin/alfredo-execution-provider",
+        sha256: providerSha256,
+      },
     });
 
     const metaEntry = manifest.packages.find((entry) => entry.role === "meta");

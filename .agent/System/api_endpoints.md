@@ -1,6 +1,6 @@
 # API Endpoints and Command Boundaries
 
-**Last Updated:** 2026-08-15
+**Last Updated:** 2026-08-30
 
 Alfredo has no remote or production HTTP API. Its application boundary is a versioned JSON command protocol shared by the React client, the Tauri bridge, the development-only localhost gateway, the persistent Python server, and the one-process Python CLI fallback. Python remains authoritative; Rust validates and transports typed payloads, while React renders acknowledged projections.
 
@@ -70,6 +70,10 @@ The `albert_mvp.inference_qualification` public seam runs repeated governed fixt
 ## Shadow Rust Execution Receipts (Issue #72)
 
 The app-local `alfredo-execution-provider` consumes the same versioned `ExecutionRequest` JSON object as Python and emits one typed `ExecutionReceipt` or structured failure per JSONL request. `execution_shadow.py` hashes every canonical store before and after a sample, compares a normalized receipt projection, and records crash or parity uncertainty without transferring authority. Cohorts bind exact fixture/source/artifact digests, production-equivalent stages, and explicit sample metadata; reducer, sidecar, and microbenchmark evidence is rejected. Rust eligibility is persisted separately and fails closed on parity, canonical-store, crash-cut, state-version, packaging, release-gate, production-equivalence, or stage-measurement failure.
+
+The Rust validator follows the Python version-1 prepared-process contract exactly: the first `--` closes Bubblewrap options, a second exact separator belongs to the required trusted `prlimit` wrapper, and the wrapper values must equal the request limits. Only the fixed `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, and `/etc` read-only source/destination pairs may retain their lexical mount aliases for merged-`/usr` compatibility; all authority-declared and other implicit paths remain canonical. Resource maxima, sanitized environment keys/byte bounds, and duplicate allowed-path rejection match Python. See the [Issue #72 report](../Reports/2026-08-15-issue-72-rust-shadow-execution.md#linux-acceptance-correction-2026-08-30).
+
+On supported Linux releases, the platform npm package includes `bin/alfredo-execution-provider` and binds its SHA-256 in `desktop.json`. A publishable `release:verify` install must run the production-shaped request through the installed Python backend and exact installed provider, observe normalized parity and an unchanged sentinel store, and preserve the provider digest in the same-job release manifest. `release:check` re-extracts and rehashes that provider from the platform tarball. This verifies a shadow candidate only; it does not route a product effect to Rust.
 
 ## Host Execution Request/Receipt
 

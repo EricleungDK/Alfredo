@@ -29,6 +29,29 @@ const built = spawnSync(tauriCommand, ["build", "--bundles", "appimage"], {
 if (built.error) throw built.error;
 if (built.status !== 0) process.exit(built.status ?? 1);
 
+const providerBuilt = spawnSync(
+  process.env.CARGO ?? "cargo",
+  [
+    "build",
+    "--manifest-path",
+    resolve(projectRoot, "src-tauri", "Cargo.toml"),
+    "--release",
+    "--no-default-features",
+    "--bin",
+    "alfredo-execution-provider",
+  ],
+  {
+    cwd: projectRoot,
+    env: {
+      ...process.env,
+      CARGO_TARGET_DIR: targetDirectory,
+    },
+    stdio: "inherit",
+  },
+);
+if (providerBuilt.error) throw providerBuilt.error;
+if (providerBuilt.status !== 0) process.exit(providerBuilt.status ?? 1);
+
 if (!process.argv.includes("--native-only")) {
   const packaged = spawnSync(
     process.execPath,
@@ -37,6 +60,8 @@ if (!process.argv.includes("--native-only")) {
       "build",
       "--target-dir",
       targetDirectory,
+      "--provider",
+      resolve(targetDirectory, "release", "alfredo-execution-provider"),
     ],
     { cwd: projectRoot, stdio: "inherit" },
   );

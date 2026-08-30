@@ -20,19 +20,20 @@ const MAX_INPUT_BYTES: usize = 96_000;
 const MAX_OUTPUT_BYTES: usize = 8_000_000;
 const MAX_TIMEOUT_SECONDS: f64 = 3_600.0;
 const MAX_ENVIRONMENT_ENTRIES: usize = 128;
-const MAX_ENVIRONMENT_VALUE_BYTES: usize = 128_000;
-const MAX_ENVIRONMENT_TOTAL_BYTES: usize = 1_000_000;
+const MAX_ENVIRONMENT_VALUE_BYTES: usize = 16 * 1024;
+const MAX_ENVIRONMENT_TOTAL_BYTES: usize = 64 * 1024;
 const MAX_PATH_ENTRIES: usize = 256;
-const MAX_ADDRESS_SPACE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-const MAX_FILE_SIZE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const MAX_OPEN_FILE_LIMIT: u64 = 1_024;
-const MAX_PROCESS_COUNT_LIMIT: u64 = 256;
+const MAX_ADDRESS_SPACE_BYTES: u64 = 64 * 1024 * 1024 * 1024;
+const MAX_FILE_SIZE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+const MAX_OPEN_FILE_LIMIT: u64 = 65_536;
+const MAX_PROCESS_COUNT_LIMIT: u64 = 4_096;
 const OUTPUT_MESSAGE_RESERVE: usize = 256;
 pub const MAX_PROTOCOL_LINE_BYTES: usize = 16 * 1024 * 1024;
 const TRUSTED_EXECUTABLE_ROOTS: [&str; 4] = ["/usr/bin", "/usr/sbin", "/bin", "/sbin"];
+const IMPLICIT_READONLY_ROOTS: [&str; 6] = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"];
 const PROTECTED_READONLY_ROOTS: [&str; 7] =
     ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/dev"];
-const ALLOWED_ENVIRONMENT_KEYS: [&str; 16] = [
+const ALLOWED_ENVIRONMENT_KEYS: [&str; 19] = [
     "CI",
     "COLORTERM",
     "HOME",
@@ -47,6 +48,9 @@ const ALLOWED_ENVIRONMENT_KEYS: [&str; 16] = [
     "TERM",
     "TMPDIR",
     "USER",
+    "PIP_CACHE_DIR",
+    "PYTHONDONTWRITEBYTECODE",
+    "npm_config_cache",
     "ALBERT_SESSION_ID",
     "ALBERT_TASK_PACKET",
 ];
@@ -241,10 +245,11 @@ impl ExecutionAuthority {
                         ));
                     }
                 }
-                if allowed_paths
-                    .windows(2)
-                    .any(|window| window[0] == window[1])
-                {
+                if allowed_paths.iter().enumerate().any(|(index, value)| {
+                    allowed_paths[index + 1..]
+                        .iter()
+                        .any(|other| other == value)
+                }) {
                     return Err(StructuredFailure::new(
                         "contract-failure",
                         "Local Agent allowed paths must be unique",
@@ -1530,6 +1535,10 @@ fn has_exact_pair(pairs: &[(String, String)], source: &str, destination: &str) -
     })
 }
 
+fn is_implicit_readonly_mount(source: &str, destination: &str) -> bool {
+    source == destination && IMPLICIT_READONLY_ROOTS.contains(&source)
+}
+
 fn validate_resource_wrapper<'a>(
     command: &'a [String],
     limits: &ExecutionLimits,
@@ -1541,7 +1550,10 @@ fn validate_resource_wrapper<'a>(
         ));
     }
     if !is_trusted_helper(&command[0], "prlimit") {
-        return Ok(command);
+        return Err(StructuredFailure::new(
+            "contract-failure",
+            "execution Bubblewrap resource boundary is missing",
+        ));
     }
     let expected = [
         format!("--as={}", limits.address_space_bytes),
@@ -1562,13 +1574,6 @@ fn validate_resource_wrapper<'a>(
         ));
     }
     Ok(&command[6..])
-}
-
-fn requires_resource_wrapper(limits: &ExecutionLimits) -> bool {
-    limits.address_space_bytes != MAX_ADDRESS_SPACE_BYTES
-        || limits.file_size_bytes != MAX_FILE_SIZE_BYTES
-        || limits.open_file_limit != MAX_OPEN_FILE_LIMIT
-        || limits.process_count_limit != MAX_PROCESS_COUNT_LIMIT
 }
 
 fn validate_prepared_argv(request: &ExecutionRequest) -> Result<(), StructuredFailure> {
@@ -1592,19 +1597,22 @@ fn validate_prepared_argv(request: &ExecutionRequest) -> Result<(), StructuredFa
             "execution provider requires a prepared Bubblewrap argv",
         ));
     }
-    let separators: Vec<_> = request
+    let separator = request
         .argv
         .iter()
-        .enumerate()
-        .filter_map(|(index, argument)| (argument == "--").then_some(index))
-        .collect();
-    if separators.len() != 1 || separators[0] <= 1 || separators[0] + 1 >= request.argv.len() {
+        .position(|argument| argument == "--")
+        .ok_or_else(|| {
+            StructuredFailure::new(
+                "contract-failure",
+                "execution Bubblewrap argv must contain one non-empty command boundary",
+            )
+        })?;
+    if separator <= 1 || separator + 1 >= request.argv.len() {
         return Err(StructuredFailure::new(
             "contract-failure",
             "execution Bubblewrap argv must contain one non-empty command boundary",
         ));
     }
-    let separator = separators[0];
     let prefix = &request.argv[1..separator];
     let mut readonly_mounts = Vec::new();
     let mut writable_mounts = Vec::new();
@@ -1668,8 +1676,12 @@ fn validate_prepared_argv(request: &ExecutionRequest) -> Result<(), StructuredFa
                         "Bubblewrap bind destination is missing",
                     )
                 })?;
-                canonical_path(source, "Bubblewrap bind source")?;
-                canonical_path(destination, "Bubblewrap bind destination")?;
+                let implicit_readonly_mount =
+                    argument == "--ro-bind" && is_implicit_readonly_mount(source, destination);
+                if !implicit_readonly_mount {
+                    canonical_path(source, "Bubblewrap bind source")?;
+                    canonical_path(destination, "Bubblewrap bind destination")?;
+                }
                 if argument == "--ro-bind" {
                     readonly_mounts.push((source.clone(), destination.clone()));
                 } else {
@@ -1766,8 +1778,7 @@ fn validate_prepared_argv(request: &ExecutionRequest) -> Result<(), StructuredFa
         }
     }
     for (source, destination) in &readonly_mounts {
-        let system_mount =
-            source == destination && PROTECTED_READONLY_ROOTS.iter().any(|root| source == root);
+        let system_mount = is_implicit_readonly_mount(source, destination);
         let declared_mount = request
             .sandbox
             .readable_roots
@@ -1809,14 +1820,6 @@ fn validate_prepared_argv(request: &ExecutionRequest) -> Result<(), StructuredFa
         return Err(StructuredFailure::new(
             "contract-failure",
             "execution Bubblewrap command is empty",
-        ));
-    }
-    if requires_resource_wrapper(&request.limits)
-        && !is_trusted_helper(&request.argv[separator + 1], "prlimit")
-    {
-        return Err(StructuredFailure::new(
-            "contract-failure",
-            "custom execution resource limits require the trusted prlimit wrapper",
         ));
     }
     Ok(())
@@ -1973,7 +1976,7 @@ mod tests {
         let request = test_request("shadow-rust-digest");
         assert_eq!(
             request.request_digest().unwrap(),
-            "182958c421e4f229fad1c86f3d360f92488695d07f829ecb195d720aa252423f"
+            "f0ff5caad0df80a6ef5165fd51c14a09e8cf5e67f53f41a3e341738507bc9a12"
         );
         let receipt = RustExecutionProvider::with_test_outcome(ProcessOutcome {
             status: ProcessOutcomeStatus::Completed,
@@ -2042,6 +2045,61 @@ mod tests {
                 "/tmp/undeclared-shadow-read".to_owned(),
             ],
         );
+        assert!(RustExecutionProvider::validate_request(&request).is_err());
+    }
+
+    #[test]
+    fn validation_requires_the_python_resource_wrapper() {
+        let mut request = test_request("shadow-rust-resource-wrapper");
+        let separator = request
+            .argv
+            .iter()
+            .position(|argument| argument == "--")
+            .expect("test request should have a command boundary");
+        request.argv.truncate(separator + 1);
+        request.argv.push("/bin/true".to_owned());
+
+        assert!(RustExecutionProvider::validate_request(&request).is_err());
+    }
+
+    #[test]
+    fn validation_accepts_python_contract_resource_and_environment_bounds() {
+        let mut request = test_request("shadow-rust-python-bounds");
+        request.limits.address_space_bytes = 16 * 1024 * 1024 * 1024;
+        request.limits.file_size_bytes = 3 * 1024 * 1024 * 1024;
+        request.limits.open_file_limit = 2_048;
+        request.limits.process_count_limit = 512;
+        let separator = request
+            .argv
+            .iter()
+            .position(|argument| argument == "--")
+            .expect("test request should have a command boundary");
+        request.argv[separator + 2] = format!("--as={}", request.limits.address_space_bytes);
+        request.argv[separator + 3] = format!("--fsize={}", request.limits.file_size_bytes);
+        request.argv[separator + 4] = format!("--nofile={}", request.limits.open_file_limit);
+        request.argv[separator + 5] = format!("--nproc={}", request.limits.process_count_limit);
+        request
+            .environment
+            .insert("PIP_CACHE_DIR".to_owned(), "/tmp/pip-cache".to_owned());
+        request
+            .environment
+            .insert("PYTHONDONTWRITEBYTECODE".to_owned(), "1".to_owned());
+        request
+            .environment
+            .insert("npm_config_cache".to_owned(), "/tmp/npm-cache".to_owned());
+
+        RustExecutionProvider::validate_request(&request)
+            .expect("Python-valid limits and environment must remain contract-valid");
+    }
+
+    #[test]
+    fn validation_rejects_non_adjacent_duplicate_allowed_paths() {
+        let mut request = test_request("shadow-rust-duplicate-paths");
+        let ExecutionAuthority::LocalAgent { allowed_paths, .. } = &mut request.authority else {
+            panic!("test request should use Local Agent authority");
+        };
+        *allowed_paths = vec!["src".to_owned(), "tests".to_owned(), "src".to_owned()];
+
         assert!(RustExecutionProvider::validate_request(&request).is_err());
     }
 
@@ -2271,11 +2329,11 @@ mod tests {
         for system_root in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"] {
             let path = Path::new(system_root);
             if path.exists() {
-                let resolved = fs::canonicalize(path)
-                    .expect("system root should have a canonical path")
-                    .to_string_lossy()
-                    .into_owned();
-                argv.extend(["--ro-bind".to_owned(), resolved.clone(), resolved]);
+                argv.extend([
+                    "--ro-bind".to_owned(),
+                    system_root.to_owned(),
+                    system_root.to_owned(),
+                ]);
             }
         }
         argv.extend([
@@ -2284,6 +2342,12 @@ mod tests {
             root.clone(),
             "--chdir".to_owned(),
             root.clone(),
+            "--".to_owned(),
+            "/usr/bin/prlimit".to_owned(),
+            format!("--as={}", limits.address_space_bytes),
+            format!("--fsize={}", limits.file_size_bytes),
+            format!("--nofile={}", limits.open_file_limit),
+            format!("--nproc={}", limits.process_count_limit),
             "--".to_owned(),
         ]);
         argv.extend(command);
@@ -2345,11 +2409,20 @@ mod tests {
                 "/proc".to_owned(),
                 "--tmpfs".to_owned(),
                 "/tmp".to_owned(),
+                "--ro-bind".to_owned(),
+                "/bin".to_owned(),
+                "/bin".to_owned(),
                 "--chdir".to_owned(),
                 working_directory.clone(),
                 "--bind".to_owned(),
                 working_directory.clone(),
                 working_directory.clone(),
+                "--".to_owned(),
+                "/usr/bin/prlimit".to_owned(),
+                "--as=8589934592".to_owned(),
+                "--fsize=2147483648".to_owned(),
+                "--nofile=1024".to_owned(),
+                "--nproc=256".to_owned(),
                 "--".to_owned(),
                 "/bin/true".to_owned(),
             ],
