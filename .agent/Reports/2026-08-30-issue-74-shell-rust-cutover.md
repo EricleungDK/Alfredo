@@ -8,6 +8,8 @@
 
 **Baseline:** `83aceb6` on `main`
 
+**Tracker state:** Closed as completed with all acceptance criteria checked; [implementation evidence](https://github.com/EricleungDK/Alfredo/issues/74#issuecomment-5469480218) is recorded on the ticket.
+
 ## Outcome
 
 Governed Shell Terminal effects can now use the qualified, integrity-bound packaged Rust execution provider. Python remains the sole authority for command classification, Frontier or Mission Commander approval, Additional Path Grants, canonical path and environment preparation, the Bubblewrap/resource boundary, durable request claim, exact correlation replay, Shell Terminal and audit state, and uncertainty reconciliation. Rust receives only the already-authorized `ExecutionRequest` and performs the prepared external process effect.
