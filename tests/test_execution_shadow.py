@@ -683,6 +683,7 @@ class ExecutionShadowTests(unittest.TestCase):
         )
         self.assertTrue(enabled.eligible)
         self.assertTrue(store.allows_provider(provider_sha256, provider_sha256))
+        self.assertFalse(store.allows_provider(provider_sha256, "f" * 64))
         self.assertFalse(store.allows_provider("0" * 64, "0" * 64))
 
         disabled = store.disable("runtime-rust-provider-contract-failure")

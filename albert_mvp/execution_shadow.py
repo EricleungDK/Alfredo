@@ -1210,10 +1210,14 @@ class RustProviderTransport:
                 "rust-provider-contract-failure",
                 f"Rust execution provider returned an invalid receipt: {exc}",
             ) from exc
-        if receipt.request_id != request.request_id or receipt.request_digest != request.request_digest:
+        if (
+            receipt.request_id != request.request_id
+            or receipt.request_digest != request.request_digest
+            or receipt.effect != request.effect
+        ):
             raise RustShadowProviderError(
                 "rust-provider-contract-failure",
-                "Rust execution provider receipt does not match the request identity.",
+                "Rust execution provider receipt does not match the request contract.",
             )
         if effect_callback_failures and receipt.status == "cancelled":
             raise effect_callback_failures[0]
@@ -1963,9 +1967,11 @@ class RustEligibilityStore:
             for value in (provider_sha256, packaged_qualified_sha256)
         ):
             return False
+        if provider_sha256 != packaged_qualified_sha256:
+            return False
         with self._lock():
             if not self.path.exists():
-                return provider_sha256 == packaged_qualified_sha256
+                return True
             decision = self._read_unlocked()
             release_evidence = (
                 decision.evidence.release_evidence

@@ -566,6 +566,39 @@ sys.stdout.flush()
         self.assertTrue(receipt.reconciliation_required)
         self.assertFalse(eligibility.eligible)
 
+    def test_receipt_effect_mismatch_is_unknown_and_disables_rust(self) -> None:
+        provider_path, _counter, _provider_sha256 = self._rust_provider_fixture()
+        provider_path.write_text(
+            provider_path.read_text(encoding="utf-8").replace(
+                '"effect": request["effect"],',
+                '"effect": "local-agent",',
+            ),
+            encoding="utf-8",
+        )
+        provider_sha256 = hashlib.sha256(provider_path.read_bytes()).hexdigest()
+        eligibility = _EligibilityStore()
+        provider = shell_execution_provider_from_environment(
+            {
+                "ALFREDO_RUST_CANDIDATE_ENABLED": "1",
+                "ALFREDO_RUST_SHELL_ENABLED": "1",
+                "ALFREDO_RUST_EXECUTION_PROVIDER": str(provider_path),
+                "ALFREDO_RUST_EXECUTION_PROVIDER_SHA256": provider_sha256,
+                "ALFREDO_RUST_EXECUTION_PROVIDER_QUALIFIED_SHA256": provider_sha256,
+            },
+            eligibility_store=eligibility,
+        )
+
+        receipt = ExecutionCoordinator(
+            ExecutionJournal(self.root / "effect-mismatch-receipts.json"),
+            provider,
+        ).execute(self._shell_request("shell:effect-mismatch"))
+
+        self.assertEqual(receipt.status, "outcome-unknown")
+        self.assertEqual(receipt.effect, "shell")
+        self.assertEqual(receipt.provider, "rust")
+        self.assertTrue(receipt.reconciliation_required)
+        self.assertFalse(eligibility.eligible)
+
     def test_ineligible_candidate_falls_back_before_claim_or_effect(self) -> None:
         provider_path, counter, provider_sha256 = self._rust_provider_fixture()
         python_effects = 0
