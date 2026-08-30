@@ -1539,6 +1539,116 @@ fn is_implicit_readonly_mount(source: &str, destination: &str) -> bool {
     source == destination && IMPLICIT_READONLY_ROOTS.contains(&source)
 }
 
+fn is_regular_non_symlink(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|metadata| metadata.file_type().is_file() && !metadata.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    if !is_regular_non_symlink(path) {
+        return false;
+    }
+    fs::metadata(path)
+        .map(|metadata| {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                metadata.permissions().mode() & 0o111 != 0
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = metadata;
+                true
+            }
+        })
+        .unwrap_or(false)
+}
+
+fn is_under_private_tmp(path: &Path) -> bool {
+    let resolved = fs::canonicalize(path).unwrap_or_else(|_| lexical_path(path));
+    [PathBuf::from("/tmp"), std::env::temp_dir()]
+        .into_iter()
+        .any(|root| {
+            let resolved_root = fs::canonicalize(&root).unwrap_or_else(|_| lexical_path(&root));
+            path.starts_with(&root) || resolved.starts_with(resolved_root)
+        })
+}
+
+fn resolve_command_executable(
+    command: &[String],
+    environment: &BTreeMap<String, String>,
+) -> Option<PathBuf> {
+    let executable = Path::new(command.first()?);
+    let candidate = if executable.is_absolute() {
+        executable.to_path_buf()
+    } else {
+        let search_path = environment
+            .get("PATH")
+            .map(String::as_str)
+            .unwrap_or("/bin:/usr/bin");
+        std::env::split_paths(search_path)
+            .map(|directory| directory.join(executable))
+            .find(|path| path.is_file())?
+    };
+    Some(fs::canonicalize(&candidate).unwrap_or_else(|_| lexical_path(&candidate)))
+}
+
+fn implicit_interpreter_script(command: &[String]) -> Option<PathBuf> {
+    let executable = Path::new(command.first()?);
+    let name = executable.file_name()?.to_string_lossy().to_lowercase();
+    if !name.starts_with("python") && !matches!(name.as_str(), "node" | "bash" | "sh" | "ruby") {
+        return None;
+    }
+    for argument in command.iter().skip(1) {
+        if matches!(argument.as_str(), "-c" | "-m" | "-e") {
+            break;
+        }
+        if argument.starts_with('-') {
+            continue;
+        }
+        let candidate = Path::new(argument);
+        if candidate.is_absolute()
+            && is_under_private_tmp(candidate)
+            && is_regular_non_symlink(candidate)
+        {
+            let resolved = fs::canonicalize(candidate).ok()?;
+            return is_under_private_tmp(&resolved).then_some(resolved);
+        }
+        break;
+    }
+    None
+}
+
+fn is_allowed_implicit_binding(
+    source: &str,
+    destination: &str,
+    implicit_executable: Option<&Path>,
+    implicit_script: Option<&Path>,
+) -> bool {
+    let source_path = Path::new(source);
+    let destination_path = Path::new(destination);
+    if !is_regular_non_symlink(source_path) {
+        return false;
+    }
+    if destination_path.is_symlink() && is_under_private_tmp(destination_path) {
+        return false;
+    }
+    let (Ok(source_resolved), Ok(destination_resolved)) = (
+        fs::canonicalize(source_path),
+        fs::canonicalize(destination_path),
+    ) else {
+        return false;
+    };
+    if source_resolved != destination_resolved {
+        return false;
+    }
+    if implicit_executable == Some(destination_resolved.as_path()) {
+        return is_executable_file(source_path);
+    }
+    implicit_script == Some(destination_resolved.as_path())
+}
+
 fn validate_resource_wrapper<'a>(
     command: &'a [String],
     limits: &ExecutionLimits,
@@ -1751,6 +1861,9 @@ fn validate_prepared_argv(request: &ExecutionRequest) -> Result<(), StructuredFa
             "execution Bubblewrap argv does not match the prepared namespace boundary",
         ));
     }
+    let command = validate_resource_wrapper(&request.argv[separator + 1..], &request.limits)?;
+    let implicit_executable = resolve_command_executable(command, &request.environment);
+    let implicit_script = implicit_interpreter_script(command);
     let writable_roots: std::collections::HashSet<_> =
         request.sandbox.writable_roots.iter().collect();
     for root in &request.sandbox.writable_roots {
@@ -1790,21 +1903,20 @@ fn validate_prepared_argv(request: &ExecutionRequest) -> Result<(), StructuredFa
                 },
             );
         if !system_mount && !declared_mount {
-            let command =
-                validate_resource_wrapper(&request.argv[separator + 1..], &request.limits)?;
-            let implicit = command.iter().any(|argument| argument == destination)
-                && !is_protected_root(destination)
-                && source == destination;
-            if !implicit {
+            if !is_allowed_implicit_binding(
+                source,
+                destination,
+                implicit_executable.as_deref(),
+                implicit_script.as_deref(),
+            ) {
                 return Err(StructuredFailure::new(
                     "contract-failure",
-                    "execution Bubblewrap argv contains an undeclared host read",
+                    "execution Bubblewrap contains an undeclared readonly mount",
                 ));
             }
         }
     }
     for directory in directories {
-        let command = validate_resource_wrapper(&request.argv[separator + 1..], &request.limits)?;
         if !command
             .iter()
             .any(|argument| argument.starts_with(&format!("{directory}/")))
@@ -1815,7 +1927,6 @@ fn validate_prepared_argv(request: &ExecutionRequest) -> Result<(), StructuredFa
             ));
         }
     }
-    let command = validate_resource_wrapper(&request.argv[separator + 1..], &request.limits)?;
     if command.is_empty() {
         return Err(StructuredFailure::new(
             "contract-failure",
@@ -2101,6 +2212,111 @@ mod tests {
         *allowed_paths = vec!["src".to_owned(), "tests".to_owned(), "src".to_owned()];
 
         assert!(RustExecutionProvider::validate_request(&request).is_err());
+    }
+
+    #[test]
+    fn validation_rejects_command_argument_as_implicit_host_read() {
+        let root = std::env::temp_dir().join(format!(
+            "alfredo-shadow-argument-mount-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("argument-mount fixture should be created");
+        let data_path = root.join("data.txt");
+        fs::write(&data_path, b"not executable").expect("argument data should be written");
+        let data = data_path.to_string_lossy().into_owned();
+        let mut request = test_request("shadow-rust-argument-mount");
+        let chdir = request
+            .argv
+            .iter()
+            .position(|argument| argument == "--chdir")
+            .expect("test request should have a chdir boundary");
+        request.argv.splice(
+            chdir..chdir,
+            ["--ro-bind".to_owned(), data.clone(), data.clone()],
+        );
+        request.argv.push(data);
+
+        assert!(RustExecutionProvider::validate_request(&request).is_err());
+        fs::remove_dir_all(root).expect("argument-mount fixture should be removable");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validation_accepts_only_implicit_executable_and_temp_script_reads() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "alfredo-shadow-implicit-read-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("implicit-read fixture should be created");
+        let executable_path = root.join("governed-runner");
+        fs::write(&executable_path, b"#!/bin/sh\nexit 0\n")
+            .expect("implicit executable should be written");
+        let mut permissions = fs::metadata(&executable_path)
+            .expect("implicit executable metadata should exist")
+            .permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable_path, permissions)
+            .expect("implicit executable should be executable");
+        let executable = executable_path.to_string_lossy().into_owned();
+        let mut executable_request = test_request("shadow-rust-implicit-executable");
+        let chdir = executable_request
+            .argv
+            .iter()
+            .position(|argument| argument == "--chdir")
+            .expect("test request should have a chdir boundary");
+        executable_request.argv.splice(
+            chdir..chdir,
+            [
+                "--ro-bind".to_owned(),
+                executable.clone(),
+                executable.clone(),
+            ],
+        );
+        let boundary = executable_request
+            .argv
+            .iter()
+            .position(|argument| argument == "--")
+            .expect("test request should have a command boundary");
+        executable_request.argv.splice(boundary + 7.., [executable]);
+        RustExecutionProvider::validate_request(&executable_request)
+            .expect("resolved executable read should remain valid");
+
+        let script_path = root.join("governed-script.py");
+        fs::write(&script_path, b"print('bounded')\n")
+            .expect("implicit interpreter script should be written");
+        let script = script_path.to_string_lossy().into_owned();
+        let mut script_request = test_request("shadow-rust-implicit-script");
+        let chdir = script_request
+            .argv
+            .iter()
+            .position(|argument| argument == "--chdir")
+            .expect("test request should have a chdir boundary");
+        script_request.argv.splice(
+            chdir..chdir,
+            ["--ro-bind".to_owned(), script.clone(), script.clone()],
+        );
+        let boundary = script_request
+            .argv
+            .iter()
+            .position(|argument| argument == "--")
+            .expect("test request should have a command boundary");
+        script_request
+            .argv
+            .splice(boundary + 7.., ["/usr/bin/python3".to_owned(), script]);
+        RustExecutionProvider::validate_request(&script_request)
+            .expect("private temp interpreter-script read should remain valid");
+
+        fs::remove_dir_all(root).expect("implicit-read fixture should be removable");
     }
 
     #[test]

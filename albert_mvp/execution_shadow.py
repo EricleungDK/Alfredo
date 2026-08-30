@@ -9,6 +9,7 @@ observation inputs during every shadow sample.
 
 from __future__ import annotations
 
+import base64
 import fcntl
 import hashlib
 import json
@@ -17,6 +18,7 @@ import os
 import re
 import signal
 import subprocess
+import tarfile
 import tempfile
 import threading
 import time
@@ -25,7 +27,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .execution import ExecutionReceipt, ExecutionRequest
 
@@ -38,6 +40,7 @@ _MAX_PROVIDER_TIMEOUT_SECONDS = 3_600.0
 _FORBIDDEN_EVIDENCE_KINDS = {"reducer", "sidecar", "microbenchmark"}
 _MAX_SHADOW_TREE_FILES = 4_096
 _MAX_SHADOW_TREE_BYTES = 128 * 1024 * 1024
+_MAX_RELEASE_METADATA_BYTES = 1024 * 1024
 _MAX_STAGE_MARKS = 64
 _PRODUCTION_STAGES = {f"S{index}" for index in range(10)} | {
     f"R{index}" for index in range(7)
@@ -125,6 +128,19 @@ def _hash_regular_file(path: Path, *, label: str) -> str:
     except OSError as exc:
         raise ShadowContractError(f"{label} could not be hashed: {exc}") from exc
     return digest.hexdigest()
+
+
+def _sha512_integrity(path: Path, *, label: str) -> str:
+    declared = Path(path)
+    digest = hashlib.sha512()
+    try:
+        with declared.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+    except OSError as exc:
+        raise ShadowContractError(f"{label} could not be hashed: {exc}") from exc
+    encoded = base64.b64encode(digest.digest()).decode("ascii")
+    return f"sha512-{encoded}"
 
 
 def _hash_bound_path(path: Path, *, label: str) -> str:
@@ -837,10 +853,36 @@ class RustShadowProvider:
             raise ShadowContractError("Rust shadow provider environment is invalid")
         self.provider_id = "rust-shadow"
 
-    def execute(self, request: ExecutionRequest) -> ExecutionReceipt:
+    def execute(
+        self,
+        request: ExecutionRequest,
+        *,
+        cancel_after_seconds: float | None = None,
+        provider_process_started: Callable[[subprocess.Popen[bytes]], None]
+        | None = None,
+    ) -> ExecutionReceipt:
         request.validate()
+        if cancel_after_seconds is not None and (
+            not isinstance(cancel_after_seconds, (int, float))
+            or isinstance(cancel_after_seconds, bool)
+            or not math.isfinite(float(cancel_after_seconds))
+            or cancel_after_seconds <= 0
+            or cancel_after_seconds > _MAX_PROVIDER_TIMEOUT_SECONDS
+        ):
+            raise ShadowContractError(
+                "Rust shadow provider cancellation control is invalid"
+            )
+        envelope: dict[str, Any] = {
+            "request": request.to_dict(include_input=True)
+        }
+        if cancel_after_seconds is not None:
+            envelope["control"] = {
+                "cancel_after_milliseconds": max(
+                    1, math.ceil(float(cancel_after_seconds) * 1_000)
+                )
+            }
         payload = json.dumps(
-            {"request": request.to_dict(include_input=True)},
+            envelope,
             ensure_ascii=True,
             sort_keys=True,
             separators=(",", ":"),
@@ -906,6 +948,8 @@ class RustShadowProvider:
                 stderr=subprocess.PIPE,
                 start_new_session=os.name == "posix",
             )
+            if provider_process_started is not None:
+                provider_process_started(process)
             assert process.stdout is not None and process.stderr is not None
             reader_threads = (
                 threading.Thread(target=drain, args=(process.stdout, stdout_buffer), daemon=True),
@@ -1104,20 +1148,278 @@ class RustReleaseGateEvidence:
             payload = json.loads(manifest.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise ShadowContractError(f"Rust package manifest is invalid: {exc}") from exc
-        if not isinstance(payload, Mapping) or set(payload) != {
+        expected_manifest_fields = {
             "schema_version",
-            "provider_path",
-            "provider_sha256",
-            "release_gate",
-        }:
-            raise ShadowContractError("Rust package manifest fields are invalid")
+            "status",
+            "verification_kind",
+            "publishable",
+            "package_version",
+            "install_spec",
+            "publish_order",
+            "packages",
+            "shadow_execution_provider",
+        }
+        if not isinstance(payload, Mapping) or set(payload) != expected_manifest_fields:
+            raise ShadowContractError("Rust release manifest fields are invalid")
+        version = payload["package_version"]
+        packages = payload["packages"]
+        publish_order = payload["publish_order"]
         if (
             payload["schema_version"] != SHADOW_SCHEMA_VERSION
-            or payload["provider_path"] != str(provider)
-            or payload["provider_sha256"] != provider_digest
-            or payload["release_gate"] != "verified"
+            or payload["status"] != "verified"
+            or payload["verification_kind"] != "production-appimage"
+            or payload["publishable"] is not True
+            or not isinstance(version, str)
+            or not version
+            or not isinstance(packages, list)
+            or len(packages) != 2
+            or not isinstance(publish_order, list)
+            or len(publish_order) != 2
         ):
-            raise ShadowContractError("Rust package manifest does not verify the provider")
+            raise ShadowContractError("Rust release manifest is not production-verified")
+        package_fields = {
+            "role",
+            "name",
+            "version",
+            "filename",
+            "bytes",
+            "sha256",
+            "integrity",
+        }
+        if any(
+            not isinstance(entry, Mapping) or set(entry) != package_fields
+            for entry in packages
+        ):
+            raise ShadowContractError("Rust release package fields are invalid")
+        platform, meta = packages
+        if (
+            platform["role"] != "platform"
+            or meta["role"] != "meta"
+            or platform["name"] != "alfredo-agent-linux-x64-gnu"
+            or meta["name"] != "alfredo-agent"
+            or publish_order != [platform["name"], meta["name"]]
+            or payload["install_spec"] != f'{meta["name"]}@{version}'
+        ):
+            raise ShadowContractError("Rust release package order is invalid")
+        manifest_root = manifest.parent.resolve(strict=True)
+        checked_tarballs: dict[str, Path] = {}
+        for entry in packages:
+            name = entry["name"]
+            filename = entry["filename"]
+            declared_bytes = entry["bytes"]
+            declared_sha256 = entry["sha256"]
+            declared_integrity = entry["integrity"]
+            if (
+                not isinstance(name, str)
+                or not name
+                or entry["version"] != version
+                or filename != f"{name}-{version}.tgz"
+                or not isinstance(declared_bytes, int)
+                or isinstance(declared_bytes, bool)
+                or declared_bytes <= 0
+                or not isinstance(declared_integrity, str)
+                or not declared_integrity.startswith("sha512-")
+            ):
+                raise ShadowContractError("Rust release package metadata is invalid")
+            _validate_digest(declared_sha256, label="Rust release package")
+            tarball = manifest_root / filename
+            if tarball.parent != manifest_root or tarball.is_symlink():
+                raise ShadowContractError("Rust release package escapes its verified root")
+            try:
+                resolved_tarball = tarball.resolve(strict=True)
+                if (
+                    resolved_tarball.parent != manifest_root
+                    or not resolved_tarball.is_file()
+                    or resolved_tarball.stat().st_size != declared_bytes
+                ):
+                    raise ShadowContractError("Rust release package artifact is invalid")
+            except OSError as exc:
+                raise ShadowContractError(
+                    f"Rust release package could not be inspected: {exc}"
+                ) from exc
+            if _hash_regular_file(
+                resolved_tarball, label="Rust release package"
+            ) != declared_sha256:
+                raise ShadowContractError("Rust release package digest changed")
+            if _sha512_integrity(
+                resolved_tarball, label="Rust release package"
+            ) != declared_integrity:
+                raise ShadowContractError(
+                    "Rust release package SHA-512 integrity changed"
+                )
+            checked_tarballs[entry["role"]] = resolved_tarball
+
+        shadow = payload["shadow_execution_provider"]
+        expected_shadow_fields = {
+            "package",
+            "path",
+            "sha256",
+            "contract",
+            "verification",
+            "request_sha256",
+            "store_unchanged",
+        }
+        if not isinstance(shadow, Mapping) or set(shadow) != expected_shadow_fields:
+            raise ShadowContractError("Rust release provider evidence fields are invalid")
+        if (
+            shadow["package"] != platform["name"]
+            or shadow["path"] != "bin/alfredo-execution-provider"
+            or shadow["sha256"] != provider_digest
+            or shadow["contract"] != "python-rust-production-parity"
+            or shadow["verification"] != "installed-package"
+            or shadow["store_unchanged"] is not True
+        ):
+            raise ShadowContractError("Rust release manifest does not verify the provider")
+        _validate_digest(shadow["request_sha256"], label="Rust release parity request")
+
+        platform_tarball = checked_tarballs["platform"]
+        meta_tarball = checked_tarballs["meta"]
+        provider_member = f'package/{shadow["path"]}'
+        executable_member = "package/bin/alfredo-desktop.AppImage"
+        platform_manifest_member = "package/package.json"
+        try:
+            with tarfile.open(platform_tarball, mode="r:gz") as archive:
+                provider_members = [
+                    member for member in archive.getmembers() if member.name == provider_member
+                ]
+                desktop_members = [
+                    member
+                    for member in archive.getmembers()
+                    if member.name == "package/desktop.json"
+                ]
+                executable_members = [
+                    member
+                    for member in archive.getmembers()
+                    if member.name == executable_member
+                ]
+                platform_manifest_members = [
+                    member
+                    for member in archive.getmembers()
+                    if member.name == platform_manifest_member
+                ]
+                if (
+                    len(provider_members) != 1
+                    or not provider_members[0].isfile()
+                    or provider_members[0].size > _MAX_SHADOW_TREE_BYTES
+                    or len(desktop_members) != 1
+                    or not desktop_members[0].isfile()
+                    or desktop_members[0].size > _MAX_RELEASE_METADATA_BYTES
+                    or len(executable_members) != 1
+                    or not executable_members[0].isfile()
+                    or executable_members[0].size > _MAX_SHADOW_TREE_BYTES
+                    or len(platform_manifest_members) != 1
+                    or not platform_manifest_members[0].isfile()
+                    or platform_manifest_members[0].size > _MAX_RELEASE_METADATA_BYTES
+                ):
+                    raise ShadowContractError(
+                        "Rust release package provider members are invalid"
+                    )
+                provider_file = archive.extractfile(provider_members[0])
+                desktop_file = archive.extractfile(desktop_members[0])
+                executable_file = archive.extractfile(executable_members[0])
+                platform_manifest_file = archive.extractfile(
+                    platform_manifest_members[0]
+                )
+                if (
+                    provider_file is None
+                    or desktop_file is None
+                    or executable_file is None
+                    or platform_manifest_file is None
+                ):
+                    raise ShadowContractError("Rust release package provider is unreadable")
+                packaged_provider_digest = hashlib.sha256(provider_file.read()).hexdigest()
+                packaged_executable_digest = hashlib.sha256(
+                    executable_file.read()
+                ).hexdigest()
+                desktop_payload = json.loads(desktop_file.read().decode("utf-8"))
+                platform_manifest_payload = json.loads(
+                    platform_manifest_file.read().decode("utf-8")
+                )
+            with tarfile.open(meta_tarball, mode="r:gz") as archive:
+                meta_manifest_members = [
+                    member
+                    for member in archive.getmembers()
+                    if member.name == "package/package.json"
+                ]
+                if (
+                    len(meta_manifest_members) != 1
+                    or not meta_manifest_members[0].isfile()
+                    or meta_manifest_members[0].size > _MAX_RELEASE_METADATA_BYTES
+                ):
+                    raise ShadowContractError(
+                        "Rust release meta package manifest is invalid"
+                    )
+                meta_manifest_file = archive.extractfile(meta_manifest_members[0])
+                if meta_manifest_file is None:
+                    raise ShadowContractError(
+                        "Rust release meta package manifest is unreadable"
+                    )
+                meta_manifest_payload = json.loads(
+                    meta_manifest_file.read().decode("utf-8")
+                )
+        except (OSError, tarfile.TarError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ShadowContractError(f"Rust release package is invalid: {exc}") from exc
+        if (
+            not isinstance(platform_manifest_payload, Mapping)
+            or platform_manifest_payload.get("name") != platform["name"]
+            or platform_manifest_payload.get("version") != version
+            or platform_manifest_payload.get("os") != ["linux"]
+            or platform_manifest_payload.get("cpu") != ["x64"]
+            or platform_manifest_payload.get("libc") != ["glibc"]
+        ):
+            raise ShadowContractError(
+                "Rust release platform package identity is invalid"
+            )
+        if (
+            not isinstance(meta_manifest_payload, Mapping)
+            or meta_manifest_payload.get("name") != meta["name"]
+            or meta_manifest_payload.get("version") != version
+            or not isinstance(meta_manifest_payload.get("optionalDependencies"), Mapping)
+            or meta_manifest_payload["optionalDependencies"].get(platform["name"])
+            != version
+        ):
+            raise ShadowContractError(
+                "Rust release meta package does not require the exact platform version"
+            )
+        if meta_manifest_payload.get("bin") != {
+            "alfredo": "bin/alfredo.js",
+            "albert": "bin/alfredo.js",
+        }:
+            raise ShadowContractError("Rust release meta package CLI identity is invalid")
+        expected_desktop_fields = {
+            "schema_version",
+            "package",
+            "version",
+            "platform",
+            "arch",
+            "libc",
+            "format",
+            "executable",
+            "executable_sha256",
+            "shadow_provider",
+            "shadow_provider_sha256",
+        }
+        if (
+            packaged_provider_digest != provider_digest
+            or not isinstance(desktop_payload, Mapping)
+            or set(desktop_payload) != expected_desktop_fields
+            or desktop_payload.get("schema_version") != SHADOW_SCHEMA_VERSION
+            or desktop_payload.get("package") != platform["name"]
+            or desktop_payload.get("version") != version
+            or desktop_payload.get("platform") != "linux"
+            or desktop_payload.get("arch") != "x64"
+            or desktop_payload.get("libc") != "glibc"
+            or desktop_payload.get("format") != "appimage"
+            or desktop_payload.get("executable")
+            != "bin/alfredo-desktop.AppImage"
+            or desktop_payload.get("executable_sha256")
+            != packaged_executable_digest
+            or desktop_payload.get("shadow_provider") != shadow["path"]
+            or desktop_payload.get("shadow_provider_sha256") != provider_digest
+        ):
+            raise ShadowContractError(
+                "Rust release package does not contain the verified provider"
+            )
         return cls(
             provider_path=str(provider),
             provider_sha256=provider_digest,

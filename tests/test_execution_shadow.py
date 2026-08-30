@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
+import runpy
+import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from dataclasses import replace
@@ -141,6 +146,129 @@ class ExecutionShadowTests(unittest.TestCase):
             source_root=str(self.source_root.resolve()),
             artifact_path=str(self.artifact.resolve()),
         )
+
+    def _verified_release_manifest(
+        self, *, meta_platform_version: str = "0.1.0"
+    ) -> Path:
+        release = self.root / "verified-release"
+        platform_package = self.root / "platform-package"
+        provider = platform_package / "bin" / "alfredo-execution-provider"
+        provider.parent.mkdir(parents=True)
+        shutil.copyfile(self.artifact, provider)
+        provider_digest = shadow_artifact_sha256(self.artifact)
+        executable = platform_package / "bin" / "alfredo-desktop.AppImage"
+        executable.write_text("verified desktop", encoding="utf-8")
+        executable_digest = shadow_artifact_sha256(executable)
+        (platform_package / "desktop.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "package": "alfredo-agent-linux-x64-gnu",
+                    "version": "0.1.0",
+                    "platform": "linux",
+                    "arch": "x64",
+                    "libc": "glibc",
+                    "format": "appimage",
+                    "executable": "bin/alfredo-desktop.AppImage",
+                    "executable_sha256": executable_digest,
+                    "shadow_provider": "bin/alfredo-execution-provider",
+                    "shadow_provider_sha256": provider_digest,
+                }
+            ),
+            encoding="utf-8",
+        )
+        (platform_package / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "alfredo-agent-linux-x64-gnu",
+                    "version": "0.1.0",
+                    "os": ["linux"],
+                    "cpu": ["x64"],
+                    "libc": ["glibc"],
+                }
+            ),
+            encoding="utf-8",
+        )
+        meta_package = self.root / "meta-package"
+        meta_package.mkdir()
+        (meta_package / "package.json").write_text(
+            json.dumps(
+                {
+                    "name": "alfredo-agent",
+                    "version": "0.1.0",
+                    "bin": {
+                        "alfredo": "bin/alfredo.js",
+                        "albert": "bin/alfredo.js",
+                    },
+                    "optionalDependencies": {
+                        "alfredo-agent-linux-x64-gnu": meta_platform_version
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        release.mkdir()
+        platform_tarball = release / "alfredo-agent-linux-x64-gnu-0.1.0.tgz"
+        with tarfile.open(platform_tarball, "w:gz") as archive:
+            archive.add(platform_package, arcname="package")
+        meta_tarball = release / "alfredo-agent-0.1.0.tgz"
+        with tarfile.open(meta_tarball, "w:gz") as archive:
+            archive.add(meta_package, arcname="package")
+
+        def integrity(path: Path) -> str:
+            digest = hashlib.sha512(path.read_bytes()).digest()
+            return f"sha512-{base64.b64encode(digest).decode('ascii')}"
+
+        manifest = release / "manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "status": "verified",
+                    "verification_kind": "production-appimage",
+                    "publishable": True,
+                    "package_version": "0.1.0",
+                    "install_spec": "alfredo-agent@0.1.0",
+                    "publish_order": [
+                        "alfredo-agent-linux-x64-gnu",
+                        "alfredo-agent",
+                    ],
+                    "packages": [
+                        {
+                            "role": "platform",
+                            "name": "alfredo-agent-linux-x64-gnu",
+                            "version": "0.1.0",
+                            "filename": platform_tarball.name,
+                            "bytes": platform_tarball.stat().st_size,
+                            "sha256": shadow_artifact_sha256(platform_tarball),
+                            "integrity": integrity(platform_tarball),
+                        },
+                        {
+                            "role": "meta",
+                            "name": "alfredo-agent",
+                            "version": "0.1.0",
+                            "filename": meta_tarball.name,
+                            "bytes": meta_tarball.stat().st_size,
+                            "sha256": shadow_artifact_sha256(meta_tarball),
+                            "integrity": integrity(meta_tarball),
+                        },
+                    ],
+                    "shadow_execution_provider": {
+                        "package": "alfredo-agent-linux-x64-gnu",
+                        "path": "bin/alfredo-execution-provider",
+                        "sha256": provider_digest,
+                        "contract": "python-rust-production-parity",
+                        "verification": "installed-package",
+                        "request_sha256": "a" * 64,
+                        "store_unchanged": True,
+                    },
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        return manifest
 
     def _metadata(self, stage: str = "S1") -> ShadowSampleMetadata:
         return ShadowSampleMetadata(
@@ -306,6 +434,115 @@ class ExecutionShadowTests(unittest.TestCase):
             (),
         )
         self.assertEqual(rust_receipt.status, "completed")
+        cancelled_argv = list(request.argv)
+        cancelled_argv[-2:] = ["/usr/bin/sleep", "1"]
+        cancelled = RustShadowProvider((str(binary),)).execute(
+            request.with_updates(
+                request_id="shadow-jsonl-cancelled",
+                argv=tuple(cancelled_argv),
+            ),
+            cancel_after_seconds=0.05,
+        )
+        self.assertEqual(cancelled.status, "cancelled")
+        self.assertEqual(cancelled.error_code, "cancelled")
+        self.assertEqual(cancelled.error_message, "release cancellation")
+
+    def test_release_probe_hashes_each_rust_sample(self) -> None:
+        binary = Path(
+            os.environ.get(
+                "ALFREDO_RUST_EXECUTION_PROVIDER",
+                "mission-control/src-tauri/target/debug/alfredo-execution-provider",
+            )
+        )
+        if not binary.is_absolute():
+            binary = (Path.cwd() / binary).resolve()
+        if not binary.exists():
+            self.skipTest("build alfredo-execution-provider to run the release probe")
+        if not any(
+            candidate.is_file()
+            for candidate in (
+                Path("/usr/bin/bwrap"),
+                Path("/usr/sbin/bwrap"),
+                Path("/bin/bwrap"),
+                Path("/sbin/bwrap"),
+            )
+        ):
+            self.skipTest("trusted Bubblewrap is required for the release probe")
+
+        canonical_root = self.root / "canonical-runtime"
+        canonical_root.mkdir()
+        canonical_file = canonical_root / "runtime.json"
+        canonical_file.write_text("canonical\n", encoding="utf-8")
+        counter = self.root / "provider-count"
+        wrapper = self.root / "alternating-provider"
+        wrapper.write_text(
+            "\n".join(
+                (
+                    "#!/usr/bin/python3",
+                    "import pathlib, subprocess, sys",
+                    f"counter = pathlib.Path({str(counter)!r})",
+                    f"canonical = pathlib.Path({str(canonical_file)!r})",
+                    f"provider = {str(binary)!r}",
+                    "count = int(counter.read_text()) if counter.exists() else 0",
+                    "counter.write_text(str(count + 1))",
+                    "canonical.write_text('mutated\\n' if count % 2 == 0 else 'canonical\\n')",
+                    "completed = subprocess.run([provider], input=sys.stdin.buffer.read(), capture_output=True)",
+                    "sys.stdout.buffer.write(completed.stdout)",
+                    "sys.stderr.buffer.write(completed.stderr)",
+                    "raise SystemExit(completed.returncode)",
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+        wrapper.chmod(0o755)
+        script = runpy.run_path(
+            str(Path("mission-control/scripts/verify-shadow-provider.py").resolve())
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError, "packaged-shadow-completed changed canonical stores"
+        ):
+            script["verify"](wrapper, self.worktree, (canonical_root,))
+
+    def test_release_probe_proves_cleanup_and_full_crash_parity(self) -> None:
+        binary = Path(
+            os.environ.get(
+                "ALFREDO_RUST_EXECUTION_PROVIDER",
+                "mission-control/src-tauri/target/debug/alfredo-execution-provider",
+            )
+        )
+        if not binary.is_absolute():
+            binary = (Path.cwd() / binary).resolve()
+        if not binary.exists():
+            self.skipTest("build alfredo-execution-provider to run the release probe")
+        if not any(
+            candidate.is_file()
+            for candidate in (
+                Path("/usr/bin/bwrap"),
+                Path("/usr/sbin/bwrap"),
+                Path("/bin/bwrap"),
+                Path("/sbin/bwrap"),
+            )
+        ):
+            self.skipTest("trusted Bubblewrap is required for the release probe")
+
+        canonical_root = self.root / "installed-runtime"
+        canonical_root.mkdir()
+        script = runpy.run_path(
+            str(Path("mission-control/scripts/verify-shadow-provider.py").resolve())
+        )
+
+        result = script["verify"](binary, self.worktree, (canonical_root,))
+        cohorts = {case["request_id"]: case for case in result["cohorts"]}
+
+        self.assertTrue(
+            cohorts["packaged-shadow-timeout-cleanup"]["cleanup_verified"]
+        )
+        self.assertTrue(
+            cohorts["packaged-shadow-crash-cut"]["normalized_parity"]
+        )
+        self.assertTrue(all(case["store_unchanged"] for case in cohorts.values()))
 
     def test_rust_provider_crash_and_structured_failure_are_non_eligible(self) -> None:
         request = self._request("shadow-provider-failure")
@@ -402,21 +639,7 @@ class ExecutionShadowTests(unittest.TestCase):
 
     def test_eligibility_requires_every_gate_and_disables_on_any_failure(self) -> None:
         store = RustEligibilityStore(self.root / "shadow" / "rust-eligibility.json")
-        provider_digest = shadow_artifact_sha256(self.artifact)
-        manifest = self.root / "package-manifest.json"
-        manifest.write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "provider_path": str(self.artifact.resolve()),
-                    "provider_sha256": provider_digest,
-                    "release_gate": "verified",
-                },
-                sort_keys=True,
-                separators=(",", ":"),
-            ),
-            encoding="utf-8",
-        )
+        manifest = self._verified_release_manifest()
         release_evidence = RustReleaseGateEvidence.from_verified_artifacts(
             provider_path=self.artifact,
             package_manifest_path=manifest,
@@ -439,6 +662,71 @@ class ExecutionShadowTests(unittest.TestCase):
 
         incomplete = replace(passing, stages_complete=False)
         self.assertFalse(store.record(incomplete).eligible)
+
+    def test_release_evidence_rejects_a_synthetic_gate_manifest(self) -> None:
+        manifest = self.root / "package-manifest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "provider_path": str(self.artifact.resolve()),
+                    "provider_sha256": shadow_artifact_sha256(self.artifact),
+                    "release_gate": "verified",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with self.assertRaisesRegex(ShadowContractError, "release manifest"):
+            RustReleaseGateEvidence.from_verified_artifacts(
+                provider_path=self.artifact,
+                package_manifest_path=manifest,
+            )
+
+    def test_release_evidence_recomputes_package_sha512_integrity(self) -> None:
+        manifest = self._verified_release_manifest()
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        payload["packages"][0]["integrity"] = "sha512-invalid"
+        manifest.write_text(json.dumps(payload), encoding="utf-8")
+
+        with self.assertRaisesRegex(ShadowContractError, "SHA-512 integrity"):
+            RustReleaseGateEvidence.from_verified_artifacts(
+                provider_path=self.artifact,
+                package_manifest_path=manifest,
+            )
+
+    def test_release_evidence_requires_exact_package_identity(self) -> None:
+        manifest = self._verified_release_manifest(meta_platform_version="9.9.9")
+
+        with self.assertRaisesRegex(ShadowContractError, "exact platform version"):
+            RustReleaseGateEvidence.from_verified_artifacts(
+                provider_path=self.artifact,
+                package_manifest_path=manifest,
+            )
+
+    def test_eligible_state_fails_closed_when_the_release_package_changes(self) -> None:
+        manifest = self._verified_release_manifest()
+        release_evidence = RustReleaseGateEvidence.from_verified_artifacts(
+            provider_path=self.artifact,
+            package_manifest_path=manifest,
+        )
+        store = RustEligibilityStore(self.root / "shadow" / "rust-eligibility.json")
+        decision = store.record(
+            RustEligibilityEvidence.all_passed(
+                sample_id="sample-shadow-package",
+                cohort_id="cohort-shadow-package",
+                stages=("S1", "R1"),
+                release_evidence=release_evidence,
+            )
+        )
+        self.assertTrue(decision.eligible)
+        platform_tarball = manifest.parent / "alfredo-agent-linux-x64-gnu-0.1.0.tgz"
+        platform_tarball.write_bytes(platform_tarball.read_bytes() + b"tampered")
+
+        reloaded = store.load()
+
+        self.assertFalse(reloaded.eligible)
+        self.assertEqual(reloaded.disabled_reason, "invalid-shadow-state")
 
 
 if __name__ == "__main__":

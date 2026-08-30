@@ -19,6 +19,8 @@ import { tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { validateShadowProviderParityEvidence } from "./shadow-provider-contract.js";
+
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const releaseRoot = resolve(projectRoot, "release", "out");
 const metaRoot = resolve(releaseRoot, "alfredo-agent");
@@ -690,6 +692,15 @@ try {
       `Installed Rust shadow provider returned an invalid structured failure: ${shadowProviderProbe.stdout}`,
     );
   }
+  const guiSmoke = fixtureArtifact
+    ? { status: "not_run_fixture" }
+    : await runGuiSmoke(
+        "alfredo",
+        workspace,
+        baseLaunchEnvironment,
+        resolve(runtime, "gui-smoke-ready.json"),
+        bundledBackend,
+      );
   let shadowProviderParity = null;
   let shadowProviderContract = "jsonl-structured-failure";
   if (!fixtureArtifact) {
@@ -701,6 +712,8 @@ try {
         realShadowProvider,
         "--workspace",
         workspace,
+        "--canonical-root",
+        runtime,
       ],
       {
         cwd: workspace,
@@ -717,29 +730,18 @@ try {
     } catch (error) {
       throw new Error(`Installed Python/Rust parity probe returned invalid JSON: ${error.message}`);
     }
-    if (
-      shadowProviderParity.status !== "pass" ||
-      shadowProviderParity.provider_sha256 !== shadowProviderDigest ||
-      shadowProviderParity.receipt_status !== "completed" ||
-      shadowProviderParity.store_unchanged !== true ||
-      typeof shadowProviderParity.request_sha256 !== "string" ||
-      !/^[a-f0-9]{64}$/.test(shadowProviderParity.request_sha256)
-    ) {
+    try {
+      validateShadowProviderParityEvidence(shadowProviderParity, {
+        providerSha256: shadowProviderDigest,
+        canonicalStoreRoots: [resolve(workspace, "shadow-release-sentinel"), runtime],
+      });
+    } catch (error) {
       throw new Error(
-        `Installed Python/Rust parity probe returned invalid evidence: ${parityProbe.stdout}`,
+        `Installed Python/Rust parity probe returned invalid evidence: ${error.message}\n${parityProbe.stdout}`,
       );
     }
     shadowProviderContract = "python-rust-production-parity";
   }
-  const guiSmoke = fixtureArtifact
-    ? { status: "not_run_fixture" }
-    : await runGuiSmoke(
-        "alfredo",
-        workspace,
-        baseLaunchEnvironment,
-        resolve(runtime, "gui-smoke-ready.json"),
-        bundledBackend,
-      );
   const verifiedArtifacts = preserveVerifiedArtifacts(
     metaDescriptor,
     platformDescriptor,

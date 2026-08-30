@@ -32,7 +32,7 @@ The execution ledger is per Mission runtime and uses schema version 1. Each reco
 
 ## Shadow Rust Eligibility
 
-Rust shadow samples do not write canonical Mission or execution stores. The app-local eligibility record retains only bounded sample/cohort identities, gate booleans, stage names, failure codes, and a revisioned decision; malformed or missing evidence disables Rust.
+Rust shadow samples do not write canonical Mission or execution stores. The app-local eligibility record retains only bounded sample/cohort identities, gate booleans, stage names, failure codes, a revisioned decision, and optional exact release evidence. Release evidence stores canonical provider/manifest paths plus their SHA-256 values; loading it reopens the complete production manifest, recomputes both archive SHA-256 and npm SHA-512 values, validates platform/meta package identities, exact dependency/aliases, and complete AppImage/provider desktop metadata, then rechecks the external provider and manifest. Missing artifacts, synthetic manifest shapes, package-identity drift, path changes, byte changes, or hash mismatches disable Rust.
 
 Finalized Agent Console user/controller turns remain in the durable full history store so conversation continuity survives restart. Only the Working Context extraction used for one model turn is windowed and content-bounded.
 

@@ -1,9 +1,11 @@
 use albert_mission_control::execution::{
-    ExecutionReceipt, ExecutionRequest, RustExecutionProvider, StructuredFailure,
+    ControlSignal, ExecutionCallbacks, ExecutionReceipt, ExecutionRequest, RustExecutionProvider,
+    StructuredFailure,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::io::{self, BufRead, BufReader, Write};
+use std::time::{Duration, Instant};
 
 #[derive(Serialize)]
 struct ProviderResponse {
@@ -18,6 +20,14 @@ struct ProviderResponse {
 #[serde(deny_unknown_fields)]
 struct ProviderRequest {
     request: Value,
+    #[serde(default)]
+    control: Option<ProviderControl>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProviderControl {
+    cancel_after_milliseconds: u64,
 }
 
 fn failure(code: &str, message: String) -> StructuredFailure {
@@ -29,8 +39,8 @@ fn failure(code: &str, message: String) -> StructuredFailure {
 }
 
 fn response_for(input: Value, provider: &RustExecutionProvider) -> ProviderResponse {
-    let request_value = match serde_json::from_value::<ProviderRequest>(input) {
-        Ok(envelope) => envelope.request,
+    let envelope = match serde_json::from_value::<ProviderRequest>(input) {
+        Ok(envelope) => envelope,
         Err(error) => {
             return ProviderResponse {
                 ok: false,
@@ -42,7 +52,7 @@ fn response_for(input: Value, provider: &RustExecutionProvider) -> ProviderRespo
             }
         }
     };
-    let request = match ExecutionRequest::from_value(request_value) {
+    let request = match ExecutionRequest::from_value(envelope.request) {
         Ok(request) => request,
         Err(error) => {
             return ProviderResponse {
@@ -52,7 +62,37 @@ fn response_for(input: Value, provider: &RustExecutionProvider) -> ProviderRespo
             }
         }
     };
-    match provider.execute(&request) {
+    let result = if let Some(control) = envelope.control {
+        if control.cancel_after_milliseconds == 0 || control.cancel_after_milliseconds > 3_600_000 {
+            return ProviderResponse {
+                ok: false,
+                receipt: None,
+                failure: Some(failure(
+                    "contract-failure",
+                    "execution provider cancellation control is outside the bounded range"
+                        .to_owned(),
+                )),
+            };
+        }
+        let deadline = Instant::now() + Duration::from_millis(control.cancel_after_milliseconds);
+        let mut poll = || {
+            if Instant::now() >= deadline {
+                Err(ControlSignal::Cancelled("release cancellation".to_owned()))
+            } else {
+                Ok(())
+            }
+        };
+        provider.execute_with_callbacks(
+            &request,
+            &mut ExecutionCallbacks {
+                process_started: None,
+                poll: Some(&mut poll),
+            },
+        )
+    } else {
+        provider.execute(&request)
+    };
+    match result {
         Ok(receipt) => ProviderResponse {
             ok: true,
             receipt: Some(receipt),
