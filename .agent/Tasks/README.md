@@ -15,6 +15,7 @@
 - Delegation approval gate support before Albert launches configured gated delegates.
 - Alfredo prompt-first workstation correction: responsive readable UI, unified console chronology, deterministic and typed controller task routing, governed automatic delegation, commands/skills/tasks/discussion, persistent Mission Work, queued/cancellable Local Agent execution, iterative repair, atomic idempotent actions, minimal resource-bounded process sandboxes, real Evidence Package artifacts, and bounded inline artifact viewing. See [the implementation report](../Reports/2026-07-11-alfredo-one-shot-workstation.md).
 - Retirement lifecycle through Issue #68: every Retirement Unit has reserved preservation, exact quiescence/identity proof, verified snapshots, outcome-driven retirement, bounded Snapshot Payload retention and reclamation, deterministic storage inspection, and governed blocked retry/export/discard actions. See [the Issue #68 report](../Reports/2026-08-09-issue-68-retirement-storage.md).
+- Qualified Shell host effects through Issue #74: Python retains command policy, approvals, Additional Path Grants, canonical Shell/audit state, exact replay, and reconciliation while one integrity-bound Rust provider performs the prepared external effect; independent rollback, transport compatibility, live child binding/cancellation, and uncertainty are covered by the [Issue #74 report](../Reports/2026-08-30-issue-74-shell-rust-cutover.md).
 
 ## Current Follow-Up
 

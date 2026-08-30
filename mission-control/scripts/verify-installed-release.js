@@ -39,6 +39,7 @@ const META_PACK_FILES = [
   "bundled-backend/albert_mvp/cli.py",
   "bundled-backend/albert_mvp/core.py",
   "bundled-backend/albert_mvp/execution.py",
+  "bundled-backend/albert_mvp/execution_cutover.py",
   "bundled-backend/albert_mvp/execution_shadow.py",
   "bundled-backend/albert_mvp/inference.py",
   "bundled-backend/albert_mvp/inference_qualification.py",

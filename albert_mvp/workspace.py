@@ -47,10 +47,10 @@ from .execution import (
     ExecutionReceipt,
     ExecutionRequest,
     ExecutionSandbox,
-    PythonExecutionProvider,
     ShellExecutionAuthority,
     _owner_is_live,
 )
+from .execution_cutover import shell_execution_provider_from_environment
 from .performance import measured_stage
 
 
@@ -1513,6 +1513,9 @@ class ShellTerminalService:
             sandbox=execution_sandbox,
             process_env=process_env,
         )
+        execution_provider = shell_execution_provider_from_environment(
+            python_executor=_run_bounded_process,
+        )
         attempt_terminal, attempt_record, record_index = (
             self._persist_execution_attempt(
                 terminal=terminal,
@@ -1526,7 +1529,7 @@ class ShellTerminalService:
                 ExecutionJournal(
                     self._execution_journal_path_for_mission(str(record["mission_id"]))
                 ),
-                PythonExecutionProvider(executor=_run_bounded_process),
+                execution_provider,
             ).execute(
                 execution_request,
                 authorize=lambda request: self._authorize_execution_request(request),

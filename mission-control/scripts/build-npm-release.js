@@ -35,6 +35,7 @@ const BACKEND_SOURCE_FILES = [
   "cli.py",
   "core.py",
   "execution.py",
+  "execution_cutover.py",
   "execution_shadow.py",
   "inference.py",
   "inference_qualification.py",

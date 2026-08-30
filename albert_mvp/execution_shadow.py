@@ -860,6 +860,8 @@ class RustShadowProvider:
         cancel_after_seconds: float | None = None,
         provider_process_started: Callable[[subprocess.Popen[bytes]], None]
         | None = None,
+        effect_process_started: Callable[[int, str], None] | None = None,
+        control_poll_callback: Callable[[], None] | None = None,
     ) -> ExecutionReceipt:
         request.validate()
         if cancel_after_seconds is not None and (
@@ -881,6 +883,9 @@ class RustShadowProvider:
                     1, math.ceil(float(cancel_after_seconds) * 1_000)
                 )
             }
+        stream_events = (
+            effect_process_started is not None or control_poll_callback is not None
+        )
         payload = json.dumps(
             envelope,
             ensure_ascii=True,
@@ -905,11 +910,20 @@ class RustShadowProvider:
         env["HOME"] = "/tmp"
         env["TMPDIR"] = "/tmp"
         env["PYTHONDONTWRITEBYTECODE"] = "1"
+        if stream_events:
+            # The current provider opts into child-binding events through this
+            # internal transport flag.  The immediately previous provider
+            # ignores it and retains its one-response JSON contract.
+            env["ALFREDO_EXECUTION_STREAM_EVENTS"] = "1"
         stdout_buffer: list[bytes] = []
         stderr_buffer: list[bytes] = []
         output_lock = threading.Lock()
         output_size = 0
         output_overflow = threading.Event()
+        protocol_failed = threading.Event()
+        protocol_failures: list[BaseException] = []
+        effect_callback_failures: list[BaseException] = []
+        effect_binding: dict[str, Any] = {}
 
         def drain(stream: Any, target: list[bytes]) -> None:
             nonlocal output_size
@@ -934,10 +948,77 @@ class RustShadowProvider:
                 except OSError:
                     pass
 
+        def drain_provider_stdout(stream: Any) -> None:
+            nonlocal output_size
+            try:
+                while True:
+                    line = stream.readline(_MAX_PROVIDER_OUTPUT_BYTES + 1)
+                    if not line:
+                        return
+                    with output_lock:
+                        output_size += len(line)
+                        if output_size > _MAX_PROVIDER_OUTPUT_BYTES:
+                            output_overflow.set()
+                            return
+                    try:
+                        message = json.loads(line.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        stdout_buffer.append(line)
+                        continue
+                    if not isinstance(message, Mapping) or message.get("event") != "process-started":
+                        stdout_buffer.append(line)
+                        continue
+                    if set(message) != {"event", "process_pid", "process_identity"}:
+                        raise RustShadowProviderError(
+                            "rust-provider-contract-failure",
+                            "Rust provider process-started event fields are invalid.",
+                        )
+                    process_pid = message.get("process_pid")
+                    process_identity = message.get("process_identity")
+                    if (
+                        effect_binding
+                        or not isinstance(process_pid, int)
+                        or isinstance(process_pid, bool)
+                        or process_pid <= 0
+                        or not isinstance(process_identity, str)
+                        or not process_identity
+                        or "\0" in process_identity
+                    ):
+                        raise RustShadowProviderError(
+                            "rust-provider-contract-failure",
+                            "Rust provider process-started event is invalid or duplicated.",
+                        )
+                    effect_binding.update(
+                        {"pid": process_pid, "identity": process_identity}
+                    )
+                    if effect_process_started is not None:
+                        try:
+                            effect_process_started(process_pid, process_identity)
+                        except BaseException as exc:
+                            # The coordinator has already observed the effect
+                            # boundary. Ask Rust to clean it up, drain the typed
+                            # receipt, then re-raise the original control/store
+                            # failure so Python decides cancelled vs uncertain.
+                            effect_callback_failures.append(exc)
+                            if os.name == "posix" and process is not None:
+                                try:
+                                    os.kill(process.pid, signal.SIGUSR1)
+                                except ProcessLookupError:
+                                    pass
+            except BaseException as exc:
+                protocol_failures.append(exc)
+                protocol_failed.set()
+            finally:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+
         process: subprocess.Popen[bytes] | None = None
         reader_threads: tuple[threading.Thread, threading.Thread] | None = None
         writer_thread: threading.Thread | None = None
         timed_out = False
+        cancellation_requested = False
         try:
             process = subprocess.Popen(
                 self.command,
@@ -952,7 +1033,7 @@ class RustShadowProvider:
                 provider_process_started(process)
             assert process.stdout is not None and process.stderr is not None
             reader_threads = (
-                threading.Thread(target=drain, args=(process.stdout, stdout_buffer), daemon=True),
+                threading.Thread(target=drain_provider_stdout, args=(process.stdout,), daemon=True),
                 threading.Thread(target=drain, args=(process.stderr, stderr_buffer), daemon=True),
             )
             for thread in reader_threads:
@@ -977,13 +1058,25 @@ class RustShadowProvider:
                 + max(5.0, request.limits.descendant_grace_seconds + 5.0),
             )
             while process.poll() is None:
-                if output_overflow.is_set():
+                if output_overflow.is_set() or protocol_failed.is_set():
                     break
+                if control_poll_callback is not None and not cancellation_requested:
+                    try:
+                        control_poll_callback()
+                    except BaseException:
+                        cancellation_requested = True
+                        if os.name == "posix":
+                            try:
+                                os.kill(process.pid, signal.SIGUSR1)
+                            except ProcessLookupError:
+                                pass
                 if time.monotonic() >= deadline:
                     timed_out = True
                     break
                 time.sleep(0.005)
-            if process.poll() is None and (timed_out or output_overflow.is_set()):
+            if process.poll() is None and (
+                timed_out or output_overflow.is_set() or protocol_failed.is_set()
+            ):
                 self._terminate(process)
             returncode = process.wait(timeout=5.0)
         except subprocess.TimeoutExpired:
@@ -994,8 +1087,9 @@ class RustShadowProvider:
                 returncode = None
         except OSError as exc:
             return replace(
-                ExecutionReceipt.unknown(
+                ExecutionReceipt.start_failed(
                     request,
+                    exit_code=127,
                     error_message=f"Rust shadow provider could not start: {exc}",
                 ),
                 provider=self.provider_id,
@@ -1011,9 +1105,13 @@ class RustShadowProvider:
                 ExecutionReceipt.unknown(
                     request,
                     error_message="Rust shadow provider timed out before a receipt was observed.",
+                    process_pid=effect_binding.get("pid"),
+                    process_identity=effect_binding.get("identity", ""),
                 ),
                 provider=self.provider_id,
             )
+        if protocol_failures:
+            raise protocol_failures[0]
         if output_overflow.is_set():
             raise RustShadowProviderError(
                 "rust-provider-output-limit",
@@ -1025,6 +1123,8 @@ class RustShadowProvider:
                 ExecutionReceipt.unknown(
                     request,
                     error_message="Rust shadow provider exited before a trustworthy receipt was observed.",
+                    process_pid=effect_binding.get("pid"),
+                    process_identity=effect_binding.get("identity", ""),
                 ),
                 provider=self.provider_id,
             )
@@ -1038,6 +1138,8 @@ class RustShadowProvider:
                         "Rust shadow provider crashed or returned invalid JSON: "
                         f"{exc}"
                     ),
+                    process_pid=effect_binding.get("pid"),
+                    process_identity=effect_binding.get("identity", ""),
                 ),
                 provider=self.provider_id,
             )
@@ -1089,6 +1191,8 @@ class RustShadowProvider:
                 "rust-provider-contract-failure",
                 "Rust shadow receipt does not match the request identity.",
             )
+        if effect_callback_failures:
+            raise effect_callback_failures[0]
         return replace(receipt, provider=self.provider_id)
 
     @staticmethod

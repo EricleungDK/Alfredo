@@ -26,7 +26,7 @@ import stat
 import subprocess
 import sys
 import tempfile
-from typing import Any, Callable, Literal, Mapping, Sequence
+from typing import Any, Callable, Literal, Mapping, Protocol, Sequence
 
 try:
     import fcntl
@@ -1139,7 +1139,12 @@ class ExecutionReceipt:
         )
 
     @classmethod
-    def executing(cls, request: ExecutionRequest) -> "ExecutionReceipt":
+    def executing(
+        cls,
+        request: ExecutionRequest,
+        *,
+        provider: str = "python",
+    ) -> "ExecutionReceipt":
         return cls._make(
             request,
             status="executing",
@@ -1148,6 +1153,7 @@ class ExecutionReceipt:
             reconciliation_required=False,
             owner_pid=os.getpid(),
             owner_identity=_process_identity(os.getpid()),
+            provider=provider,
         )
 
     @classmethod
@@ -1176,6 +1182,7 @@ class ExecutionReceipt:
         *,
         exit_code: int,
         error_message: str,
+        provider: str = "python",
     ) -> "ExecutionReceipt":
         return cls._make(
             request,
@@ -1185,6 +1192,7 @@ class ExecutionReceipt:
             reconciliation_required=False,
             error_code="provider-start-failed",
             error_message=error_message,
+            provider=provider,
         )
 
     @classmethod
@@ -1199,6 +1207,7 @@ class ExecutionReceipt:
         process_identity: str = "",
         started_at: str | None = None,
         ended_at: str | None = None,
+        provider: str = "python",
     ) -> "ExecutionReceipt":
         return cls._make(
             request,
@@ -1214,6 +1223,7 @@ class ExecutionReceipt:
             process_identity=process_identity,
             started_at=started_at,
             ended_at=ended_at,
+            provider=provider,
         )
 
     @classmethod
@@ -1225,6 +1235,7 @@ class ExecutionReceipt:
         effect_started: bool = True,
         process_pid: int | None = None,
         process_identity: str = "",
+        provider: str = "python",
     ) -> "ExecutionReceipt":
         return cls._make(
             request,
@@ -1236,6 +1247,7 @@ class ExecutionReceipt:
             error_message=error_message,
             process_pid=process_pid,
             process_identity=process_identity,
+            provider=provider,
         )
 
     @classmethod
@@ -1361,6 +1373,23 @@ def _owner_is_live(pid: int | None, identity: str) -> bool:
 ExecutionExecutor = Callable[..., subprocess.CompletedProcess[str]]
 
 
+class ExecutionProvider(Protocol):
+    """One implementation of the already-authorized host-effect boundary."""
+
+    provider_id: str
+
+    def validate_request(self, request: ExecutionRequest) -> None: ...
+
+    def execute(
+        self,
+        request: ExecutionRequest,
+        *,
+        process_binding_started: Callable[[Any, str], None] | None = None,
+        poll_callback: Callable[[], None] | None = None,
+        output_callback: Callable[[str, bytes], None] | None = None,
+    ) -> ExecutionReceipt: ...
+
+
 class PythonExecutionProvider:
     """Python-backed provider for an already prepared bounded argv effect."""
 
@@ -1441,11 +1470,13 @@ class PythonExecutionProvider:
                     error_message=str(exc),
                     process_pid=binding.get("pid"),
                     process_identity=binding.get("identity", ""),
+                    provider=self.provider_id,
                 )
             return ExecutionReceipt.start_failed(
                 request,
                 exit_code=127,
                 error_message=str(exc),
+                provider=self.provider_id,
             )
         except OSError as exc:
             if binding:
@@ -1454,11 +1485,13 @@ class PythonExecutionProvider:
                     error_message=str(exc),
                     process_pid=binding.get("pid"),
                     process_identity=binding.get("identity", ""),
+                    provider=self.provider_id,
                 )
             return ExecutionReceipt.start_failed(
                 request,
                 exit_code=127,
                 error_message=str(exc),
+                provider=self.provider_id,
             )
         if not isinstance(completed, subprocess.CompletedProcess):
             raise ExecutionContractError(
@@ -1612,7 +1645,12 @@ class ExecutionJournal:
             "receipt": receipt.to_dict(include_output=False),
         }
 
-    def claim(self, request: ExecutionRequest) -> ExecutionReceipt | None:
+    def claim(
+        self,
+        request: ExecutionRequest,
+        *,
+        provider: str = "python",
+    ) -> ExecutionReceipt | None:
         request.validate()
         with self._lock():
             payload = self._read()
@@ -1621,7 +1659,7 @@ class ExecutionJournal:
             if existing is None:
                 records[request.request_id] = self._record(
                     request,
-                    ExecutionReceipt.executing(request),
+                    ExecutionReceipt.executing(request, provider=provider),
                 )
                 self._write(payload)
                 return None
@@ -1644,6 +1682,7 @@ class ExecutionJournal:
                 owner_identity=receipt.owner_identity,
                 process_pid=receipt.process_pid,
                 process_identity=receipt.process_identity,
+                provider=receipt.provider,
             )
             records[request.request_id] = self._record(request, unknown)
             self._write(payload)
@@ -1730,6 +1769,7 @@ class ExecutionJournal:
                         owner_identity=current.owner_identity,
                         process_pid=current.process_pid,
                         process_identity=current.process_identity,
+                        provider=current.provider,
                     )
                     records[request.request_id] = self._record(request, current)
                     self._write(payload)
@@ -1787,6 +1827,7 @@ class ExecutionJournal:
                     owner_identity=receipt.owner_identity,
                     process_pid=receipt.process_pid,
                     process_identity=receipt.process_identity,
+                    provider=receipt.provider,
                 )
                 payload["records"][request_id] = self._record(request, unknown)
                 changed = True
@@ -1820,7 +1861,7 @@ class ExecutionJournal:
 class ExecutionCoordinator:
     """Authorize, persist, execute, and reconcile one exact host effect."""
 
-    def __init__(self, journal: ExecutionJournal, provider: PythonExecutionProvider):
+    def __init__(self, journal: ExecutionJournal, provider: ExecutionProvider):
         self.journal = journal
         self.provider = provider
 
@@ -1838,6 +1879,9 @@ class ExecutionCoordinator:
         | None = None,
     ) -> ExecutionReceipt:
         request.validate()
+        provider_id = self.provider.provider_id
+        if not isinstance(provider_id, str) or not provider_id:
+            raise ExecutionContractError("execution provider identity is invalid")
         try:
             if authorize is not None:
                 authorize(request)
@@ -1847,6 +1891,7 @@ class ExecutionCoordinator:
                 request,
                 exit_code=127,
                 error_message=str(exc),
+                provider=provider_id,
             )
             return self.journal.record_start_failed(request, receipt)
         process_bound = False
@@ -1857,11 +1902,19 @@ class ExecutionCoordinator:
             nonlocal process_bound, process_pid, process_identity
             process_bound = True
             process_pid = getattr(process, "pid", None)
-            process_identity = (
-                _process_identity(process_pid)
-                if isinstance(process_pid, int)
-                else ""
+            reported_identity = getattr(process, "execution_identity", "")
+            observed_identity = (
+                _process_identity(process_pid) if isinstance(process_pid, int) else ""
             )
+            if reported_identity and (
+                not isinstance(reported_identity, str)
+                or "\0" in reported_identity
+                or (observed_identity and reported_identity != observed_identity)
+            ):
+                raise ExecutionContractError(
+                    "execution provider reported a conflicting process identity"
+                )
+            process_identity = reported_identity or observed_identity
             self.journal.bind_process(
                 request,
                 process_pid=process_pid,
@@ -1870,7 +1923,7 @@ class ExecutionCoordinator:
             if process_binding_started is not None:
                 process_binding_started(process, process_token)
 
-        existing = self.journal.claim(request)
+        existing = self.journal.claim(request, provider=provider_id)
         if existing is not None:
             return existing
         try:
@@ -1893,6 +1946,7 @@ class ExecutionCoordinator:
                     effect_started=process_bound,
                     process_pid=process_pid,
                     process_identity=process_identity,
+                    provider=provider_id,
                 )
             elif process_bound:
                 receipt = ExecutionReceipt.unknown(
@@ -1900,17 +1954,32 @@ class ExecutionCoordinator:
                     error_message=str(exc),
                     process_pid=process_pid,
                     process_identity=process_identity,
+                    provider=provider_id,
                 )
             else:
                 receipt = ExecutionReceipt.start_failed(
                     request,
                     exit_code=127,
                     error_message=str(exc),
+                    provider=provider_id,
                 )
             try:
                 self.journal.complete(request, receipt)
             finally:
                 raise
+        if receipt.provider != provider_id:
+            mismatch = ExecutionContractError(
+                "execution provider returned a receipt for a different provider"
+            )
+            uncertain = ExecutionReceipt.unknown(
+                request,
+                error_message=str(mismatch),
+                process_pid=process_pid,
+                process_identity=process_identity,
+                provider=provider_id,
+            )
+            self.journal.complete(request, uncertain)
+            raise mismatch
         self.journal.complete(request, receipt)
         return receipt
 
@@ -1923,6 +1992,7 @@ __all__ = [
     "ExecutionEffect",
     "ExecutionJournal",
     "ExecutionLimits",
+    "ExecutionProvider",
     "ExecutionReceipt",
     "ExecutionReplayConflict",
     "ExecutionRequest",

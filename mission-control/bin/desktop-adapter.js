@@ -72,7 +72,55 @@ function sha256File(path) {
   return hash.digest("hex");
 }
 
-export function resolveDesktopAdapter(projectRoot) {
+function verifiedExecutable(platformRoot, relativePath, expectedSha256, label, reinstall) {
+  const executable = resolve(platformRoot, relativePath);
+  if (!isInside(platformRoot, executable)) {
+    throw new DesktopAdapterError(
+      `Alfredo ${label} escapes its package boundary: ${relativePath}`,
+      reinstall,
+    );
+  }
+  let entry;
+  try {
+    entry = lstatSync(executable);
+  } catch (error) {
+    throw new DesktopAdapterError(
+      `Alfredo ${label} is missing: ${executable} (${error.message})`,
+      reinstall,
+    );
+  }
+  if (entry.isSymbolicLink() || !entry.isFile()) {
+    throw new DesktopAdapterError(
+      `Alfredo ${label} must be a regular non-symlink file: ${executable}`,
+      reinstall,
+    );
+  }
+  const realPlatformRoot = realpathSync(platformRoot);
+  const realExecutable = realpathSync(executable);
+  if (!isInside(realPlatformRoot, realExecutable)) {
+    throw new DesktopAdapterError(
+      `Alfredo ${label} resolves outside its package boundary: ${executable}`,
+      reinstall,
+    );
+  }
+  try {
+    accessSync(realExecutable, constants.R_OK | constants.X_OK);
+  } catch (error) {
+    throw new DesktopAdapterError(
+      `Alfredo ${label} is not readable and executable: ${realExecutable} (${error.message})`,
+      reinstall,
+    );
+  }
+  if (sha256File(realExecutable) !== expectedSha256) {
+    throw new DesktopAdapterError(
+      `Alfredo ${label} integrity mismatch: ${realExecutable}`,
+      reinstall,
+    );
+  }
+  return realExecutable;
+}
+
+export function resolveDesktopAdapter(projectRoot, environment = process.env) {
   const hostKey = `${process.platform}:${process.arch}`;
   const supported = SUPPORTED_ADAPTERS.get(hostKey);
   const metaManifestPath = resolve(projectRoot, "package.json");
@@ -141,7 +189,11 @@ export function resolveDesktopAdapter(projectRoot) {
     typeof adapter.executable_sha256 !== "string" ||
     !/^[a-f0-9]{64}$/.test(adapter.executable_sha256) ||
     typeof adapter.executable !== "string" ||
-    !adapter.executable.trim()
+    !adapter.executable.trim() ||
+    typeof adapter.shadow_provider_sha256 !== "string" ||
+    !/^[a-f0-9]{64}$/.test(adapter.shadow_provider_sha256) ||
+    typeof adapter.shadow_provider !== "string" ||
+    !adapter.shadow_provider.trim()
   ) {
     throw new DesktopAdapterError(
       `Alfredo desktop adapter metadata does not match ${hostKey}/${supported.libc}.`,
@@ -149,56 +201,61 @@ export function resolveDesktopAdapter(projectRoot) {
     );
   }
 
-  const executable = resolve(platformRoot, adapter.executable);
-  if (!isInside(platformRoot, executable)) {
+  const rustCandidateEnabled = environment.ALFREDO_RUST_CANDIDATE_ENABLED ?? "1";
+  const rustShellEnabled = environment.ALFREDO_RUST_SHELL_ENABLED ?? "1";
+  const rustLocalAgentEnabled =
+    environment.ALFREDO_RUST_LOCAL_AGENT_ENABLED ?? "1";
+  if (rustCandidateEnabled !== "0" && rustCandidateEnabled !== "1") {
     throw new DesktopAdapterError(
-      `Alfredo desktop executable escapes its package boundary: ${adapter.executable}`,
+      "ALFREDO_RUST_CANDIDATE_ENABLED must be 0 or 1.",
       reinstall,
     );
   }
-  let executableEntry;
-  try {
-    executableEntry = lstatSync(executable);
-  } catch (error) {
+  if (rustShellEnabled !== "0" && rustShellEnabled !== "1") {
     throw new DesktopAdapterError(
-      `Alfredo desktop executable is missing: ${executable} (${error.message})`,
+      "ALFREDO_RUST_SHELL_ENABLED must be 0 or 1.",
       reinstall,
     );
   }
-  if (executableEntry.isSymbolicLink() || !executableEntry.isFile()) {
+  if (rustLocalAgentEnabled !== "0" && rustLocalAgentEnabled !== "1") {
     throw new DesktopAdapterError(
-      `Alfredo desktop executable must be a regular non-symlink file: ${executable}`,
+      "ALFREDO_RUST_LOCAL_AGENT_ENABLED must be 0 or 1.",
       reinstall,
     );
   }
-  const realPlatformRoot = realpathSync(platformRoot);
-  const realExecutable = realpathSync(executable);
-  if (!isInside(realPlatformRoot, realExecutable)) {
-    throw new DesktopAdapterError(
-      `Alfredo desktop executable resolves outside its package boundary: ${executable}`,
-      reinstall,
-    );
-  }
-  try {
-    accessSync(realExecutable, constants.R_OK | constants.X_OK);
-  } catch (error) {
-    throw new DesktopAdapterError(
-      `Alfredo desktop executable is not readable and executable: ${realExecutable} (${error.message})`,
-      reinstall,
-    );
-  }
-  const executableSha256 = sha256File(realExecutable);
-  if (executableSha256 !== adapter.executable_sha256) {
-    throw new DesktopAdapterError(
-      `Alfredo desktop executable integrity mismatch: ${realExecutable}`,
-      reinstall,
-    );
-  }
+  const realExecutable = verifiedExecutable(
+    platformRoot,
+    adapter.executable,
+    adapter.executable_sha256,
+    "desktop executable",
+    reinstall,
+  );
+  const rustProviderRequired =
+    rustCandidateEnabled === "1" &&
+    (rustShellEnabled === "1" || rustLocalAgentEnabled === "1");
+  const realProvider = rustProviderRequired
+    ? verifiedExecutable(
+        platformRoot,
+        adapter.shadow_provider,
+        adapter.shadow_provider_sha256,
+        "Rust execution provider",
+        reinstall,
+      )
+    : "";
   return {
     kind: "native",
     packageName: supported.packageName,
     version: metaManifest.version,
     executable: realExecutable,
-    environment: { APPIMAGE_EXTRACT_AND_RUN: "1" },
+    environment: {
+      APPIMAGE_EXTRACT_AND_RUN: "1",
+      ALFREDO_RUST_CANDIDATE_ENABLED: rustCandidateEnabled,
+      ALFREDO_RUST_SHELL_ENABLED: rustShellEnabled,
+      ALFREDO_RUST_LOCAL_AGENT_ENABLED: rustLocalAgentEnabled,
+      ALFREDO_RUST_EXECUTION_PROVIDER: realProvider,
+      ALFREDO_RUST_EXECUTION_PROVIDER_SHA256: rustProviderRequired
+        ? adapter.shadow_provider_sha256
+        : "",
+    },
   };
 }

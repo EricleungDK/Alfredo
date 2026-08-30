@@ -25,6 +25,7 @@ function adapterFixture() {
   const metaRoot = resolve(nodeModules, "alfredo-agent");
   const platformRoot = resolve(nodeModules, "alfredo-agent-linux-x64-gnu");
   const executable = resolve(platformRoot, "bin", "alfredo-desktop.AppImage");
+  const provider = resolve(platformRoot, "bin", "alfredo-execution-provider");
   mkdirSync(resolve(metaRoot, "bin"), { recursive: true });
   mkdirSync(resolve(platformRoot, "bin"), { recursive: true });
   writeJson(resolve(metaRoot, "package.json"), {
@@ -38,7 +39,12 @@ function adapterFixture() {
   });
   writeFileSync(executable, "#!/bin/sh\nexit 0\n", "utf8");
   chmodSync(executable, 0o755);
+  writeFileSync(provider, "#!/bin/sh\nexit 0\n", "utf8");
+  chmodSync(provider, 0o755);
   const executableSha256 = createHash("sha256")
+    .update("#!/bin/sh\nexit 0\n")
+    .digest("hex");
+  const providerSha256 = createHash("sha256")
     .update("#!/bin/sh\nexit 0\n")
     .digest("hex");
   writeJson(resolve(platformRoot, "desktop.json"), {
@@ -51,8 +57,10 @@ function adapterFixture() {
     format: "appimage",
     executable: "bin/alfredo-desktop.AppImage",
     executable_sha256: executableSha256,
+    shadow_provider: "bin/alfredo-execution-provider",
+    shadow_provider_sha256: providerSha256,
   });
-  return { root, metaRoot, platformRoot, executable };
+  return { root, metaRoot, platformRoot, executable, provider, providerSha256 };
 }
 
 test("resolves an exact-version executable from the supported platform package", () => {
@@ -63,8 +71,63 @@ test("resolves an exact-version executable from the supported platform package",
       packageName: "alfredo-agent-linux-x64-gnu",
       version: "0.1.0",
       executable: fixture.executable,
-      environment: { APPIMAGE_EXTRACT_AND_RUN: "1" },
+      environment: {
+        APPIMAGE_EXTRACT_AND_RUN: "1",
+        ALFREDO_RUST_CANDIDATE_ENABLED: "1",
+        ALFREDO_RUST_SHELL_ENABLED: "1",
+        ALFREDO_RUST_LOCAL_AGENT_ENABLED: "1",
+        ALFREDO_RUST_EXECUTION_PROVIDER: fixture.provider,
+        ALFREDO_RUST_EXECUTION_PROVIDER_SHA256: fixture.providerSha256,
+      },
     });
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("preserves explicit Rust fallback flags for the launched desktop", () => {
+  const fixture = adapterFixture();
+  try {
+    writeFileSync(fixture.provider, "tampered provider that must not run\n", "utf8");
+    chmodSync(fixture.provider, 0o644);
+    const resolved = resolveDesktopAdapter(fixture.metaRoot, {
+      ALFREDO_RUST_CANDIDATE_ENABLED: "0",
+      ALFREDO_RUST_SHELL_ENABLED: "0",
+      ALFREDO_RUST_LOCAL_AGENT_ENABLED: "0",
+    });
+    expect(resolved.environment).toMatchObject({
+      ALFREDO_RUST_CANDIDATE_ENABLED: "0",
+      ALFREDO_RUST_SHELL_ENABLED: "0",
+      ALFREDO_RUST_LOCAL_AGENT_ENABLED: "0",
+      ALFREDO_RUST_EXECUTION_PROVIDER: "",
+      ALFREDO_RUST_EXECUTION_PROVIDER_SHA256: "",
+    });
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("rejects invalid Rust provider flags before launching the desktop", () => {
+  const fixture = adapterFixture();
+  try {
+    expect(() =>
+      resolveDesktopAdapter(fixture.metaRoot, {
+        ALFREDO_RUST_SHELL_ENABLED: "sometimes",
+      }),
+    ).toThrow(/ALFREDO_RUST_SHELL_ENABLED must be 0 or 1/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("keeps the Local Agent Python fallback independent from Shell cutover", () => {
+  const fixture = adapterFixture();
+  try {
+    const resolved = resolveDesktopAdapter(fixture.metaRoot, {
+      ALFREDO_RUST_LOCAL_AGENT_ENABLED: "0",
+    });
+    expect(resolved.environment.ALFREDO_RUST_LOCAL_AGENT_ENABLED).toBe("0");
+    expect(resolved.environment.ALFREDO_RUST_SHELL_ENABLED).toBe("1");
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
@@ -133,6 +196,8 @@ test("rejects a desktop artifact path outside the platform package", () => {
       format: "appimage",
       executable: "../outside.AppImage",
       executable_sha256: "0".repeat(64),
+      shadow_provider: "bin/alfredo-execution-provider",
+      shadow_provider_sha256: fixture.providerSha256,
     });
     expect(() => resolveDesktopAdapter(fixture.metaRoot)).toThrow(/escapes its package boundary/);
   } finally {
@@ -155,6 +220,19 @@ test("rejects missing, malformed, and mismatched desktop artifact digests", () =
     writeFileSync(fixture.executable, "#!/bin/sh\nexit 1\n", "utf8");
     chmodSync(fixture.executable, 0o755);
     expect(() => resolveDesktopAdapter(fixture.metaRoot)).toThrow(/integrity mismatch/);
+  } finally {
+    rmSync(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("rejects a tampered packaged Rust execution provider", () => {
+  const fixture = adapterFixture();
+  try {
+    writeFileSync(fixture.provider, "#!/bin/sh\nexit 9\n", "utf8");
+    chmodSync(fixture.provider, 0o755);
+    expect(() => resolveDesktopAdapter(fixture.metaRoot)).toThrow(
+      /Rust execution provider integrity mismatch/,
+    );
   } finally {
     rmSync(fixture.root, { recursive: true, force: true });
   }
