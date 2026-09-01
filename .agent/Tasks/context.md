@@ -4,21 +4,21 @@
 
 ## Active Orchestration Context
 
-<!-- refreshed 2026-09-01 for Issue #75 tracker completion -->
+<!-- refreshed 2026-09-01 for durable line-ending policy -->
 
-- **Captured For Run**: `2026-09-01 - Publish the completed Issue #75 evidence to GitHub and reconcile its lifecycle.`
-- **Current Mission Focus**: `GitHub Issue #75 is reconciled as completed using the verified implementation evidence in local commit cdac943, while publication, human accessibility, and production performance acceptance remain explicitly external.`
-- **Active Agent Focus**: `Codex root completed the bounded GitHub ticket update and orchestration reconciliation. No implementation or additional review work is active.`
-- **Model Assignments (active run)**: `Codex root is the sole active agent for the tracker update; the completed Ramanujan specification and Dalton Standards reviews remain the final review evidence.`
-- **Coordination State**: `GitHub Issue #75 is closed as completed at 2026-09-01T20:06:16Z. All five acceptance criteria are checked, the exact completion evidence is posted in issue comment 5499723188, and the obsolete ready-for-agent label is removed. No parent issue, dependency, release, push, PR, or unrelated ticket was mutated.`
-- **Fixed Boundaries**: `Issue #75 verifies existing product authority rather than transferring it. Python remains canonical for Mission, inference scheduling, policy, receipts, replay, and reconciliation. Publication/reinstall, human real-display/accessibility acceptance, and repeated production performance cohorts remain separate external work.`
-- **Testing Seam Direction**: `No new testing is required for the tracker-only update. Reuse the committed Issue #75 report and final verified matrix without inflating skipped tests or external gates into completed work.`
-- **Current Implementation State**: `Issue #75 is implemented in local commit cdac943. The production-equivalent real-backend journey, visible non-authoritative inference identity, dual-protocol Shell/Local Agent compatibility, explicit pre-effect Python fallback, separated performance families, installed package boundary, and fail-closed retirement corrections are complete.`
-- **Focused Evidence So Far**: `Python ran 797 tests, OK (2 skipped); frontend passed 321/321; Rust passed 74 with one intentional ignored fixture; TypeScript, the 39-module build, gateway, functional/responsive Chromium, performance fixtures/contracts, installed AppImage/package verification, thirteen provider cohorts, fallback, immutable-store checks, and release:check all passed. The final specification and Standards rereviews are clean.`
-- **Documentation State**: `The committed Issue #75 report remains the detailed evidence source; GitHub now contains the concise authoritative completion summary and explicit external follow-up boundary.`
-- **Review State**: `Ramanujan's final Issue #75/PRD #56 specification rereview and Dalton's final Standards rereview are clean.`
-- **Pending Blockers**: `No Issue #75 implementation blocker remains. Authenticated publication/reinstall, human real-display/accessibility acceptance, and repeated production performance cohorts remain explicitly external and unperformed.`
-- **Next Decisions / Actions**: `No Issue #75 action remains. Authenticated publication/reinstall, human real-display/accessibility acceptance, and repeated production performance cohorts remain separately scoped future work requiring their own authorization. No push, publication, PR, parent-ticket mutation, or destructive operation is authorized.`
+- **Captured For Run**: `2026-09-01 - Prevent recurring cross-platform line-ending churn.`
+- **Current Mission Focus**: `Add a repository-owned LF policy and normalize the small set of historically non-LF tracked text files without changing their logical content.`
+- **Active Agent Focus**: `Codex root completed and validated the bounded Git EOL policy; no product implementation is active.`
+- **Model Assignments (active run)**: `Codex root is the sole active agent; no delegation is needed for this bounded Git audit.`
+- **Coordination State**: `The prior 79-file CRLF/mixed working-tree incident is cleaned up. The reviewed .gitattributes policy, six historical text normalizations, and this orchestration record are contained in one local conventional commit on main; no push or remote mutation occurred.`
+- **Fixed Boundaries**: `Preserve all substantive content and binary bytes. Commit only the EOL policy, six line-ending-only normalizations, and this orchestration record. Do not push, create a pull request, alter GitHub, or include unrelated work.`
+- **Testing Seam Direction**: `Validate attributes on representative text and binary paths, verify every tracked text worktree path is LF, prove normalized historical files differ only by carriage returns, and confirm no staged diff.`
+- **Current Implementation State**: `.gitattributes now applies text=auto eol=lf repository-wide and explicitly marks PNG, ICO, and ICNS application assets as binary. Four archived issue documents, albert_mvp/server.py, and tests/test_orchestrator_server.py are normalized from committed CRLF/mixed content to LF without logical edits.`
+- **Focused Evidence So Far**: `Git check-attr reports text=auto/eol=lf for representative Markdown and Python paths and -text/-diff/-merge for representative PNG/ICO assets. All 341 tracked text worktree paths are LF: 335 committed-LF paths plus the six normalized historical paths. The six-file diff is empty with --ignore-cr-at-eol, git diff --check is clean, and the cached diff is empty.`
+- **Documentation State**: `The self-documenting .gitattributes policy and this active orchestration block record the preventive fix; historical Issue #75 evidence remains unchanged.`
+- **Review State**: `The final diff is bounded to .gitattributes, this orchestration record, and six line-ending-only normalizations. No substantive user edit or binary byte was changed.`
+- **Pending Blockers**: `No implementation or commit blocker remains.`
+- **Next Decisions / Actions**: `No local cleanup action remains. Stop without pushing or mutating GitHub; any later push requires separate user authorization.`
 
 ## Previous Orchestration Context (historical - Issue #73 implementation)
 

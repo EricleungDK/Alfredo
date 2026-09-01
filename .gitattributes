@@ -1,0 +1,7 @@
+# Keep text files stable across Windows, macOS, and Linux.
+* text=auto eol=lf
+
+# Preserve packaged application assets byte-for-byte.
+*.icns binary
+*.ico binary
+*.png binary
