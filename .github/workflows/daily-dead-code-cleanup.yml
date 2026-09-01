@@ -15,8 +15,39 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  preflight:
+    name: Avoid overlapping cleanup pull requests
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      has_open_cleanup: ${{ steps.open-pull.outputs.present }}
+    steps:
+      - name: Check for an existing automated cleanup PR
+        id: open-pull
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ github.token }}
+          script: |
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: "open",
+              per_page: 100,
+            });
+            const existing = pulls.find((pull) =>
+              pull.head.ref.startsWith("codex/dead-code-")
+            );
+            core.setOutput("present", existing ? "true" : "false");
+            if (existing) {
+              core.notice(`Skipping while ${existing.html_url} awaits review.`);
+            }
+
   cleanup:
     name: Find, verify, and propose dead-code removal
+    needs: preflight
+    if: needs.preflight.outputs.has_open_cleanup != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
