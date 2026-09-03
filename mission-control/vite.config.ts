@@ -55,6 +55,10 @@ export default defineConfig(({ mode }) => {
     test: {
       environment: "jsdom",
       exclude: [...configDefaults.exclude, "tests/performance-*.test.js"],
+      // App.test.tsx contains a large asynchronous UI matrix. Serial file
+      // execution keeps it from competing with other jsdom workers and makes
+      // baseline/post-change verification comparable on bounded cloud hosts.
+      fileParallelism: false,
       globals: true,
       setupFiles: "./src/test-setup.ts",
     },
