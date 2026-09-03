@@ -15,16 +15,23 @@ This repository uses `.agent/Tasks/context.md` as the source of truth for agent 
 - Pending blockers, risks, approvals, and next actions.
 - A short log of local orchestration-relevant decisions.
 
-Before planning or coding, verify `.agent/Tasks/context.md` contains a fresh `## Active Orchestration Context` section for this run. If the block is stale or incomplete, update it first.
+Before planning or coding, verify `.agent/Tasks/context.md` contains a fresh `## Active Orchestration Context` section for this run. If the block is stale or incomplete, update it first when the run changes durable project orchestration state. A bounded scheduled-maintenance run may use its explicit GitHub trigger as the current run context and must not create a context-only change when its correct outcome is no change.
 After significant planning or implementation, update `.agent/Tasks/context.md` with any changes to the above before returning to coding.
+
+An explicit current user request or GitHub issue, pull-request, or scheduled-automation trigger is the authority for that run. Completed-run restrictions retained in an older orchestration block are historical constraints, not standing prohibitions on a newly authorized run. Preserve their factual history, but do not let stale `do not push`, `do not create a pull request`, or similar wording override the current trigger.
 
 ### Issue tracker
 
 GitHub Issues is the authoritative tracker. Each PRD is a `[PRD]` parent issue with ordered native Issue Slice sub-issues and native dependency edges. External PRs are not a triage surface. `.scratch/` is a read-only migration archive. See `docs/agents/issue-tracker.md`.
 
-### Github issue instruction
+### GitHub issue instruction
 
-GitHub is authoritative. For any live GitHub operation, request network escalation on the first command; do not probe with the default sandbox first. Use `gh` for issue/PR operations. A sandbox DNS/API failure is an environment restriction, not a product failure.
+GitHub is authoritative. Match the GitHub access method to the execution environment:
+
+- In a local or CLI checkout, request network escalation on the first live GitHub command, use authenticated `gh` for issue/PR operations, and infer the repository from the configured remote. A sandbox DNS/API failure is an environment restriction, not a product failure.
+- In a GitHub-triggered Codex Cloud run, treat the repository, issue or pull request, selected branch, and checked-out commit supplied by the cloud task as authoritative. The checkout may intentionally have no configured Git remote, remote-tracking refs, authenticated `gh`, or `GH_TOKEN`; their absence is not a failed precondition. Use the connected GitHub integration and the cloud task's result/publishing surface for issue reporting and pull-request handoff.
+- Codex Cloud authenticates through the user's ChatGPT session. Never request, create, or require an `OPENAI_API_KEY` for a native Codex Cloud run.
+- For a scheduled issue-triggered run, the final response is the issue report delivered by the connector. Do not require a separate `gh issue comment` command. If the connected environment cannot perform a requested GitHub mutation, report that exact publishing limitation after completing every safe read-only analysis and verification step; do not substitute API-key or GitHub Actions infrastructure.
 
 ### Triage labels
 

@@ -1,8 +1,26 @@
 # Central Context
 
-**Last Updated**: 2026-09-01
+**Last Updated**: 2026-09-03
 
 ## Active Orchestration Context
+
+<!-- refreshed 2026-09-03 for native Codex Cloud automation policy -->
+
+- **Captured For Run**: `2026-09-03 - Repair the subscription-based Codex Cloud automation contract for GitHub Issue #79.`
+- **Current Mission Focus**: `Remove local-CLI-only authentication and remote preconditions from GitHub-triggered Codex Cloud runs while retaining them for local agents.`
+- **Active Agent Focus**: `Codex root is preparing and verifying a documentation-only policy correction for review in a pull request.`
+- **Model Assignments (active run)**: `Codex root is the sole active agent; no delegation is needed for this bounded instruction correction.`
+- **Coordination State**: `Issue #79's scheduled trigger reaches Codex Cloud, but prior runs stopped before dead-code analysis because repository instructions required a configured Git remote and authenticated gh. The preceding line-ending task also remained in the active context with a historical no-GitHub-mutation boundary.`
+- **Fixed Boundaries**: `Keep the native ChatGPT subscription and Codex Cloud design. Do not add or request an OpenAI API key, activate the superseded GitHub Actions approach, weaken the dead-code safety boundary, or change product code.`
+- **Testing Seam Direction**: `Review the instruction diff, check Markdown whitespace, and confirm that local/CLI GitHub operations still require authenticated gh while native cloud runs use their supplied repository/ref and connected integration.`
+- **Current Implementation State**: `AGENTS.md and the GitHub tracker guide distinguish local/CLI access from GitHub-triggered Codex Cloud access. They also define current trigger authority, no-change context handling, connector-delivered reporting, and fail-closed behavior when a mutation surface is unavailable.`
+- **Focused Evidence So Far**: `The live main snapshot was clean at 282580e before the documentation branch was created. The prior Issue #79 failures and the conflicting active context were reproduced from repository and issue evidence.`
+- **Documentation State**: `This active block supersedes the completed line-ending run below; the original record is retained as historical context.`
+- **Review State**: `The final diff is bounded to three documentation files and passes git diff --check.`
+- **Pending Blockers**: `None for publishing the review pull request; maintainer GitHub authentication was refreshed without adding an OpenAI API key.`
+- **Next Decisions / Actions**: `Commit the bounded documentation change, open a pull request, then run a validation-only Issue #79 trigger after merge.`
+
+## Previous Orchestration Context (historical - durable line-ending policy)
 
 <!-- refreshed 2026-09-01 for durable line-ending policy -->
 
