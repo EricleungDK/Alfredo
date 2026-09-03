@@ -1326,12 +1326,6 @@ def _is_explicit_git_not_repository(
     )
 
 
-def _positive_pid(value: Any) -> int | None:
-    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
-        return value
-    return None
-
-
 def _optional_positive_pid(data: dict[str, Any], field_name: str) -> int | None:
     if field_name not in data or data[field_name] is None:
         return None
