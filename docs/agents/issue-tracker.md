@@ -1,6 +1,12 @@
 # Issue tracker: GitHub
 
-GitHub Issues in `EricleungDK/Alfredo` is the authoritative tracker. Use the `gh` CLI for tracker operations.
+GitHub Issues in `EricleungDK/Alfredo` is the authoritative tracker. Local and CLI agents use authenticated `gh` for tracker operations. GitHub-triggered Codex Cloud agents use the repository, trigger metadata, connected GitHub integration, and result/publishing surface supplied by the cloud task; they do not require `gh`, a configured Git remote, `GH_TOKEN`, or an OpenAI API key.
+
+## Execution environments
+
+- **Local or CLI checkout:** use the `gh` commands below and infer the repository from `git remote -v`.
+- **GitHub-triggered Codex Cloud:** treat the supplied repository/ref and checked-out commit as authoritative. Use connected issue/PR context to inspect tracker state, and use the cloud result/publishing surface for reporting and pull-request handoff. A connector-delivered final response is the issue or pull-request report; do not duplicate it with `gh issue comment`.
+- If a cloud run lacks a requested mutation capability, finish all safe analysis and verification first, then report the exact publishing limitation. Do not ask for an `OPENAI_API_KEY` or introduce a GitHub Actions substitute.
 
 ## PRD hierarchy
 
@@ -25,7 +31,7 @@ The PRD parent is the GitHub equivalent of `.scratch/<feature-slug>/`; its order
 - Close as completed: `gh issue close <number> --reason completed`
 - Close as not planned: `gh issue close <number> --reason "not planned"`
 
-Infer the repository from `git remote -v` when working inside this clone.
+Infer the repository from `git remote -v` when working inside a local or CLI clone. Do not apply this local-only requirement to a GitHub-triggered Codex Cloud checkout.
 
 For GitHub CLI versions without sub-issue and dependency flags, use the REST endpoints through `gh api`:
 
