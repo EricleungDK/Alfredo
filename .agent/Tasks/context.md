@@ -4,6 +4,24 @@
 
 ## Active Orchestration Context
 
+<!-- refreshed 2026-09-03 for deterministic Codex Cloud verification -->
+
+- **Captured For Run**: `2026-09-03 - Stabilize frontend verification for the Issue #79 cleanup automation.`
+- **Current Mission Focus**: `Remove environment and scheduling noise from the frontend test signal without weakening assertions or the cleanup safety boundary.`
+- **Active Agent Focus**: `Codex root is reproducing the failing seams, applying bounded test-harness corrections, and will validate them locally and through the native Codex Cloud cleanup loop.`
+- **Model Assignments (active run)**: `Codex root is the sole active agent; no delegation is needed for this bounded diagnosis and test correction.`
+- **Coordination State**: `Issue #79 now reaches repository analysis and comparative verification. Its second live run reproduced identical Python baseline/post-change counts but one extra frontend failure in the post-change run, so it correctly reverted the candidate and published no PR.`
+- **Fixed Boundaries**: `Do not weaken product assertions, excuse candidate-related regressions, add an OpenAI API key, activate GitHub Actions cleanup, or merge a cleanup PR. Change only proven test-determinism seams and their orchestration record.`
+- **Testing Seam Direction**: `Use the exact human-escalation test, the full 143-case App file, type checking, build, and the full Cloud baseline/post-change cleanup run. Keep UI number-format assertions aligned with the runtime locale and eliminate inter-file worker contention on bounded hosts.`
+- **Current Implementation State**: `The human-escalation test passes alone and in the full App file locally. A separate artifact-viewer assertion fails reproducibly because it hard-codes US thousands separators while production uses the host locale. Vitest file concurrency also contradicts the App test file's documented bounded-worker scheduling requirement.`
+- **Focused Evidence So Far**: `The exact human-escalation test passed in 302 ms; it passed again in 101 ms within the complete App file. The complete App file's only local failure rendered the correct locale-specific 128.000 value against a hard-coded 128,000 assertion.`
+- **Documentation State**: `This active block supersedes the completed Codex Cloud policy-repair context below without altering its historical evidence.`
+- **Review State**: `Pending green focused/full-App/type/build verification and Cloud validation.`
+- **Pending Blockers**: `The host approval service rejected one attempted full-matrix command before execution; focused and full-App feedback loops remain available, and Codex Cloud is the authoritative final environment check.`
+- **Next Decisions / Actions**: `Verify the locale-safe assertion and serial test-file scheduling, publish and merge a bounded repair PR, then rerun Issue #79 until it returns a verified no-change result or draft cleanup PR.`
+
+## Previous Orchestration Context (historical - native Codex Cloud automation policy)
+
 <!-- refreshed 2026-09-03 for native Codex Cloud automation policy -->
 
 - **Captured For Run**: `2026-09-03 - Repair the subscription-based Codex Cloud automation contract for GitHub Issue #79.`

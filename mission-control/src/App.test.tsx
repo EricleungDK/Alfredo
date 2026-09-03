@@ -3628,6 +3628,7 @@ test("shows bounded evidence loading, failure, retry, truncation, and inline con
   const firstLoad = new Promise<SessionArtifactReadResult>((resolve) => {
     resolveFirst = resolve;
   });
+  const contentLimitBytes = 128_000;
   const loadSessionArtifact = vi
     .fn<(request: SessionArtifactReadRequest) => Promise<SessionArtifactReadResult>>()
     .mockImplementationOnce(async () => firstLoad)
@@ -3642,7 +3643,7 @@ test("shows bounded evidence loading, failure, retry, truncation, and inline con
         media_type: "application/json",
         content: '{"evidence_valid": true}',
         byte_count: 24,
-        content_limit_bytes: 128000,
+        content_limit_bytes: contentLimitBytes,
         truncated: true,
       },
     });
@@ -3678,7 +3679,11 @@ test("shows bounded evidence loading, failure, retry, truncation, and inline con
   expect(await within(viewer).findByLabelText("Evidence Package content")).toHaveTextContent(
     '"evidence_valid": true',
   );
-  expect(within(viewer).getByText(/Content is truncated at 128,000 bytes/)).toBeVisible();
+  expect(
+    within(viewer).getByText(
+      `Content is truncated at ${contentLimitBytes.toLocaleString()} bytes.`,
+    ),
+  ).toBeVisible();
   expect(loadSessionArtifact).toHaveBeenCalledTimes(2);
   expect(screen.queryByRole("link", { name: /Evidence Package session-ISS-EVIDENCE-1/ })).not.toBeInTheDocument();
   fireEvent.click(within(viewer).getByRole("button", { name: "Close session evidence viewer" }));
