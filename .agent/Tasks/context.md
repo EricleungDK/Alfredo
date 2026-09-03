@@ -16,9 +16,9 @@
 - **Current Implementation State**: `The human-escalation test passes alone and in the full App file locally. A separate artifact-viewer assertion fails reproducibly because it hard-codes US thousands separators while production uses the host locale. Vitest file concurrency also contradicts the App test file's documented bounded-worker scheduling requirement.`
 - **Focused Evidence So Far**: `The exact human-escalation test passed in 302 ms; it passed again in 101 ms within the complete App file. The complete App file's only local failure rendered the correct locale-specific 128.000 value against a hard-coded 128,000 assertion.`
 - **Documentation State**: `This active block supersedes the completed Codex Cloud policy-repair context below without altering its historical evidence.`
-- **Review State**: `Pending green focused/full-App/type/build verification and Cloud validation.`
-- **Pending Blockers**: `The host approval service rejected one attempted full-matrix command before execution; focused and full-App feedback loops remain available, and Codex Cloud is the authoritative final environment check.`
-- **Next Decisions / Actions**: `Verify the locale-safe assertion and serial test-file scheduling, publish and merge a bounded repair PR, then rerun Issue #79 until it returns a verified no-change result or draft cleanup PR.`
+- **Review State**: `Codex Cloud passed both exact focused tests, the complete 143-test App file, type checking, the 39-module production build, and diff checking. Serial file execution was confirmed active. The full frontend matrix reproduced the established unchanged baseline of 317 passing and 4 host-dependent failures.`
+- **Pending Blockers**: `None for the bounded test-stability repair. The unchanged broad failures remain comparative baseline evidence for Issue #79 rather than regressions introduced by this branch.`
+- **Next Decisions / Actions**: `Merge the bounded repair PR, then rerun Issue #79 until it returns a verified no-change result or draft cleanup PR.`
 
 ## Previous Orchestration Context (historical - native Codex Cloud automation policy)
 
