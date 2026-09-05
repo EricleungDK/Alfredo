@@ -4,6 +4,16 @@
 
 ## Active Orchestration Context
 
+- **Captured For Run**: 2026-09-05 manual execution of the Issue #79 daily cleanup workflow, starting SHA 2750ceca1333ebb6ce7111b9547c10f2b6e1884c.
+- **Current Mission / Ownership**: Codex root removes only two unconsumed App callbacks, private prop plumbing, and now-unused private draft types/import. Separate failure repair must use another task and branch.
+- **Proof**: TypeScript symbol identity shows each callback is referenced only at its declaration and the CommandDeck JSX prop; the three receiving destructured props have zero reads. Repository-wide references, private non-exported types/component, entrypoint and call-path review agree. Live client APIs and conversational Ad Hoc Delegation remain intact.
+- **Fixed Boundaries**: At most 10 files/300 deleted lines, no behavior change, test weakening, unrelated repair or merge. Preserve original checkout edits.
+- **Baseline**: App 144/144, frontend 299 passed/23 failed, gateway 20 passed/3 failed, typecheck/build pass, layout 4/4. Python 27 discovered with 18 import errors (Unix fcntl unavailable); browser cannot initialize backend; release spawn EINVAL; no verified release output; Cargo absent. Retain identical commands and environment for comparison.
+- **Comparative Result**: Candidate matches all baseline counts and failure signatures. Full Vitest failure blocks match after removing interleaved timing/summary lines; Python output matches except duration; browser assertion/stack and release errors are unchanged. App 144/144 and layout 4/4 pass; typecheck/build pass. No tests changed and no candidate-only retries.
+- **Pending / Next**: Publish one verified cleanup draft, then dispatch the deduplicated release-seam Git fixture repair in a separate task and branch; keep all PRs unmerged and report remaining unsupported-host limits.
+
+## Previous Orchestration Context (historical - Queue repair)
+
 - **Captured For Run**: 2026-09-05, user-requested Queue test repair and Issue #79 comparative-verification policy update.
 - **Current Mission Focus**: Reproduce intermittent Queue acknowledgment assertion; retain behavioral coverage and publish a separate repair PR.
 - **Active Agent Focus / Model Assignments**: Codex root is the sole active agent.
