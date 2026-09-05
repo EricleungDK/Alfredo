@@ -4,6 +4,19 @@
 
 ## Active Orchestration Context
 
+- **Captured For Run**: 2026-09-05, explicit implement request for issue #86 followed by closing the issue.
+- **Mission / Ownership**: Codex root owns the repair and closure. This request resolves the previous takeover question. Independent Standards and Spec reviewers will inspect the bounded candidate as required by implement/code-review.
+- **Authorization / Boundaries**: Apply and commit the verified fixture fix on the current local branch; preserve unrelated pre-existing context edits. Issue #86 authorizes a separate draft repair PR, and the current request explicitly authorizes closing #86. Never merge or change global Git settings; preserve all journey and diagnostic assertions.
+- **Feedback / Cause**: The fresh fixture Git repository lacks LF attributes. Actual-builder regression under inherited true fails before the fix; true/false/input pass after an explicit fixture .gitattributes. Use this pre-agreed seam for the permanent test.
+- **Baseline**: Diagnosis verified current remote main 3e03c657 in isolation. Current checkout remains a0195ad. Root source must receive only the bounded patch, with no unrelated main/cleanup synchronization.
+- **Verification Plan**: Re-run the focused red/green seam, typecheck, original journey, and full frontend suite once at the end. Review against a0195ad for local implementation and publish the same bounded changes atop current remote main.
+- **Remaining Boundary**: The permitted full journey reaches retirement and fails closed because WSL denies /proc/527/cwd inspection. Untouched main reproduces the exact same retirement failure under identical permissions. No full-journey or release success is claimed.
+- **Implementation / Review**: Verified fixture LF policy and three commit/checkout regression cases are applied. Local red/green and both typechecks pass. Independent Standards and Spec reviewers each report zero findings.
+- **Verification State**: Permitted full frontend suite: 324 passed / 1 known WSL retirement failure, also reproduced on untouched main. Both local and current-main typechecks pass. All three fixture regressions pass. Initial sandbox failures (288 passed / 37 failed) were environment restrictions resolved by the permitted run.
+- **Next Actions**: Commit the reviewed source/report while preserving unrelated local context edits, publish the same bounded repair atop remote main in one draft PR, link #79, and close #86 as explicitly requested. Leave the PR unmerged.
+
+## Previous Orchestration Context (historical - cleanup run)
+
 - **Captured For Run**: 2026-09-05 manual execution of the Issue #79 daily cleanup workflow, starting SHA 2750ceca1333ebb6ce7111b9547c10f2b6e1884c.
 - **Current Mission / Ownership**: Codex root removes only two unconsumed App callbacks, private prop plumbing, and now-unused private draft types/import. Separate failure repair must use another task and branch.
 - **Proof**: TypeScript symbol identity shows each callback is referenced only at its declaration and the CommandDeck JSX prop; the three receiving destructured props have zero reads. Repository-wide references, private non-exported types/component, entrypoint and call-path review agree. Live client APIs and conversational Ad Hoc Delegation remain intact.
