@@ -37,6 +37,8 @@ function writeReleaseTracker(root: string) {
   const issues = tracker;
   const agentConfig = resolve(root, "agents.json");
   mkdirSync(issues, { recursive: true });
+  // This fixture is a separate repository and does not inherit our .gitattributes.
+  writeFileSync(resolve(workspace, ".gitattributes"), "* text=auto eol=lf\n", "utf8");
   writeFileSync(resolve(tracker, "PRD.md"), "# Alfredo Release Seam\n", "utf8");
   writeFileSync(
     resolve(issues, "01-release-seam.md"),
@@ -433,6 +435,53 @@ function createBackendClient(options: {
     },
   };
 }
+
+test.each(["true", "false", "input"])(
+  "release tracker preserves LF through commit and checkout with inherited core.autocrlf=%s",
+  (autocrlf) => {
+    const root = realpathSync(mkdtempSync(resolve(tmpdir(), "alfredo-release-git-")));
+    const globalConfig = resolve(root, "gitconfig");
+    writeFileSync(
+      globalConfig,
+      `[core]\n\tautocrlf = ${autocrlf}\n\teol = crlf\n\tsafecrlf = true\n`,
+      "utf8",
+    );
+    vi.stubEnv("GIT_CONFIG_GLOBAL", globalConfig);
+    vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
+    // Keep the matrix independent of command-scope settings in the test runner.
+    vi.stubEnv("GIT_CONFIG_COUNT", "0");
+    vi.stubEnv("GIT_CONFIG_PARAMETERS", "");
+    try {
+      const { workspace } = writeReleaseTracker(root);
+      const git = (...args: string[]) => {
+        const result = spawnSync("git", ["-C", workspace, ...args], { encoding: "utf8" });
+        expect(result.stderr).toBe("");
+        expect(result.status).toBe(0);
+        return result.stdout;
+      };
+      expect(git("config", "--global", "--get", "core.autocrlf").trim()).toBe(autocrlf);
+      const files = ["PRD.md", "01-release-seam.md", "02-runner-recovery.md"];
+      const contents = files.map((file) => {
+        const relative = `.agent/issues/${file}`;
+        const content = readFileSync(resolve(workspace, relative), "utf8");
+        expect(content).toContain("\n");
+        expect(content).not.toContain("\r");
+        expect(git("show", `HEAD:${relative}`)).toBe(content);
+        rmSync(resolve(workspace, relative));
+        return content;
+      });
+      git("checkout", "--", ".");
+      files.forEach((file, index) => {
+        expect(readFileSync(resolve(workspace, ".agent/issues", file), "utf8"))
+          .toBe(contents[index]);
+      });
+      expect(git("status", "--porcelain")).toBe("");
+    } finally {
+      vi.unstubAllEnvs();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test("release seam covers launch intent, workstation action acknowledgement, journal, and restart restore", async () => {
   window.localStorage.clear();
