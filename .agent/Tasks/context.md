@@ -1,8 +1,20 @@
 # Central Context
 
-**Last Updated**: 2026-09-03
+**Last Updated**: 2026-09-05
 
 ## Active Orchestration Context
+
+- **Captured For Run**: 2026-09-05, user-requested Queue test repair and Issue #79 comparative-verification policy update.
+- **Current Mission Focus**: Reproduce intermittent Queue acknowledgment assertion; retain behavioral coverage and publish a separate repair PR.
+- **Active Agent Focus / Model Assignments**: Codex root is the sole active agent.
+- **Fixed Boundaries**: Isolated clone at af74a85; preserve original checkout edits, never merge, never weaken tests or mix dead-code removal into repair.
+- **Testing Seam Direction**: Run the existing test with a delayed acknowledgment to expose asynchronous assertion races; verify the original full App file, typecheck, build and gateway checks.
+- **Cause / Fix**: The existing status role is present during Pending. A 25 ms response delay reproduces the immediate Acknowledged assertion failure. Wait for acknowledged content and focus together; cover immediate and delayed responses without changing production code or weakening assertions.
+- **Verification**: Original App file 143/143; repaired App file 144/144. Typecheck and 39-module build pass. Broad frontend baseline 298 passed/23 failed; repaired 299 passed/23 failed, with identical failing test identities and diagnostic signatures. Gateway 20 passed/3 Windows path failures matching the broad runs. Node 22.19.0, npm 10.9.3, Windows x64; native Linux release/browser gates were not run for this test-only repair.
+- **Automation State**: Issue #79 and the existing 09:00 local daily prompt now apply comparative attribution to focused and broad checks and require deduplicated separate repair tasks/PRs for proven baseline defects. New or worsened failures and uncertainty still block cleanup.
+- **Pending Blockers / Next Actions**: Publish the isolated test repair as a draft PR and report on #79. No merge or cleanup code change in this repair.
+
+## Previous Orchestration Context (historical - verified cleanup)
 
 <!-- refreshed 2026-09-03 for the verified Issue #79 cleanup -->
 
