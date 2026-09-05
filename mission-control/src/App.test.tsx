@@ -6891,7 +6891,7 @@ test("surfaces and retries an Activity Journal load failure without discarding c
   await waitFor(() => expect(loads).toBe(2));
 });
 
-test("workspace queue lists grouped governance items and acknowledges decisions", async () => {
+test.each([0, 25])("workspace queue lists grouped governance items and acknowledges decisions (response delay: %i ms)", async (responseDelay) => {
   const item = {
     item_id: "issue-change-command-deck-ISS-01-000001",
     mission_id: "command-deck",
@@ -6940,6 +6940,7 @@ test("workspace queue lists grouped governance items and acknowledges decisions"
     }),
     submitWorkspaceQueueDecision: async (request) => {
       decisions.push(request);
+      if (responseDelay) await new Promise((resolve) => setTimeout(resolve, responseDelay));
       return {
         kind: "acknowledged",
         acknowledgement: {
@@ -6967,8 +6968,12 @@ test("workspace queue lists grouped governance items and acknowledges decisions"
 
   fireEvent.click(within(queue).getByRole("button", { name: "Approve issue-change-command-deck-ISS-01-000001" }));
 
-  expect(await screen.findByRole("status", { name: "Workspace Queue decision status" })).toHaveTextContent("Acknowledged");
-  expect(screen.getByRole("status", { name: "Workspace Queue decision status" })).toHaveFocus();
+  // The status exists while pending; wait for the acknowledged state, not merely its presence.
+  await waitFor(() => {
+    const status = screen.getByRole("status", { name: "Workspace Queue decision status" });
+    expect(status).toHaveTextContent("Acknowledged");
+    expect(status).toHaveFocus();
+  });
   expect(decisions).toEqual([
     {
       correlation_id: "queue-approve-issue-change-command-deck-ISS-01-000001-2",
