@@ -24,7 +24,6 @@ import type {
   ShellTerminalClassification,
   ShellTerminalCommandRecord,
   ShellTerminalCommandStatus,
-  MissionDraftCreateRequest,
   MissionDraftDecision,
   MissionDraftProjection,
   ReviewDecision,
@@ -79,23 +78,6 @@ import {
 import "./styles.css";
 
 const AGENT_CONSOLE_USER_CONTENT_CHARACTER_LIMIT = 16_000;
-
-interface AdHocDelegationDraft {
-  readonly acceptanceCriteria: readonly string[];
-  readonly allowedPaths: readonly string[];
-  readonly commandPolicy: Readonly<Record<string, string>>;
-  readonly proposedAgent: string;
-  readonly originatingMessageId: string;
-}
-
-interface MissionDraftCreateDraft {
-  readonly proposedGoal: string;
-  readonly selectedAdHocIds: readonly string[];
-  readonly excludedAdHocIds: readonly string[];
-  readonly newWorkItems: readonly string[];
-  readonly dependencies: readonly string[];
-  readonly unresolvedDecisions: readonly string[];
-}
 
 interface WorkstationActionTurn {
   readonly id: string;
@@ -2439,141 +2421,6 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
     [beginVisibleWorkstationAction, client, finishVisibleWorkstationAction, missionDrafts, refreshMissionDrafts, state],
   );
 
-  const submitMissionDraftCreate = useCallback(
-    async (draft: MissionDraftCreateDraft) => {
-      if (
-        state === "loading" ||
-        (state.kind !== "ready" && state.kind !== "empty") ||
-        !client.submitMissionDraftCreate
-      ) {
-        return;
-      }
-      const current = state;
-      const correlationId = `mission-draft-create-${current.snapshot.revision}`;
-      beginVisibleWorkstationAction(
-        correlationId,
-        `Create Mission Draft ${draft.proposedGoal}`,
-        "mission-draft:create",
-      );
-      setMissionDraftStatus({ state: "pending", message: "Creating Mission Draft." });
-      const request: MissionDraftCreateRequest = {
-        correlation_id: correlationId,
-        expected_revision: current.snapshot.revision,
-        proposed_goal: draft.proposedGoal,
-        selected_ad_hoc_ids: draft.selectedAdHocIds,
-        excluded_ad_hoc_ids: draft.excludedAdHocIds,
-        new_work_items: draft.newWorkItems,
-        dependencies: draft.dependencies,
-        unresolved_decisions: draft.unresolvedDecisions,
-        mission_id: current.snapshot.active_mission?.id,
-      };
-      const result = await client.submitMissionDraftCreate(request);
-      if (result.kind === "acknowledged") {
-        await refreshMissionDrafts();
-        const snapshotResult = await client.loadSnapshot();
-        if (snapshotResult.kind !== "ready" && snapshotResult.kind !== "empty") {
-          const message =
-            `Mission Draft was acknowledged, but canonical snapshot reload failed: ` +
-            `${snapshotResult.message} Retry the canonical workspace load.`;
-          setMissionDraftStatus({ state: "rejected", message });
-          finishVisibleWorkstationAction(
-            correlationId,
-            "mission-draft:create",
-            "failed",
-            message,
-          );
-          setConnectionStatus("offline");
-          return;
-        }
-        setState(snapshotResult);
-        setConnectionStatus("connected");
-        setMissionDraftStatus({
-          state: "acknowledged",
-          message: result.acknowledgement.effect_summary,
-        });
-        finishVisibleWorkstationAction(
-          correlationId,
-          "mission-draft:create",
-          "acknowledged",
-          result.acknowledgement.effect_summary,
-          result.acknowledgement.correlation_id,
-        );
-        return;
-      }
-      setMissionDraftStatus({ state: result.kind, message: result.message });
-      finishVisibleWorkstationAction(correlationId, "mission-draft:create", result.kind, result.message);
-    },
-    [beginVisibleWorkstationAction, client, finishVisibleWorkstationAction, refreshMissionDrafts, state],
-  );
-
-  const submitAdHocDelegationProposal = useCallback(
-    async (proposal: AdHocDelegationDraft) => {
-      if (
-        state === "loading" ||
-        (state.kind !== "ready" && state.kind !== "empty") ||
-        !client.submitAdHocDelegationProposal
-      ) {
-        return;
-      }
-      const current = state;
-      const scope = current.snapshot.conversation_scope;
-      const correlationId = `ad-hoc-delegation-${proposal.originatingMessageId}-${current.snapshot.revision}`;
-      beginVisibleWorkstationAction(
-        correlationId,
-        `Propose Ad Hoc Delegation from ${proposal.originatingMessageId}`,
-        proposal.originatingMessageId,
-      );
-      setQueueStatus({ state: "pending", message: "Ad Hoc Delegation proposal pending" });
-      const request: AdHocDelegationProposalRequest = {
-        correlation_id: correlationId,
-        expected_revision: current.snapshot.revision,
-        source: "agent-console",
-        scope_kind: scope.kind,
-        scope_target: scope.target_id,
-        scope_label: scope.label,
-        mission_id: scope.mission_id ?? current.snapshot.active_mission?.id,
-        acceptance_criteria: proposal.acceptanceCriteria,
-        allowed_paths: proposal.allowedPaths,
-        command_policy: proposal.commandPolicy,
-        proposed_agent: proposal.proposedAgent,
-        originating_message_id: proposal.originatingMessageId,
-      };
-      const result = await client.submitAdHocDelegationProposal(request);
-      if (result.kind !== "acknowledged") {
-        setQueueStatus({ state: result.kind, message: result.message });
-        finishVisibleWorkstationAction(correlationId, proposal.originatingMessageId, result.kind, result.message);
-        return;
-      }
-      const reloaded = await client.loadSnapshot();
-      if (reloaded.kind !== "ready" && reloaded.kind !== "empty") {
-        setQueueStatus({ state: "rejected", message: "Proposal acknowledged but reload failed" });
-        finishVisibleWorkstationAction(
-          correlationId,
-          proposal.originatingMessageId,
-          "failed",
-          "Ad Hoc Delegation proposal acknowledged but canonical snapshot reload failed.",
-        );
-        setConnectionStatus("offline");
-        return;
-      }
-      setState(reloaded);
-      setConnectionStatus("connected");
-      setQueueStatus({
-        state: "acknowledged",
-        message: result.acknowledgement.effect_summary,
-      });
-      finishVisibleWorkstationAction(
-        correlationId,
-        proposal.originatingMessageId,
-        "acknowledged",
-        result.acknowledgement.effect_summary,
-        result.acknowledgement.correlation_id,
-      );
-      await refreshWorkspaceQueue();
-    },
-    [beginVisibleWorkstationAction, client, finishVisibleWorkstationAction, refreshWorkspaceQueue, state],
-  );
-
   const selectCodingWorkspace = useCallback(
     async (selectionMode: "existing" | "create") => {
       if (!launchContext || !client.selectCodingWorkspace || !codingWorkspacePath.trim()) {
@@ -2846,7 +2693,6 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
       onActivityFilterChange={setActivityFilters}
       onActivityRefresh={() => void refreshActivityJournal(activityFilters)}
       queueStatus={queueStatus}
-      latestConsoleMessage={consoleHistory.at(-1) ?? null}
       queueReasons={queueReasons}
       onQueueReasonChange={(itemId, reason) =>
         setQueueReasons((current) => ({ ...current, [itemId]: reason }))
@@ -2861,8 +2707,6 @@ export function App({ client, syncIntervalMs = 1000 }: AppProps) {
         setWorkstationActionDrafts((current) => ({ ...current, [key]: draft }))
       }
       onWorkstationAction={submitWorkstationAction}
-      onAdHocProposal={submitAdHocDelegationProposal}
-      onMissionDraftCreate={submitMissionDraftCreate}
       onMissionDraftReasonChange={(draftId, reason) =>
         setMissionDraftReasons((current) => ({ ...current, [draftId]: reason }))
       }
@@ -3556,7 +3400,6 @@ function CommandDeck({
   onActivityFilterChange,
   onActivityRefresh,
   queueStatus,
-  latestConsoleMessage,
   queueReasons,
   onQueueReasonChange,
   onQueueDecision,
@@ -3567,8 +3410,6 @@ function CommandDeck({
   workstationActionDrafts,
   onWorkstationActionDraftChange,
   onWorkstationAction,
-  onAdHocProposal,
-  onMissionDraftCreate,
   onMissionDraftReasonChange,
   onMissionDraftDecision,
   commandAuditOpen,
@@ -3651,7 +3492,6 @@ function CommandDeck({
     state: "pending" | "acknowledged" | "stale" | "rejected";
     message: string;
   } | null;
-  latestConsoleMessage: AgentConsoleMessage | null;
   queueReasons: Record<string, string>;
   onQueueReasonChange: (itemId: string, reason: string) => void;
   onQueueDecision: (itemId: string, decision: WorkspaceQueueDecision, reason: string) => void;
@@ -3665,8 +3505,6 @@ function CommandDeck({
     action: WorkstationGovernedAction,
     draft: WorkstationActionDraftState,
   ) => void;
-  onAdHocProposal: (proposal: AdHocDelegationDraft) => void;
-  onMissionDraftCreate: (draft: MissionDraftCreateDraft) => void;
   onMissionDraftReasonChange: (draftId: string, reason: string) => void;
   onMissionDraftDecision: (
     draftId: string,
