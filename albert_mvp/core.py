@@ -12667,7 +12667,6 @@ class AlbertMission:
         self,
         session: LocalAgentSession,
     ) -> dict[str, Any]:
-        worktree_path = session.worktree_path
         marker = session.repository_snapshot.get("preparation")
         marker_state = marker.get("state") if isinstance(marker, dict) else ""
         if marker_state in {"target-overlay-pending", "target-overlay-applied"}:
