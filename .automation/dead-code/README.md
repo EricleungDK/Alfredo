@@ -4,11 +4,12 @@ This directory lives on the dedicated `automation-state` branch and is the machi
 
 ## Sources of truth
 
-- Policy and safety contract: issue #79.
+- Policy and safety contract: issue #79 body.
 - Current pull-request state: live GitHub PR data only. Never infer open/closed/merged state from issue text or historical comments.
 - Current workflow state: `.automation/dead-code/state.json` on `automation-state`.
 - Per-run evidence: one GitHub issue titled `[Dead-code run] YYYY-MM-DD`.
 - Historical machine records and usage: `.automation/dead-code/runs/YYYY-MM-DD.json` on this branch when available.
+- Issue #79 comments dated on or before 2026-09-10 are legacy evidence only and must never be parsed as the current queue.
 
 ## State rules
 
@@ -20,15 +21,29 @@ Before starting a new run, the timer must query live GitHub for currently open P
 
 Each day that passes the prechecks gets one issue named `[Dead-code run] YYYY-MM-DD`. The issue contains the Cloud trigger, Cloud evidence/pending record, local publication result and usage metadata for that run. Close the run issue once terminal. Do not append routine run records to issue #79.
 
+New records use v2 markers so legacy #79 comments cannot be mistaken for live queue state:
+
+- `<!-- alfredo-run-v2 -->`
+- `<!-- alfredo-pending-v2 -->`
+- `<!-- alfredo-publication-v2 -->`
+
 ## Usage accounting
 
-Each run should report usage only from authoritative runtime or OpenAI usage metadata when available. Never manufacture token counts or convert tokens into a subscription-quota percentage without an explicit platform-provided allowance denominator.
+Track the timer, Cloud producer and local publisher separately. Report usage only from authoritative runtime or OpenAI usage metadata when available. Never manufacture token counts or convert tokens into a subscription-quota percentage without an explicit platform-provided allowance denominator.
 
-Use this shape in the run record:
+Use this shape in each run record:
 
 ```json
 {
   "usage": {
+    "timer": {
+      "model": null,
+      "input_tokens": null,
+      "cached_input_tokens": null,
+      "output_tokens": null,
+      "credits": null,
+      "source": "unavailable"
+    },
     "cloud": {
       "model": null,
       "input_tokens": null,
