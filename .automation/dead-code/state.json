@@ -1,0 +1,20 @@
+{
+  "version": 2,
+  "workflow": "alfredo-dead-code-cleanup",
+  "policy_issue": "https://github.com/EricleungDK/Alfredo/issues/79",
+  "state_branch": "automation-state",
+  "active_run": null,
+  "last_terminal_run": {
+    "run_id": "2026-09-06",
+    "status": "published",
+    "run_issue": null,
+    "pr_url": "https://github.com/EricleungDK/Alfredo/pull/88",
+    "pr_state": "merged"
+  },
+  "migration": {
+    "legacy_history_issue": 79,
+    "legacy_history_through": "2026-09-10",
+    "note": "Legacy issue comments are historical evidence only and are never authoritative for current PR state. New runs use one issue per run."
+  },
+  "updated_at": "2026-09-10T15:17:00Z"
+}
