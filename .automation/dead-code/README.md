@@ -25,6 +25,7 @@ New records use v2 markers so legacy #79 comments cannot be mistaken for live qu
 
 - `<!-- alfredo-run-v2 -->`
 - `<!-- alfredo-pending-v2 -->`
+- `<!-- alfredo-outcome-v2 -->`
 - `<!-- alfredo-publication-v2 -->`
 
 ## Usage accounting
