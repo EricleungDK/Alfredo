@@ -9,7 +9,7 @@ This directory lives on the dedicated `automation-state` branch and is the machi
 - Current workflow state: `.automation/dead-code/state.json` on `automation-state`.
 - Per-run evidence: one GitHub issue titled `[Dead-code run] YYYY-MM-DD`.
 - Historical machine records and usage: `.automation/dead-code/runs/YYYY-MM-DD.json` on this branch when available.
-- Issue #79 comments dated on or before 2026-09-10 are legacy evidence only and must never be parsed as the current queue.
+- Legacy v1 comment bodies on issue #79 were intentionally cleared on 2026-09-10 after the v2 migration. The #79 comment timeline is not an operational state source.
 
 ## State rules
 
