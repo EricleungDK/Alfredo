@@ -3,25 +3,52 @@
   "workflow": "alfredo-dead-code-cleanup",
   "policy_issue": "https://github.com/EricleungDK/Alfredo/issues/79",
   "state_branch": "automation-state",
-  "active_run": {
-    "run_id": "2026-09-11",
-    "run_issue": "https://github.com/EricleungDK/Alfredo/issues/89",
-    "run_issue_number": 89,
-    "status": "triggered",
-    "created_at": "2026-09-11T07:03:24Z"
-  },
+  "active_run": null,
   "last_terminal_run": {
-    "run_id": "2026-09-06",
-    "status": "published",
-    "run_issue": null,
-    "pr_url": "https://github.com/EricleungDK/Alfredo/pull/88",
-    "pr_state": "merged"
+    "run_id": "2026-09-11",
+    "status": "verification_failed",
+    "run_issue": "https://github.com/EricleungDK/Alfredo/issues/89",
+    "pr_url": null,
+    "base_sha": "89f6cfd7c498af3f337564f64b54aad03f47e604",
+    "usage": {
+      "timer": {
+        "model": null,
+        "input_tokens": null,
+        "cached_input_tokens": null,
+        "output_tokens": null,
+        "credits": null,
+        "source": "unavailable"
+      },
+      "cloud": {
+        "model": null,
+        "input_tokens": null,
+        "cached_input_tokens": null,
+        "output_tokens": null,
+        "credits": null,
+        "source": "unavailable"
+      },
+      "local": {
+        "model": null,
+        "input_tokens": null,
+        "cached_input_tokens": null,
+        "output_tokens": null,
+        "credits": null,
+        "source": "unavailable"
+      },
+      "quota": {
+        "used": null,
+        "remaining": null,
+        "unit": null,
+        "reset_at": null,
+        "source": "unavailable"
+      }
+    }
   },
-  "last_reported_run": "2026-09-06",
+  "last_reported_run": "2026-09-11",
   "migration": {
     "legacy_history_issue": 79,
     "legacy_history_through": "2026-09-10",
     "note": "Legacy issue comments are historical evidence only and are never authoritative for current PR or queue state. New runs use one issue per run."
   },
-  "updated_at": "2026-09-11T07:03:50Z"
+  "updated_at": "2026-09-12T06:58:25Z"
 }
