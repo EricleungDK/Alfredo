@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "id": "albert_mvp.workspace.SharedUnderstandingGateError",
+      "path": "albert_mvp/workspace.py",
+      "symbol": "SharedUnderstandingGateError",
+      "classification": "compatibility_re_export",
+      "reason": "The symbol is intentionally observable from albert_mvp.workspace; tests/test_workspace_snapshot.py imports SharedUnderstandingGateError from that module. Removing the import caused candidate-only ImportError failures on runs 2026-09-11 and 2026-09-12.",
+      "evidence_runs": ["2026-09-11", "2026-09-12"],
+      "handling": "Do not propose this binding as dead code while repository references still import SharedUnderstandingGateError from albert_mvp.workspace. Perform only a cheap reference check. If that observable import contract disappears or the relevant module changes materially, re-evaluate rather than permanently suppressing it."
+    }
+  ]
+}
