@@ -16,7 +16,11 @@ This directory lives on the dedicated `automation-state` branch and is the machi
 
 `active_run` is either `null` or an object containing the current run ID, run issue URL/number, status and timestamps. At most one active run is allowed. A run is terminal after `published`, `superseded`, `rejected`, `no_change`, or `verification_failed` is established. Terminal runs clear `active_run` and update `last_terminal_run`.
 
-Before starting a new run, the timer must query live GitHub for currently open PRs whose title begins `chore: remove proven dead code`. Closed or merged PRs never block a new run. It must then read `state.json`; a non-terminal active run blocks another run. It must also search for an existing run issue for today's Europe/Copenhagen date to prevent duplicates.
+Before starting a new run, the timer must query live GitHub for currently open PRs whose title begins `chore: remove proven dead code`. Closed or merged PRs never block a new run. It then reads the active run, if any, and performs a cheap orchestration preflight before deciding that the run blocks another day.
+
+A valid pending record younger than 24 hours may block a new run while publication is in progress. It must not block if its schema/checksum is malformed or if its patch is structurally outside policy. In particular, reject pending changes that touch tests (`tests/`, test directories, `*.test.*`, `*.spec.*`), fixtures, generated/vendored code, migrations, or policy/orchestration state; reject binary/rename/mode changes, oversized scope, and additions that are not merely a syntactic contraction of an existing line. Timer rejection is orchestration-only: never apply the patch.
+
+Any unresolved active run older than 24 hours is stale. Terminalize it as `superseded` with classification `stale_run_timeout`, clear `active_run`, close the run issue, and allow the current day's fresh analysis to proceed. Never publish or reuse a stale patch. The timer must also search for an existing run issue for today's Europe/Copenhagen date to prevent duplicates.
 
 ## Candidate exclusions
 
