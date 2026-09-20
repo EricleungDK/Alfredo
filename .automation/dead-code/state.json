@@ -47,11 +47,11 @@
       }
     }
   },
-  "last_reported_run": "2026-09-12",
+  "last_reported_run": "2026-09-13",
   "migration": {
     "legacy_history_issue": 79,
     "legacy_history_through": "2026-09-10",
     "note": "Legacy issue comments are historical evidence only and are never authoritative for current PR or queue state. New runs use one issue per run."
   },
-  "updated_at": "2026-09-20T08:58:51Z"
+  "updated_at": "2026-09-20T09:01:20Z"
 }
