@@ -4,25 +4,47 @@
   "policy_issue": "https://github.com/EricleungDK/Alfredo/issues/79",
   "state_branch": "automation-state",
   "known_live_ref": "automation-state:.automation/dead-code/known-live.json",
-  "active_run": {
-    "run_id": "2026-09-13",
-    "run_issue": "https://github.com/EricleungDK/Alfredo/issues/91",
-    "run_issue_number": 91,
-    "status": "triggered",
-    "created_at": "2026-09-13T07:02:38Z"
-  },
+  "active_run": null,
   "last_terminal_run": {
-    "run_id": "2026-09-12",
-    "status": "no_change",
-    "classification": "candidate_disqualified_as_live_compatibility_surface",
-    "run_issue": "https://github.com/EricleungDK/Alfredo/issues/90",
+    "run_id": "2026-09-13",
+    "status": "rejected",
+    "classification": "out_of_policy_test_file",
+    "run_issue": "https://github.com/EricleungDK/Alfredo/issues/91",
     "pr_url": null,
     "base_sha": "89f6cfd7c498af3f337564f64b54aad03f47e604",
+    "terminal_at": "2026-09-20T08:58:51Z",
     "usage": {
-      "timer": {"model": null, "input_tokens": null, "cached_input_tokens": null, "output_tokens": null, "credits": null, "source": "not_exposed_to_automation"},
-      "cloud": {"model": null, "input_tokens": null, "cached_input_tokens": null, "output_tokens": null, "credits": null, "source": "not_exposed_to_github_connector", "task_url": "https://chatgpt.com/s/cd_6aa4f8a0054081918882569b6470879e"},
-      "local": {"model": null, "input_tokens": null, "cached_input_tokens": null, "output_tokens": null, "credits": null, "source": "not_run"},
-      "quota": {"used": null, "remaining": null, "unit": null, "reset_at": null, "source": "available_only_in_chatgpt_or_codex_usage_ui"}
+      "timer": {
+        "model": null,
+        "input_tokens": null,
+        "cached_input_tokens": null,
+        "output_tokens": null,
+        "credits": null,
+        "source": "not_exposed_to_automation"
+      },
+      "cloud": {
+        "model": null,
+        "input_tokens": null,
+        "cached_input_tokens": null,
+        "output_tokens": null,
+        "credits": null,
+        "source": "not_exposed_to_github_connector"
+      },
+      "local": {
+        "model": null,
+        "input_tokens": null,
+        "cached_input_tokens": null,
+        "output_tokens": null,
+        "credits": null,
+        "source": "not_run"
+      },
+      "quota": {
+        "used": null,
+        "remaining": null,
+        "unit": null,
+        "reset_at": null,
+        "source": "available_only_in_chatgpt_or_codex_usage_ui"
+      }
     }
   },
   "last_reported_run": "2026-09-12",
@@ -31,5 +53,5 @@
     "legacy_history_through": "2026-09-10",
     "note": "Legacy issue comments are historical evidence only and are never authoritative for current PR or queue state. New runs use one issue per run."
   },
-  "updated_at": "2026-09-13T07:02:38Z"
+  "updated_at": "2026-09-20T08:58:51Z"
 }
