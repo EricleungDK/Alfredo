@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "run_id": "2026-09-21",
+  "status": "triggered",
+  "policy_issue": "https://github.com/EricleungDK/Alfredo/issues/79",
+  "run_issue": "https://github.com/EricleungDK/Alfredo/issues/93",
+  "run_issue_number": 93,
+  "state_ref": "automation-state:.automation/dead-code/state.json",
+  "known_live_ref": "automation-state:.automation/dead-code/known-live.json",
+  "created_at": "2026-09-21T07:05:12Z",
+  "updated_at": "2026-09-21T07:05:12Z",
+  "usage": {
+    "timer": {"model": null, "input_tokens": null, "cached_input_tokens": null, "output_tokens": null, "credits": null, "source": "not_exposed_to_automation"},
+    "cloud": {"model": null, "input_tokens": null, "cached_input_tokens": null, "output_tokens": null, "credits": null, "source": "not_exposed_to_github_connector"},
+    "local": {"model": null, "input_tokens": null, "cached_input_tokens": null, "output_tokens": null, "credits": null, "source": "not_run"},
+    "quota": {"used": null, "remaining": null, "unit": null, "reset_at": null, "source": "available_only_in_chatgpt_or_codex_usage_ui"}
+  }
+}
