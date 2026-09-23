@@ -4,23 +4,17 @@
   "policy_issue": "https://github.com/EricleungDK/Alfredo/issues/79",
   "state_branch": "automation-state",
   "known_live_ref": "automation-state:.automation/dead-code/known-live.json",
-  "active_run": {
-    "run_id": "2026-09-22",
-    "run_issue": "https://github.com/EricleungDK/Alfredo/issues/94",
-    "run_issue_number": 94,
-    "status": "triggered",
-    "created_at": "2026-09-22T07:04:00Z"
-  },
+  "active_run": null,
   "last_terminal_run": {
-    "run_id": "2026-09-21",
+    "run_id": "2026-09-22",
     "status": "no_change",
-    "run_issue": "https://github.com/EricleungDK/Alfredo/issues/93",
+    "run_issue": "https://github.com/EricleungDK/Alfredo/issues/94",
     "pr_url": null,
-    "source_commit": "89f6cfd",
-    "terminal_at": "2026-09-22T07:01:33Z",
+    "source_sha": "89f6cfd7c498af3f337564f64b54aad03f47e604",
+    "terminal_at": "2026-09-22T07:09:59Z",
     "usage": {
       "timer": {"model": null, "input_tokens": null, "cached_input_tokens": null, "output_tokens": null, "credits": null, "source": "not_exposed_to_automation"},
-      "cloud": {"model": null, "input_tokens": null, "cached_input_tokens": null, "output_tokens": null, "credits": null, "source": "not_exposed_to_github_connector", "task_url": "https://github.com/EricleungDK/Alfredo/issues/93"},
+      "cloud": {"model": null, "input_tokens": null, "cached_input_tokens": null, "output_tokens": null, "credits": null, "source": "not_exposed_to_github_connector", "task_thread_url": "https://github.com/EricleungDK/Alfredo/issues/94"},
       "local": {"model": null, "input_tokens": null, "cached_input_tokens": null, "output_tokens": null, "credits": null, "source": "not_run"},
       "quota": {"used": null, "remaining": null, "unit": null, "reset_at": null, "source": "available_only_in_chatgpt_or_codex_usage_ui"}
     }
@@ -31,5 +25,5 @@
     "legacy_history_through": "2026-09-10",
     "note": "Legacy issue comments are historical evidence only and are never authoritative for current PR or queue state. New runs use one issue per run."
   },
-  "updated_at": "2026-09-22T07:04:00Z"
+  "updated_at": "2026-09-23T06:58:35Z"
 }
