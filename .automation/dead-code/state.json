@@ -19,7 +19,7 @@
       "quota": {"used": null, "remaining": null, "unit": null, "reset_at": null, "source": "available_only_in_chatgpt_or_codex_usage_ui"}
     }
   },
-  "last_reported_run": "2026-09-22",
+  "last_reported_run": "2026-09-23",
   "migration": {
     "legacy_history_issue": 79,
     "legacy_history_through": "2026-09-10",
