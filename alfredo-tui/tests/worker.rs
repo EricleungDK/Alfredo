@@ -560,6 +560,22 @@ fn file_policy_rejects_metadata_traversal_duplicates_and_binary_edits() {
         files: vec!["x".into()],
         check: vec!["true".into()],
     };
+    let twice = FilePlan {
+        files: vec![
+            FileEdit {
+                path: "x".into(),
+                content: "a".into(),
+            },
+            FileEdit {
+                path: "x".into(),
+                content: "b".into(),
+            },
+        ],
+    };
+    assert_eq!(
+        worker::validate_plan(&twice, &policy).unwrap_err(),
+        "Returned x more than once; return each file once with its complete content"
+    );
     assert!(worker::validate_plan(
         &FilePlan {
             files: vec![FileEdit {

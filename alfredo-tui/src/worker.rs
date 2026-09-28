@@ -284,8 +284,17 @@ pub fn validate_plan(plan: &FilePlan, policy: &WorkPolicy) -> Result<()> {
     let mut seen = BTreeSet::new();
     let mut total = 0;
     for file in &plan.files {
-        if !seen.insert(&file.path) || file.content.contains('\0') {
-            return Err("Worker returned a duplicate or binary file".into());
+        if !seen.insert(&file.path) {
+            return Err(format!(
+                "Returned {} more than once; return each file once with its complete content",
+                file.path
+            ));
+        }
+        if file.content.contains('\0') {
+            return Err(format!(
+                "Returned binary content (NUL byte) for {}",
+                file.path
+            ));
         }
         total += file.content.len();
         if total > 128 * 1024 {

@@ -195,7 +195,10 @@ fn hierarchy_names_task_counts_and_renders_dependency_edges_once() {
     let tree = region(&buffer, 0, 2, 40, 33);
     // Default view: done/total over planned tasks (#1 done via accepted repair #5),
     // repairs counted separately; plan request instead of its receipt revision.
-    assert!(tree.contains("Mission Work · 1/5 done · 1 repair"), "{tree}");
+    assert!(
+        tree.contains("Mission Work · 1/5 done · 1 repair"),
+        "{tree}"
+    );
     assert!(tree.contains("Build a parser · 5"), "{tree}");
     assert!(!tree.contains("Plan r1"), "{tree}");
     assert!(tree.contains("Manual tasks · 1"), "{tree}");
