@@ -710,3 +710,22 @@ async fn preload_bypasses_admission_sends_keep_alive_and_reports_failure_as_erro
         .unwrap_err()
         .contains("500"));
 }
+
+#[test]
+fn ollama_host_forms_normalize_to_an_http_origin() {
+    use alfredo_tui::provider::normalize_endpoint;
+    for (input, expected) in [
+        ("127.0.0.1:11434", "http://127.0.0.1:11434"),
+        ("0.0.0.0", "http://127.0.0.1:11434"),
+        ("0.0.0.0:8080", "http://127.0.0.1:8080"),
+        ("http://0.0.0.0:11434", "http://127.0.0.1:11434"),
+        ("localhost", "http://localhost:11434"),
+        (" myhost:9000/ ", "http://myhost:9000"),
+        ("http://localhost:11434", "http://localhost:11434"),
+        ("https://models.example", "https://models.example"),
+        ("[::1]:11434", "http://[::1]:11434"),
+    ] {
+        assert_eq!(normalize_endpoint(input), expected, "{input}");
+        assert!(Ollama::new(&normalize_endpoint(input), Duration::from_secs(1)).is_ok());
+    }
+}

@@ -168,6 +168,30 @@ impl FrameProgress {
     }
 }
 
+/// Accepts Ollama's own `OLLAMA_HOST` forms (`host`, `host:port`, bind address
+/// `0.0.0.0`) as well as full HTTP(S) origins.
+pub fn normalize_endpoint(value: &str) -> String {
+    let value = value.trim().trim_end_matches('/');
+    let (scheme, rest) = match value.split_once("://") {
+        Some((scheme, rest)) => (Some(scheme), rest),
+        None => (None, value),
+    };
+    let (host, port) = match rest.rsplit_once(':') {
+        Some((host, port)) if !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()) => {
+            (host, Some(port))
+        }
+        _ => (rest, None),
+    };
+    // A bind-all address is not connectable; the server listens on loopback too.
+    let host = if host == "0.0.0.0" { "127.0.0.1" } else { host };
+    match (scheme, port) {
+        (Some(scheme), Some(port)) => format!("{scheme}://{host}:{port}"),
+        (Some(scheme), None) => format!("{scheme}://{host}"),
+        (None, Some(port)) => format!("http://{host}:{port}"),
+        (None, None) => format!("http://{host}:11434"),
+    }
+}
+
 impl Ollama {
     pub fn new(base: &str, idle_timeout: Duration) -> Result<Self, String> {
         let mut endpoint = reqwest::Url::parse(base).map_err(|_| "Invalid Ollama URL")?;

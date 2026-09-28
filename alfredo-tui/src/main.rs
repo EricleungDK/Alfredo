@@ -142,6 +142,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             _ => return Err(format!("Unknown argument: {arg}; use --help").into()),
         }
     }
+    let endpoint = alfredo_tui::provider::normalize_endpoint(&endpoint);
     if model.trim().is_empty() || model.len() > 200 || model.chars().any(char::is_control) {
         return Err("Model name must contain 1–200 bytes without control characters".into());
     }
