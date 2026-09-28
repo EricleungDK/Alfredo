@@ -260,13 +260,14 @@ async fn shared_admission_rechecks_captured_inputs_before_http_and_releases_refu
                 "stale-captured-request".into(),
                 vec![],
                 sender,
-                move || async move {
+                move || {
                     checks_in.fetch_add(1, Ordering::SeqCst);
-                    if changed_in.load(Ordering::SeqCst) {
+                    let result = if changed_in.load(Ordering::SeqCst) {
                         Err("Captured task revision changed".into())
                     } else {
                         Ok(())
-                    }
+                    };
+                    async move { result }
                 },
             )
             .await;

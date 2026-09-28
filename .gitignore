@@ -16,3 +16,4 @@ mission-control/src-tauri/target/
 alfredo-tui/target/
 alfredo-tui/dist/
 alfredo-tui/dependency-audit.json
+.claude/worktrees/

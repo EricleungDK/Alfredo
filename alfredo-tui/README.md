@@ -155,6 +155,26 @@ active/configured slots when available. Position may change as foreground reques
 arrive. **Waiting for model server** follows admission and does not claim the server
 is loading or busy. Model discovery bypasses this queue.
 
+### Connection and warm models
+
+- `--keep-alive VALUE` (env `ALFREDO_KEEP_ALIVE`, default `30m`) is sent as Ollama
+  `keep_alive` on chat, planner and worker requests. Accepts Go durations (`30m`,
+  `1h30m`), integer seconds (`300`; `-1` keeps the model loaded), or `default` to
+  omit the field and use the server setting.
+- At startup, on workspace switch and on `/model NAME`, Alfredo preloads the model
+  in the background (`POST /api/generate` with an empty prompt). Preload bypasses
+  the inference queue; failure is only a status.
+- `--connect-retries N` (0–10, default 3; 0 disables): a model request that fails
+  before any reply or thinking text (connection refused/reset, no response headers,
+  HTTP 5xx) retries automatically after 1 s, 2 s, 4 s… The session shows
+  **Reconnecting in Ns · retry i/N**; Esc cancels immediately. Once any text has
+  arrived, the partial reply is kept and retry stays manual (Ctrl+R). Checks and
+  tools are never retried.
+- The header polls `GET /api/ps` every 5 s (2 s timeout, outside the queue):
+  `ollama ✓ MODEL warm`, `ollama ✓ MODEL loading`, `ollama ✓ MODEL` (server up,
+  model not loaded) or `ollama ✗ retrying`. Narrow terminals omit the model name.
+  A restarted server is picked up without restarting Alfredo.
+
 Queued cancellation removes eligibility before HTTP dispatch; process exit releases
 its client slots. Saved queue records never replay inference. The ten-minute total
 deadline still includes queue time; the loading/idle deadline starts after admission.

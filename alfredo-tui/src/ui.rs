@@ -42,6 +42,30 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&crate::task_control::
     .split(area);
     let session = &app.sessions[app.selected];
     let active = app.sessions.iter().filter(|s| s.status.active()).count();
+    let health = app.health.state(&session.model);
+    let health = health
+        .label(&session.model, area.width >= 100)
+        .map(|label| {
+            let color = if health.healthy() {
+                Color::Green
+            } else {
+                Color::Red
+            };
+            Span::styled(format!(" {label} "), Style::default().fg(color))
+        })
+        .unwrap_or_default();
+    // With a mission line, health sits at its right edge so the status row keeps its width.
+    let health_width = u16::try_from(health.width()).unwrap_or(u16::MAX);
+    let (health, mission_health) = if identity.is_some() {
+        (Span::default(), Some(health))
+    } else {
+        (health, None)
+    };
+    let used = if mission_health.is_some() {
+        0
+    } else {
+        health_width
+    };
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -51,6 +75,7 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&crate::task_control::
                     .bg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
+            health,
             Span::raw(if let Some(tasks) = tasks {
                 let dispatch = if area.width >= 60 {
                     format!(
@@ -62,9 +87,9 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&crate::task_control::
                 };
                 let status = tasks
                     .work_status()
-                    .concise(area.width.saturating_sub(10 + dispatch.len() as u16));
+                    .concise(area.width.saturating_sub(10 + used + dispatch.len() as u16));
                 let mut header = format!(" {dispatch}{status}");
-                let remaining = usize::from(area.width)
+                let remaining = usize::from(area.width.saturating_sub(used))
                     .saturating_sub(9 + unicode_width::UnicodeWidthStr::width(header.as_str()));
                 if remaining >= 16 {
                     if tasks.visible {
@@ -87,6 +112,12 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&crate::task_control::
         rows[0],
     );
     if let Some(snapshot) = identity {
+        let health_width = health_width.min(rows[1].width);
+        let line = Layout::horizontal([Constraint::Min(0), Constraint::Length(health_width)])
+            .split(rows[1]);
+        if let Some(health) = mission_health {
+            frame.render_widget(Paragraph::new(Line::from(health)), line[1]);
+        }
         frame.render_widget(
             Paragraph::new(format!(
                 " Mission: {} · {}",
@@ -94,7 +125,7 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&crate::task_control::
                 safe(&snapshot.workspace.display().to_string())
             ))
             .style(Style::default().fg(Color::Cyan)),
-            rows[1],
+            line[0],
         );
     }
     let wide = area.width >= 88;

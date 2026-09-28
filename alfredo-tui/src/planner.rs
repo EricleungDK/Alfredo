@@ -737,7 +737,11 @@ impl Planner {
             let (model_sender, mut model_events) = mpsc::channel(32);
             let provider = provider.with_json_schema(schema).with_priority(crate::inference_admission::Class::Foreground);
             let expected_revision = request.expected_revision;
-            let admission_check = move || async move {
+            // Runs again on each automatic reconnection.
+            let admission_check = move || {
+                let admission_store = admission_store.clone();
+                let architecture = architecture.clone();
+                async move {
                 if expected_revision.is_none() && architecture.is_none() {
                     return Ok(());
                 }
@@ -753,6 +757,7 @@ impl Planner {
                     }
                     Ok(())
                 }).await.map_err(|_| "Planner admission reader stopped".to_string())?
+                }
             };
             tokio::join!(provider.chat_with_admission(0, 0, model, messages, model_sender, admission_check), async {
                 while let Some(event) = model_events.recv().await {
@@ -821,6 +826,14 @@ impl Planner {
                 }
                 Update::Admitted => {
                     self.notice = "Plan waiting for model server · no action taken".into()
+                }
+                Update::Retrying(retry) => {
+                    self.notice = format!(
+                        "Reconnecting to model server in {}s · retry {}/{} · no action taken",
+                        retry.delay.as_secs(),
+                        retry.retry,
+                        retry.limit
+                    )
                 }
                 Update::Token(token) => {
                     if self.partial.len() + token.len() > 128 * 1024 {

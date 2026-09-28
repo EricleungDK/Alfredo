@@ -126,6 +126,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.respond(wire(result))
 
     def do_POST(self):
+        if self.path == '/api/generate':
+            # Startup/model-selection preload: loads the model, generates nothing.
+            self.rfile.read(int(self.headers.get('Content-Length', 0)))
+            body = b'{"done":true,"done_reason":"load"}\n'
+            self.send_response(200)
+            self.send_header('Content-Type', 'application/json')
+            self.send_header('Content-Length', str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         try:
             if self.path != '/api/chat':
                 raise ValueError(f'Unexpected inference endpoint: {self.path}')

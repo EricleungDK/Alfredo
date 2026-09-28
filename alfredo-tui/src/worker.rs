@@ -739,7 +739,11 @@ async fn perform(
     let job = tokio::spawn(async move {
         provider
             .chat_with_admission(0, 1, model, messages, sender, move || {
-                worker_inference_admission(admission_store, admission_task, admission_cancel)
+                worker_inference_admission(
+                    admission_store.clone(),
+                    admission_task.clone(),
+                    admission_cancel.clone(),
+                )
             })
             .await;
     });
@@ -758,6 +762,7 @@ async fn perform(
                 Some(Update::Queued) => observer.stage("Waiting for shared Alfredo capacity"),
                 Some(Update::QueueProgress(queue)) => observer.queue(queue),
                 Some(Update::Admitted) => observer.stage("Waiting for model server"),
+                Some(Update::Retrying(_)) => observer.stage("Reconnecting to model server"),
                 Some(Update::Token(text)) => { observer.content(text.len()); answer.push_str(&text); },
                 Some(Update::Done) => { done = true; break; },
                 Some(Update::Failed(reason)) => { error = Some(reason); break; },

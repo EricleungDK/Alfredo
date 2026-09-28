@@ -39,6 +39,16 @@ class FixtureServer:
                 self.wfile.write(b'{"models":[{"name":"fixture"}]}')
 
             def do_POST(self):
+                if self.path == '/api/generate':
+                    # Startup/model-selection preload: loads the model, generates nothing.
+                    self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                    body = b'{"done":true,"done_reason":"load"}\n'
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.send_header('Content-Length', str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
                 try:
                     request = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
                     prompt = request['messages'][-1]['content']
