@@ -6125,6 +6125,13 @@ async fn blocks_answer_is_requested_without_schema_and_applied_verbatim() {
     let prompt = last_prompt(&request);
     assert!(prompt.contains("=== FILE: <path> ==="), "{prompt}");
     assert!(!prompt.contains("JSON schema"), "{prompt}");
+    // The format is restated after the long source context.
+    assert!(
+        prompt.trim_end().ends_with(
+            "Answer only with FILE blocks, one per changed file, each ending with === END FILE ==="
+        ),
+        "{prompt}"
+    );
     let evidence: worker::Evidence =
         serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
     assert_eq!(
