@@ -214,20 +214,34 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
                 .add_modifier(Modifier::BOLD),
         )
     };
-    let failed = matches!(
-        evidence.status,
-        TaskStatus::Failed | TaskStatus::Rejected | TaskStatus::Cancelled
-    );
+    let detail = single_line(&evidence.detail);
+    let (text, color) = match evidence.status {
+        TaskStatus::ReviewReady | TaskStatus::Accepted => {
+            ("✓ Check passed".to_owned(), Color::Green)
+        }
+        TaskStatus::Cancelled => (format!("– Run cancelled · {detail}"), Color::Yellow),
+        TaskStatus::NeedsHumanReview => (format!("‖ Held · {detail}"), Color::Magenta),
+        _ => (format!("✗ Run failed · {detail}"), Color::Red),
+    };
+    let passed = color == Color::Green;
+    let exit = evidence
+        .check
+        .as_ref()
+        .and_then(|check| check.exit_code)
+        .map(|code| format!(" · exit {code}"))
+        .unwrap_or_default();
+    // A pass is one line; a failure keeps the check status on its own line.
     let mut lines = vec![Line::styled(
-        format!("Outcome · {}", single_line(&evidence.detail)),
-        Style::default().fg(if failed { Color::Red } else { Color::Green }),
+        if passed {
+            format!("{text}{exit}")
+        } else {
+            text
+        },
+        Style::default().fg(color),
     )];
     match &evidence.check {
+        Some(_) if passed => {}
         Some(check) => {
-            let exit = check
-                .exit_code
-                .map(|code| format!(" · exit {code}"))
-                .unwrap_or_default();
             lines.push(Line::from(format!(
                 "Check · {}{exit}",
                 single_line(&check.status)

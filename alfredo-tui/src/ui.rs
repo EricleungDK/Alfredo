@@ -392,7 +392,8 @@ fn draw_body(
                     .map(|s| Line::from(s.to_owned()))
                     .collect(),
                 " Plan draft · /plan-revise · /plan-save · /plan-cancel ".into(),
-                false,
+                // Follow the streaming draft while it generates.
+                tasks.planner.active(),
             );
         } else if let Some(evidence) = &tasks.evidence {
             let block = frame_block(
@@ -549,9 +550,15 @@ fn draw_transcript(
     let identity = tasks.and_then(|tasks| tasks.snapshot.as_ref());
     let mut lines = Vec::new();
     let mut blocks = Vec::new();
+    // A new chat suggests the common path, even below the workspace arrival line.
     if session.messages.is_empty()
         && session.task_receipts().is_empty()
-        && session.commands().is_empty()
+        && session.commands().iter().all(|command| {
+            matches!(
+                command.intent,
+                crate::command_intent::Intent::SelectionArrival { .. }
+            )
+        })
     {
         lines.push(Line::from(
             "Type /go GOAL and autopilot plans, runs and reviews it.",

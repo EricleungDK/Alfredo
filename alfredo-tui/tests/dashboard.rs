@@ -354,6 +354,70 @@ fn finished_task_shows_outcome_then_diff_and_failure_reason_in_the_pane() {
 }
 
 #[test]
+fn successful_outcome_reads_as_passed_not_as_a_pending_review_request() {
+    let evidence = serde_json::to_string(&Evidence {
+        agent: None,
+        candidate_commit: None,
+        model_metrics: None,
+        generation: None,
+        run: "run-1".into(),
+        baseline: "a".repeat(40),
+        status: TaskStatus::ReviewReady,
+        detail: "Approved check passed; changes await human review".into(),
+        patch: String::new(),
+        check: None,
+    })
+    .unwrap();
+    let lines = alfredo_tui::dashboard::outcome_lines(&evidence).unwrap();
+    let first = lines[0].to_string();
+    assert!(first.contains("✓ Check passed"), "{first}");
+    assert!(!first.contains("await human review"), "{first}");
+    assert!(!lines.iter().any(|line| line.to_string().contains("run-1")));
+}
+
+#[test]
+fn empty_chat_suggests_go_even_after_the_workspace_arrival_line() {
+    let fixture = calc_plan();
+    let mut app = App::new("fixture".into());
+    let request = alfredo_tui::selection_command::Request {
+        correlation: "arrival".into(),
+        origin: alfredo_tui::selection_command::Origin::Conversation {
+            workspace: "/repo/source".into(),
+            mission: "source".into(),
+            conversation: "default".into(),
+            session: 0,
+        },
+        choice: alfredo_tui::selection_command::Choice {
+            workspace: alfredo_tui::selection_command::WorkspaceChoice::Create {
+                parent: "/repo".into(),
+                name: "created".into(),
+            },
+            mission: alfredo_tui::selection_command::MissionChoice::StartNew {
+                name: "next".into(),
+            },
+        },
+        conversation: "default".into(),
+    };
+    app.sessions[0]
+        .submit_selection_arrival(
+            request,
+            alfredo_tui::selection_command::Outcome {
+                phase: alfredo_tui::selection_command::Phase::Selected,
+                failure: None,
+            },
+        )
+        .unwrap();
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.snapshot = fixture.control.snapshot.clone();
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal
+        .draw(|frame| ui::draw_with_tasks(frame, &app, &control))
+        .unwrap();
+    let screen = text(terminal.backend().buffer());
+    assert!(screen.contains("/go GOAL"), "{screen}");
+}
+
+#[test]
 fn autopilot_follows_the_running_task_unless_the_user_recently_moved() {
     let mut fixture = calc_plan();
     fixture.select(1);
