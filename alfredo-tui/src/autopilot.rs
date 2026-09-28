@@ -124,7 +124,11 @@ pub enum RunState {
     Running,
     Paused,
     Finishing,
+    /// Finished with every planned task accepted.
     Done,
+    /// Finished with some planned tasks accepted and others failed or held.
+    Partial,
+    /// Finished with no planned task accepted (or stopped before any ran).
     Failed,
 }
 impl RunState {
@@ -135,9 +139,37 @@ impl RunState {
             Self::Paused => "paused",
             Self::Finishing => "integrating",
             Self::Done => "done",
-            Self::Failed => "stopped",
+            Self::Partial => "partial",
+            Self::Failed => "failed",
         }
     }
+    pub fn marker(self) -> &'static str {
+        match self {
+            Self::Paused => "‖",
+            Self::Done => "✓",
+            Self::Partial => "◐",
+            Self::Failed => "✗",
+            _ => "▶",
+        }
+    }
+    pub fn finished(self) -> bool {
+        matches!(self, Self::Done | Self::Partial | Self::Failed)
+    }
+}
+
+/// Finished state from original planned-task outcomes; repairs never count as tasks.
+fn outcome(accepted: usize, total: usize) -> RunState {
+    if total > 0 && accepted == total {
+        RunState::Done
+    } else if accepted > 0 {
+        RunState::Partial
+    } else {
+        RunState::Failed
+    }
+}
+
+fn plural(count: u32, word: &str) -> String {
+    format!("{count} {word}{}", if count == 1 { "" } else { "s" })
 }
 
 /// Read-only projection for the UI. Counts derive from durable task receipts.
@@ -165,12 +197,7 @@ impl Status {
         } else {
             format!("{:02}:{:02}", seconds / 60, seconds % 60)
         };
-        let marker = match self.state {
-            RunState::Paused => "‖",
-            RunState::Done => "✓",
-            RunState::Failed => "■",
-            _ => "▶",
-        };
+        let marker = self.state.marker();
         let mut line = format!(
             "Autopilot {marker} {} · {}/{} done · {} failed · repairs {} · {clock}",
             self.state.label(),
@@ -223,6 +250,8 @@ pub struct Autopilot {
     /// Monotonic process clock plus seconds already elapsed when it was taken.
     clock: (std::time::Instant, u64),
     notice: String,
+    /// One-line result, handed once to the terminal footer when the loop finishes.
+    finished_notice: Option<String>,
 }
 
 impl Autopilot {
@@ -269,7 +298,13 @@ impl Autopilot {
             job: None,
             clock: (std::time::Instant::now(), saved_elapsed.unwrap_or_default()),
             notice,
+            finished_notice: None,
         })
+    }
+
+    /// The finished loop's one-line result, once; it replaces the stale start notice.
+    pub fn take_finished_notice(&mut self) -> Option<String> {
+        self.finished_notice.take()
     }
 
     fn elapsed(&self) -> u64 {
@@ -402,6 +437,7 @@ impl Autopilot {
         self.last = None;
         self.attempts.clear();
         self.job = None;
+        self.finished_notice = None;
         self.clock = (std::time::Instant::now(), 0);
         self.notice = format!(
             "Autopilot started · plan → approve → dispatch → review/repair (max {max_repairs} repairs per task) · F5 pauses"
@@ -541,7 +577,7 @@ impl Autopilot {
 
     pub fn status(&self, tasks: &TaskControl) -> Option<Status> {
         let saved = self.saved.as_ref()?;
-        let state = match saved.phase {
+        let mut state = match saved.phase {
             Phase::Done => RunState::Done,
             Phase::Failed => RunState::Failed,
             _ if saved.paused => RunState::Paused,
@@ -559,6 +595,9 @@ impl Autopilot {
                     Settled::Active => {}
                 }
             }
+        }
+        if state == RunState::Done {
+            state = outcome(done, saved.count as usize);
         }
         Some(Status {
             state,
@@ -644,8 +683,9 @@ impl Autopilot {
         if let Some(saved) = self.saved.as_mut() {
             saved.phase = Phase::Failed;
             saved.finished = Some(saved.started + elapsed);
-            saved.report = Some(format!("Autopilot stopped: {}\n{notice}", saved.goal));
+            saved.report = Some(format!("Autopilot failed: {}\n{notice}", saved.goal));
         }
+        self.finished_notice = Some(clean(&format!("Autopilot failed · {notice}"), 1024));
         self.set_notice(tasks, notice);
         tasks.autopilot_report = self.report().map(str::to_owned);
         self.persist();
@@ -866,12 +906,8 @@ impl Autopilot {
                     format!("/resolve-repair {}", head.id),
                 )),
                 TaskStatus::Failed | TaskStatus::Cancelled => {
-                    let detail = head
-                        .run
-                        .as_ref()
-                        .map(|run| run.detail.as_str())
-                        .unwrap_or("worker failed");
-                    let reason = clean(&format!("autopilot: {detail}"), 1800);
+                    let reason =
+                        clean(&format!("autopilot: {}", failure_detail(tasks, head)), 1800);
                     Some((
                         format!("repair-{}", head.id),
                         format!("/repair {} {reason}", head.id),
@@ -1011,7 +1047,21 @@ impl Autopilot {
         };
         let saved = self.saved.as_ref().unwrap().clone();
         let families = families(&snapshot, &saved, tasks);
-        let mut lines = vec![format!("Autopilot finished: {}", clean(&saved.goal, 200))];
+        let accepted = families
+            .iter()
+            .filter(|family| matches!(family.settled, Settled::Success(_)))
+            .count();
+        let repairs: u32 = families.iter().map(|family| family.repairs).sum();
+        let state = outcome(accepted, families.len());
+        let tally = format!(
+            "{accepted}/{} task(s) accepted · {}",
+            families.len(),
+            plural(repairs, "repair")
+        );
+        let mut lines = vec![
+            format!("Autopilot {}: {}", state.label(), clean(&saved.goal, 200)),
+            tally,
+        ];
         let mut stuck = 0;
         for family in &families {
             let title = snapshot
@@ -1031,7 +1081,6 @@ impl Autopilot {
             };
             lines.push(format!("#{} {title} — {outcome}", family.root));
         }
-        let accepted = families.len() - stuck;
         let branch = match result {
             Ok(value) => {
                 let (name, commit) = value.split_once('\0').unwrap_or((&value, ""));
@@ -1059,16 +1108,17 @@ impl Autopilot {
             }
         };
         let report = lines.join("\n");
-        let notice = match &branch {
-            Some(name) => format!(
-                "Autopilot done · {accepted}/{} accepted · git switch {name}",
-                families.len()
-            ),
-            None => format!(
-                "Autopilot done · {accepted}/{} accepted · no integration branch",
-                families.len()
-            ),
-        };
+        let notice = format!(
+            "Autopilot {} · {accepted}/{} accepted · {} · {}",
+            state.label(),
+            families.len(),
+            plural(repairs, "repair"),
+            match &branch {
+                Some(name) => format!("git switch {name}"),
+                None => "no integration branch".into(),
+            }
+        );
+        self.finished_notice = Some(notice.clone());
         let elapsed = self.elapsed();
         if let Some(saved) = self.saved.as_mut() {
             saved.phase = Phase::Done;
@@ -1081,6 +1131,26 @@ impl Autopilot {
         tasks.autopilot_report = Some(report);
         self.persist();
     }
+}
+
+/// Repair reason detail: a failed check's bounded output tail from verified
+/// evidence, else the recorded run detail. Never empty.
+fn failure_detail(tasks: &TaskControl, head: &Task) -> String {
+    let check = tasks
+        .store()
+        .evidence(head.id)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<crate::worker::Evidence>(&raw).ok())
+        .and_then(|evidence| evidence.check)
+        .filter(|check| !crate::worker::check_passed(check));
+    if let Some(check) = check {
+        return crate::worker::failure_summary(&check, 1780);
+    }
+    head.run
+        .as_ref()
+        .map(|run| clean(&run.detail, 1780))
+        .filter(|detail| !detail.trim_end_matches(':').trim().is_empty())
+        .unwrap_or_else(|| "worker failed; no detail recorded".into())
 }
 
 /// Autopilot approves without a human reading each policy, so it also refuses

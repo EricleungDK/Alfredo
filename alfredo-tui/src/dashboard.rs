@@ -84,14 +84,24 @@ pub fn state_word(task: &Task) -> &'static str {
     }
 }
 
-pub fn done_total(snapshot: &Snapshot) -> (usize, usize) {
+/// Original tasks done and total, plus repair tasks counted separately. An
+/// original task resolved by an accepted repair counts as done.
+pub fn done_total(snapshot: &Snapshot) -> (usize, usize, usize) {
+    let originals: Vec<&Task> = snapshot
+        .tasks
+        .iter()
+        .filter(|task| task.repair_of.is_none())
+        .collect();
+    let done = originals
+        .iter()
+        .filter(|task| {
+            task.status == TaskStatus::Accepted || snapshot.resolution_for_family(task.id).is_some()
+        })
+        .count();
     (
-        snapshot
-            .tasks
-            .iter()
-            .filter(|task| task.status == TaskStatus::Accepted)
-            .count(),
-        snapshot.tasks.len(),
+        done,
+        originals.len(),
+        snapshot.tasks.len() - originals.len(),
     )
 }
 
@@ -111,13 +121,7 @@ pub fn clock(elapsed: std::time::Duration) -> String {
 
 /// Header row: glyph, state, done/total, failures, elapsed, branch when done, goal.
 pub fn autopilot_row(status: &crate::autopilot::Status, width: usize) -> String {
-    use crate::autopilot::RunState;
-    let marker = match status.state {
-        RunState::Paused => "‖",
-        RunState::Done => "✓",
-        RunState::Failed => "■",
-        _ => "▶",
-    };
+    let marker = status.state.marker();
     let mut row = format!(
         " Autopilot {marker} {} · {}/{} done · {} failed",
         status.state.label(),

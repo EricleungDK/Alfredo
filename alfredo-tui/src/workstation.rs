@@ -98,6 +98,21 @@ impl Workstation {
     pub fn mission(&self) -> &str {
         &self.mission
     }
+    /// Refresh the read-only autopilot projection. A finished loop replaces the
+    /// stale footer notice (such as “Autopilot started …”) with its result, once.
+    pub fn sync_autopilot(&mut self) -> bool {
+        let mut changed = false;
+        let status = self.autopilot.status(&self.tasks);
+        if status != self.tasks.autopilot {
+            self.tasks.autopilot = status;
+            changed = true;
+        }
+        if let Some(notice) = self.autopilot.take_finished_notice() {
+            self.app.notice = notice;
+            changed = true;
+        }
+        changed
+    }
     pub fn can_switch(&self) -> Result<(), String> {
         if self.wayfinder.active() {
             return Err("Wait for the Wayfinder scope receipt before switching work".into());
