@@ -1,7 +1,7 @@
 //! Async terminal adapter for durable task commands. Model prose never calls it.
 use crate::mission_work::{NodeId, Tree};
 use crate::provider::Ollama;
-use crate::tasks::{Action, Request, Snapshot, TaskStore};
+use crate::tasks::{Action, Refusal, Request, Snapshot, TaskStore};
 use std::time::{SystemTime, UNIX_EPOCH};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -38,6 +38,8 @@ impl From<(Snapshot, String)> for Projection {
     }
 }
 type Outcome = Result<Projection, String>;
+/// A store write's outcome; a transient refusal may carry the current snapshot.
+type Checked = Result<Projection, Refusal>;
 type ControlResult = (
     crate::control_command::Request,
     Result<crate::understanding::Snapshot, String>,
@@ -65,8 +67,8 @@ pub struct TaskControl {
     pub canonical_scope: Option<crate::understanding::Snapshot>,
     scope_retry: Option<crate::understanding::Request>,
     store: TaskStore,
-    sender: mpsc::Sender<Outcome>,
-    receiver: mpsc::Receiver<Outcome>,
+    sender: mpsc::Sender<Checked>,
+    receiver: mpsc::Receiver<Checked>,
     background_sender: mpsc::Sender<Outcome>,
     background_receiver: mpsc::Receiver<Outcome>,
     refreshing: bool,
@@ -76,6 +78,8 @@ pub struct TaskControl {
     prepared_active: Option<crate::command_intent::Intent>,
     prepared_workers: BTreeMap<u64, crate::command_intent::Intent>,
     prepared_errors: BTreeMap<String, String>,
+    /// Correlations whose refusal was transient: nothing was written.
+    prepared_transient: BTreeSet<String>,
     controller_epoch: u64,
     dispatch_origin: Option<crate::control_command::Request>,
     control_sender: mpsc::UnboundedSender<ControlResult>,
@@ -102,8 +106,8 @@ pub struct TaskControl {
     retry: Option<Request>,
     incarnation: String,
     sequence: u64,
-    worker_sender: mpsc::Sender<(u64, Outcome)>,
-    worker_receiver: mpsc::Receiver<(u64, Outcome)>,
+    worker_sender: mpsc::Sender<(u64, Checked)>,
+    worker_receiver: mpsc::Receiver<(u64, Checked)>,
     pub workers: BTreeMap<u64, Arc<AtomicBool>>,
     pub dispatch: crate::dispatch::Dispatch,
     progress: BTreeMap<u64, watch::Receiver<crate::worker::Progress>>,
@@ -154,6 +158,7 @@ impl TaskControl {
             prepared_active: None,
             prepared_workers: BTreeMap::new(),
             prepared_errors: BTreeMap::new(),
+            prepared_transient: BTreeSet::new(),
             controller_epoch: 0,
             dispatch_origin: None,
             control_sender,
@@ -366,6 +371,7 @@ impl TaskControl {
                     .checked_add(1)
                     .ok_or("Controller epoch exhausted; restart before enabling dispatch")?;
                 self.dispatch.enabled = true;
+                self.dispatch.contended = None;
                 self.dispatch_origin = Some(request.clone());
                 Ok(())
             });
@@ -400,19 +406,31 @@ impl TaskControl {
             }
         }
         while let Ok((task, result)) = self.worker_receiver.try_recv() {
-            if let Some(intent) = self.prepared_workers.remove(&task) {
-                if let Err(error) = &result {
-                    self.prepared_errors
-                        .insert(intent.correlation().into(), error.clone());
-                }
+            let intent = self.prepared_workers.remove(&task);
+            if let Some(intent) = &intent {
+                self.record_refusal(intent.correlation(), &result);
             }
-            if let Err(error) = &result {
-                self.dispatch.failures.insert(task, error.clone());
-            }
+            let automatic = matches!(
+                intent,
+                Some(crate::command_intent::Intent::DispatchRun { .. })
+            );
             self.workers.remove(&task);
             self.worker_identities.remove(&task);
             self.progress.remove(&task);
-            self.apply_outcome(result);
+            match &result {
+                Err(refusal) if automatic && refusal.transient() => {
+                    let reason = refusal.to_string();
+                    self.apply_checked(result);
+                    self.defer_launch(task, &reason);
+                }
+                _ => {
+                    self.dispatch.transient.remove(&task);
+                    if let Err(error) = &result {
+                        self.dispatch.failures.insert(task, error.to_string());
+                    }
+                    self.apply_checked(result);
+                }
+            }
             changed = true;
         }
         for receiver in self.progress.values_mut() {
@@ -425,10 +443,7 @@ impl TaskControl {
             return changed;
         };
         if let Some(intent) = self.prepared_active.take() {
-            if let Err(error) = &result {
-                self.prepared_errors
-                    .insert(intent.correlation().into(), error.clone());
-            }
+            self.record_refusal(intent.correlation(), &result);
         }
         self.pending = false;
         self.writing = false;
@@ -451,8 +466,62 @@ impl TaskControl {
             }
             self.retry = None;
         }
-        self.apply_outcome(result);
+        self.apply_checked(result);
         true
+    }
+
+    /// A stale refusal still delivers the current snapshot, so the next decision
+    /// is prepared on current state instead of repeating the refused revision.
+    fn apply_checked(&mut self, result: Checked) {
+        match result {
+            Ok(projection) => self.apply_outcome(Ok(projection)),
+            Err(Refusal::Stale(Some(current))) => {
+                let notice = format!(
+                    "{} · current state loaded (revision {})",
+                    Refusal::Stale(None),
+                    current.revision
+                );
+                self.apply_outcome(Ok((*current, notice).into()));
+            }
+            Err(refusal) => self.apply_outcome(Err(refusal.into())),
+        }
+    }
+
+    fn record_refusal(&mut self, correlation: &str, result: &Checked) {
+        self.prepared_transient.remove(correlation);
+        if let Err(refusal) = result {
+            self.prepared_errors
+                .insert(correlation.into(), refusal.to_string());
+            if refusal.transient() {
+                self.prepared_transient.insert(correlation.into());
+            }
+        }
+    }
+
+    /// Nothing was claimed: release this approval's start reservation so a fresh
+    /// request on current state may launch it. Bounded; then dispatch stops.
+    fn defer_launch(&mut self, task: u64, reason: &str) {
+        use crate::dispatch::TRANSIENT_LIMIT;
+        self.dispatch.attempts.remove(&task);
+        let count = self.dispatch.transient.entry(task).or_default();
+        *count += 1;
+        if *count >= TRANSIENT_LIMIT {
+            self.dispatch.transient.remove(&task);
+            let message = format!(
+                "Automatic launch #{task} deferred {TRANSIENT_LIMIT} times; task state kept changing: {reason}"
+            );
+            self.disable_dispatch();
+            self.dispatch.contended = Some(message.clone());
+            self.notice = message;
+        } else {
+            self.notice =
+                format!("Automatic launch #{task} deferred: {reason}; retrying on current state");
+        }
+    }
+
+    /// The intent was refused without effect because task state moved underneath it.
+    pub fn intent_transient(&self, intent: &crate::command_intent::Intent) -> bool {
+        self.prepared_transient.contains(intent.correlation())
     }
 
     fn apply_outcome(&mut self, result: Outcome) {
@@ -1160,13 +1229,13 @@ impl TaskControl {
                         .map(Projection::from),
                     None => Err("Worker provider unavailable".into()),
                 };
-                let _ = sender.send(result).await;
+                let _ = sender.send(result.map_err(Refusal::from)).await;
             });
             return;
         }
         runtime.spawn(async move {
             let result = tokio::task::spawn_blocking(move || match request {
-                Some(request) => store.transact(request).map(|(snapshot, receipt)| {
+                Some(request) => store.transact_checked(request).map(|(snapshot, receipt)| {
                     let notice = match &receipt.request.action {
                         Action::ReviewArchitecture { task, .. } if receipt.task == *task => format!("Architecture failures repeated · Architect revision required for #{task} · revision {}", receipt.revision),
                         Action::ReviewArchitecture { task, .. } => format!("Architecture review #{task} saved · repair #{} proposed · revision {}", receipt.task, receipt.revision),
@@ -1189,7 +1258,7 @@ impl TaskControl {
                         scope: None,
                         canonical_scope: scope_state.ok(),
                     }
-                }),
+                }).map_err(Refusal::from),
             })
             .await
             .unwrap_or_else(|_| Err("Task storage worker stopped; outcome unknown".into()));
@@ -1265,7 +1334,7 @@ impl TaskControl {
         let (observer, progress) = crate::worker::Observer::channel();
         self.progress.insert(task, progress);
         runtime.spawn(async move {
-            let result = tokio::spawn(crate::worker::start_observed(
+            let result = tokio::spawn(crate::worker::start_checked(
                 store,
                 task,
                 correlation,
@@ -1456,6 +1525,10 @@ impl TaskControl {
     /// Stop retries of a launch that could not be published or admitted. Existing
     /// workers continue; a stale request cannot turn off a newer controller.
     pub fn refuse_dispatch(&mut self, request: &crate::dispatch::RunRequest, reason: &str) {
+        if self.prepared_transient.contains(&request.correlation) {
+            // Already deferred without effect; a fresh request retries on current state.
+            return;
+        }
         let reason = crate::console_command::bounded_reason(reason);
         self.prepared_errors
             .insert(request.correlation.clone(), reason.clone());
@@ -1476,16 +1549,19 @@ impl TaskControl {
         runtime: &Runtime,
         request: &crate::dispatch::RunRequest,
     ) -> Result<(), String> {
-        let result: Result<(), String> = (|| {
+        let result: Result<(), Refusal> = (|| {
             request.validate()?;
             self.validate_dispatch_origin(&request.source)?;
             if self.pending || self.control_pending.is_some() {
-                return Err("Task or controller acknowledgment is pending".into());
+                // Another acknowledgment will move task state; prepare again after it.
+                return Err(Refusal::Busy);
             }
             let snapshot = self.snapshot.as_ref().ok_or("Task queue unavailable")?;
-            if snapshot.revision != request.expected_revision
-                || crate::dispatch::approval(snapshot, request.task)
-                    != Some(request.approval_revision)
+            if snapshot.revision != request.expected_revision {
+                // This controller already holds newer state; nothing was claimed.
+                return Err(Refusal::Stale(None));
+            }
+            if crate::dispatch::approval(snapshot, request.task) != Some(request.approval_revision)
             {
                 return Err("Task revision or approval changed before automatic launch".into());
             }
@@ -1516,10 +1592,22 @@ impl TaskControl {
             );
             Ok(())
         })();
-        if let Err(error) = &result {
-            self.refuse_dispatch(request, error);
+        match result {
+            Ok(()) => Ok(()),
+            Err(refusal) if refusal.transient() => {
+                let reason = refusal.to_string();
+                self.prepared_errors
+                    .insert(request.correlation.clone(), reason.clone());
+                self.prepared_transient.insert(request.correlation.clone());
+                self.defer_launch(request.task, &reason);
+                Err(reason)
+            }
+            Err(refusal) => {
+                let reason = refusal.to_string();
+                self.refuse_dispatch(request, &reason);
+                Err(reason)
+            }
         }
-        result
     }
 
     pub fn intent_pending(&self, intent: &crate::command_intent::Intent) -> bool {
@@ -1765,6 +1853,7 @@ impl TaskControl {
             return Err("Command acknowledgment is already pending".into());
         }
         self.prepared_errors.remove(intent.correlation());
+        self.prepared_transient.remove(intent.correlation());
         self.prepared_retry = Some(intent.clone());
         self.visible = true;
         let target = match intent {
@@ -1891,7 +1980,7 @@ impl TaskControl {
                         }
                         Err(error) => Err(error),
                     };
-                    let _ = sender.send(result).await;
+                    let _ = sender.send(result.map_err(Refusal::from)).await;
                 });
             }
             Intent::Recover { task, run, .. } => {
@@ -1914,7 +2003,7 @@ impl TaskControl {
                         })
                         .await
                         .unwrap_or_else(|_| Err("Recovery worker stopped; outcome unknown".into()));
-                    let _ = sender.send(result).await;
+                    let _ = sender.send(result.map_err(Refusal::from)).await;
                 });
             }
         }
@@ -2234,7 +2323,7 @@ impl TaskControl {
                 let result = crate::branch::publish(store, task, revision, correlation)
                     .await
                     .map(Projection::from);
-                let _ = sender.send(result).await;
+                let _ = sender.send(result.map_err(Refusal::from)).await;
             });
             return Ok(());
         }
@@ -2251,7 +2340,7 @@ impl TaskControl {
                         .unwrap_or_else(|_| {
                             Err("Recovery stopped; refresh before retrying /recover".into())
                         });
-                let _ = sender.send(result).await;
+                let _ = sender.send(result.map_err(Refusal::from)).await;
             });
             return Ok(());
         }

@@ -1122,3 +1122,327 @@ fn shell_string_check_is_rejected_before_unattended_approval_and_replanned() {
         vec!["/usr/bin/python3", "-m", "unittest"]
     );
 }
+
+/// How a concurrent writer overtakes a command that already captured its revision.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Race {
+    /// The store moves; this controller still holds the older snapshot.
+    Claim,
+    /// The store moves and this controller observes it before dispatching.
+    Admission,
+}
+
+/// Another writer (a parallel worker receipt or a human) lands one unrelated receipt.
+fn concurrent_write(fixture: &Fixture) {
+    let revision = fixture.store.snapshot().unwrap().revision;
+    fixture
+        .store
+        .transact(Request {
+            correlation: format!("concurrent-{revision}"),
+            expected_revision: revision,
+            action: Action::Propose {
+                title: "Unrelated concurrent note".into(),
+                model: "fixture".into(),
+                dependencies: vec![],
+            },
+        })
+        .unwrap();
+}
+
+/// `drive` without periodic refresh, so only the controller's own receipts move
+/// its snapshot. Before a command selected by `races` is dispatched (after it
+/// captured its revision), `concurrent_write` overtakes it. Stops when finished
+/// or paused.
+fn drive_racing(
+    fixture: &Fixture,
+    autopilot: &mut Autopilot,
+    control: &mut TaskControl,
+    runtime: &Runtime,
+    mut races: impl FnMut(&str) -> Option<Race>,
+) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut race = |label: &str, control: &mut TaskControl| {
+        let Some(race) = races(label) else {
+            return;
+        };
+        concurrent_write(fixture);
+        if race == Race::Admission {
+            control.refresh(runtime);
+            while control.pending {
+                control.poll();
+                assert!(Instant::now() < deadline, "refresh: {}", control.notice);
+                thread::sleep(Duration::from_millis(1));
+            }
+        }
+    };
+    loop {
+        control.poll();
+        if finished(autopilot, control) || !autopilot.running() {
+            return;
+        }
+        if let Some(submission) = autopilot.tick(runtime, control) {
+            race(&submission.text, control);
+            let _ = control.dispatch_prepared(runtime, &submission.intent);
+        }
+        if let Ok(Some(request)) = control.prepare_dispatch() {
+            race(&format!("launch #{}", request.task), control);
+            let _ = control.dispatch_prepared(runtime, &Intent::DispatchRun { request });
+        }
+        assert!(
+            Instant::now() < deadline,
+            "Timed out racing\n{:?}\n{}",
+            autopilot.status(control),
+            control.notice
+        );
+        thread::sleep(Duration::from_millis(3));
+    }
+}
+
+fn starts(snapshot: &alfredo_tui::tasks::Snapshot, id: u64) -> usize {
+    snapshot
+        .receipts
+        .iter()
+        .filter(
+            |receipt| matches!(receipt.request.action, Action::Start { task, .. } if task == id),
+        )
+        .count()
+}
+
+fn repair_launch_race(race: Race) {
+    let fixture = Fixture::new();
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return json!({"tasks": [
+                {"title": "Make answer return 42", "acceptance": ["answer() returns 42"], "model": "fixture",
+                 "dependencies": [], "policy": {"files": ["calc.py"], "check": check("from calc import answer; assert answer() == 42")}},
+                {"title": "Write notes", "acceptance": ["notes exist"], "model": "fixture",
+                 "dependencies": [], "policy": {"files": ["notes.txt"], "check": check("from pathlib import Path; assert Path('notes.txt').read_text()")}},
+            ]})
+            .to_string();
+        }
+        if worker_prompt(request).starts_with("Implement this task: Write notes") {
+            files("notes.txt", "independent\n")
+        } else {
+            bad_calc()
+        }
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Answer and notes", "fixture", 1, &control)
+        .unwrap();
+    let mut raced = 0;
+    drive_racing(&fixture, &mut autopilot, &mut control, &runtime, |label| {
+        (label == "launch #3" && raced == 0).then(|| {
+            raced += 1;
+            race
+        })
+    });
+    assert_eq!(raced, 1, "the repair launch was raced");
+    let status = autopilot.status(&control).unwrap();
+    let report = autopilot.report().unwrap_or_default().to_string();
+    assert_eq!(
+        status.state,
+        RunState::Partial,
+        "{status:?} {}",
+        autopilot.notice()
+    );
+    assert_eq!((status.done, status.total, status.failed), (1, 2, 1));
+    assert!(report.contains("repair budget exhausted"), "{report}");
+    assert!(!report.contains("launch failed"), "{report}");
+    let snapshot = fixture.store.snapshot().unwrap();
+    let repairs: Vec<_> = snapshot
+        .tasks
+        .iter()
+        .filter(|task| task.repair_of.is_some())
+        .collect();
+    assert_eq!(repairs.len(), 1, "exactly one repair child");
+    assert_eq!(
+        (repairs[0].id, repairs[0].status.clone()),
+        (3, TaskStatus::Failed)
+    );
+    assert_eq!(starts(&snapshot, 3), 1, "exactly one repair run");
+    assert!(
+        control.dispatch.failures.is_empty(),
+        "{:?}",
+        control.dispatch.failures
+    );
+}
+
+#[test]
+fn repair_launch_overtaken_at_its_claim_retries_on_current_state_once() {
+    repair_launch_race(Race::Claim);
+}
+
+#[test]
+fn repair_launch_overtaken_before_admission_retries_on_current_state_once() {
+    repair_launch_race(Race::Admission);
+}
+
+fn one_good_task() -> Server {
+    Server::new(|request, _| {
+        if planner(request) {
+            return json!({"tasks": [
+                {"title": "Make answer return 42", "acceptance": ["answer() returns 42"], "model": "fixture",
+                 "dependencies": [], "policy": {"files": ["calc.py"], "check": check("from calc import answer; assert answer() == 42")}},
+            ]})
+            .to_string();
+        }
+        good_calc()
+    })
+}
+
+fn decisions(snapshot: &alfredo_tui::tasks::Snapshot, id: u64) -> usize {
+    snapshot
+        .receipts
+        .iter()
+        .filter(
+            |receipt| matches!(receipt.request.action, Action::Decide { task, .. } if task == id),
+        )
+        .count()
+}
+
+#[test]
+fn review_overtaken_by_a_concurrent_write_is_resubmitted_on_current_state() {
+    let fixture = Fixture::new();
+    let server = one_good_task();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start("Answer", "fixture", 1, &control).unwrap();
+    let mut raced = 0;
+    drive_racing(&fixture, &mut autopilot, &mut control, &runtime, |label| {
+        (label.contains("/review 1") && raced == 0).then(|| {
+            raced += 1;
+            Race::Claim
+        })
+    });
+    assert_eq!(raced, 1);
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!(
+        status.state,
+        RunState::Done,
+        "{status:?} {}",
+        autopilot.notice()
+    );
+    let snapshot = fixture.store.snapshot().unwrap();
+    assert_eq!(decisions(&snapshot, 1), 1, "exactly one review");
+    assert_eq!(starts(&snapshot, 1), 1, "exactly one run");
+}
+
+#[test]
+fn resolve_repair_overtaken_by_a_concurrent_write_is_resubmitted_on_current_state() {
+    let fixture = Fixture::new();
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return two_task_plan();
+        }
+        let prompt = worker_prompt(request);
+        if prompt.starts_with("Implement this task: Repair #1:") {
+            good_calc()
+        } else if prompt.starts_with("Implement this task: Make answer") {
+            bad_calc()
+        } else {
+            app()
+        }
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Make answer return 42 and add app", "fixture", 2, &control)
+        .unwrap();
+    let mut raced = 0;
+    drive_racing(&fixture, &mut autopilot, &mut control, &runtime, |label| {
+        (label.contains("/resolve-repair 3") && raced == 0).then(|| {
+            raced += 1;
+            Race::Claim
+        })
+    });
+    assert_eq!(raced, 1);
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!(
+        status.state,
+        RunState::Done,
+        "{status:?} {}",
+        autopilot.notice()
+    );
+    assert_eq!(status.repairs, 1);
+    let snapshot = fixture.store.snapshot().unwrap();
+    let resolutions = snapshot
+        .receipts
+        .iter()
+        .filter(|receipt| matches!(receipt.request.action, Action::ResolveRepair { .. }))
+        .count();
+    assert_eq!(resolutions, 1, "exactly one resolution");
+    assert_eq!(
+        snapshot
+            .tasks
+            .iter()
+            .filter(|t| t.repair_of.is_some())
+            .count(),
+        1
+    );
+    assert_eq!(starts(&snapshot, 3), 1);
+}
+
+#[test]
+fn five_consecutive_overtaken_reviews_pause_then_resume_reviews_once() {
+    let fixture = Fixture::new();
+    let server = one_good_task();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start("Answer", "fixture", 1, &control).unwrap();
+    let mut raced = 0;
+    drive_racing(&fixture, &mut autopilot, &mut control, &runtime, |label| {
+        label.contains("/review 1").then(|| {
+            raced += 1;
+            Race::Claim
+        })
+    });
+    assert_eq!(raced, 5, "bounded to five transient refusals");
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Paused);
+    assert!(
+        autopilot.notice().contains("task state kept changing"),
+        "{}",
+        autopilot.notice()
+    );
+    assert_eq!(decisions(&fixture.store.snapshot().unwrap(), 1), 0);
+    autopilot.resume(&control).unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "done", finished);
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Done);
+    assert_eq!(decisions(&fixture.store.snapshot().unwrap(), 1), 1);
+}
+
+#[test]
+fn five_consecutive_overtaken_launches_pause_without_spending_the_attempt() {
+    let fixture = Fixture::new();
+    let server = one_good_task();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start("Answer", "fixture", 1, &control).unwrap();
+    let mut raced = 0;
+    drive_racing(&fixture, &mut autopilot, &mut control, &runtime, |label| {
+        (label == "launch #1").then(|| {
+            raced += 1;
+            Race::Claim
+        })
+    });
+    assert_eq!(raced, 5, "bounded to five transient refusals");
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Paused);
+    assert!(
+        autopilot.notice().contains("task state kept changing"),
+        "{}",
+        autopilot.notice()
+    );
+    let snapshot = fixture.store.snapshot().unwrap();
+    assert_eq!(starts(&snapshot, 1), 0);
+    assert!(control.dispatch.failures.is_empty());
+    autopilot.resume(&control).unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "done", finished);
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Done);
+    assert_eq!(starts(&fixture.store.snapshot().unwrap(), 1), 1);
+}

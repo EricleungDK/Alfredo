@@ -36,11 +36,19 @@ impl RunRequest {
     }
 }
 
+/// Consecutive transient refusals (stale revision, busy store) tolerated for one
+/// decision before the controller stops and asks for attention.
+pub const TRANSIENT_LIMIT: u32 = 5;
+
 #[derive(Default)]
 pub struct Dispatch {
     pub enabled: bool,
     pub attempts: BTreeMap<u64, u64>,
     pub failures: BTreeMap<u64, String>,
+    /// Consecutive launch refusals that wrote nothing, per task.
+    pub transient: BTreeMap<u64, u32>,
+    /// Set when a launch hit `TRANSIENT_LIMIT`; dispatch was turned off.
+    pub contended: Option<String>,
 }
 pub fn approval(snapshot: &Snapshot, task: u64) -> Option<u64> {
     snapshot.receipts.iter().rev().find_map(|receipt| {
