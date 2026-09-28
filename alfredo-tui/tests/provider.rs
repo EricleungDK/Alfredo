@@ -537,18 +537,33 @@ async fn keep_alive_is_sent_on_chat_and_omitted_when_unset() {
 #[tokio::test]
 async fn refused_connection_before_content_retries_with_backoff_until_server_starts() {
     let addr = reserve();
-    // Budget 100+200+…+1600 ms tolerates a busy machine; the server starts at 150 ms.
     let provider = retrying(
         &ollama_fixture::endpoint(addr),
         5,
         Duration::from_millis(100),
     );
-    let late = tokio::task::spawn_blocking(move || {
-        std::thread::sleep(Duration::from_millis(150));
-        serve(addr, |_, _| done("recovered"))
-    });
-    let events = run(&provider).await;
-    let fixture = late.await.unwrap();
+    // The server starts only once the first refusal has been reported, so the
+    // retry path is exercised regardless of scheduling.
+    let (sender, mut receiver) = mpsc::channel(128);
+    let chat = provider.chat(4, 7, "fixture".into(), prompt(), sender);
+    let observe = async {
+        let mut events = Vec::new();
+        let mut fixture = None;
+        while let Some(event) = receiver.recv().await {
+            assert_eq!((event.session, event.attempt), (4, 7));
+            if fixture.is_none() && matches!(event.update, Update::Retrying(_)) {
+                fixture = Some(
+                    tokio::task::spawn_blocking(move || serve(addr, |_, _| done("recovered")))
+                        .await
+                        .unwrap(),
+                );
+            }
+            events.push(event);
+        }
+        (events, fixture)
+    };
+    let (_, (events, fixture)) = tokio::join!(chat, observe);
+    let fixture = fixture.expect("first connection was refused");
     let retries = retries(&events);
     assert!(!retries.is_empty());
     assert_eq!(retries[0].retry, 1);
