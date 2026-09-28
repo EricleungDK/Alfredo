@@ -28,6 +28,8 @@ const ATTEMPTS: u32 = 3;
 const MAX_STATE: usize = 256 * 1024;
 pub const DEFAULT_MAX_REPAIRS: u32 = 3;
 pub const MAX_REPAIRS: u32 = 16;
+/// Planning attempts per goal: the first plan plus two validation re-plans.
+const PLAN_ATTEMPTS: u32 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -56,8 +58,12 @@ struct Saved {
     finished: Option<u64>,
     #[serde(default)]
     plan_attempts: u32,
+    /// Single re-plan error written by older builds; read-only.
     #[serde(default)]
     plan_error: Option<String>,
+    /// Validation errors of every rejected planning attempt, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    plan_errors: Vec<String>,
     #[serde(default)]
     plan_request: Option<String>,
     #[serde(default)]
@@ -104,7 +110,7 @@ fn now() -> u64 {
         .as_secs()
 }
 /// Remove controls and bound bytes on a character boundary.
-fn clean(value: &str, limit: usize) -> String {
+pub(crate) fn clean(value: &str, limit: usize) -> String {
     let mut result: String = value
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
@@ -432,6 +438,7 @@ impl Autopilot {
             finished: None,
             plan_attempts: 0,
             plan_error: None,
+            plan_errors: vec![],
             plan_request: None,
             save_request: None,
             first: None,
@@ -846,13 +853,13 @@ impl Autopilot {
             let saved = self.saved.as_mut().unwrap();
             saved.plan_attempts += 1;
             saved.plan_request = None;
-            if saved.plan_attempts >= 2 {
+            if saved.plan_attempts >= PLAN_ATTEMPTS {
                 self.fail(
                     tasks,
-                    format!("Planning failed twice; autopilot stopped: {error}"),
+                    format!("Planning failed {PLAN_ATTEMPTS} times; autopilot stopped: {error}"),
                 );
             } else {
-                saved.plan_error = Some(error);
+                saved.plan_errors.push(error);
                 self.persist();
             }
             return Ok(None);
@@ -865,10 +872,17 @@ impl Autopilot {
             return Ok(None);
         }
         let mut prompt = clean(&saved.goal, 4096);
-        if let Some(error) = &saved.plan_error {
+        let errors: Vec<String> = saved
+            .plan_error
+            .iter()
+            .chain(&saved.plan_errors)
+            .enumerate()
+            .map(|(index, error)| format!("attempt {}: {}", index + 1, clean(error, 1024)))
+            .collect();
+        if !errors.is_empty() {
             prompt.push_str(&format!(
-                " | The previous plan was rejected by validation: {}. Return a corrected complete plan.",
-                clean(error, 1024)
+                " | Earlier plans were rejected by validation; fix every issue: {}. Return a corrected complete plan.",
+                errors.join("; ")
             ));
         }
         let text = format!("/plan {prompt}");
@@ -1207,20 +1221,14 @@ fn failure_detail(tasks: &TaskControl, head: &Task) -> String {
 }
 
 /// Autopilot approves without a human reading each policy, so it also refuses
-/// checks that can only fail: a shell string where an argv program is required.
+/// plans a reader would reject: checks that can only fail and unordered writers.
 fn unattended_lint(plan: &crate::planner::Plan) -> Result<(), String> {
-    for (index, step) in plan.tasks.iter().enumerate() {
-        if let Some(program) = step.policy.check.first() {
-            if program.chars().any(char::is_whitespace) {
-                return Err(format!(
-                    "Task {} check must be an argv array, not a shell string: split {:?} into separate program and argument strings",
-                    index + 1,
-                    clean(program, 200)
-                ));
-            }
-        }
+    let findings = crate::plan_lint::findings(plan);
+    if findings.is_empty() {
+        Ok(())
+    } else {
+        Err(findings.join("; "))
     }
-    Ok(())
 }
 
 fn draft_matches(tasks: &TaskControl, request: &str) -> bool {

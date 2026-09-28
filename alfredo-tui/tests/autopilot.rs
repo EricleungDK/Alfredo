@@ -562,7 +562,7 @@ fn finished_autopilot_replaces_the_stale_start_notice_in_the_footer_once() {
     assert!(
         work.app
             .notice
-            .starts_with("Autopilot failed · Planning failed twice"),
+            .starts_with("Autopilot failed · Planning failed 3 times"),
         "{}",
         work.app.notice
     );
@@ -617,7 +617,7 @@ fn finished_state_saved_by_an_older_build_still_loads_with_an_honest_state() {
 }
 
 #[test]
-fn invalid_plan_is_retried_once_with_its_validation_error_then_stops() {
+fn invalid_plan_is_retried_twice_with_its_validation_errors_then_stops() {
     let fixture = Fixture::new();
     let server = Server::new(|request, _| {
         assert!(planner(request));
@@ -635,18 +635,21 @@ fn invalid_plan_is_retried_once_with_its_validation_error_then_stops() {
     let status = autopilot.status(&control).unwrap();
     assert_eq!(status.state, RunState::Failed);
     let prompts = server.prompts();
-    assert_eq!(prompts.len(), 2, "{prompts:?}");
+    assert_eq!(prompts.len(), 3, "{prompts:?}");
     assert!(!prompts[0].contains("rejected"));
+    for prompt in &prompts[1..] {
+        assert!(
+            prompt.contains("Improve calc") && prompt.contains("dependencies"),
+            "{prompt}"
+        );
+    }
+    assert!(prompts[2].contains("attempt 1") && prompts[2].contains("attempt 2"));
     assert!(
-        prompts[1].contains("Improve calc") && prompts[1].contains("dependencies"),
-        "{}",
-        prompts[1]
-    );
-    assert!(
-        autopilot.notice().contains("Planning failed"),
+        autopilot.notice().contains("Planning failed 3 times"),
         "{}",
         autopilot.notice()
     );
+    assert!(autopilot.report().unwrap().contains("dependencies"));
     assert!(fixture.store.snapshot().unwrap().tasks.is_empty());
 }
 
@@ -1494,5 +1497,59 @@ fn identical_repair_is_reported_as_no_progress_and_the_next_repair_samples_hotte
     assert!(
         last.contains("previous attempt returned identical code that still fails"),
         "{last}"
+    );
+}
+
+fn textutil_plan(first_check: Value) -> String {
+    json!({"tasks": [
+        {"title": "Create textutil", "acceptance": ["word_count and reverse_words work"], "model": "fixture",
+         "dependencies": [], "policy": {"files": ["textutil.py"], "check": first_check}},
+        {"title": "Test textutil", "acceptance": ["tests cover both"], "model": "fixture",
+         "dependencies": [1], "policy": {"files": ["test_textutil.py"],
+         "check": ["/usr/bin/python3", "-m", "unittest", "test_textutil.py"]}},
+    ]})
+    .to_string()
+}
+
+#[test]
+fn check_needing_a_later_tasks_file_is_replanned_with_accumulated_errors() {
+    let fixture = Fixture::new();
+    let server = Server::new(|request, index| {
+        assert!(planner(request), "no worker may start from a rejected plan");
+        textutil_plan(if index < 2 {
+            json!(["/usr/bin/python3", "-m", "unittest", "test_textutil.py"])
+        } else {
+            json!(["/usr/bin/python3", "-c", "import textutil"])
+        })
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Create textutil and its tests", "fixture", 2, &control)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "plan saved",
+        |_, c| c.snapshot.as_ref().is_some_and(|s| !s.tasks.is_empty()),
+    );
+    autopilot.pause(&mut control);
+    let prompts = server.prompts();
+    assert_eq!(prompts.len(), 3, "{prompts:?}");
+    let error = "Task 1 check references test_textutil.py, which does not exist yet and is not written by task 1 or its dependencies";
+    assert!(prompts[1].contains(error), "{}", prompts[1]);
+    assert!(
+        prompts[2].contains("attempt 1") && prompts[2].contains("attempt 2"),
+        "{}",
+        prompts[2]
+    );
+    assert_eq!(prompts[2].matches(error).count(), 2, "{}", prompts[2]);
+    let tasks = fixture.store.snapshot().unwrap().tasks;
+    assert_eq!(tasks.len(), 2);
+    assert_eq!(
+        tasks[0].policy.as_ref().unwrap().check,
+        vec!["/usr/bin/python3", "-c", "import textutil"]
     );
 }
