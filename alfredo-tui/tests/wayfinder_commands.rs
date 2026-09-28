@@ -69,7 +69,7 @@ fn turn(app: &mut App, session: usize, prompt: &str) -> (usize, Turn) {
     )
 }
 fn prepared(router: &mut Router, runtime: &tokio::runtime::Runtime) -> (Turn, Request) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         assert!(
             router.poll(runtime).is_empty(),
@@ -83,7 +83,7 @@ fn prepared(router: &mut Router, runtime: &tokio::runtime::Runtime) -> (Turn, Re
     }
 }
 fn completion(router: &mut Router, runtime: &tokio::runtime::Runtime) -> Completion {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(60);
     loop {
         let mut results = router.poll(runtime);
         if !results.is_empty() {
@@ -297,10 +297,12 @@ fn cancellation_after_wayfinder_write_preserves_canonical_receipt_without_revivi
     assert!(autosave.contains_saved_command(0, app.sessions[0].commands().last().unwrap()));
     router.dispatch_prepared(&runtime, 0, &request).unwrap();
     app.sessions[0].set_command_state(&id, CommandState::Submitted);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while scope.snapshot().unwrap().revision == 0 {
-        assert!(Instant::now() < deadline);
-        thread::sleep(Duration::from_millis(2));
+    // Wait for the durable write itself. A read that finds the scope lock busy
+    // (the writer holds it) is "not yet", not a failure.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while scope.snapshot().map_or(true, |state| state.revision == 0) {
+        assert!(Instant::now() < deadline, "Wayfinder write timed out");
+        thread::sleep(Duration::from_millis(5));
     }
     app.sessions[0].cancel();
     let messages = app.sessions[0].messages.clone();

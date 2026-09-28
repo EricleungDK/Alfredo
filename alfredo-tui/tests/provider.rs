@@ -66,6 +66,50 @@ fn server_capture(
     (endpoint, handle, receiver)
 }
 
+/// Serves `body`, then holds the connection open until released (bounded for safety).
+fn server_capture_held(
+    body: Vec<Vec<u8>>,
+    held: std::sync::mpsc::Receiver<()>,
+) -> (
+    String,
+    thread::JoinHandle<()>,
+    std::sync::mpsc::Receiver<serde_json::Value>,
+) {
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let handle = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = Vec::new();
+        let mut byte = [0];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            request.push(byte[0]);
+        }
+        let headers = String::from_utf8(request).unwrap();
+        let length: usize = headers
+            .lines()
+            .find_map(|line| {
+                line.to_lowercase()
+                    .strip_prefix("content-length: ")
+                    .map(str::to_owned)
+            })
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mut request = vec![0; length];
+        stream.read_exact(&mut request).unwrap();
+        let _ = sender.send(serde_json::from_slice(&request).unwrap());
+        stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n").unwrap();
+        for bytes in body {
+            stream.write_all(&bytes).unwrap();
+            let _ = stream.flush();
+        }
+        let _ = held.recv_timeout(Duration::from_secs(120));
+    });
+    (endpoint, handle, receiver)
+}
+
 async fn collect(body: Vec<Vec<u8>>, pause: Duration, timeout: Duration) -> Vec<Event> {
     let (endpoint, server) = server(body, pause);
     let provider = Ollama::new(&endpoint, timeout).unwrap();
@@ -133,17 +177,33 @@ async fn malformed_oversized_and_midstream_errors_are_never_completion() {
 
 #[tokio::test]
 async fn idle_stream_hits_deadline_without_blocking_other_sessions() {
-    let slow = collect(
+    // The stalled server keeps its connection open until the client has reported
+    // its outcome, so only the idle deadline can end the slow stream.
+    let (release, held) = std::sync::mpsc::channel::<()>();
+    let (endpoint, server, _) = server_capture_held(
         vec![b"{\"message\":{\"content\":\"partial\"}}\n".to_vec()],
-        Duration::from_millis(250),
-        Duration::from_millis(80),
+        held,
     );
+    let slow = async move {
+        let provider = Ollama::new(&endpoint, Duration::from_millis(80)).unwrap();
+        let (sender, mut receiver) = mpsc::channel(128);
+        provider.chat(4, 7, "fixture".into(), vec![], sender).await;
+        let mut events = Vec::new();
+        while let Some(event) = receiver.recv().await {
+            events.push(event);
+        }
+        release.send(()).unwrap();
+        events
+    };
     let fast = collect(
         vec![b"{\"done\":true}\n".to_vec()],
         Duration::ZERO,
         Duration::from_secs(3),
     );
     let (slow, fast) = tokio::join!(slow, fast);
+    tokio::task::spawn_blocking(move || server.join().unwrap())
+        .await
+        .unwrap();
     assert!(
         matches!(&slow.last().unwrap().update, Update::Failed(error) if error.contains("stalled"))
     );

@@ -219,7 +219,7 @@ impl WorkStatus {
         if !self.loaded {
             return format!("Work {} local · state unavailable", self.workers);
         }
-        if width < 60 {
+        if width < 40 {
             return format!("{} work · {} alerts", self.workers, self.attention());
         }
         let mut parts = vec![format!("Work {} local", self.workers)];

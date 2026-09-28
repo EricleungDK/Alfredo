@@ -103,8 +103,22 @@ fn client_timing_is_attempt_bound_visible_and_not_restored_as_live_time() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(screen.contains("Client · queue"));
-    assert!(screen.contains("first text"));
+    // Default view: one compact timing line; the full phase breakdown stays
+    // available from Timing::summary.
+    let compact = session
+        .timing
+        .as_ref()
+        .unwrap()
+        .compact(std::time::Instant::now());
+    assert!(screen.contains(&compact), "{screen}");
+    assert!(!screen.contains("Client · queue"), "{screen}");
+    assert!(session
+        .timing
+        .as_ref()
+        .unwrap()
+        .summary(std::time::Instant::now())
+        .contains("first text"));
+    assert!(screen.contains("disconnected"), "{screen}");
     let json = serde_json::to_value(&session).unwrap();
     assert!(json.get("timing").is_none());
     let restored: Session = serde_json::from_value(json).unwrap();
@@ -149,7 +163,7 @@ fn thinking_is_transient_attempt_bound_progress_until_answer_text() {
         .iter()
         .map(|cell| cell.symbol())
         .collect();
-    assert!(screen.contains("Thinking / waiting for text"));
+    assert!(screen.contains("Chat 1 · thinking"), "{screen}");
     assert!(serde_json::to_value(&session)
         .unwrap()
         .get("thinking")
@@ -257,8 +271,17 @@ fn long_conversations_keep_live_timing_visible_while_reading_history() {
             .iter()
             .map(|c| c.symbol())
             .collect();
-        assert!(text.contains("Client · queue"), "{text}");
-        assert!(text.contains("waiting for text"), "{text}");
+        // The compact live timing line (e.g. "0.0s") stays visible while reading history.
+        let timing = text.find("Chat 1 · thinking").expect(&text);
+        let rest = &text[timing..];
+        let digits: Vec<char> = rest.chars().take(400).collect();
+        assert!(
+            digits.windows(4).any(|w| w[0].is_ascii_digit()
+                && w[1] == '.'
+                && w[2].is_ascii_digit()
+                && w[3] == 's'),
+            "{text}"
+        );
         assert!(
             text.contains(if scroll == 0 {
                 "Latest question"
@@ -483,7 +506,7 @@ fn retried_stream_keeps_reader_on_following_receipt_lines() {
             sequence: 0,
             after_messages: 2,
             revision,
-            task: 1,
+            task: revision,
             correlation: format!("OBS_{revision:03}"),
         }));
     }
@@ -501,11 +524,12 @@ fn retried_stream_keeps_reader_on_following_receipt_lines() {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        text.find("OBS_")
-            .map(|index| text[index..index + 7].to_owned())
+        // Correlations are not shown in chat; each receipt names its task.
+        text.find("? Task #")
+            .map(|index| text[index..].split(" update").next().unwrap().to_owned())
     };
     render(&app, 100);
-    app.sessions[0].scroll_rows(-30);
+    app.sessions[0].scroll_rows(-15);
     let before = render(&app, 100).unwrap();
     let key =
         serde_json::to_value(&app.sessions[0]).unwrap()["reading"]["block_anchor"]["key"].clone();

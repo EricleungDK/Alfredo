@@ -55,6 +55,14 @@ F1 on an empty prompt lists every command. Most used:
 edit detached worktrees from committed HEAD; your branch, index and working files
 are never modified.
 
+## Dashboard
+
+`/go` opens the dashboard (F2): one line per task (`✓` accepted, `▶` running, `○` pending,
+`◐` awaiting review, `✗` failed, `‖` held/blocked) with `done/total`. The right pane shows
+the selected task's live worker output, or once finished its outcome, diff and check
+output. While autopilot runs it follows the running task unless you moved the selection
+in the last 10 s. Receipt IDs and revisions stay in F3 evidence and F4 activity.
+
 ## Build from source
 
 Linux x86-64, Rust 1.96.0, Git. From the repository root:

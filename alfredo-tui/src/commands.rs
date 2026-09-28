@@ -98,8 +98,70 @@ pub fn capability_prompt(text: &str) -> Result<Option<&str>, String> {
 pub struct Choice {
     pub name: String,
     pub description: &'static str,
+    /// Help group heading; set only for the F1 catalog.
+    pub group: Option<&'static str>,
     draft: String,
 }
+
+/// F1 help groups, most common first. Every catalog entry appears exactly once.
+pub const HELP_GROUPS: &[(&str, &[&str])] = &[
+    (
+        "Autopilot",
+        &["/go", "/pause", "/resume", "/stop", "/autopilot"],
+    ),
+    (
+        "Tasks",
+        &[
+            "/tasks",
+            "/task",
+            "/after",
+            "/plan",
+            "/plan-revise",
+            "/plan-save",
+            "/plan-cancel",
+            "/approve",
+            "/run",
+            "/dispatch",
+            "/cancel-task",
+        ],
+    ),
+    (
+        "Review",
+        &[
+            "/evidence",
+            "/accept",
+            "/reject",
+            "/repair",
+            "/resolve-repair",
+            "/review",
+            "/branch",
+        ],
+    ),
+    (
+        "Chat",
+        &[
+            "/chat",
+            "/model",
+            "/models",
+            "@wayfinder",
+            "/scope",
+            "/scope-confirm",
+            "/scope-retry",
+        ],
+    ),
+    ("Navigation", &["/workspace", "/activity", "/refresh"]),
+    (
+        "Advanced",
+        &[
+            "/permit",
+            "/assign",
+            "/recover",
+            "/architect-revise",
+            "/retry-task",
+            "/retry-command",
+        ],
+    ),
+];
 
 pub struct Completion {
     pub choices: Vec<Choice>,
@@ -129,6 +191,7 @@ impl Completion {
             .map(|(name, description)| Choice {
                 name: (*name).into(),
                 description,
+                group: None,
                 draft: format!("{name} "),
             })
             .collect(),
@@ -176,19 +239,43 @@ impl Completion {
                 .map(|name| Choice {
                     name: name.clone(),
                     description: "installed model",
+                    group: None,
                     draft: format!("{head}{name}"),
                 })
                 .collect(),
         )
     }
+    /// The grouped F1 catalog: every command and capability, most common first.
     pub fn all() -> Self {
-        let mut all = Self::open("/").expect("command catalog is nonempty");
-        all.choices.extend(
-            Self::open("@")
-                .expect("capability catalog is nonempty")
-                .choices,
-        );
-        all
+        let mut remaining: Vec<Choice> = Self::open("/")
+            .expect("command catalog is nonempty")
+            .choices
+            .into_iter()
+            .chain(
+                Self::open("@")
+                    .expect("capability catalog is nonempty")
+                    .choices,
+            )
+            .collect();
+        let mut choices = Vec::with_capacity(remaining.len());
+        for (group, names) in HELP_GROUPS {
+            for name in *names {
+                if let Some(index) = remaining.iter().position(|choice| choice.name == *name) {
+                    let mut choice = remaining.remove(index);
+                    choice.group = Some(group);
+                    choices.push(choice);
+                }
+            }
+        }
+        // Anything not yet grouped still appears, under Advanced.
+        choices.extend(remaining.into_iter().map(|mut choice| {
+            choice.group = Some("Advanced");
+            choice
+        }));
+        Self {
+            choices,
+            selected: 0,
+        }
     }
     pub fn next(&mut self, forward: bool) {
         self.selected = if forward {
