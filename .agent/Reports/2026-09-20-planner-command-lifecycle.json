@@ -1,0 +1,58 @@
+{
+  "date": "2026-09-20",
+  "scope": "Saved planner generation, revision, Architect revision and cancellation commands",
+  "schemas": {
+    "task": 16,
+    "conversation_set": 12,
+    "scope": 2,
+    "agent_transcript": 1
+  },
+  "changes": [
+    "Explicit planner requests pass the existing exact saved-Pending barrier before dispatch.",
+    "Revision binds exact base draft digest; Architect binds source review/evidence and task revision; cancellation binds exact generation and retained draft.",
+    "Bounded planner outcomes stay at the originating command and remain distinct from canonical Task Plan-save receipts.",
+    "Retained draft has optional exact request origin; restart reconciles matching generated result without inference replay.",
+    "Schema12 preserves exact v11 backup and rejects older-schema metadata, orphan origins, mismatched current-origin outcomes and invalid planner states.",
+    "Recorded terminal planner commands require a new command rather than replay under the old identity."
+  ],
+  "delegation": {
+    "planner_lifecycle_and_review": "/root/review_agent_continuity",
+    "persistence_and_real_http": "/root/test_repair_resolution",
+    "ui_and_layout_and_system_docs": "/root/console_chronology",
+    "adapters_main_and_release": "/root"
+  },
+  "validation": {
+    "focused": 65,
+    "native": {
+      "passed": 254,
+      "failed": 0,
+      "ignored": 7
+    },
+    "strict_clippy": "passed",
+    "installed_smoke": "..\n----------------------------------------------------------------------\nRan 2 tests in 15.026s\n\nOK\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+    "source_hashes_verified": 42,
+    "payload_hashes_verified": 6,
+    "documentation": {
+      "grade": "A",
+      "score": 98.2,
+      "existing_traceability_gaps": 3
+    },
+    "specific_evidence": [
+      "Real HTTP draft generation, revision, parse failure, active cancellation with retained prior draft and stale cancellation refusal.",
+      "Saved intent barrier, session0 origin while session1 selected, restart recovery, no task creation or inference replay.",
+      "Real Architect review fixture rejects stale task revision and mismatched source before HTTP, then succeeds for exact prepared origin.",
+      "UI separates draft result from Plan-save receipt and retains later reading anchors at narrow width.",
+      "Installed terminal verifies both saved generation outcomes and exact retained revised-draft origin."
+    ]
+  },
+  "candidate": {
+    "path": "/tmp/alfredo-planner-command-lifecycle-candidate/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "efc26b6bd1a5e81bb6f96590419f362908a1bbe23a006caffded0446a552593b"
+  },
+  "limitations": [
+    "Automatic Architect routing still lacks a saved planner command origin.",
+    "Automatic dispatch decisions, active-worker cancellation and Wayfinder/workspace causal adapters remain required.",
+    "Full formation, model qualification, recovery/retirement, platform matrix and production launch remain open.",
+    "No remote CI, publication or human visual acceptance claimed."
+  ]
+}

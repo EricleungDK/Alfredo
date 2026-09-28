@@ -1,0 +1,1940 @@
+{
+  "candidate": "/tmp/alfredo-length-candidate/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+  "comparison": [
+    {
+      "after": {
+        "processes": "    PID    PPID COMMAND\n  26146       1 /usr/local/bin/ollama serve\n  27331   25301 ollama pull muse-glimmer\n",
+        "residency": {
+          "models": [
+            {
+              "context_length": 4096,
+              "details": {
+                "families": [
+                  "qwen3"
+                ],
+                "family": "qwen3",
+                "format": "gguf",
+                "parameter_size": "14.8B",
+                "parent_model": "",
+                "quantization_level": "Q4_K_M"
+              },
+              "digest": "bdbd181c33f2ed1b31c972991882db3cf4d192569092138a7d29e973cd9debe8",
+              "expires_at": "2026-09-14T22:15:06.217784275+02:00",
+              "model": "qwen3:14b",
+              "name": "qwen3:14b",
+              "size": 9646353939,
+              "size_vram": 9646353939
+            }
+          ]
+        },
+        "utc": "2026-09-14T20:10:06.238120+00:00",
+        "version": {
+          "version": "0.34.0"
+        }
+      },
+      "before": {
+        "processes": "    PID    PPID COMMAND\n  26146       1 /usr/local/bin/ollama serve\n  27331   25301 ollama pull muse-glimmer\n",
+        "residency": {
+          "models": []
+        },
+        "utc": "2026-09-14T20:08:23.545640+00:00",
+        "version": {
+          "version": "0.34.0"
+        }
+      },
+      "capacity": 2,
+      "exit_code": 101,
+      "log": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.99s\n     Running tests/worker.rs (alfredo-tui/target/debug/deps/worker-21de274c09067944)\n\nrunning 1 test\nLIVE_WORKER_CAPACITY 2\ntest live_parallel_workers_pass_independent_edge_case_checks has been running for over 60 seconds\nLIVE_WORKER_SAMPLE {\"candidate_commit\":null,\"case\":\"merge_intervals\",\"detail\":\"Ollama did not respond before the loading deadline\",\"elapsed_seconds\":60.040469152,\"first_content_seconds\":null,\"model\":\"qwen3:14b\",\"model_metrics\":null,\"status\":\"failed\"}\nLIVE_WORKER_SAMPLE {\"candidate_commit\":null,\"case\":\"strict_port\",\"detail\":\"Ollama disconnected before completion; partial reply retained\",\"elapsed_seconds\":101.908586794,\"first_content_seconds\":null,\"model\":\"qwen3:14b\",\"model_metrics\":null,\"status\":\"failed\"}\n\nthread 'live_parallel_workers_pass_independent_edge_case_checks' (28435) panicked at tests/worker.rs:1639:5:\nBoth independent live coding cases must pass; see sample outcomes\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest live_parallel_workers_pass_independent_edge_case_checks ... FAILED\n\nfailures:\n\nfailures:\n    live_parallel_workers_pass_independent_edge_case_checks\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 102.07s\n\nerror: test failed, to rerun pass `--test worker`\n",
+      "samples": [
+        {
+          "candidate_commit": null,
+          "case": "merge_intervals",
+          "detail": "Ollama did not respond before the loading deadline",
+          "elapsed_seconds": 60.040469152,
+          "first_content_seconds": null,
+          "model": "qwen3:14b",
+          "model_metrics": null,
+          "status": "failed"
+        },
+        {
+          "candidate_commit": null,
+          "case": "strict_port",
+          "detail": "Ollama disconnected before completion; partial reply retained",
+          "elapsed_seconds": 101.908586794,
+          "first_content_seconds": null,
+          "model": "qwen3:14b",
+          "model_metrics": null,
+          "status": "failed"
+        }
+      ]
+    },
+    {
+      "after": {
+        "processes": "    PID    PPID COMMAND\n  26146       1 /usr/local/bin/ollama serve\n",
+        "residency": {
+          "models": [
+            {
+              "context_length": 4096,
+              "details": {
+                "families": [
+                  "qwen3"
+                ],
+                "family": "qwen3",
+                "format": "gguf",
+                "parameter_size": "14.8B",
+                "parent_model": "",
+                "quantization_level": "Q4_K_M"
+              },
+              "digest": "bdbd181c33f2ed1b31c972991882db3cf4d192569092138a7d29e973cd9debe8",
+              "expires_at": "2026-09-14T22:17:34.974022629+02:00",
+              "model": "qwen3:14b",
+              "name": "qwen3:14b",
+              "size": 9646353939,
+              "size_vram": 9646353939
+            }
+          ]
+        },
+        "utc": "2026-09-14T20:12:35.115180+00:00",
+        "version": {
+          "version": "0.34.0"
+        }
+      },
+      "before": {
+        "processes": "    PID    PPID COMMAND\n  26146       1 /usr/local/bin/ollama serve\n  27331   25301 ollama pull muse-glimmer\n",
+        "residency": {
+          "models": [
+            {
+              "context_length": 4096,
+              "details": {
+                "families": [
+                  "qwen3"
+                ],
+                "family": "qwen3",
+                "format": "gguf",
+                "parameter_size": "14.8B",
+                "parent_model": "",
+                "quantization_level": "Q4_K_M"
+              },
+              "digest": "bdbd181c33f2ed1b31c972991882db3cf4d192569092138a7d29e973cd9debe8",
+              "expires_at": "2026-09-14T22:15:06.217784275+02:00",
+              "model": "qwen3:14b",
+              "name": "qwen3:14b",
+              "size": 9646353939,
+              "size_vram": 9646353939
+            }
+          ]
+        },
+        "utc": "2026-09-14T20:10:06.243004+00:00",
+        "version": {
+          "version": "0.34.0"
+        }
+      },
+      "capacity": 1,
+      "exit_code": 101,
+      "log": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.60s\n     Running tests/worker.rs (alfredo-tui/target/debug/deps/worker-21de274c09067944)\n\nrunning 1 test\nLIVE_WORKER_CAPACITY 1\ntest live_parallel_workers_pass_independent_edge_case_checks has been running for over 60 seconds\nLIVE_WORKER_SAMPLE {\"candidate_commit\":null,\"case\":\"strict_port\",\"detail\":\"Ollama disconnected before completion; partial reply retained\",\"elapsed_seconds\":67.555812573,\"first_content_seconds\":null,\"model\":\"qwen3:14b\",\"model_metrics\":null,\"status\":\"failed\"}\nLIVE_WORKER_SAMPLE {\"candidate_commit\":null,\"case\":\"merge_intervals\",\"detail\":\"Check failed (exit 1): \",\"elapsed_seconds\":148.837575275,\"first_content_seconds\":76.958854202,\"model\":\"qwen3:14b\",\"model_metrics\":{\"eval_count\":3307,\"eval_duration\":80505496000,\"load_duration\":11710142,\"prompt_eval_count\":451,\"prompt_eval_duration\":206929000,\"total_duration\":81280972732},\"status\":\"failed\"}\n\nthread 'live_parallel_workers_pass_independent_edge_case_checks' (28769) panicked at tests/worker.rs:1639:5:\nBoth independent live coding cases must pass; see sample outcomes\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest live_parallel_workers_pass_independent_edge_case_checks ... FAILED\n\nfailures:\n\nfailures:\n    live_parallel_workers_pass_independent_edge_case_checks\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 149.11s\n\nerror: test failed, to rerun pass `--test worker`\n",
+      "samples": [
+        {
+          "candidate_commit": null,
+          "case": "strict_port",
+          "detail": "Ollama disconnected before completion; partial reply retained",
+          "elapsed_seconds": 67.555812573,
+          "first_content_seconds": null,
+          "model": "qwen3:14b",
+          "model_metrics": null,
+          "status": "failed"
+        },
+        {
+          "candidate_commit": null,
+          "case": "merge_intervals",
+          "detail": "Check failed (exit 1): ",
+          "elapsed_seconds": 148.837575275,
+          "first_content_seconds": 76.958854202,
+          "model": "qwen3:14b",
+          "model_metrics": {
+            "eval_count": 3307,
+            "eval_duration": 80505496000,
+            "load_duration": 11710142,
+            "prompt_eval_count": 451,
+            "prompt_eval_duration": 206929000,
+            "total_duration": 81280972732
+          },
+          "status": "failed"
+        }
+      ]
+    }
+  ],
+  "conclusion": "Both capacities failed on unchanged Ollama 0.34.0. Serial admission did not resolve missing completion markers. Do not claim qualification or change admission defaults from this experiment.",
+  "date": "2026-09-14",
+  "installed_acceptance": "..\n----------------------------------------------------------------------\nRan 2 tests in 9.085s\n\nOK\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+  "limits": "Probe does not explain larger structured-response EOF failures. Defaults, thinking, generation budgets and server configuration unchanged. External model download was present.",
+  "metadata_only_probe": [
+    {
+      "frames": [
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 4
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 4
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 5
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 6
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 7
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 7
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 5
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 2
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 2
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 5
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 9
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 4
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 5
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 4
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 6
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 6
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 4
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 10
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 5
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 5
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 11
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 7
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 8
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 6
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 6
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 7
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 4
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 9
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 2
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 5
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 7
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 2
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 4
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 6
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 5
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 4
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 4
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 2
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 5
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 4
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 4
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 6
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 5
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 2
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 5
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 5
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 5
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 4
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 7
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 8
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 5
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 6
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 4
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 5
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 8
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 5
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 2
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 9
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 8
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 5
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 2
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 5
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 7
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 2
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 11
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 7
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 6
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 5
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 10
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 2
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 6
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 2
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 9
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 11
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 7
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 2
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 4
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 7
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 7
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 4
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 4
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 11
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 4
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 4
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 3
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 2
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 7
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": true,
+          "done_reason": "length",
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "done_reason",
+            "eval_count",
+            "eval_duration",
+            "load_duration",
+            "message",
+            "model",
+            "prompt_eval_cached_count",
+            "prompt_eval_count",
+            "prompt_eval_duration",
+            "total_duration"
+          ],
+          "thinking_bytes": 0
+        }
+      ],
+      "seconds": 5.506408845999431,
+      "status": 200,
+      "think": null
+    },
+    {
+      "frames": [
+        {
+          "content_bytes": 2,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 0
+        },
+        {
+          "content_bytes": 5,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 0
+        },
+        {
+          "content_bytes": 2,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 0
+        },
+        {
+          "content_bytes": 5,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 0
+        },
+        {
+          "content_bytes": 1,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 0
+        },
+        {
+          "content_bytes": 0,
+          "done": true,
+          "done_reason": "stop",
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "done_reason",
+            "eval_count",
+            "eval_duration",
+            "load_duration",
+            "message",
+            "model",
+            "prompt_eval_cached_count",
+            "prompt_eval_count",
+            "prompt_eval_duration",
+            "total_duration"
+          ],
+          "thinking_bytes": 0
+        }
+      ],
+      "seconds": 1.7057809309999357,
+      "status": 200,
+      "think": false
+    }
+  ],
+  "probe_request": {
+    "format": "JSON schema requiring boolean ready",
+    "model": "qwen3:14b",
+    "num_predict": 128,
+    "stream": true,
+    "temperature": 0
+  },
+  "sha256": "e81b30c90bb34327741e6d3c5752f03fffaa29e42473cc75301bb5cc48c2b44f",
+  "verified_fix": "Known done_reason=length now fails with partial text and metrics retained; never reports successful completion."
+}

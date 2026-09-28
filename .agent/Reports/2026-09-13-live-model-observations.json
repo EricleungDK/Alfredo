@@ -1,0 +1,269 @@
+{
+  "schema_version": 1,
+  "date": "2026-09-13",
+  "purpose": "Bounded observations from synthetic fixtures; not sustained qualification or a model-speedup claim",
+  "coder_baseline": {
+    "environment": {
+      "version": {
+        "version": "0.30.6"
+      },
+      "ps": {
+        "models": []
+      },
+      "tags": [
+        {
+          "name": "qwen2.5-coder:14b",
+          "model": "qwen2.5-coder:14b",
+          "modified_at": "2026-06-18T17:24:36.204125512+02:00",
+          "size": 8988124298,
+          "digest": "9ec8897f747e246e970bc5cfdda85d22f1123dc2e3d34978a010a75968716849",
+          "details": {
+            "parent_model": "",
+            "format": "gguf",
+            "family": "qwen2",
+            "families": [
+              "qwen2"
+            ],
+            "parameter_size": "14.8B",
+            "quantization_level": "Q4_K_M",
+            "context_length": 32768,
+            "embedding_length": 5120
+          },
+          "capabilities": [
+            "completion",
+            "tools",
+            "insert"
+          ]
+        }
+      ]
+    },
+    "transport_output": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 3.20s\n     Running tests/live.rs (alfredo-tui/target/debug/deps/live-fcf411689ee8f454)\n\nrunning 1 test\nServer timing \u00b7 load 18.74s \u00b7 prompt 0.13s \u00b7 generate 0.04s \u00b7 total 18.91s \u00b7 57.0 generated tokens/s \u00b7 36 prompt tokens\nlive smoke: first_content=Some(18.87818515s), complete=18.913739036s, reply=\"READY\"\ntest live_ollama_completes_through_the_rust_transport ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.94s\n\n",
+    "worker_output": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 4.87s\n     Running tests/worker.rs (alfredo-tui/target/debug/deps/worker-b0a473e9e37d3e60)\n\nrunning 1 test\nLive coding worker: 2.023840871s, ReviewReady: Approved check passed; changes await human review\ntest live_local_model_produces_real_edits_and_passing_check ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 2.19s\n\n"
+  },
+  "default_baseline": {
+    "environment": {
+      "version": {
+        "version": "0.30.6"
+      },
+      "ps": {
+        "models": [
+          {
+            "name": "qwen2.5-coder:14b",
+            "model": "qwen2.5-coder:14b",
+            "size": 9470098799,
+            "digest": "9ec8897f747e246e970bc5cfdda85d22f1123dc2e3d34978a010a75968716849",
+            "details": {
+              "parent_model": "",
+              "format": "gguf",
+              "family": "qwen2",
+              "families": [
+                "qwen2"
+              ],
+              "parameter_size": "14.8B",
+              "quantization_level": "Q4_K_M"
+            },
+            "expires_at": "2026-09-13T21:57:08.734008249+02:00",
+            "size_vram": 9470098799,
+            "context_length": 4096
+          }
+        ]
+      },
+      "tags": [
+        {
+          "name": "qwen3:14b",
+          "model": "qwen3:14b",
+          "modified_at": "2026-06-18T17:24:36.22825975+02:00",
+          "size": 9276198565,
+          "digest": "bdbd181c33f2ed1b31c972991882db3cf4d192569092138a7d29e973cd9debe8",
+          "details": {
+            "parent_model": "",
+            "format": "gguf",
+            "family": "qwen3",
+            "families": [
+              "qwen3"
+            ],
+            "parameter_size": "14.8B",
+            "quantization_level": "Q4_K_M",
+            "context_length": 40960,
+            "embedding_length": 5120
+          },
+          "capabilities": [
+            "completion",
+            "tools",
+            "thinking"
+          ]
+        }
+      ]
+    },
+    "transport_output": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.48s\n     Running tests/live.rs (alfredo-tui/target/debug/deps/live-fcf411689ee8f454)\n\nrunning 1 test\nServer timing \u00b7 load 20.22s \u00b7 prompt 0.27s \u00b7 generate 2.21s \u00b7 total 22.71s \u00b7 44.3 generated tokens/s \u00b7 17 prompt tokens\nlive smoke: first_content=Some(22.688653194s), complete=22.711161877s, reply=\"READY\"\ntest live_ollama_completes_through_the_rust_transport ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 22.73s\n\n"
+  },
+  "default_repeated": {
+    "schema_version": 1,
+    "purpose": "Bounded local observations, not sustained qualification",
+    "model": "qwen3:14b",
+    "version": {
+      "version": "0.30.6"
+    },
+    "identity": {
+      "name": "qwen3:14b",
+      "model": "qwen3:14b",
+      "modified_at": "2026-06-18T17:24:36.22825975+02:00",
+      "size": 9276198565,
+      "digest": "bdbd181c33f2ed1b31c972991882db3cf4d192569092138a7d29e973cd9debe8",
+      "details": {
+        "parent_model": "",
+        "format": "gguf",
+        "family": "qwen3",
+        "families": [
+          "qwen3"
+        ],
+        "parameter_size": "14.8B",
+        "quantization_level": "Q4_K_M",
+        "context_length": 40960,
+        "embedding_length": 5120
+      },
+      "capabilities": [
+        "completion",
+        "tools",
+        "thinking"
+      ]
+    },
+    "samples": [
+      {
+        "index": 1,
+        "resident_before": {
+          "models": [
+            {
+              "name": "qwen3:14b",
+              "model": "qwen3:14b",
+              "size": 9646353939,
+              "digest": "bdbd181c33f2ed1b31c972991882db3cf4d192569092138a7d29e973cd9debe8",
+              "details": {
+                "parent_model": "",
+                "format": "gguf",
+                "family": "qwen3",
+                "families": [
+                  "qwen3"
+                ],
+                "parameter_size": "14.8B",
+                "quantization_level": "Q4_K_M"
+              },
+              "expires_at": "2026-09-13T21:58:00.072699957+02:00",
+              "size_vram": 9646353939,
+              "context_length": 4096
+            }
+          ]
+        },
+        "exit_code": 0,
+        "outer_seconds": 4.25807725499908,
+        "output": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.01s\n     Running tests/live.rs (alfredo-tui/target/debug/deps/live-fcf411689ee8f454)\n\nrunning 1 test\nServer timing \u00b7 load 0.13s \u00b7 prompt 0.26s \u00b7 generate 1.76s \u00b7 total 2.17s \u00b7 46.1 generated tokens/s \u00b7 17 prompt tokens\nlive smoke: thinking_started=Some(461.721646ms), first_content=Some(2.150581177s), complete=2.173704944s, reply=\"READY\"\ntest live_ollama_completes_through_the_rust_transport ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.19s\n\n"
+      },
+      {
+        "index": 2,
+        "resident_before": {
+          "models": [
+            {
+              "name": "qwen3:14b",
+              "model": "qwen3:14b",
+              "size": 9646353939,
+              "digest": "bdbd181c33f2ed1b31c972991882db3cf4d192569092138a7d29e973cd9debe8",
+              "details": {
+                "parent_model": "",
+                "format": "gguf",
+                "family": "qwen3",
+                "families": [
+                  "qwen3"
+                ],
+                "parameter_size": "14.8B",
+                "quantization_level": "Q4_K_M"
+              },
+              "expires_at": "2026-09-13T22:03:16.018987519+02:00",
+              "size_vram": 9646353939,
+              "context_length": 4096
+            }
+          ]
+        },
+        "exit_code": 0,
+        "outer_seconds": 5.244447228000354,
+        "output": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.21s\n     Running tests/live.rs (alfredo-tui/target/debug/deps/live-fcf411689ee8f454)\n\nrunning 1 test\nServer timing \u00b7 load 0.12s \u00b7 prompt 0.05s \u00b7 generate 2.77s \u00b7 total 2.95s \u00b7 42.6 generated tokens/s \u00b7 17 prompt tokens\nlive smoke: thinking_started=Some(282.111562ms), first_content=Some(2.929407373s), complete=2.953182979s, reply=\"READY\"\ntest live_ollama_completes_through_the_rust_transport ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.97s\n\n"
+      },
+      {
+        "index": 3,
+        "resident_before": {
+          "models": [
+            {
+              "name": "qwen3:14b",
+              "model": "qwen3:14b",
+              "size": 9646353939,
+              "digest": "bdbd181c33f2ed1b31c972991882db3cf4d192569092138a7d29e973cd9debe8",
+              "details": {
+                "parent_model": "",
+                "format": "gguf",
+                "family": "qwen3",
+                "families": [
+                  "qwen3"
+                ],
+                "parameter_size": "14.8B",
+                "quantization_level": "Q4_K_M"
+              },
+              "expires_at": "2026-09-13T22:03:21.263541262+02:00",
+              "size_vram": 9646353939,
+              "context_length": 4096
+            }
+          ]
+        },
+        "exit_code": 0,
+        "outer_seconds": 4.457006598000589,
+        "output": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.28s\n     Running tests/live.rs (alfredo-tui/target/debug/deps/live-fcf411689ee8f454)\n\nrunning 1 test\nServer timing \u00b7 load 0.12s \u00b7 prompt 0.06s \u00b7 generate 1.90s \u00b7 total 2.10s \u00b7 41.6 generated tokens/s \u00b7 17 prompt tokens\nlive smoke: thinking_started=Some(310.745513ms), first_content=Some(2.07906075s), complete=2.102108494s, reply=\"READY\"\ntest live_ollama_completes_through_the_rust_transport ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.12s\n\n"
+      }
+    ],
+    "resident_after": {
+      "models": [
+        {
+          "name": "qwen3:14b",
+          "model": "qwen3:14b",
+          "size": 9646353939,
+          "digest": "bdbd181c33f2ed1b31c972991882db3cf4d192569092138a7d29e973cd9debe8",
+          "details": {
+            "parent_model": "",
+            "format": "gguf",
+            "family": "qwen3",
+            "families": [
+              "qwen3"
+            ],
+            "parameter_size": "14.8B",
+            "quantization_level": "Q4_K_M"
+          },
+          "expires_at": "2026-09-13T22:03:25.722113939+02:00",
+          "size_vram": 9646353939,
+          "context_length": 4096
+        }
+      ]
+    },
+    "identity_after": {
+      "name": "qwen3:14b",
+      "model": "qwen3:14b",
+      "modified_at": "2026-06-18T17:24:36.22825975+02:00",
+      "size": 9276198565,
+      "digest": "bdbd181c33f2ed1b31c972991882db3cf4d192569092138a7d29e973cd9debe8",
+      "details": {
+        "parent_model": "",
+        "format": "gguf",
+        "family": "qwen3",
+        "families": [
+          "qwen3"
+        ],
+        "parameter_size": "14.8B",
+        "quantization_level": "Q4_K_M",
+        "context_length": 40960,
+        "embedding_length": 5120
+      },
+      "capabilities": [
+        "completion",
+        "tools",
+        "thinking"
+      ]
+    }
+  },
+  "default_worker_output": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.44s\n     Running tests/worker.rs (alfredo-tui/target/debug/deps/worker-b0a473e9e37d3e60)\n\nrunning 1 test\nLive coding worker: 8.481401841s, ReviewReady: Approved check passed; changes await human review\ntest live_local_model_produces_real_edits_and_passing_check ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 18 filtered out; finished in 8.62s\n\n"
+}

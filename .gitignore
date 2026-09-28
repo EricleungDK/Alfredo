@@ -13,3 +13,7 @@ mission-control/src-tauri/target/
 .pytest_cache/
 .ruff_cache/
 .agent/Tasks/consolidated_context.md
+alfredo-tui/target/
+alfredo-tui/dist/
+alfredo-tui/dependency-audit.json
+.claude/worktrees/

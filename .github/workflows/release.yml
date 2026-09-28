@@ -1,0 +1,58 @@
+name: Release draft
+
+# Builds the verified Linux archive for a v* tag and creates a DRAFT release.
+# Publishing the draft is a manual step by the owner.
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RUSTUP_TOOLCHAIN: 1.96.0
+  CARGO_TERM_COLOR: always
+
+jobs:
+  draft:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal
+      - name: Check tag matches crate version
+        run: |
+          version=$(python3 -c "import tomllib; print(tomllib.load(open('alfredo-tui/Cargo.toml','rb'))['package']['version'])")
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "Tag $GITHUB_REF_NAME != v$version"; exit 1; }
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+      - name: Install worker sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap util-linux
+          # Ubuntu 24.04 AppArmor blocks unprivileged user namespaces that bwrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net true
+      - name: Package release archive
+        run: python3 alfredo-tui/scripts/package_release.py --output dist
+      - name: Installed release smoke
+        timeout-minutes: 20
+        run: python3 alfredo-tui/tests/release_smoke.py dist/*.tar.gz
+      - name: Release notes from CHANGELOG
+        run: |
+          awk -v v="$VERSION" 'index($0, "## [" v "]") == 1 {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "CHANGELOG.md has no section for $VERSION"; exit 1; }
+      - name: Create draft release (never published automatically)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" --draft --verify-tag \
+            --title "alfredo-tui $VERSION" --notes-file notes.md \
+            dist/*.tar.gz dist/*.tar.gz.sha256

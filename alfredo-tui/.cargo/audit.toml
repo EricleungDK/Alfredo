@@ -1,0 +1,4 @@
+# Run cargo audit from alfredo-tui so personal configuration cannot suppress findings.
+[advisories]
+ignore = []
+

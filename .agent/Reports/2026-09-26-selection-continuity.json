@@ -1,0 +1,84 @@
+{
+  "date": "2026-09-26",
+  "scope": "Native startup and workspace/mission selection continuity",
+  "schemas": {
+    "task": 16,
+    "conversation_set": 17,
+    "selection_journal": 1,
+    "scope": 2,
+    "agent_transcript": 1
+  },
+  "changes": [
+    "Picker validates exact repository and mission choices without creation effects; cancellation before confirmation leaves no repository, mission or selection journal.",
+    "Startup saves and syncs its exact request in an independent bounded journal. Switching also saves its exact originating session command before journal admission and preparation.",
+    "One-use admission tokens, correlation conflict checks, explicit transaction unlock and reserved outcome capacity prevent restart or uncertain-creation replay.",
+    "Repository, mission, target-loading and handoff milestones remain distinct from actual selection and task authority. Partial creation is retained and reported on later failure.",
+    "Both conversation owners remain held through target loading, destination history capacity and latest source/arrival saves. A successful swap replaces model-event channel generations.",
+    "Selected is published after the in-process swap; later journal/history failures surface without claiming rollback. Restored observations reconcile exact requests against the independent journal.",
+    "Schema17 preserves exact v16 backups, validates origin/arrival domain and session identity, preserves drafts/reading, and rejects generic action replay.",
+    "Read-only mission preflight retains corrective Resume/Start New picker behavior. Journal admission checks state separation before mkdir, including future paths.",
+    "MIT project license and unchanged third-party notices remain bundled in the native archive."
+  ],
+  "delegation": {
+    "journal_handoff": "/root/controller_lifecycle",
+    "persistence_regressions": "/root/controller_tests",
+    "ui_docs_review": "/root/automatic_launch_ui",
+    "picker_main_release": "/root"
+  },
+  "validation": {
+    "focused": {
+      "passed": 104,
+      "failed": 0,
+      "ignored": 0
+    },
+    "additional_separation_regression": {
+      "red": "expected failure when guard removed",
+      "green": "1 passed",
+      "logs": [
+        "/tmp/selection-state-guard-red.log",
+        "/tmp/selection-state-guard-green.log"
+      ]
+    },
+    "native": {
+      "passed": 305,
+      "failed": 0,
+      "ignored": 7
+    },
+    "renamed_fixture_recheck": {
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0
+    },
+    "format": "passed",
+    "strict_clippy": "passed",
+    "installed_smoke": "..\n----------------------------------------------------------------------\nRan 2 tests in 15.159s\n\nOK\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+    "source_hashes_verified": 45,
+    "payload_hashes_verified": 6,
+    "documentation": {
+      "grade": "A",
+      "score": 98.2,
+      "existing_traceability_gaps": 3
+    },
+    "environment": "Initial sandboxed full run could not bind its localhost HTTP fixture; full run and installed checks passed with local socket/subprocess permissions.",
+    "specific_evidence": [
+      "Journal denial/held lock and failed source publication cause no repository or mission creation.",
+      "A repository can be created before a mission conflict; source remains usable and RepositoryReady failure stays inspectable without replay.",
+      "Target owner conflict, malformed history, history capacity and deterministic final source-save failure preserve source and release target ownership.",
+      "Migration and hostile-origin tests validate exact session, conversation, workspace and mission identity; arrivals never enter model messages or task receipts.",
+      "Wide/narrow layout tests retain creation observations, neutral outcome styling, drafts and reading anchors through restore/resize.",
+      "Installed archive PTY covers picker correction, startup resume, cancellation before creation, repository/mission creation, switching back with drafts, and malformed target handoff with exact journal assertions."
+    ]
+  },
+  "candidate": {
+    "path": "/tmp/alfredo-selection-candidate/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "d90ebe9b45586382cd67620cb99fa8ab6ffee01423bd911f31a213b64a7897b6"
+  },
+  "limitations": [
+    "Uncertain creation requires inspection and a new explicit Open/Resume choice; no creation marker provenance or automatic replay is introduced.",
+    "Selection preparation is synchronous local work after confirmation; slow-filesystem latency and interruption during preparation are not qualified.",
+    "Selection journal is bounded to 512 records/12 MiB with reserved outcome capacity; journal retirement is not implemented.",
+    "Cross-process model admission, full model qualification and dynamic context, mission formation, uncertain execution recovery, retirement and platform acceptance remain open.",
+    "No commit, push, publication, remote CI or production launch acceptance is claimed."
+  ],
+  "next_slice": ".agent/Tasks/native-inference-admission.md"
+}

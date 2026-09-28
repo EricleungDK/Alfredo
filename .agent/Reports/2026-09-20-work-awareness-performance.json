@@ -1,0 +1,102 @@
+{
+  "date": "2026-09-20",
+  "scope": "Large-history native chat redraw regression",
+  "schemas": {
+    "task": 16,
+    "conversation_set": 7,
+    "scope": 2,
+    "agent_transcript": 1,
+    "changed": false
+  },
+  "root_cause": "architecture_required counted failures over every ancestor before checking for an Architect escalation receipt; ordinary rejected chains paid repeated full-history scans on each redraw.",
+  "change": "Check rejected status, exact escalation receipt and pending latest adoption before counting distinct ancestral failures. Pure conjunction ordering preserves authority and cancellation/hold semantics. No cache or inferred state.",
+  "measurements": {
+    "before": {
+      "cold_draw_us": 139900,
+      "direct_work_status_us": 140739,
+      "fixture": "256-task-4095-receipt-repair-chain",
+      "receipts": 4095,
+      "snapshot_bytes": 871381,
+      "status_counts": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0
+      ],
+      "tasks": 256,
+      "viewport": [
+        100,
+        24
+      ],
+      "warm_draws": 20,
+      "warm_total_us": 2753794
+    },
+    "after": {
+      "cold_draw_us": 4992,
+      "direct_work_status_us": 3457,
+      "fixture": "256-task-4095-receipt-repair-chain",
+      "receipts": 4095,
+      "snapshot_bytes": 871381,
+      "status_counts": [
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0
+      ],
+      "tasks": 256,
+      "viewport": [
+        100,
+        24
+      ],
+      "warm_draws": 20,
+      "warm_total_us": 73501
+    },
+    "warm_redraw_speedup": 37.466075291492636,
+    "interpretation": "Optimized local synthetic projection at the 256-task/4095-receipt bound; component redraw timing only, not model/network latency or cross-host performance qualification. No flaky wall-clock assertion."
+  },
+  "delegation": {
+    "measurement": "/root/test_repair_resolution",
+    "independent_semantic_review": "/root/review_agent_continuity",
+    "root": "Diagnosis, optimization, before/after execution and release integration"
+  },
+  "validation": {
+    "native": {
+      "passed": 221,
+      "failed": 0,
+      "ignored": 7
+    },
+    "explicit_ignored_benchmark": "passed before and after with identical projected counts",
+    "strict_clippy": "passed",
+    "installed_smoke": "..\n----------------------------------------------------------------------\nRan 2 tests in 9.692s\n\nOK\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+    "source_hashes_verified": 39,
+    "payload_hashes_verified": 6,
+    "documentation": {
+      "grade": "A",
+      "score": 98.2,
+      "existing_traceability_gaps": 3
+    }
+  },
+  "candidate": {
+    "path": "/tmp/alfredo-work-status-performance-candidate/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "46ed4467d90dcdc56038b154dbca78d1cc2351403f7179502b6ae3ad398693d0"
+  },
+  "logs": [
+    "/tmp/work-status-perf-before.log",
+    "/tmp/work-status-perf-after.log",
+    "/tmp/work-status-performance-full.log",
+    "/tmp/work-status-performance-clippy.log",
+    "/tmp/work-status-performance-package.log",
+    "/tmp/work-status-performance-installed.log"
+  ],
+  "limitations": [
+    "Synthetic bounded worst-case repair history; no universal frame-time claim.",
+    "Unified attributed chronology, full mission formation/revision, model qualification, recovery/retirement, automatic execution authorization and full production launch remain open.",
+    "Remote CI, publication and human visual/accessibility acceptance remain unverified."
+  ]
+}

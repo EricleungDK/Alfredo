@@ -1,0 +1,57 @@
+{
+  "date": "2026-09-20",
+  "scope": "Worker Start and Finish phases anchored to originating command",
+  "schemas": {
+    "task": 16,
+    "conversation_set": 11,
+    "scope": 2,
+    "agent_transcript": 1
+  },
+  "changes": [
+    "Resolve exact Run intent Start, derived run ID and matching TaskRun baseline/inputs; completion requires a later deterministic Finish for same task/run/digest.",
+    "Render separate claim and result lines; absent Finish stays unacknowledged, regardless of task review status or local worker disappearance.",
+    "Suppress matching claim/result observer duplicates across sessions using one precomputed identity set per incoming batch.",
+    "Expand saved reading bounds via schema11 with exact v10 backup; retain keyed history and no restart replay."
+  ],
+  "delegation": {
+    "resolver_and_review": "/root/review_agent_continuity",
+    "real_workers_and_schema_regressions": "/root/test_repair_resolution",
+    "ui_and_layout": "/root/console_chronology",
+    "main_reading_and_release": "/root"
+  },
+  "validation": {
+    "focused": 43,
+    "native": {
+      "passed": 249,
+      "failed": 0,
+      "ignored": 7
+    },
+    "strict_clippy": "passed",
+    "installed_smoke": "..\n----------------------------------------------------------------------\nRan 2 tests in 15.623s\n\nOK\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+    "source_hashes_verified": 41,
+    "payload_hashes_verified": 6,
+    "documentation": {
+      "grade": "A",
+      "score": 98.2,
+      "existing_traceability_gaps": 3
+    },
+    "specific_evidence": [
+      "Real HTTP success, failure and cancellation workers with saved-intent barrier and origin0 while selected1.",
+      "Exact Start/Finish, mismatched chain refusal, live-owner uncertainty, retained real-evidence recovery after missing Finish publication.",
+      "Restart restores unconfirmed command without inference replay and derives original result from canonical receipts.",
+      "Installed console shows both claimed and ReviewReady phases; saved observer refs exclude the explicitly started run result.",
+      "Later chat reading/draft and narrower geometry retain origin-block identity."
+    ],
+    "verification_sequence": "Full native and strict Clippy pass; first installed run reached new lifecycle checks then fixture opened evidence before added /tasks refresh completed. Fixture now waits for actual refresh acknowledgment; final installed pass, no product guard weakened."
+  },
+  "candidate": {
+    "path": "/tmp/alfredo-worker-command-lifecycle-candidate/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "3ec398a4fdcfee973f760e134b05cb61fa2d7480ce040ce76da344e8de57e606"
+  },
+  "limitations": [
+    "Background dispatch lacking a saved Run intent retains observation-only history.",
+    "Planner generation/revision/cancellation, automatic dispatch decisions, active cancellation and Wayfinder/workspace command adapters remain required.",
+    "Old schema10 reading anchor on trailing Run blank may now point to new result slot; exact character reflow remains open.",
+    "Full formation, model qualification, recovery/retirement, platform matrix and production launch remain open; no remote CI/publication/human acceptance claimed."
+  ]
+}

@@ -1,0 +1,75 @@
+{
+  "date": "2026-09-26",
+  "scope": "Saved automatic Architect drafts linked to canonical review and late model admission checks",
+  "schemas": {
+    "task": 16,
+    "conversation_set": 15,
+    "scope": 2,
+    "agent_transcript": 1
+  },
+  "changes": [
+    "Effectful Architect tick replaced with inert preparation from the exact acknowledged ReviewArchitecture request.",
+    "Main saves an automatic draft command in its source review session before dispatching inference; existing reading and composer are preserved.",
+    "Canonical review source, current task revision and Architect origin must match at dispatch; planner rechecks captured revision and origin after shared model capacity becomes available, before HTTP.",
+    "Schema15 preserves exact v14 bytes, requires the earlier same-session review command and rejects duplicate inner planner identities across explicit and automatic wrappers.",
+    "Generated drafts and planner outcomes resolve through the same exact inner request; restart never resumes inference.",
+    "Plan cancellation withdraws the unsent automatic token; an older successful save cannot dispatch it. Started inference retains exact-generation cancellation.",
+    "Task adoption and execution approval remain separate operations with independent canonical receipts.",
+    "Conversation owner release explicitly unlocks its file description so inherited descriptors in concurrent child creation cannot transiently retain a closed namespace."
+  ],
+  "delegation": {
+    "lifecycle_and_cancellation": "/root/controller_lifecycle",
+    "persistence_and_queued_admission": "/root/controller_tests",
+    "ui_layout_docs": "/root/automatic_launch_ui",
+    "integration_and_release": "/root"
+  },
+  "validation": {
+    "focused": {
+      "passed": 127,
+      "failed": 0,
+      "ignored": 3
+    },
+    "conversation_owner_regression": {
+      "before_fix": "failed with retained inherited lock",
+      "after_fix": "passed",
+      "evidence_logs": [
+        "/tmp/automatic-architect-full-initial-owner-failure.log",
+        "/tmp/automatic-architect-owner-red.log",
+        "/tmp/automatic-architect-owner-green.log"
+      ],
+      "qualification": "Held-child test proves the inherited-descriptor mechanism; the original parallel run did not record a specific child process identity."
+    },
+    "native": {
+      "passed": 274,
+      "failed": 0,
+      "ignored": 7
+    },
+    "strict_clippy": "passed",
+    "installed_smoke": "..\n----------------------------------------------------------------------\nRan 2 tests in 14.503s\n\nOK\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+    "source_hashes_verified": 43,
+    "payload_hashes_verified": 6,
+    "documentation": {
+      "grade": "A",
+      "score": 98.2,
+      "existing_traceability_gaps": 3
+    },
+    "specific_evidence": [
+      "Real HTTP two-failure review journey waits for saved source and saved automatic draft, retains origin across session changes and restores draft without replay.",
+      "Old Pending save cannot dispatch a withdrawn automatic draft; unrelated pending operations and origin composer are preserved.",
+      "Full-suite cancellation restart exposed retained conversation ownership after drop; a deterministic inherited-descriptor regression verifies explicit owner release.One-slot provider fixture queues Architect, changes canonical task revision, releases capacity and observes exact Failed with no stale HTTP.",
+      "Migration rejects orphan, cross-session, changed source, late source, old-schema metadata and duplicate planner identities while preserving malformed files.",
+      "Layout regression covers Architect actor, pending/submitted/generated phases, original session, background reading, resize, draft preservation and separate Plan receipt.",
+      "Installed PTY verifies exact saved draft origin before adoption and automatic command-to-canonical-review linkage after restart."
+    ]
+  },
+  "candidate": {
+    "path": "/tmp/alfredo-automatic-architect-candidate/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "198b374dc9a1980beb6fcd06586893b62c58ef5d1633b8e1625b684eed4ab347"
+  },
+  "limitations": [
+    "Wayfinder/workspace causal adapters and pre-admission error history remain open.",
+    "Full mission formation, model qualification, uncertain execution recovery, retirement and platform matrix remain open.",
+    "Post-capacity check is an admission snapshot, not a store lock held during inference; task adoption still performs its own validation.",
+    "Production launch, remote CI and human visual/accessibility acceptance are not claimed."
+  ]
+}

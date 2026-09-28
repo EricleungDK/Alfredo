@@ -1,0 +1,101 @@
+name: Rust terminal regression
+
+on:
+  pull_request:
+    paths:
+      - 'LICENSE'
+      - 'alfredo-tui/**'
+      - 'mission-control/src-tauri/src/execution.rs'
+      - '.github/workflows/rust-terminal.yml'
+  push:
+    paths:
+      - 'LICENSE'
+      - 'alfredo-tui/**'
+      - 'mission-control/src-tauri/src/execution.rs'
+      - '.github/workflows/rust-terminal.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-terminal-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUSTUP_TOOLCHAIN: 1.96.0
+  CARGO_TERM_COLOR: always
+  MANIFEST: alfredo-tui/Cargo.toml
+
+jobs:
+  terminal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --component rustfmt,clippy
+      - name: Cache Cargo registry, dependencies and tools
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: alfredo-tui -> target
+          cache-bin: true
+      - name: Install worker sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap util-linux
+          # Ubuntu 24.04 AppArmor blocks unprivileged user namespaces that bwrap needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net true
+      - name: Format
+        run: cargo fmt --manifest-path "$MANIFEST" -- --check
+      - name: Clippy
+        run: cargo clippy --locked --manifest-path "$MANIFEST" --all-targets -- -D warnings
+      - name: Tests
+        run: cargo test --locked --manifest-path "$MANIFEST"
+      - name: Dependency notice integrity tests
+        run: python3 -m unittest discover -s alfredo-tui/tests -p 'test_*.py'
+      - name: Build debug binary
+        run: cargo build --locked --manifest-path "$MANIFEST"
+      - name: PTY smoke - terminal
+        timeout-minutes: 10
+        run: python3 alfredo-tui/tests/terminal_smoke.py
+      - name: PTY smoke - autopilot
+        timeout-minutes: 10
+        run: python3 alfredo-tui/tests/autopilot_terminal_smoke.py
+      - name: PTY smoke - inference
+        timeout-minutes: 10
+        run: python3 alfredo-tui/tests/inference_terminal_smoke.py
+      - name: PTY smoke - recovery
+        timeout-minutes: 10
+        run: python3 alfredo-tui/tests/recovery_terminal_smoke.py
+      - name: PTY smoke - qualification CLI
+        timeout-minutes: 10
+        run: python3 alfredo-tui/tests/qualification_cli_smoke.py
+      - name: Install dependency auditor
+        run: |
+          cargo audit --version 2>/dev/null | grep -q ' 0\.22\.2$' \
+            || cargo install cargo-audit --version 0.22.2 --locked --force
+      - name: Audit locked dependencies
+        working-directory: alfredo-tui
+        run: cargo audit --file Cargo.lock --deny warnings --json > dependency-audit.json
+      - name: Verify audit failure gate
+        run: python3 alfredo-tui/tests/audit_smoke.py
+      - name: Retain dependency audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alfredo-terminal-dependency-audit
+          path: alfredo-tui/dependency-audit.json
+          if-no-files-found: warn
+      - name: Package release archive
+        run: python3 alfredo-tui/scripts/package_release.py --output alfredo-tui/dist
+      - name: Installed release smoke
+        timeout-minutes: 20
+        run: python3 alfredo-tui/tests/release_smoke.py alfredo-tui/dist/*.tar.gz
+      - name: Retain verified candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: alfredo-terminal-linux-x86_64-candidate
+          path: alfredo-tui/dist/*
+          if-no-files-found: error

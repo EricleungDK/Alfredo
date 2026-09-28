@@ -17,6 +17,8 @@ export default defineConfig({
   outputDir: "/tmp/alfredo-localhost-playwright-results",
   use: {
     headless: true,
+    trace: "retain-on-failure",
+    screenshot: "only-on-failure",
     serviceWorkers: "block",
   },
   webServer: {

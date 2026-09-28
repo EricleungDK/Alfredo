@@ -1,0 +1,334 @@
+{
+  "date": "2026-09-27",
+  "scope": "Native bounded inference diagnostic harness and regression corrections",
+  "authority": [
+    "Active user Rust rewrite and regression goal",
+    "https://github.com/EricleungDK/Alfredo/issues/69",
+    "https://github.com/EricleungDK/Alfredo/issues/70"
+  ],
+  "status": "Harness verified; live profile quality remains unqualified; production rewrite/release remains active",
+  "changes": [
+    "Standalone --qualify-inference and read-only --inspect-qualification run outside user missions, with fixed paired schedule, bounded attempts/deadlines and checkpoint no-replay.",
+    "Immutable baseline/context-only candidate profiles preserve ordinary defaults. Actual transmitted payload, profile, message and prefix identities are recorded.",
+    "Bounded selected-model version/digest/quantization/context/residency observations are captured per request before its shared permit is released. Generation, metadata probe and instrumented lifetime remain separate.",
+    "Four isolated real native scope/planner/approval/worker/check/review scenarios retain canonical receipts, source/evidence bindings and repair lineage. Accepted reports require every generation phase.",
+    "Separate parent oracle blocks generated-code early-exit success forgery and checks typed values and pinned reference sources. Foreground queue proof overlaps exact pending background generation, excluding metadata-only waiting.",
+    "Reports preserve external replacement, refuse inconsistent resealed records and stop before fixture creation when cancellation arrives during inspection.",
+    "Live fixture-v1 transcripts exposed incomplete worker-facing criteria. Fixture-v2 explicitly retains complete port/arithmetic/reference contracts; oracle assertions and production model settings were unchanged."
+  ],
+  "delegation": {
+    "runtime_metadata_and_initial_cli_fixture": "controller_lifecycle",
+    "request_profiles_oracle_and_generation_observer": "controller_tests",
+    "governed_runner_and_regressions": "automatic_launch_ui",
+    "independent_review_and_installed_assertions": "qualification_review",
+    "fixture_contract_correction": "fixture_contract",
+    "next_user_visible_slice_audit": "next_slice_audit",
+    "integration_release_live_and_reports": "root"
+  },
+  "validation": {
+    "full_native_before_two_final_boundary_contract_regressions": {
+      "passed": 357,
+      "failed": 0,
+      "ignored": 7
+    },
+    "final_focused_library_runner_oracle": {
+      "passed": 48,
+      "failed": 0,
+      "ignored": 0
+    },
+    "final_format": "passed",
+    "final_strict_clippy": "passed",
+    "installed_suites": {
+      "terminal": 2,
+      "shared_inference": 1,
+      "qualification_cli": 2
+    },
+    "installed_log": "..\n----------------------------------------------------------------------\nRan 2 tests in 16.197s\n\nOK\n.\n----------------------------------------------------------------------\nRan 1 test in 3.336s\n\nOK\nInstalled shared inference acceptance passed: two terminals, queued chat/worker cancellation, owner exit, restart without replay\n..\n----------------------------------------------------------------------\nRan 2 tests in 5.979s\n\nOK\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+    "source_hashes_verified": 51,
+    "payload_hashes_verified": 6,
+    "fixture_contract_red": "Actual v1 worker transcript omitted required return None contract; assertion failed in /tmp/alfredo-fixture-contract-red.log. Captured-request regression passes with fixture v2.",
+    "logs": [
+      "/tmp/alfredo-qualification-full.log",
+      "/tmp/alfredo-qualification-boundary-final.log",
+      "/tmp/alfredo-qualification-v2-focused.log",
+      "/tmp/alfredo-qualification-v2-clippy.log",
+      "/tmp/alfredo-qualification-v2-package.log",
+      "/tmp/alfredo-qualification-v2-installed.log"
+    ],
+    "documentation": {
+      "grade": "A",
+      "score": 98.2,
+      "issues": 3,
+      "log": "/tmp/alfredo-qualification-docs-final.json",
+      "consolidated_context": "refreshed"
+    }
+  },
+  "candidate": {
+    "path": "/tmp/alfredo-inference-qualification-v2-candidate/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "8bcc05f36bc0d3c40a8c17f08c0e148129e1f14fe7edd1f1c837c90e78670a63",
+    "fixture_version": 2,
+    "license": "MIT with bundled third-party notices"
+  },
+  "live_diagnostics": [
+    {
+      "fixture_version": 1,
+      "report": ".agent/Reports/2026-09-27-inference-fixture-v1-diagnostic.json",
+      "report_file_sha256": "a1bacf8f1409f1833e8564ea01617fd889d6c6a566f9f87925975f7896ea3ee5",
+      "finished": false,
+      "attempted": 4,
+      "scheduled": 8,
+      "accepted": 0,
+      "generation_requests": 8,
+      "completed_requests": 7,
+      "stop_reason": "Cohort cancelled or deadline reached; remaining cases were not started",
+      "initial_runtime": {
+        "endpoint_origin": "http://127.0.0.1:11434",
+        "selected_model": "qwen3:14b",
+        "server_version": "0.34.0",
+        "catalog": {
+          "digest": "bdbd181c33f2ed1b31c972991882db3cf4d192569092138a7d29e973cd9debe8",
+          "quantization": "Q4_K_M"
+        },
+        "running": null
+      },
+      "inspection_log": "/tmp/alfredo-qualification-inspect-v1.log",
+      "artifact_directory": "/tmp/alfredo-qualification-live-20260927/report.json.artifacts",
+      "artifact_manifest": "/tmp/alfredo-qualification-live-20260927/artifact-manifest.json",
+      "artifact_manifest_sha256": "09b7d123953865a92555f868918fdf5d29325dd212cbca2d5b09950d1e1ca3c9",
+      "cases": [
+        {
+          "scenario": "small-edit",
+          "profile": "baseline",
+          "phase": "finished",
+          "outcome": "failed",
+          "elapsed_ms": 23178,
+          "reviewed_elapsed_ms": null,
+          "failure": "Independent fixture check did not establish review-ready work",
+          "foreground": null
+        },
+        {
+          "scenario": "small-edit",
+          "profile": "context-candidate",
+          "phase": "finished",
+          "outcome": "failed",
+          "elapsed_ms": 15358,
+          "reviewed_elapsed_ms": null,
+          "failure": "Independent fixture check did not establish review-ready work",
+          "foreground": null
+        },
+        {
+          "scenario": "required-source",
+          "profile": "baseline",
+          "phase": "finished",
+          "outcome": "failed",
+          "elapsed_ms": 8679,
+          "reviewed_elapsed_ms": null,
+          "failure": "Independent fixture check did not establish review-ready work",
+          "foreground": null
+        },
+        {
+          "scenario": "required-source",
+          "profile": "context-candidate",
+          "phase": "finished",
+          "outcome": "incomplete",
+          "elapsed_ms": 240045,
+          "reviewed_elapsed_ms": null,
+          "failure": "Qualification cancelled; inspect retained canonical worker result",
+          "foreground": null
+        },
+        {
+          "scenario": "repair",
+          "profile": "baseline",
+          "phase": "pending",
+          "outcome": null,
+          "elapsed_ms": null,
+          "reviewed_elapsed_ms": null,
+          "failure": null,
+          "foreground": null
+        },
+        {
+          "scenario": "repair",
+          "profile": "context-candidate",
+          "phase": "pending",
+          "outcome": null,
+          "elapsed_ms": null,
+          "reviewed_elapsed_ms": null,
+          "failure": null,
+          "foreground": null
+        },
+        {
+          "scenario": "queued-foreground",
+          "profile": "baseline",
+          "phase": "pending",
+          "outcome": null,
+          "elapsed_ms": null,
+          "reviewed_elapsed_ms": null,
+          "failure": null,
+          "foreground": null
+        },
+        {
+          "scenario": "queued-foreground",
+          "profile": "context-candidate",
+          "phase": "pending",
+          "outcome": null,
+          "elapsed_ms": null,
+          "reviewed_elapsed_ms": null,
+          "failure": null,
+          "foreground": null
+        }
+      ]
+    },
+    {
+      "fixture_version": 2,
+      "report": ".agent/Reports/2026-09-27-inference-fixture-v2-diagnostic.json",
+      "report_file_sha256": "629a689975ddd67c008e15504b56ca760a31b6b730dc3239ecf07fe6a4d076ce",
+      "finished": true,
+      "attempted": 8,
+      "scheduled": 8,
+      "accepted": 1,
+      "generation_requests": 16,
+      "completed_requests": 16,
+      "stop_reason": null,
+      "initial_runtime": {
+        "endpoint_origin": "http://127.0.0.1:11434",
+        "selected_model": "qwen3:14b",
+        "server_version": "0.34.0",
+        "catalog": {
+          "digest": "bdbd181c33f2ed1b31c972991882db3cf4d192569092138a7d29e973cd9debe8",
+          "quantization": "Q4_K_M"
+        },
+        "running": {
+          "digest": "bdbd181c33f2ed1b31c972991882db3cf4d192569092138a7d29e973cd9debe8",
+          "context_length": 16384,
+          "size": 12181412248,
+          "size_vram": 10288166338
+        }
+      },
+      "inspection_log": "/tmp/alfredo-qualification-inspect-v2.log",
+      "artifact_directory": "/tmp/alfredo-qualification-live-v2-20260927/report.json.artifacts",
+      "artifact_manifest": "/tmp/alfredo-qualification-live-v2-20260927/artifact-manifest.json",
+      "artifact_manifest_sha256": "3659e2fa32d8b0a73990947aca51287fd737becf00096fbb65582999055a8b57",
+      "cases": [
+        {
+          "scenario": "small-edit",
+          "profile": "baseline",
+          "phase": "finished",
+          "outcome": "failed",
+          "elapsed_ms": 12461,
+          "reviewed_elapsed_ms": null,
+          "failure": "Independent fixture check did not establish review-ready work",
+          "foreground": null
+        },
+        {
+          "scenario": "small-edit",
+          "profile": "context-candidate",
+          "phase": "finished",
+          "outcome": "failed",
+          "elapsed_ms": 17690,
+          "reviewed_elapsed_ms": null,
+          "failure": "Independent fixture check did not establish review-ready work",
+          "foreground": null
+        },
+        {
+          "scenario": "required-source",
+          "profile": "baseline",
+          "phase": "finished",
+          "outcome": "failed",
+          "elapsed_ms": 10307,
+          "reviewed_elapsed_ms": null,
+          "failure": "Independent fixture check did not establish review-ready work",
+          "foreground": null
+        },
+        {
+          "scenario": "required-source",
+          "profile": "context-candidate",
+          "phase": "finished",
+          "outcome": "accepted",
+          "elapsed_ms": 19241,
+          "reviewed_elapsed_ms": 19241,
+          "failure": null,
+          "foreground": null
+        },
+        {
+          "scenario": "repair",
+          "profile": "baseline",
+          "phase": "finished",
+          "outcome": "failed",
+          "elapsed_ms": 8443,
+          "reviewed_elapsed_ms": null,
+          "failure": "Repair draft omitted its declared failure-seed instruction",
+          "foreground": null
+        },
+        {
+          "scenario": "repair",
+          "profile": "context-candidate",
+          "phase": "finished",
+          "outcome": "failed",
+          "elapsed_ms": 8692,
+          "reviewed_elapsed_ms": null,
+          "failure": "Repair draft omitted its declared failure-seed instruction",
+          "foreground": null
+        },
+        {
+          "scenario": "queued-foreground",
+          "profile": "baseline",
+          "phase": "finished",
+          "outcome": "failed",
+          "elapsed_ms": 18937,
+          "reviewed_elapsed_ms": null,
+          "failure": "Independent fixture check did not establish review-ready work",
+          "foreground": {
+            "background_request": 12,
+            "queue_observed": true,
+            "queue_ms": 2315,
+            "completed": true,
+            "check_passed": true,
+            "response_sha256": "d7f972a2c2a91ee3e88dc388f20494df807a692959ae352b099237a3a6095f32"
+          }
+        },
+        {
+          "scenario": "queued-foreground",
+          "profile": "context-candidate",
+          "phase": "finished",
+          "outcome": "failed",
+          "elapsed_ms": 31523,
+          "reviewed_elapsed_ms": null,
+          "failure": "Independent fixture check did not establish review-ready work",
+          "foreground": {
+            "background_request": 15,
+            "queue_observed": true,
+            "queue_ms": 8074,
+            "completed": true,
+            "check_passed": true,
+            "response_sha256": "d7f972a2c2a91ee3e88dc388f20494df807a692959ae352b099237a3a6095f32"
+          }
+        }
+      ]
+    }
+  ],
+  "findings": [
+    "Corrected cohort completed all8 scenarios and all16 dispatched generations, with1 canonical accepted outcome; this is not broad model reliability or an accuracy percentage.",
+    "Both small-edit profiles produced isdigit-based parsing that accepts Unicode digits despite the explicit ASCII contract; fixed oracle rejected both.",
+    "Baseline required-source work altered a pinned reference and was rejected. Candidate required-source work passed independent checks and canonical review in19241ms including instrumentation.",
+    "Both repair scenarios stopped at the required seed-marker guard before worker execution; no live repair outcome was measured. Treat this as fixture eligibility refusal, not evidence of repair ability.",
+    "Both queued discussions completed their checked JSON responses while the background coding results failed. Observed foreground waits were2315ms baseline and8074ms candidate; one pair cannot support a general latency claim.",
+    "Original v1 cohort remains incomplete4/8 with0 accepted, including a240045ms scenario cancellation; its ambiguous worker contract prevents a clean quality comparison."
+  ],
+  "limitations": [
+    "Upstream runtime binary/configuration pin and exact templated token headroom remain unverified. Model tag/metadata observations are not atomic upstream attestation.",
+    "One corrected paired repetition is diagnostic only. Required context, cold/warm residency, role context swaps and load overhead differ; no profile promotion, default change or speed claim.",
+    "A scenario reaching its240-second limit cancels the shared cohort token and leaves remaining cases Pending; cleanup is awaited. Client cancellation does not prove server-side abort.",
+    "Inspection validates current compiled fixture definitions; use the retained matching binary/archive to inspect historical fixture-v1 reports. Hashes identify content rather than authenticating a publisher.",
+    "Raw diagnostic reports are retained in the repository. Isolated workspaces, binary copies and artifact manifests are currently retained under the listed /tmp paths, not a portable restoration archive.",
+    "Full11-kind qualification family, role reliability, token admission, runtime withdrawal/promotion/rollback, Mission formation/Issue Graph, recovery/retirement, cross-platform and human/release acceptance remain open.",
+    "Native-only work did not require another browser run. No commit, push, publication or production-completion claim."
+  ],
+  "next_slice": ".agent/Tasks/native-mission-work-tree.md",
+  "human_preview": {
+    "directory": "alfredo-tui/dist/preview-2026-09-27",
+    "platform": "Linux x86_64 GNU / WSL",
+    "verified": "All packaged payload hashes match; executable --help succeeds",
+    "launch": "./alfredo-tui/dist/preview-2026-09-27/alfredo-tui --model qwen3:14b --state-dir \"$HOME/.local/state/alfredo-preview\"",
+    "publication": "Local preview only; no GitHub publication"
+  }
+}

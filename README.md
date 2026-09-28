@@ -1,147 +1,176 @@
-# Alfredo Local Coding-Agent Workstation
+# Alfredo
 
-**Last updated:** 2026-08-03
+Alfredo is a native terminal (`alfredo-tui`) that runs local Ollama coding agents
+on your Git repository. Give it a goal; it plans tasks, runs each one in an isolated
+worktree and sandbox, checks the result, repairs failures, and leaves one local
+branch for you to review. Nothing leaves your machine and nothing is pushed.
 
-Alfredo is a local-first coding-agent workstation with a prompt-dominant React/Tauri interface and an authoritative Python Orchestrator. Use it for fast project discussion, skills and slash commands, governed coding tasks, and visible Local Agent work. The secondary Mission Work lane shows real subagent sessions, workable Issue Slices, evidence, and typed review/retry/cancel actions.
+## Requirements
 
-The repository retains `Albert` and `Mission Control` compatibility names in Python modules and older documentation.
+- Linux x86-64 (WSL2 works; see [WSL notes](#wsl-notes)).
+- Git at `/usr/bin/git`, and a repository with at least one commit.
+- [Ollama](https://ollama.com) running locally, plus a model, e.g.
+  `ollama pull qwen2.5-coder:14b`.
+- For coding workers: bubblewrap (`/usr/bin/bwrap`) and prlimit (`/usr/bin/prlimit`,
+  from util-linux). Debian/Ubuntu: `sudo apt install git bubblewrap util-linux`.
+- To build from source: Rust 1.96 (`rustup toolchain install 1.96.0`).
 
-## Install and Start the Workstation
+Chat works without the worker tools; only coding tasks need them.
 
-The production release candidate is a small `alfredo-agent` CLI/backend package plus an exact-version `alfredo-agent-linux-x64-gnu` AppImage package. On 2026-07-13 the rebuilt production gate passed a meta-only isolated-registry install, plain-PATH `alfredo` launch, frontend load, and installed-backend workspace snapshot. The artifact gate reports pass/publishable true for the 77,761,016-byte AppImage with SHA-256 `3faec58bc4e4a0b1c825cb58a3ec5475e5daac36bb0c839e0699ae6ddf006be2`; the exact audited tarballs also pass the independent `release:check` and npm publish dry-runs. The packages are still not public: local npm authentication is absent, and the protected hosted provenance/publish/public-reinstall workflow has not run. Do not treat the following registry command as available until ticket 20 records that final gate.
+## Install
 
-After publication, start Alfredo from any directory you want to use as the Starting Location:
-
-```bash
-npm install --global alfredo-agent
-cd /path/to/your/projects
-alfredo
-```
-
-The invocation directory is not silently selected. Agent Console asks you to choose an exact existing Git repository or create one below the Starting Location; only the acknowledged repository becomes the Coding Workspace. Mission choice follows separately. Use `alfredo --agent qwen3-14b` or `alfredo workstation --agent qwen3-14b` to select the initial controller explicitly. The installed command launches the packaged native desktop directly; it does not invoke Cargo, Vite, the Tauri CLI, or a source checkout. The AppImage extraction fallback is applied internally, so the command does not require the user to know AppImage/FUSE flags.
-
-The currently verified native artifact baseline is Ubuntu 24.04 x64 with glibc 2.39; broader Ubuntu or glibc compatibility is not yet claimed. Consumer prerequisites include Node.js 20+ and npm for installation/the CLI shim, plus Python 3 and Bubblewrap for the backend. Missing Ollama or a selected model no longer blocks the desktop from opening; those are required only when local-model work is actually requested. Use `ALBERT_PYTHON` if Python is not available as `python3`, or `ALBERT_BACKEND_ROOT` for an intentional backend override.
-
-To build and verify the exact release locally, including a real AppImage build, meta-only install through an isolated npm registry, PATH resolution, plain `alfredo` invocation, and a bounded GUI-plus-backend readiness smoke:
+From source (needs the full checkout; the build includes
+`mission-control/src-tauri/src/execution.rs`):
 
 ```bash
-cd /path/to/local-coding-agent/mission-control
-npm install
-npm run release:verify
-npm run release:check
+git clone https://github.com/EricleungDK/Alfredo.git
+cd Alfredo
+cargo install --locked --path alfredo-tui   # installs ~/.cargo/bin/alfredo-tui
+alfredo-tui --version
 ```
 
-For source development, the repository launcher deliberately retains the Tauri development path:
+From a release archive (`alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz` plus its
+`.sha256`):
 
 ```bash
-cd /path/to/local-coding-agent/mission-control
-npm ci
-cargo --version
-cd ..
-node mission-control/bin/alfredo.js workstation --agent qwen3-14b
+sha256sum -c alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+install -m 755 alfredo-tui-0.1.0-x86_64-unknown-linux-gnu/alfredo-tui ~/.local/bin/
+alfredo-tui --version
 ```
 
-The source launcher checks for the lockfile-installed local Tauri CLI and Cargo before spawning the desktop process. A missing prerequisite fails with an Alfredo preflight message and a copyable repair command instead of exposing a raw child-process error. These development requirements do not apply to the packaged native desktop.
+See [alfredo-tui/INSTALL.md](alfredo-tui/INSTALL.md) for upgrade, uninstall and state notes.
 
-For the preferred persistent browser-development workstation on a Mac with Apple's `container` CLI (not Docker), run this once from the repository root:
+## 60-second quickstart
 
 ```bash
-./scripts/apple-container-dev setup
+cd ~/code/my-repo                          # any Git repo with a commit
+alfredo-tui --doctor --model qwen2.5-coder:14b   # optional preflight (exit 0 = ok)
+alfredo-tui --model qwen2.5-coder:14b
 ```
 
-Then keep `http://127.0.0.1:1420` open. The named `alfredo-dev` container runs detached, keeps its Linux Node dependencies, Cargo output, Rust toolchain, and Alfredo runtime in named volumes, and bind-mounts the repository's parent so host code changes appear immediately and sibling repositories remain available below `/workspace`. Polling-backed Vite watching makes bind-mounted host edits reload reliably. The first setup installs Apple's recommended Linux kernel if needed, then bootstraps Python, Git, Bubblewrap, pinned Rust 1.88.0, and lockfile-exact npm dependencies inside the persistent container. It does not use Docker or Compose.
-
-Daily commands are:
+1. The main screen opens on the repository root, mission `default`. No setup prompts.
+   The header shows server health (`ollama ✓ MODEL warm`).
+2. Type `/go Add a --verbose flag to the CLI and a test for it` and press Enter.
+   Autopilot plans tasks, approves them, runs workers, auto-accepts tasks whose
+   approved check passes, and retries failures (up to 2 repairs per task).
+3. Press F5 to pause or resume at any time; `/stop` also cancels running workers;
+   `/autopilot` shows status.
+4. When done, the summary names the branch `alfredo/go-<id>`. Your HEAD, index and
+   working files were never touched. Review and merge it yourself:
 
 ```bash
-./scripts/apple-container-dev status
-./scripts/apple-container-dev start
-./scripts/apple-container-dev restart
-./scripts/apple-container-dev logs
-./scripts/apple-container-dev stop
+git log --stat HEAD..alfredo/go-<id>   # what autopilot produced
+git switch alfredo/go-<id>             # optional: try it, then switch back
+git merge alfredo/go-<id>              # on your branch, when satisfied
 ```
 
-`start` and `restart` wait for a successful canonical Rust/Python bridge response, not only for an open HTTP port. Use `rebuild` only when you intentionally want to recreate the named container; the npm, Cargo, and runtime volumes remain preserved. The service is published only on the host loopback address.
+You can also start unattended: `alfredo-tui --model qwen2.5-coder:14b --go "GOAL"`.
+Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
+`/evidence`, `/accept`, …); press F1 on an empty prompt for the command list.
 
-The host-process fallback remains available:
+## Keys
 
-```bash
-cd mission-control
-npm run dev
-```
+| Key | Action |
+| --- | --- |
+| Enter | Send prompt or command |
+| Shift+Enter | New line (if the terminal reports it; paste also works) |
+| F1 | Command picker (empty prompt); Tab after `/prefix` completes |
+| F2 | Toggle Mission Work (task tree) / conversation |
+| F3 | Evidence for the selected task (in Mission Work) |
+| F4 | Activity (saved task receipts) |
+| F5 | Pause / resume autopilot |
+| Up / Down | Prompt history; in Mission Work, select task |
+| Alt+Left / Alt+Right | Collapse / expand a task branch (Mission Work) |
+| PageUp / PageDown | Scroll transcript, details or evidence |
+| Tab / Shift+Tab | Next / previous conversation |
+| Ctrl+N | New conversation (max 8) |
+| Esc | Cancel the current model request (keeps partial reply); close pickers |
+| Ctrl+R | Retry a failed or cancelled turn |
+| Ctrl+W / Ctrl+U | Delete word / clear prompt |
+| Ctrl+Q / Ctrl+C | Quit (cancels workers and waits for their results) |
 
-Open `http://127.0.0.1:1420`. Do not run this fallback while `alfredo-dev` owns the port. Both paths start a typed Rust bridge to the same authoritative Python Orchestrator used by Tauri, so repository selection, Mission choice, snapshots, and governed actions use canonical state rather than preview fixtures. By default, Alfredo's parent directory is the Starting Location, allowing a new sibling repository without overlapping the forbidden backend; set `ALFREDO_STARTING_LOCATION` explicitly when another projects directory is intended. The bridge is capability- and same-origin-guarded and exists only while its Vite process is running. Stop the host fallback with `Ctrl+C`.
+## Flags
 
-For the Tauri development window without the managed launcher:
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `--model NAME` | `qwen3:14b` (env `ALFREDO_MODEL`) | Model for new conversations |
+| `--endpoint URL` | `http://127.0.0.1:11434` (env `OLLAMA_HOST`) | Ollama HTTP origin |
+| `--go GOAL` | off | Start autopilot on launch |
+| `--max-repairs N` | 2 | Auto-repairs per task, 0–16 (0 disables) |
+| `--workspace DIR` | current repo | Open the repository containing `DIR` |
+| `--mission NAME` / `--new-mission NAME` | `default` | Resume / create a named mission (with `--workspace`) |
+| `--select` | off | Always show the repository/mission selector |
+| `--conversation NAME` | `default` | Named conversation set (one terminal owns a set) |
+| `--state-dir DIR` | `~/.local/state/alfredo` (env `ALFREDO_STATE_DIR`) | State location; must be outside the repo |
+| `--keep-alive VALUE` | `30m` (env `ALFREDO_KEEP_ALIVE`) | Ollama `keep_alive`: `30m`, `300`, `-1`, or `default` |
+| `--connect-retries N` | 3 | Auto-retry (1 s, 2 s, 4 s…) before any reply text, 0–10 |
+| `--parallel-models N` | 2 | Concurrent model requests per endpoint across terminals, 1–8 |
+| `--structured-thinking auto\|on\|off` | `off` | Thinking mode for structured (plan/worker) requests |
+| `--doctor` | | Check storage, model, repo and worker tools; no TTY; exit 2 on failure |
+| `--qualify-inference REPORT` | | Opt-in model diagnostic run (see [reference](alfredo-tui/docs/reference.md#run-an-explicit-inference-diagnostic)) |
+| `--qualification-repetitions N` | 3 | Repetitions for `--qualify-inference`, 1–3 |
+| `--inspect-qualification REPORT` | | Summarize a saved diagnostic report |
+| `--help`, `--version` | | |
 
-```bash
-cd mission-control
-npm run desktop
-```
+## Troubleshooting
 
-Native development uses a separate loopback Vite port (`1422`), so a browser workstation on `1420` no longer blocks the Tauri launcher.
+- **Header shows `ollama ✗ retrying`, or doctor says "Cannot reach Ollama"**: start
+  Ollama (`ollama serve` or your system service) and check `--endpoint`. Alfredo
+  recovers automatically once the server is back; no restart needed.
+- **`OLLAMA_HOST`**: Ollama's own forms (`host:port`, `0.0.0.0`) are accepted;
+  `0.0.0.0` connects to `127.0.0.1`. `--endpoint` overrides it.
+- **Model not installed** (doctor: "is not listed"): `ollama pull MODEL`, or use
+  `/models` then `/model NAME` inside the terminal.
+- **Doctor: `FAIL installed worker tool: /usr/bin/bwrap`** (or prlimit/git): install
+  `bubblewrap` / `util-linux` / `git`. The paths are fixed.
+- **Worker fails at sandbox start** (e.g. "Permission denied" setting up namespaces):
+  your distro restricts unprivileged user namespaces (Ubuntu 24.04+ AppArmor). Test
+  with `bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net true` and allow
+  bwrap per your distro's policy.
+- **"Interactive terminal required"**: run in a real terminal, not piped.
+- **"Conversation namespace is in use"**: another terminal owns that conversation
+  set; use `--conversation other` (both terminals share the task queue).
 
-## What Works
+### WSL notes
 
-- Selection-required startup from a distinct Starting Location, with acknowledged existing/new Git repository selection and no fabricated Mission or Workspace Session.
-- Explicit exact Resume Mission or distinct Start New Mission choice after workspace acknowledgement, with canonical workspace/Mission restoration across process and desktop restart.
-- One durable Agent Console chronology for controller discussion, commands, skills, coding requests, proposals, approvals, and outcomes.
-- `/help`, `/skills`, `/use`, `/run`, `/task`, and `/status`, plus natural-language coding-task routing.
-- Governed automatic delegation only after an exact canonical Mission/scope/goal/path/policy/worker boundary check.
-- Queued, cancellable, crash-recoverable Local Agent sessions in isolated worktrees with bounded iterative repair.
-- Reload-safe canonical repair actions for Review Workspace, TUI, CLI, and Ad Hoc sessions, with inherited authority and exactly-once child launch.
-- Persistent Mission Work cards, Issue Assignment, Workspace Queue, Review Workspace, Activity Journal, and Context Inspector.
-- Timestamp-backed last activity, safe copyable recent-workspace relaunch commands, and bounded refresh continuity for transport-failed workstation outcomes.
-- Minimal Bubblewrap process views, PID-namespace descendant supervision, resource/output caps, allowed-path enforcement, typed exact-boundary path-grant requests, mutation-coincident recovery markers, idempotent audit reconciliation, and whole-file evidence validation with bounded display memory.
-- Real bounded review artifacts opened through an inline safe-text viewer rather than raw local-file navigation.
-- Responsive two-lane desktop layout that stacks cleanly for tablet and phone widths.
+- Run Alfredo and your repositories inside the Linux filesystem (`~/...`), not
+  `/mnt/c`; worktrees and checks are much slower on the Windows mount.
+- If Ollama runs on Windows rather than inside WSL, `127.0.0.1` may not reach it
+  unless WSL mirrored networking is on. Either run Ollama inside WSL, enable mirrored
+  networking, or pass `--endpoint http://<windows-host-ip>:11434` with Ollama
+  listening on that interface.
+- bubblewrap works on WSL2 with the default kernel.
 
-## Verification
+## Limitations
 
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
-
-cd mission-control
-npm test -- --run
-npm run test:gateway
-npm run test:browser
-npm run test:performance
-npm run typecheck
-npm run build
-npm run test:layout
-npm run release:verify
-npm run release:check
-
-cd src-tauri
-cargo fmt --check
-cargo test
-```
-
-The production Chromium layout gate passes 4/4 at 1440×900, 1100×760, 820×900, and 390×844. See the [current acceptance-correction report](.agent/Reports/2026-07-12-alfredo-install-queue-acceptance-correction.md) for exact release status; the [2026-07-11 implementation report](.agent/Reports/2026-07-11-alfredo-one-shot-workstation.md) is retained as superseded history.
-
-Production performance evidence uses exact installed artifacts, clean committed
-source, immutable fixtures, separately hashed correctness gates, and at least 30
-process-cold or 100 process-warm randomized AB/BA pairs. See the
-[performance cohort operator guide](mission-control/performance/README.md).
-No current source-tree measurement is an accepted speed result.
-
-## Current Model Roles
-
-- `qwen3-14b` — default low-latency controller.
-- `qwen3.6-27b` — selectable frontier/router.
-- `gemma4-12b` and `gemma4-26b` — normal local workers.
-- `qwen2.5-coder-14b` and `deepseek-r1-14b` — delegate-only escalation targets.
-
-Controller routing and worker assignment are separate: a controller may classify or discuss a request, but only an eligible Local Agent role can execute a persisted session.
+- Linux x86-64 only. No macOS or Windows-native build; release archives are built
+  and tested on one glibc host (see `BUILD.json`).
+- Local-model quality limits unattended runs. Plans can be wrong, checks can be weak,
+  repairs can fail; expect to review, re-plan or finish some tasks by hand.
+- Auto-accept trusts the approved check. If the check passes, the task is accepted;
+  a weak check means weak acceptance. Risk-flagged and human-hold reviews still wait
+  for you.
+- Checks run in a sandbox with read-only system tools only; toolchains installed in
+  your home directory (e.g. `~/.cargo`, `~/.nvm`) are not visible to checks.
+- Work is based on committed HEAD; uncommitted changes are not seen by workers.
+- Autopilot never pushes, never opens PRs and never moves your branch.
 
 ## Documentation
 
-- [Documentation index](.agent/README.md)
-- [Project architecture](.agent/System/project_architecture.md)
-- [Development workflow](.agent/SOP/development_workflow.md)
-- [API and command boundaries](.agent/System/api_endpoints.md)
-- [Persistence schema](.agent/System/database_schema.md)
-- [UX guidelines](.agent/System/ux_guidelines.md)
-- [Active orchestration context](.agent/Tasks/context.md)
-- [Domain terminology](CONTEXT.md)
-- [Production performance cohort operator guide](mission-control/performance/README.md)
+- [alfredo-tui/README.md](alfredo-tui/README.md) — build, test and package from source.
+- [alfredo-tui/docs/reference.md](alfredo-tui/docs/reference.md) — detailed behavior
+  (tasks, review, repair, storage, scope, diagnostics).
+- [CHANGELOG.md](CHANGELOG.md)
+- [.agent/Tasks/STATUS.md](.agent/Tasks/STATUS.md) — current project status.
+
+## Legacy
+
+This repository also contains an earlier desktop workstation (React/Tauri
+`mission-control/` with a Python orchestrator `albert_mvp/`). It is no longer the
+primary product. Its documentation is in [docs/legacy.md](docs/legacy.md).
+
+## License
+
+MIT; see [LICENSE](LICENSE). Release archives include `THIRD_PARTY_NOTICES.txt` and
+`DEPENDENCIES.json` for dependencies, which keep their own licenses.

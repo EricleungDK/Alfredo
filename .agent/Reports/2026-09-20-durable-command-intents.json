@@ -1,0 +1,59 @@
+{
+  "date": "2026-09-20",
+  "scope": "Durable prepared command intents and originating conversation results",
+  "schemas": {
+    "task": 16,
+    "conversation_set": 10,
+    "scope": 2,
+    "agent_transcript": 1
+  },
+  "changes": [
+    "Immutable typed intent and attempt are saved before dispatch; exact Autosave snapshot equality gates only the live pending token.",
+    "Task, assignment, Plan save, scope, explicit worker Start, branch and recovery adapters capture targets before save and dispatch without reparsing selection or draft.",
+    "Command states are separate from model messages; canonical exact receipt identity supplies action phase in originating conversation.",
+    "Restored commands become unconfirmed without replay; explicit retry retains origin and exact intent with a new saved attempt.",
+    "Shared sequence and stable command reading keys retain presentation order; matched observation duplicates are suppressed.",
+    "Canonical scope cache survives panel changes and restart; normalized capacity reserves terminal outcomes and cross-session duplicate command IDs refuse.",
+    "Temporary cross-session retry notice clears on dispatch so acknowledged results remain visible."
+  ],
+  "delegation": {
+    "command_adapters_and_scope_cache": "/root/review_agent_continuity",
+    "autosave_schema_capacity_and_review": "/root/test_repair_resolution",
+    "command_ui_and_review": "/root/console_chronology",
+    "model_main_retry_and_installed_integration": "/root"
+  },
+  "validation": {
+    "native": {
+      "passed": 245,
+      "failed": 0,
+      "ignored": 7
+    },
+    "strict_clippy": "passed",
+    "installed_smoke": "..\n----------------------------------------------------------------------\nRan 2 tests in 15.462s\n\nOK\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+    "source_hashes_verified": 41,
+    "payload_hashes_verified": 6,
+    "documentation": {
+      "grade": "A",
+      "score": 98.2,
+      "existing_traceability_gaps": 3
+    },
+    "installed_specific_evidence": [
+      "Force conversation intent publication failure using directory at target; no task created.",
+      "Normal proposal/approval bind exact canonical requests.",
+      "Explicit restored retry from another conversation preserves original intent and leaves task snapshot unchanged.",
+      "Full previous worker/Architect/reading/restart/handoff journey still passes."
+    ],
+    "verification_sequence": "Full native pass; test-only Clippy style correction; installed journey reproduced stale retry notice covering result; corrected notice and verified final strict Clippy/archive/installed journey. Scope fixture now waits for actual refusal rather than pre-existing header."
+  },
+  "candidate": {
+    "path": "/tmp/alfredo-durable-command-candidate-final/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "f572cc85f731e6f665235555d806360de22ee8898533d2404c6d938acb7bcfc9"
+  },
+  "limitations": [
+    "Worker command acknowledgment currently proves Start claim; later Finish-origin lifecycle linking remains required.",
+    "Planner generation/revision/cancellation, automatic dispatch decisions, active cancellation and Wayfinder/workspace commands retain existing paths and still require causal adapters.",
+    "Preparation failures retain draft and notice rather than a persisted refused intent entry.",
+    "Full formation, model qualification, recovery/retirement, platform matrix and production launch remain open.",
+    "No remote CI, publication or human visual/accessibility acceptance claimed."
+  ]
+}

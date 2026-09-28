@@ -37,5 +37,18 @@ test("localhost opens a functional Alfredo workstation", async ({ page }) => {
   await expect(page.getByText("Agent Console / localhost-e2e", { exact: true })).toBeVisible();
   await expect(page.getByLabel("Message Alfredo")).toBeVisible();
   await expect(page.locator("body")).toHaveCSS("scroll-behavior", "auto");
+  // A page reload must restore the acknowledged workspace/mission through the
+  // real bridge rather than returning to an empty selection form.
+  await page.reload();
+  await expect(page.getByRole("main", { name: "Prompt Workstation" })).toBeVisible();
+  await expect(page.getByRole("region", { name: "Agent Console", exact: true })).toBeVisible();
+  await expect(page.getByRole("combobox", { name: "Workspace to relaunch" })).toHaveValue(workspacePath);
+  await expect(page.getByRole("treeitem", { name: /^mission localhost-e2e;/ })).toBeVisible();
+  await expect(page.getByText("Agent Console / localhost-e2e", { exact: true })).toBeVisible();
+  await expect(page.getByLabel("Message Alfredo")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Choose or create a repository" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Mission selection required" })).toHaveCount(0);
+  await expect(page.getByText("Alfredo workstation unavailable")).toHaveCount(0);
+  expect(await page.evaluate(() => "__TAURI_INTERNALS__" in window)).toBe(false);
   expect(pageErrors).toEqual([]);
 });

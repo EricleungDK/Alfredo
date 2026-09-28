@@ -1,0 +1,1278 @@
+//! Autopilot: a thin controller that chooses the next command a user could have
+//! typed (`/plan`, `/plan-save`, `/approve`, `/dispatch on`, `/review`, `/repair`,
+//! `/resolve-repair`). The terminal saves and dispatches each choice through the
+//! normal console intent path, so task policy, evidence verification, locks and
+//! receipts stay authoritative. Its own small state file lives beside the task
+//! store; it never replays inference or effects on restart and restores paused.
+use crate::{
+    command_intent::Intent,
+    task_control::TaskControl,
+    tasks::{Snapshot, Task, TaskStatus, TaskStore},
+    understanding,
+};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::{self, File, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+use tokio::{runtime::Runtime, sync::oneshot};
+
+const VERSION: u32 = 1;
+/// Repeated submissions of one decision without effect pause the loop.
+const ATTEMPTS: u32 = 3;
+const MAX_STATE: usize = 256 * 1024;
+pub const DEFAULT_MAX_REPAIRS: u32 = 2;
+pub const MAX_REPAIRS: u32 = 16;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum Phase {
+    Scoping,
+    Planning,
+    Saving,
+    Running,
+    Finishing,
+    Done,
+    Failed,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Saved {
+    version: u32,
+    id: String,
+    goal: String,
+    model: String,
+    max_repairs: u32,
+    phase: Phase,
+    paused: bool,
+    started: u64,
+    #[serde(default)]
+    finished: Option<u64>,
+    #[serde(default)]
+    plan_attempts: u32,
+    #[serde(default)]
+    plan_error: Option<String>,
+    #[serde(default)]
+    plan_request: Option<String>,
+    #[serde(default)]
+    save_request: Option<String>,
+    #[serde(default)]
+    first: Option<u64>,
+    #[serde(default)]
+    count: u64,
+    /// Heads cancelled before a resume; only these may be repaired automatically.
+    #[serde(default)]
+    retry_cancelled: BTreeSet<u64>,
+    #[serde(default)]
+    notice: String,
+    #[serde(default)]
+    report: Option<String>,
+    #[serde(default)]
+    branch: Option<String>,
+}
+impl Saved {
+    fn active(&self) -> bool {
+        !matches!(self.phase, Phase::Done | Phase::Failed)
+    }
+    fn validate(&self) -> Result<(), String> {
+        if self.version != VERSION
+            || !text(&self.goal, 4096)
+            || !text(&self.model, 200)
+            || self.id.len() != 16
+            || !self.id.bytes().all(|b| b.is_ascii_hexdigit())
+            || self.max_repairs > MAX_REPAIRS
+        {
+            return Err("Unsupported or invalid autopilot state".into());
+        }
+        Ok(())
+    }
+}
+
+fn text(value: &str, limit: usize) -> bool {
+    !value.trim().is_empty() && value.len() <= limit && !value.chars().any(char::is_control)
+}
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+/// Remove controls and bound bytes on a character boundary.
+fn clean(value: &str, limit: usize) -> String {
+    let mut result: String = value
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if result.len() > limit {
+        let mut end = limit;
+        while !result.is_char_boundary(end) {
+            end -= 1;
+        }
+        result.truncate(end);
+    }
+    result.trim().to_string()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RunState {
+    Planning,
+    Running,
+    Paused,
+    Finishing,
+    Done,
+    Failed,
+}
+impl RunState {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Planning => "planning",
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::Finishing => "integrating",
+            Self::Done => "done",
+            Self::Failed => "stopped",
+        }
+    }
+}
+
+/// Read-only projection for the UI. Counts derive from durable task receipts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Status {
+    pub state: RunState,
+    pub goal: String,
+    pub done: usize,
+    pub total: usize,
+    pub failed: usize,
+    pub repairs: u32,
+    pub elapsed: Duration,
+    pub branch: Option<String>,
+}
+impl Status {
+    pub fn line(&self) -> String {
+        let seconds = self.elapsed.as_secs();
+        let clock = if seconds >= 3600 {
+            format!(
+                "{}:{:02}:{:02}",
+                seconds / 3600,
+                seconds / 60 % 60,
+                seconds % 60
+            )
+        } else {
+            format!("{:02}:{:02}", seconds / 60, seconds % 60)
+        };
+        let marker = match self.state {
+            RunState::Paused => "‖",
+            RunState::Done => "✓",
+            RunState::Failed => "■",
+            _ => "▶",
+        };
+        let mut line = format!(
+            "Autopilot {marker} {} · {}/{} done · {} failed · repairs {} · {clock}",
+            self.state.label(),
+            self.done,
+            self.total,
+            self.failed,
+            self.repairs
+        );
+        if let Some(branch) = &self.branch {
+            line.push_str(&format!(" · {}", clean(branch, 80)));
+        }
+        line.push_str(&format!(" · {}", clean(&self.goal, 60)));
+        line
+    }
+}
+
+/// One command chosen by autopilot. The caller admits it exactly like typed input.
+#[derive(Clone, Debug)]
+pub struct Submission {
+    pub text: String,
+    pub intent: Intent,
+}
+
+pub fn is_command(text: &str) -> bool {
+    let text = text.trim();
+    let verb = text.split_whitespace().next().unwrap_or("");
+    verb == "/go" || matches!(text, "/pause" | "/resume" | "/stop" | "/autopilot")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Settled {
+    Active,
+    Success(u64),
+    Stuck(String),
+}
+
+struct Family {
+    root: u64,
+    head: u64,
+    settled: Settled,
+    repairs: u32,
+}
+
+pub struct Autopilot {
+    path: PathBuf,
+    saved: Option<Saved>,
+    last: Option<Intent>,
+    attempts: BTreeMap<String, u32>,
+    job: Option<oneshot::Receiver<Result<String, String>>>,
+    /// Monotonic process clock plus seconds already elapsed when it was taken.
+    clock: (std::time::Instant, u64),
+    notice: String,
+}
+
+impl Autopilot {
+    /// Load this conversation set's autopilot. A saved active loop is always
+    /// restored paused; nothing is replayed until an explicit resume.
+    pub fn open(directory: &Path, conversation: &str) -> Result<Self, String> {
+        let path = directory.join(format!(
+            "autopilot-{:x}.json",
+            Sha256::digest(conversation.as_bytes())
+        ));
+        let saved = match fs::read(&path) {
+            Ok(bytes) => {
+                if bytes.len() > MAX_STATE {
+                    return Err("Autopilot state exceeds its size bound; file preserved".into());
+                }
+                let mut saved: Saved = serde_json::from_slice(&bytes).map_err(|error| {
+                    format!("Autopilot state is invalid ({error}); file preserved")
+                })?;
+                saved.validate()?;
+                if saved.active() {
+                    saved.paused = true;
+                    if saved.phase == Phase::Finishing {
+                        saved.phase = Phase::Running;
+                    }
+                }
+                Some(saved)
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(format!("Cannot read autopilot state: {error}")),
+        };
+        let saved_elapsed = saved
+            .as_ref()
+            .map(|saved: &Saved| now().saturating_sub(saved.started));
+        let notice = saved
+            .as_ref()
+            .filter(|saved| saved.active())
+            .map(|_| "Autopilot restored paused · /resume or F5 continues".to_string())
+            .unwrap_or_default();
+        Ok(Self {
+            path,
+            saved,
+            last: None,
+            attempts: BTreeMap::new(),
+            job: None,
+            clock: (std::time::Instant::now(), saved_elapsed.unwrap_or_default()),
+            notice,
+        })
+    }
+
+    fn elapsed(&self) -> u64 {
+        match self.saved.as_ref().and_then(|saved| {
+            saved
+                .finished
+                .map(|finished| finished.saturating_sub(saved.started))
+        }) {
+            Some(fixed) => fixed,
+            None => self.clock.1 + self.clock.0.elapsed().as_secs(),
+        }
+    }
+
+    pub fn notice(&self) -> &str {
+        &self.notice
+    }
+    pub fn report(&self) -> Option<&str> {
+        self.saved.as_ref()?.report.as_deref()
+    }
+    /// True while the loop may still act; switching work must wait for pause.
+    pub fn running(&self) -> bool {
+        self.saved
+            .as_ref()
+            .is_some_and(|saved| saved.active() && !saved.paused)
+    }
+
+    fn persist(&mut self) {
+        let Some(saved) = &self.saved else {
+            return;
+        };
+        let result = (|| -> Result<(), String> {
+            let bytes = serde_json::to_vec_pretty(saved).map_err(|e| e.to_string())?;
+            let directory = self.path.parent().ok_or("Missing state directory")?;
+            let temporary = directory.join(format!(".autopilot-{}.tmp", std::process::id()));
+            let mut options = OpenOptions::new();
+            options.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let mut file = options.open(&temporary).map_err(|e| e.to_string())?;
+            file.write_all(&bytes)
+                .and_then(|_| file.sync_all())
+                .map_err(|e| e.to_string())?;
+            fs::rename(&temporary, &self.path).map_err(|e| e.to_string())?;
+            File::open(directory)
+                .and_then(|dir| dir.sync_all())
+                .map_err(|e| e.to_string())
+        })();
+        if let Err(error) = result {
+            if let Some(saved) = self.saved.as_mut() {
+                saved.paused = saved.active();
+            }
+            self.notice = format!("Autopilot paused: state save failed: {error}");
+        }
+    }
+
+    fn set_notice(&mut self, tasks: &mut TaskControl, notice: String) {
+        tasks.notice = notice.clone();
+        self.notice = notice.clone();
+        if let Some(saved) = self.saved.as_mut() {
+            saved.notice = notice;
+        }
+    }
+
+    pub fn start(
+        &mut self,
+        goal: &str,
+        model: &str,
+        max_repairs: u32,
+        tasks: &TaskControl,
+    ) -> Result<String, String> {
+        let goal = goal.trim();
+        if !text(goal, 4096) {
+            return Err("Usage: /go GOAL (1–4096 bytes without control characters)".into());
+        }
+        if !text(model, 200) {
+            return Err("Autopilot needs a selected model".into());
+        }
+        if max_repairs > MAX_REPAIRS {
+            return Err(format!("--max-repairs accepts 0 to {MAX_REPAIRS}"));
+        }
+        if let Some(saved) = &self.saved {
+            if saved.active() && (!saved.paused || !tasks.workers.is_empty()) {
+                return Err(format!(
+                    "Autopilot is active for “{}”; /pause or /stop and let workers finish before a new /go",
+                    clean(&saved.goal, 80)
+                ));
+            }
+        }
+        if tasks.planner.active() || tasks.planner.checkpoint().is_some() {
+            return Err("A plan draft is open; /plan-save or /plan-cancel it before /go".into());
+        }
+        if let Some(scope) = &tasks.canonical_scope {
+            scope_blocker(scope, goal)?;
+        }
+        let id = format!(
+            "{:x}",
+            Sha256::digest(format!(
+                "{goal}\0{}\0{:?}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+            ))
+        )[..16]
+            .to_string();
+        self.saved = Some(Saved {
+            version: VERSION,
+            id,
+            goal: goal.into(),
+            model: model.into(),
+            max_repairs,
+            phase: Phase::Scoping,
+            paused: false,
+            started: now(),
+            finished: None,
+            plan_attempts: 0,
+            plan_error: None,
+            plan_request: None,
+            save_request: None,
+            first: None,
+            count: 0,
+            retry_cancelled: BTreeSet::new(),
+            notice: String::new(),
+            report: None,
+            branch: None,
+        });
+        self.last = None;
+        self.attempts.clear();
+        self.job = None;
+        self.clock = (std::time::Instant::now(), 0);
+        self.notice = format!(
+            "Autopilot started · plan → approve → dispatch → review/repair (max {max_repairs} repairs per task) · F5 pauses"
+        );
+        self.persist();
+        Ok(self.notice.clone())
+    }
+
+    /// No new starts or automatic decisions; running workers finish normally.
+    pub fn pause(&mut self, tasks: &mut TaskControl) -> String {
+        let Some(saved) = self.saved.as_mut().filter(|saved| saved.active()) else {
+            return "No active autopilot".into();
+        };
+        saved.paused = true;
+        tasks.disable_dispatch();
+        self.persist();
+        self.notice = "Autopilot paused · running workers finish · /resume or F5 continues".into();
+        self.notice.clone()
+    }
+
+    /// A typed `/dispatch off` is the user taking control: pause rather than
+    /// re-enable dispatch behind their back. Other manual commands pass through.
+    pub fn observe_manual(&mut self, text: &str, tasks: &mut TaskControl) {
+        if text.trim() == "/dispatch off" && self.running() {
+            self.pause(tasks);
+            self.notice = "Autopilot paused by /dispatch off · /resume continues".into();
+        }
+    }
+
+    pub fn resume(&mut self, tasks: &TaskControl) -> Result<String, String> {
+        let saved = self
+            .saved
+            .as_mut()
+            .ok_or("No autopilot goal; use /go GOAL")?;
+        if !saved.active() {
+            return Err("Autopilot already finished; /go GOAL starts a new loop".into());
+        }
+        saved.paused = false;
+        if let Some(snapshot) = &tasks.snapshot {
+            // Runs cancelled by /stop or quit may be repaired after this resume.
+            for family in families(snapshot, saved, tasks) {
+                if let Some(task) = snapshot.tasks.iter().find(|t| t.id == family.head) {
+                    if task.status == TaskStatus::Cancelled && task.run.is_some() {
+                        saved.retry_cancelled.insert(task.id);
+                    }
+                }
+            }
+        }
+        if saved.phase == Phase::Planning
+            && !tasks.planner.active()
+            && !matches!(&saved.plan_request, Some(request) if draft_matches(tasks, request))
+        {
+            // Interrupted generation restarts once explicitly resumed.
+            saved.plan_request = None;
+        }
+        self.attempts.clear();
+        self.last = None;
+        self.persist();
+        self.notice = "Autopilot resumed".into();
+        Ok(self.notice.clone())
+    }
+
+    pub fn toggle(&mut self, tasks: &mut TaskControl) -> Result<String, String> {
+        if self.running() {
+            Ok(self.pause(tasks))
+        } else {
+            self.resume(tasks)
+        }
+    }
+
+    /// Pause, then cancel running workers through the existing cancel command.
+    pub fn stop(&mut self, runtime: &Runtime, tasks: &mut TaskControl) -> String {
+        let model = self
+            .saved
+            .as_ref()
+            .map(|saved| saved.model.clone())
+            .unwrap_or_else(|| "pending".into());
+        self.pause(tasks);
+        let workers: Vec<u64> = tasks.workers.keys().copied().collect();
+        let mut errors = Vec::new();
+        for task in &workers {
+            if let Err(error) = tasks.command(runtime, &format!("/cancel-task {task}"), &model) {
+                errors.push(format!("#{task}: {error}"));
+            }
+        }
+        self.notice = if errors.is_empty() {
+            format!(
+                "Autopilot stopped · cancellation requested for {} worker(s) · /resume continues",
+                workers.len()
+            )
+        } else {
+            format!(
+                "Autopilot stopped · cancellation issues: {}",
+                errors.join("; ")
+            )
+        };
+        self.notice.clone()
+    }
+
+    /// Terminal command entry for `/go`, `/pause`, `/resume`, `/stop`, `/autopilot`.
+    pub fn command(
+        &mut self,
+        runtime: &Runtime,
+        tasks: &mut TaskControl,
+        text: &str,
+        model: &str,
+        max_repairs: u32,
+    ) -> Result<String, String> {
+        let text = text.trim();
+        match text {
+            "/pause" => Ok(self.pause(tasks)),
+            "/resume" => self.resume(tasks),
+            "/stop" => Ok(self.stop(runtime, tasks)),
+            "/autopilot" => {
+                let status = self
+                    .status(tasks)
+                    .ok_or("No autopilot goal; use /go GOAL")?;
+                let mut report = status.line();
+                if !self.notice.is_empty() {
+                    report.push_str(&format!("\n{}", self.notice));
+                }
+                if let Some(summary) = self.report() {
+                    report.push_str(&format!("\n\n{summary}"));
+                }
+                tasks.set_visible(true);
+                tasks.autopilot_report = Some(report);
+                Ok("Autopilot status · /tasks returns to task details".into())
+            }
+            _ => match text.strip_prefix("/go") {
+                Some(goal) if goal.starts_with(char::is_whitespace) && !goal.trim().is_empty() => {
+                    self.start(goal, model, max_repairs, tasks)
+                }
+                _ => Err("Usage: /go GOAL".into()),
+            },
+        }
+    }
+
+    pub fn status(&self, tasks: &TaskControl) -> Option<Status> {
+        let saved = self.saved.as_ref()?;
+        let state = match saved.phase {
+            Phase::Done => RunState::Done,
+            Phase::Failed => RunState::Failed,
+            _ if saved.paused => RunState::Paused,
+            Phase::Scoping | Phase::Planning | Phase::Saving => RunState::Planning,
+            Phase::Running => RunState::Running,
+            Phase::Finishing => RunState::Finishing,
+        };
+        let (mut done, mut failed, mut repairs) = (0, 0, 0);
+        if let Some(snapshot) = &tasks.snapshot {
+            for family in families(snapshot, saved, tasks) {
+                repairs += family.repairs;
+                match family.settled {
+                    Settled::Success(_) => done += 1,
+                    Settled::Stuck(_) => failed += 1,
+                    Settled::Active => {}
+                }
+            }
+        }
+        Some(Status {
+            state,
+            goal: saved.goal.clone(),
+            done,
+            total: saved.count as usize,
+            failed,
+            repairs,
+            elapsed: Duration::from_secs(self.elapsed()),
+            branch: saved.branch.clone(),
+        })
+    }
+
+    /// Choose at most one next command. Returns None while paused, waiting for an
+    /// acknowledgment, or when there is nothing to do.
+    pub fn tick(&mut self, runtime: &Runtime, tasks: &mut TaskControl) -> Option<Submission> {
+        self.poll_integration(tasks);
+        let saved = self.saved.as_ref()?;
+        if saved.paused || !saved.active() || saved.phase == Phase::Finishing {
+            return None;
+        }
+        if tasks.pending
+            || tasks.writing
+            || self
+                .last
+                .as_ref()
+                .is_some_and(|intent| tasks.intent_pending(intent))
+        {
+            return None;
+        }
+        tasks.snapshot.as_ref()?;
+        let result = match saved.phase {
+            Phase::Scoping => self.scoping(tasks),
+            Phase::Planning => self.planning(tasks),
+            Phase::Saving => self.saving(tasks),
+            Phase::Running => self.running_step(runtime, tasks),
+            _ => Ok(None),
+        };
+        match result {
+            Ok(Some((key, text, intent))) => {
+                let attempts = self.attempts.entry(key.clone()).or_default();
+                *attempts += 1;
+                if *attempts > ATTEMPTS {
+                    let reason = self
+                        .last
+                        .as_ref()
+                        .and_then(|intent| tasks.intent_error(intent))
+                        .unwrap_or_else(|| tasks.notice.clone());
+                    self.halt(
+                        tasks,
+                        format!(
+                            "Autopilot paused: “{text}” had no effect after {ATTEMPTS} attempts: {reason}"
+                        ),
+                    );
+                    return None;
+                }
+                self.last = Some(intent.clone());
+                self.persist();
+                Some(Submission {
+                    text: format!("Autopilot · {text}"),
+                    intent,
+                })
+            }
+            Ok(None) => None,
+            Err(error) => {
+                self.halt(tasks, format!("Autopilot paused: {error}"));
+                None
+            }
+        }
+    }
+
+    fn halt(&mut self, tasks: &mut TaskControl, notice: String) {
+        if let Some(saved) = self.saved.as_mut() {
+            saved.paused = true;
+        }
+        tasks.disable_dispatch();
+        self.set_notice(tasks, notice);
+        self.persist();
+    }
+
+    fn fail(&mut self, tasks: &mut TaskControl, notice: String) {
+        let elapsed = self.elapsed();
+        if let Some(saved) = self.saved.as_mut() {
+            saved.phase = Phase::Failed;
+            saved.finished = Some(saved.started + elapsed);
+            saved.report = Some(format!("Autopilot stopped: {}\n{notice}", saved.goal));
+        }
+        self.set_notice(tasks, notice);
+        tasks.autopilot_report = self.report().map(str::to_owned);
+        self.persist();
+    }
+
+    fn advance(&mut self, phase: Phase) {
+        if let Some(saved) = self.saved.as_mut() {
+            saved.phase = phase;
+        }
+        self.attempts.clear();
+        self.persist();
+    }
+
+    fn scoping(
+        &mut self,
+        tasks: &mut TaskControl,
+    ) -> Result<Option<(String, String, Intent)>, String> {
+        let Some(scope) = tasks.canonical_scope.clone() else {
+            return Ok(None);
+        };
+        let saved = self.saved.as_ref().unwrap();
+        if let Err(error) = scope_blocker(&scope, &saved.goal) {
+            self.fail(tasks, error);
+            return Ok(None);
+        }
+        let brief = goal_brief(&saved.goal);
+        let needs_scope = if scope.confirmed {
+            false
+        } else if scope.brief.is_none() {
+            crate::wayfinder::entry_mode(&saved.goal).is_some()
+        } else {
+            true
+        };
+        if !needs_scope {
+            self.advance(Phase::Planning);
+            return Ok(None);
+        }
+        let (label, action) = if scope.brief.as_ref() == Some(&brief) && !scope.confirmed {
+            (
+                format!("/scope-confirm {}", scope.draft_revision),
+                understanding::Action::Confirm {
+                    draft_revision: scope.draft_revision,
+                },
+            )
+        } else {
+            (
+                "/scope (goal-derived minimal scope)".to_string(),
+                understanding::Action::Draft { brief },
+            )
+        };
+        let kind = if matches!(action, understanding::Action::Draft { .. }) {
+            "draft"
+        } else {
+            "confirm"
+        };
+        let intent = Intent::Scope {
+            request: understanding::Request {
+                correlation: format!("autopilot-{}-scope-{kind}-{}", saved.id, scope.revision),
+                expected_revision: scope.revision,
+                action,
+            },
+        };
+        intent.validate()?;
+        Ok(Some((format!("scope-{kind}"), label, intent)))
+    }
+
+    fn planning(
+        &mut self,
+        tasks: &mut TaskControl,
+    ) -> Result<Option<(String, String, Intent)>, String> {
+        if tasks.planner.active() {
+            return Ok(None);
+        }
+        let saved = self.saved.as_ref().unwrap().clone();
+        if let Some(request) = &saved.plan_request {
+            let error = if draft_matches(tasks, request) {
+                match tasks.planner.draft.as_ref().map(unattended_lint) {
+                    Some(Err(error)) => {
+                        // Same effect as /plan-cancel: discard the unsaved draft.
+                        tasks.planner.cancel();
+                        tasks.planner.draft = None;
+                        error
+                    }
+                    _ => {
+                        self.advance(Phase::Saving);
+                        return Ok(None);
+                    }
+                }
+            } else {
+                clean(
+                    tasks
+                        .planner
+                        .notice
+                        .trim_end_matches(" · no action taken")
+                        .trim_end_matches(" · previous draft retained"),
+                    1024,
+                )
+            };
+            let error = if error.is_empty() {
+                "Planner stopped without a draft".to_string()
+            } else {
+                error
+            };
+            let saved = self.saved.as_mut().unwrap();
+            saved.plan_attempts += 1;
+            saved.plan_request = None;
+            if saved.plan_attempts >= 2 {
+                self.fail(
+                    tasks,
+                    format!("Planning failed twice; autopilot stopped: {error}"),
+                );
+            } else {
+                saved.plan_error = Some(error);
+                self.persist();
+            }
+            return Ok(None);
+        }
+        if tasks.planner.checkpoint().is_some() {
+            self.fail(
+                tasks,
+                "Planning failed: another plan draft is open; /plan-save or /plan-cancel it".into(),
+            );
+            return Ok(None);
+        }
+        let mut prompt = clean(&saved.goal, 4096);
+        if let Some(error) = &saved.plan_error {
+            prompt.push_str(&format!(
+                " | The previous plan was rejected by validation: {}. Return a corrected complete plan.",
+                clean(error, 1024)
+            ));
+        }
+        let text = format!("/plan {prompt}");
+        let intent = tasks
+            .prepare_command(&text, &saved.model)?
+            .ok_or("Planner command unavailable")?;
+        self.saved.as_mut().unwrap().plan_request = Some(intent.correlation().to_string());
+        Ok(Some((
+            format!("plan-{}", saved.plan_attempts),
+            text,
+            intent,
+        )))
+    }
+
+    fn saving(
+        &mut self,
+        tasks: &mut TaskControl,
+    ) -> Result<Option<(String, String, Intent)>, String> {
+        let snapshot = tasks.snapshot.as_ref().unwrap();
+        let saved = self.saved.as_ref().unwrap();
+        if let Some(request) = &saved.save_request {
+            if let Some(receipt) = snapshot
+                .receipts
+                .iter()
+                .find(|receipt| &receipt.request.correlation == request)
+            {
+                let crate::tasks::Action::Plan { plan } = &receipt.request.action else {
+                    return Err("Plan save receipt has an unexpected action".into());
+                };
+                let (first, count) = (receipt.task, plan.tasks.len() as u64);
+                let saved = self.saved.as_mut().unwrap();
+                saved.first = Some(first);
+                saved.count = count;
+                self.advance(Phase::Running);
+                return Ok(None);
+            }
+        }
+        if tasks.planner.checkpoint().is_none() {
+            self.fail(
+                tasks,
+                "Planning failed: the draft disappeared before it was saved".into(),
+            );
+            return Ok(None);
+        }
+        let intent = tasks
+            .prepare_command("/plan-save", &saved.model)?
+            .ok_or("Plan save unavailable")?;
+        self.saved.as_mut().unwrap().save_request = Some(intent.correlation().to_string());
+        Ok(Some(("plan-save".into(), "/plan-save".into(), intent)))
+    }
+
+    fn running_step(
+        &mut self,
+        runtime: &Runtime,
+        tasks: &mut TaskControl,
+    ) -> Result<Option<(String, String, Intent)>, String> {
+        let snapshot = tasks.snapshot.clone().unwrap();
+        let saved = self.saved.as_ref().unwrap().clone();
+        let families = families(&snapshot, &saved, tasks);
+        let find = |id: u64| snapshot.tasks.iter().find(|task| task.id == id);
+        let mut command = None;
+        for family in families.iter().filter(|f| f.settled == Settled::Active) {
+            let Some(head) = find(family.head) else {
+                continue;
+            };
+            command = match head.status {
+                TaskStatus::Proposed if head.policy.is_some() => Some((
+                    format!("approve-{}", head.id),
+                    format!("/approve {}", head.id),
+                )),
+                TaskStatus::ReviewReady => {
+                    let criteria: Vec<_> = snapshot
+                        .acceptance_for_task(head.id)
+                        .iter()
+                        .enumerate()
+                        .map(|(index, _)| {
+                            serde_json::json!({"criterion": index + 1, "met": true,
+                                "note": "Autopilot: approved check passed with verified evidence; criterion not independently inspected"})
+                        })
+                        .collect();
+                    let review = serde_json::json!({"outcome": "approved", "reason": "autopilot: check passed", "criteria": criteria});
+                    Some((
+                        format!("review-{}", head.id),
+                        format!("/review {} {review}", head.id),
+                    ))
+                }
+                TaskStatus::Accepted if head.repair_of.is_some() => Some((
+                    format!("resolve-{}", head.id),
+                    format!("/resolve-repair {}", head.id),
+                )),
+                TaskStatus::Failed | TaskStatus::Cancelled => {
+                    let detail = head
+                        .run
+                        .as_ref()
+                        .map(|run| run.detail.as_str())
+                        .unwrap_or("worker failed");
+                    let reason = clean(&format!("autopilot: {detail}"), 1800);
+                    Some((
+                        format!("repair-{}", head.id),
+                        format!("/repair {} {reason}", head.id),
+                    ))
+                }
+                _ => None,
+            };
+            if command.is_some() {
+                break;
+            }
+        }
+        if command.is_none() && !tasks.dispatch.enabled {
+            let ready = families.iter().any(|family| {
+                family.settled == Settled::Active
+                    && find(family.head).is_some_and(|task| {
+                        task.status == TaskStatus::Approved
+                            && task.run.is_none()
+                            && !tasks.workers.contains_key(&task.id)
+                            && task
+                                .dependencies
+                                .iter()
+                                .all(|dep| snapshot.dependency_source(*dep).is_ok())
+                    })
+            });
+            if ready {
+                command = Some((
+                    format!("dispatch-{}", snapshot.revision),
+                    "/dispatch on".into(),
+                ));
+            }
+        }
+        if let Some((key, text)) = command {
+            let intent = tasks
+                .prepare_command(&text, &saved.model)?
+                .ok_or("Command unavailable")?;
+            let display = if text.starts_with("/review ") {
+                format!(
+                    "{} (approved: check passed)",
+                    &text[..text.find(" {").unwrap_or(text.len())]
+                )
+            } else {
+                text
+            };
+            return Ok(Some((key, display, intent)));
+        }
+        if tasks.workers.is_empty()
+            && families
+                .iter()
+                .all(|family| family.settled != Settled::Active)
+        {
+            self.integrate(runtime, tasks, &snapshot, &families);
+        }
+        Ok(None)
+    }
+
+    fn integrate(
+        &mut self,
+        runtime: &Runtime,
+        tasks: &mut TaskControl,
+        snapshot: &Snapshot,
+        families: &[Family],
+    ) {
+        let saved = self.saved.as_ref().unwrap().clone();
+        let sources: Vec<u64> = families
+            .iter()
+            .filter_map(|family| match family.settled {
+                Settled::Success(source) => Some(source),
+                _ => None,
+            })
+            .collect();
+        tasks.disable_dispatch();
+        if sources.is_empty() {
+            self.complete(tasks, Err("no task was accepted".into()));
+            return;
+        }
+        let first = saved.first.unwrap_or(1);
+        let baseline = snapshot
+            .plan_for_task(first)
+            .and_then(|plan| plan.context.as_ref())
+            .map(|context| context.baseline.clone())
+            .or_else(|| {
+                families
+                    .iter()
+                    .filter(|family| {
+                        snapshot
+                            .tasks
+                            .iter()
+                            .any(|t| t.id == family.root && t.dependencies.is_empty())
+                    })
+                    .find_map(|family| {
+                        snapshot
+                            .tasks
+                            .iter()
+                            .find(|t| t.id == family.root)
+                            .and_then(|t| t.run.as_ref())
+                            .map(|run| run.baseline.clone())
+                    })
+            });
+        let Some(baseline) = baseline else {
+            self.complete(tasks, Err("no recorded plan baseline".into()));
+            return;
+        };
+        let name = format!("alfredo/go-{}", &saved.id[..8]);
+        let (sender, receiver) = oneshot::channel();
+        let store = tasks.store().clone();
+        let workspace = snapshot.workspace.clone();
+        runtime.spawn(async move {
+            let result = integration_branch(store, workspace, baseline, sources, name.clone())
+                .await
+                .map(|commit| format!("{name}\0{commit}"));
+            let _ = sender.send(result);
+        });
+        self.job = Some(receiver);
+        self.advance(Phase::Finishing);
+        self.set_notice(
+            tasks,
+            "Autopilot composing accepted results on an integration branch".into(),
+        );
+    }
+
+    fn poll_integration(&mut self, tasks: &mut TaskControl) {
+        let Some(job) = self.job.as_mut() else {
+            return;
+        };
+        let result = match job.try_recv() {
+            Ok(result) => result,
+            Err(oneshot::error::TryRecvError::Empty) => return,
+            Err(oneshot::error::TryRecvError::Closed) => Err("integration stopped".into()),
+        };
+        self.job = None;
+        self.complete(tasks, result);
+    }
+
+    fn complete(&mut self, tasks: &mut TaskControl, result: Result<String, String>) {
+        let Some(snapshot) = tasks.snapshot.clone() else {
+            return;
+        };
+        let saved = self.saved.as_ref().unwrap().clone();
+        let families = families(&snapshot, &saved, tasks);
+        let mut lines = vec![format!("Autopilot finished: {}", clean(&saved.goal, 200))];
+        let mut stuck = 0;
+        for family in &families {
+            let title = snapshot
+                .tasks
+                .iter()
+                .find(|t| t.id == family.root)
+                .map(|t| clean(&t.title, 80))
+                .unwrap_or_default();
+            let outcome = match &family.settled {
+                Settled::Success(source) if *source == family.root => "accepted".to_string(),
+                Settled::Success(source) => format!("accepted via repair #{source}"),
+                Settled::Stuck(reason) => {
+                    stuck += 1;
+                    reason.clone()
+                }
+                Settled::Active => "unfinished".into(),
+            };
+            lines.push(format!("#{} {title} — {outcome}", family.root));
+        }
+        let accepted = families.len() - stuck;
+        let branch = match result {
+            Ok(value) => {
+                let (name, commit) = value.split_once('\0').unwrap_or((&value, ""));
+                lines.push(format!(
+                    "Integration branch {name} at {} ({accepted} accepted task(s)); HEAD, index and working files unchanged",
+                    &commit[..commit.len().min(12)]
+                ));
+                lines.push(format!(
+                    "Review: git switch {name} · Merge: git merge {name}"
+                ));
+                if stuck > 0 {
+                    lines.push(format!(
+                        "Partial result: {stuck} task(s) held or failed; the branch contains the accepted subset only"
+                    ));
+                }
+                Some(name.to_string())
+            }
+            Err(error) => {
+                lines.push(if accepted > 0 {
+                    format!("No integration branch: the accepted subset does not compose cleanly: {error}")
+                } else {
+                    format!("No integration branch: {error}")
+                });
+                None
+            }
+        };
+        let report = lines.join("\n");
+        let notice = match &branch {
+            Some(name) => format!(
+                "Autopilot done · {accepted}/{} accepted · git switch {name}",
+                families.len()
+            ),
+            None => format!(
+                "Autopilot done · {accepted}/{} accepted · no integration branch",
+                families.len()
+            ),
+        };
+        let elapsed = self.elapsed();
+        if let Some(saved) = self.saved.as_mut() {
+            saved.phase = Phase::Done;
+            saved.finished = Some(saved.started + elapsed);
+            saved.report = Some(report.clone());
+            saved.branch = branch;
+        }
+        self.set_notice(tasks, notice);
+        tasks.set_visible(true);
+        tasks.autopilot_report = Some(report);
+        self.persist();
+    }
+}
+
+/// Autopilot approves without a human reading each policy, so it also refuses
+/// checks that can only fail: a shell string where an argv program is required.
+fn unattended_lint(plan: &crate::planner::Plan) -> Result<(), String> {
+    for (index, step) in plan.tasks.iter().enumerate() {
+        if let Some(program) = step.policy.check.first() {
+            if program.chars().any(char::is_whitespace) {
+                return Err(format!(
+                    "Task {} check must be an argv array, not a shell string: split {:?} into separate program and argument strings",
+                    index + 1,
+                    clean(program, 200)
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn draft_matches(tasks: &TaskControl, request: &str) -> bool {
+    tasks.planner.checkpoint().is_some_and(|draft| {
+        draft
+            .origin
+            .as_ref()
+            .is_some_and(|origin| origin.correlation == request)
+            && draft.validate().is_ok()
+    })
+}
+
+fn goal_brief(goal: &str) -> understanding::Brief {
+    understanding::Brief {
+        destination: format!("Autopilot goal: {}", clean(goal, 1900)),
+        scope: "Only the tasks autopilot plans for this goal, each limited to its approved files and check.".into(),
+        constraints: "Local isolated worktrees and approved file/check policies; no push; the checked-out branch, index and working files stay untouched.".into(),
+        uncertainty: "Plan and code are model-generated; autopilot acceptance relies on the approved check passing, not independent inspection.".into(),
+    }
+}
+
+/// A user-authored pending draft is never confirmed on the user's behalf. Only
+/// an untouched Wayfinder entry placeholder or autopilot's own draft may proceed.
+fn scope_blocker(scope: &understanding::Snapshot, goal: &str) -> Result<(), String> {
+    if scope.brief.is_none() || scope.confirmed {
+        return Ok(());
+    }
+    let placeholder = scope.flow.is_some() && scope.draft_revision == 1;
+    if placeholder || scope.brief.as_ref() == Some(&goal_brief(goal)) {
+        return Ok(());
+    }
+    Err(format!(
+        "Scope draft {} awaits your review; inspect /scope and /scope-confirm {} (or revise it) before /go",
+        scope.draft_revision, scope.draft_revision
+    ))
+}
+
+/// Settle each planned task family from durable receipts plus local worker state.
+fn families(snapshot: &Snapshot, saved: &Saved, tasks: &TaskControl) -> Vec<Family> {
+    let Some(first) = saved.first else {
+        return vec![];
+    };
+    let find = |id: u64| snapshot.tasks.iter().find(|task| task.id == id);
+    let roots: BTreeMap<u64, u64> = snapshot
+        .tasks
+        .iter()
+        .filter(|task| task.id >= first)
+        .filter_map(|task| Some((task.id, snapshot.repair_root(task.id)?)))
+        .collect();
+    let mut result: Vec<Family> = Vec::new();
+    for root in first..first + saved.count {
+        let Some(task) = find(root) else {
+            continue;
+        };
+        let members: Vec<&Task> = snapshot
+            .tasks
+            .iter()
+            .filter(|t| roots.get(&t.id) == Some(&root))
+            .collect();
+        let head = members.iter().map(|t| t.id).max().unwrap_or(root);
+        let repairs = members
+            .iter()
+            .filter(|t| {
+                t.repair_of
+                    .and_then(find)
+                    .is_some_and(|parent| parent.status == TaskStatus::Failed)
+            })
+            .count() as u32;
+        let head_task = find(head).unwrap_or(task);
+        let blocked = || {
+            head_task.dependencies.iter().find_map(|dep| {
+                let dependency = result
+                    .iter()
+                    .find(|family| family.root == snapshot.repair_root(*dep).unwrap_or(*dep))?;
+                matches!(dependency.settled, Settled::Stuck(_))
+                    .then(|| format!("blocked by #{dep}"))
+            })
+        };
+        let settled = if let Some(source) = snapshot.resolution_for_family(root) {
+            Settled::Success(source)
+        } else if task.status == TaskStatus::Accepted {
+            Settled::Success(root)
+        } else {
+            match head_task.status {
+                TaskStatus::NeedsHumanReview => Settled::Stuck("held for human review".into()),
+                TaskStatus::Rejected => Settled::Stuck("rejected by review".into()),
+                TaskStatus::Failed if repairs >= saved.max_repairs => Settled::Stuck(format!(
+                    "failed; repair budget exhausted ({repairs}/{})",
+                    saved.max_repairs
+                )),
+                TaskStatus::Cancelled if head_task.run.is_none() => {
+                    Settled::Stuck("cancelled before start".into())
+                }
+                TaskStatus::Cancelled if !saved.retry_cancelled.contains(&head) => {
+                    Settled::Stuck("cancelled; /resume retries it".into())
+                }
+                TaskStatus::Running if !tasks.workers.contains_key(&head) => {
+                    Settled::Stuck(format!("run interrupted; inspect with /recover {head}"))
+                }
+                TaskStatus::Proposed | TaskStatus::Approved => match blocked() {
+                    Some(reason) => Settled::Stuck(reason),
+                    None if head_task.status == TaskStatus::Approved
+                        && head_task.run.is_none()
+                        && !tasks.workers.contains_key(&head)
+                        && crate::dispatch::approval(snapshot, head).is_some_and(|approval| {
+                            tasks.dispatch.attempts.get(&head) == Some(&approval)
+                        }) =>
+                    {
+                        let reason = tasks
+                            .dispatch
+                            .failures
+                            .get(&head)
+                            .map(|failure| clean(failure, 200))
+                            .unwrap_or_else(|| "launch did not start".into());
+                        Settled::Stuck(format!("launch failed: {reason}"))
+                    }
+                    None => Settled::Active,
+                },
+                _ => Settled::Active,
+            }
+        };
+        result.push(Family {
+            root,
+            head,
+            settled,
+            repairs,
+        });
+    }
+    result
+}
+
+/// Compose accepted candidates on the recorded baseline with the same object-only
+/// merge used for dependency baselines, then create one new local branch ref.
+async fn integration_branch(
+    store: TaskStore,
+    workspace: PathBuf,
+    baseline: String,
+    sources: Vec<u64>,
+    name: String,
+) -> Result<String, String> {
+    let mut candidates = Vec::new();
+    for source in sources {
+        let reader = store.clone();
+        let raw = tokio::task::spawn_blocking(move || reader.evidence(source))
+            .await
+            .map_err(|_| "Evidence reader stopped".to_string())??;
+        let evidence: crate::worker::Evidence =
+            serde_json::from_str(&raw).map_err(|_| "Malformed accepted evidence")?;
+        candidates.push((
+            source,
+            crate::worker::verify_candidate(&workspace, &evidence).await?,
+        ));
+    }
+    let commit = crate::dependencies::compose(&workspace, baseline, &candidates).await?;
+    let reference = format!("refs/heads/{name}");
+    match crate::worker::git(&workspace, &["show-ref", "--verify", "--hash", &reference]).await {
+        Ok(current) if current.trim() == commit => {}
+        Ok(_) => {
+            return Err(format!(
+                "{name} already exists and points elsewhere; it was not changed"
+            ))
+        }
+        Err(_) => {
+            crate::worker::git(
+                &workspace,
+                &[
+                    "update-ref",
+                    "--no-deref",
+                    &reference,
+                    &commit,
+                    "0000000000000000000000000000000000000000",
+                ],
+            )
+            .await?;
+        }
+    }
+    Ok(commit)
+}

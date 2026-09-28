@@ -1,0 +1,121 @@
+{
+  "date": "2026-09-14",
+  "gpu_observation": {
+    "gpu_utilization_percent": 97,
+    "memory_total_mib": 12282,
+    "memory_used_mib": 11048,
+    "name": "NVIDIA GeForce RTX 4070"
+  },
+  "logs": {
+    "alfredo-live-parallel-1.log": "   Compiling alfredo-tui v0.1.0 (/mnt/c/users/ericl/documents/ai-projects/local-coding-agent/alfredo-tui)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.74s\n     Running tests/worker.rs (alfredo-tui/target/debug/deps/worker-21de274c09067944)\n\nrunning 1 test\ntest live_parallel_workers_pass_independent_edge_case_checks has been running for over 60 seconds\nLIVE_WORKER_SAMPLE {\"candidate_commit\":null,\"case\":\"merge_intervals\",\"detail\":\"Ollama did not respond before the loading deadline\",\"elapsed_seconds\":60.04722579,\"first_content_seconds\":null,\"model\":\"qwen3:14b\",\"model_metrics\":null,\"status\":\"failed\"}\n\nthread 'live_parallel_workers_pass_independent_edge_case_checks' (23327) panicked at tests/worker.rs:1593:9:\nassertion `left == right` failed: merge_intervals: {\n  \"run\": \"task-2-run-5\",\n  \"baseline\": \"e2289d4f2c3e83febe654bb481b1990456b8b43d\",\n  \"status\": \"failed\",\n  \"detail\": \"Ollama did not respond before the loading deadline\",\n  \"patch\": \"\",\n  \"check\": null\n}\n  left: Failed\n right: ReviewReady\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest live_parallel_workers_pass_independent_edge_case_checks ... FAILED\n\nfailures:\n\nfailures:\n    live_parallel_workers_pass_independent_edge_case_checks\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 60.55s\n\nerror: test failed, to rerun pass `--test worker`\n",
+    "alfredo-live-parallel-2.log": "   Compiling alfredo-tui v0.1.0 (/mnt/c/users/ericl/documents/ai-projects/local-coding-agent/alfredo-tui)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.66s\n     Running tests/worker.rs (alfredo-tui/target/debug/deps/worker-21de274c09067944)\n\nrunning 1 test\ntest live_parallel_workers_pass_independent_edge_case_checks has been running for over 60 seconds\nLIVE_WORKER_SAMPLE {\"candidate_commit\":null,\"case\":\"merge_intervals\",\"detail\":\"Ollama did not respond before the loading deadline\",\"elapsed_seconds\":60.037030138,\"first_content_seconds\":null,\"model\":\"qwen3:14b\",\"model_metrics\":null,\"status\":\"failed\"}\nLIVE_WORKER_SAMPLE {\"candidate_commit\":\"eb71c5978dee51373a7c52a57747d43f65f695d3\",\"case\":\"strict_port\",\"detail\":\"Approved check passed; changes await human review\",\"elapsed_seconds\":84.963358776,\"first_content_seconds\":81.470766587,\"model\":\"qwen3:14b\",\"model_metrics\":{\"eval_count\":101,\"eval_duration\":2581555000,\"load_duration\":153956808,\"prompt_eval_count\":3633,\"prompt_eval_duration\":1508487000,\"total_duration\":84753782240},\"status\":\"review-ready\"}\n\nthread 'live_parallel_workers_pass_independent_edge_case_checks' (24333) panicked at tests/worker.rs:1632:5:\nBoth independent live coding cases must pass; see sample outcomes\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest live_parallel_workers_pass_independent_edge_case_checks ... FAILED\n\nfailures:\n\nfailures:\n    live_parallel_workers_pass_independent_edge_case_checks\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 85.13s\n\nerror: test failed, to rerun pass `--test worker`\n",
+    "alfredo-live-serial-admission.log": "   Compiling alfredo-tui v0.1.0 (/mnt/c/users/ericl/documents/ai-projects/local-coding-agent/alfredo-tui)\n    Finished `test` profile [unoptimized + debuginfo] target(s) in 24.73s\n     Running tests/worker.rs (alfredo-tui/target/debug/deps/worker-21de274c09067944)\n\nrunning 1 test\nLIVE_WORKER_CAPACITY 1\ntest live_parallel_workers_pass_independent_edge_case_checks has been running for over 60 seconds\nLIVE_WORKER_SAMPLE {\"candidate_commit\":null,\"case\":\"strict_port\",\"detail\":\"Ollama connection lost; partial reply retained\",\"elapsed_seconds\":76.937008252,\"first_content_seconds\":null,\"model\":\"qwen3:14b\",\"model_metrics\":null,\"status\":\"failed\"}\nLIVE_WORKER_SAMPLE {\"candidate_commit\":null,\"case\":\"merge_intervals\",\"detail\":\"Cannot reach Ollama; check the server and endpoint, then retry\",\"elapsed_seconds\":76.246961375,\"first_content_seconds\":null,\"model\":\"qwen3:14b\",\"model_metrics\":null,\"status\":\"failed\"}\n\nthread 'live_parallel_workers_pass_independent_edge_case_checks' (25570) panicked at tests/worker.rs:1639:5:\nBoth independent live coding cases must pass; see sample outcomes\nnote: run with `RUST_BACKTRACE=1` environment variable to display a backtrace\ntest live_parallel_workers_pass_independent_edge_case_checks ... FAILED\n\nfailures:\n\nfailures:\n    live_parallel_workers_pass_independent_edge_case_checks\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 19 filtered out; finished in 78.16s\n\nerror: test failed, to rerun pass `--test worker`\n"
+  },
+  "model": {
+    "capabilities": [
+      "completion",
+      "tools",
+      "thinking"
+    ],
+    "details": {
+      "context_length": 40960,
+      "embedding_length": 5120,
+      "families": [
+        "qwen3"
+      ],
+      "family": "qwen3",
+      "format": "gguf",
+      "parameter_size": "14.8B",
+      "parent_model": "",
+      "quantization_level": "Q4_K_M"
+    },
+    "digest": "bdbd181c33f2ed1b31c972991882db3cf4d192569092138a7d29e973cd9debe8",
+    "model": "qwen3:14b",
+    "modified_at": "2026-06-18T17:24:36.22825975+02:00",
+    "name": "qwen3:14b",
+    "size": 9276198565
+  },
+  "next": "Repeat paired admission comparison against a stable recorded server version before deciding default capacity or model profile changes.",
+  "purpose": "Representative optional coding acceptance; not sustained qualification",
+  "result": "Not qualified: two-request trials had loading timeouts; one port case passed. Capacity-one comparison interrupted by external server upgrade. No defaults or deadlines changed.",
+  "samples": {
+    "alfredo-live-parallel-1.log": [
+      {
+        "candidate_commit": null,
+        "case": "merge_intervals",
+        "detail": "Ollama did not respond before the loading deadline",
+        "elapsed_seconds": 60.04722579,
+        "first_content_seconds": null,
+        "model": "qwen3:14b",
+        "model_metrics": null,
+        "status": "failed"
+      }
+    ],
+    "alfredo-live-parallel-2.log": [
+      {
+        "candidate_commit": null,
+        "case": "merge_intervals",
+        "detail": "Ollama did not respond before the loading deadline",
+        "elapsed_seconds": 60.037030138,
+        "first_content_seconds": null,
+        "model": "qwen3:14b",
+        "model_metrics": null,
+        "status": "failed"
+      },
+      {
+        "candidate_commit": "eb71c5978dee51373a7c52a57747d43f65f695d3",
+        "case": "strict_port",
+        "detail": "Approved check passed; changes await human review",
+        "elapsed_seconds": 84.963358776,
+        "first_content_seconds": 81.470766587,
+        "model": "qwen3:14b",
+        "model_metrics": {
+          "eval_count": 101,
+          "eval_duration": 2581555000,
+          "load_duration": 153956808,
+          "prompt_eval_count": 3633,
+          "prompt_eval_duration": 1508487000,
+          "total_duration": 84753782240
+        },
+        "status": "review-ready"
+      }
+    ],
+    "alfredo-live-serial-admission.log": [
+      {
+        "candidate_commit": null,
+        "case": "strict_port",
+        "detail": "Ollama connection lost; partial reply retained",
+        "elapsed_seconds": 76.937008252,
+        "first_content_seconds": null,
+        "model": "qwen3:14b",
+        "model_metrics": null,
+        "status": "failed"
+      },
+      {
+        "candidate_commit": null,
+        "case": "merge_intervals",
+        "detail": "Cannot reach Ollama; check the server and endpoint, then retry",
+        "elapsed_seconds": 76.246961375,
+        "first_content_seconds": null,
+        "model": "qwen3:14b",
+        "model_metrics": null,
+        "status": "failed"
+      }
+    ]
+  },
+  "server_interruption": {
+    "evidence": [
+      "Stopping ollama.service - Ollama Service...",
+      "Started ollama.service - Ollama Service.",
+      "Listening on 127.0.0.1:11434 (version 0.34.0)"
+    ],
+    "interpretation": "Service upgrade interrupted the capacity-one comparison; not evidence that client serialization failed under a stable server.",
+    "new_version": "0.34.0",
+    "server_parallel_requests": 1,
+    "source": "journalctl -u ollama --since 2026-09-14 22:00:00",
+    "stopped_at": "2026-09-14T22:03:23+02:00"
+  },
+  "server_version_before": {
+    "version": "0.30.6"
+  }
+}

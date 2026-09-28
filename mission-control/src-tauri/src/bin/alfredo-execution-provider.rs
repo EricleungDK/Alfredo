@@ -155,6 +155,7 @@ fn response_for(
         provider.execute_with_callbacks(
             &request,
             &mut ExecutionCallbacks {
+                output: None,
                 process_started: Some(&mut started),
                 poll: Some(&mut poll),
             },

@@ -1,0 +1,50 @@
+{
+  "date": "2026-09-20",
+  "auditor": "cargo-audit 0.22.2",
+  "command": "cargo audit --file Cargo.lock --deny warnings --json (cwd alfredo-tui)",
+  "audit": {
+    "database": {
+      "advisory-count": 1251,
+      "last-commit": "d5c17953a895cf19e8d3ce66eaa42b6fcfe1fb16",
+      "last-updated": "2026-09-19T10:42:27+02:00"
+    },
+    "lockfile": {
+      "dependency-count": 213
+    },
+    "settings": {
+      "target_arch": [],
+      "target_os": [],
+      "severity": null,
+      "ignore": [],
+      "informational_warnings": [
+        "unmaintained",
+        "unsound",
+        "notice"
+      ]
+    },
+    "vulnerabilities": {
+      "found": false,
+      "count": 0,
+      "list": []
+    },
+    "warnings": {}
+  },
+  "candidate": {
+    "archive": "/tmp/alfredo-criterion-review-candidate-v2/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+    "archive_sha256": "39c3f73aafb0848fb2aa21be2686f609bd5bd17bd4d57d852da48bc9bae5eb91",
+    "source_files_verified": 37,
+    "payload_files_verified": 6,
+    "audited_lock_sha256": "102a6056b555d240689bd065ccebac4bb1f5090caa6bae2d8ea292d1c5e2032f",
+    "source_commit": "b01541f1d7499addc78f096b3df7133d248db767",
+    "source_dirty": true
+  },
+  "known_vulnerability_failure_gate": "Audit failure gate verified against RUSTSEC-2022-0051; application lockfile untouched\n",
+  "third_party_notice_tests": ".........\n----------------------------------------------------------------------\nRan 9 tests in 0.021s\n\nOK\n",
+  "product_changes": "None; current lockfile and candidate remain unchanged.",
+  "limits": [
+    "RustSec reports known published dependency advisories; this is not application security or license-compatibility qualification.",
+    "Remote CI and cross-platform acceptance have not been observed in this run.",
+    "The full Rust rewrite objective remains active; review-policy outcomes, formation/chronology, recovery/retirement and launch gates are incomplete.",
+    "No publication."
+  ]
+}
