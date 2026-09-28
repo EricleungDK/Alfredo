@@ -11,6 +11,10 @@ import tarfile
 import tempfile
 import tomllib
 
+# PTY journeys run against the installed binary; autopilot covers /go end to end.
+SMOKES = ['terminal_smoke.py', 'inference_terminal_smoke.py', 'qualification_cli_smoke.py',
+          'recovery_terminal_smoke.py', 'autopilot_terminal_smoke.py']
+
 
 def verify(archive):
     expected, filename = Path(str(archive) + '.sha256').read_text().strip().split('  ')
@@ -81,14 +85,9 @@ def smoke(archive):
         if version != f"alfredo-tui {manifest['version']}":
             raise ValueError('Installed version does not match build provenance')
         subprocess.run(['alfredo-tui', '--help'], cwd=root, env=env, check=True, stdout=subprocess.DEVNULL)
-        subprocess.run([sys.executable, str(Path(__file__).with_name('terminal_smoke.py').resolve())],
-                       cwd=root, env=env, check=True)
-        subprocess.run([sys.executable, str(Path(__file__).with_name('inference_terminal_smoke.py').resolve())],
-                       cwd=root, env=env, check=True)
-        subprocess.run([sys.executable, str(Path(__file__).with_name('qualification_cli_smoke.py').resolve())],
-                       cwd=root, env=env, check=True)
-        subprocess.run([sys.executable, str(Path(__file__).with_name('recovery_terminal_smoke.py').resolve())],
-                       cwd=root, env=env, check=True)
+        for smoke_script in SMOKES:
+            subprocess.run([sys.executable, str(Path(__file__).with_name(smoke_script).resolve())],
+                           cwd=root, env=env, check=True)
         print(f'Installed archive acceptance passed: {version} ({manifest["target"]})')
 
 
