@@ -190,39 +190,46 @@ fn all(buffer: &Buffer) -> String {
 
 #[test]
 fn hierarchy_names_task_counts_and_renders_dependency_edges_once() {
-    let fixture = hierarchy();
+    let mut fixture = hierarchy();
     let buffer = fixture.render(140, 40);
     let tree = region(&buffer, 0, 2, 40, 33);
-    assert!(tree.contains("Mission Work · 6/6 tasks"), "{tree}");
-    assert!(tree.contains("Plan r1 · 5 tasks"), "{tree}");
-    assert!(tree.contains("Build a parser"), "{tree}");
-    assert!(tree.contains("Manual tasks · 1 task"), "{tree}");
+    // Default view: done/total progress, plan request instead of its receipt revision.
+    assert!(tree.contains("Mission Work · 1/6 done"), "{tree}");
+    assert!(tree.contains("Build a parser · 5"), "{tree}");
+    assert!(!tree.contains("Plan r1"), "{tree}");
+    assert!(tree.contains("Manual tasks · 1"), "{tree}");
     for status in [
-        "#1 Rejected",
-        "#2 Approved",
-        "#3 Proposed",
-        "#4 Proposed",
-        "#5 Accepted",
-        "#6 Proposed",
+        "✗ #1 Original parser",
+        "○ #2 Read inputs",
+        "○ #3 Write outputs",
+        "○ #4 Check integration",
+        "✓ #5 Repair parser",
+        "○ #6 Manual audit",
     ] {
         assert_eq!(tree.matches(status).count(), 1, "{status}: {tree}");
     }
-    assert_eq!(tree.matches("Depends on #1").count(), 2, "{tree}");
-    assert!(tree.contains("Depends on #2, #3"), "{tree}");
+    // Dependency edges are shown once, in the selected task's detail.
+    assert!(!tree.contains("Depends on"), "{tree}");
     let original = tree
         .lines()
-        .find(|line| line.contains("#1 Rejected"))
+        .find(|line| line.contains("#1 Original"))
         .unwrap();
     let repair = tree
         .lines()
-        .find(|line| line.contains("#5 Accepted"))
+        .find(|line| line.contains("#5 Repair"))
         .unwrap();
     let column =
         |line: &str| unicode_width::UnicodeWidthStr::width(line.split('#').next().unwrap());
     assert!(column(repair) > column(original), "{tree}");
-    assert!(tree.contains("↳ #5"), "{tree}");
+    assert!(tree.contains("↳ ✓ #5"), "{tree}");
     assert!(all(&buffer).contains("Resolved by accepted repair #5"));
     assert!(all(&buffer).contains("keep draft"));
+    fixture.select(4);
+    let detail = region(&fixture.render(140, 40), 40, 2, 100, 33);
+    assert_eq!(detail.matches("Depends on #2, #3").count(), 1, "{detail}");
+    // The plan receipt revision stays available in the activity view.
+    fixture.control.activity = Some(String::new());
+    assert!(all(&fixture.render(140, 40)).contains("r1 · task #1"));
 }
 
 #[test]
@@ -251,9 +258,9 @@ fn group_selection_removes_stale_task_model_evidence_and_actions() {
     }
     assert!(fixture.control.collapse_work_node());
     let collapsed = all(&fixture.render(140, 40));
-    assert!(collapsed.contains("▸ Plan r1 · 5 tasks"));
-    assert!(!collapsed.contains("#5 Accepted"));
-    assert!(collapsed.contains("Mission Work · 6/6 tasks"));
+    assert!(collapsed.contains("▸ Build a parser · 5"), "{collapsed}");
+    assert!(!collapsed.contains("#5 Repair parser"));
+    assert!(collapsed.contains("Mission Work · 1/6 done"));
 }
 
 #[test]
@@ -265,17 +272,17 @@ fn minimum_size_keeps_selected_tree_row_composer_and_scrollable_exact_inspector(
     for _ in 0..100 {
         let buffer = fixture.render(32, 10);
         let text = all(&buffer);
-        assert!(text.contains("#5 Accepted"), "{text}");
+        assert!(text.contains("#5 Repair parser"), "{text}");
         assert!(text.contains("Prompt"), "{text}");
         assert!(text.contains("keep draft"), "{text}");
-        assert!(text.contains("Alt+←/→"), "{text}");
+        assert!(text.contains("F1 help"), "{text}");
         observed.push_str(&region(&buffer, 0, 3, 32, 2));
         observed.push('\n');
         fixture.control.scroll_rows(1);
     }
     for expected in [
         "Repair parser",
-        "task-5-run-1",
+        "Recorded outcome",
         "Repair of #1",
         "Evidence recorded",
         "exact-worker-model",
@@ -285,6 +292,8 @@ fn minimum_size_keeps_selected_tree_row_composer_and_scrollable_exact_inspector(
             "missing {expected}: {observed}"
         );
     }
+    // Run identifiers are F3 evidence detail, not default detail.
+    assert!(!observed.contains("task-5-run-1"));
     assert!(!observed.contains("task-1-run-1"));
     assert_eq!(
         serde_json::to_value(&fixture.app.sessions[0]).unwrap(),
@@ -296,7 +305,7 @@ fn minimum_size_keeps_selected_tree_row_composer_and_scrollable_exact_inspector(
     for _ in 0..20 {
         let buffer = fixture.render(32, 10);
         let text = all(&buffer);
-        assert!(text.contains("Plan r1 · 5 tasks"), "{text}");
+        assert!(text.contains("Build a parser · 5"), "{text}");
         assert!(text.contains("keep draft"), "{text}");
         group_details.push_str(&region(&buffer, 0, 3, 32, 2));
         fixture.control.scroll_rows(1);
@@ -325,18 +334,22 @@ fn running_task_exposes_actual_model_run_and_missing_observation_without_claimin
     fixture.select(1);
     let text = all(&fixture.render(160, 40));
     for expected in [
-        "#1 Running",
+        "#1 · Running",
         "Model: exact-worker-model",
-        "task-1-run-1",
         "Current observation unavailable",
         "recorded run does not prove a live worker",
-        "Recent saved activity",
-        "saved-r1",
         "Evidence: no completed run evidence recorded",
-        "0 local workers",
+        "Work 0 local",
     ] {
         assert!(text.contains(expected), "missing {expected}: {text}");
     }
+    // Run and receipt identifiers moved to the evidence and activity views.
+    assert!(!text.contains("task-1-run-1"), "{text}");
+    assert!(!text.contains("saved-r1"), "{text}");
+    fixture.control.activity = Some("#1".into());
+    let activity = all(&fixture.render(160, 40));
+    assert!(activity.contains("saved-r1"), "{activity}");
+    fixture.control.activity = None;
     fixture.control.run_observations.insert(
         1,
         "Owner probe stale; /refresh for a new observation".into(),

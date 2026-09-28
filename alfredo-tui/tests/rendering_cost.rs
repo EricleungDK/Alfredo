@@ -229,3 +229,126 @@ fn measure_mission_work_redraws() {
         "scope": "Actual draw_with_tasks with Ratatui TestBackend; cold means fresh presentation caches, not OS/process cold. Excludes terminal IO and model/network latency. No duration threshold."})
     );
 }
+
+/// Dashboard with 200 tasks and 4 streaming workers; returns (control, senders, root).
+fn streaming_dashboard() -> (
+    TaskControl,
+    Vec<tokio::sync::watch::Sender<alfredo_tui::worker::Progress>>,
+    PathBuf,
+) {
+    use alfredo_tui::tasks::{Task, TaskRun};
+    let root = std::env::temp_dir().join(format!(
+        "alfredo-dashboard-cost-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    fs::create_dir_all(root.join("workspace")).unwrap();
+    let store = TaskStore::new(&root.join("state"), &root.join("workspace"), "Cost").unwrap();
+    let mut control = TaskControl::new(store);
+    let statuses = [
+        TaskStatus::Accepted,
+        TaskStatus::Proposed,
+        TaskStatus::Approved,
+        TaskStatus::ReviewReady,
+        TaskStatus::Failed,
+    ];
+    let tasks: Vec<Task> = (1..=200u64)
+        .map(|id| {
+            let status = if id <= 4 {
+                TaskStatus::Running
+            } else {
+                statuses[id as usize % statuses.len()].clone()
+            };
+            Task {
+                id,
+                title: format!("Task number {id} with a reasonably long descriptive title"),
+                model: "fixture".into(),
+                dependencies: if id > 1 { vec![id - 1] } else { vec![] },
+                status: status.clone(),
+                policy: Some(WorkPolicy {
+                    files: vec![format!("file{id}.py")],
+                    check: vec!["python3".into(), "-m".into(), "unittest".into()],
+                }),
+                repair_of: None,
+                run: (status == TaskStatus::Running).then(|| TaskRun {
+                    id: format!("run-{id}"),
+                    baseline: "a".repeat(40),
+                    inputs: vec![],
+                    evidence_sha256: None,
+                    detail: "Running".into(),
+                }),
+            }
+        })
+        .collect();
+    control.snapshot = Some(Snapshot {
+        schema_version: alfredo_tui::tasks::SCHEMA_VERSION,
+        workspace: root.join("workspace"),
+        mission: "Cost".into(),
+        revision: 0,
+        tasks,
+        receipts: vec![],
+    });
+    control
+        .restore_view(TaskView {
+            visible: true,
+            selected: Some(2),
+            query: String::new(),
+        })
+        .unwrap();
+    let mut senders = vec![];
+    for task in 1..=4 {
+        let (sender, receiver) = tokio::sync::watch::channel(alfredo_tui::worker::Progress {
+            stage: "Receiving model plan",
+            model_output: "streamed model text line\n".repeat(300),
+            check_stdout: b"test output\n".repeat(400),
+            ..Default::default()
+        });
+        control.attach_progress(
+            task,
+            receiver,
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        );
+        senders.push(sender);
+    }
+    (control, senders, root)
+}
+
+fn average_streaming_redraw_ms(frames: u32) -> f64 {
+    let (control, senders, root) = streaming_dashboard();
+    let app = App::new("fixture".into());
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+    draw(&mut terminal, &app, &control);
+    let mut total = 0u128;
+    for frame in 0..frames {
+        for sender in &senders {
+            sender.send_modify(|progress| {
+                progress.model_output.push_str(&format!("token {frame}\n"));
+                progress.received_bytes += 8;
+            });
+        }
+        total += draw(&mut terminal, &app, &control);
+    }
+    let _ = fs::remove_dir_all(root);
+    total as f64 / f64::from(frames) / 1e6
+}
+
+#[test]
+fn dashboard_redraw_with_streaming_workers_is_bounded() {
+    let average = average_streaming_redraw_ms(20);
+    let limit = if cfg!(debug_assertions) { 50.0 } else { 16.0 };
+    assert!(
+        average < limit,
+        "average redraw {average:.2} ms ≥ {limit} ms"
+    );
+}
+
+#[test]
+#[ignore = "explicit release-mode dashboard redraw measurement"]
+fn measure_dashboard_streaming_redraws() {
+    let average = average_streaming_redraw_ms(200);
+    println!(
+        "{}",
+        serde_json::json!({"fixture": "200 tasks, 4 streaming workers, 140x40", "average_ms": average})
+    );
+    assert!(average < 16.0, "average redraw {average:.2} ms ≥ 16 ms");
+}

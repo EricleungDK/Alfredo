@@ -213,6 +213,45 @@ impl Session {
         }
     }
 
+    /// Short phase for the transcript timing line while a request is active.
+    pub fn wait_phase(&self) -> Option<&'static str> {
+        if !self.status.active() {
+            return None;
+        }
+        if self.retry.is_some() {
+            Some("reconnecting")
+        } else if self.queued {
+            Some("queued")
+        } else if self.status == Status::Connecting && self.thinking {
+            Some("thinking")
+        } else if self.status == Status::Connecting
+            && self
+                .timing
+                .as_ref()
+                .is_some_and(|timing| timing.has_admission())
+        {
+            Some("waiting for model")
+        } else {
+            None
+        }
+    }
+
+    /// One short word (or `retry N/M`) for the session list.
+    pub fn short_status(&self) -> String {
+        if let Some((retry, _)) = self.retry.as_ref().filter(|_| self.status.active()) {
+            return format!("retry {}/{}", retry.retry, retry.limit);
+        }
+        match &self.status {
+            Status::Connecting | Status::Streaming if self.queued => "queued".into(),
+            Status::Connecting => "thinking".into(),
+            Status::Streaming => "streaming".into(),
+            Status::Ready => "ready".into(),
+            Status::Complete => "done".into(),
+            Status::Cancelled => "cancelled".into(),
+            Status::Failed(_) => "failed".into(),
+        }
+    }
+
     pub fn queue_observation(&self) -> Option<crate::inference_admission::Observation> {
         (self.status.active() && self.queued)
             .then_some(self.queue_observation)
@@ -544,6 +583,21 @@ impl Session {
             text,
             intent,
             true,
+            None,
+            crate::console_command::CommandState::Pending,
+        )
+    }
+    /// Record an autopilot-chosen command like typed input, but keep the reader's
+    /// position: autopilot must not pull a user who scrolled up to the bottom.
+    pub fn submit_autopilot_command(
+        &mut self,
+        text: String,
+        intent: crate::command_intent::Intent,
+    ) -> Result<String, String> {
+        self.admit_command(
+            text,
+            intent,
+            false,
             None,
             crate::console_command::CommandState::Pending,
         )

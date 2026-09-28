@@ -36,6 +36,8 @@ pub struct Progress {
     pub stage_started: Instant,
     pub first_content: Option<Duration>,
     pub received_bytes: usize,
+    /// Bounded tail of streamed model text, for live display only.
+    pub model_output: String,
     pub check_stdout: Vec<u8>,
     pub check_stderr: Vec<u8>,
 }
@@ -49,6 +51,7 @@ impl Default for Progress {
             stage_started: now,
             first_content: None,
             received_bytes: 0,
+            model_output: String::new(),
             check_stdout: Vec::new(),
             check_stderr: Vec::new(),
         }
@@ -75,6 +78,8 @@ impl Progress {
         )
     }
 }
+
+const MODEL_OUTPUT_TAIL: usize = 8192;
 
 #[derive(Clone)]
 pub struct Observer(watch::Sender<Progress>);
@@ -105,14 +110,22 @@ impl Observer {
     fn queue(&self, queue: crate::inference_admission::Observation) {
         self.0.send_modify(|p| p.queue = Some(queue));
     }
-    fn content(&self, bytes: usize) {
+    fn content(&self, text: &str) {
         self.0.send_modify(|p| {
             if p.first_content.is_none() {
                 p.first_content = Some(p.stage_started.elapsed());
                 p.stage = "Receiving model plan";
                 p.stage_started = Instant::now();
             }
-            p.received_bytes += bytes;
+            p.received_bytes += text.len();
+            p.model_output.push_str(text);
+            if p.model_output.len() > MODEL_OUTPUT_TAIL {
+                let mut start = p.model_output.len() - MODEL_OUTPUT_TAIL;
+                while !p.model_output.is_char_boundary(start) {
+                    start += 1;
+                }
+                p.model_output.drain(..start);
+            }
         });
     }
 }
@@ -763,7 +776,7 @@ async fn perform(
                 Some(Update::QueueProgress(queue)) => observer.queue(queue),
                 Some(Update::Admitted) => observer.stage("Waiting for model server"),
                 Some(Update::Retrying(_)) => observer.stage("Reconnecting to model server"),
-                Some(Update::Token(text)) => { observer.content(text.len()); answer.push_str(&text); },
+                Some(Update::Token(text)) => { observer.content(&text); answer.push_str(&text); },
                 Some(Update::Done) => { done = true; break; },
                 Some(Update::Failed(reason)) => { error = Some(reason); break; },
                 None => break,

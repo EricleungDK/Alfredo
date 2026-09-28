@@ -115,7 +115,21 @@ pub struct TaskControl {
     pub autopilot: Option<crate::autopilot::Status>,
     /// Completion/status report opened by autopilot; any task view replaces it.
     pub autopilot_report: Option<String>,
+    /// Last user-driven selection move; autopilot focus waits while it is recent.
+    manual_selection: Option<std::time::Instant>,
+    /// Detail pane follows the live tail until the user scrolls away from it.
+    pub(crate) follow_tail: std::cell::Cell<bool>,
+    /// Whether the last rendered detail pane showed a live worker.
+    pub(crate) detail_live: std::cell::Cell<bool>,
+    /// Compact verified outcome per task, keyed by the acknowledged evidence hash.
+    outcomes: std::cell::RefCell<BTreeMap<u64, (String, OutcomeLines)>>,
 }
+
+/// Rendered outcome lines, or why verified evidence could not be shown.
+pub type OutcomeLines = Arc<Result<Vec<ratatui::text::Line<'static>>, String>>;
+
+/// Autopilot focus waits this long after a manual selection move.
+const MANUAL_SELECTION_HOLD: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl TaskControl {
     pub fn new(store: TaskStore) -> Self {
@@ -184,6 +198,10 @@ impl TaskControl {
             run_observations: BTreeMap::new(),
             autopilot: None,
             autopilot_report: None,
+            manual_selection: None,
+            follow_tail: std::cell::Cell::new(true),
+            detail_live: Default::default(),
+            outcomes: Default::default(),
         }
     }
 
@@ -583,6 +601,7 @@ impl TaskControl {
         self.activity = None;
         self.evidence = None;
         self.scroll = 0;
+        self.follow_tail.set(true);
         Ok(())
     }
 
@@ -664,6 +683,7 @@ impl TaskControl {
         self.evidence = None;
         self.autopilot_report = None;
         self.scroll = 0;
+        self.follow_tail.set(true);
     }
 
     fn reveal_work_task(&mut self, task: u64) {
@@ -691,6 +711,7 @@ impl TaskControl {
         if self.pending {
             return false;
         }
+        self.manual_selection = Some(std::time::Instant::now());
         let Some(focused) = self.focused_work_node() else {
             return false;
         };
@@ -716,6 +737,7 @@ impl TaskControl {
         if self.pending {
             return false;
         }
+        self.manual_selection = Some(std::time::Instant::now());
         let Some(focused) = self.focused_work_node() else {
             return false;
         };
@@ -738,14 +760,18 @@ impl TaskControl {
 
     /// Navigate from the last rendered boundary, avoiding invisible overscroll.
     pub fn scroll_rows(&mut self, rows: i32) {
-        let current = self.scroll.min(self.scroll_max.get());
+        let maximum = self.scroll_max.get();
+        let current = if self.detail_live.get() && self.follow_tail.get() {
+            maximum
+        } else {
+            self.scroll.min(maximum)
+        };
         self.scroll = if rows < 0 {
             current.saturating_sub(rows.unsigned_abs() as usize)
         } else {
-            current
-                .saturating_add(rows as usize)
-                .min(self.scroll_max.get())
+            current.saturating_add(rows as usize).min(maximum)
         };
+        self.follow_tail.set(self.scroll >= maximum);
     }
 
     /// Keep one rendered row in common between pages; tiny panes still advance.
@@ -758,6 +784,7 @@ impl TaskControl {
         if self.pending {
             return;
         }
+        self.manual_selection = Some(std::time::Instant::now());
         let tree = self.work_tree();
         if tree.rows.is_empty() {
             return;
@@ -772,6 +799,147 @@ impl TaskControl {
             (None, false) => tree.rows.len() - 1,
         };
         self.focus_work_node(tree.rows[next].id);
+    }
+
+    /// While autopilot is active, focus the running task unless the user moved
+    /// the selection within the last few seconds. Returns whether focus moved.
+    pub fn follow_running_task(&mut self) -> bool {
+        use crate::autopilot::RunState;
+        if self.pending
+            || !self.autopilot.as_ref().is_some_and(|status| {
+                matches!(
+                    status.state,
+                    RunState::Planning | RunState::Running | RunState::Finishing
+                )
+            })
+            || self
+                .manual_selection
+                .is_some_and(|at| at.elapsed() < MANUAL_SELECTION_HOLD)
+        {
+            return false;
+        }
+        let Some(snapshot) = &self.snapshot else {
+            return false;
+        };
+        let running = |id: u64| {
+            snapshot
+                .tasks
+                .iter()
+                .any(|task| task.id == id && task.status == crate::tasks::TaskStatus::Running)
+        };
+        if self.selected_task().is_some_and(|task| running(task.id)) {
+            return false;
+        }
+        // Prefer a task with a live local worker, then any recorded running task.
+        let target = self
+            .progress
+            .keys()
+            .copied()
+            .find(|id| running(*id))
+            .or_else(|| {
+                snapshot
+                    .tasks
+                    .iter()
+                    .find(|task| task.status == crate::tasks::TaskStatus::Running)
+                    .map(|task| task.id)
+            });
+        let Some(target) = target else {
+            return false;
+        };
+        if !self
+            .work_tree()
+            .rows
+            .iter()
+            .any(|row| row.task == Some(target))
+        {
+            self.reveal_work_task(target);
+        }
+        if !self
+            .work_tree()
+            .rows
+            .iter()
+            .any(|row| row.task == Some(target))
+        {
+            return false;
+        }
+        self.focus_work_node(NodeId::Task(target));
+        true
+    }
+
+    /// Age the last manual selection (tests and long-idle sessions).
+    pub fn expire_manual_selection(&mut self, age: std::time::Duration) {
+        self.manual_selection = self.manual_selection.and_then(|at| at.checked_sub(age));
+    }
+
+    /// Register observed worker progress (used by dispatch and by render fixtures).
+    pub fn attach_progress(
+        &mut self,
+        task: u64,
+        progress: watch::Receiver<crate::worker::Progress>,
+        cancel: Arc<AtomicBool>,
+    ) {
+        self.progress.insert(task, progress);
+        self.workers.insert(task, cancel);
+    }
+
+    /// True once per batch of new worker output, so streaming redraws promptly.
+    pub fn progress_changed(&mut self) -> bool {
+        let mut changed = false;
+        for receiver in self.progress.values_mut() {
+            if receiver.has_changed().unwrap_or(false) {
+                receiver.borrow_and_update();
+                changed = true;
+            }
+        }
+        changed
+    }
+
+    pub fn has_live_workers(&self) -> bool {
+        !self.progress.is_empty()
+    }
+
+    /// Current live worker view for a task, if a local worker is observed.
+    pub fn worker_live(&self, task: u64) -> Option<crate::dashboard::Live> {
+        let progress = self.progress.get(&task)?.borrow();
+        let stage = progress
+            .queue
+            .as_ref()
+            .map(crate::client_timing::queue_summary)
+            .unwrap_or_else(|| progress.stage.into());
+        Some(crate::dashboard::Live {
+            stage: format!(
+                "{stage} · {:.1}s · {} received",
+                progress.started.elapsed().as_secs_f64(),
+                crate::dashboard::bytes(progress.received_bytes)
+            ),
+            cancelling: self
+                .workers
+                .get(&task)
+                .is_some_and(|flag| flag.load(Ordering::SeqCst)),
+            model_output: progress.model_output.clone(),
+            stdout: String::from_utf8_lossy(&progress.check_stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&progress.check_stderr).into_owned(),
+        })
+    }
+
+    /// Compact verified outcome for a finished task. Evidence is read and verified
+    /// through the store once per acknowledged evidence hash, then cached.
+    pub fn outcome(&self, task: &crate::tasks::Task) -> Option<OutcomeLines> {
+        let hash = task.run.as_ref()?.evidence_sha256.clone()?;
+        if let Some((cached, lines)) = self.outcomes.borrow().get(&task.id) {
+            if *cached == hash {
+                return Some(Arc::clone(lines));
+            }
+        }
+        let lines = Arc::new(
+            self.store
+                .evidence(task.id)
+                .and_then(|raw| crate::dashboard::outcome_lines(&raw)),
+        );
+        self.outcomes
+            .borrow_mut()
+            .insert(task.id, (hash, Arc::clone(&lines)));
+        Some(lines)
     }
 
     pub fn worker_output(&self, task: u64) -> Option<(String, String)> {

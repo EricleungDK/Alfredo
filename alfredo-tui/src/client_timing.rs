@@ -46,6 +46,14 @@ impl Timing {
     pub fn finish(&mut self, now: Instant) {
         self.ended.get_or_insert(now);
     }
+    /// Short form for the transcript: elapsed seconds only.
+    pub fn compact(&self, now: Instant) -> String {
+        let end = self.ended.unwrap_or(now);
+        format!(
+            "{:.1}s",
+            end.saturating_duration_since(self.started).as_secs_f64()
+        )
+    }
     pub fn summary(&self, now: Instant) -> String {
         let end = self.ended.unwrap_or(now);
         let seconds = |to: Instant, from: Instant| to.saturating_duration_since(from).as_secs_f64();

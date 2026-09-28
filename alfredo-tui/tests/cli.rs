@@ -24,6 +24,11 @@ fn help_documents_zero_ceremony_start_and_select_flag() {
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.contains("--select"));
     assert!(help.contains("mission default"));
+    assert!(!help.contains("migration in progress"));
+    let quickstart: Vec<_> = help.lines().take(3).collect();
+    assert!(quickstart[0].starts_with("Quickstart:"), "{help}");
+    assert!(quickstart[1].contains("/go"), "{help}");
+    assert!(quickstart[2].contains("F1 help"), "{help}");
 }
 
 #[test]

@@ -24,7 +24,10 @@ fn terminal_renders_at_wide_narrow_and_tiny_sizes_with_unicode() {
                 .collect();
             assert!(text.contains("ALFREDO"));
             assert!(text.contains("Prompt"));
-            assert!(text.contains("Sessions"));
+            // At 32x10 the session list gives way to the transcript.
+            if height >= 12 {
+                assert!(text.contains("Sessions"));
+            }
         }
     }
 }
@@ -145,7 +148,7 @@ fn chat_keeps_background_work_visible_without_moving_draft_or_reading_position()
         } else {
             assert!(header.contains("1 work · 2 alerts"), "{header}");
         }
-        assert!(text.contains("F4 Activity"), "{text}");
+        assert!(text.contains("F1 help"), "{text}");
         assert!(text.contains("Prompt"));
         assert!(!tasks.visible);
         assert_eq!(app.selected, selected_before);
@@ -250,9 +253,18 @@ fn console_interleaves_exact_task_receipts_without_feeding_them_to_model() {
     };
     let before = app.sessions[0].messages.clone();
     let text = render(&app, &tasks);
-    assert!(text.find("FIRST_ANSWER").unwrap() < text.find("Observed task receipt").unwrap());
-    assert!(text.find("Observed task receipt").unwrap() < text.find("SECOND_QUESTION").unwrap());
-    assert!(text.contains("Task proposed · revision 1 · exact-proposal"));
+    assert!(text.find("FIRST_ANSWER").unwrap() < text.find("✓ Task #7 proposed").unwrap());
+    assert!(text.find("✓ Task #7 proposed").unwrap() < text.find("SECOND_QUESTION").unwrap());
+    // Chat shows the short line; revision and correlation are F4 activity detail.
+    assert!(!text.contains("exact-proposal"), "{text}");
+    assert!(!text.contains("revision 1"), "{text}");
+    tasks.visible = true;
+    tasks.activity = Some(String::new());
+    let activity = render(&app, &tasks);
+    assert!(activity.contains("r1 · task #7"), "{activity}");
+    assert!(activity.contains("exact-proposal"), "{activity}");
+    tasks.visible = false;
+    tasks.activity = None;
     assert_eq!(app.sessions[0].messages, before);
     assert_eq!(app.sessions[0].draft, "Preserve unsent draft");
     tasks.snapshot.as_mut().unwrap().receipts[0].request.action = Action::Decide {
@@ -267,8 +279,11 @@ fn console_interleaves_exact_task_receipts_without_feeding_them_to_model() {
         },
     };
     let text = render(&app, &tasks);
-    assert!(text.contains("Human review required: Security"), "{text}");
-    assert!(!text.contains("Review: Needs repair"));
+    assert!(
+        text.contains("Task #7 held · Security risk needs human review"),
+        "{text}"
+    );
+    assert!(!text.contains("review: Needs repair"));
     for mismatch in 0..3 {
         let receipt = &mut tasks.snapshot.as_mut().unwrap().receipts[0];
         receipt.revision = if mismatch == 0 { 2 } else { 1 };
@@ -280,12 +295,11 @@ fn console_interleaves_exact_task_receipts_without_feeding_them_to_model() {
         }
         .into();
         let text = render(&app, &tasks);
-        assert!(text.contains("Task receipt unavailable"));
-        assert!(!text.contains("Observed task receipt"));
-        assert!(!text.contains("Task proposed"));
+        assert!(text.contains("? Task #7 update not verified"), "{text}");
+        assert!(!text.contains("Task #7 proposed"));
     }
     tasks.snapshot = None;
-    assert!(render(&app, &tasks).contains("Task receipt unavailable"));
+    assert!(render(&app, &tasks).contains("? Task #7 update not verified"));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -390,7 +404,7 @@ fn command_receipt_binding_preserves_origin_and_never_enters_inference() {
     let pending = render(&app, &tasks);
     assert!(pending.contains("/task Origin work"));
     assert!(pending.contains("Pending · saving intent"));
-    assert!(!pending.contains("Task receipt"));
+    assert!(!pending.contains("Task #7 proposed"));
     for (state, label) in [
         (
             CommandState::Submitted,
@@ -412,7 +426,7 @@ fn command_receipt_binding_preserves_origin_and_never_enters_inference() {
         assert!(app.sessions[0].set_command_state(&command_id, state));
         let text = render(&app, &tasks);
         assert!(text.contains(label));
-        assert!(!text.contains("Task receipt"));
+        assert!(!text.contains("Task #7 proposed"));
     }
     let original = serde_json::to_value(&app.sessions[0]).unwrap();
     app.add_session();
@@ -424,11 +438,20 @@ fn command_receipt_binding_preserves_origin_and_never_enters_inference() {
         task: 7,
     });
     tasks.snapshot.as_mut().unwrap().revision = 1;
-    assert!(!render(&app, &tasks).contains("command-exact"));
+    assert!(!render(&app, &tasks).contains("Task #7 proposed"));
     app.selected = 0;
     let acknowledged = render(&app, &tasks);
-    assert!(acknowledged.contains("Task proposed · Task receipt"));
-    assert!(acknowledged.contains("command-exact"));
+    assert!(
+        acknowledged.contains("✓ Task #7 proposed"),
+        "{acknowledged}"
+    );
+    // The correlation is F4 activity detail, not chat text.
+    assert!(!acknowledged.contains("command-exact"));
+    tasks.visible = true;
+    tasks.activity = Some("#7".into());
+    assert!(render(&app, &tasks).contains("command-exact"));
+    tasks.visible = false;
+    tasks.activity = None;
     assert!(!acknowledged.contains("Pending · saving intent"));
     assert_eq!(serde_json::to_value(&app.sessions[0]).unwrap(), original);
     tasks.snapshot.as_mut().unwrap().receipts[0].request.action = Action::Propose {
@@ -436,7 +459,7 @@ fn command_receipt_binding_preserves_origin_and_never_enters_inference() {
         model: "worker".into(),
         dependencies: vec![],
     };
-    assert!(!render(&app, &tasks).contains("Task receipt"));
+    assert!(!render(&app, &tasks).contains("Task #7 proposed"));
     assert!(app.sessions[0].observe_task_receipt(TaskReceiptRef {
         sequence: 0,
         after_messages: 0,
@@ -446,7 +469,7 @@ fn command_receipt_binding_preserves_origin_and_never_enters_inference() {
     }));
     let ordered = render(&app, &tasks);
     assert!(
-        ordered.find("/task Origin work").unwrap() < ordered.find("Observed task receipt").unwrap()
+        ordered.find("/task Origin work").unwrap() < ordered.find("✓ Task #7 proposed").unwrap()
     );
     let messages = app.sessions[0].begin().unwrap();
     assert_eq!(messages.len(), 1);
@@ -486,7 +509,7 @@ fn command_receipt_binding_preserves_origin_and_never_enters_inference() {
     tasks.snapshot.as_mut().unwrap().revision = 2;
     let risk = render(&app, &tasks);
     assert!(
-        risk.contains("Human review required: Security · Task receipt r2"),
+        risk.contains("Task #7 held · Security risk needs human review"),
         "{risk}"
     );
     std::fs::remove_dir_all(root).unwrap();
@@ -539,8 +562,8 @@ fn worker_command_keeps_claim_and_result_at_origin_without_moving_later_reading(
     };
     let pending = render(&app, &tasks, 140, 32);
     assert!(pending.contains("Pending · saving intent"));
-    assert!(pending.contains("Result not acknowledged"));
-    assert!(!pending.contains("Worker run claimed"));
+    assert!(pending.contains("no result yet"));
+    assert!(!pending.contains("Task #7 started"));
     let snapshot = tasks.snapshot.as_mut().unwrap();
     snapshot.revision = 1;
     snapshot.receipts.push(Receipt {
@@ -573,8 +596,8 @@ fn worker_command_keeps_claim_and_result_at_origin_without_moving_later_reading(
         }),
     });
     let claimed = render(&app, &tasks, 140, 32);
-    assert!(claimed.contains("Worker run claimed · Task receipt r1"));
-    assert!(claimed.contains("Result not acknowledged"));
+    assert!(claimed.contains("✓ Task #7 started"), "{claimed}");
+    assert!(claimed.contains("no result yet"));
     app.add_session();
     for status in [
         TaskStatus::ReviewReady,
@@ -601,19 +624,18 @@ fn worker_command_keeps_claim_and_result_at_origin_without_moving_later_reading(
                 },
             },
         });
-        assert!(!render(&app, &tasks, 140, 32).contains("Worker result:"));
+        let finished = match status {
+            TaskStatus::ReviewReady => "✓ Task #7 check passed · awaiting review",
+            TaskStatus::Failed => "✗ Task #7 failed",
+            _ => "– Task #7 run cancelled",
+        };
+        assert!(!render(&app, &tasks, 140, 32).contains(finished));
         app.selected = 0;
         let result = render(&app, &tasks, 140, 32);
-        assert!(
-            result.contains("Worker run claimed · Task receipt r1"),
-            "{result}"
-        );
-        assert!(
-            result.contains(&format!("Worker result: {status:?} · Task receipt r2")),
-            "{result}"
-        );
-        assert!(!result.contains("Result not acknowledged"));
-        assert!(!result.contains("Review accepted"));
+        assert!(result.contains("✓ Task #7 started"), "{result}");
+        assert!(result.contains(finished), "{result}");
+        assert!(!result.contains("no result yet"));
+        assert!(!result.contains("Task #7 accepted"));
         app.selected = 1;
     }
     app.selected = 0;
@@ -711,9 +733,8 @@ fn planner_outcomes_are_originating_drafts_and_plan_save_is_separate_authority()
     for (width, height) in [(140, 32), (60, 24)] {
         let generated = render(&app, &tasks, width, height);
         assert!(generated.contains("Draft generated"), "{generated}");
-        assert!(!generated.contains("Task receipt"));
-        assert!(!generated.contains("Task approved"));
-        assert!(!generated.contains("Plan proposed"));
+        assert!(!generated.contains("Task #1 approved"));
+        assert!(!generated.contains("Plan saved"));
     }
     let save = Request {
         correlation: "save-plan".into(),
@@ -754,8 +775,8 @@ fn planner_outcomes_are_originating_drafts_and_plan_save_is_separate_authority()
     tasks.snapshot.as_mut().unwrap().revision = 1;
     let saved = render(&app, &tasks, 140, 32);
     assert!(saved.contains("Draft generated · 1 step · saving and approval are separate"));
-    assert!(saved.contains("Plan proposed · Task receipt r1"));
-    assert!(!saved.contains("Task approved"));
+    assert!(saved.contains("✓ Plan saved · task #1"), "{saved}");
+    assert!(!saved.contains("Task #1 approved"));
     app.sessions[0].insert("Later discussion");
     let request = app.sessions[0].begin().unwrap();
     assert_eq!(request.len(), 1);
@@ -824,7 +845,7 @@ fn planner_outcomes_are_originating_drafts_and_plan_save_is_separate_authority()
     );
     let discarded = render(&app, &tasks, 100, 24);
     assert!(discarded.contains("Draft discarded"));
-    assert!(!discarded.contains("Task receipt"));
+    assert!(!discarded.contains("Plan saved"));
     assert!(!discarded.contains("Draft generation stopped"));
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -911,8 +932,8 @@ fn cancellation_request_stays_at_origin_and_does_not_overwrite_actual_worker_res
     };
     let pending = render(&app, &tasks, 140, 32);
     assert!(pending.contains("Pending · saving intent"));
-    assert!(pending.contains("Result not acknowledged"));
-    assert!(!pending.contains("Worker run claimed"));
+    assert!(pending.contains("no result yet"));
+    assert!(!pending.contains("Task #7 started"));
     assert!(!pending.contains("Cancellation requested"));
     app.sessions[0].set_command_state(&id, CommandState::Submitted);
     assert!(render(&app, &tasks, 140, 32).contains("Submitted · controller operation pending"));
@@ -930,9 +951,9 @@ fn cancellation_request_stays_at_origin_and_does_not_overwrite_actual_worker_res
     for (width, height) in [(140, 32), (60, 24)] {
         let requested = render(&app, &tasks, width, height);
         assert!(requested.contains("Cancellation requested"), "{requested}");
-        assert!(requested.contains("Result not acknowledged"), "{requested}");
-        assert!(!requested.contains("Worker result:"));
-        assert!(!requested.contains("Task receipt r1"));
+        assert!(requested.contains("no result yet"), "{requested}");
+        assert!(!requested.contains("Task #7 run cancelled"));
+        assert!(!requested.contains("Task #7 started"));
     }
     // A late successful result remains truthful even after cancellation was requested.
     let snapshot = tasks.snapshot.as_mut().unwrap();
@@ -978,11 +999,11 @@ fn cancellation_request_stays_at_origin_and_does_not_overwrite_actual_worker_res
         let result = render(&app, &tasks, 140, 32);
         assert!(result.contains(primary), "{result}");
         assert!(
-            result.contains("Worker result: ReviewReady · Task receipt r2"),
+            result.contains("✓ Task #7 check passed · awaiting review"),
             "{result}"
         );
-        assert!(!result.contains("Worker result: Cancelled"));
-        assert!(!result.contains("Worker run claimed"));
+        assert!(!result.contains("Task #7 run cancelled"));
+        assert!(!result.contains("Task #7 started"));
     }
     app.sessions[0].insert("Later chat");
     assert_eq!(app.sessions[0].begin().unwrap().len(), 1);
@@ -1070,12 +1091,9 @@ fn restored_dispatch_outcome_is_historical_while_current_dispatch_stays_off() {
             .iter()
             .map(|cell| cell.symbol())
             .collect::<String>();
-        assert!(
-            text.contains("Dispatch enabled for originating controller"),
-            "{text}"
-        );
+        assert!(text.contains("✓ Dispatch on"), "{text}");
         assert!(text.contains("dispatch off"), "{text}");
-        assert!(!text.contains("Task receipt"));
+        assert!(!text.contains("Task #"));
     }
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -1178,27 +1196,28 @@ fn automatic_launch_has_dispatch_actor_and_keeps_origin_reading_and_drafts() {
         )
         .unwrap();
     assert_eq!(app.selected, 1);
-    assert!(!render(&app, &tasks, 140, 32).contains("Dispatch · launch"));
+    assert!(!render(&app, &tasks, 140, 32).contains("Dispatch · run task #7"));
     assert_eq!(app.sessions[0].draft, "Origin unsent 🦀");
     assert_eq!(app.sessions[1].draft, "Selected unsent 中文");
     assert!(app.sessions[0].messages.is_empty());
     app.selected = 0;
     for (width, height) in [(140, 32), (60, 24)] {
         let pending = render(&app, &tasks, width, height);
-        assert!(pending.contains("You · command #1"), "{pending}");
-        assert!(pending.contains("Dispatch · launch #2"), "{pending}");
-        assert!(!pending.contains("You · command #2"), "{pending}");
-        assert!(pending.contains("dispatch command #1"), "{pending}");
+        // The dispatch actor heads its own entry below the originating command.
+        let origin = pending.find("› /dispatch on").expect(&pending);
+        let launch = pending.find("▶ Dispatch · run task #7").expect(&pending);
+        assert!(origin < launch, "{pending}");
+        assert!(!pending.contains("› Automatic /run"), "{pending}");
         assert!(pending.contains("Pending · saving intent"), "{pending}");
-        assert!(pending.contains("Result not acknowledged"), "{pending}");
-        assert!(!pending.contains("Worker run claimed"), "{pending}");
+        assert!(pending.contains("no result yet"), "{pending}");
+        assert!(!pending.contains("Task #7 started"), "{pending}");
     }
     let restored = conversations::Snapshot::capture(&app, "automatic-test").restore();
     let unknown = render(&restored, &tasks, 140, 32);
-    assert!(unknown.contains("Dispatch · launch #2"), "{unknown}");
+    assert!(unknown.contains("▶ Dispatch · run task #7"), "{unknown}");
     assert!(unknown.contains("Outcome unconfirmed"), "{unknown}");
     assert!(unknown.contains("dispatch off"), "{unknown}");
-    assert!(!unknown.contains("Worker run claimed"), "{unknown}");
+    assert!(!unknown.contains("Task #7 started"), "{unknown}");
     assert!(tasks.workers.is_empty());
     let snapshot = tasks.snapshot.as_mut().unwrap();
     snapshot.revision = 2;
@@ -1224,11 +1243,8 @@ fn automatic_launch_has_dispatch_actor_and_keeps_origin_reading_and_drafts() {
         detail: String::new(),
     });
     let claimed = render(&app, &tasks, 140, 32);
-    assert!(
-        claimed.contains("Worker run claimed · Task receipt r2"),
-        "{claimed}"
-    );
-    assert!(claimed.contains("Result not acknowledged"), "{claimed}");
+    assert!(claimed.contains("✓ Task #7 started"), "{claimed}");
+    assert!(claimed.contains("no result yet"), "{claimed}");
     for status in [
         TaskStatus::ReviewReady,
         TaskStatus::Failed,
@@ -1254,20 +1270,19 @@ fn automatic_launch_has_dispatch_actor_and_keeps_origin_reading_and_drafts() {
                 },
             },
         });
+        let finished = match status {
+            TaskStatus::ReviewReady => "✓ Task #7 check passed · awaiting review",
+            TaskStatus::Failed => "✗ Task #7 failed",
+            _ => "– Task #7 run cancelled",
+        };
         app.selected = 1;
-        assert!(!render(&app, &tasks, 140, 32).contains("Worker result:"));
+        assert!(!render(&app, &tasks, 140, 32).contains(finished));
         app.selected = 0;
         let result = render(&app, &tasks, 140, 32);
-        assert!(
-            result.contains("Worker run claimed · Task receipt r2"),
-            "{result}"
-        );
-        assert!(
-            result.contains(&format!("Worker result: {status:?} · Task receipt r3")),
-            "{result}"
-        );
-        assert!(!result.contains("Result not acknowledged"), "{result}");
-        assert!(!result.contains("Review accepted"), "{result}");
+        assert!(result.contains("✓ Task #7 started"), "{result}");
+        assert!(result.contains(finished), "{result}");
+        assert!(!result.contains("no result yet"), "{result}");
+        assert!(!result.contains("Task #7 accepted"), "{result}");
     }
     app.sessions[0].begin().unwrap();
     app.sessions[0].apply(
@@ -1424,7 +1439,7 @@ fn automatic_architect_draft_stays_with_review_and_preserves_background_reading(
         )
         .unwrap();
     assert_eq!(app.selected, 1);
-    assert!(!render(&app, &tasks, 140, 32).contains("Architect · draft"));
+    assert!(!render(&app, &tasks, 140, 32).contains("Architect · revise task #7"));
     assert_eq!(app.sessions[0].draft, "Origin unsent 🦀");
     assert_eq!(app.sessions[1].draft, "Selected unsent 中文");
     assert_eq!(app.sessions[0].messages.len(), 2);
@@ -1437,7 +1452,10 @@ fn automatic_architect_draft_stays_with_review_and_preserves_background_reading(
     assert_eq!(restored.sessions[0].draft, "Origin unsent 🦀");
     restored.sessions[0].scroll_rows(1000);
     let unknown = render(&restored, &tasks, 140, 32);
-    assert!(unknown.contains("Architect · draft #2"), "{unknown}");
+    assert!(
+        unknown.contains("◆ Architect · revise task #7"),
+        "{unknown}"
+    );
     assert!(unknown.contains("Outcome unconfirmed"), "{unknown}");
     assert!(!unknown.contains("Draft generated"), "{unknown}");
     assert!(!tasks.planner.active());
@@ -1445,13 +1463,15 @@ fn automatic_architect_draft_stays_with_review_and_preserves_background_reading(
     app.sessions[0].scroll_rows(1000);
     for (width, height) in [(140, 32), (60, 24)] {
         let pending = render(&app, &tasks, width, height);
-        assert!(pending.contains("Architect · draft #2"), "{pending}");
-        assert!(!pending.contains("You · command #2"), "{pending}");
-        assert!(!pending.contains("Dispatch · launch #2"), "{pending}");
-        assert!(pending.contains("review command #1"), "{pending}");
+        assert!(
+            pending.contains("◆ Architect · revise task #7"),
+            "{pending}"
+        );
+        assert!(!pending.contains("› Automatic"), "{pending}");
+        assert!(!pending.contains("▶ Dispatch"), "{pending}");
         assert!(pending.contains("Pending · saving intent"), "{pending}");
-        assert!(!pending.contains("Result not acknowledged"), "{pending}");
-        assert!(!pending.contains("Worker run claimed"), "{pending}");
+        assert!(!pending.contains("no result yet"), "{pending}");
+        assert!(!pending.contains("Task #7 started"), "{pending}");
     }
     app.sessions[0].set_command_state(&id, CommandState::Submitted);
     assert!(render(&app, &tasks, 140, 32).contains("Submitted · planner operation pending"));
@@ -1470,12 +1490,9 @@ fn automatic_architect_draft_stays_with_review_and_preserves_background_reading(
     for (width, height) in [(140, 32), (60, 24)] {
         let generated = render(&app, &tasks, width, height);
         assert!(generated.contains("Draft generated"), "{generated}");
-        assert!(!generated.contains("Plan proposed"), "{generated}");
-        assert!(!generated.contains("Task approved"), "{generated}");
-        assert!(
-            !generated.contains("Result not acknowledged"),
-            "{generated}"
-        );
+        assert!(!generated.contains("Plan saved"), "{generated}");
+        assert!(!generated.contains("approved"), "{generated}");
+        assert!(!generated.contains("no result yet"), "{generated}");
     }
     assert_eq!(tasks.snapshot.as_ref().unwrap().receipts.len(), 1);
     let save = Request {
@@ -1516,14 +1533,14 @@ fn automatic_architect_draft_stays_with_review_and_preserves_background_reading(
     });
     tasks.snapshot.as_mut().unwrap().revision = 2;
     let saved = render(&app, &tasks, 140, 32);
-    assert!(saved.contains("Architect · draft #2"), "{saved}");
+    assert!(saved.contains("◆ Architect · revise task #7"), "{saved}");
     assert!(
         saved.contains("Draft generated · 1 step · saving and approval are separate"),
         "{saved}"
     );
-    assert!(saved.contains("You · command #3"), "{saved}");
-    assert!(saved.contains("Plan proposed · Task receipt r2"), "{saved}");
-    assert!(!saved.contains("Task approved"), "{saved}");
+    assert!(saved.contains("› /plan-save"), "{saved}");
+    assert!(saved.contains("✓ Plan saved · task #8"), "{saved}");
+    assert!(!saved.contains("approved"), "{saved}");
     assert_eq!(app.sessions[0].draft, "Origin unsent 🦀");
     std::fs::remove_dir_all(root).unwrap();
 }
@@ -1584,13 +1601,12 @@ fn wayfinder_scope_action_keeps_turn_origin_after_cancellation_and_restart() {
     assert_eq!(app.sessions[0].draft, "Unsent origin 🦀");
     for (width, height) in [(140, 32), (60, 24)] {
         let pending = render(&app, &tasks, width, height);
-        assert!(pending.contains("Wayfinder · scope #1"), "{pending}");
-        assert!(pending.contains("turn 1"), "{pending}");
+        assert!(pending.contains("◇ Wayfinder · turn 1"), "{pending}");
         assert!(pending.contains("Enter shared understanding"), "{pending}");
         assert!(pending.contains("Pending · saving intent"), "{pending}");
-        assert!(!pending.contains("You · command #1"), "{pending}");
-        assert!(!pending.contains("Scope receipt r1"), "{pending}");
-        assert!(!pending.contains("Task receipt"), "{pending}");
+        assert!(!pending.contains("› Enter"), "{pending}");
+        assert!(!pending.contains("Scope saved"), "{pending}");
+        assert!(!pending.contains("Task #"), "{pending}");
     }
     assert_eq!(
         render(&app, &tasks, 140, 32)
@@ -1604,32 +1620,36 @@ fn wayfinder_scope_action_keeps_turn_origin_after_cancellation_and_restart() {
     let restored = conversations::Snapshot::capture(&app, "wayfinder-test").restore();
     let unknown = render(&restored, &tasks, 140, 32);
     assert!(unknown.contains("Outcome unconfirmed"), "{unknown}");
-    assert!(!unknown.contains("Scope receipt r1"), "{unknown}");
+    assert!(!unknown.contains("Scope saved"), "{unknown}");
     assert_eq!(scope.snapshot().unwrap().revision, 0);
     assert!(tasks.workers.is_empty());
     app.add_session();
     app.sessions[1].insert("Unsent selected 中文");
     tasks.canonical_scope = Some(scope.transact(request.clone()).unwrap());
-    assert!(!render(&app, &tasks, 140, 32).contains("Scope receipt r1"));
+    assert!(!render(&app, &tasks, 140, 32).contains("Scope saved"));
     assert_eq!(app.selected, 1);
     app.selected = 0;
     let acknowledged = render(&app, &tasks, 140, 32);
-    assert!(
-        acknowledged.contains("Scope receipt r1 · wayfinder-origin"),
-        "{acknowledged}"
-    );
+    assert!(acknowledged.contains("✓ Scope saved"), "{acknowledged}");
+    assert!(!acknowledged.contains("wayfinder-origin"), "{acknowledged}");
+    // The scope revision is shown by the scope view itself.
+    tasks.visible = true;
+    tasks.scope_view = tasks.canonical_scope.clone();
+    assert!(render(&app, &tasks, 140, 32).contains("Shared Understanding · revision 1"));
+    tasks.visible = false;
+    tasks.scope_view = None;
     assert!(matches!(app.sessions[0].status, Status::Cancelled));
     assert!(app.sessions[0].messages[1].content.is_empty());
     assert_eq!(app.sessions[0].draft, "Unsent origin 🦀");
     assert_eq!(app.sessions[1].draft, "Unsent selected 中文");
     assert!(!tasks.canonical_scope.as_ref().unwrap().confirmed);
     assert!(store.snapshot().unwrap().tasks.is_empty());
-    assert!(render(&restored, &tasks, 140, 32).contains("Scope receipt r1 · wayfinder-origin"));
+    assert!(render(&restored, &tasks, 140, 32).contains("✓ Scope saved"));
     // Same correlation and revision with a different action cannot acknowledge this turn.
     tasks.canonical_scope.as_mut().unwrap().receipts[0]
         .request
         .action = Action::Confirm { draft_revision: 1 };
-    assert!(!render(&app, &tasks, 140, 32).contains("Scope receipt r1"));
+    assert!(!render(&app, &tasks, 140, 32).contains("Scope saved"));
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -1720,8 +1740,8 @@ fn delayed_wayfinder_action_renders_at_its_turn_and_preserves_later_reading() {
     app.sessions[0].scroll_rows(-1000);
     let beginning = render(&app, 140, 32);
     let origin = beginning.find("ORIGIN_DESTINATION").unwrap();
-    let earlier_command = beginning.find("You · command #1").unwrap();
-    let scope = beginning.find("Wayfinder · scope #3 · turn 1").unwrap();
+    let earlier_command = beginning.find("› /task first unrelated proposal").unwrap();
+    let scope = beginning.find("◇ Wayfinder · turn 1").unwrap();
     let later_turn = beginning.find("LATER_DISCUSSION").unwrap();
     assert!(
         origin < earlier_command && earlier_command < scope && scope < later_turn,
@@ -1733,7 +1753,7 @@ fn delayed_wayfinder_action_renders_at_its_turn_and_preserves_later_reading() {
     );
     assert_eq!(beginning.matches("ORIGIN_DESTINATION").count(), 1);
     app.sessions[0].scroll_rows(1000);
-    assert!(render(&app, 140, 32).contains("You · command #2"));
+    assert!(render(&app, 140, 32).contains("› /task second unrelated proposal"));
 }
 
 #[test]
@@ -1907,7 +1927,11 @@ fn fresh_application_notice_is_visible_over_a_selected_failed_session() {
                 "{screen}"
             );
             assert!(!footer.contains("Retained provider failure"), "{screen}");
-            assert!(screen.contains("Disconnected / failed"), "{screen}");
+            // The failure reason stays in the transcript itself.
+            assert!(
+                screen.contains("✗ Request failed · Retained provider"),
+                "{screen}"
+            );
         }
         app.notice.clear();
         let (footer, _) = render(&app, Some(&tasks), width, height);
@@ -1961,8 +1985,8 @@ fn shared_capacity_queue_and_upstream_wait_remain_distinct_in_wide_and_narrow_la
         app.sessions[0].insert("Unfinished next prompt 🦀");
         app.sessions[0].apply(1, Update::Queued);
         let generic = render(&app, width, height);
-        assert!(generic.contains("Queued for Alfredo"), "{generic}");
-        assert!(!generic.contains("position"), "{generic}");
+        assert!(generic.contains("Chat 1 · queued"), "{generic}");
+        assert!(!generic.contains("queued 2/3"), "{generic}");
         let mut observation = Observation {
             position: 2,
             waiting: 3,
@@ -1972,40 +1996,26 @@ fn shared_capacity_queue_and_upstream_wait_remain_distinct_in_wide_and_narrow_la
         };
         app.sessions[0].apply(1, Update::QueueProgress(observation));
         let queued = render(&app, width, height);
-        for expected in [
-            "Queued for Alfredo",
-            "Shared Alfredo capacity",
-            "position 2/3",
-            "2/2 active",
-            "admission pending",
-        ] {
+        for expected in ["Chat 1 · queued", "queued 2/3 · 2/2 active"] {
             assert!(queued.contains(expected), "{expected}: {queued}");
         }
-        assert!(
-            queued.contains(match class {
-                Class::Foreground => "foreground",
-                Class::Background => "background",
-            }),
-            "{queued}"
-        );
-        assert!(!queued.contains("Waiting for model server"), "{queued}");
+        // The queue class stays in the observation, not the compact line.
+        assert_eq!(app.sessions[0].queue_observation().unwrap().class, class);
+        assert!(!queued.contains("waiting for model"), "{queued}");
         assert!(!queued.contains("loading"), "{queued}");
         observation.position = 1;
         observation.waiting = 2;
         observation.active = 1;
         app.sessions[0].apply(1, Update::QueueProgress(observation));
         let changed = render(&app, width, height);
-        for expected in ["position 1/2", "1/2 active"] {
+        for expected in ["queued 1/2", "1/2 active"] {
             assert!(changed.contains(expected), "{expected}: {changed}");
         }
-        assert!(!changed.contains("position 2/3"), "{changed}");
+        assert!(!changed.contains("queued 2/3"), "{changed}");
         app.sessions[0].apply(1, Update::Admitted);
         let upstream = render(&app, width, height);
-        assert!(upstream.contains("Waiting for model server"), "{upstream}");
-        assert!(upstream.contains("Client · queue"), "{upstream}");
-        assert!(upstream.contains("waiting for text"), "{upstream}");
-        assert!(!upstream.contains("Shared Alfredo capacity"), "{upstream}");
-        assert!(!upstream.contains("position 1/2"), "{upstream}");
+        assert!(upstream.contains("waiting for model"), "{upstream}");
+        assert!(!upstream.contains("queued 1/2"), "{upstream}");
         assert!(!upstream.contains("loading"), "{upstream}");
         assert!(!upstream.contains("Server timing"), "{upstream}");
         assert_eq!(app.sessions[0].draft, "Unfinished next prompt 🦀");
@@ -2071,7 +2081,7 @@ fn selection_history_separates_creation_loading_and_actual_handoff() {
         )
     };
     let pending = render(&app, 140, 32);
-    assert!(pending.contains("You · selection #1"), "{pending}");
+    assert!(pending.contains("› Create /repo/created"), "{pending}");
     assert!(pending.contains("Pending · saving intent"), "{pending}");
     assert!(!pending.contains("Repository created"), "{pending}");
     let restored = alfredo_tui::conversations::Snapshot::capture(&app, "default").restore();
@@ -2113,8 +2123,8 @@ fn selection_history_separates_creation_loading_and_actual_handoff() {
             assert!(text.contains(expected), "{text}");
             assert!(!text.contains(absent), "{text}");
             assert!(text.contains("/repo/created"), "{text}");
-            assert!(!text.contains("Task receipt"), "{text}");
-            assert!(!text.contains("Task approved"), "{text}");
+            assert!(!text.contains("Task #"), "{text}");
+            assert!(!text.contains("approved"), "{text}");
         }
     }
     app.sessions[0].set_command_state(
@@ -2137,7 +2147,7 @@ fn selection_history_separates_creation_loading_and_actual_handoff() {
     assert_eq!(app.sessions[0].draft, "Source unfinished draft 🦀");
     assert!(app.sessions[0].messages.is_empty());
     app.add_session();
-    assert!(!render(&app, 140, 32).contains("You · selection"));
+    assert!(!render(&app, 140, 32).contains("› Create /repo/created"));
     app.selected = 0;
     app.sessions[0].set_command_state(
         &id,
@@ -2204,7 +2214,7 @@ fn selection_arrival_preserves_destination_reading_and_waits_for_actual_selectio
         )
         .unwrap();
     assert_eq!(app.selected, 1);
-    assert!(!render(&app, 140, 32).contains("Workspace · arrival"));
+    assert!(!render(&app, 140, 32).contains("Workspace /repo/created"));
     assert_eq!(app.sessions[0].messages, messages);
     assert_eq!(app.sessions[0].draft, "Destination unfinished draft 🦀");
     assert_eq!(app.sessions[1].draft, "Unrelated selected draft 中文");
@@ -2220,13 +2230,16 @@ fn selection_arrival_preserves_destination_reading_and_waits_for_actual_selectio
     app.sessions[0].scroll_rows(1000);
     for (width, height) in [(140, 32), (60, 24)] {
         let prepared = render(&app, width, height);
-        assert!(prepared.contains("Workspace · arrival #1"), "{prepared}");
-        assert!(prepared.contains("/repo/created"), "{prepared}");
+        // One dim line: destination, then the preparation milestone.
+        assert!(
+            prepared.contains("· Workspace /repo/created · mission next"),
+            "{prepared}"
+        );
         assert!(prepared.contains("handoff prepared"), "{prepared}");
         assert!(prepared.contains("selection not recorded"), "{prepared}");
         assert!(!prepared.contains("workspace selected"), "{prepared}");
-        assert!(!prepared.contains("Task receipt"), "{prepared}");
-        assert!(!prepared.contains("You · selection"), "{prepared}");
+        assert!(!prepared.contains("Task #"), "{prepared}");
+        assert!(!prepared.contains("› Workspace"), "{prepared}");
     }
     app.sessions[0].set_command_state(
         &id,
@@ -2238,7 +2251,7 @@ fn selection_arrival_preserves_destination_reading_and_waits_for_actual_selectio
         },
     );
     let selected = render(&app, 140, 32);
-    assert!(selected.contains("workspace selected"), "{selected}");
+    assert!(selected.contains("mission next · ready"), "{selected}");
     assert!(!selected.contains("selection not recorded"), "{selected}");
     assert_eq!(app.sessions[0].messages, messages);
 }

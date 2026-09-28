@@ -255,9 +255,15 @@ fn task_panel_pages_reach_every_marker_in_both_directions_after_resize() {
         (Panel::Planner, markers("PLAN", 24)),
         (Panel::Scope, markers("SCOPE", 24)),
         (Panel::Activity, markers("ACT", 12)),
+        // Receipt correlations (ACT_*) are Activity-view detail; the inspector
+        // pages from the task title through its policy to the criteria.
         (
             Panel::Inspector,
-            vec!["ACT_09".into(), "ACT_10".into(), "ACT_11".into()],
+            vec![
+                "Selected task".into(),
+                "file-11.rs".into(),
+                "Acceptance criteria".into(),
+            ],
         ),
     ] {
         fixture.show(panel, true);

@@ -5,6 +5,7 @@ pub mod provider;
 pub mod task_control;
 pub mod tasks;
 // Shared production host-effect implementation; no Python or desktop runtime dependency.
+pub mod dashboard;
 #[path = "../../mission-control/src-tauri/src/execution.rs"]
 pub mod execution;
 pub mod ui;
