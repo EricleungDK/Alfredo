@@ -18,7 +18,7 @@ alfredo-tui --model qwen2.5-coder:14b
 Opens straight into the repository root, mission `default`. Then either:
 
 - **Autopilot**: `/go GOAL`. Plans, approves, dispatches, auto-accepts tasks whose
-  approved check passes, auto-repairs failures (`--max-repairs`, default 2), and
+  approved check passes, auto-repairs failures (`--max-repairs`, default 3), and
   composes accepted work onto `alfredo/go-<id>`. F5 or `/pause` / `/resume`;
   `/stop` also cancels running workers; `/autopilot` shows status. After a restart
   the loop comes back paused and never replays work.
