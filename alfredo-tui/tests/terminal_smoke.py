@@ -414,7 +414,7 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'tok/s')
             self.assertFalse(release_slow.is_set())
             os.write(master, b'limit\r')
-            wait_for(b'generation limit')
+            wait_for(b'4096-token limit')
             wait_for(b'LIMIT_PARTIAL')
             os.write(master, b'\t\x1b')  # Return to slow session and cancel.
             wait_for(b'cancelled')
@@ -831,7 +831,7 @@ class TerminalSmoke(unittest.TestCase):
             self.assertEqual(termios.tcgetattr(slave), original)
             conversation_path = next(Path(state.name).glob('rust-tasks-v1/*/conversations-*.json'))
             preferences = json.loads(conversation_path.read_text())
-            self.assertIn('generation limit', preferences['sessions'][1]['status']['Failed'])
+            self.assertIn('Model output hit the 4096-token limit', preferences['sessions'][1]['status']['Failed'])
             self.assertEqual(preferences['sessions'][1]['messages'][-1]['content'], 'LIMIT_PARTIAL')
             sources = preferences['sessions'][0]['sources']
             self.assertEqual(sources['1']['kind'], 'wayfinder')

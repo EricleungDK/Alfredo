@@ -1051,6 +1051,8 @@ fn cli_documents_and_validates_autopilot_flags() {
     ] {
         assert!(help.contains(text), "{text} missing from help");
     }
+    assert_eq!(alfredo_tui::autopilot::DEFAULT_MAX_REPAIRS, 3);
+    assert!(help.contains("--max-repairs, default 3"), "{help}");
     for args in [
         vec!["--go"],
         vec!["--go", " "],
@@ -1445,4 +1447,52 @@ fn five_consecutive_overtaken_launches_pause_without_spending_the_attempt() {
     drive(&mut autopilot, &mut control, &runtime, "done", finished);
     assert_eq!(autopilot.status(&control).unwrap().state, RunState::Done);
     assert_eq!(starts(&fixture.store.snapshot().unwrap(), 1), 1);
+}
+
+#[test]
+fn identical_repair_is_reported_as_no_progress_and_the_next_repair_samples_hotter() {
+    let fixture = Fixture::new();
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return json!({"tasks": [{"title": "Make answer return 42", "acceptance": ["answer() is 42"],
+                "model": "fixture", "dependencies": [], "policy": {"files": ["calc.py"],
+                "check": check("from calc import answer; assert answer() == 42, answer()")}}]})
+            .to_string();
+        }
+        bad_calc()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Make answer return 42", "fixture", 2, &control)
+        .unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "failed", finished);
+    let snapshot = fixture.store.snapshot().unwrap();
+    let second = snapshot
+        .tasks
+        .iter()
+        .find(|t| t.repair_of == Some(2))
+        .unwrap();
+    assert!(
+        second
+            .title
+            .contains("autopilot: No change from previous attempt · Check failed"),
+        "{}",
+        second.title
+    );
+    let temperatures: Vec<_> = server
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| !planner(request))
+        .map(|request| request["options"]["temperature"].as_f64().unwrap())
+        .collect();
+    assert_eq!(temperatures, vec![0.0, 0.0, 0.6]);
+    let last = server.prompts().pop().unwrap();
+    assert!(
+        last.contains("previous attempt returned identical code that still fails"),
+        "{last}"
+    );
 }

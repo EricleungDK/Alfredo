@@ -223,16 +223,18 @@ impl WorkStatus {
             return format!("{} work · {} alerts", self.workers, self.attention());
         }
         let mut parts = vec![format!("Work {} local", self.workers)];
-        for (count, label) in [
-            (self.held, "held"),
-            (self.review, "review"),
-            (self.architect, "Architect"),
-            (self.repair, "repair"),
-            (self.resolve, "resolve"),
-            (self.recorded, "recorded run"),
+        // Nouns pluralize; state words (held, review, resolve) stay as labels.
+        for (count, label, plural) in [
+            (self.held, "held", false),
+            (self.review, "review", false),
+            (self.architect, "Architect", false),
+            (self.repair, "repair", true),
+            (self.resolve, "resolve", false),
+            (self.recorded, "recorded run", true),
         ] {
             if count != 0 {
-                parts.push(format!("{count} {label}"));
+                let suffix = if plural && count != 1 { "s" } else { "" };
+                parts.push(format!("{count} {label}{suffix}"));
             }
         }
         if self.attention() == 0 {

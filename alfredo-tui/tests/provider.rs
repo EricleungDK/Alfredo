@@ -367,7 +367,7 @@ async fn generation_limit_retains_text_and_metrics_without_successful_completion
         )
         .await;
         assert!(
-            matches!(&events.last().unwrap().update, Update::Failed(error) if error.contains("generation limit"))
+            matches!(&events.last().unwrap().update, Update::Failed(error) if error.starts_with("Model output hit the 4096-token limit"))
         );
         assert!(!events
             .iter()
@@ -394,6 +394,64 @@ async fn generation_limit_retains_text_and_metrics_without_successful_completion
     )
     .await;
     assert!(matches!(events.last().unwrap().update, Update::Done));
+}
+
+#[tokio::test]
+async fn repair_sampling_is_sent_bounded_and_recorded_as_requested_generation() {
+    for (temperature, limit, wire_temperature, wire_limit, summary) in [
+        (
+            0.3,
+            8192,
+            serde_json::json!(0.3),
+            8192,
+            "token limit 8192 · temperature 0.3",
+        ),
+        (
+            5.0,
+            999_999,
+            serde_json::json!(0.8),
+            8192,
+            "token limit 8192 · temperature 0.8",
+        ),
+        (
+            0.0,
+            4096,
+            serde_json::json!(0),
+            4096,
+            "token limit 4096 · temperature 0",
+        ),
+    ] {
+        let (endpoint, server, request) = server_capture(
+            vec![b"{\"message\":{\"content\":\"{}\"},\"done\":true}\n".to_vec()],
+            Duration::ZERO,
+        );
+        let provider = Ollama::new(&endpoint, Duration::from_secs(3))
+            .unwrap()
+            .with_json_schema(serde_json::json!({"type":"object"}))
+            .with_sampling(temperature, limit);
+        let generation = provider.structured_generation();
+        assert!(generation.valid());
+        assert!(
+            generation.summary().ends_with(summary),
+            "{}",
+            generation.summary()
+        );
+        let (sender, mut events) = mpsc::channel(128);
+        provider
+            .chat(0, 1, "fixture".into(), prompt(), sender)
+            .await;
+        while events.recv().await.is_some() {}
+        let request = request.recv().unwrap();
+        assert_eq!(request["options"]["temperature"], wire_temperature);
+        assert_eq!(request["options"]["num_predict"], wire_limit);
+        server.join().unwrap();
+    }
+    // Evidence saved before fractional temperatures still reads as the same number.
+    let legacy: alfredo_tui::provider::Generation =
+        serde_json::from_str(r#"{"thinking":"off","num_predict":4096,"temperature":0}"#).unwrap();
+    assert!(legacy
+        .summary()
+        .ends_with("token limit 4096 · temperature 0"));
 }
 
 #[tokio::test]

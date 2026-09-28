@@ -53,7 +53,7 @@ alfredo-tui --model qwen2.5-coder:14b
    The header shows server health (`ollama ✓ MODEL warm`).
 2. Type `/go Add a --verbose flag to the CLI and a test for it` and press Enter.
    Autopilot plans tasks, approves them, runs workers, auto-accepts tasks whose
-   approved check passes, and retries failures (up to 2 repairs per task).
+   approved check passes, and retries failures (up to 3 repairs per task).
 3. Press F5 to pause or resume at any time; `/stop` also cancels running workers;
    `/autopilot` shows status.
 4. When done, the summary names the branch `alfredo/go-<id>`. Your HEAD, index and
@@ -97,7 +97,7 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 | `--model NAME` | `qwen3:14b` (env `ALFREDO_MODEL`) | Model for new conversations |
 | `--endpoint URL` | `http://127.0.0.1:11434` (env `OLLAMA_HOST`) | Ollama HTTP origin |
 | `--go GOAL` | off | Start autopilot on launch |
-| `--max-repairs N` | 2 | Auto-repairs per task, 0–16 (0 disables) |
+| `--max-repairs N` | 3 | Auto-repairs per task, 0–16 (0 disables) |
 | `--workspace DIR` | current repo | Open the repository containing `DIR` |
 | `--mission NAME` / `--new-mission NAME` | `default` | Resume / create a named mission (with `--workspace`) |
 | `--select` | off | Always show the repository/mission selector |

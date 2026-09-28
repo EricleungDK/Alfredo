@@ -15,8 +15,17 @@ commands: plan → `/plan-save` → approve every planned task → `/dispatch on
 worker's approved check passes and its evidence verifies, autopilot records an
 approved criterion review (reason `autopilot: check passed`). A failed or invalid
 run gets a linked `/repair` with the failure summary as reason, bounded by
-`--max-repairs N` per task (default 2, 0 disables); an accepted repair is
-`/resolve-repair`ed so dependents proceed. An exhausted task stays failed, its
+`--max-repairs N` per task (default 3, 0 disables); an accepted repair is
+`/resolve-repair`ed so dependents proceed. Each repair prompt starts with a short
+"What is still failing" section (failing test names, assertion/error lines and
+`-`/`+` diff lines, at most 30 lines / 2 KiB) before the full prior evidence. A
+failed repair whose files equal its parent attempt's is recorded as `No change
+from previous attempt`, and the next repair says so and starts a fresh Local Agent
+conversation. Repair sampling temperature
+stays 0 for the first repair, then steps 0.3 → 0.6 → 0.8 (cap) after two or more
+failed attempts, one extra step after no progress. When a reply hits the
+4096-token limit (`Model output hit the 4096-token limit`), the next repair
+requests 8192. Evidence records the requested temperature and limit. An exhausted task stays failed, its
 dependents stay blocked, and independent work continues. Invalid plans are retried
 once with the validation error appended, then autopilot stops.
 

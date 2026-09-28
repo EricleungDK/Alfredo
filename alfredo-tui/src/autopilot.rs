@@ -26,7 +26,7 @@ const VERSION: u32 = 1;
 /// Repeated submissions of one decision without effect pause the loop.
 const ATTEMPTS: u32 = 3;
 const MAX_STATE: usize = 256 * 1024;
-pub const DEFAULT_MAX_REPAIRS: u32 = 2;
+pub const DEFAULT_MAX_REPAIRS: u32 = 3;
 pub const MAX_REPAIRS: u32 = 16;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1188,17 +1188,16 @@ impl Autopilot {
 }
 
 /// Repair reason detail: a failed check's bounded output tail from verified
-/// evidence, else the recorded run detail. Never empty.
+/// evidence (naming a no-progress attempt), else the recorded run detail. Never empty.
 fn failure_detail(tasks: &TaskControl, head: &Task) -> String {
-    let check = tasks
+    let failure = tasks
         .store()
         .evidence(head.id)
         .ok()
         .and_then(|raw| serde_json::from_str::<crate::worker::Evidence>(&raw).ok())
-        .and_then(|evidence| evidence.check)
-        .filter(|check| !crate::worker::check_passed(check));
-    if let Some(check) = check {
-        return crate::worker::failure_summary(&check, 1780);
+        .and_then(|evidence| crate::worker::check_failure(&evidence, 1780));
+    if let Some(failure) = failure {
+        return failure;
     }
     head.run
         .as_ref()
