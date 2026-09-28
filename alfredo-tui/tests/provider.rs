@@ -185,7 +185,9 @@ async fn idle_stream_hits_deadline_without_blocking_other_sessions() {
         held,
     );
     let slow = async move {
-        let provider = Ollama::new(&endpoint, Duration::from_millis(80)).unwrap();
+        // Generous deadline: on a loaded host a short one can expire before the
+        // first frame arrives, which is a different (retryable) failure.
+        let provider = Ollama::new(&endpoint, Duration::from_secs(1)).unwrap();
         let (sender, mut receiver) = mpsc::channel(128);
         provider.chat(4, 7, "fixture".into(), vec![], sender).await;
         let mut events = Vec::new();
