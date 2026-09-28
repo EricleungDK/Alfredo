@@ -106,7 +106,7 @@ class RecoveryTerminalSmoke(unittest.TestCase):
     def test_narrow_page_keys_do_not_skip_task_inspector_rows(self):
         terminal = self.terminal(height=10, width=32)
         terminal.send('/task Inspect every detail\r')
-        self.screen_has(terminal, '#1 Proposed')
+        self.screen_has(terminal, '○ #1')
         self.screen_has(terminal, 'Needs approval')
         before = self.task_path().read_bytes()
         terminal.send(b'\x1b[6~')
@@ -180,7 +180,7 @@ class RecoveryTerminalSmoke(unittest.TestCase):
 
         terminal = self.terminal(resume=True, conversation='narrow-inspection', height=10, width=32)
         terminal.send('/tasks #1\r')
-        self.screen_has(terminal, '#1 Failed')
+        self.screen_has(terminal, '✗ #1')
         self.page_to(terminal, 'after check')
         terminal.send('/evidence 1\r')
         self.screen_has(terminal, 'Verified run evidence')

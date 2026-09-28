@@ -392,9 +392,9 @@ class TerminalSmoke(unittest.TestCase):
             self.assertEqual(captured_scope['revision'], 3)
             self.assertTrue(captured_scope['confirmed'])
             self.assertEqual(captured_scope['brief']['scope'], 'Fixture repository only')
-            wait_for(b'Thinking / waiting for text')
+            wait_for(b' thinking')
             self.assertNotIn('PRIVATE_THINKING_SENTINEL', visible_screen(output))
-            wait_for(b'waiting for text 1.')  # Clock advances while no model output arrives.
+            wait_for('thinking · 1.'.encode())  # Clock advances while no model output arrives.
             os.write(master, b'/workspace\r')
             wait_for(b'Finish or cancel active conversations')
             self.assertNotIn('Open your work', visible_screen(output))
@@ -411,13 +411,13 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'Conversation model: second-model')
             os.write(master, b'fst\x1b[D\x1b[Da\x1b[F\r')  # New session; insert a into fst using Left, then End.
             wait_for(b'FAST_REPLY')
-            wait_for(b'Server timing')
+            wait_for(b'tok/s')
             self.assertFalse(release_slow.is_set())
             os.write(master, b'limit\r')
             wait_for(b'generation limit')
             wait_for(b'LIMIT_PARTIAL')
             os.write(master, b'\t\x1b')  # Return to slow session and cancel.
-            wait_for(b'Cancelled')
+            wait_for(b'cancelled')
             # Intent publication failure must prevent canonical task dispatch.
             intent_path = next(Path(state.name).glob('rust-tasks-v1/*/conversations-*.json'))
             intent_bytes = intent_path.read_bytes()
@@ -441,8 +441,7 @@ class TerminalSmoke(unittest.TestCase):
             self.assertEqual(record['tasks'][0]['status'], 'approved')
             self.assertEqual(record['revision'], 2)
             os.write(master, b'/chat\r')
-            wait_for(b'Task receipt r2')
-            wait_for(b'Task approved')
+            wait_for(b'Task #1 approved')
             os.write(master, b'/tasks\r')
             wait_for(b'Persisted_fix')
             os.write(master, b'\x11')  # Ctrl+Q
@@ -520,8 +519,8 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/run 1\r')
             wait_for(b'needs review', timeout=15)
             os.write(master, b'/chat\r')
-            wait_for(b'Worker run claimed')
-            wait_for(b'Worker result: ReviewReady')
+            wait_for(b'Task #1 started')
+            wait_for(b'Task #1 check passed')
             os.write(master, b'/tasks\r')
             wait_for(b'Persisted_fix')
             wait_for(b'Task queue refreshed')
@@ -542,7 +541,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/approve 2\r')
             wait_for(b'revision 8')
             os.write(master, b'/run 2\r')
-            wait_for(b'#2 ReviewReady', timeout=15)
+            wait_for('◐ #2'.encode(), timeout=15)
             repair_requests = [r for r in model_requests if r['messages'][-1]['content'].startswith('Implement this task: Repair #1:')]
             self.assertEqual(len(repair_requests), 1)
             self.assertEqual([m['role'] for m in repair_requests[0]['messages']], ['user', 'assistant', 'user'])
@@ -574,7 +573,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/resolve-repair 2\r')
             wait_for(b'revision 15')
             os.write(master, b'/run 3\r')
-            wait_for(b'#3 ReviewReady', timeout=15)
+            wait_for('◐ #3'.encode(), timeout=15)
             os.write(master, b'/evidence 3\r')
             wait_for(b'Accepted dependency inputs: #1 via repair #2')
             result = json.loads(saved.read_text())
@@ -658,7 +657,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/approve 4\r')
             wait_for(b'revision 24')
             os.write(master, b'/run 4\r')
-            wait_for(b'#4 ReviewReady', timeout=15)
+            wait_for('◐ #4'.encode(), timeout=15)
             self.assertEqual(worker_models[-1], replacement)
             self.assertEqual(json.loads(saved.read_text())['tasks'][3]['model'], replacement)
             self.assertEqual(Path(workspace.name, 'answer.py').read_text(), 'VALUE = 0\n')
@@ -690,9 +689,9 @@ class TerminalSmoke(unittest.TestCase):
             # Hierarchy rows can extend beyond the viewport; inspect both exact
             # results without changing the concurrent-dispatch authority checks.
             os.write(master, b'/tasks #6\r')
-            wait_for(b'#6 ReviewReady', timeout=15)
+            wait_for('◐ #6'.encode(), timeout=15)
             os.write(master, b'/tasks #7\r')
-            wait_for(b'#7 ReviewReady', timeout=15)
+            wait_for('◐ #7'.encode(), timeout=15)
             self.assertIsNone(json.loads(saved.read_text())['tasks'][4].get('run'))
             os.write(master, b'/evidence 4\r')
             wait_for(b'Acceptance criteria')
@@ -714,7 +713,7 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'Approved with limitations')
             wait_for(b'Limitation:')
             self.assertTrue(any(r['request']['action'].get('decision') == decision for r in json.loads(saved.read_text())['receipts']))
-            wait_for(b'#5 ReviewReady', timeout=15)
+            wait_for('◐ #5'.encode(), timeout=15)
             os.write(master, b'/dispatch off\r')
             wait_for('dispatch off · Work'.encode())
             dispatched = json.loads(saved.read_text())
@@ -736,7 +735,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/tasks #8\r')
             wait_for(b'Task filter applied')
             os.write(master, b'/run 8\r')
-            wait_for(b'#8 ReviewReady', timeout=15)
+            wait_for('◐ #8'.encode(), timeout=15)
             requests_before_architect = len(model_requests)
             os.write(master, ('/review 8 ' + json.dumps(architecture_review) + '\r').encode())
             wait_for(b'Review draft paths', timeout=15)
@@ -774,7 +773,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/tasks #9\r')
             wait_for(b'Task filter applied')
             os.write(master, b'/run 9\r')
-            wait_for(b'#9 ReviewReady', timeout=15)
+            wait_for('◐ #9'.encode(), timeout=15)
             revised = json.loads(saved.read_text())
             self.assertEqual(revised['tasks'][8]['run']['baseline'], revised['tasks'][7]['run']['baseline'])
             self.assertEqual(revised['tasks'][8]['run']['inputs'], revised['tasks'][7]['run']['inputs'])
@@ -795,7 +794,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'\x15')  # Refused commands retain their editable draft.
             os.write(master, b'\x1b[1;3C\x1b[B')  # Expand, then explicitly select a task.
             os.write(master, b'/tasks #9\r')
-            wait_for(b'Task #9 \xc2\xb7 revision')
+            wait_for('Task #9 · awaiting review'.encode())
             self.assertEqual(saved.read_bytes(), tree_bytes)
             self.assertEqual(len(model_requests), tree_requests)
             # Read old output while a real HTTP stream continues, then resume its tail.
@@ -826,7 +825,7 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'READ_MORE_020')
             restart_anchor = re.search(r'READ_MORE_\d{3}', visible_screen(output)).group()
             os.write(master, b'\t/tasks #7\r')  # Restore the original selected conversation.
-            wait_for(b'Task #7 \xc2\xb7 revision')
+            wait_for('Task #7 · awaiting review'.encode())
             os.write(master, b'\x11')
             self.assertEqual(process.wait(timeout=3), 0)
             self.assertEqual(termios.tcgetattr(slave), original)
@@ -890,7 +889,7 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'ALFREDO')
             wait_for(b'AUTO_TWO')
             wait_for(b'#7')
-            wait_for(b'Dispatch OFF')
+            wait_for('dispatch off · Work'.encode())
             self.assertEqual(json.loads(saved.read_text()), revised)
             os.write(master, b'\x1bOQ\x1b[Z')  # Chat, then previous (reading) session.
             wait_for(restart_anchor.encode())

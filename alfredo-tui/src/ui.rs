@@ -858,7 +858,7 @@ fn work_inspector(
     };
     let status = match task.status {
         TaskStatus::Proposed => "Needs approval",
-        TaskStatus::Approved => "Approved · waiting to run",
+        TaskStatus::Approved => "Approved · /run after explicit policy",
         TaskStatus::Cancelled => "Cancelled",
         TaskStatus::Running => "Running",
         TaskStatus::NeedsHumanReview => "Held for human review · /review to resolve",
