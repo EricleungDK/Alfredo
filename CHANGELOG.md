@@ -8,6 +8,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Coding workers now answer with plain-text FILE blocks
+  (`=== FILE: path ===` … `=== END FILE ===`) instead of schema-constrained JSON,
+  so code is written verbatim with no quote/newline escaping. The worker request
+  sends no schema; `think: false` and repair sampling are kept. A reply cut off
+  inside a block fails with `Model output ended inside FILE block for PATH
+  (truncated)`, and the next repair says so. Legacy JSON answers are still
+  accepted. `--worker-format json` restores the constrained JSON request;
+  evidence records the requested format. Qualification pins `json`.
+- Repair prompts show prior evidence as plain text (patch and check output
+  unescaped), a fresh repair gets the previous attempt's files as FILE blocks,
+  and retained legacy JSON answers are replayed as FILE blocks.
+- The running task pane shows streamed FILE blocks as code: `▸ path` headings,
+  marker lines hidden.
+
 - Autopilot repair budget default is now 3 (`--max-repairs` still overrides).
 - Repair prompts open with a short "What is still failing" section: failing test
   names, assertion/error lines and `-`/`+` diff lines (max 30 lines / 2 KiB),

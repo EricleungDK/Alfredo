@@ -392,8 +392,9 @@ Start in an existing Git repository with a commit, then enter:
 
 `/permit` declares exact relative files and one check argv; changing policy resets
 approval. `/run` claims a durable run and creates a detached worktree from committed
-HEAD. Dirty working files are not copied. The model supplies a schema-constrained
-file plan, and Rust rejects unapproved paths before writing. The approved check
+HEAD. Dirty working files are not copied. The model returns complete files as
+FILE blocks (see "Worker answer format"), and Rust rejects unapproved paths before
+writing. The approved check
 runs in Bubblewrap with private network/process namespaces, system tools mounted
 read-only, and only the isolated worktree writable. Host home directories and
 external toolchains are unavailable. Git filters/includes are rejected at preflight.
@@ -880,6 +881,46 @@ again when restarting. It follows workspace switches within the process. No toke
 budget, deadline, admission limit or Ollama server configuration changes. No silent
 retry or fallback occurs. This workaround is tested on synthetic coding cases;
 complete role/model quality qualification remains open.
+
+Coding workers in the default `blocks` format send no schema but keep this policy
+(`think: false` by default) and the repair sampling temperature, so latency and
+behavior stay comparable with the JSON request.
+
+## Worker answer format
+
+By default (`--worker-format blocks`) a coding worker answers in plain text:
+
+```
+=== FILE: relative/path.py ===
+<complete file content, verbatim>
+=== END FILE ===
+```
+
+One or more blocks, one per changed file; text outside blocks is ignored but kept
+in the saved `model-response.txt`. Rules:
+
+- Marker lines must start the line exactly (trailing spaces allowed).
+- The path must be an allowed file; unapproved paths, duplicates, NUL bytes and
+  the 32-file / 128 KiB bounds are refused as before.
+- Content is taken verbatim; CRLF becomes LF and trailing newlines collapse to one.
+  One markdown fence layer inside a block (first line starting with ```` ``` ````,
+  last line ```` ``` ````) is stripped.
+- Output ending inside a block fails with `Model output ended inside FILE block for
+  PATH (truncated)`; no blocks fails with `Model returned no FILE blocks`. The next
+  repair states that the previous response was truncated.
+- File content cannot contain a line equal to a marker line. A FILE marker inside
+  an open block is refused as ambiguous.
+
+A legacy JSON answer (`{"files":[{"path","content"}]}`) is still accepted in either
+mode, so older conversations and fixtures keep working. When continuing a Local
+Agent conversation, a retained JSON answer is replayed as FILE blocks. A fresh
+repair receives the previous attempt's files as FILE blocks, and prior evidence is
+shown as plain text (patch and check output unescaped).
+
+`--worker-format json` sends the legacy schema-constrained JSON request instead.
+Evidence records the requested format in `generation.answer_format`; older
+evidence has no field (JSON request, unrecorded). Inference qualification always
+pins `json` so recorded request profiles stay comparable.
 
 ## Requested generation settings in worker evidence
 

@@ -107,6 +107,7 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 | `--connect-retries N` | 3 | Auto-retry (1 s, 2 s, 4 s…) before any reply text, 0–10 |
 | `--parallel-models N` | 2 | Concurrent model requests per endpoint across terminals, 1–8 |
 | `--structured-thinking auto\|on\|off` | `off` | Thinking mode for structured (plan/worker) requests |
+| `--worker-format blocks\|json` | `blocks` | Worker answer format: plain-text FILE blocks, or legacy schema-constrained JSON (see [reference](alfredo-tui/docs/reference.md#worker-answer-format)) |
 | `--doctor` | | Check storage, model, repo and worker tools; no TTY; exit 2 on failure |
 | `--qualify-inference REPORT` | | Opt-in model diagnostic run (see [reference](alfredo-tui/docs/reference.md#run-an-explicit-inference-diagnostic)) |
 | `--qualification-repetitions N` | 3 | Repetitions for `--qualify-inference`, 1–3 |
