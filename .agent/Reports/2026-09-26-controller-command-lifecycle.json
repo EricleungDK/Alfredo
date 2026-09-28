@@ -1,0 +1,59 @@
+{
+  "date": "2026-09-26",
+  "scope": "Saved worker cancellation and dispatch controls with live terminal dispatch status",
+  "schemas": {
+    "task": 16,
+    "conversation_set": 13,
+    "scope": 2,
+    "agent_transcript": 1
+  },
+  "changes": [
+    "Exact process controller and worker Start identity captured for cancellation before save/dispatch, including automatic starts.",
+    "Local cancellation-request outcome remains separate from canonical same-run Finish; stale owner refuses.",
+    "Dispatch enabling rechecks scope asynchronously and epoch on application; disabling, shutdown and scope holds invalidate pending enable.",
+    "Restoration retains historical outcomes, marks unfinished commands unknown, never resumes control effects, and starts dispatch off.",
+    "Header exposes live dispatch status at width60 and above; narrow32 layout preserved.",
+    "Schema13 preserves exact v12 backup, rejects unsupported/mismatched control metadata, and expands cancellation result reading bounds.",
+    "Observed Start is not suppressed by a cancellation entry that only displays its Finish."
+  ],
+  "delegation": {
+    "lifecycle": "/root/controller_lifecycle",
+    "persistence_and_real_workers": "/root/controller_tests",
+    "ui_layout_system_docs": "/root/controller_ui",
+    "integration_final_test_fixes_release": "/root"
+  },
+  "validation": {
+    "focused": 84,
+    "native": {
+      "passed": 262,
+      "failed": 0,
+      "ignored": 7
+    },
+    "strict_clippy": "passed",
+    "installed_smoke": "..\n----------------------------------------------------------------------\nRan 2 tests in 14.212s\n\nOK\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+    "source_hashes_verified": 43,
+    "payload_hashes_verified": 6,
+    "documentation": {
+      "grade": "A",
+      "score": 98.2,
+      "existing_traceability_gaps": 3
+    },
+    "specific_evidence": [
+      "Saved intent failure leaves worker flag and task state unchanged, followed by exact-origin cancellation with real HTTP worker.",
+      "Pre-Start cancellation, stale controller/correlation refusal, completed-worker stale cancellation refusal and independent successful Finish.",
+      "Off preserves active automatic worker; stale epoch/scope refuse, historical enable replay cannot reenable, pending enable invalidated by off.",
+      "Origin session, narrow reading anchor and newer draft retention; restored enabled history coexists with live off.",
+      "Installed dispatch on/off records preserved with exact controller, schema13 and restart off."
+    ]
+  },
+  "candidate": {
+    "path": "/tmp/alfredo-controller-command-candidate/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "eb0229158adb4e0b6b3415ce2e0aecafa3fa9ac55a3cc796652ba0e8842ca588"
+  },
+  "limitations": [
+    "Automatic per-worker launch provenance still requires saved Run staging; a saved dispatch toggle alone does not establish launch provenance.",
+    "Automatic Architect and Wayfinder/workspace causal adapters remain unfinished.",
+    "Full formation, live-model qualification, uncertain execution recovery, retirement, supported platform matrix and production launch remain open.",
+    "No remote CI, publication or human visual/accessibility acceptance claimed."
+  ]
+}

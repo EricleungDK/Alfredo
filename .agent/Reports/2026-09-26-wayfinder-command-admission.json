@@ -1,0 +1,74 @@
+{
+  "date": "2026-09-26",
+  "scope": "Wayfinder saved scope admission and original-turn continuity",
+  "schemas": {
+    "task": 16,
+    "conversation_set": 16,
+    "scope": 2,
+    "agent_transcript": 1
+  },
+  "changes": [
+    "Router prepares scope Enter/Draft/Confirm requests asynchronously without writes; exact saved Pending publication gates dispatch.",
+    "Prepared routes remain bounded and active while waiting for the shared save barrier, preserving source session, original user-message boundary and model messages.",
+    "Ctrl+R resumes the same stored request; explicit command replay can originate from another selected session without transferring reply ownership.",
+    "Unsent cancellation withdraws only its exact route and token; in-flight writes reconcile their exact canonical receipt independently of reply eligibility.",
+    "Concurrent entry requests preserve one flow; losing requests observe current scope without claiming another request receipt.",
+    "Schema16 preserves exact v15 bytes, validates prompt/turn binding and unique scope correlations across wrappers, and never restores a dispatch token.",
+    "Delayed scope entries preserve stable reading keys and render at their original turn; reply receipt labels now validate canonical scope and any bound request.",
+    "The UI reads lightweight preparation metadata without cloning full conversation histories each frame.",
+    "Fresh application notices take precedence over a selected session failure in the footer; session failure remains visible and its detail returns when the notice clears."
+  ],
+  "delegation": {
+    "router_and_store": "/root/controller_lifecycle",
+    "schema_and_regressions": "/root/controller_tests",
+    "ui_layout_docs_and_main_tests": "/root/automatic_launch_ui",
+    "main_integration_and_release": "/root"
+  },
+  "validation": {
+    "focused": {
+      "passed": 83,
+      "failed": 0,
+      "ignored": 0
+    },
+    "native": {
+      "passed": 286,
+      "failed": 0,
+      "ignored": 7
+    },
+    "strict_clippy": "passed",
+    "notice_regression": {
+      "red": "expected rendering failure reproduced",
+      "green": "focused regression passed",
+      "logs": [
+        "/tmp/wayfinder-notice-red.log",
+        "/tmp/wayfinder-notice-green.log",
+        "/tmp/wayfinder-admission-installed-initial-notice-failure.log"
+      ]
+    },
+    "installed_smoke": "..\n----------------------------------------------------------------------\nRan 2 tests in 15.624s\n\nOK\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+    "source_hashes_verified": 43,
+    "payload_hashes_verified": 6,
+    "documentation": {
+      "grade": "A",
+      "score": 98.2,
+      "existing_traceability_gaps": 3
+    },
+    "specific_evidence": [
+      "Async Store/Router tests prove inert preparation, saved Enter\u2192Draft\u2192Confirm admission, exact receipt binding, restart without effects and exact explicit replay.",
+      "Main tests keep two routes behind an unrelated pending token, admit each separately, and preserve origin/drafts when cancellation or restart occurs before effect.",
+      "Malformed turn boundaries/prompts, duplicate scope IDs, old-schema metadata and conflicting backups are rejected unchanged.",
+      "Layout tests verify delayed insertion, narrow/wide rendering, reading preservation, unknown restart and canonical header proof.",
+      "Installed PTY forces Wayfinder conversation save failure with unchanged scope/no model request, retries with Ctrl+R, verifies all three scope records and replays confirmation from another conversation without new receipts/tasks/model calls."
+    ]
+  },
+  "candidate": {
+    "path": "/tmp/alfredo-wayfinder-admission-candidate-v2/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "442c56333aae078f8eac2e2705113e955376a94119daa3cfcb31ea7c7ee1267d"
+  },
+  "limitations": [
+    "Workspace/mission selection causal events and pre-admission parse-error history remain open.",
+    "Full mission formation, multi-task architecture revisions, model qualification, uncertain execution recovery, retirement and platform matrix remain open.",
+    "Legacy saved Wayfinder replies without typed intent retain only their recorded receipt reference and do not acquire fabricated command origins.",
+    "Production launch, remote CI and human visual/accessibility acceptance remain unproven."
+  ]
+}

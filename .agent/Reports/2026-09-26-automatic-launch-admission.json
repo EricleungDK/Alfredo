@@ -1,0 +1,58 @@
+{
+  "date": "2026-09-26",
+  "scope": "Persisted automatic worker launch admission and origin tracking",
+  "schemas": {
+    "task": 16,
+    "conversation_set": 14,
+    "scope": 2,
+    "agent_transcript": 1
+  },
+  "changes": [
+    "Removed effectful dispatch_tick; prepare_dispatch selects without launching or reserving attempts.",
+    "Every automatic worker stages a DispatchRun under its exact enabled parent in the same session and waits for the successfully saved Pending record.",
+    "Admission rechecks process controller/source/epoch, scope, task revision, approval and readiness; failed publication or admission disables current dispatch without poisoning a newer controller.",
+    "Automatic history preserves current session, reading anchor and composer and uses Dispatch actor with exact Start/Finish phases.",
+    "Schema14 validates earlier same-session enabled parent, retains exact v13 backup and never restores a dispatch token or replays an automatic command.",
+    "Dispatch off withdraws an automatic token still awaiting its save; later completion of that obsolete save cannot launch it.",
+    "Read-only result binding additionally verifies latest canonical approval before Start matches captured approval."
+  ],
+  "delegation": {
+    "lifecycle": "/root/controller_lifecycle",
+    "schema_and_real_workers": "/root/controller_tests",
+    "ui_layout_docs": "/root/automatic_launch_ui",
+    "main_integration_and_release": "/root"
+  },
+  "validation": {
+    "focused": 79,
+    "native": {
+      "passed": 267,
+      "failed": 0,
+      "ignored": 7
+    },
+    "strict_clippy": "passed",
+    "installed_smoke": "..\n----------------------------------------------------------------------\nRan 2 tests in 14.222s\n\nOK\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+    "source_hashes_verified": 43,
+    "payload_hashes_verified": 6,
+    "documentation": {
+      "grade": "A",
+      "score": 98.2,
+      "existing_traceability_gaps": 3
+    },
+    "specific_evidence": [
+      "Real HTTP worker starts only after exact Autosave acknowledgment, with original session retained while another session is selected.",
+      "Failed save leaves no worker or canonical mutation and stops selection; disabled/superseded controller refuses saved launch.",
+      "Correct Start/Finish chain and structurally valid wrong-approval refusal; parent linkage and hostile migration cases.",
+      "Automatic append during streaming preserves draft, cursor and reading; origin and narrow-layout tests.",
+      "Installed parallel-worker journey verifies three saved automatic launches with exact parent, approval and Start receipts."
+    ]
+  },
+  "candidate": {
+    "path": "/tmp/alfredo-automatic-launch-candidate/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "fc38a04354a0e6574be5afdec051231841c56d9e689bbfd1cc037153d6484842"
+  },
+  "limitations": [
+    "Automatic Architect generation and Wayfinder/workspace causal adapters remain unfinished.",
+    "Full mission formation, model qualification, uncertain execution recovery, retirement and platform matrix remain open.",
+    "Production launch, remote CI and human visual/accessibility acceptance are not claimed."
+  ]
+}

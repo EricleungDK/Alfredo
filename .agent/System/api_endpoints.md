@@ -4,6 +4,78 @@
 
 Alfredo has no remote or production HTTP API. Its application boundary is a versioned JSON command protocol shared by the React client, the Tauri bridge, the development-only localhost gateway, the persistent Python server, and the one-process Python CLI fallback. Python remains authoritative; Rust validates and transports typed payloads, while React renders acknowledged projections.
 
+## Native Rust terminal boundary
+
+The separate `alfredo-tui` binary owns its own task store and calls Ollama directly.
+`--doctor` runs without terminal initialization: the ordinary stores validate named
+conversation state, GET /api/tags checks its restored model, sanitized bounded Git
+reads inspect the worker baseline/config, and metadata checks locate required tools.
+Exit 0/2 indicates passed/failed preflight checks. It may create private lock
+namespaces, but saves no conversations/task receipts and sends no inference.
+`/models` calls `GET /api/tags` under ten-second/1-MiB/256-entry bounds. `/model NAME`
+selects a catalog model for an idle, non-interrupted conversation; it does not change
+existing task assignments. Discovery failures retain the last catalog with an error.
+Its `/task`, `/after`, `/permit`, `/approve`, `/run`, `/cancel-task`, `/evidence`,
+`/recover`, `/repair`, `/accept`, `/reject` and `/branch` commands do not call the Python protocol described below.
+Mutations carry expected revision and correlation identity. Dependent /run requests
+first verify accepted-parent candidates and compose an isolated Git baseline with
+ancestry/conflict checks. Schema-v4 run receipts bind input task/run/digest/candidate
+identities; the store rechecks evidence at claim. Preparation has a 60-second
+deadline/cancellation and changes only derived Git objects/managed refs; model,
+worktree and check execution follow the durable run claim. Explicit file/check
+policy plus fresh approval is required before a durable run claim; terminal
+completion binds retained evidence, and review verifies that evidence again.
+`/branch ID` verifies an accepted candidate and confirms/creates its deterministic
+local ref without checkout or overwrite, then records a schema-v5 Branch receipt.
+An exact existing ref permits receipt reconciliation; different targets refuse.
+Opening `/evidence ID` also selects that exact task, keeping displayed evidence and
+ID-less review commands aligned. The terminal renders parsed check/diff/output
+sections after store verification; rendering grants no new authority.
+`/recover ID` acquires an existing released worker-owner lock and acknowledges a
+valid saved result without replaying effects; missing/invalid evidence preserves
+the uncertain claim. Refresh projects advisory ownership/recoverability.
+`/activity [query or #ID]` reads/searches canonical task receipts without creating
+a task mutation or conversation action claim.
+Native discussion, planning and worker inference share same-user capacity per
+normalized endpoint origin (default two, `--parallel-models` 1–8), independent of
+mission state directories. Foreground discussion/planning has bounded priority over
+background workers, without preemption. A live capacity conflict refuses. Queued
+requests remain cancellable before HTTP dispatch; discovery bypasses admission.
+`Queued` and changed `QueueProgress` observations precede `Admitted`, which follows
+post-capacity planner/task guards. The UI distinguishes shared Alfredo queueing
+from upstream waiting; neither proves GPU capacity or server-side cancellation.
+Workers recheck cancellation and the exact captured Running task/run, policy and
+model after capacity admission. They accept unrelated task-store revision changes
+and await provider-future cancellation before publishing Finish. The client `queue`
+timing spans request preparation and validation through admission, not only shared
+capacity waiting.
+`--qualify-inference REPORT [--qualification-repetitions 1..3]` runs a separate
+diagnostic cohort without terminal initialization or an active user mission. It
+defaults to three repetitions of four scenarios paired across baseline and explicit
+foreground-8192/background-16384 context profiles, with fixed shared capacity one,
+128 maximum generation requests and a 1,800-second cohort deadline plus cleanup.
+`--inspect-qualification REPORT` validates and summarizes only; it sends no HTTP and
+never resumes an incomplete report. Existing report or artifact paths refuse.
+Artifacts are retained at `<REPORT>.artifacts`. Production defaults remain unchanged.
+
+Recorded qualification generations retain exact payload/profile hashes and bounded
+message/prefix identities. Before `Done`, while their shared permit remains held,
+they inspect `/api/version`, `/api/tags` and `/api/ps` through read-only concurrent
+requests, each with a ten-second deadline and 1-MiB ceiling; model lists allow at
+most 256 entries. These probes do not acquire another admission ticket. Ordinary
+unrecorded calls do not probe. Generation time, probe duration and instrumented total
+are separate observations. Missing metadata or probe failure cannot produce runtime
+qualification, even when generation itself completes. Runtime pins/token headroom
+remain unverified; inspection hashes are neither reconstructable prompts nor upstream
+attestations. No automatic profile promotion or performance claim follows.
+See [terminal commands](../../alfredo-tui/README.md) for syntax and current limits.
+The shared Rust execution callbacks optionally observe stdout/stderr through a
+nonblocking 32-by-4-KiB channel. This changes no request/receipt schema or desktop
+JSONL output; desktop callers leave the observer absent. Terminal live tails are
+advisory and saved execution receipts remain authoritative.
+The existing execution validator accepts optional `--unshare-net`; terminal workers
+always request it, while desktop callers retain their existing boundary.
+
 ## Endpoints
 
 The endpoint families are:
@@ -231,3 +303,343 @@ Raw model streams, worker prompts/responses, terminal bytes, test logs, and diff
 ## Security and Authentication
 
 Alfredo has no remote authentication endpoint. The development localhost capability defends a loopback transport; it does not grant domain authority. Authority comes from the local Mission Commander action, exact expected revision, accepted Issue Slice or approved queue item, configured agent role, command policy, and explicit path grants. The Python Orchestrator enforces all of these constraints even when callers bypass React or Tauri.
+
+### Native terminal completion timing
+
+Completion timing is shown as **Server timing** in the conversation, plan preview
+and verified worker evidence when Ollama supplies it. Load, prompt evaluation,
+generation and total durations are optional; generated tokens/s uses only reported
+generation duration and token count. These are server observations, separate from
+client queue and first-content latency. Invalid fields are ignored independently
+(durations above ten minutes and counts above one million are omitted), and missing
+metrics do not fail an otherwise complete response. Conversation and plan timing is
+transient; worker timing is retained in digest-bound evidence. It grants no approval
+or check success. See [Ollama chat response metrics](https://docs.ollama.com/api/chat).
+
+## Thinking-stream progress
+
+Ollama's [thinking protocol](https://docs.ollama.com/capabilities/thinking) can emit
+reasoning separately from answer content. The native provider accepts thinking-only
+frames and emits one payload-free progress event per request. Conversation status
+shows `Thinking / waiting for text`, the planner shows `Model thinking`, and a coding
+worker shows `Thinking` until answer content arrives. Reasoning text is neither
+shown as an answer nor retained in conversation, plan or worker output. Thinking and
+answer bytes share the existing 128-KiB output budget; individual frames remain
+limited to 64 KiB. This preserves bounded transport while supporting thinking models.
+
+Thinking status is transient, attempt-bound and cleared by retry/restart; late events
+cannot revive completed or cancelled work. First-content timing still measures answer
+text, not hidden reasoning. This change observes the phase without changing the
+model's thinking configuration, token budget or execution authority.
+
+## Native Wayfinder first-contact routing
+
+The Rust `wayfinder` adapter runs before conversational model dispatch. It ports the
+legacy deterministic entry vocabulary: new projects/consequential changes enter Chart,
+Wayfinder map/ticket/issue references enter Work-through, and ordinary read-only
+explanation/status/review/diagnosis/inspection stays outside. Existing project scope
+continues across missions and restarts without another flow entry. Model continuations
+receive captured scope as reference; model prose cannot mutate or confirm scope.
+
+A flow entry records the originating prompt (at most 16 KiB), a mode and a pending
+brief with explicit unknowns. It cannot be confirmed until the Commander supplies a
+scope draft. Four complete labeled lines (Destination, Scope, Constraints, Uncertainty)
+save a bounded draft against the observed revision. `confirm shared understanding N`
+requires the exact draft revision and records agreement only. These deterministic
+responses are receipt-backed and end the turn without model inference or task actions.
+Manual `/scope` commands remain available. Ambiguous/malformed field text stays
+conversation; refused writes are not acknowledged as successful actions.
+
+Routing writes are tracked independently of cancellable inference jobs. Cancellation
+cannot abandon a pending receipt: polling still observes the outcome; switching and
+normal quit wait for routing completion. Dispatch pauses while routing is pending,
+and a newly pending gate turns it off. Safe inspection/reconciliation commands remain
+available while new task actions wait for the routing result.
+
+## Generation limits
+
+A response ending with Ollama `done_reason: "length"` is incomplete. The terminal
+retains partial answer text and bounded server metrics, but marks the turn failed
+instead of complete. Workers and planners cannot treat that response as successful
+structured output, even if the partial text happens to be valid JSON. Shorten the
+request or choose an appropriate model before explicitly retrying; no retry or
+token-budget increase happens automatically. Normal `stop` and legacy responses
+without a reason keep their existing completion behavior.
+
+## Structured-request thinking
+
+Planner and coding-worker requests now send `think: false` by default alongside
+their JSON schema. This avoids a reproduced qwen3:14b/Ollama 0.34.0 failure where
+thinking-only frames ended without answer text or a completion marker. The same
+edge-case coding checks passed with thinking disabled. Ordinary chat requests
+retain the model/server thinking default.
+
+`--structured-thinking off|on|auto` explicitly sets this policy for schema-constrained
+requests: off is the default, on requests thinking, and auto omits the option. Use
+a mode supported by the selected model. The setting is invocation-local; pass it
+again when restarting. It follows workspace switches within the process. No token
+budget, deadline, admission limit or Ollama server configuration changes. No silent
+retry or fallback occurs. This workaround is tested on synthetic coding cases;
+complete role/model quality qualification remains open.
+
+## Refine an unsaved task plan
+
+After `/plan REQUEST` completes, use `/plan-revise REQUEST` to refine its tasks,
+paths, checks and dependencies. The planner receives the previous task list,
+original request and accumulated revision requests, plus freshly captured committed
+repository context and project scope. It retains the draft's planner model even
+if the conversation model has changed. Review the complete replacement before
+`/plan-save`; saving proposes tasks and never approves or runs them.
+
+A failed or malformed revision restores the previous complete draft with its
+original task revision, so a failed refinement cannot refresh a stale save. Saving
+and another revision are blocked while inference is active. `/plan-cancel` discards
+the current draft and pending revision; late responses cannot restore them. Revision
+requests share the 8 KiB prompt limit, and previous task reference data is bounded
+to 64 KiB. Complete drafts now survive restart as described below; full Mission
+Draft/Issue Graph formation remains unfinished.
+
+## Plan draft restart continuity
+
+Conversation snapshots v5 retain a bounded complete task-plan draft and its original
+task revision. Autosave, normal shutdown and a quiescent workspace/mission switch
+preserve it under the existing conversation owner lock and atomic save. A pending
+refinement checkpoints its prior complete draft; partial first-generation output
+is not a plan and is not restored. No inference resumes automatically.
+
+Restored plans open for review, retaining their original repository/scope bindings
+and stale-state checks. `/plan-save` still requires explicit submission and approval
+remains separate. `/plan-cancel` clears the draft on the next checkpoint or normal
+shutdown. A completed save followed by a crash before conversation checkpoint may
+restore an older preview, but its old task revision prevents duplicate publication.
+Saved plans are limited to 256 KiB and must pass the normal plan validation.
+
+V1–v4 snapshots remain readable. First v5 save keeps the exact source bytes in a
+versioned `.vN-backup`; conflicting backups, future versions, invalid plans and old
+versions carrying plan data refuse without overwriting the original. Task v9 and
+scope v2 remain unchanged. Full Mission Draft/Issue Graph formation is still open.
+
+## Explicit Wayfinder capability
+
+Type `@wayfinder REQUEST` to address the native scope adapter. Tab completes the
+name; arrows select, Enter fills the composer, and Escape dismisses completion.
+Completion never submits a turn. F1 lists this capability alongside commands.
+Unknown leading `@` names and an empty Wayfinder request produce an error and retain
+the draft without model dispatch. Mentions inside ordinary prose are not commands.
+
+An explicit discussion request without a saved scope enters Chart (or Work-through
+for an existing Wayfinder map/ticket). Ordinary read-only prompts outside the capability keep their existing
+exclusion from automatic Chart. Four-field briefs and exact-revision confirmation
+also accept the prefix; their outcomes retain the same scope receipts and grant no
+task approval or execution. Subsequent discussion reuses the existing flow.
+Other native roles remain accessible through their documented commands; this is
+not a general skill/plugin executor or complete capability-routing implementation.
+
+## Recovery before check launch
+
+New worker runs retain a version-1 `execution-boundary.json` bound to the task,
+run and baseline before preparing work. Before launching the approved check, the
+worker exclusively creates and syncs `check-launch-intent.json` and its directory.
+Failure to record this intent prevents check launch. The sandbox cannot write these
+records outside its worktree. They are lifecycle records, not success or approval.
+
+When the worker owner lock is free, `/recover ID` can reconstruct a Failed result
+only if the start boundary matches, final evidence is absent and check-launch intent
+is absent. It preserves partial work and states that no patch was reconstructed.
+It does not invoke Git, inference or checks. Repeating recovery returns the existing
+acknowledgment; `/repair` then proposes a new task with inherited permissions and
+fresh approval. This does not prove retained-worktree quiescence or allow cleanup.
+
+Missing/invalid/legacy boundaries, mismatched identities, any check-launch intent
+(including an incomplete file), and existing malformed evidence remain unresolved.
+Existing saved terminal evidence retains its previous recovery path. No task,
+conversation or scope schema migration is required; old runs are not assigned new
+proof by default. Recovery after a possibly launched check remains an open boundary.
+
+
+## Explicit plan acceptance criteria
+
+New generated plans require 1–16 distinct observable acceptance criteria per task,
+each a nonempty single line of at most 1024 UTF-8 bytes. Review them alongside the
+paths, check command and dependencies before `/plan-save`. Saving still creates
+Proposed tasks; approval remains separate. A passing check does not automatically
+establish every criterion or accept a task.
+
+Task schema v10 retains the criteria in the immutable Plan receipt. The selected
+task and evidence review show the recorded contract, and workers receive it as
+reference within the approved policy. Repair descendants inherit the original
+criteria and need fresh approval. Legacy/manual tasks without criteria explicitly
+say not recorded; no criteria are inferred from a command or successful result.
+
+Conversation schema v6 preserves criteria in unsaved plan drafts across restart
+and quiescent mission handoff. Task v1–v9 and conversation v1–v5 remain readable;
+the first newer write retains an exact version-named backup. Conflicting backups,
+malformed criteria, future schemas and older schemas claiming new criteria refuse
+without replacing the original. Task/conversation locations are unchanged.
+
+This advances the Local Agent task-packet contract. Full Mission Draft/Issue Graph
+formation and attributed action chronology
+remain separate unfinished requirements.
+
+
+## Criterion-level review
+
+Use `/review ID JSON` to record an explicit accept/reject decision, its reason and
+an evidence note for each recorded criterion, in order starting at 1:
+
+```text
+/review 4 {"accept":true,"reason":"Reviewed implementation and checks","criteria":[{"criterion":1,"met":true,"note":"Retained test asserts VALUE equals 42"}]}
+```
+
+Acceptance requires every recorded criterion to be marked met. A rejected review
+may mark criteria not met. Notes are reviewer assertions supported by the inspected
+evidence, not independently verified facts. The reason is a nonempty single line
+of at most 2048 UTF-8 bytes; each note is a nonempty single line of at most 1024
+bytes, with at most 16 ordered criteria. Unknown fields and mismatched coverage
+refuse. Legacy/manual tasks without recorded criteria use an empty criteria list.
+
+New `/accept` calls for tasks with criteria refuse and direct the user to `/review`.
+`/accept` for tasks without criteria and `/reject` remain available. Historical
+boolean review receipts remain readable and exactly replayable without invented
+reasons or criterion assessments. Both review paths retain the existing successful
+check, evidence-digest, expected-revision and exact-correlation guards. No inference
+or repair runs inside the review transaction. Enabled dispatch may subsequently
+start already-approved dependents when their parent becomes Accepted.
+
+Task schema v11 adds the Assess receipt. Replay validates each assessment against
+the already validated Plan receipt prefix and repair lineage. Before the first v11
+mutation, a v1–v10 store receives an exact version-named backup; conflicting backups
+or older schemas carrying Assess receipts refuse unchanged. Conversation v6 and
+scope v2 are unchanged. Notes appear in task details, saved Activity and evidence
+review; an open evidence view updates after acknowledgment. Rejected notes become
+reference data for a separately proposed and approved repair, under the existing
+128-KiB combined repair-context bound.
+
+Explicit outcome support is documented below. Automated Frontier Reviewer
+decisions and tiered automatic repair routing remain unfinished.
+
+## Explicit review outcomes (task schema v12)
+
+`/review ID JSON` also accepts `outcome` in place of the legacy `accept` field:
+`approved`, `approved-with-limitations`, `needs-repair`, `needs-human-review`, or
+`rejected`. The reason and ordered criterion evidence notes remain required.
+
+```text
+/review 4 {"outcome":"approved-with-limitations","reason":"Inspected implementation and checks","criteria":[{"criterion":1,"met":true,"note":"Retained check verifies VALUE equals 42"}],"limitations":["Performance outside this fixture remains unmeasured"]}
+```
+
+Both approving outcomes require all recorded criteria met, intact evidence and an
+original successful worker completion. Limited approval additionally requires
+1–8 distinct, nonempty single-line limitations, each at most 1024 UTF-8 bytes.
+Other outcomes cannot carry limitations. Limitations cannot waive failed criteria.
+
+Needs human review holds the task and its dependents. Direct approval, run and
+repair cannot bypass the hold; an explicit new review decision must resolve it.
+A failed run held for review still cannot be approved. Needs repair and Rejected
+remain unaccepted; repair requires a separate proposal and fresh approval.
+Saved Activity, task details and open evidence show the recorded outcome; resolving
+a hold replaces stale review notes while preserving criteria and dependency inputs.
+
+Task schema v12 adds the Decide receipt and human-review status. The first mutation
+of a v1–v11 store preserves an exact version-named backup; conflicting backups and
+older schemas carrying Decide refuse unchanged. Legacy Review and Assess receipts
+remain readable and replayable. Conversation v6 and scope v2 are unchanged.
+Automatic reviewer inference, tiered repair routing and architect escalation remain
+unfinished; these decisions are explicit user actions.
+
+## Review risk escalation (task schema v13)
+
+A review may declare `risk` as `critical`, `security`, or `merge-risk`:
+
+```text
+/review 4 {"outcome":"rejected","risk":"security","reason":"Review found an unsafe input path","criteria":[{"criterion":1,"met":false,"note":"Inspected input handling needs correction"}]}
+```
+
+Recording any of these risks with Rejected, Needs repair or Needs human review
+automatically holds the task for human review. The original outcome and risk remain
+in the receipt and Activity; task status shows the hold. This blocks dependent
+execution, direct approval/run, repair of the held task and sibling repair proposals
+from its parent. Risk classification is a reviewer assertion, not automatic risk
+detection. Absent classification means unrecorded, not verified safe.
+
+Approved outcomes carrying a risk refuse. Resolve a held task with a subsequent
+explicit `/review`, omitting `risk` and explaining the human decision in `reason`.
+Approval still requires the original successful check and every recorded criterion
+met. A failed run cannot become approved through risk escalation. Resolving to
+Needs repair permits a separate repair proposal that still requires fresh approval.
+No model request or repair starts inside the review transaction.
+
+Task schema v13 adds the optional typed risk. Exact v1–v12 backups precede the first
+mutation; older schemas carrying a classified risk refuse unchanged. Existing
+unclassified reviews remain readable/replayable with no invented classification.
+Conversation v6 and scope v2 are unchanged. Same/fresh-agent continuity and
+Architect revision routing remain unfinished.
+
+## Atomic review-to-repair proposals (task schema v14)
+
+`/review ID JSON` now records an unclassified `needs-repair` or `rejected` outcome
+and creates an inherited repair task in one transaction. The terminal names both
+the reviewed parent and the new child, and links the child from parent readiness.
+The child is Proposed: inspect it and explicitly `/approve CHILD` before `/run` or
+enabled dispatch can start it. Recording the review does not launch a model/check.
+
+```text
+/review 4 {"outcome":"needs-repair","reason":"Correct the calculation edge case","criteria":[{"criterion":1,"met":false,"note":"Observed failing boundary input"}]}
+```
+
+The compound receipt stores both review intent and the child proposal; its primary
+receipt task is the new child. Activity can find it under either parent or child.
+Review notes and acceptance criteria follow repair lineage, and Local Agent
+continuity counts compound Rejected decisions exactly like earlier rejections.
+Risk-bearing reviews still enter a human hold without creating a repair.
+
+Evidence, criterion coverage, open project scope, task/receipt/storage capacity and
+unresolved-child guards apply to the whole operation. Failure leaves both review
+and proposal uncommitted. Exact retries after restart return the same child;
+conflicting/stale requests cannot add another child or overwrite the outcome.
+A pending scope gate blocks the compound operation because it proposes new work.
+
+Schema v14 adds `review-and-repair`; earlier schemas cannot contain that receipt.
+Exact v1–v13 backups precede migration. Old Decide, Assess and boolean Review
+receipts retain their original meaning; they do not retroactively create children.
+Legacy `accept` JSON and `/reject` remain review-only, with `/repair` available for
+explicit separate proposals. Conversation v6, scope v2 and agent transcript v1 are
+unchanged.
+
+Repair dependency resolution is implemented in schema v15 below. Review-triggered
+execution authorization and full launch qualification remain open.
+
+
+The Rust terminal /resolve-repair ID explicitly selects an accepted repair for its unsuccessful ancestor dependencies. It requires current revision, open scope, verified evidence and no unresolved family branch. The selection is immutable and exact request retry is idempotent. Future input records distinguish declared task from optional source_task.
+
+
+## Architect revision after repeated failures
+
+A reviewer can set `"failure":"architecture"` on a nonapproval `/review` decision.
+The first classified failure proposes a normal repair. A second distinct reviewed
+run in that lineage records an Architect route and stops ordinary repair work;
+critical/security/merge risk takes precedence and remains a human hold. Absence
+of classification stays unrecorded, and repeating a review cannot manufacture a
+second failed run.
+
+The current acknowledgment opens the real Frontier Architect when no draft or
+inference is already active. `/architect-revise ID` explicitly resumes a pending
+route after disconnect/restart or after another draft is cleared. Restoring state
+never repeats inference. The Architect receives bounded verified lineage evidence,
+review notes and criteria, plus repository context from the parent's exact commit.
+It produces one revised repair task with explicit criteria and exact file/check
+policy. This bounded repair revision does not rewrite unrelated mission tasks.
+
+`/plan-save` explicitly adopts that draft as a linked Proposed repair, preserving
+original dependencies and execution baseline/inputs. New paths/checks still require
+fresh approval. The revised task starts a fresh Local Agent conversation and a new
+architecture-failure cycle. Accepted revised work uses `/resolve-repair` normally.
+Source task/run/evidence digest and route revision bind the draft; stale or tampered
+source evidence refuses adoption. Draft refinement/restoration retains provenance.
+Task schema16 and conversation schema7 introduce these fields with exact prior
+version backups; earlier schemas cannot claim the new provenance.
+
+The latest adopted Architect repair defines the active family branch. Older branches
+cannot start workers, create repairs, change reviews or resolve the family. Cancelling
+an adopted repair before it runs reopens its source Architect route; an explicit
+new draft/adoption can replace the cancelled proposal without restoring old policy.

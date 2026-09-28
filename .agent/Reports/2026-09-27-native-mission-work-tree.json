@@ -1,0 +1,90 @@
+{
+  "date": "2026-09-27",
+  "status": "verified bounded slice; local human preview shipped",
+  "scope": "Native Mission Work hierarchy, exact navigation, narrow inspector and asynchronous evidence regression fixes",
+  "plan": ".agent/Tasks/native-mission-work-tree.md",
+  "delegation": {
+    "projection": "/root/work_projection",
+    "navigation": "/root/work_navigation",
+    "rendering": "/root/work_render",
+    "integration_and_verification": "/root"
+  },
+  "changes": [
+    "Canonical Plan receipt revisions identify groups; manual tasks and repair descendants appear once; dependency edges remain distinct from parentage.",
+    "Readiness and replacement provenance reuse canonical helpers. Projection is cached by task/scope revision and view inputs.",
+    "Up/Down visits task and group rows; Alt+Left/Right navigates and collapses or expands branches. Groups have no implicit action target.",
+    "Exact saved task anchors survive hidden filters, background refresh, group focus and restart. Explicit task IDs reveal their ancestors; collapse is transient view state.",
+    "Wide view has a tree and task/group inspector. At32x10 the selected row, scrollable inspector and composer remain reachable.",
+    "Incoming evidence is identified by local request sequence, invalidated on hide/reopen, and projects reviewer text from the newest admitted snapshot while retaining the verified run body.",
+    "Focused evidence/review keeps a smaller sidebar at wide sizes and uses full width below100 columns; a96x24 regression keeps Check result initially visible."
+  ],
+  "schemas": {
+    "task": 16,
+    "conversation_set": 17,
+    "migration": "none"
+  },
+  "validation": {
+    "stale_review_red": "Deterministic old-evidence/new-background-review ordering failed with Earlier review awaits discussion before the fix.",
+    "full_native": {
+      "passed": 379,
+      "failed": 0,
+      "ignored": 7,
+      "log": "/tmp/alfredo-mission-work-tree-tests.log",
+      "scope": "Full implementation before final focused-panel width correction; final layout/review checks and installed suites cover that correction. Counts overlap."
+    },
+    "strict_clippy": "passed after focused evidence correction",
+    "format": "passed after focused evidence correction",
+    "installed_archive": {
+      "passed": 5,
+      "terminal": 2,
+      "shared_inference": 1,
+      "qualification_cli": 2,
+      "log": "/tmp/alfredo-mission-work-tree-v2-installed.log"
+    },
+    "documentation": {
+      "grade": "A",
+      "score": 98.2,
+      "existing_traceability_gaps": 3
+    },
+    "installed_first_candidate": "Failed at100x24: 40-column overview sidebar narrowed focused evidence and hid the initial Check result section; failed archive preserved, never shipped.",
+    "evidence_width_red": {
+      "test": "focused_evidence_at_96_columns_keeps_check_result_in_the_initial_view",
+      "result": "failed before correction",
+      "log": "/tmp/alfredo-mission-work-tree-width-red.log"
+    },
+    "final_layout_review_checks": {
+      "passed": 32,
+      "failed": 0,
+      "log": "/tmp/alfredo-mission-work-tree-layout-green.log"
+    },
+    "debug_terminal": {
+      "passed": 2,
+      "log": "/tmp/alfredo-mission-work-tree-debug-pty.log"
+    },
+    "fixture_corrections": [
+      "Tree rows no longer imply every task fits at once; PTY explicitly selects #6 and #7 while retaining barrier-backed concurrent dispatch and exactly-one-Start assertions.",
+      "Refused group evidence command remains editable; fixture clears it explicitly before the next command.",
+      "Terminal waits for exact Task #9 and Task #7 inspector headings so unrelated visible receipt references cannot satisfy selection/restart assertions."
+    ],
+    "source_hashes_verified": 52,
+    "payload_hashes_verified": 6
+  },
+  "limitations": [
+    "No GitHub Issue Graph import, complete Mission Draft formation, attention prioritization, capability routing or archive/retirement parity is claimed.",
+    "Tree hierarchy is indexed and iterative; existing canonical readiness helpers retain their complexity. No general latency benchmark is claimed.",
+    "No new inference model/profile default or live model quality result.",
+    "Linux x86-64 local preview only; cross-platform, remote CI, human acceptance and production publication remain open.",
+    "Recent-activity construction currently formats all matching receipts before displaying three. Bounded-history redraw cost needs measurement; no severe-latency claim was established in this slice."
+  ],
+  "candidate": {
+    "path": "/tmp/alfredo-mission-work-tree-v2-candidate/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "271358a69de1c743bad43bdddcf551623192e20074945fd755f0178ec7a19c9a"
+  },
+  "human_preview": {
+    "path": "/mnt/c/users/ericl/documents/ai-projects/local-coding-agent/alfredo-tui/dist/preview-2026-09-27-work-tree",
+    "binary_sha256": "7d83b15e7c2dd0cb0c4cf22a15450f1a4c9665dd8aa4a2e88b6921943d54c21c",
+    "launch": "./alfredo-tui/dist/preview-2026-09-27-work-tree/alfredo-tui --model qwen3:14b --state-dir \"$HOME/.local/state/alfredo-preview\"",
+    "controls": "Choose workspace and mission; F2 opens Mission Work, Up/Down selects rows, Alt+Left/Right collapses/expands, F3 opens selected task evidence, Ctrl+Q quits."
+  },
+  "next_slice": ".agent/Tasks/native-check-result-recovery.md"
+}

@@ -1,0 +1,98 @@
+{
+  "date": "2026-09-20",
+  "scope": "Atomic review-to-repair proposal routing",
+  "source_issue": {
+    "body": "<!-- local-issue-source: .scratch/local-coding-agent-mvp/issues/06-frontier-review-and-repair-policy.md sha256:aa6b5f37b0f05d41b0e86f8edace3e9c28dd711d76e2441500d815a71da6ddc8 -->\n> Migrated from `.scratch/local-coding-agent-mvp/issues/06-frontier-review-and-repair-policy.md`. Original status: `complete`; original type: `afk`; source SHA-256: `aa6b5f37b0f05d41b0e86f8edace3e9c28dd711d76e2441500d815a71da6ddc8`.\n\n## What to build\n\nBuild the Frontier Reviewer decision path and tiered repair policy. Review outcomes should be evidence-based and should update the Issue Slice, Local Agent session, and mission summary consistently.\n\n## Acceptance criteria\n\n- [x] Review outcomes support Approved, Approved with limitations, Needs repair, Needs human review, and Rejected.\n- [x] Missing or invalid evidence prevents Approved outcomes.\n- [x] First rejection routes repair to the same Local Agent.\n- [x] Second rejection routes repair to a fresh Local Agent.\n- [x] Repeated architecture failure routes back to Frontier Architect revision.\n- [x] Critical, security, or merge-risk failure escalates to the user.\n",
+    "number": 7,
+    "title": "06 \u2014 Frontier Review and Repair Policy"
+  },
+  "schemas": {
+    "task": 14,
+    "conversation_set": 6,
+    "scope": 2,
+    "agent_transcript": 1
+  },
+  "behavior": [
+    "Current /review with no-risk NeedsRepair or Rejected commits parent review and inherited Proposed repair child in one receipt/transaction.",
+    "Child requires fresh explicit approval; no model/check runs inside review. Risk-bearing reviews still hold without child.",
+    "Parent and child Activity filters show the compound receipt; readiness names linked child.",
+    "Review notes, acceptance criteria and compound rejection counts follow repair lineage.",
+    "Open-scope, evidence, coverage, unresolved-child and capacity guards apply atomically. Exact replay returns same child.",
+    "Exact v1-v13 backups; earlier schemas reject compound receipt. Historical Decide/Assess/Review semantics remain unchanged."
+  ],
+  "validation": {
+    "native": {
+      "passed": 200,
+      "failed": 0,
+      "ignored": 6
+    },
+    "strict_clippy": "passed",
+    "installed": "..\n----------------------------------------------------------------------\nRan 2 tests in 7.892s\n\nOK\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+    "subagent_tests": [
+      "review_and_repair tests cover both outcomes, contract/risk/scope/tamper refusal, v13 migration/downgrade, retry/conflict/stale/duplicate, fresh approval and actual continued/fresh worker requests",
+      "256-task capacity refuses without committing parent review",
+      "Failed parent with human-held repair child refuses compound review without altering bytes or creating sibling"
+    ],
+    "design_review": "Independent subagent identified receipt-reader, held-child, Activity attribution and dependency-resolution concerns; first three addressed in this implementation.",
+    "source_hashes_verified": 38,
+    "payload_hashes_verified": 6
+  },
+  "archive": "/tmp/alfredo-atomic-review-candidate/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+  "sha256": "e5a370f4fbcdd73519b16cf6bba2655c54f7ef221312133832d4ace3fb17fc97",
+  "source_files_sha256": {
+    "LICENSE": "928684f6edb0ca1cd716fe3263ffb5942669d7cc2074504338dbdeac2fe8f6ba",
+    "alfredo-tui/Cargo.lock": "102a6056b555d240689bd065ccebac4bb1f5090caa6bae2d8ea292d1c5e2032f",
+    "alfredo-tui/Cargo.toml": "17717c9cedf01ad06f48c79f05f55e4e1fb5855b4b9083a3aca79c571a7511ab",
+    "alfredo-tui/INSTALL.md": "f90b72a1004e4e55b95c96c0bb5dc8eaa39741536b410691ab6375dae9da9baf",
+    "alfredo-tui/scripts/package_release.py": "70c65139a7a1affc2ddd249c8051fc4df127db1ae2c068d6aa60f7d5de16b8f9",
+    "alfredo-tui/scripts/third_party.py": "96cf1c6a40faf7edd07cacc9093281fa172e13f3b473e7748386340ba323b590",
+    "alfredo-tui/src/activity.rs": "fd638f1418e1d5d96953758a6a1623bb3d302bb31db73e9fbc00385a89a0befa",
+    "alfredo-tui/src/agent.rs": "f4713472899f6aacd9a5a8f866eeddc224249805c778663860f9631861d40e9b",
+    "alfredo-tui/src/assessment.rs": "3d1cc6b1d7e10db8c6acf49c173519fc0229b49ab1d1941e339591dcd3cfec42",
+    "alfredo-tui/src/assignment.rs": "59821859f97ae7f1d9b791c3a7a1a7b34ca15e0f11ecb4a135a3b3392f0825f4",
+    "alfredo-tui/src/branch.rs": "2c78c6410631de2c8b3912f9e4b940d4f588c79a9f3d0e5f7f38346bcbdfb027",
+    "alfredo-tui/src/client_timing.rs": "39f02f30e7bec496b1c1660471e7adfb10c5b66b633330cd39c305571d2572a9",
+    "alfredo-tui/src/commands.rs": "380c4e16a09b926f4c988e0fc31b6ae8b97fcc4193b1dd68b191b17f6c15a160",
+    "alfredo-tui/src/conversations.rs": "f596e93114fa5b9e5d5bc635e5d01fe9e45768e8e1f47a27396b3f487a7e13c9",
+    "alfredo-tui/src/dependencies.rs": "b65265f6f952f452cd8dc6bba90b42a10a53b8a64d90917e46bcf1c1ef50ed24",
+    "alfredo-tui/src/dispatch.rs": "2bea85b1f36cd806b7aad5979ba73aeb6854cd16f239894b8f18ba9c1961d79f",
+    "alfredo-tui/src/doctor.rs": "f13642cc9da2cc7f3819784a523140f3e779b94d92659f5e9f671ee48015c49b",
+    "alfredo-tui/src/lib.rs": "47e8e99cded787016f4d9132d1775a889b9d32b31b030c646ffbd9d2a93d022c",
+    "alfredo-tui/src/main.rs": "2eae6195cde2284259acc7682f8467c291309ddc5a6d268acf2bd0f7e1c217e0",
+    "alfredo-tui/src/metrics.rs": "3d05066c102308ef60d035ea1ffd13a45d7baae9704026682d57020a03ea79df",
+    "alfredo-tui/src/missions.rs": "5e21557fea4bccc3d54d70407090b094240870b38555a87b8920f5df2f79ce3b",
+    "alfredo-tui/src/model.rs": "29de871d7f3f0ab9933339462e288796e08cde6342064413497b125a48124c32",
+    "alfredo-tui/src/planner.rs": "4d368b189b9dd599480e28e3136902704439171007bccc560efd7118a781e9a7",
+    "alfredo-tui/src/planning_context.rs": "5d3b5f03a95f2517a325a2fca03c0204d2fa5548939761a17c343549df774c0a",
+    "alfredo-tui/src/provider.rs": "d085a7d73839ca2147da7edcb2e9b25e4e4570973eec7f4343d8f1c55f1a697c",
+    "alfredo-tui/src/reading.rs": "a766581ec60aa980615d49a8aea7c86ef512d084e50be786d54bbe28e8c2613d",
+    "alfredo-tui/src/review.rs": "3ecf21aa5b2aef4d300326ccd9d6a2b1da4374d09e40fe3f0ca2ca54d6b94f3c",
+    "alfredo-tui/src/run_boundary.rs": "bfa8447b057997259b1bc2fd50a28664370eb0547ef4c6d63cf493605d3cfbb2",
+    "alfredo-tui/src/selection.rs": "6b26918aea9b98ffdc8e91ca62e50dac29d2e0ab793ab18b23d3c77db549c584",
+    "alfredo-tui/src/task_control.rs": "9ed8cef1991fdcf26e38b168f63187225b3195faad4f0d921bd2883e0ee6089b",
+    "alfredo-tui/src/task_view.rs": "e5003da3e77764e6a0705422647d14cb8c54dc2a0f6cec2823567a5c3e5e40a3",
+    "alfredo-tui/src/tasks.rs": "c3d91fc22aba8b0457ccc3d63077dc723879e9db13e9919a9c73fb9623fb6d98",
+    "alfredo-tui/src/ui.rs": "88d7eb76f1bd57bafe31980f56c4c5b910d61c0cf483a23aabc9c32da25a77d8",
+    "alfredo-tui/src/understanding.rs": "b39259765b8b38936a2f1e82d592baf664429e814d9c6ae0ca527a17c7089212",
+    "alfredo-tui/src/wayfinder.rs": "24817eb060c4034f689c6601bf99752dbcf2efe45eb2c11ff5bcfc943934f851",
+    "alfredo-tui/src/worker.rs": "61ad010878efe85f163077839099dfda869b4aa23b956615bb09afab3d3f7612",
+    "alfredo-tui/src/workstation.rs": "3b5da564ea01b9fe8a34da4c86fdcd24818f3a8aef78b131523dffa52e9fe42e",
+    "mission-control/src-tauri/src/execution.rs": "931d81de093da56c1ae8ebb4220560d940006b98ccf40566594feb5133f857d9"
+  },
+  "logs": [
+    "/tmp/atomic-parser.log",
+    "/tmp/review-route-agent-focused-final.log",
+    "/tmp/review-route-held-agent.log",
+    "/tmp/atomic-full.log",
+    "/tmp/atomic-clippy.log",
+    "/tmp/atomic-package.log",
+    "/tmp/atomic-installed.log"
+  ],
+  "remaining": [
+    "Accepting repaired child does not resolve dependency IDs referencing rejected parent; needs governed replacement/resolution.",
+    "Architecture failure classification and durable Architect revision routing.",
+    "Review-triggered execution authorization, qualified model selection and broad real-model quality/performance.",
+    "Full formation/chronology, uncertain-worker recovery/retirement, cross-platform/remote CI and human launch qualification."
+  ],
+  "published": false
+}

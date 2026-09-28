@@ -1,0 +1,3365 @@
+{
+  "schema_version": 1,
+  "captured_date": "2026-09-13",
+  "repository": "EricleungDK/Alfredo",
+  "purpose": "Coverage inventory, not a completion certificate or replacement issue tracker",
+  "source_command": "gh issue list --state all --limit 500 --json number,title,state,body,url,updatedAt; gh api issues/<parent>/sub_issues",
+  "limitations": [
+    "Test entrypoints are related contract locations, not proof of every acceptance bullet.",
+    "Historical checkbox state is copied as source metadata, never current terminal evidence.",
+    "Native parent/child order was fetched; full native dependency edges were not audited.",
+    "Parent user stories need detailed decomposition before final completion audit.",
+    "No legacy-to-Rust state conversion or complete rollback proof exists."
+  ],
+  "issues": [
+    {
+      "number": 1,
+      "title": "[PRD] Local Coding Agent MVP",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/1",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:20:21Z",
+      "body_sha256": "55231cf918756f0dc594658ab2ab52ec4ff0b500d23892fc79a6ef60e19301f8",
+      "category": "parent",
+      "native_parent": null,
+      "native_children": [
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        31
+      ],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Roll up native children; parent stories/decisions also require detailed acceptance audit. Closure is not terminal completion."
+    },
+    {
+      "number": 2,
+      "title": "01 \u2014 Mission State and Record Loading",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/2",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:20:22Z",
+      "body_sha256": "144d2d67f67e6013bcadcb23544085f221691ea91e1107963cab418178d5da6e",
+      "category": "product",
+      "native_parent": 1,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "The user can run a local command and see the current Product Requirements Document title, Issue Slice count, blockers, and readiness summary.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Issue Slices are loaded from local markdown tracker records and ordered by dependency.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "App-local runtime state is persisted outside the target repo and keyed by project identity.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The target repo is not polluted with bulky runtime state.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Missing or malformed issue records produce actionable errors instead of crashes.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/tasks.rs",
+        "alfredo-tui/tests/worker.rs"
+      ],
+      "parity": "partial",
+      "gap": "Tracker/PRD loading and authoritative dependency order are absent; task namespaces cover only isolated local task state. Accepted local task candidates now compose into verified isolated child baselines with conflict refusal and durable input provenance; native tracker graph parity and workspace branch publication remain incomplete."
+    },
+    {
+      "number": 3,
+      "title": "02 \u2014 Review Locking and Assignment",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/3",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:20:23Z",
+      "body_sha256": "7a488e00e68ba9fbb3791d6721e665e35e4811791a58607c049806cac5cd745c",
+      "category": "product",
+      "native_parent": 1,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "The user can approve, hold, or request revision for an Issue Slice from the local command surface.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Approval locks slice goal, acceptance criteria, blockers, HITL/AFK classification, risk level, and evidence requirements.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Assigned model agent, launch order, and optional Local Agent notes remain editable before launch.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Attempts to change locked fields after approval are rejected unless the user explicitly unlocks the slice.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The review state is persisted and visible in the mission board summary.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/tasks.rs"
+      ],
+      "parity": "partial",
+      "gap": "Approval/reset guards exist; slice contract locking, explicit reopen and assignment-note continuity are absent."
+    },
+    {
+      "number": 4,
+      "title": "03 \u2014 Launch Local Agent Session",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/4",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:20:24Z",
+      "body_sha256": "3e45cc30981c84e1470e44ac090085945cd4cb10e110006c92356232e9c0d9bd",
+      "category": "product",
+      "native_parent": 1,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Only approved Issue Slices with satisfied blockers can launch.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Launch creates a mission-scoped Local Agent session record tied to one primary Issue Slice.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The task packet contains the slice goal, acceptance criteria, allowed paths, command policy, evidence requirements, and assignment.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The isolated worktree path is outside the target repo.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Accepted or completed worktrees are marked cleanup-eligible rather than deleted.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/tasks.rs",
+        "alfredo-tui/tests/worker.rs"
+      ],
+      "parity": "partial",
+      "gap": "Explicit dispatch starts ready Approved tasks only after Accepted dependencies, with common worker/receipt guards and per-approval retry suppression. Native Issue Slice/session/task-packet parity, configured roles and governed cleanup eligibility remain incomplete."
+    },
+    {
+      "number": 5,
+      "title": "04 \u2014 Command and Visibility Policy",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/5",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:20:25Z",
+      "body_sha256": "3808f7e889212f36386a8311a561ada33d29fa06d18d5e09d31992c1a9f15380",
+      "category": "product",
+      "native_parent": 1,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Commands are classified before execution and blocked or marked approval-required when policy demands it.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Project-specific command approvals can be recorded in app-local runtime state.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "File visibility classification is available to task packet and review generation.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Local-only files cause Frontier Reviewer limitations to be explicit.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Blocked files are excluded from Frontier Model context.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py",
+        "tests/test_workspace_snapshot.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/worker.rs"
+      ],
+      "parity": "partial",
+      "gap": "Exact file/check sandbox policy exists; classified command approvals, visibility tiers and contextual expiring path grants are absent."
+    },
+    {
+      "number": 6,
+      "title": "05 \u2014 Evidence Package Validation",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/6",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:20:26Z",
+      "body_sha256": "4b626afea72fc0215b5654f1efa3351667b3f2b0289d6a6c5bcf2c426e9d5f7a",
+      "category": "product",
+      "native_parent": 1,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Evidence Packages can be recorded for a Local Agent session.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Missing required evidence blocks review with clear validation errors.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Evidence links are stored without embedding bulky raw evidence in mission Markdown.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Known risks and proposed context updates are visible in the review summary.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Evidence validation result is persisted in mission state.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/worker.rs"
+      ],
+      "parity": "partial",
+      "gap": "Digest-bound diff/check evidence exists; full required-evidence schema, risks and proposed context updates are absent."
+    },
+    {
+      "number": 7,
+      "title": "06 \u2014 Frontier Review and Repair Policy",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/7",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:20:27Z",
+      "body_sha256": "d4195821199fe17a48377011ee513555232ce5be77f324dde520029aa376bf30",
+      "category": "product",
+      "native_parent": 1,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Review outcomes support Approved, Approved with limitations, Needs repair, Needs human review, and Rejected.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Missing or invalid evidence prevents Approved outcomes.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "First rejection routes repair to the same Local Agent.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Second rejection routes repair to a fresh Local Agent.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Repeated architecture failure routes back to Frontier Architect revision.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Critical, security, or merge-risk failure escalates to the user.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py",
+        "tests/test_workspace_snapshot.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/worker.rs",
+        "alfredo-tui/tests/review.rs"
+      ],
+      "parity": "partial",
+      "gap": "Readable check/diff/output review and exact inspected-task shorthand validate evidence; explicit receipt-linked repair inherits policy with fresh approval and verified prior context. Automatic repair routing, limited approval, architect escalation and integrated timeline remain absent. Accepted results now support verified local review-branch handoff; remote publication and active-branch merge remain separate."
+    },
+    {
+      "number": 8,
+      "title": "07 \u2014 Mission Record Generation",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/8",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:20:28Z",
+      "body_sha256": "3ef9ca48a8aa84cb612336b04fbaafeec99c07c38eb2f6167fdf174d68c52d04",
+      "category": "product",
+      "native_parent": 1,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Mission records are generated inside the target repo and are git-trackable.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Runtime state and bulky evidence remain outside the target repo.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The mission summary shows current status and next action.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The timeline records meaningful state transitions and decisions, not command approval noise.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Per-Issue Slice mission records link to tracker issues and evidence artifacts.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "A returning agent can identify the next action by reading the mission summary first.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py",
+        "tests/test_workspace_snapshot.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/tasks.rs",
+        "alfredo-tui/tests/command_adapters.rs",
+        "alfredo-tui/tests/planner_command_lifecycle.rs",
+        "alfredo-tui/tests/control_commands.rs"
+      ],
+      "parity": "partial",
+      "gap": "Searchable saved task receipt activity and conversation snapshots exist; generated mission records, actor/time attribution and integrated consequential-action chronology remain absent.",
+      "native_observed_chronology": "2026-09-20: Native console now persists exact canonical task receipt references at local observation boundaries, separate from model messages; initial history remains Activity and no actor/time/command causality is inferred. Full causal Workspace/Mission/planner/action chronology remains incomplete.",
+      "native_prepared_command_intents": "2026-09-20: Schema10 prepared task/scope/run/branch/recovery intents save before dispatch, retain originating conversation and exact retry identity; canonical receipts alone derive acknowledgment. 245 native tests, strict Clippy and installed failure/retry journey pass. Worker Finish linkage, planner/dispatch/live cancellation and Wayfinder/workspace causal adapters remain open. See Reports/2026-09-20-durable-command-intents.json and Tasks/native-command-chronology.md.",
+      "native_worker_command_lifecycle": "2026-09-20: Explicit Run command retains separate exact Start and run-bound Finish in original conversation; canonical task/run/baseline/inputs/digest gates completion. Real success/failure/cancel/recovery/restart tests plus installed console/dedup pass. Automatic dispatch and other causal adapters remain open; see worker-command-lifecycle report.",
+      "planner_command_checkpoint": "Explicit generation/revision/Architect/cancellation uses saved exact requests and bounded draft outcomes with schema12 origin recovery; generated drafts are separate from canonical Plan saves. Remaining automatic and workspace adapters are tracked in native-command-chronology.md; focused65/full254, strict Clippy and installed archive pass; see planner-command-lifecycle report.",
+      "controller_command_checkpoint": "Exact process/worker control identities and historical local outcomes, schema13, current dispatch header and restart-off verified: focused84/full262, strictClippy and installed archive. Remaining automatic launch provenance tracked in native-command-chronology.md.",
+      "automatic_launch_checkpoint": "Saved automatic launch admission and same-session dispatch provenance with schema14; focused79/full267, strictClippy and installed archive verified; report automatic-launch-admission.",
+      "automatic_architect_checkpoint": "Saved review-to-Architect draft provenance with schema15, cancellation withdrawal and queued admission recheck; Focused127 and full274 pass / 7 ignored, strict Clippy and installed archive pass. Report automatic-architect-admission.",
+      "wayfinder_admission_checkpoint": "Turn-bound scope requests saved before dispatch; schema16 migration, retries, cancellation, queueing, canonical headers and installed PTY verified. Focused83 and full286 pass / 7 ignored; strict Clippy and installed archive pass. Report wayfinder-command-admission.",
+      "selection_continuity_checkpoint": "Exact startup/source saved admission, schema17 origin/arrival and journal1, creation/cancellation/failure/handoff regressions and installed PTY verified. Focused 104 and full 305 pass / 7 ignored; separation guard RED/GREEN, strict Clippy and installed archive pass. Report selection-continuity."
+    },
+    {
+      "number": 9,
+      "title": "08 \u2014 PR Readiness and GitHub Fallback",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/9",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:20:29Z",
+      "body_sha256": "43e31f16172bb740384ec83554f74da01fe9c8349e752f326d4843df278d762b",
+      "category": "product",
+      "native_parent": 1,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Approved or Approved with limitations slices can be marked PR-ready.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "One Issue Slice maps to one PR by default.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Branch naming includes mission and Issue Slice identity.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "PR summaries include Issue Slice, changed behavior, acceptance criteria, evidence, Frontier Review, and Local Agent activity.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "If `gh` is available and authenticated, the tool can produce the command it would use for PR creation.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "If `gh` is missing or unauthenticated, the tool generates local PR-ready instructions.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The tool never marks a slice merge-approved or auto-merges to main.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py"
+      ],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "PR-ready lifecycle, branch/PR summaries and authenticated/manual publishing fallback are absent."
+    },
+    {
+      "number": 10,
+      "title": "[PRD] Alfredo Agent Workstation",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/10",
+      "github_state": "OPEN",
+      "github_updated_at": "2026-07-23T15:19:22Z",
+      "body_sha256": "f27369ba4e2642bf6e4d5feb68cf18b169969dd25571a53eb08beb2b3c229330",
+      "category": "parent",
+      "native_parent": null,
+      "native_children": [
+        11,
+        12,
+        13,
+        14,
+        15,
+        16,
+        17,
+        18,
+        19,
+        20
+      ],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Roll up native children; parent stories/decisions also require detailed acceptance audit. Closure is not terminal completion."
+    },
+    {
+      "number": 11,
+      "title": "20 \u2014 Ship the Alfredo Npm Workstation Entrypoint",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/11",
+      "github_state": "OPEN",
+      "github_updated_at": "2026-07-23T15:19:25Z",
+      "body_sha256": "c50f37b1621904b9e16e7c6e725470bb068e72e3883ec3160c9cb31c00b2798a",
+      "category": "product",
+      "native_parent": 10,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": false,
+          "text": "The published npm bin exposes `alfredo`, launches the Tauri/React workstation by default, and sets the desktop app title to Alfredo.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "`alfredo --agent <agent-id>` and `alfredo workstation --agent <agent-id>` select a valid controller or model before the first prompt turn.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Startup preflight reports actionable, copyable failures for npm/runtime setup, desktop shell launch, backend process, workspace access, Ollama, required model availability, and writable runtime locations.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The selected coding workspace is never inferred from the Alfredo installation location, and recent workspaces remain available after relaunch.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "A deprecated `albert` public alias remains available for one compatibility window if practical, without requiring internal package or `.albert` path renames.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "mission-control/tests/build-npm-release.test.js",
+        "mission-control/tests/alfredo-entrypoint.test.js"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/cli.rs",
+        "alfredo-tui/tests/release_smoke.py",
+        "alfredo-tui/tests/doctor.rs"
+      ],
+      "parity": "partial",
+      "gap": "Native Linux archive, installed-binary PTY acceptance and noninteractive storage/model/Git/tool diagnostics exist; OS/glibc matrix, public entrypoint, license review and desktop npm compatibility decision remain unverified."
+    },
+    {
+      "number": 12,
+      "title": "21 \u2014 Add Headless Alfredo Cli Grammar",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/12",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:19:27Z",
+      "body_sha256": "eea35b3f0d77ece5e6cde25f915d15cec653cddb64fda31de63140d1c9492b16",
+      "category": "product",
+      "native_parent": 10,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "`alfredo run --agent <agent-id> \"<prompt>\"` executes terminal-only model work and returns clear lifecycle output suitable for automation.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "`alfredo review --agent <agent-id>` and `alfredo review <session-id> --agent <agent-id>` run review-oriented work without launching the desktop UI.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "`alfredo agents` lists configured agents and models using the provider-neutral model registry vocabulary.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Per-command `--agent` is the canonical scripting grammar for headless commands, and invalid agent ids fail with actionable guidance.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Terminal-only work still respects Orchestrator governance, command policy, path grants, model assignment, and Evidence Package boundaries.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py",
+        "mission-control/tests/alfredo-entrypoint.test.js"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/cli.rs"
+      ],
+      "parity": "partial",
+      "gap": "Rust has interactive CLI flags only; headless run/review/agents grammar is absent."
+    },
+    {
+      "number": 13,
+      "title": "22 \u2014 Build the Prompt Dominant Workstation Shell",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/13",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:19:29Z",
+      "body_sha256": "40cafd33ba4269488333f42472c2cb31a13b50b5aaa4ff39dd54bb7b7ba00a8a",
+      "category": "product",
+      "native_parent": 10,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "The desktop workstation opens to a two-zone layout with the prompt pane as the dominant working surface and Agent Workstations as a persistent side pane.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The prompt transcript renders user prompts, assistant/controller responses, consequential workstation actions, and meaningful outcomes without mixing in raw telemetry.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The active prompt composer remains pinned at the bottom while prior turns scroll independently.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "A compact status line near the composer shows connection, selected controller/model, Conversation Scope, workspace, and active execution state.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Constrained-width behavior keeps the prompt, composer, critical status, and side-pane decisions reachable without overlapping content.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "mission-control/src/App.test.tsx",
+        "mission-control/src/styles.test.ts"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/layout.rs",
+        "alfredo-tui/tests/terminal_smoke.py"
+      ],
+      "parity": "partial",
+      "gap": "Terminal layout/composer exists; complete scope/status boundary and simultaneous task/conversation layout equivalence remain incomplete."
+    },
+    {
+      "number": 14,
+      "title": "23 \u2014 Project Live Agent Workstation Cards",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/14",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:19:30Z",
+      "body_sha256": "e3a55a65cb986d64f7d39b690909fb8368367e25b00bd1e5697ee2d6f8b4f80e",
+      "category": "product",
+      "native_parent": 10,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Each live card shows agent or subagent name, actual model, role, current task, status, phase or progress, last activity, approval blockers, files touched count, latest command or test summary, and next action.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Card status covers thinking, running, waiting approval, blocked, reviewing, review-ready, done, and failed states from canonical Orchestrator/session state.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Blocked and waiting-approval cards sort above other live work, active work is grouped separately from done or historical sessions, and optional mission or scope grouping is available when many sessions exist.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The UI may show pending intent immediately, but accepted state appears only after Orchestrator acknowledgement with the expected revision.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Projection tests prove cards update from canonical state and do not derive accepted state from frontend-only assumptions.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "mission-control/src/App.test.tsx",
+        "mission-control/src/workstation-projection.test.ts"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/worker.rs",
+        "alfredo-tui/tests/tasks.rs",
+        "alfredo-tui/tests/layout.rs",
+        "alfredo-tui/tests/terminal_smoke.py"
+      ],
+      "parity": "partial",
+      "gap": "Selected task status/progress/evidence and bounded live check stdout/stderr exist; nested delegation tree, attention priority, role, activity trail and selected-only tool-output subscription are absent."
+    },
+    {
+      "number": 15,
+      "title": "24 \u2014 Expand Workstation Cards for Operational Detail",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/15",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:19:32Z",
+      "body_sha256": "768d6a8251ef0c1a738336abee41e7519abe8c23bfd4c6beabd9b802c6a53353",
+      "category": "product",
+      "native_parent": 10,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Expanded cards show tool activity, files touched, diffs, Evidence Package links, relevant terminal excerpts, review state, and available governed actions for the selected agent or subagent.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Opening a diff, selecting a session, filtering, sorting, expanding, collapsing, and pinning cards remain local side-pane navigation and do not append prompt transcript turns.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Evidence Package links and terminal excerpts are connected to their originating session and remain available for Frontier Reviewer or human review decisions.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Raw token streams and raw terminal bytes remain transient unless summarized as meaningful activity, evidence, or review artifacts.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Interaction tests distinguish routine side-pane navigation from consequential workstation actions.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "mission-control/src/App.test.tsx",
+        "tests/test_workspace_snapshot.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/worker.rs",
+        "alfredo-tui/tests/layout.rs",
+        "alfredo-tui/tests/terminal_smoke.py"
+      ],
+      "parity": "partial",
+      "gap": "Selected-task evidence is inspectable; live tool excerpts, pin/filter/sort and durable full activity are incomplete."
+    },
+    {
+      "number": 16,
+      "title": "25 \u2014 Route the First Consequential Workstation Action",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/16",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:19:33Z",
+      "body_sha256": "cfda1b155f32059e135e3ce1824588979cd2ce378728dd4d31f92e21b6c014c6",
+      "category": "product",
+      "native_parent": 10,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "A waiting workstation card exposes approve, reject, and defer actions only when the Orchestrator says those actions are currently valid.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The chosen action submits a typed request containing action type, actor, target identity, expected revision, and reason when required.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The prompt pane shows a human-readable workstation-action turn and the live Orchestrator/controller reaction for validation, rejection, acceptance, or failure.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The card exposes pending, accepted, rejected, failed, stale, and disabled states without treating a click as accepted state before acknowledgement.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The Activity Journal records the meaningful attributed action and outcome without storing raw transient streams as domain events.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "mission-control/src/App.test.tsx",
+        "tests/test_workspace_snapshot.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/tasks.rs",
+        "alfredo-tui/tests/worker.rs"
+      ],
+      "parity": "partial",
+      "gap": "Typed revision/correlation task actions exist; natural-language receipt-bound action routing, all action classes, actor/reason attribution and journal are incomplete."
+    },
+    {
+      "number": 17,
+      "title": "26 \u2014 Cover the Governed Workstation Action Family",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/17",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:19:35Z",
+      "body_sha256": "3dc19def7df3ba01a6a8436057e5dc4192b5daad8355fb6dc3ddf0f74aa351c1",
+      "category": "product",
+      "native_parent": 10,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Launch, retry, cancel, approval, rejection, deferral, and path grant decisions cannot bypass Orchestrator validation or expected-revision checks.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Evidence acceptance, repair requests, human-review escalation, model assignment changes, and Mission Draft confirmation create typed requests and visible human-readable prompt/orchestrator turns.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Conversation Scope changes that affect the next model turn are visible near the composer and reconstructable from durable prompt or Activity Journal records.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Stale actions explain the current state and recovery path, and disabled actions explain why they cannot be used.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Governance tests cover accepted and rejected paths for each consequential action class.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "mission-control/src/App.test.tsx",
+        "tests/test_workspace_snapshot.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/tasks.rs",
+        "alfredo-tui/tests/worker.rs"
+      ],
+      "parity": "partial",
+      "gap": "Typed revision/correlation task actions exist; natural-language receipt-bound action routing, all action classes, actor/reason attribution and journal are incomplete."
+    },
+    {
+      "number": 18,
+      "title": "27 \u2014 Persist Alfredo Workstation Continuity",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/18",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:19:37Z",
+      "body_sha256": "6eaf9bb0d926b690425baa7489dc191afc266d21ae2e2ad1b2e037be3723eada",
+      "category": "product",
+      "native_parent": 10,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Selected workspace, recent workspaces, selected controller/model, prompt transcript, active sessions, approvals, evidence links, card state, and side-pane selection restore after restart.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Persisted Activity Journal records preserve meaningful attributed actions separately from canonical current-state snapshots.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Ephemeral token streaming, loading animation, and raw transient terminal output are not required to replay exactly after restart.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Restore behavior distinguishes backend runtime location from selected coding workspace.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Persistence tests restart the app/backend and verify transcript, Agent Workstations state, approvals, evidence links, recent workspaces, and selected workspace continuity.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_mission_selection.py",
+        "tests/test_workspace_snapshot.py",
+        "mission-control/src/alfredo-release-seam.test.tsx"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/tasks.rs",
+        "alfredo-tui/tests/recovery.rs",
+        "alfredo-tui/tests/conversations.rs",
+        "alfredo-tui/tests/workstation.rs",
+        "alfredo-tui/tests/missions.rs",
+        "alfredo-tui/tests/terminal_smoke.py"
+      ],
+      "parity": "partial",
+      "gap": "Native explicit Resume/Start New, atomic identity collision checks, legacy resume, saved workspace/mission choices, in-app quiescent handoff and task/conversation/view restart continuity exist. Handoff preserves source state on cancellation/open/save failure and isolates old events. Complete Workspace Session and attributed mission-formation receipt chains remain incomplete."
+    },
+    {
+      "number": 19,
+      "title": "28 \u2014 Validate Alfredo Accessibility and Responsive Use",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/19",
+      "github_state": "OPEN",
+      "github_updated_at": "2026-07-23T15:19:39Z",
+      "body_sha256": "ca73ae1489bba1477e443830d47029f4ea63fd99095b64a65e416dd0dcc4a4bc",
+      "category": "product",
+      "native_parent": 10,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Prompt operation, card navigation, expansion, approvals, review actions, and diff opening are keyboard-operable with logical focus order and visible focus.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Semantic regions, card labels, status announcements, action names, stale-state explanations, and error messages are understandable to screen-reader users.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Text, controls, compact badges, focus indicators, and semantic status colors meet WCAG AA contrast expectations.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Reduced-motion preferences disable nonessential motion while preserving live status comprehension.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Constrained-width tests prove the prompt remains primary and critical workstation decisions remain reachable.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": false,
+          "text": "A human reviewer confirms the workstation hierarchy, keyboard flow, screen-reader comprehension, zoom/reflow behavior, and low-vision readability.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "mission-control/src/App.test.tsx",
+        "mission-control/src/styles.test.ts"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/layout.rs",
+        "alfredo-tui/tests/terminal_smoke.py",
+        "alfredo-tui/tests/editor.rs"
+      ],
+      "parity": "partial",
+      "gap": "Keyboard/reflow tests exist; terminal assistive-technology, palette contrast and human acceptance remain unverified."
+    },
+    {
+      "number": 20,
+      "title": "29 \u2014 Add Alfredo Release Seam Verification",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/20",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:19:42Z",
+      "body_sha256": "094fe20366b77e1ab3dc02243f8be03c37bedae071cc7c2a6d6093e3f8644d9c",
+      "category": "product",
+      "native_parent": 10,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "An end-to-end journey covers Alfredo launch intent, startup preflight, workspace selection, prompt composer visibility, card projection, one consequential action, prompt/orchestrator reaction, acknowledged card update, Activity Journal record, and restart restore.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "CLI tests cover default workstation launch, explicit workstation launch, headless run, review, session review, agent listing, `--agent` handling, invalid agent ids, and intentional Albert compatibility aliases.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Backend contract tests cover typed consequential actions with expected revisions, actor, target identity, and reason where required.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Provider/model tests use a deterministic provider-neutral fake for CI and keep local Ollama smoke verification separately marked.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Transcript tests prove durable history includes prompts, controller responses, consequential actions, and outcomes while excluding routine navigation and raw telemetry.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "mission-control/src/alfredo-release-seam.test.tsx",
+        "mission-control/tests/shadow-provider-contract.test.js"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/terminal_smoke.py"
+      ],
+      "parity": "partial",
+      "gap": "PTY coding journey covers a subset; complete installed product, planning/retirement/restart/fallback and human release gates are unverified."
+    },
+    {
+      "number": 21,
+      "title": "[PRD] Alfredo Console-First Workstation Redesign",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/21",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:27:46Z",
+      "body_sha256": "ff9d18f0a927fd06aa5aed7a669148b836c84f7d288c292bd3637edaf7599e26",
+      "category": "parent",
+      "native_parent": null,
+      "native_children": [
+        22,
+        23,
+        24,
+        25,
+        26,
+        27,
+        28,
+        29,
+        30
+      ],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Roll up native children; parent stories/decisions also require detailed acceptance audit. Closure is not terminal completion."
+    },
+    {
+      "number": 22,
+      "title": "01 \u2014 Console First Workstation Layout",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/22",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:19:45Z",
+      "body_sha256": "e5ed12c24db8ee7f575a0a0e7d93263fea743a40a85e2e41c8be680aa60d5cf2",
+      "category": "product",
+      "native_parent": 21,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Alfredo opens to an Agent Console-first workstation where prompting is the primary visual and interaction surface.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The prompt composer remains pinned at the bottom while earlier console turns can be reviewed.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "A compact status line near the composer shows connection, selected controller/model, Conversation Scope, workspace, and active execution state.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The side pane remains secondary in width and hierarchy, and no Shell Terminal or workstation tab switcher is presented as the default primary structure.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Tests verify the rendered default layout, composer reachability, status-line content, and console-dominant hierarchy.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "mission-control/src/App.test.tsx",
+        "mission-control/src/styles.test.ts"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/layout.rs",
+        "alfredo-tui/tests/terminal_smoke.py"
+      ],
+      "parity": "partial",
+      "gap": "Terminal layout/composer exists; complete scope/status boundary and simultaneous task/conversation layout equivalence remain incomplete."
+    },
+    {
+      "number": 23,
+      "title": "02 \u2014 Inline Command Execution Cards",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/23",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:19:47Z",
+      "body_sha256": "7818b90a39296c2ffb6db1f6e97fa9d082eada9c392b718fd1ef4b68fabd7bee",
+      "category": "product",
+      "native_parent": 21,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Submitted or observed Shell Terminal commands appear in the Agent Console as inline command turns or compact command cards.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Command cards show the command, purpose when available, relevant working directory, policy or approval state, execution status, and summarized output.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Full command output remains reachable through expansion, selected-turn detail, Activity Journal, or equivalent audit/debug drill-down.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Command history, requested path entry, access-level selectors, and manual grant forms are not standing default GUI panels.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Durable Agent Console history excludes raw terminal bytes while preserving meaningful command summaries and outcomes.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Tests cover inline command rendering, summary/default behavior, full-output inspection, and hidden default command-history surfaces.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_workspace_snapshot.py",
+        "mission-control/src/App.test.tsx"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/worker.rs"
+      ],
+      "parity": "partial",
+      "gap": "Approved worker check receipt exists; general Shell command cards and durable summarized command history are absent."
+    },
+    {
+      "number": 24,
+      "title": "03 \u2014 Inline Approvals and Contextual Path Grants",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/24",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:19:51Z",
+      "body_sha256": "d1b23d87eef16c86428d2ac924a054f138dafc7c2f5f966a85924356bb832cf4",
+      "category": "product",
+      "native_parent": 21,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Commands that require approval produce inline approval prompts before execution can proceed.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Additional Path Grant requests are raised contextually when a blocked command or agent action needs out-of-workspace access.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Path-grant prompts include path, access level, duration, reason, and affected action.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Agents and skills cannot create or expand grants without explicit Mission Commander authority.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Active, denied, and expired grants are visible when inspecting relevant command, approval, Activity Journal, or detail surfaces.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Tests cover command approval prompts, contextual grant prompts, grant decision outcomes, and absence of a standing default grant form.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py",
+        "tests/test_workspace_snapshot.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/worker.rs"
+      ],
+      "parity": "partial",
+      "gap": "Exact file/check sandbox policy exists; classified command approvals, visibility tiers and contextual expiring path grants are absent."
+    },
+    {
+      "number": 25,
+      "title": "04 \u2014 Mission Work Pane Active Workstation Cards",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/25",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:19:56Z",
+      "body_sha256": "adbbdc35ef20a37e9e733985f425bd793d03ef413512a20df48cbc8c48e63441",
+      "category": "product",
+      "native_parent": 21,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "The side pane is labeled and structured as Mission Work rather than a tab switcher between Workstations and Shell Terminal.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Active Workstations are the top region and remain visible while the Mission Commander prompts.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Workstation cards show agent or subagent identity, Issue Slice, actual model, role, current state, last meaningful activity, latest command/test summary, blocker or next action, and review/evidence affordances when present.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Blocked and waiting-approval cards sort above routine active work while other states remain visually distinct.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Workstation cards remain the primary live-supervision model and are not replaced by a dense table.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Tests verify card projection, sorting priority, state distinctions, and visibility alongside the Agent Console.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "mission-control/src/App.test.tsx",
+        "mission-control/src/workstation-projection.test.ts"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/worker.rs",
+        "alfredo-tui/tests/tasks.rs",
+        "alfredo-tui/tests/layout.rs",
+        "alfredo-tui/tests/terminal_smoke.py",
+        "alfredo-tui/tests/mission_work.rs",
+        "alfredo-tui/tests/work_navigation.rs",
+        "alfredo-tui/tests/work_tree_ui.rs"
+      ],
+      "parity": "partial",
+      "gap": "Canonical Plan/manual groups, nested repair ancestry, dependency edges, exact selection, current model/run observations, evidence and recent task receipts now appear in the native Mission Work tree. Full role/delegation parity, attention ordering, selected-only output subscription and broader accessibility remain incomplete.",
+      "native_evidence_report": ".agent/Reports/2026-09-27-native-mission-work-tree.json"
+    },
+    {
+      "number": 26,
+      "title": "05 \u2014 Issue Assignment Board Projection and Local Navigation",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/26",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:20:01Z",
+      "body_sha256": "3284f6be94454a89aeb2e6e4af77f0edf6f95789eb979a9a1972b516492841e6",
+      "category": "product",
+      "native_parent": 21,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "The Issue Assignment Board appears below Active Workstations and shows every relevant Issue Slice.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Each row shows Issue Slice identity, title or concise label, owner or assigned agent, assignment state, lifecycle/readiness state, blocker state, and linked workstation/session when present.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Unassigned ready work, blocked work, active work, review-ready work, complete work, and failed work are distinguishable.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Selecting an issue row focuses local side-pane detail without changing Conversation Scope or appending a prompt transcript turn.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Issue rows offer an explicit scope-change action when a selected issue can become the next prompt target.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Disabled actions explain why they are disabled, and blocked issues show blocker summaries.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Projection tests verify the board derives accepted owner/state/workstation linkage from canonical mission or session data and does not invent accepted assignment state before Orchestrator acknowledgement.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py",
+        "mission-control/src/App.test.tsx"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/tasks.rs",
+        "alfredo-tui/tests/layout.rs",
+        "alfredo-tui/tests/terminal_smoke.py",
+        "alfredo-tui/tests/worker.rs",
+        "alfredo-tui/tests/conversations.rs"
+      ],
+      "parity": "partial",
+      "gap": "Per-conversation-set restart view/selection/search continuity, terminal task search, exact-ID navigation, visible-row selection, blocker/readiness explanations and receipt-bound model/run projection exist. Native Issue Slice board identity, configured owner/workstation linkage and explicit Conversation Scope-change affordances remain incomplete."
+    },
+    {
+      "number": 27,
+      "title": "06 \u2014 Governed Issue Assignment and Launch Actions",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/27",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:20:08Z",
+      "body_sha256": "daa61ce041c86dc8629fe6f7689e305ddb30289e841fa77c712fe7df67a3d315",
+      "category": "product",
+      "native_parent": 21,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Unassigned ready issues offer governed launch or assignment actions only when the Orchestrator says those actions are valid.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Consequential actions submit typed Orchestrator requests with action type, actor, target identity, expected revision, and reason where required.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Accepted consequential actions create visible human-readable Agent Console or orchestrator turns.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Stale issue assignment actions explain the current state and a recovery path rather than failing ambiguously.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Routine navigation, filtering, sorting, evidence opening, and detail expansion do not append durable prompt transcript turns.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Governance tests cover assignment, launch, retry, repair, review escalation, model assignment, and scope-affecting actions through typed validation.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "mission-control/src/App.test.tsx",
+        "tests/test_workspace_snapshot.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/tasks.rs",
+        "alfredo-tui/tests/worker.rs"
+      ],
+      "parity": "partial",
+      "gap": "Typed revision/correlation task actions exist; natural-language receipt-bound action routing, all action classes, actor/reason attribution and journal are incomplete."
+    },
+    {
+      "number": 28,
+      "title": "07 \u2014 Activity Journal and Durable Transcript Boundaries",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/28",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:20:11Z",
+      "body_sha256": "3b9e9ec533375bb21d7b376fbb54f46892fbf31dd60078f90bfe7cd6d433adfb",
+      "category": "product",
+      "native_parent": 21,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Durable Agent Console history includes prompts, assistant/controller responses, consequential actions, command/grant approval decisions, and outcomes.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Routine issue-board navigation, card selection, filtering, sorting, expansion, and evidence viewing stay out of the prompt transcript unless they trigger a consequential action.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Activity Journal records meaningful attributed command, grant, assignment, approval, outcome, and evidence events.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Raw token streams and terminal bytes are excluded from durable prompt history and Activity Journal entries unless summarized as evidence.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Journal entries remain searchable or inspectable enough to reconstruct relevant command, grant, assignment, approval, and outcome decisions.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Transcript and Activity Journal tests cover inclusion boundaries, exclusion boundaries, attribution, and evidence-link behavior.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py",
+        "tests/test_workspace_snapshot.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/tasks.rs",
+        "alfredo-tui/tests/conversations.rs",
+        "alfredo-tui/tests/command_adapters.rs",
+        "alfredo-tui/tests/planner_command_lifecycle.rs",
+        "alfredo-tui/tests/control_commands.rs"
+      ],
+      "parity": "partial",
+      "gap": "Searchable saved task receipt activity and conversation snapshots exist; generated mission records, actor/time attribution and integrated consequential-action chronology remain absent.",
+      "native_observed_chronology": "2026-09-20: Native console now persists exact canonical task receipt references at local observation boundaries, separate from model messages; initial history remains Activity and no actor/time/command causality is inferred. Full causal Workspace/Mission/planner/action chronology remains incomplete.",
+      "native_prepared_command_intents": "2026-09-20: Schema10 prepared task/scope/run/branch/recovery intents save before dispatch, retain originating conversation and exact retry identity; canonical receipts alone derive acknowledgment. 245 native tests, strict Clippy and installed failure/retry journey pass. Worker Finish linkage, planner/dispatch/live cancellation and Wayfinder/workspace causal adapters remain open. See Reports/2026-09-20-durable-command-intents.json and Tasks/native-command-chronology.md.",
+      "native_worker_command_lifecycle": "2026-09-20: Explicit Run command retains separate exact Start and run-bound Finish in original conversation; canonical task/run/baseline/inputs/digest gates completion. Real success/failure/cancel/recovery/restart tests plus installed console/dedup pass. Automatic dispatch and other causal adapters remain open; see worker-command-lifecycle report.",
+      "planner_command_checkpoint": "Explicit generation/revision/Architect/cancellation uses saved exact requests and bounded draft outcomes with schema12 origin recovery; generated drafts are separate from canonical Plan saves. Remaining automatic and workspace adapters are tracked in native-command-chronology.md; focused65/full254, strict Clippy and installed archive pass; see planner-command-lifecycle report.",
+      "controller_command_checkpoint": "Exact process/worker control identities and historical local outcomes, schema13, current dispatch header and restart-off verified: focused84/full262, strictClippy and installed archive. Remaining automatic launch provenance tracked in native-command-chronology.md.",
+      "automatic_launch_checkpoint": "Saved automatic launch admission and same-session dispatch provenance with schema14; focused79/full267, strictClippy and installed archive verified; report automatic-launch-admission.",
+      "automatic_architect_checkpoint": "Saved review-to-Architect draft provenance with schema15, cancellation withdrawal and queued admission recheck; Focused127 and full274 pass / 7 ignored, strict Clippy and installed archive pass. Report automatic-architect-admission.",
+      "wayfinder_admission_checkpoint": "Turn-bound scope requests saved before dispatch; schema16 migration, retries, cancellation, queueing, canonical headers and installed PTY verified. Focused83 and full286 pass / 7 ignored; strict Clippy and installed archive pass. Report wayfinder-command-admission.",
+      "selection_continuity_checkpoint": "Exact startup/source saved admission, schema17 origin/arrival and journal1, creation/cancellation/failure/handoff regressions and installed PTY verified. Focused 104 and full 305 pass / 7 ignored; separation guard RED/GREEN, strict Clippy and installed archive pass. Report selection-continuity."
+    },
+    {
+      "number": 29,
+      "title": "08 \u2014 Restart Continuity through the Release Seam",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/29",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:20:16Z",
+      "body_sha256": "cf205da2d1dd4df3f742906fd9ddf41eeec8710cb2537df6db66f4c9fe1e18fb",
+      "category": "product",
+      "native_parent": 21,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Restart restore covers selected workspace, recent workspaces, selected controller/model, Conversation Scope, prompt transcript, active sessions, approvals, evidence links, active workstation state, and Activity Journal availability.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Meaningful Mission Work continuity restores, including selected workstation, selected issue, useful expanded/detail state, and side-pane state.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Transient hover, animation, and raw terminal bytes are not persisted as restored UI state.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The existing release-seam journey demonstrates console-first layout, Active Workstations, Issue Assignment Board, a governed action, visible console/orchestrator turns, Activity Journal evidence, and restored meaningful state after restart.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Persistence tests verify canonical accepted state is restored without showing unacknowledged assignments or launches as accepted.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_mission_selection.py",
+        "tests/test_workspace_snapshot.py",
+        "mission-control/src/alfredo-release-seam.test.tsx"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/tasks.rs",
+        "alfredo-tui/tests/recovery.rs",
+        "alfredo-tui/tests/conversations.rs",
+        "alfredo-tui/tests/workstation.rs",
+        "alfredo-tui/tests/missions.rs",
+        "alfredo-tui/tests/terminal_smoke.py"
+      ],
+      "parity": "partial",
+      "gap": "Native explicit Resume/Start New, atomic identity collision checks, legacy resume, saved workspace/mission choices, in-app quiescent handoff and task/conversation/view restart continuity exist. Handoff preserves source state on cancellation/open/save failure and isolates old events. Complete Workspace Session and attributed mission-formation receipt chains remain incomplete."
+    },
+    {
+      "number": 30,
+      "title": "09 \u2014 Responsive and Accessible Workstation Hardening",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/30",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:20:20Z",
+      "body_sha256": "69350565116829fae14c4cbb6d8131076bfe9faa4f161e85b095d4fe76b722a8",
+      "category": "product",
+      "native_parent": 21,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "The Agent Console, Active Workstations, and Issue Assignment Board expose semantic regions with understandable accessible names.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Keyboard focus order moves logically through the composer, active workstation cards, issue assignment rows, approvals, review actions, and detail expansion.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Text remains readable with sufficient contrast, visible focus, and stable compact rows in the assignment matrix.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Reduced-motion preferences disable nonessential live-status animation while preserving understandable status changes.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Constrained-width layouts keep the prompt, composer, active workstation decisions, and issue assignment state reachable without incoherent overlap.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Accessibility and responsive tests or documented checks cover keyboard operation, semantic hierarchy, contrast/focus, reduced motion, and constrained-width behavior.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "mission-control/src/App.test.tsx",
+        "mission-control/src/styles.test.ts"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/layout.rs",
+        "alfredo-tui/tests/terminal_smoke.py",
+        "alfredo-tui/tests/editor.rs"
+      ],
+      "parity": "partial",
+      "gap": "Keyboard/reflow tests exist; terminal assistive-technology, palette contrast and human acceptance remain unverified."
+    },
+    {
+      "number": 31,
+      "title": "[PRD] Local Coding Agent MVP Development Roadmap",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/31",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:28:05Z",
+      "body_sha256": "8f6d2070d564b1a3808782d884b7c57a39b5915339cf96dd97f55c4a20fe02d6",
+      "category": "parent",
+      "native_parent": 1,
+      "native_children": [
+        32,
+        33,
+        34,
+        35,
+        36,
+        37,
+        38,
+        39,
+        40
+      ],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Roll up native children; parent stories/decisions also require detailed acceptance audit. Closure is not terminal completion."
+    },
+    {
+      "number": 32,
+      "title": "01 \u2014 Lifecycle State Cleanup and Reopen Controls",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/32",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:28:06Z",
+      "body_sha256": "551797bda794897353bc27adcab23f692635cfa89225d5de10a11fbef9f79be3",
+      "category": "product",
+      "native_parent": 31,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "The board and launch path use the same lifecycle rules for approved, blocked, launched, PR-ready, complete, and repair states.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The user can inspect one Issue Slice and see its tracker status, runtime status, review state, blockers, and next valid actions.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "A completed Issue Slice cannot be silently re-approved for launch; reopening is explicit and recorded.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Reopening a slice resets only the state needed for re-review and does not erase assignment notes, evidence history, or mission timeline entries.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Invalid state transitions produce actionable errors without Python tracebacks.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Tests cover approval, launch blocking, completion, reopening, and tracker/runtime precedence.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/tasks.rs"
+      ],
+      "parity": "partial",
+      "gap": "Approval/reset guards exist; slice contract locking, explicit reopen and assignment-note continuity are absent."
+    },
+    {
+      "number": 33,
+      "title": "02 \u2014 Textual TUI Mission Board",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/33",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:28:07Z",
+      "body_sha256": "2befea56ee60e9437d11b70df98d1a0e727c32cd138a09da40c7764c6a2fb79f",
+      "category": "product",
+      "native_parent": 31,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "The user can launch a TUI command from the local command surface.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The TUI shows ordered Issue Slices with status, blockers, assignment, and launch readiness.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The TUI highlights the next recommended action for the mission.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The TUI can show details for a selected Issue Slice, including acceptance criteria and blocked-by information.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Empty, missing, or malformed tracker state is handled with a readable error view.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Tests cover the TUI data model and rendering-ready board state without requiring fragile terminal snapshots.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py",
+        "mission-control/src/App.test.tsx"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/tasks.rs",
+        "alfredo-tui/tests/layout.rs",
+        "alfredo-tui/tests/terminal_smoke.py",
+        "alfredo-tui/tests/mission_work.rs",
+        "alfredo-tui/tests/work_navigation.rs",
+        "alfredo-tui/tests/work_tree_ui.rs"
+      ],
+      "parity": "partial",
+      "gap": "Native Mission Work tree now groups canonical Plans and repairs, preserves exact task anchors, and reuses readiness/replacement provenance. GitHub Issue Graph import, complete issue scope changes and full desktop readiness parity remain absent.",
+      "native_evidence_report": ".agent/Reports/2026-09-27-native-mission-work-tree.json"
+    },
+    {
+      "number": 34,
+      "title": "03 \u2014 Agent Model Configuration Registry",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/34",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:28:08Z",
+      "body_sha256": "6d722715ab8a89efec1fbafb173dd4f5608673433b53ac6ffd1ab0bfa25cbe10",
+      "category": "product",
+      "native_parent": 31,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "The user can list configured Local Agent and Frontier role entries from the command surface.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Configured agents include a stable id, role, provider or runner type, and command or model details needed by that runner type.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Invalid config produces actionable validation errors that identify the broken agent entry.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Assigning an Issue Slice to an unknown agent is rejected.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Existing issue metadata can still provide suggested and assigned agents when no config is present.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Tests cover config loading, missing config fallback, invalid config, listing agents, and assignment validation.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py",
+        "tests/test_capabilities.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/models.rs"
+      ],
+      "parity": "partial",
+      "gap": "Installed model catalog/selection exists; provider-neutral role registry, config validation and assignment eligibility are absent."
+    },
+    {
+      "number": 35,
+      "title": "04 \u2014 TUI Assignment and Launch Controls",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/35",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:28:09Z",
+      "body_sha256": "63b1ecfc30ccdbf4de3b583a7aa6a475615a0e47981cdba0212eb5bb004f8456",
+      "category": "product",
+      "native_parent": 31,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "The TUI shows available configured agents for an Issue Slice assignment decision.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The user can assign or override a slice's Local Agent from the TUI.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The user can approve and launch an eligible slice from the TUI.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Blocked or invalid launches are prevented in the TUI with the same error reason as the CLI.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "TUI assignment and launch actions persist to runtime state and are visible after restart.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Tests cover assignment, approval, launch, blocked launch, and persisted TUI action results through the same core APIs used by the CLI.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/tasks.rs",
+        "alfredo-tui/tests/worker.rs",
+        "alfredo-tui/tests/assignment.rs"
+      ],
+      "parity": "partial",
+      "gap": "Installed model catalog and /assign ID MODEL now provide durable unstarted-worker overrides, fresh approval, common transaction guards and actual reassigned worker dispatch. Native Issue Slice identity, configured agent/profile registry and qualified role assignment remain incomplete."
+    },
+    {
+      "number": 36,
+      "title": "05 \u2014 Fake Local Agent Runner",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/36",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:28:10Z",
+      "body_sha256": "41f5ece2ab96de684ff4506da2ca31154a30c1c0c38af9ec14e0f631381fdc88",
+      "category": "product",
+      "native_parent": 31,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "A configured fake Local Agent can be assigned to and launched for an approved ready Issue Slice.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Launch creates an isolated worktree outside the target repo and writes a readable task packet.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The fake runner records a durable log artifact and a deterministic completion result.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The fake runner produces a valid Evidence Package without manual evidence flags.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The session lifecycle moves from launched to completed or evidence-ready in persisted runtime state.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Tests cover the fake runner end-to-end from assignment through evidence validation.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/worker.rs"
+      ],
+      "parity": "partial",
+      "gap": "Real model-generated plans/checks are tested via HTTP fixtures; configurable fake/command runner adapters and full task packets are absent."
+    },
+    {
+      "number": 37,
+      "title": "06 \u2014 Command Backed Local Agent Runner",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/37",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:28:11Z",
+      "body_sha256": "1f52ef86a3dbeb27fc575cd9652edc5b2af7ffe042356263ff1f40324e53b9a4",
+      "category": "product",
+      "native_parent": 31,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "A command-backed Local Agent can be configured, assigned, and launched for an approved ready Issue Slice.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The runner receives the task packet and runs with the isolated worktree as its working context.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Runner stdout, stderr, exit status, and start/end times are recorded as session artifacts.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Command policy is checked before runner execution and human-required commands are blocked.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The session records success, failure, or needs-human-review without losing logs.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Tests cover successful execution, nonzero exit, missing command, and command-policy blocking.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/worker.rs"
+      ],
+      "parity": "partial",
+      "gap": "Real model-generated plans/checks are tested via HTTP fixtures; configurable fake/command runner adapters and full task packets are absent."
+    },
+    {
+      "number": 38,
+      "title": "07 \u2014 Automated Evidence Collection",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/38",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:28:12Z",
+      "body_sha256": "86c16c11cf7096132a3d4b6ccd6ed03f686a43f6e88635a810b4188ff9131c16",
+      "category": "product",
+      "native_parent": 31,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Evidence collection derives changed files from the isolated worktree.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Evidence collection records a diff summary or an explicit no-diff result.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Runner logs and relevant command output are linked as artifacts rather than embedded into mission markdown.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Test results are captured when configured or marked not applicable with a reason.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Known risks and proposed context updates are present as explicit fields, even when empty.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Tests cover evidence collection for changed files, no changes, test success, test failure, and missing optional evidence.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/worker.rs"
+      ],
+      "parity": "partial",
+      "gap": "Digest-bound diff/check evidence exists; full required-evidence schema, risks and proposed context updates are absent."
+    },
+    {
+      "number": 39,
+      "title": "08 \u2014 TUI Review and Repair Loop",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/39",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:28:13Z",
+      "body_sha256": "0881d4c56d6c0cc268784ed890ba2c4d16e9c446f8fd14adf6a3bc2ce135d703",
+      "category": "product",
+      "native_parent": 31,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "The TUI shows sessions that are ready for review and links them to their Issue Slice and Evidence Package.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The user can record Approved, Approved with limitations, Needs repair, Needs human review, and Rejected outcomes from the TUI.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Approved outcomes require valid evidence and are blocked when evidence is missing or invalid.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Rejection routing follows the repair policy for same-agent repair, fresh-agent repair, architect revision, or user escalation.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Review outcomes update the Issue Slice, session, mission summary, and timeline consistently.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Tests cover each review outcome and repair route through TUI-accessible core actions.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py",
+        "tests/test_workspace_snapshot.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/worker.rs",
+        "alfredo-tui/tests/review.rs"
+      ],
+      "parity": "partial",
+      "gap": "Readable check/diff/output review and exact inspected-task shorthand validate evidence; explicit receipt-linked repair inherits policy with fresh approval and verified prior context. Automatic repair routing, limited approval, architect escalation and integrated timeline remain absent. Accepted results now support verified local review-branch handoff; remote publication and active-branch merge remain separate."
+    },
+    {
+      "number": 40,
+      "title": "09 \u2014 PR Readiness from TUI",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/40",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T15:28:14Z",
+      "body_sha256": "e481e2f4be76c2bcab78fcc32def487421add8fab28efc782136467cb1b09488",
+      "category": "product",
+      "native_parent": 31,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "The TUI shows which Issue Slices are PR-ready and which are still blocked from PR preparation.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The user can prepare PR instructions for a selected PR-ready slice from the TUI.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The generated PR summary includes Issue Slice, changed behavior, acceptance criteria, evidence, review outcome, and Local Agent activity.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The tool reports whether `gh` automation is available and falls back to manual instructions when it is not.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The TUI and CLI use the same PR readiness rules and never mark a slice merge-approved.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Tests cover PR-ready display, unavailable `gh` fallback, available `gh` command generation, and non-PR-ready blocking.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_albert_mvp.py"
+      ],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "PR-ready lifecycle, branch/PR summaries and authenticated/manual publishing fallback are absent."
+    },
+    {
+      "number": 41,
+      "title": "[Wayfinder] Chart Alfredo's reliable, observable, and faster modernization",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/41",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-30T19:51:22Z",
+      "body_sha256": "9df2d935b154a33d3831d59c943cce4522486af94fb828fbd7c8c17d6e600f8e",
+      "category": "parent",
+      "native_parent": null,
+      "native_children": [
+        42,
+        43,
+        44,
+        45,
+        51,
+        52,
+        46,
+        47,
+        48,
+        49,
+        50,
+        53,
+        54,
+        55
+      ],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Roll up native children; parent stories/decisions also require detailed acceptance audit. Closure is not terminal completion."
+    },
+    {
+      "number": 42,
+      "title": "Capture real Alfredo workflow failures",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/42",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T20:03:09Z",
+      "body_sha256": "a2da3b2e6db9e9b932daaee5e6bdebac73e9584cbf8ce9512fceee2054458e15",
+      "category": "research",
+      "native_parent": 41,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Historical research/prototype question; retain as evidence context. Requalify any performance or architecture claim for the Rust terminal."
+    },
+    {
+      "number": 43,
+      "title": "Measure Alfredo's current architecture and performance baseline",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/43",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-23T20:31:19Z",
+      "body_sha256": "44acd0e98c73bf9cc61cd5deaaf70d0e608e7982e8c6f6ffd4999152fab5e080",
+      "category": "research",
+      "native_parent": 41,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Historical research/prototype question; retain as evidence context. Requalify any performance or architecture claim for the Rust terminal."
+    },
+    {
+      "number": 44,
+      "title": "Prototype the Coding Workspace-to-Mission journey",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/44",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-24T17:26:13Z",
+      "body_sha256": "0bdc429c77c2f9f4118ccb005ab3a8b777fc965ceb60dbbbe97a95b3032b2e17",
+      "category": "research",
+      "native_parent": 41,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Historical research/prototype question; retain as evidence context. Requalify any performance or architecture claim for the Rust terminal."
+    },
+    {
+      "number": 45,
+      "title": "Diagnose workspace selection and false-success action routing",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/45",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-24T17:37:51Z",
+      "body_sha256": "53f6df055958d836224423836715a6f30117a8b0118882e61e457742fc1cd9f7",
+      "category": "research",
+      "native_parent": 41,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Historical research/prototype question; retain as evidence context. Requalify any performance or architecture claim for the Rust terminal."
+    },
+    {
+      "number": 46,
+      "title": "Prototype the Mission Execution Tree",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/46",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-27T20:14:07Z",
+      "body_sha256": "9b1e3fabc607441e35d964903a223a1d5127eedc4e16562b5d87bb74783b3a90",
+      "category": "research",
+      "native_parent": 41,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Historical research/prototype question; retain as evidence context. Requalify any performance or architecture claim for the Rust terminal."
+    },
+    {
+      "number": 47,
+      "title": "Identify the local-model optimization strategy",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/47",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-27T20:31:44Z",
+      "body_sha256": "7c699293f73dd921c5c9c5a61725f219f096ccfa108ced093f514f58476c377d",
+      "category": "research",
+      "native_parent": 41,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Historical research/prototype question; retain as evidence context. Requalify any performance or architecture claim for the Rust terminal."
+    },
+    {
+      "number": 48,
+      "title": "Prototype a Rust Orchestrator vertical slice",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/48",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-29T18:29:18Z",
+      "body_sha256": "f0e036c294a26c0e46326a9fd9c6a4961561ea2db63674488fcbb3ec59f74dcb",
+      "category": "research",
+      "native_parent": 41,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Historical research/prototype question; retain as evidence context. Requalify any performance or architecture claim for the Rust terminal."
+    },
+    {
+      "number": 49,
+      "title": "Choose Alfredo's backend modernization architecture",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/49",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-29T20:10:25Z",
+      "body_sha256": "eccaf3e15543923fabce307d51709ce0d55bd50a37aad60eb4a9ccf963302e6e",
+      "category": "research",
+      "native_parent": 41,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Historical research/prototype question; retain as evidence context. Requalify any performance or architecture claim for the Rust terminal."
+    },
+    {
+      "number": 50,
+      "title": "Define Alfredo's project-start Wayfinder routing",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/50",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-30T19:31:54Z",
+      "body_sha256": "8bf1058f1d3a190a20d65ce648aa43ad1b7219ca4a282516548914e62eb75265",
+      "category": "research",
+      "native_parent": 41,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Historical research/prototype question; retain as evidence context. Requalify any performance or architecture claim for the Rust terminal."
+    },
+    {
+      "number": 51,
+      "title": "Choose Alfredo's relationship to FirstMate",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/51",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-27T16:29:31Z",
+      "body_sha256": "48691529d8923e2a326cf1bbdf270d6a8fbe7e449fdbcbb50a571973179b631f",
+      "category": "research",
+      "native_parent": 41,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Historical research/prototype question; retain as evidence context. Requalify any performance or architecture claim for the Rust terminal."
+    },
+    {
+      "number": 52,
+      "title": "Evaluate FirstMate patterns for Alfredo",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/52",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-27T16:48:27Z",
+      "body_sha256": "288bb5e038544da8700e64b229003e0502ab873fc7939349e7b9b3318d1c3e87",
+      "category": "research",
+      "native_parent": 41,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Historical research/prototype question; retain as evidence context. Requalify any performance or architecture claim for the Rust terminal."
+    },
+    {
+      "number": 53,
+      "title": "Prototype Alfredo's attention-driven Local Agent supervision loop",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/53",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-29T14:27:00Z",
+      "body_sha256": "bfa1b92b11c32820ff33261d44a3e00e2b42a4bc530ba88bc25710d0aaf75c4f",
+      "category": "research",
+      "native_parent": 41,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Historical research/prototype question; retain as evidence context. Requalify any performance or architecture claim for the Rust terminal."
+    },
+    {
+      "number": 54,
+      "title": "Define the Local Agent session-worktree retirement contract",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/54",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-27T21:28:32Z",
+      "body_sha256": "e9f63c53e34707fc2dc4cc5bbe9fdaebd58cc35ddc83677749735dc463038dd1",
+      "category": "research",
+      "native_parent": 41,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Historical research/prototype question; retain as evidence context. Requalify any performance or architecture claim for the Rust terminal."
+    },
+    {
+      "number": 55,
+      "title": "Measure whether Rust improves Alfredo desktop startup and rendered workflows",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/55",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-29T19:16:57Z",
+      "body_sha256": "05c6c825793be80fe4f0f5079df62f0c4252c60ede9eacb74156cdbdf681eda0",
+      "category": "research",
+      "native_parent": 41,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Historical research/prototype question; retain as evidence context. Requalify any performance or architecture claim for the Rust terminal."
+    },
+    {
+      "number": 56,
+      "title": "[PRD] Alfredo reliable, observable, and faster modernization",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/56",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-30T21:38:05Z",
+      "body_sha256": "d762e91934b4d8fe124a9799296e112e3611af9e849d9fd4a10c6cb4efa4524c",
+      "category": "parent",
+      "native_parent": null,
+      "native_children": [
+        57,
+        58,
+        59,
+        60,
+        61,
+        62,
+        63,
+        64,
+        65,
+        66,
+        67,
+        68,
+        69,
+        70,
+        71,
+        72,
+        73,
+        74,
+        75
+      ],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Roll up native children; parent stories/decisions also require detailed acceptance audit. Closure is not terminal completion."
+    },
+    {
+      "number": 57,
+      "title": "01 \u2014 Establish an acknowledged Coding Workspace",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/57",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-07-31T20:37:49Z",
+      "body_sha256": "1af69f9dde439f121184ef19e11c291ff7ee3fe7674089a2caf2e63ca6d43b32",
+      "category": "product",
+      "native_parent": 56,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Launch exposes a selection-required state with a Starting Location and no bound Coding Workspace or Mission.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Choosing an existing repository and creating a new repository both validate the exact target before acknowledgement; invalid or unsafe targets fail clearly without changing accepted state.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Install root, backend root, Starting Location, Coding Workspace, runtime root, and Workspace Session remain distinct, including source-development launch.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The one-process CLI, persistent transport, Tauri bridge, and rendered React workstation agree on the versioned selection contract and structured failures.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "React never projects a Coding Workspace or effectful success before the correlated Orchestrator acknowledgement.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_workspace_selection.py",
+        "mission-control/src/workspace-selection-gate.test.tsx"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/cli.rs",
+        "alfredo-tui/tests/tasks.rs",
+        "alfredo-tui/tests/selection.rs",
+        "alfredo-tui/tests/terminal_smoke.py",
+        "alfredo-tui/tests/missions.rs",
+        "alfredo-tui/tests/workstation.rs"
+      ],
+      "parity": "partial",
+      "gap": "Native explicit Resume/Start New, atomic identity collision checks, legacy resume, saved workspace/mission choices, in-app quiescent handoff and task/conversation/view restart continuity exist. Handoff preserves source state on cancellation/open/save failure and isolates old events. Complete Workspace Session and attributed mission-formation receipt chains remain incomplete."
+    },
+    {
+      "number": 58,
+      "title": "02 \u2014 Resume or start a Mission with restart continuity",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/58",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-08-02T20:38:28Z",
+      "body_sha256": "18ccce3672dddf8d6f84e355b61296e7085fd8c81acd51f2ae82e2eb730c4969",
+      "category": "product",
+      "native_parent": 56,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "A known Coding Workspace presents explicit Resume Mission and Start New Mission choices before Mission-qualified work begins.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Resume selects the exact existing Mission, while Start New Mission creates one distinct identity without duplicating an existing Mission.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The acknowledged Coding Workspace and Mission restore after process and desktop restart through canonical state.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Recent workspaces remain explicit relaunch choices and cannot silently retarget the current Workspace Session.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Public CLI, persistent transport, Tauri, React, and restart tests cover both choices and structured failure paths.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_mission_selection.py",
+        "tests/test_workspace_snapshot.py",
+        "mission-control/src/alfredo-release-seam.test.tsx"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/tasks.rs",
+        "alfredo-tui/tests/recovery.rs",
+        "alfredo-tui/tests/conversations.rs",
+        "alfredo-tui/tests/missions.rs",
+        "alfredo-tui/tests/terminal_smoke.py",
+        "alfredo-tui/tests/workstation.rs"
+      ],
+      "parity": "partial",
+      "gap": "Native explicit Resume/Start New, atomic identity collision checks, legacy resume, saved workspace/mission choices, in-app quiescent handoff and task/conversation/view restart continuity exist. Handoff preserves source state on cancellation/open/save failure and isolates old events. Complete Workspace Session and attributed mission-formation receipt chains remain incomplete.",
+      "selection_continuity_checkpoint": "Exact startup/source saved admission, schema17 origin/arrival and journal1, creation/cancellation/failure/handoff regressions and installed PTY verified. Focused 104 and full 305 pass / 7 ignored; separation guard RED/GREEN, strict Clippy and installed archive pass. Report selection-continuity."
+    },
+    {
+      "number": 59,
+      "title": "03 \u2014 Bind conversational action claims to Orchestrator receipts",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/59",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-08-03T09:14:29Z",
+      "body_sha256": "65ec88e98743ed7fff21dab60d2a8d05b4f4ae54bb0ea79d43995b3787edb022",
+      "category": "product",
+      "native_parent": 56,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Commentary cannot claim that a proposal, mutation, launch, file change, review, or completion occurred without a correlated canonical receipt.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Effectful intent that produces no authorized action returns a visible clarification, refusal, or No action taken outcome.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Proposal, approval, queued, running, evidence, Review Decision, and accepted completion remain distinct acknowledged events.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Exact correlation replay returns the original outcome without duplicate mutation, while changed scope, authority, or target fails closed.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Malformed or ambiguous controller output remains discussion and cannot preserve success-sounding effect claims as authoritative feedback.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "mission-control/src/App.test.tsx",
+        "tests/test_workspace_snapshot.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/tasks.rs",
+        "alfredo-tui/tests/worker.rs",
+        "alfredo-tui/tests/planner.rs",
+        "alfredo-tui/tests/understanding.rs",
+        "alfredo-tui/tests/workstation.rs",
+        "alfredo-tui/tests/terminal_smoke.py"
+      ],
+      "parity": "partial",
+      "gap": "Native Wayfinder entry/draft/confirmation responses identify exact scope receipts and distinguish historical replay from current scope. Explicit /plan captures pinned repository and scope bindings in task v9 receipts; task execution still requires canonical approval/evidence. General natural-language action routing, all action classes and structured per-message capability attribution remain incomplete.",
+      "wayfinder_admission_checkpoint": "Turn-bound scope requests saved before dispatch; schema16 migration, retries, cancellation, queueing, canonical headers and installed PTY verified. Focused83 and full286 pass / 7 ignored; strict Clippy and installed archive pass. Report wayfinder-command-admission.",
+      "selection_continuity_checkpoint": "Exact startup/source saved admission, schema17 origin/arrival and journal1, creation/cancellation/failure/handoff regressions and installed PTY verified. Focused 104 and full 305 pass / 7 ignored; separation guard RED/GREEN, strict Clippy and installed archive pass. Report selection-continuity."
+    },
+    {
+      "number": 60,
+      "title": "04 \u2014 Enter Wayfinder through the Shared Understanding Gate",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/60",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-08-03T10:15:11Z",
+      "body_sha256": "5aba53f07bea927c610c9d50f89e71ac0d75860301ddff1bed228af01c83b0da",
+      "category": "product",
+      "native_parent": 56,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "New-project and consequential-change first contacts enter Chart mode through one canonical wayfinder-alfredo adapter without relying on controller memory.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Fresh references to an existing Wayfinder map or ticket enter Work-through mode, and later turns continue the durable active flow without nesting or reinvocation.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Read-only explanation, status, review, diagnosis, and inspection remain outside automatic Chart mode unless they explicitly target Wayfinder work.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Before the gate, conversation, read-only inspection, bounded research, Grilling, and throwaway prototypes remain available while canonical planning artifacts, delegation, and production implementation are blocked.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The gate opens only through an explicit Mission Commander receipt or visible agent acknowledgment; an agent acknowledgment ends the turn, and opening the gate never automatically invokes another skill.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_workspace_snapshot.py",
+        "mission-control/src/App.test.tsx"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/understanding.rs",
+        "alfredo-tui/tests/terminal_smoke.py",
+        "alfredo-tui/tests/planner.rs",
+        "alfredo-tui/tests/workstation.rs"
+      ],
+      "parity": "partial",
+      "gap": "Native Wayfinder routing now durably enters Chart/Work-through before conversational inference, reuses the repository flow across missions/restart, preserves read-only entry exclusions, and handles four-field scope drafts plus exact-revision Commander confirmation without follow-on inference/task actions. v2 scope receipts migrate v1 with exact backups; cancellation cannot abandon a pending routing write. Full Mission Draft/graph/skill execution, desktop/native migration and structured conversation-source attribution remain incomplete.",
+      "wayfinder_admission_checkpoint": "Turn-bound scope requests saved before dispatch; schema16 migration, retries, cancellation, queueing, canonical headers and installed PTY verified. Focused83 and full286 pass / 7 ignored; strict Clippy and installed archive pass. Report wayfinder-command-admission."
+    },
+    {
+      "number": 61,
+      "title": "05 \u2014 Complete keyboard-first conversational Mission formation",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/61",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-08-04T08:50:39Z",
+      "body_sha256": "9c24f29aa407854a3277f8563508c2839190fd786e412a54eb4bfebc520729ef",
+      "category": "product",
+      "native_parent": 56,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Responses and outcomes identify the responsible capability boundary, including Coding Workspace, Wayfinder, Orchestrator, and Mission.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "ArrowUp and ArrowDown traverse in-memory prompt history and restore the unsent draft after traversal.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Slash-command and at-capability completion are keyboard operable, dismissible, and return focus predictably to the composer.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "A submitted turn appears immediately; background updates follow only when the reader is near the end and never displace an older reading position.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Responsive, reduced-motion, focus, accessible-name, and keyboard-only tests cover the complete conversational journey.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "mission-control/src/App.test.tsx",
+        "mission-control/src/issue-61-client.test.ts"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/editor.rs",
+        "alfredo-tui/tests/layout.rs",
+        "alfredo-tui/tests/terminal_smoke.py",
+        "alfredo-tui/tests/commands.rs",
+        "alfredo-tui/tests/session.rs",
+        "alfredo-tui/tests/conversations.rs",
+        "alfredo-tui/tests/command_adapters.rs",
+        "alfredo-tui/tests/planner_command_lifecycle.rs",
+        "alfredo-tui/tests/control_commands.rs"
+      ],
+      "parity": "partial",
+      "gap": "Native history now retains structured model/Wayfinder source labels and optional scope receipt references, with v1/v2 exact-backup migration and no inferred legacy source. Cursor editing, prompt history and slash completion work. Unified Workspace/Mission/task action chronology, @-capability completion, exact persisted reading anchors across restart/reflow and complete formation/accessibility acceptance remain incomplete. Live reading anchors now survive stream growth and view/session switches; controlled HTTP/PTY and 66,000-line rendering regressions pass.",
+      "native_observed_chronology": "2026-09-20: Native console now persists exact canonical task receipt references at local observation boundaries, separate from model messages; initial history remains Activity and no actor/time/command causality is inferred. Full causal Workspace/Mission/planner/action chronology remains incomplete.",
+      "native_stable_reading": "2026-09-20: Schema9 stable message/receipt block anchors survive earlier receipt insertion, retry growth, resize and restart. Direct TestBackend comparison demonstrates numeric-only displacement. Full causal command lifecycle is specified in native-command-chronology.md but remains unimplemented; exact character-position reflow still open.",
+      "native_prepared_command_intents": "2026-09-20: Schema10 prepared task/scope/run/branch/recovery intents save before dispatch, retain originating conversation and exact retry identity; canonical receipts alone derive acknowledgment. 245 native tests, strict Clippy and installed failure/retry journey pass. Worker Finish linkage, planner/dispatch/live cancellation and Wayfinder/workspace causal adapters remain open. See Reports/2026-09-20-durable-command-intents.json and Tasks/native-command-chronology.md.",
+      "native_worker_command_lifecycle": "2026-09-20: Explicit Run command retains separate exact Start and run-bound Finish in original conversation; canonical task/run/baseline/inputs/digest gates completion. Real success/failure/cancel/recovery/restart tests plus installed console/dedup pass. Automatic dispatch and other causal adapters remain open; see worker-command-lifecycle report.",
+      "planner_command_checkpoint": "Explicit generation/revision/Architect/cancellation uses saved exact requests and bounded draft outcomes with schema12 origin recovery; generated drafts are separate from canonical Plan saves. Remaining automatic and workspace adapters are tracked in native-command-chronology.md; focused65/full254, strict Clippy and installed archive pass; see planner-command-lifecycle report.",
+      "controller_command_checkpoint": "Exact process/worker control identities and historical local outcomes, schema13, current dispatch header and restart-off verified: focused84/full262, strictClippy and installed archive. Remaining automatic launch provenance tracked in native-command-chronology.md.",
+      "automatic_launch_checkpoint": "Saved automatic launch admission and same-session dispatch provenance with schema14; focused79/full267, strictClippy and installed archive verified; report automatic-launch-admission.",
+      "automatic_architect_checkpoint": "Saved review-to-Architect draft provenance with schema15, cancellation withdrawal and queued admission recheck; Focused127 and full274 pass / 7 ignored, strict Clippy and installed archive pass. Report automatic-architect-admission.",
+      "wayfinder_admission_checkpoint": "Turn-bound scope requests saved before dispatch; schema16 migration, retries, cancellation, queueing, canonical headers and installed PTY verified. Focused83 and full286 pass / 7 ignored; strict Clippy and installed archive pass. Report wayfinder-command-admission.",
+      "selection_continuity_checkpoint": "Exact startup/source saved admission, schema17 origin/arrival and journal1, creation/cancellation/failure/handoff regressions and installed PTY verified. Focused 104 and full 305 pass / 7 ignored; separation guard RED/GREEN, strict Clippy and installed archive pass. Report selection-continuity."
+    },
+    {
+      "number": 62,
+      "title": "06 \u2014 Measure production startup and rendered-action cohorts",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/62",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-08-01T05:05:01Z",
+      "body_sha256": "d902d54c3f4fc981a8c06f87d4f119f93c31cc887518262965d51dd993ad067c",
+      "category": "product",
+      "native_parent": 56,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Startup instrumentation records the agreed S0 through S9 stages through usable and hydrated rendered desktop states.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Rendered Queue and session workflows record the agreed R0 through R6 stages, keeping canonical visible result separate from deferred runner claim.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Immutable minimal, representative, and pending-work fixtures record exact identities, byte counts, source and artifact hashes, and correctness results.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Repeated process-cold and process-warm cohorts use monotonic clocks and report raw JSON Lines, sample count, p50, nearest-rank p95, range, failures, and paired deltas.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Invalid correctness, replay, crash-cut, packaging, or rollback evidence invalidates the associated latency sample and prevents a speed claim.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_performance_measurement.py",
+        "tests/test_performance_correctness.py",
+        "mission-control/tests/performance-cohorts.test.js"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/live.rs",
+        "alfredo-tui/tests/provider.rs",
+        "alfredo-tui/tests/worker.rs"
+      ],
+      "parity": "partial",
+      "gap": "Bounded server load/prompt/generation metrics and two live READY observations are available; repeated paired production cohorts, complete UI stage decomposition, distributions and rollback-qualified speed evidence remain absent."
+    },
+    {
+      "number": 63,
+      "title": "07 \u2014 Build the inspectable Mission Execution Tree",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/63",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-08-06T20:51:41Z",
+      "body_sha256": "8edb1ab0a5d82fb7cdc6a84b6f2824b3f476691851ea3b19653734488c2b5c87",
+      "category": "product",
+      "native_parent": 56,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "The tree derives hierarchy and state only from canonical Issue Slice, Ad Hoc Delegation, session, review, evidence, and dependency records.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Issue identities and titles remain prominent; counts name their units; lifecycle and risk use explicit text and shape in addition to color.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Selecting started work opens an inspector with task, role and model, current activity, latest update, activity trail, evidence, touched files, and available governed actions.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Detailed Local Agent output is subscribed and rendered only while that exact inspector is open.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Desktop, compact desktop, tablet, and phone layouts preserve Agent Console access, natural reflow, named regions, keyboard operation, visible focus, and zero page-level horizontal overflow.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "mission-control/src/App.test.tsx",
+        "mission-control/src/workstation-projection.test.ts"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/worker.rs",
+        "alfredo-tui/tests/tasks.rs",
+        "alfredo-tui/tests/layout.rs",
+        "alfredo-tui/tests/terminal_smoke.py",
+        "alfredo-tui/tests/mission_work.rs",
+        "alfredo-tui/tests/work_navigation.rs",
+        "alfredo-tui/tests/work_tree_ui.rs"
+      ],
+      "parity": "partial",
+      "gap": "Canonical Plan/manual groups, nested repair ancestry, dependency edges, exact selection, current model/run observations, evidence and recent task receipts now appear in the native Mission Work tree. Full role/delegation parity, attention ordering, selected-only output subscription and broader accessibility remain incomplete.",
+      "native_evidence_report": ".agent/Reports/2026-09-27-native-mission-work-tree.json"
+    },
+    {
+      "number": 64,
+      "title": "08 \u2014 Operate and archive work through the Mission Execution Tree",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/64",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-08-08T22:52:41Z",
+      "body_sha256": "f3415158eac362b97d2406c853be015c40f2c90be21fe7afdb5a29b1aa136a1c",
+      "category": "product",
+      "native_parent": 56,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Desktop action panels remain within Mission Work and constrained layouts use reachable dialogs with managed focus and restoration.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Cancellation, review, repair, blocker, and archive actions state their exact consequence before submission and render only acknowledged outcomes afterward.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Repair previews its inherited task packet and launches only through the canonical repair action without duplicating a prior session.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Blocker recommendations include rationale, proposed acceptance, assigned actor, and exact dependency consequence; follow-up work never falsely unblocks the original record.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Completed Issue Slice subtrees archive and restore with identity, evidence, Activity Journal history, nested sessions, and inspection intact.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_workspace_snapshot.py",
+        "mission-control/src/App.test.tsx"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/tasks.rs",
+        "alfredo-tui/tests/worker.rs",
+        "alfredo-tui/tests/mission_work.rs",
+        "alfredo-tui/tests/work_navigation.rs",
+        "alfredo-tui/tests/work_tree_ui.rs"
+      ],
+      "parity": "partial",
+      "gap": "Cancel/review, linked repair proposals and canonical readiness/replacement explanations are accessible through task-tree inspection. Identity-preserving archive/restore and complete governed tree actions remain absent.",
+      "native_evidence_report": ".agent/Reports/2026-09-27-native-mission-work-tree.json"
+    },
+    {
+      "number": 65,
+      "title": "09 \u2014 Supervise and recover Local Agent runners deterministically",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/65",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-08-09T09:07:27Z",
+      "body_sha256": "c25b44463d78be9a596842351da295a802be62f3b36b4258988af698481d738d",
+      "category": "product",
+      "native_parent": 56,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Healthy no-change observations cause no model turn, attention item, Mission mutation, or repeated Agent Console narration.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Actionable attention and recovery intent persist before the observer cursor advances, and semantic duplicates replay to the same receipt after restart.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Automatic recovery requires exact runner, process-group, Mission, session, revision, Worktree Identity, and result-absence proof before one fresh runner is queued.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Valid late results are reconciled rather than rerun; reused process identity, unavailable probes, contradictory state, and identity mismatch fail closed.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "One failed automatic recovery ends automation for that incident and raises an actionable Mission Commander decision in Agent Console and Mission Work.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_runner_supervision.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/recovery.rs",
+        "alfredo-tui/tests/check_recovery.rs",
+        "alfredo-tui/src/run_boundary.rs",
+        "alfredo-tui/tests/recovery_terminal_smoke.py"
+      ],
+      "parity": "partial",
+      "gap": "Owner locks, intact-final-evidence recovery and verified terminal check checkpoints permit explicit Failed interruption without replay. Exact child/process-group quiescence, attention ledger and one-shot safe automatic runner recovery remain absent.",
+      "native_checkpoint_evidence": ".agent/Reports/2026-09-27-check-result-recovery.json"
+    },
+    {
+      "number": 66,
+      "title": "10 \u2014 Reserve and prove preservation for every Retirement Unit",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/66",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-08-12T20:31:48Z",
+      "body_sha256": "1812451806bf9c1096b04c1be889c62ab6f2520e1fcf780d9432390279e92833",
+      "category": "product",
+      "native_parent": 56,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "A Preservation Budget is reserved before a Retirement Unit begins and stays bound until verified preservation or explicit discard.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "One expected-revision lifecycle lock prevents execution, review, repair, cancellation, and duplicate retirement from racing.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Worktree Identity agrees across stored session path, deterministic managed path, canonical filesystem location, and expected Git registration; the Coding Workspace is never eligible.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Runner Quiescence is independently corroborated and cannot be inferred from terminal status alone.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "A Retirement Snapshot preserves baseline identity, Git-visible changes, registered evidence, authority, sizes, and hashes and passes manifest readback plus disposable clean-room reconstruction.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_retirement_preservation.py"
+      ],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "No preservation reservations, reconstructable snapshots, retirement phases/grace, aggregate storage budget, pin/export/discard or quiescence proof."
+    },
+    {
+      "number": 67,
+      "title": "11 \u2014 Retire completed, cancelled, failed, and reviewed work safely",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/67",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-08-09T19:47:11Z",
+      "body_sha256": "0aeaae396c10314a8d1d3a293f70f2fee147b057627acb8424879adca06e9b4d",
+      "category": "product",
+      "native_parent": 56,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Accepted evidence and completed cancellation preserve and retire automatically after quiescence without waiting for merge.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Failed work receives a configurable default Retention Grace Period with no automatic investigation or repair, while human-review work remains nonterminal and retained.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Request repair preserves and retires the prior unit, then creates a separately authorized Retirement Unit reconstructed from verified preserved material.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Preserving, Preserved or Grace, Retiring, Retired, and Retirement Blocked persist before effects and recover idempotently after a crash at every phase.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Ordinary Git removal is exact and non-force, non-Git removal stays inside the exact validated managed directory, and successful removal verifies both path and registration absence.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_retirement_preservation.py"
+      ],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "No preservation reservations, reconstructable snapshots, retirement phases/grace, aggregate storage budget, pin/export/discard or quiescence proof."
+    },
+    {
+      "number": 68,
+      "title": "12 \u2014 Manage retirement storage and blocked outcomes",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/68",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-08-12T20:31:07Z",
+      "body_sha256": "15a702c7e544745ef37101ed44cb316ae0992a26d755f121ff45c043517b2e81",
+      "category": "product",
+      "native_parent": 56,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Snapshot Payload retention and aggregate storage budgets are configurable with the agreed default duration and capacity, and payloads can be pinned.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Eligible unpinned payloads reclaim oldest first, while protected or pinned exhaustion blocks new Retirement Units and raises attention.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Compact Retirement Records remain durable after payload reclamation and continue to expose identity, authority, hashes, and disposition.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Deterministic status includes a compact storage summary and deterministic storage inspection reports usage, counts, expiry, largest payloads, reclamation, and blockers.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Retirement Blocked exposes retry, inspect, export, and exact Retained Worktree Discard; discard can never bypass Runner Quiescence, managed containment, or Coding Workspace exclusion.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_retirement_preservation.py"
+      ],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "No preservation reservations, reconstructable snapshots, retirement phases/grace, aggregate storage budget, pin/export/discard or quiescence proof."
+    },
+    {
+      "number": 69,
+      "title": "13 \u2014 Run local models through instrumented Profiles and Leases",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/69",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-08-15T00:01:29Z",
+      "body_sha256": "c6cb2a7862b36706944b6511667f3e506b6b75c1955b79c3b8eb066d7dc15085",
+      "category": "product",
+      "native_parent": 56,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Every turn records exact model digest, keep-alive, context and output budgets, thinking and sampling configuration, schema, quantization, residency, and processor placement.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Explicit token admission and output headroom reject over-budget work before inference, and only a complete bounded schema-valid result may enter governance.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Partial streams, malformed or oversized output, timeout, and cancellation remain non-authoritative and produce structured outcomes.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "One Local Inference Lease at a time provides visible bounded queueing, priority, cancellation, Mission attribution, and audit without granting Mission authority.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Timings distinguish load, prompt evaluation, first token, and decoding, while model affinity prefers one qualified resident normal model over avoidable swaps.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_inference.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/provider.rs",
+        "alfredo-tui/tests/models.rs",
+        "alfredo-tui/tests/admission.rs",
+        "alfredo-tui/src/inference_admission.rs",
+        "alfredo-tui/tests/shared_provider.rs",
+        "alfredo-tui/tests/inference_processes.rs",
+        "alfredo-tui/tests/inference_terminal_smoke.py",
+        "alfredo-tui/tests/worker.rs",
+        "alfredo-tui/tests/inference_runtime.rs",
+        "alfredo-tui/tests/inference_profiles.rs"
+      ],
+      "parity": "partial",
+      "gap": "Optional native diagnostics now bind actual payload/profile/prefix hashes and per-request selected digest, quantization, residency/context observations while holding client admission. Ordinary production turns remain unchanged. Explicit token headroom, Mission-attributed inference audit, qualified resident affinity and verified upstream runtime pinning remain incomplete; default capacity2 is not full legacy single-lease parity."
+    },
+    {
+      "number": 70,
+      "title": "14 \u2014 Qualify and promote Local Inference Profiles",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/70",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-08-14T07:15:03Z",
+      "body_sha256": "b52f933f59a0dd14522d48690e04b4d56e9690eddc398843044c765310313ac0",
+      "category": "product",
+      "native_parent": 56,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": false,
+          "text": "Repeated governed fixtures cover discussion, routing, small and multi-file edits, repair, malformed output, policy violations, cancellation, long context, swaps, and queued Local Agents.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": false,
+          "text": "Reports include valid routes, plans, evidence, accepted outcomes, repairs, escalations, decomposed inference timings, and end-to-end reviewed latency.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": false,
+          "text": "Initial controller and normal-worker context profiles are compared at the agreed bounded sizes and expand only when required material fits and reviewed outcomes improve.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": false,
+          "text": "Exact prompt-prefix reuse and digest-keyed deterministic context selection are measured; changed prefixes invalidate reuse and source-dependent plans, evidence, authority, and outcomes are never cached as truth.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": false,
+          "text": "Promotion requires non-inferior quality and reliability, pins a non-withdrawn runtime and binary configuration, and retains a tested rollback path.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_inference_qualification.py",
+        "tests/test_inference_qualification_cli.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/live.rs",
+        "alfredo-tui/tests/worker.rs",
+        "alfredo-tui/tests/qualification_runner.rs",
+        "alfredo-tui/tests/qualification_oracle.rs",
+        "alfredo-tui/tests/qualification_cli_smoke.py",
+        "alfredo-tui/src/qualification.rs"
+      ],
+      "parity": "partial",
+      "gap": "Bounded paired baseline/context-candidate diagnostics now cover four native governed scenarios with canonical review, independent parent checks, exact source/request identities, decomposed timings and no-replay reports. Deterministic installed CLI covers8 cases/20 requests and tampering refusal. The complete11-kind family, broad repeated model quality, exact token/template headroom, runtime withdrawal/pinning, promotion and rollback remain incomplete."
+    },
+    {
+      "number": 71,
+      "title": "15 \u2014 Expand host execution behind a Python request/receipt seam",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/71",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-08-14T07:03:04Z",
+      "body_sha256": "1035ec5d59996b882f2a78c4bb5025f4eefe60325bab5260b5931a66887d1ea8",
+      "category": "product",
+      "native_parent": 56,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Python authorizes the exact effect, persists intent, invokes the execution provider, and reconciles the typed receipt into canonical state.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The boundary covers process launch, supervision, cancellation, sandbox and environment enforcement, resource limits, process-tree cleanup, timeout, and bounded output.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Local Agent and Shell paths preserve their distinct authority inputs while sharing the stable host-effects module.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Exact replay and crash cuts never duplicate an external effect; uncertain effects retain evidence and require reconciliation.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The one-process CLI, persistent transport, packaged desktop, current public contracts, and existing structured failures remain compatible through the Python provider.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_execution.py",
+        "tests/test_execution_integration.py",
+        "tests/test_execution_shadow.py",
+        "tests/test_local_agent_execution_cutover.py",
+        "tests/test_execution_cutover.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/worker.rs",
+        "alfredo-tui/tests/recovery.rs",
+        "alfredo-tui/tests/check_recovery.rs",
+        "alfredo-tui/src/run_boundary.rs",
+        "alfredo-tui/tests/recovery_terminal_smoke.py"
+      ],
+      "parity": "partial",
+      "gap": "Shared Rust host-effect provider and native request-bound terminal check checkpoints are exercised, with no-replay explicit interruption recovery and real process-death/refusal tests. Full protocol, uncertain-effect/process reconciliation, Shell and packaged rollback parity remain incomplete.",
+      "native_checkpoint_evidence": ".agent/Reports/2026-09-27-check-result-recovery.json"
+    },
+    {
+      "number": 72,
+      "title": "16 \u2014 Shadow Rust execution receipts against Python",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/72",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-08-30T13:03:31Z",
+      "body_sha256": "9c4bf034db3cfc2511162b688518f7d279ed6ea24bce2076a5418cd950e96822",
+      "category": "product",
+      "native_parent": 56,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": false,
+          "text": "The same contract suite runs against Python and Rust for validation, launch, supervision, cancellation, sandboxing, resources, bounded output, timeout, cleanup, replay, and crash cuts.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": false,
+          "text": "Python canonical stores are hashed before and after every Rust shadow sample and remain byte-unchanged except for explicitly approved observation records.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": false,
+          "text": "Normalized receipts, structured failures, process outcomes, and visible projections match or produce an explicit parity failure.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": false,
+          "text": "Shadow cohorts use the production-equivalent fixtures and stage measurements; reducer, sidecar, or microbenchmark results cannot support a product speed claim.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": false,
+          "text": "Any parity, crash, state-version, packaging, or release-gate failure disables Rust eligibility without changing Python authority.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_execution.py",
+        "tests/test_execution_integration.py",
+        "tests/test_execution_shadow.py",
+        "tests/test_local_agent_execution_cutover.py",
+        "tests/test_execution_cutover.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/worker.rs",
+        "alfredo-tui/tests/recovery.rs"
+      ],
+      "parity": "partial",
+      "gap": "Shared Rust host-effect provider is exercised; full new-authority current/previous protocol, crash reconciliation, Shell and packaged rollback parity remain incomplete."
+    },
+    {
+      "number": 73,
+      "title": "17 \u2014 Cut Local Agent host effects over to Rust safely",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/73",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-08-30T15:12:26Z",
+      "body_sha256": "0eda2f986483530d76d48e858e9355f98149e6c73cb79d860b3210cbd5d0a8b4",
+      "category": "product",
+      "native_parent": 56,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": false,
+          "text": "Exactly one provider performs each authorized Local Agent external effect, and Python remains the sole canonical writer.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": false,
+          "text": "Current and immediately previous request, receipt, and state versions remain readable without destructive conversion.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": false,
+          "text": "A feature flag returns Local Agent effects to the packaged Python provider, which remains included throughout the compatibility window.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": false,
+          "text": "Automatic rollback occurs only with positive proof that no canonical write or external effect occurred and no unresolved receipt exists.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": false,
+          "text": "Completed or uncertain effects never rerun automatically; uncertainty preserves evidence and raises Mission Commander reconciliation.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_execution.py",
+        "tests/test_execution_integration.py",
+        "tests/test_execution_shadow.py",
+        "tests/test_local_agent_execution_cutover.py",
+        "tests/test_execution_cutover.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/worker.rs",
+        "alfredo-tui/tests/recovery.rs"
+      ],
+      "parity": "partial",
+      "gap": "Shared Rust host-effect provider is exercised; full new-authority current/previous protocol, crash reconciliation, Shell and packaged rollback parity remain incomplete."
+    },
+    {
+      "number": 74,
+      "title": "18 \u2014 Cut Shell host effects over to Rust safely",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/74",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-08-30T15:10:04Z",
+      "body_sha256": "d2db299c8addd13fabef0a153b5b8ab6501979339f21681650a58a18d23aa74c",
+      "category": "product",
+      "native_parent": 56,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "Exactly one provider performs each authorized Shell external effect, with Python retaining request validation, permissions, canonical command state, and audit authority.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Command policy, Additional Path Grants, sanitized environment, sandbox mounts, resource bounds, output limits, cancellation, and outcome-unknown behavior remain contract-equivalent.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Exact correlation replay and changed-boundary conflicts retain current semantics across CLI, persistent transport, Tauri, and React.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The packaged Python Shell provider remains available behind the fallback feature flag without state conversion.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Rollback and uncertainty follow the same no-effect proof and Mission Commander reconciliation rules as Local Agent execution.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "tests/test_execution.py",
+        "tests/test_execution_integration.py",
+        "tests/test_execution_shadow.py",
+        "tests/test_local_agent_execution_cutover.py",
+        "tests/test_execution_cutover.py"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/worker.rs",
+        "alfredo-tui/tests/recovery.rs"
+      ],
+      "parity": "partial",
+      "gap": "Shared Rust host-effect provider is exercised; full new-authority current/previous protocol, crash reconciliation, Shell and packaged rollback parity remain incomplete."
+    },
+    {
+      "number": 75,
+      "title": "19 \u2014 Verify the packaged modernized workstation and fallback boundary",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/75",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-09-01T20:06:16Z",
+      "body_sha256": "cbfd19a748a0cf02197b29f73300dc509f9e7114443cf682ac9d0352c6a0ff37",
+      "category": "product",
+      "native_parent": 56,
+      "native_children": [],
+      "source_acceptance": [
+        {
+          "source_checked": true,
+          "text": "A production-equivalent journey covers Starting Location, Coding Workspace choice, Mission resume or start, Wayfinder, Shared Understanding Gate, governed dispatch, Mission Execution Tree, evidence, review, supervision, recovery, retirement, and restart.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Local Inference Profile and Lease behavior is visible and attributable without granting model or scheduler authority over Mission state.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Rust Local Agent and Shell effects pass current and previous protocol compatibility, crash-cut, replay, packaged-desktop, one-process CLI, persistent transport, and Python fallback tests.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "Performance reports separate launcher, desktop, React, backend, persistence, transport, rendered actions, and model phases and accept only repeatable human-perceptible improvements with correctness intact.",
+          "terminal_verification": "not-established"
+        },
+        {
+          "source_checked": true,
+          "text": "The complete Python, frontend, TypeScript, production build, Rust, responsive browser, package-integrity, installed-launch, frontend-ready, and backend-ready release gates pass or any unverified external gate remains explicitly open.",
+          "terminal_verification": "not-established"
+        }
+      ],
+      "legacy_test_entrypoints": [
+        "mission-control/src/alfredo-release-seam.test.tsx",
+        "mission-control/tests/shadow-provider-contract.test.js"
+      ],
+      "rust_test_entrypoints": [
+        "alfredo-tui/tests/terminal_smoke.py"
+      ],
+      "parity": "partial",
+      "gap": "PTY coding journey covers a subset; complete installed product, planning/retirement/restart/fallback and human release gates are unverified."
+    },
+    {
+      "number": 79,
+      "title": "[Automation] Daily conservative dead-code cleanup",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/79",
+      "github_state": "OPEN",
+      "github_updated_at": "2026-09-10T15:42:52Z",
+      "body_sha256": "a03496710cf2b207153757980087138393ec4d0db4e2ec935f7a56b5ee00380c",
+      "category": "automation",
+      "native_parent": null,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Operational cleanup policy/run, not a coding-agent product feature. This rewrite does not trigger, publish, or change automation state."
+    },
+    {
+      "number": 83,
+      "title": "[Maintenance repair] Wait for Workspace Queue acknowledgment in App test",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/83",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-09-05T10:37:07Z",
+      "body_sha256": "7b0d44ee0777262e6d0d94682765d67aeeebba956520334dad1b024fae825dae",
+      "category": "maintenance",
+      "native_parent": null,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [
+        "mission-control/src/App.test.tsx"
+      ],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Legacy test-only acknowledgment repair: exact delayed/immediate regression rerun in this audit; no corresponding React port implied."
+    },
+    {
+      "number": 86,
+      "title": "[Maintenance repair] Isolate release-seam Git fixture from core.autocrlf",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/86",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-09-05T11:28:54Z",
+      "body_sha256": "eb0f536980cf6e6dd2cfb21a7e71b72af6cc9836f929520d83b90b826aaeb5c7",
+      "category": "maintenance",
+      "native_parent": null,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [
+        "mission-control/src/alfredo-release-seam.test.tsx"
+      ],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Legacy fixture line-ending repair: exact inherited true/false/input regression rerun; full release journey still has the recorded retirement inspection failure."
+    },
+    {
+      "number": 89,
+      "title": "[Dead-code run] 2026-09-11",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/89",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-09-12T07:38:41Z",
+      "body_sha256": "98b29ce8dab46cd6b8d6e999debb11ff1a0347790bc799f22448d36167005055",
+      "category": "automation",
+      "native_parent": null,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Operational cleanup policy/run, not a coding-agent product feature. This rewrite does not trigger, publish, or change automation state."
+    },
+    {
+      "number": 90,
+      "title": "[Dead-code run] 2026-09-12",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/90",
+      "github_state": "CLOSED",
+      "github_updated_at": "2026-09-12T07:39:26Z",
+      "body_sha256": "68cf5f95ef2e61bbd74c38af0c290e09fe2c48ce17158f95140f5f7599dcbced",
+      "category": "automation",
+      "native_parent": null,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Operational cleanup policy/run, not a coding-agent product feature. This rewrite does not trigger, publish, or change automation state."
+    },
+    {
+      "number": 91,
+      "title": "[Dead-code run] 2026-09-13",
+      "url": "https://github.com/EricleungDK/Alfredo/issues/91",
+      "github_state": "OPEN",
+      "github_updated_at": "2026-09-13T07:12:50Z",
+      "body_sha256": "be2fae0be0175ce0297053e8c44940621766243533b54d9182387f66bff3aa93",
+      "category": "automation",
+      "native_parent": null,
+      "native_children": [],
+      "source_acceptance": [],
+      "legacy_test_entrypoints": [],
+      "rust_test_entrypoints": [],
+      "parity": "not-established",
+      "gap": "Operational cleanup policy/run, not a coding-agent product feature. This rewrite does not trigger, publish, or change automation state."
+    }
+  ],
+  "focused_verification": {
+    "date": "2026-09-13",
+    "issues": [
+      83,
+      86
+    ],
+    "command": "cd mission-control && npm test -- --run src/App.test.tsx src/alfredo-release-seam.test.tsx -t 'workspace queue lists grouped governance items and acknowledges decisions|release tracker preserves LF'",
+    "passed": 5,
+    "not_selected": 143,
+    "duration_seconds": 66.9,
+    "result": "pass",
+    "log": "/tmp/alfredo-issue-regression-maintenance.log",
+    "scope": "Immediate/delayed Queue acknowledgment and inherited core.autocrlf true/false/input; does not run the full release journey."
+  }
+}

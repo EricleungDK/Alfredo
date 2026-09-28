@@ -1,0 +1,95 @@
+{
+  "date": "2026-09-26",
+  "scope": "Native shared inference admission across terminals",
+  "authority": [
+    "Active Rust rewrite goal",
+    "https://github.com/EricleungDK/Alfredo/issues/69"
+  ],
+  "schemas": {
+    "task": 16,
+    "conversation_set": 17,
+    "selection_journal": 1,
+    "scope": 2,
+    "agent_transcript": 1,
+    "inference_admission_ledger": 1
+  },
+  "changes": [
+    "Same-user Alfredo processes share client capacity for a normalized HTTP(S) endpoint origin, independent of mission state and TMPDIR. Pure provider construction and model discovery remain inert.",
+    "Configured capacities 1\u20138 (default2) must match while live tickets exist. FIFO applies within classes; at most three foreground grants precede an already-waiting background request.",
+    "Bounded private ledger and owner locks retain eligibility through waiting and active permits. Dead or cancelled owners cannot replay inference. Missing/changed owner identity or malformed proof refuses new work.",
+    "Cleanup publishes removal before unlinking dead owner files; transaction contention is pending and no global lock spans HTTP or an await.",
+    "Chat/planning explicitly use foreground and actual coding workers background. Structured JSON formatting does not infer role; wire generation settings and deadlines remain unchanged.",
+    "Queued workers recheck cancellation and the exact captured Running task before HTTP without rejecting unrelated task revisions. Provider shutdown is awaited before Finish.",
+    "Transient class/position/active-capacity observations distinguish Preparing, Queued for Alfredo, Waiting for model server and thinking/streaming. Admission/cancellation/terminal outcomes clear queue state; stale attempts cannot revive it.",
+    "MIT project license and third-party notices remain bundled in the native archive."
+  ],
+  "delegation": {
+    "coordinator_and_worker_race": "/root/controller_lifecycle",
+    "provider_regressions_and_independent_review": "/root/controller_tests",
+    "ui_docs_and_installed_fixture": "/root/automatic_launch_ui",
+    "integration_process_fixtures_release": "/root"
+  },
+  "validation": {
+    "coordinator_focused": {
+      "passed": 10,
+      "failed": 0
+    },
+    "initial_native": {
+      "passed": 325,
+      "failed": 0,
+      "ignored": 7
+    },
+    "worker_cancel_red_green": {
+      "red": "Guard disabled: one HTTP request after queued cancellation, expected zero. Test failed as intended.",
+      "green": "Guard restored: exact test passed.",
+      "logs": [
+        "/tmp/alfredo-inference-worker-cancel-red.log",
+        "/tmp/alfredo-inference-worker-cancel-green.log"
+      ]
+    },
+    "native": {
+      "passed": 327,
+      "failed": 0,
+      "ignored": 7
+    },
+    "format": "passed",
+    "strict_clippy": "passed",
+    "debug_shared_terminal": "1 passed in 4.780s",
+    "installed_smoke": "..\n----------------------------------------------------------------------\nRan 2 tests in 16.625s\n\nOK\n.\n----------------------------------------------------------------------\nRan 1 test in 3.342s\n\nOK\nInstalled shared inference acceptance passed: two terminals, queued chat/worker cancellation, owner exit, restart without replay\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+    "source_hashes_verified": 46,
+    "payload_hashes_verified": 6,
+    "documentation": {
+      "grade": "A",
+      "score": 98.2,
+      "existing_traceability_gaps": 3
+    },
+    "logs": [
+      "/tmp/alfredo-inference-native-final.log",
+      "/tmp/alfredo-inference-clippy.log",
+      "/tmp/alfredo-inference-package.log",
+      "/tmp/alfredo-inference-installed.log"
+    ],
+    "specific_evidence": [
+      "Separate OS process clients verify aggregate capacity, class FIFO, bounded foreground priority, live capacity conflicts, cancelled/dead-owner cleanup and no stale-ticket replay.",
+      "Real HTTP fixtures verify independent provider scheduling, exact wire settings, discovery bypass, zero HTTP for cancelled/conflicting requests and post-admission validation.",
+      "Actual worker tests verify Background role, zero HTTP/edits when queued cancellation occurs, and valid continuation when an unrelated task advances the store revision.",
+      "Installed concurrent terminals use separate workspaces/state directories on one endpoint. Queued chat cancellation/retry, actual worker cancellation, killed active owner and restart without inference replay pass.",
+      "Killed-client fixture deliberately keeps its server handler alive while another client proceeds, proving the distinction between client-slot release and upstream computation cancellation.",
+      "Existing installed terminal suite continues to exercise conversation/workspace/mission continuity and governed worker journeys; no browser rerun was required for these native-only changes."
+    ]
+  },
+  "candidate": {
+    "path": "/tmp/alfredo-inference-admission-candidate/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "18a8c128acaa1494cbe04964666599211b56beeb06f2a7537d1692688dceecdb"
+  },
+  "limitations": [
+    "Shared admission covers cooperating same-user clients on the same host using the same normalized origin; no DNS alias merging or coordination of other clients/users/hosts.",
+    "Do not manually replace/delete scheduler directories or ledger.lock while clients run. Advisory file locks do not defend against same-user namespace replacement.",
+    "Releasing a client slot does not prove server-side cancellation, residency, GPU headroom or latency improvement.",
+    "The current queue timing spans preparation/validation through admission, not exclusively registered shared-slot wait.",
+    "Per-endpoint state is bounded but aggregate endpoint namespace retirement remains open.",
+    "Exact model/runtime profiles, token/context headroom, Mission-attributed inference audit, resident affinity and paired live reviewed-quality/latency qualification remain incomplete.",
+    "No new live-model or browser qualification, remote CI, commit, push, publication or production-completion claim."
+  ],
+  "next_slice": ".agent/Tasks/native-inference-qualification.md"
+}

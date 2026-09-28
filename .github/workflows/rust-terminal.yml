@@ -1,0 +1,75 @@
+name: Rust terminal regression
+
+on:
+  pull_request:
+    paths:
+      - 'LICENSE'
+      - 'alfredo-tui/**'
+      - 'mission-control/src-tauri/src/execution.rs'
+      - '.github/workflows/rust-terminal.yml'
+  push:
+    paths:
+      - 'LICENSE'
+      - 'alfredo-tui/**'
+      - 'mission-control/src-tauri/src/execution.rs'
+      - '.github/workflows/rust-terminal.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  terminal:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.96.0 --profile minimal --component rustfmt,clippy
+      - name: Install dependency auditor
+        run: cargo +1.96.0 install cargo-audit --version 0.22.2 --locked
+      - name: Audit locked dependencies
+        working-directory: alfredo-tui
+        run: cargo audit --file Cargo.lock --deny warnings --json > dependency-audit.json
+      - name: Verify audit failure gate
+        run: python3 alfredo-tui/tests/audit_smoke.py
+      - name: Retain dependency audit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: alfredo-terminal-dependency-audit
+          path: alfredo-tui/dependency-audit.json
+          if-no-files-found: warn
+      - name: Install worker sandbox
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap
+      - name: Format, regression and lint checks
+        run: |
+          cargo +1.96.0 fmt --manifest-path alfredo-tui/Cargo.toml -- --check
+          cargo +1.96.0 test --locked --manifest-path alfredo-tui/Cargo.toml
+          cargo +1.96.0 clippy --locked --manifest-path alfredo-tui/Cargo.toml --all-targets -- -D warnings
+      - name: Dependency notice integrity tests
+        run: python3 -m unittest discover -s alfredo-tui/tests -p 'test_*.py'
+      - name: Real terminal acceptance
+        run: |
+          cargo +1.96.0 build --locked --manifest-path alfredo-tui/Cargo.toml
+          python3 alfredo-tui/tests/terminal_smoke.py
+      - name: Release binary smoke
+        run: |
+          cargo +1.96.0 build --release --locked --manifest-path alfredo-tui/Cargo.toml
+          alfredo-tui/target/release/alfredo-tui --help
+          alfredo-tui/target/release/alfredo-tui --version
+          ALFREDO_TUI_BINARY="$PWD/alfredo-tui/target/release/alfredo-tui" python3 alfredo-tui/tests/terminal_smoke.py
+      - name: Package and verify installed candidate
+        env:
+          RUSTUP_TOOLCHAIN: 1.96.0
+        run: |
+          python3 alfredo-tui/scripts/package_release.py --output alfredo-tui/dist
+          python3 alfredo-tui/tests/release_smoke.py alfredo-tui/dist/*.tar.gz
+      - name: Retain verified development candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: alfredo-terminal-linux-x86_64-candidate
+          path: alfredo-tui/dist/*
+          if-no-files-found: error

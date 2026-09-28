@@ -6,6 +6,13 @@ Alfredo is a local-first coding-agent workstation with a prompt-dominant React/T
 
 The repository retains `Albert` and `Mission Control` compatibility names in Python modules and older documentation.
 
+The [native Rust terminal rewrite](alfredo-tui/README.md) is now in development.
+It supports concurrent streaming Ollama conversations, cancellation,
+disconnected-state handling, and a durable Rust task queue with dependencies and
+approval receipts. Explicitly permitted workers now edit isolated Git worktrees,
+run sandboxed checks and retain review evidence; follow the [migration plan](.agent/Tasks/rust-terminal-migration.md)
+for the full product and launch requirements.
+
 ## Install and Start the Workstation
 
 The production release candidate is a small `alfredo-agent` CLI/backend package plus an exact-version `alfredo-agent-linux-x64-gnu` AppImage package. On 2026-07-13 the rebuilt production gate passed a meta-only isolated-registry install, plain-PATH `alfredo` launch, frontend load, and installed-backend workspace snapshot. The artifact gate reports pass/publishable true for the 77,761,016-byte AppImage with SHA-256 `3faec58bc4e4a0b1c825cb58a3ec5475e5daac36bb0c839e0699ae6ddf006be2`; the exact audited tarballs also pass the independent `release:check` and npm publish dry-runs. The packages are still not public: local npm authentication is absent, and the protected hosted provenance/publish/public-reinstall workflow has not run. Do not treat the following registry command as available until ticket 20 records that final gate.
@@ -145,3 +152,9 @@ Controller routing and worker assignment are separate: a controller may classify
 - [Active orchestration context](.agent/Tasks/context.md)
 - [Domain terminology](CONTEXT.md)
 - [Production performance cohort operator guide](mission-control/performance/README.md)
+
+## License
+
+Alfredo’s own code is licensed under the [MIT License](LICENSE). Third-party
+components retain their respective licenses; native candidate archives include
+THIRD_PARTY_NOTICES.txt and DEPENDENCIES.json.

@@ -1,9 +1,22 @@
 # Alfredo / Albert Project Documentation
 
-**Last Updated**: 2026-08-30
+**Last Updated**: 2026-09-27
 **Status**: Prompt-first Alfredo workstation with a persistent Apple-container canonical localhost environment, explicit Coding Workspace/Mission continuity, and receipt-bound conversational action truth; authenticated npm publication, registry-only install, and the documented human/release follow-up remain explicit
 
 ## Quick Start
+
+The active native Rust terminal rewrite is tracked in the
+[migration plan](Tasks/rust-terminal-migration.md) and
+[all-issue regression inventory](Tasks/rust-terminal-regression-inventory.md),
+[selection continuity](Tasks/native-selection-chronology.md),
+[shared inference admission](Tasks/native-inference-admission.md),
+[native inference diagnostics](Tasks/native-inference-qualification.md),
+[Mission Work tree slice](Tasks/native-mission-work-tree.md),
+[check-result recovery](Tasks/native-check-result-recovery.md),
+[proposed Mission Work rendering slice](Tasks/native-mission-work-rendering.md),
+[browser coverage matrix](Tasks/browser-regression-matrix.md), with runnable commands in
+[`alfredo-tui/README.md`](../alfredo-tui/README.md) and current evidence in the
+[terminal foundation report](Reports/2026-09-13-rust-terminal-foundation.md).
 
 1. Read [Project Architecture](System/project_architecture.md) for the current workstation, Orchestrator, and runner boundaries.
 2. Follow [Development Workflow](SOP/development_workflow.md) for local development.
@@ -74,6 +87,8 @@
 - [Database migrations](SOP/database_migrations.md) explains the no-SQL persistence migration policy.
 
 ## Reports
+
+- [Native check-result recovery](Reports/2026-09-27-check-result-recovery.json) records exact checkpoint validation, explicit Failed reconciliation without replay, process-death cuts and narrow-terminal paging regression evidence.
 
 - [Alfredo install and Queue acceptance correction](Reports/2026-07-12-alfredo-install-queue-acceptance-correction.md) is the current release/acceptance report and explicitly supersedes the 2026-07-11 package-completion claim.
 - [Conversational action receipt binding](Reports/2026-08-02-conversational-action-receipts.md) records the Issue #59 implementation, public seams, and verification evidence.

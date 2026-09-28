@@ -1,0 +1,61 @@
+{
+  "date": "2026-09-20",
+  "scope": "Explicit accepted repair dependency resolution",
+  "schemas": {
+    "task": 15,
+    "conversation_set": 6,
+    "scope": 2,
+    "agent_transcript": 1
+  },
+  "behavior": [
+    "Immutable ResolveRepair receipt maps unsuccessful ancestor IDs to selected accepted repair; original outcomes and dependency declarations remain intact.",
+    "Future dependency inputs retain declared task and optional actual source_task; repairs reuse exact parent baseline and input vector.",
+    "Unresolved branches, human holds, absent criterion coverage and invalid retained evidence refuse resolution. Closed families reject new repairs/reviews during transaction and replay.",
+    "Exact retries, stale/conflicting requests, v14 backup and older-schema authority refusal are covered. Git candidates revalidate before dependent execution."
+  ],
+  "delegation": {
+    "integration": "/root/review_agent_continuity",
+    "worker_regressions": "/root/test_repair_resolution",
+    "root": "Store, command/UI, integration, installed acceptance and documentation",
+    "independent_findings_fixed": [
+      "Replay could reopen resolved family",
+      "Failed ancestor could gain human hold after resolution while consumers remained eligible"
+    ]
+  },
+  "validation": {
+    "native": {
+      "passed": 206,
+      "ignored": 6,
+      "failed": 0
+    },
+    "focused_worker": {
+      "passed": 5,
+      "seconds": 1.52
+    },
+    "strict_clippy": "passed",
+    "installed_smoke": "..\n----------------------------------------------------------------------\nRan 2 tests in 7.885s\n\nOK\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+    "source_hashes_verified": 38,
+    "payload_hashes_verified": 6,
+    "documentation": {
+      "grade": "A",
+      "score": 98.2,
+      "existing_traceability_gaps": 3
+    }
+  },
+  "candidate": {
+    "path": "/tmp/alfredo-resolution-candidate/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "baa1353c49735e83f8396495a6e866af38a8830485861045c1c4147f99ea33a5"
+  },
+  "logs": [
+    "/tmp/resolve-full.log",
+    "/tmp/resolve-clippy.log",
+    "/tmp/resolve-worker-tests-final.log",
+    "/tmp/resolve-package.log",
+    "/tmp/resolve-installed.log"
+  ],
+  "limitations": [
+    "Architect failure classification/revision, automatic execution authorization, full formation/chronology, model qualification, recovery/retirement and production launch remain open.",
+    "Resolution transaction validates retained evidence and candidate metadata; Git object verification occurs before dependent execution.",
+    "No remote CI or publication performed."
+  ]
+}

@@ -1,0 +1,83 @@
+{
+  "date": "2026-09-20",
+  "scope": "Five explicit review outcomes with durable human-review hold",
+  "source_issues": [
+    7,
+    39
+  ],
+  "task_schema": 12,
+  "conversation_schema": 6,
+  "scope_schema": 2,
+  "validation": {
+    "native_full": "189 passed, 6 ignored",
+    "strict_clippy": "passed after boolean simplification and fixture initialization correction",
+    "focused_final": "assessment and worker regressions passed",
+    "installed_release": "..\n----------------------------------------------------------------------\nRan 2 tests in 7.780s\n\nOK\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+    "source_hashes_verified": 37,
+    "payload_hashes_verified": 6
+  },
+  "archive": "/tmp/alfredo-review-outcomes-candidate-v2/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+  "sha256": "02068556485c85717ea2a0c5f2279928e38a724af6d2f7fc234cf497ec10c765",
+  "source_files_sha256": {
+    "LICENSE": "928684f6edb0ca1cd716fe3263ffb5942669d7cc2074504338dbdeac2fe8f6ba",
+    "alfredo-tui/Cargo.lock": "102a6056b555d240689bd065ccebac4bb1f5090caa6bae2d8ea292d1c5e2032f",
+    "alfredo-tui/Cargo.toml": "17717c9cedf01ad06f48c79f05f55e4e1fb5855b4b9083a3aca79c571a7511ab",
+    "alfredo-tui/INSTALL.md": "90b1dbd3fdb282957b45625f04794af22242cf7f39c94bb20a2b97da2ea62ad9",
+    "alfredo-tui/scripts/package_release.py": "70c65139a7a1affc2ddd249c8051fc4df127db1ae2c068d6aa60f7d5de16b8f9",
+    "alfredo-tui/scripts/third_party.py": "96cf1c6a40faf7edd07cacc9093281fa172e13f3b473e7748386340ba323b590",
+    "alfredo-tui/src/activity.rs": "d3b3a5520629155755545ce713d3c3feff146afd96daad167dc7f66dafdd888c",
+    "alfredo-tui/src/assessment.rs": "f7b1a840b5f0b99108f73cfba176b95e8106d37bf67daffbda3108b266349eeb",
+    "alfredo-tui/src/assignment.rs": "59821859f97ae7f1d9b791c3a7a1a7b34ca15e0f11ecb4a135a3b3392f0825f4",
+    "alfredo-tui/src/branch.rs": "2c78c6410631de2c8b3912f9e4b940d4f588c79a9f3d0e5f7f38346bcbdfb027",
+    "alfredo-tui/src/client_timing.rs": "39f02f30e7bec496b1c1660471e7adfb10c5b66b633330cd39c305571d2572a9",
+    "alfredo-tui/src/commands.rs": "380c4e16a09b926f4c988e0fc31b6ae8b97fcc4193b1dd68b191b17f6c15a160",
+    "alfredo-tui/src/conversations.rs": "f596e93114fa5b9e5d5bc635e5d01fe9e45768e8e1f47a27396b3f487a7e13c9",
+    "alfredo-tui/src/dependencies.rs": "b65265f6f952f452cd8dc6bba90b42a10a53b8a64d90917e46bcf1c1ef50ed24",
+    "alfredo-tui/src/dispatch.rs": "2bea85b1f36cd806b7aad5979ba73aeb6854cd16f239894b8f18ba9c1961d79f",
+    "alfredo-tui/src/doctor.rs": "f13642cc9da2cc7f3819784a523140f3e779b94d92659f5e9f671ee48015c49b",
+    "alfredo-tui/src/lib.rs": "07e301f99ec1273b57d39d589b4ca89bbc8e4ac99e4dc1dc91f412df780b8805",
+    "alfredo-tui/src/main.rs": "2eae6195cde2284259acc7682f8467c291309ddc5a6d268acf2bd0f7e1c217e0",
+    "alfredo-tui/src/metrics.rs": "3d05066c102308ef60d035ea1ffd13a45d7baae9704026682d57020a03ea79df",
+    "alfredo-tui/src/missions.rs": "5e21557fea4bccc3d54d70407090b094240870b38555a87b8920f5df2f79ce3b",
+    "alfredo-tui/src/model.rs": "29de871d7f3f0ab9933339462e288796e08cde6342064413497b125a48124c32",
+    "alfredo-tui/src/planner.rs": "4d368b189b9dd599480e28e3136902704439171007bccc560efd7118a781e9a7",
+    "alfredo-tui/src/planning_context.rs": "5d3b5f03a95f2517a325a2fca03c0204d2fa5548939761a17c343549df774c0a",
+    "alfredo-tui/src/provider.rs": "d085a7d73839ca2147da7edcb2e9b25e4e4570973eec7f4343d8f1c55f1a697c",
+    "alfredo-tui/src/reading.rs": "a766581ec60aa980615d49a8aea7c86ef512d084e50be786d54bbe28e8c2613d",
+    "alfredo-tui/src/review.rs": "d0e1877a93cfdd051aeb8d0a58b693cc3ff1f65e9808251d23076992bdbb9f2c",
+    "alfredo-tui/src/run_boundary.rs": "ce531670c720b931ffec2a940cfd6b58cc797ae61a736284ea220fe6ae162930",
+    "alfredo-tui/src/selection.rs": "6b26918aea9b98ffdc8e91ca62e50dac29d2e0ab793ab18b23d3c77db549c584",
+    "alfredo-tui/src/task_control.rs": "7646a2ef074d54dcef42e8f9c9a0fff93788a0c722a2c8cf55785d25e8dcf06f",
+    "alfredo-tui/src/task_view.rs": "98e02dff41bc77b125812afb7d087926bcdb7e532d9507216c9f5cac0cdbbb01",
+    "alfredo-tui/src/tasks.rs": "264d9df256e0107253adcc424a9db0efdbc7af2ed8524cc0fdabbed45cfe2537",
+    "alfredo-tui/src/ui.rs": "44b8ea3ec52190e2cc41a35f296df429ec75246dac0c069c87fb2b89836b4673",
+    "alfredo-tui/src/understanding.rs": "b39259765b8b38936a2f1e82d592baf664429e814d9c6ae0ca527a17c7089212",
+    "alfredo-tui/src/wayfinder.rs": "24817eb060c4034f689c6601bf99752dbcf2efe45eb2c11ff5bcfc943934f851",
+    "alfredo-tui/src/worker.rs": "1734e4ba21352e725e92c8521448f766a3ddc630d6c3bb4d0c68a0276126d109",
+    "alfredo-tui/src/workstation.rs": "3b5da564ea01b9fe8a34da4c86fdcd24818f3a8aef78b131523dffa52e9fe42e",
+    "mission-control/src-tauri/src/execution.rs": "931d81de093da56c1ae8ebb4220560d940006b98ccf40566594feb5133f857d9"
+  },
+  "behavior": [
+    "Approved, Approved with limitations, Needs repair, Needs human review and Rejected are explicit persisted outcomes.",
+    "Both approvals require all criteria met and original successful completion; limitations cannot waive criteria.",
+    "Human review holds dependent dispatch, direct approval/run and repair until an explicit resolving review.",
+    "Failed work cannot acquire approval by entering a hold.",
+    "Exact v11 backup, replay, downgrade/tamper/conflict refusal verified with real isolated workers.",
+    "Resolving a hold replaces open review notes while preserving contract and dependency metadata.",
+    "MIT project license and third-party notices included."
+  ],
+  "logs": [
+    "/tmp/outcomes-full-tests.log",
+    "/tmp/outcomes-focused-final.log",
+    "/tmp/outcomes-clippy-final.log",
+    "/tmp/outcomes-package-final.log",
+    "/tmp/outcomes-installed-final.log"
+  ],
+  "remaining": [
+    "Automatic tiered repair and architect escalation.",
+    "Full Mission Draft/Issue Graph formation and unified attributed chronology.",
+    "Post-launch uncertain-worker reconciliation and retirement/storage.",
+    "Broad model/platform qualification, remote CI and human launch acceptance.",
+    "No publication performed."
+  ]
+}

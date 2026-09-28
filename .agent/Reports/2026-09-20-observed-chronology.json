@@ -1,0 +1,50 @@
+{
+  "date": "2026-09-20",
+  "scope": "Native canonical task receipt observation chronology",
+  "schemas": {
+    "task": 16,
+    "conversation_set": 8,
+    "scope": 2,
+    "agent_transcript": 1
+  },
+  "changes": [
+    "TaskControl observes new canonical receipts in revision order; initial history stays Activity.",
+    "Session stores bounded receipt references at complete turn boundaries separately from inference messages.",
+    "Renderer verifies exact revision/task/correlation and displays phase, with risk-first human review. Unavailable references stay explicitly unverified.",
+    "Schema8 migration preserves exact previous bytes; malformed/old-version references refuse.",
+    "Active selected turns defer observation display; retry growth shifts later receipt reading anchors."
+  ],
+  "delegation": {
+    "ui_and_layout": "/root/console_chronology",
+    "persistence_and_regressions": "/root/test_repair_resolution",
+    "canonical_cursor_and_independent_review": "/root/review_agent_continuity",
+    "integration": "/root"
+  },
+  "validation": {
+    "native": {
+      "passed": 229,
+      "failed": 0,
+      "ignored": 7
+    },
+    "strict_clippy": "passed after equivalent is_multiple_of style correction",
+    "installed_smoke": "..\n----------------------------------------------------------------------\nRan 2 tests in 9.105s\n\nOK\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+    "source_hashes_verified": 39,
+    "payload_hashes_verified": 6,
+    "documentation": {
+      "grade": "A",
+      "score": 98.2,
+      "existing_traceability_gaps": 3
+    }
+  },
+  "candidate": {
+    "path": "/tmp/alfredo-observed-chronology-candidate/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "2c113a3604ac281257b149514110b802ff2544c530ceb45b989ca5b760865344"
+  },
+  "limitations": [
+    "Observation positions are not originating command causality or actor/time attribution.",
+    "Initial receipt history and actions unobserved before interruption remain available in Activity without invented chat positions.",
+    "Display waits for selected active turn to finish; background work remains visible in the work header.",
+    "Full Workspace/Mission/planner causal chronology, mission formation, qualification, recovery/retirement and launch gates remain open.",
+    "No remote CI, publication or human visual/accessibility acceptance claimed."
+  ]
+}

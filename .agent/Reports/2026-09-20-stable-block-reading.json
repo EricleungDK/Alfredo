@@ -1,0 +1,56 @@
+{
+  "date": "2026-09-20",
+  "scope": "Stable native transcript reading blocks, prerequisite to causal command chronology",
+  "schemas": {
+    "task": 16,
+    "conversation_set": 9,
+    "scope": 2,
+    "agent_transcript": 1
+  },
+  "changes": [
+    "Persist typed message/receipt block identity with block-local line and wrapped row.",
+    "Resolve block before navigation and capture updated anchor after rendering; legacy numeric anchors upgrade on render.",
+    "Remove ad hoc streaming line insertion adjustment.",
+    "Validate owning block and schema9 metadata; preserve exact v8 backup.",
+    "Record full durable-before-dispatch command lifecycle and adapters in native-command-chronology.md."
+  ],
+  "evidence": [
+    "Actual UI comparison proves numeric-only anchor moves after receipt insertion while stable key preserves viewed message.",
+    "Retry output grows by newlines and same-line wrapping above read receipts without displacing them; narrower rendering preserves receipt identity.",
+    "Save/restart after hidden streaming growth retains receipt block identity and never replays inference.",
+    "Installed PTY asserts schema9 saved message key and existing stream/view/restart journey."
+  ],
+  "delegation": {
+    "reading_and_ui": "/root/console_chronology",
+    "schema_and_regressions": "/root/test_repair_resolution",
+    "command_lifecycle_plan_and_review": "/root/review_agent_continuity",
+    "model_and_release_integration": "/root"
+  },
+  "validation": {
+    "focused": 39,
+    "native": {
+      "passed": 232,
+      "failed": 0,
+      "ignored": 7
+    },
+    "strict_clippy": "passed",
+    "installed_smoke": "..\n----------------------------------------------------------------------\nRan 2 tests in 9.568s\n\nOK\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+    "source_hashes_verified": 39,
+    "payload_hashes_verified": 6,
+    "documentation": {
+      "grade": "A",
+      "score": 98.2,
+      "existing_traceability_gaps": 3
+    }
+  },
+  "candidate": {
+    "path": "/tmp/alfredo-stable-block-reading-candidate/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "047ed873aeebc531d5769773a2f042154d1f14473810387f89e3dc16ca311cc7"
+  },
+  "limitations": [
+    "Preserves block/line/wrapped-row identity; exact character-position reflow remains open.",
+    "Command lifecycle plan is not implemented: intent-before-dispatch, all typed adapters and causal outcomes still required.",
+    "Full formation, model qualification, recovery/retirement, platform matrix and production launch remain open.",
+    "No remote CI, publication or human acceptance claimed."
+  ]
+}

@@ -1,0 +1,417 @@
+{
+  "candidate": "/tmp/alfredo-thinking-candidate/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+  "change": "Schema-constrained requests default to think=false; --structured-thinking auto|on|off overrides. Plain chat requests omit think.",
+  "date": "2026-09-14",
+  "direct_default_log": "    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.34s\n     Running tests/worker.rs (alfredo-tui/target/debug/deps/worker-21de274c09067944)\n\nrunning 1 test\nLIVE_WORKER_CAPACITY 2\nLIVE_WORKER_SAMPLE {\"candidate_commit\":\"aec7bbe504cd4b0ced0cc7da6d1017097d97d366\",\"case\":\"merge_intervals\",\"detail\":\"Approved check passed; changes await human review\",\"elapsed_seconds\":4.269655569,\"first_content_seconds\":0.31356082,\"model\":\"qwen3:14b\",\"model_metrics\":{\"eval_count\":167,\"eval_duration\":3795914000,\"load_duration\":1746254,\"prompt_eval_count\":457,\"prompt_eval_duration\":306477000,\"total_duration\":4109070119},\"status\":\"review-ready\"}\nLIVE_WORKER_SAMPLE {\"candidate_commit\":\"32e62f129d5adeeeecacaae48f1b9b89dd988801\",\"case\":\"strict_port\",\"detail\":\"Approved check passed; changes await human review\",\"elapsed_seconds\":6.75341755,\"first_content_seconds\":4.215495162,\"model\":\"qwen3:14b\",\"model_metrics\":{\"eval_count\":100,\"eval_duration\":2255260000,\"load_duration\":1903700,\"prompt_eval_count\":436,\"prompt_eval_duration\":24141000,\"total_duration\":6468728044},\"status\":\"review-ready\"}\ntest live_parallel_workers_pass_independent_edge_case_checks ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 19 filtered out; finished in 6.99s\n\n",
+  "direct_default_samples": [
+    {
+      "candidate_commit": "aec7bbe504cd4b0ced0cc7da6d1017097d97d366",
+      "case": "merge_intervals",
+      "detail": "Approved check passed; changes await human review",
+      "elapsed_seconds": 4.269655569,
+      "first_content_seconds": 0.31356082,
+      "model": "qwen3:14b",
+      "model_metrics": {
+        "eval_count": 167,
+        "eval_duration": 3795914000,
+        "load_duration": 1746254,
+        "prompt_eval_count": 457,
+        "prompt_eval_duration": 306477000,
+        "total_duration": 4109070119
+      },
+      "status": "review-ready"
+    },
+    {
+      "candidate_commit": "32e62f129d5adeeeecacaae48f1b9b89dd988801",
+      "case": "strict_port",
+      "detail": "Approved check passed; changes await human review",
+      "elapsed_seconds": 6.75341755,
+      "first_content_seconds": 4.215495162,
+      "model": "qwen3:14b",
+      "model_metrics": {
+        "eval_count": 100,
+        "eval_duration": 2255260000,
+        "load_duration": 1903700,
+        "prompt_eval_count": 436,
+        "prompt_eval_duration": 24141000,
+        "total_duration": 6468728044
+      },
+      "status": "review-ready"
+    }
+  ],
+  "installed_acceptance": "..\n----------------------------------------------------------------------\nRan 2 tests in 7.549s\n\nOK\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+  "limits": "Synthetic edge-case tasks only; broader model/role quality and sustained performance qualification remain open. Default admission and deadlines unchanged.",
+  "model": "qwen3:14b",
+  "relay_think_false": [
+    {
+      "content_bytes": 351,
+      "done_frames": 1,
+      "eof": true,
+      "format": {
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "content": {
+                  "type": "string"
+                },
+                "path": {
+                  "enum": [
+                    "calc.py"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "content"
+              ],
+              "type": "object"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "files"
+        ],
+        "type": "object"
+      },
+      "frames": 99,
+      "model": "qwen3:14b",
+      "options": {
+        "num_predict": 4096,
+        "temperature": 0
+      },
+      "request_bytes": 2029,
+      "request_sha256": "064bc6ffeb8090d4dcd6d67760b29e2cf3614c4e86ea515d4be9dd45eb4ffc78",
+      "seconds": 2.806085234999955,
+      "status": 200,
+      "tail": [
+        {
+          "content_bytes": 4,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 0
+        },
+        {
+          "content_bytes": 3,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 0
+        },
+        {
+          "content_bytes": 2,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 0
+        },
+        {
+          "content_bytes": 2,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 0
+        },
+        {
+          "content_bytes": 0,
+          "done": true,
+          "done_reason": "stop",
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "done_reason",
+            "eval_count",
+            "eval_duration",
+            "load_duration",
+            "message",
+            "model",
+            "prompt_eval_cached_count",
+            "prompt_eval_count",
+            "prompt_eval_duration",
+            "total_duration"
+          ],
+          "thinking_bytes": 0
+        }
+      ],
+      "think": false,
+      "thinking_bytes": 0
+    },
+    {
+      "content_bytes": 691,
+      "done_frames": 1,
+      "eof": true,
+      "format": {
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "content": {
+                  "type": "string"
+                },
+                "path": {
+                  "enum": [
+                    "calc.py"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "content"
+              ],
+              "type": "object"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "files"
+        ],
+        "type": "object"
+      },
+      "frames": 179,
+      "model": "qwen3:14b",
+      "options": {
+        "num_predict": 4096,
+        "temperature": 0
+      },
+      "request_bytes": 2317,
+      "request_sha256": "ffa7e870bf429be5bb1faf65e4d118cc7e3f83e1bf45ef5a6691ea67fae55883",
+      "seconds": 4.2880211810006585,
+      "status": 200,
+      "tail": [
+        {
+          "content_bytes": 4,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 0
+        },
+        {
+          "content_bytes": 3,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 0
+        },
+        {
+          "content_bytes": 2,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 0
+        },
+        {
+          "content_bytes": 2,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 0
+        },
+        {
+          "content_bytes": 0,
+          "done": true,
+          "done_reason": "stop",
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "done_reason",
+            "eval_count",
+            "eval_duration",
+            "load_duration",
+            "message",
+            "model",
+            "prompt_eval_cached_count",
+            "prompt_eval_count",
+            "prompt_eval_duration",
+            "total_duration"
+          ],
+          "thinking_bytes": 0
+        }
+      ],
+      "think": false,
+      "thinking_bytes": 0
+    }
+  ],
+  "server": "Ollama 0.34.0",
+  "sha256": "06ab0ecef3298b9ae7bec82608b29102f80c2fd3c018337d7dbc7431a93cbe87",
+  "upstream_baseline": [
+    {
+      "content_bytes": 0,
+      "done_frames": 0,
+      "eof": true,
+      "format": {
+        "additionalProperties": false,
+        "properties": {
+          "files": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "content": {
+                  "type": "string"
+                },
+                "path": {
+                  "enum": [
+                    "calc.py"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "path",
+                "content"
+              ],
+              "type": "object"
+            },
+            "maxItems": 32,
+            "minItems": 1,
+            "type": "array"
+          }
+        },
+        "required": [
+          "files"
+        ],
+        "type": "object"
+      },
+      "frames": 1948,
+      "model": "qwen3:14b",
+      "options": {
+        "num_predict": 4096,
+        "temperature": 0
+      },
+      "request_bytes": 1954,
+      "request_sha256": "8e989bbef9721d94867b1b1da4f53a347522cbaed99f961f61ad8275e6c0706e",
+      "seconds": 55.239768906999416,
+      "status": 200,
+      "tail": [
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        },
+        {
+          "content_bytes": 0,
+          "done": false,
+          "done_reason": null,
+          "error": null,
+          "keys": [
+            "created_at",
+            "done",
+            "message",
+            "model"
+          ],
+          "thinking_bytes": 1
+        }
+      ],
+      "thinking_bytes": 7144
+    }
+  ]
+}

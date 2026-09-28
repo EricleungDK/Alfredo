@@ -404,7 +404,7 @@ impl ExecutionRequest {
                 })
                 || value.contains('\0')
                 || !ALLOWED_ENVIRONMENT_KEYS.contains(&key.as_str())
-                || value.as_bytes().len() > MAX_ENVIRONMENT_VALUE_BYTES
+                || value.len() > MAX_ENVIRONMENT_VALUE_BYTES
             {
                 return Err(StructuredFailure::new(
                     "contract-failure",
@@ -412,8 +412,8 @@ impl ExecutionRequest {
                 ));
             }
             environment_bytes = environment_bytes
-                .saturating_add(key.as_bytes().len())
-                .saturating_add(value.as_bytes().len());
+                .saturating_add(key.len())
+                .saturating_add(value.len());
             if environment_bytes > MAX_ENVIRONMENT_TOTAL_BYTES {
                 return Err(StructuredFailure::new(
                     "contract-failure",
@@ -423,7 +423,7 @@ impl ExecutionRequest {
         }
         let input_digest = sha256_text(self.input_text.as_deref().unwrap_or(""));
         if let Some(input) = &self.input_text {
-            if input.contains('\0') || input.as_bytes().len() > MAX_INPUT_BYTES {
+            if input.contains('\0') || input.len() > MAX_INPUT_BYTES {
                 return Err(StructuredFailure::new(
                     "contract-failure",
                     "execution input is invalid or exceeds the bounded size",
@@ -555,8 +555,8 @@ impl ExecutionReceipt {
                 "execution receipt output is invalid",
             ));
         }
-        if self.stdout_bytes != self.stdout.as_bytes().len()
-            || self.stderr_bytes != self.stderr.as_bytes().len()
+        if self.stdout_bytes != self.stdout.len()
+            || self.stderr_bytes != self.stderr.len()
             || self.stdout_sha256 != sha256_text(&self.stdout)
             || self.stderr_sha256 != sha256_text(&self.stderr)
         {
@@ -570,6 +570,8 @@ impl ExecutionReceipt {
         Ok(())
     }
 
+    // Keep the existing normalized receipt constructor aligned with its wire fields.
+    #[allow(clippy::too_many_arguments)]
     fn make(
         request: &ExecutionRequest,
         status: &str,
@@ -614,8 +616,8 @@ impl ExecutionReceipt {
             started_at,
             ended_at,
             exit_code,
-            stdout_bytes: stdout.as_bytes().len(),
-            stderr_bytes: stderr.as_bytes().len(),
+            stdout_bytes: stdout.len(),
+            stderr_bytes: stderr.len(),
             stdout_sha256: sha256_text(&stdout),
             stderr_sha256: sha256_text(&stderr),
             stdout,
@@ -677,7 +679,16 @@ pub enum ControlSignal {
     Cancelled(String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OutputStream {
+    Stdout,
+    Stderr,
+}
+type OutputObserver<'a> = &'a mut dyn FnMut(OutputStream, &[u8]);
+
 pub struct ExecutionCallbacks<'a> {
+    /// Best-effort bounded live output. Callbacks must return promptly; receipts remain authoritative.
+    pub output: Option<OutputObserver<'a>>,
     pub process_started: Option<&'a mut dyn FnMut(ProcessBinding) -> Result<(), ControlSignal>>,
     pub poll: Option<&'a mut dyn FnMut() -> Result<(), ControlSignal>>,
 }
@@ -685,6 +696,7 @@ pub struct ExecutionCallbacks<'a> {
 impl<'a> ExecutionCallbacks<'a> {
     pub fn none() -> Self {
         Self {
+            output: None,
             process_started: None,
             poll: None,
         }
@@ -924,6 +936,8 @@ impl ProcessLauncher for SystemProcessLauncher {
                 });
             }
         }
+        let (output_sender, output_receiver) = std::sync::mpsc::sync_channel(32);
+        let live_output = callbacks.output.is_some().then_some(output_sender);
         let total_output = Arc::new(AtomicUsize::new(0));
         let output_limited = Arc::new(AtomicBool::new(false));
         let stdout = spawn_capture(
@@ -942,6 +956,9 @@ impl ProcessLauncher for SystemProcessLauncher {
                 .saturating_sub(OUTPUT_MESSAGE_RESERVE),
             total_output.clone(),
             output_limited.clone(),
+            live_output
+                .clone()
+                .map(|sender| (OutputStream::Stdout, sender)),
         );
         let stderr = spawn_capture(
             child.stderr.take().ok_or_else(|| LaunchError {
@@ -959,6 +976,7 @@ impl ProcessLauncher for SystemProcessLauncher {
                 .saturating_sub(OUTPUT_MESSAGE_RESERVE),
             total_output,
             output_limited.clone(),
+            live_output.map(|sender| (OutputStream::Stderr, sender)),
         );
         let input_thread = child.stdin.take().map(|mut stdin| {
             let input = request.input_text.clone();
@@ -980,6 +998,7 @@ impl ProcessLauncher for SystemProcessLauncher {
         let mut exit_code = None;
         let mut leader_exited_at = None;
         loop {
+            deliver_output(callbacks, &output_receiver);
             if let Some(callback) = callbacks.poll.as_mut() {
                 if let Err(ControlSignal::Cancelled(message)) = callback() {
                     if let Err(error) = terminate_child(
@@ -1113,6 +1132,7 @@ impl ProcessLauncher for SystemProcessLauncher {
             process_pid: Some(pid),
             process_identity: identity.clone(),
         })?;
+        deliver_output(callbacks, &output_receiver);
         if let Some(input_thread) = input_thread {
             match input_thread.join() {
                 Ok(Ok(())) => {}
@@ -1196,11 +1216,28 @@ fn append_bounded_diagnostic(output: &mut Vec<u8>, diagnostic: &str, budget: usi
     }
 }
 
+type LiveOutput = (OutputStream, Vec<u8>);
+fn deliver_output(
+    callbacks: &mut ExecutionCallbacks<'_>,
+    receiver: &std::sync::mpsc::Receiver<LiveOutput>,
+) {
+    // Bound one drain so continuous output cannot starve cancellation/deadlines.
+    for _ in 0..32 {
+        let Ok((stream, bytes)) = receiver.try_recv() else {
+            break;
+        };
+        if let Some(callback) = callbacks.output.as_mut() {
+            callback(stream, &bytes);
+        }
+    }
+}
+
 fn spawn_capture<R: Read + Send + 'static>(
     mut reader: R,
     limit: usize,
     total: Arc<AtomicUsize>,
     output_limited: Arc<AtomicBool>,
+    live: Option<(OutputStream, std::sync::mpsc::SyncSender<LiveOutput>)>,
 ) -> thread::JoinHandle<io::Result<Vec<u8>>> {
     thread::spawn(move || -> io::Result<Vec<u8>> {
         let mut output = Vec::new();
@@ -1212,7 +1249,13 @@ fn spawn_capture<R: Read + Send + 'static>(
             }
             let prior = total.fetch_add(count, Ordering::Relaxed);
             let allowed = limit.saturating_sub(prior);
-            output.extend_from_slice(&buffer[..count.min(allowed)]);
+            let bytes = &buffer[..count.min(allowed)];
+            output.extend_from_slice(bytes);
+            if let Some((stream, sender)) = &live {
+                if !bytes.is_empty() {
+                    let _ = sender.try_send((*stream, bytes.to_vec()));
+                }
+            }
             if prior.saturating_add(count) > limit {
                 output_limited.store(true, Ordering::Relaxed);
                 break;
@@ -1289,16 +1332,15 @@ fn terminate_child(
 
     let deadline = Instant::now() + Duration::from_secs_f64(grace_seconds.min(60.0));
     while Instant::now() < deadline {
+        // On Unix, keep an unreaped leader's PID identity available until the
+        // existing identity check and group signal below have completed. Reaping
+        // here can remove that identity while SIGTERM-ignoring members survive.
+        #[cfg(not(unix))]
         if child
             .try_wait()
             .map_err(|error| format!("cleanup wait failed: {error}"))?
             .is_some()
         {
-            #[cfg(unix)]
-            if process_group_is_live(pid) {
-                thread::sleep(Duration::from_millis(10));
-                continue;
-            }
             return Ok(());
         }
         #[cfg(unix)]
@@ -1379,7 +1421,7 @@ fn process_exit_code(status: std::process::ExitStatus) -> Option<i32> {
         if let Some(code) = status.code() {
             return Some(code);
         }
-        return status.signal().map(|signal| -signal);
+        status.signal().map(|signal| -signal)
     }
     #[cfg(not(unix))]
     {
@@ -1733,7 +1775,8 @@ fn validate_prepared_argv(request: &ExecutionRequest) -> Result<(), StructuredFa
     while index < prefix.len() {
         let argument = prefix[index].as_str();
         match argument {
-            "--die-with-parent" | "--new-session" | "--unshare-user" | "--unshare-pid" => {
+            "--die-with-parent" | "--new-session" | "--unshare-user" | "--unshare-pid"
+            | "--unshare-net" => {
                 *flags.entry(argument).or_default() += 1;
                 index += 1;
             }
@@ -1902,18 +1945,19 @@ fn validate_prepared_argv(request: &ExecutionRequest) -> Result<(), StructuredFa
                     expected_source == source && expected_destination == destination
                 },
             );
-        if !system_mount && !declared_mount {
-            if !is_allowed_implicit_binding(
+        if !system_mount
+            && !declared_mount
+            && !is_allowed_implicit_binding(
                 source,
                 destination,
                 implicit_executable.as_deref(),
                 implicit_script.as_deref(),
-            ) {
-                return Err(StructuredFailure::new(
-                    "contract-failure",
-                    "execution Bubblewrap contains an undeclared readonly mount",
-                ));
-            }
+            )
+        {
+            return Err(StructuredFailure::new(
+                "contract-failure",
+                "execution Bubblewrap contains an undeclared readonly mount",
+            ));
         }
     }
     for directory in directories {
@@ -1989,7 +2033,7 @@ fn canonical_json(value: &Value) -> String {
         ),
         Value::Object(values) => {
             let mut entries: Vec<_> = values.iter().collect();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(left, _)| *left);
             format!(
                 "{{{}}}",
                 entries
@@ -2398,6 +2442,29 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn unread_live_output_never_blocks_capture_or_changes_receipt_bytes() {
+        let bytes = vec![b'x'; 65536];
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let total = Arc::new(AtomicUsize::new(0));
+        let limited = Arc::new(AtomicBool::new(false));
+        let capture = spawn_capture(
+            std::io::Cursor::new(bytes.clone()),
+            8192,
+            total,
+            limited.clone(),
+            Some((OutputStream::Stdout, sender)),
+        );
+        let actual = join_capture(capture, "fixture")
+            .expect("Unread advisory channel must not block capture");
+        assert_eq!(actual, bytes[..8192]);
+        assert!(limited.load(Ordering::Relaxed));
+        let (stream, observed) = receiver.try_recv().unwrap();
+        assert_eq!(stream, OutputStream::Stdout);
+        assert!(observed.len() <= 4096);
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
     fn system_launcher_closes_stdin_and_captures_completed_output() {
         if trusted_bwrap_path().is_none() {
             return;
@@ -2499,16 +2566,93 @@ mod tests {
             Err(ControlSignal::Cancelled("test cancellation".to_owned()))
         };
         let mut callbacks = ExecutionCallbacks {
+            output: None,
             process_started: Some(&mut process_started),
             poll: None,
         };
         let receipt = RustExecutionProvider::new()
             .execute_with_callbacks(&request, &mut callbacks)
             .expect("cancellation should be a typed receipt");
-        assert_eq!(receipt.status, "cancelled");
+        assert_eq!(receipt.status, "cancelled", "{receipt:?}");
         assert!(receipt.effect_started);
         assert!(!receipt.reconciliation_required);
         fs::remove_dir_all(root).expect("cancel fixture should be removable");
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn forced_cleanup_reaps_leader_without_losing_surviving_group_members() {
+        use std::os::unix::process::CommandExt;
+        let mut leader = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = leader.id();
+        let identity = process_identity(pid);
+        let mut member = Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM; printf r; exec sleep 30"])
+            .process_group(pid as i32)
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = [0];
+        member
+            .stdout
+            .take()
+            .unwrap()
+            .read_exact(&mut ready)
+            .unwrap();
+        assert_eq!(ready, [b'r']);
+        // Reap our own group member as soon as cleanup kills it. On a regression,
+        // this guard also stops it rather than leaving the test's process alive.
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stopping = stop.clone();
+        let reaper = thread::spawn(move || loop {
+            if let Some(status) = member.try_wait().unwrap() {
+                return (status, false);
+            }
+            if stopping.load(Ordering::SeqCst) {
+                member.kill().unwrap();
+                return (member.wait().unwrap(), true);
+            }
+            thread::sleep(Duration::from_millis(1));
+        });
+        let result = terminate_child(&mut leader, pid, &identity, 0.03);
+        stop.store(true, Ordering::SeqCst);
+        let (member_status, needed_test_cleanup) = reaper.join().unwrap();
+        let _ = leader.kill();
+        let _ = leader.wait();
+        assert!(result.is_ok(), "{result:?}");
+        assert!(
+            !needed_test_cleanup,
+            "Provider returned before stopping the group member"
+        );
+        assert!(!member_status.success());
+        assert!(!process_group_is_live(pid));
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[test]
+    fn cleanup_rejects_changed_identity_without_signalling_live_child() {
+        use std::os::unix::process::CommandExt;
+        let mut child = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let identity = process_identity(pid);
+        let refused = terminate_child(&mut child, pid, &format!("{identity}-wrong"), 0.03);
+        let still_alive = child.try_wait().unwrap().is_none();
+        let cleanup = terminate_child(&mut child, pid, &identity, 0.03);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(refused
+            .unwrap_err()
+            .contains("identity could not be verified"));
+        assert!(still_alive);
+        assert!(cleanup.is_ok(), "{cleanup:?}");
     }
 
     #[cfg(unix)]

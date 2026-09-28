@@ -1,0 +1,103 @@
+{
+  "date": "2026-09-27",
+  "status": "verified bounded slice; local human preview shipped",
+  "scope": "Durable native check-result checkpoint, conservative explicit interrupted-worker recovery, and narrow task/evidence paging",
+  "plan": ".agent/Tasks/native-check-result-recovery.md",
+  "delegation": {
+    "artifact_contract": "/root/check_checkpoint",
+    "worker_recovery_paging_and_publication_cuts": "/root/check_integration",
+    "crash_regressions_and_independent_review": "/root/check_crash_tests",
+    "installed_acceptance_packaging_and_integration": "/root"
+  },
+  "changes": [
+    "Before effects, save schema-2 check-launch intent binding immutable contract version1, exact request/digest, approved task/run/Mission/baseline and managed sandbox paths.",
+    "Inside the blocking check call, validate and synchronize schema-1 check-result with exact intent-byte SHA-256 and actual receipt before returning to async worker finalization.",
+    "Validate supported provider outcome combinations, receipt identity, timestamps, process metadata, output bounds and hashes; normal outcome-unknown diagnostics remain ineligible for interrupted-run recovery.",
+    "After owner release, explicit /recover prefers intact final evidence. With absent final evidence and verified terminal result, record Failed interruption with retained receipt/output and no inferred patch or candidate; deterministic Finish prevents replay.",
+    "Legacy unbound intents, partial/malformed artifacts, wrong identities and damaged existing evidence remain unchanged and ineligible.",
+    "Task/evidence PageUp and PageDown now use rendered inner viewport height with overlap, preventing narrow-terminal skipped details."
+  ],
+  "schemas": {
+    "task": 16,
+    "conversation_set": 17,
+    "execution_boundary": 1,
+    "new_check_launch_intent": 2,
+    "check_contract": 1,
+    "check_result": 1,
+    "migration": "none; legacy intent schema1 remains ineligible for post-check reconstruction"
+  },
+  "validation": {
+    "full_native": {
+      "passed": 396,
+      "failed": 0,
+      "ignored": 8,
+      "log": "/tmp/alfredo-check-recovery-full.log",
+      "scope": "Before the final test-only publication-cut fixture and test-closure lint correction; no subsequent production logic change. Counts overlap focused gates."
+    },
+    "final_artifact_and_publication_tests": {
+      "passed": 8,
+      "failed": 0,
+      "ignored": 1,
+      "log": "/tmp/alfredo-check-recovery-publication-cuts.log",
+      "scope": "Seven artifact tests plus one real subprocess test covering two writer cuts. Ignored child fixture is explicitly invoked by its parent test."
+    },
+    "crash_and_worker": {
+      "crash_passed": 8,
+      "worker_passed": 46,
+      "ignored": 4,
+      "log": "/tmp/alfredo-check-recovery-crashes.log",
+      "scope": "Real before-launch/during-check/after-checkpoint/after-evidence process-death cuts, concurrent recovery, refusal/publication failure, actual normal worker checkpoint/evidence binding. Final marker accumulation also passed full native run."
+    },
+    "debug_pty": {
+      "passed": 2,
+      "log": "/tmp/alfredo-check-recovery-debug-pty.log"
+    },
+    "narrow_paging_red": {
+      "log": "/tmp/alfredo-narrow-page-red.log",
+      "result": "Real32x10 PageDown skipped Model detail on the previously shipped preview."
+    },
+    "publication_crash_evidence": "Test-only thread-local hooks in the real writer park after actual provider return immediately before result create_new or immediately after successful creation/before any write. Parent SIGKILL/wait then reopens store, proves one check and exact bytes retained with no Finish. Hooks are compiled out of production.",
+    "installed_recovery_scope": "Constructed missing-finalization state from genuine installed worker checkpoint and captured Running snapshot; explicitly not a timed crash of the installed worker. Actual death evidence is supplied by Rust subprocess tests.",
+    "strict_clippy": {
+      "result": "passed",
+      "log": "/tmp/alfredo-check-recovery-final-clippy.log",
+      "initial_failure": "Test-only closure Vec type complexity; corrected with fixed function-pointer array, without lint suppression."
+    },
+    "format": "passed",
+    "independent_review": "Artifact, worker/recovery, installed PTY and paging reviewed across delegated owners; no actionable product findings.",
+    "installed_archive": {
+      "passed": 7,
+      "terminal": 2,
+      "shared_inference": 1,
+      "qualification_cli": 2,
+      "recovery_and_narrow_paging": 2,
+      "log": "/tmp/alfredo-check-result-recovery-installed.log"
+    },
+    "source_hashes_verified": 52,
+    "payload_hashes_verified": 6,
+    "documentation": {
+      "grade": "A",
+      "score": 98.2,
+      "existing_traceability_gaps": 3
+    }
+  },
+  "limitations": [
+    "No complete runner/helper quiescence, process identity reconciliation, signaling, automatic respawn, worktree reuse, retirement or acceptance inferred from check completion.",
+    "Private artifact hashes detect corruption/substitution, not coherent same-user replacement of all private state.",
+    "Process-death tests and file/directory synchronization do not establish physical power-loss durability on every filesystem.",
+    "No live model call or model/profile promotion; broader previous live diagnostic remains1/8 accepted.",
+    "Linux x86-64 development candidate only. Cross-platform, remote CI, full product/issue parity, human acceptance and production publication remain open."
+  ],
+  "candidate": {
+    "path": "/tmp/alfredo-check-result-recovery-candidate/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "ff71ddf874ff6d98a8a4c35579d07e6db62813aa5b033b6e40199a1aa183ae1c",
+    "build_log": "/tmp/alfredo-check-result-recovery-package.log"
+  },
+  "human_preview": {
+    "path": "/mnt/c/users/ericl/documents/ai-projects/local-coding-agent/alfredo-tui/dist/preview-2026-09-27-recovery",
+    "binary_sha256": "b9c559ee304c82909dbe12e3a3ca0be6d8c32e0155b9661ed9ba2025d2b9eadd",
+    "launch": "./alfredo-tui/dist/preview-2026-09-27-recovery/alfredo-tui --model qwen3:14b --state-dir \"$HOME/.local/state/alfredo-preview\"",
+    "controls": "Choose workspace and mission; F2 opens Mission Work, Up/Down selects rows, Alt+Left/Right expands/collapses, F3 opens evidence, PageUp/PageDown scrolls the focused panel, Ctrl+Q quits. Use /recover ID only for a stopped worker with eligible saved evidence."
+  },
+  "next_slice": ".agent/Tasks/native-mission-work-rendering.md"
+}

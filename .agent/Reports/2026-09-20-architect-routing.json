@@ -1,0 +1,77 @@
+{
+  "date": "2026-09-20",
+  "scope": "Repeated architecture failures route to actual Frontier Architect repair revision",
+  "source_issue": {
+    "number": 7,
+    "url": "https://github.com/EricleungDK/Alfredo/issues/7",
+    "verified_this_run": true,
+    "requirement": "Repeated architecture failure routes back to Frontier Architect revision."
+  },
+  "schemas": {
+    "task": 16,
+    "conversation_set": 7,
+    "scope": 2,
+    "agent_transcript": 1
+  },
+  "behavior": [
+    "Optional explicit architecture failure classification remains separate from human risk; second distinct reviewed run in a cycle stops ordinary repair work and records the Architect route.",
+    "Current acknowledgment invokes the real Architect without replacing existing drafts; failures/restart retain route and require explicit /architect-revise ID, with no inference replay.",
+    "Bounded verified lineage evidence and criteria plus exact pinned-commit context feed one revised repair task. Source task/run/digest/review revision bind trusted draft provenance through refine/restore/adopt.",
+    "Explicit Plan adoption creates linked Proposed task with revised policy/model/criteria and inherited dependency IDs and exact baseline/inputs; fresh approval and fresh Local Agent are required.",
+    "Latest adopted Architect branch supersedes older repair branches. Cancelling an unstarted adoption reopens its source route for explicit new draft/adoption; exact old retries remain old receipts.",
+    "Risk holds, missing/tampered evidence, stale/conflicting source bindings, ordinary route bypasses and older-schema false provenance refuse."
+  ],
+  "delegation": {
+    "planner_and_pinned_capture": "/root/review_agent_continuity",
+    "worker_and_http_regressions": "/root/test_repair_resolution",
+    "root": "Store, classification, controller/UI, lifecycle integration, installed acceptance and documentation",
+    "independent_findings_fixed": [
+      "Approved sibling could execute during pending Architect route",
+      "Top-level replay could bypass architecture route",
+      "Old ancestor repair could reuse obsolete policy after adoption",
+      "Cancelling unstarted adoption needed explicit recovery"
+    ]
+  },
+  "validation": {
+    "native": {
+      "passed": 214,
+      "failed": 0,
+      "ignored": 6
+    },
+    "focused_worker": {
+      "passed": 5,
+      "seconds": 0.63
+    },
+    "strict_clippy": "passed",
+    "installed_smoke": "..\n----------------------------------------------------------------------\nRan 2 tests in 9.388s\n\nOK\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+    "source_hashes_verified": 39,
+    "payload_hashes_verified": 6,
+    "initial_smoke_corrections": [
+      "Explicit task selection for off-screen task8/9",
+      "Scroll completed draft to visible generated title",
+      "Restart assertion compares post-Architect state rather than prior dispatch checkpoint"
+    ],
+    "documentation": {
+      "grade": "A",
+      "score": 98.2,
+      "existing_traceability_gaps": 3
+    }
+  },
+  "candidate": {
+    "path": "/tmp/alfredo-architect-candidate-final/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "20bd744686d11159ab6d2df151d1303e1db92ea10815529eab077092cf7d89dc"
+  },
+  "logs": [
+    "/tmp/architect-final-full.log",
+    "/tmp/architect-final-clippy.log",
+    "/tmp/architect-boundary-tests.log",
+    "/tmp/architect-final-package.log",
+    "/tmp/architect-final-installed.log"
+  ],
+  "limitations": [
+    "Failure classification is explicit reviewer input; no automatic model failure classifier or inference replay is claimed.",
+    "Architect revises one linked repair packet, not the full multi-task mission graph.",
+    "Automatic execution authorization, full formation/chronology, qualified model profiles, recovery/retirement and production launch gates remain open.",
+    "Remote CI and publication have not been performed."
+  ]
+}

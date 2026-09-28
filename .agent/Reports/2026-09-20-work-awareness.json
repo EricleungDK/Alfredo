@@ -1,0 +1,71 @@
+{
+  "date": "2026-09-20",
+  "scope": "Persistent terminal work awareness and draft-safe Activity navigation",
+  "source_issue": {
+    "number": 61,
+    "url": "https://github.com/EricleungDK/Alfredo/issues/61",
+    "verified_this_run": true,
+    "scope_note": "Improves native background outcomes and keyboard reading/drafting continuity; does not complete unified capability chronology."
+  },
+  "schemas": {
+    "task": 16,
+    "conversation_set": 7,
+    "scope": 2,
+    "agent_transcript": 1,
+    "changed": false
+  },
+  "behavior": [
+    "Header shows local coding workers and canonical attention in chat and Tasks views, with compact minimum-width copy.",
+    "Review, human hold, repair approval, Architect route, accepted repair resolution and unowned recorded runs remain visible without changing draft/reading/view. Recorded Running state never implies live/dead ownership.",
+    "Resolved/superseded/handled ancestors do not duplicate alerts; cancelled unstarted proposals restore pending parent/Architect actions.",
+    "F4 opens saved Activity, hides planner panel without discarding its draft, and F2 returns to chat reading position.",
+    "After failed plan save, successful Activity refresh clears draft only if exact requested Plan receipt is actually acknowledged."
+  ],
+  "delegation": {
+    "ui_and_layout": "/root/review_agent_continuity",
+    "projection_and_draft_regressions": "/root/test_repair_resolution",
+    "root": "Work-status projection, shortcut, integration, installed journey and documentation",
+    "independent_findings_fixed": [
+      "Proposed repair suppressed ancestor alert without own approval attention",
+      "Activity refresh after failed Plan save could discard unsaved draft"
+    ]
+  },
+  "validation": {
+    "native": {
+      "passed": 221,
+      "failed": 0,
+      "ignored": 6
+    },
+    "focused_planner_and_projection": 24,
+    "strict_clippy": "passed",
+    "installed_smoke": "..\n----------------------------------------------------------------------\nRan 2 tests in 9.598s\n\nOK\nInstalled archive acceptance passed: alfredo-tui 0.1.0 (x86_64-unknown-linux-gnu)\n",
+    "source_hashes_verified": 39,
+    "payload_hashes_verified": 6,
+    "fixture_corrections": [
+      "Layout fixture now separates state from workspace",
+      "Draft fixture restores SavedDraft to match production notice state",
+      "Installed chat-view assertion now uses Sessions panel rather than removed Conversations header text"
+    ],
+    "documentation": {
+      "grade": "A",
+      "score": 98.2,
+      "existing_traceability_gaps": 3
+    }
+  },
+  "candidate": {
+    "path": "/tmp/alfredo-work-status-candidate/alfredo-tui-0.1.0-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "c8f257bf40eb2591c2043b975198946ab1622b02bd7e1de96a555dde19f1c944"
+  },
+  "logs": [
+    "/tmp/work-status-final-full.log",
+    "/tmp/work-status-final-clippy.log",
+    "/tmp/work-status-draft-tests-final.log",
+    "/tmp/work-status-final-package.log",
+    "/tmp/work-status-final-installed.log"
+  ],
+  "limitations": [
+    "No unread claim, inferred action actor/timestamp or new persistence authority.",
+    "Unified conversation/action chronology, complete mission formation/fullgraph revision, qualified model profiles, recovery/retirement, automatic execution authorization and production launch remain open.",
+    "Remote CI/publication and human visual/accessibility acceptance remain unverified."
+  ]
+}
