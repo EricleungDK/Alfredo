@@ -203,6 +203,12 @@ fn evidence() -> View {
     View::from_verified(2, &raw).unwrap()
 }
 
+/// Resize the backend too: `Terminal::draw` autoresizes back to the backend size.
+fn resize(terminal: &mut Terminal<TestBackend>, width: u16, height: u16) {
+    terminal.backend_mut().resize(width, height);
+    terminal.resize(Rect::new(0, 0, width, height)).unwrap();
+}
+
 fn text(buffer: &Buffer) -> String {
     buffer
         .content
@@ -217,7 +223,7 @@ fn stacked_task_panels_match_the_winning_panel_buffer_and_scroll_bounds() {
     let mut fixture = Fixture::new();
     let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
     for (width, height) in [(140, 40), (32, 10)] {
-        terminal.resize(Rect::new(0, 0, width, height)).unwrap();
+        resize(&mut terminal, width, height);
         for panel in PANELS {
             for scroll in [0, 7, usize::MAX] {
                 fixture.show(panel, false);
@@ -257,7 +263,7 @@ fn task_panel_pages_reach_every_marker_in_both_directions_after_resize() {
         fixture.show(panel, true);
         fixture.control.scroll = usize::MAX;
         for (width, height) in [(32, 10), (140, 40), (32, 10)] {
-            terminal.resize(Rect::new(0, 0, width, height)).unwrap();
+            resize(&mut terminal, width, height);
             // The resize must replace the previous viewport's bounds before paging.
             fixture.draw(&mut terminal);
             let maximum = fixture.maximum();
@@ -298,7 +304,7 @@ fn model_and_completion_overlays_preserve_task_paging_until_the_panel_returns() 
     let mut terminal = Terminal::new(TestBackend::new(32, 10)).unwrap();
     for (models, completion) in [(true, false), (false, true), (true, true)] {
         fixture.show(Panel::Planner, true);
-        terminal.resize(Rect::new(0, 0, 32, 10)).unwrap();
+        resize(&mut terminal, 32, 10);
         fixture.control.scroll = 0;
         fixture.draw(&mut terminal);
         let maximum = fixture.maximum();
@@ -308,7 +314,7 @@ fn model_and_completion_overlays_preserve_task_paging_until_the_panel_returns() 
         fixture.app.models = vec!["catalog-model".into()];
         fixture.app.models_notice = "MODEL_CATALOG".into();
         fixture.app.completion = completion.then(|| Completion::open("/ta").unwrap());
-        terminal.resize(Rect::new(0, 0, 140, 40)).unwrap();
+        resize(&mut terminal, 140, 40);
         let covered = fixture.draw(&mut terminal);
         assert!(text(&covered).contains(if completion { "Complete" } else { "Models" }));
         assert!(!text(&covered).contains("DRAFT_HEADER"));

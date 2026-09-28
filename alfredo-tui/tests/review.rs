@@ -101,6 +101,7 @@ fn evidence_page_keys_visit_every_row_forward_and_backward_after_resize() {
     let app = App::new("fixture".into());
     let mut terminal = Terminal::new(TestBackend::new(32, 10)).unwrap();
     for (width, height) in [(32, 10), (140, 40), (32, 10)] {
+        terminal.backend_mut().resize(width, height);
         terminal
             .resize(ratatui::layout::Rect::new(0, 0, width, height))
             .unwrap();
@@ -229,6 +230,7 @@ fn long_evidence_can_reach_its_last_line() {
         .collect();
     assert!(!text.contains("FINAL_EVIDENCE_LINE"));
     control.scroll_rows(100);
+    terminal.backend_mut().resize(60, 18);
     terminal
         .resize(ratatui::layout::Rect::new(0, 0, 60, 18))
         .unwrap();
