@@ -331,6 +331,45 @@ fn generated_plan_requires_explicit_save_and_approval_and_renders_narrow_preview
     server.join().unwrap();
 }
 #[test]
+fn planner_instruction_runs_existing_tests_and_keeps_them_out_of_written_files() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let fixture = Fixture::new();
+    confirm_scope(&fixture.store);
+    let (provider, server, requests) = server_capture(
+        serde_json::json!({"tasks":plan().tasks}).to_string(),
+        true,
+        Duration::ZERO,
+    );
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.set_provider(provider);
+    control.refresh(&runtime);
+    wait(&mut control, |c| !c.pending);
+    control
+        .command(&runtime, "/plan Make test_calc.py pass", "fixture")
+        .unwrap();
+    wait(&mut control, |c| c.planner.draft.is_some());
+    server.join().unwrap();
+    let request = requests.recv().unwrap();
+    let system = request["messages"][0]["content"].as_str().unwrap();
+    assert!(system.starts_with("Act as Frontier Architect"), "{system}");
+    for text in [
+        "When the goal references existing test files, set the check to run those tests",
+        "Do not list existing test files in policy files unless the goal asks to change them",
+        "workers receive them as read-only reference",
+    ] {
+        assert!(system.contains(text), "{text} missing: {system}");
+    }
+    assert_eq!(
+        request["format"]["properties"]["tasks"]["items"]["required"],
+        serde_json::json!(["title", "acceptance", "model", "dependencies", "policy"])
+    );
+    assert_eq!(
+        request["format"]["properties"]["tasks"]["items"]["properties"]["policy"]["required"],
+        serde_json::json!(["files", "check"])
+    );
+}
+
+#[test]
 fn malformed_or_incomplete_model_output_cannot_be_saved_as_a_plan() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     for (content, done) in [

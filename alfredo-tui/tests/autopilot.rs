@@ -581,6 +581,42 @@ fn finished_autopilot_replaces_the_stale_start_notice_in_the_footer_once() {
 }
 
 #[test]
+fn finished_state_saved_by_an_older_build_still_loads_with_an_honest_state() {
+    use sha2::{Digest, Sha256};
+    let fixture = Fixture::new();
+    let directory = fixture.directory();
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join(format!(
+        "autopilot-{:x}.json",
+        Sha256::digest("default".as_bytes())
+    ));
+    // Exact field set written before partial/failed finish states existed.
+    fs::write(
+        &path,
+        json!({"version": 1, "id": "0123456789abcdef", "goal": "Old goal", "model": "fixture",
+            "max_repairs": 2, "phase": "done", "paused": false, "started": 100, "finished": 160,
+            "plan_attempts": 0, "plan_error": null, "plan_request": "p", "save_request": "s",
+            "first": null, "count": 1, "retry_cancelled": [],
+            "notice": "Autopilot done · 0/1 accepted · no integration branch",
+            "report": "Autopilot finished: Old goal\nNo integration branch: no task was accepted",
+            "branch": null})
+        .to_string(),
+    )
+    .unwrap();
+    let control = TaskControl::new(fixture.store.clone());
+    let mut autopilot = Autopilot::open(&directory, "default").unwrap();
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!(status.state, RunState::Failed);
+    assert_eq!((status.done, status.total), (0, 1));
+    assert_eq!(status.elapsed, Duration::from_secs(60));
+    assert!(autopilot.report().unwrap().contains("Old goal"));
+    assert!(
+        autopilot.take_finished_notice().is_none(),
+        "no replayed notice"
+    );
+}
+
+#[test]
 fn invalid_plan_is_retried_once_with_its_validation_error_then_stops() {
     let fixture = Fixture::new();
     let server = Server::new(|request, _| {
