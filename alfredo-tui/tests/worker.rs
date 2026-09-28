@@ -5479,3 +5479,230 @@ async fn queued_worker_rechecks_cancellation_after_capacity_before_http() {
 async fn queued_worker_admission_allows_unrelated_task_revision_changes() {
     queued_worker_admission_race(false).await;
 }
+
+fn commit_files(fixture: &Fixture, files: &[(&str, &str)]) {
+    for (path, content) in files {
+        let file = fixture.workspace.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, content).unwrap();
+    }
+    for args in [
+        vec!["add", "."],
+        vec!["-c", "core.hooksPath=/dev/null", "commit", "-qm", "more"],
+    ] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&fixture.workspace)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+}
+
+/// Plan one approved task with `policy`; returns its id.
+fn plan_task(fixture: &Fixture, prompt: &str, title: &str, policy: WorkPolicy) -> u64 {
+    use alfredo_tui::planner::{Plan, Step};
+    fixture.action(Action::Plan {
+        plan: Plan {
+            architecture: None,
+            prompt: prompt.into(),
+            planner: "fixture".into(),
+            context: None,
+            scope: None,
+            tasks: vec![Step {
+                acceptance: vec!["tests pass".into()],
+                title: title.into(),
+                model: "fixture".into(),
+                dependencies: vec![],
+                policy,
+            }],
+        },
+    });
+    let id = fixture.store.snapshot().unwrap().tasks.len() as u64;
+    fixture.action(Action::Approve { task: id });
+    id
+}
+
+#[tokio::test]
+async fn worker_receives_committed_check_and_named_files_as_read_only_reference() {
+    let fixture = Fixture::new();
+    let test_source = "import unittest\nfrom calc import answer\n\nclass T(unittest.TestCase):\n    def test_answer(self):\n        self.assertEqual(answer(), 42)  # TEST_SOURCE_SENTINEL\n";
+    let big = format!("# BIG_SENTINEL\n{}", "x = 1\n".repeat(8 * 1024));
+    commit_files(
+        &fixture,
+        &[
+            ("test_calc.py", test_source),
+            ("docs/spec.md", "SPEC_SENTINEL: answer is 42\n"),
+            ("GOAL_REF.md", "GOAL_SENTINEL\n"),
+            ("unrelated.py", "UNRELATED_SENTINEL = 1\n"),
+            ("big.py", &big),
+        ],
+    );
+    // Working-file edits are never model input; only the pinned commit is read.
+    fs::write(fixture.workspace.join("test_calc.py"), "DIRTY_SENTINEL\n").unwrap();
+    let policy = WorkPolicy {
+        files: vec!["calc.py".into()],
+        check: vec![
+            "/usr/bin/python3".into(),
+            "-B".into(),
+            "-m".into(),
+            "unittest".into(),
+            "test_calc.py".into(),
+        ],
+    };
+    let task = plan_task(
+        &fixture,
+        "Make test_calc.py pass; see GOAL_REF.md and big.py.",
+        "Implement calc.py per docs/spec.md",
+        policy.clone(),
+    );
+    let (capture, captured) = std::sync::mpsc::channel();
+    let plan = one_file("calc.py", "def answer():\n    return 42\n");
+    let (provider, server, _) = server_with_capture(plan, Duration::ZERO, "", Some(capture));
+    let revision = fixture.store.snapshot().unwrap().revision;
+    let (snapshot, detail) = worker::start(
+        fixture.store.clone(),
+        task,
+        "reference-run".into(),
+        revision,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    let request = captured.recv().unwrap();
+    let prompt = request["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let reference = prompt
+        .find("READ-ONLY REFERENCE FILES")
+        .unwrap_or_else(|| panic!("{prompt}"));
+    for text in [
+        "READ-ONLY FILE test_calc.py\n",
+        test_source,
+        "READ-ONLY FILE docs/spec.md\nSPEC_SENTINEL: answer is 42\n",
+        "READ-ONLY FILE GOAL_REF.md\nGOAL_SENTINEL\n",
+        "READ-ONLY REFERENCE OMITTED big.py",
+    ] {
+        assert!(
+            prompt[reference..].contains(text),
+            "{text} missing: {prompt}"
+        );
+    }
+    assert!(prompt.contains("never return them"), "{prompt}");
+    // Check-argv files come first, before goal/description mentions.
+    assert!(
+        prompt.find("READ-ONLY FILE test_calc.py").unwrap()
+            < prompt.find("READ-ONLY FILE docs/spec.md").unwrap()
+    );
+    for absent in ["DIRTY_SENTINEL", "UNRELATED_SENTINEL", "BIG_SENTINEL"] {
+        assert!(!prompt.contains(absent), "{absent} leaked: {prompt}");
+    }
+    assert!(
+        prompt.contains("Allowed exact files: [\"calc.py\"]"),
+        "{prompt}"
+    );
+    assert_eq!(
+        request["format"]["properties"]["files"]["items"]["properties"]["path"]["enum"],
+        serde_json::json!(["calc.py"])
+    );
+    let finished = snapshot.tasks.iter().find(|t| t.id == task).unwrap();
+    assert_eq!(finished.policy.as_ref(), Some(&policy));
+    assert_eq!(finished.status, TaskStatus::ReviewReady, "{detail}");
+}
+
+#[tokio::test]
+async fn unapproved_returned_file_is_named_with_the_allowed_list_and_nothing_is_written() {
+    let fixture = Fixture::new();
+    fixture.permit();
+    let (provider, server, _) = server(one_file("test_calc.py", "hijack"), Duration::ZERO);
+    let (snapshot, detail) = worker::start(
+        fixture.store.clone(),
+        1,
+        "unapproved-name".into(),
+        3,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(snapshot.tasks[0].status, TaskStatus::Failed);
+    assert_eq!(
+        detail,
+        "Returned unapproved file test_calc.py; only calc.py, notes.txt may be written"
+    );
+    let directory = fixture
+        .store
+        .run_directory(&snapshot.tasks[0].run.as_ref().unwrap().id)
+        .unwrap();
+    assert!(!directory.join("worktree/test_calc.py").exists());
+}
+
+#[tokio::test]
+async fn failed_check_detail_carries_a_sanitized_relative_output_tail() {
+    let fixture = Fixture::new();
+    fixture.action(Action::Permit {
+        task: 1,
+        policy: WorkPolicy {
+            files: vec!["calc.py".into()],
+            check: vec![
+                "/usr/bin/python3".into(),
+                "-B".into(),
+                "-c".into(),
+                "import os, sys; print('OUT_LINE'); [sys.stderr.write(f'noise {i}\\n') for i in range(60)]; sys.stderr.write('  File \"' + os.getcwd() + '/calc.py\", line 2\\n\\x1b[31mAssertionError: TAIL_SENTINEL\\x1b[0m\\n'); sys.exit(1)".into(),
+            ],
+        },
+    });
+    fixture.action(Action::Approve { task: 1 });
+    let (provider, server, _) = server(
+        one_file("calc.py", "def answer():\n    return 0\n"),
+        Duration::ZERO,
+    );
+    let (snapshot, detail) = worker::start(
+        fixture.store.clone(),
+        1,
+        "tail-run".into(),
+        3,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(snapshot.tasks[0].status, TaskStatus::Failed);
+    let recorded = &snapshot.tasks[0].run.as_ref().unwrap().detail;
+    assert_eq!(recorded, &detail);
+    assert!(
+        detail.starts_with("Check failed (exit 1): stderr: "),
+        "{detail}"
+    );
+    assert!(
+        detail.ends_with("File \"calc.py\", line 2 | AssertionError: TAIL_SENTINEL"),
+        "{detail}"
+    );
+    assert!(!detail.contains("/worktree"), "{detail}");
+    assert!(
+        !detail.contains('\u{1b}') && !detail.contains("[31m"),
+        "{detail}"
+    );
+    assert!(detail.len() <= 1024, "{}", detail.len());
+    let tail = worker::output_tail(
+        &serde_json::from_str::<worker::Evidence>(&fixture.store.evidence(1).unwrap())
+            .unwrap()
+            .check
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(tail.0, "stderr");
+    assert_eq!(tail.1.lines().count(), 40, "{}", tail.1);
+    assert!(tail.1.len() <= 4096);
+    assert!(
+        tail.1.ends_with("AssertionError: TAIL_SENTINEL"),
+        "{}",
+        tail.1
+    );
+}
