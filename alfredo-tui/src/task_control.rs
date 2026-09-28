@@ -111,6 +111,10 @@ pub struct TaskControl {
     pub evidence: Option<crate::review::View>,
     pub activity: Option<String>,
     pub run_observations: BTreeMap<u64, String>,
+    /// Read-only autopilot projection for rendering; the controller owns decisions.
+    pub autopilot: Option<crate::autopilot::Status>,
+    /// Completion/status report opened by autopilot; any task view replaces it.
+    pub autopilot_report: Option<String>,
 }
 
 impl TaskControl {
@@ -178,7 +182,13 @@ impl TaskControl {
             evidence: None,
             activity: None,
             run_observations: BTreeMap::new(),
+            autopilot: None,
+            autopilot_report: None,
         }
+    }
+
+    pub fn store(&self) -> &TaskStore {
+        &self.store
     }
 
     pub fn observe_scope(&mut self, state: crate::understanding::Snapshot) {
@@ -558,6 +568,7 @@ impl TaskControl {
         self.visible = visible;
         if !visible {
             self.pending_evidence = None;
+            self.autopilot_report = None;
         }
     }
 
@@ -651,6 +662,7 @@ impl TaskControl {
         self.pending_evidence = None;
         self.activity = None;
         self.evidence = None;
+        self.autopilot_report = None;
         self.scroll = 0;
     }
 
@@ -1761,6 +1773,7 @@ impl TaskControl {
             text
         };
         self.visible = true;
+        self.autopilot_report = None;
         let mut words = text.split_whitespace();
         let review_target = match words.next() {
             Some("/review" | "/accept" | "/reject") => {
