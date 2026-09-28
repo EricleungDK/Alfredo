@@ -259,14 +259,42 @@ pub fn validate_plan(plan: &FilePlan, policy: &WorkPolicy) -> Result<()> {
     if plan.files.is_empty() || plan.files.len() > 32 {
         return Err("Worker must return 1–32 file edits".into());
     }
+    let mut unapproved: Vec<String> = Vec::new();
+    for file in &plan.files {
+        let path = crate::dashboard::single_line(&file.path)
+            .chars()
+            .take(200)
+            .collect::<String>();
+        if !policy.files.contains(&file.path) && !unapproved.contains(&path) {
+            unapproved.push(path);
+        }
+    }
+    if !unapproved.is_empty() {
+        let shown = unapproved.len().min(4);
+        let mut named = unapproved[..shown].join(", ");
+        if unapproved.len() > shown {
+            named.push_str(&format!(" and {} more", unapproved.len() - shown));
+        }
+        return Err(format!(
+            "Returned unapproved file{} {named}; only {} may be written",
+            if unapproved.len() == 1 { "" } else { "s" },
+            policy.files.join(", ")
+        ));
+    }
     let mut seen = BTreeSet::new();
     let mut total = 0;
     for file in &plan.files {
-        if !policy.files.contains(&file.path)
-            || !seen.insert(&file.path)
-            || file.content.contains('\0')
-        {
-            return Err("Worker returned an unapproved, duplicate or binary file".into());
+        if !seen.insert(&file.path) {
+            return Err(format!(
+                "Returned {} more than once; return each file once with its complete content",
+                file.path
+            ));
+        }
+        if file.content.contains('\0') {
+            return Err(format!(
+                "Returned binary content (NUL byte) for {}",
+                file.path
+            ));
         }
         total += file.content.len();
         if total > 128 * 1024 {
@@ -274,6 +302,134 @@ pub fn validate_plan(plan: &FilePlan, policy: &WorkPolicy) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Approved plus read-only reference source text in one worker request.
+const SOURCE_CONTEXT: usize = 96 * 1024;
+const TAIL_LINES: usize = 40;
+const TAIL_BYTES: usize = 4096;
+
+/// Remove ANSI escape sequences and control characters (keeping newlines), and
+/// shorten absolute run-worktree paths to repository-relative ones.
+fn sanitize_output(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\u{1b}' => {
+                if chars.peek() == Some(&'[') {
+                    chars.next();
+                    for next in chars.by_ref() {
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                } else {
+                    chars.next();
+                }
+            }
+            '\r' if chars.peek() == Some(&'\n') => {}
+            '\r' | '\n' => plain.push('\n'),
+            '\t' => plain.push(' '),
+            c if c.is_control() => {}
+            c => plain.push(c),
+        }
+    }
+    const MARK: &str = "/worktree/";
+    let mut out = String::with_capacity(plain.len());
+    let mut rest = plain.as_str();
+    while let Some(index) = rest.find(MARK) {
+        let before = &rest[..index];
+        let start = before
+            .rfind(|c: char| {
+                c.is_whitespace() || matches!(c, '"' | '\'' | '(' | '[' | '<' | '=' | ',' | '`')
+            })
+            .map_or(0, |i| i + 1);
+        out.push_str(&before[..start]);
+        if !before[start..].starts_with('/') {
+            out.push_str(&before[start..]);
+            out.push_str(MARK);
+        }
+        rest = &rest[index + MARK.len()..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Bounded, sanitized tail of retained check output: stderr when it has text,
+/// otherwise stdout. Last 40 lines and at most 4 KiB.
+pub fn output_tail(check: &ExecutionReceipt) -> Option<(&'static str, String)> {
+    let (label, raw) = [("stderr", &check.stderr), ("stdout", &check.stdout)]
+        .into_iter()
+        .find(|(_, text)| !text.trim().is_empty())?;
+    let clean = sanitize_output(raw);
+    let lines: Vec<&str> = clean.trim_end().lines().collect();
+    let mut tail = lines[lines.len().saturating_sub(TAIL_LINES)..].join("\n");
+    if tail.len() > TAIL_BYTES {
+        let mut start = tail.len() - TAIL_BYTES;
+        while !tail.is_char_boundary(start) {
+            start += 1;
+        }
+        tail.drain(..start);
+    }
+    Some((label, tail))
+}
+
+pub fn check_passed(check: &ExecutionReceipt) -> bool {
+    check.status == "completed" && check.exit_code == Some(0) && !check.reconciliation_required
+}
+
+/// One-line check failure summary within `budget` bytes. The output tail keeps its
+/// most recent text; the detail after the colon is never empty.
+pub fn failure_summary(check: &ExecutionReceipt, budget: usize) -> String {
+    let mut head = format!(
+        "Check {} (exit {}): ",
+        crate::dashboard::single_line(&check.status),
+        check
+            .exit_code
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "unknown".into())
+    );
+    let message = crate::dashboard::single_line(check.error_message.trim());
+    if !message.is_empty() {
+        head.push_str(&message);
+    }
+    let Some((label, tail)) = output_tail(check) else {
+        if message.is_empty() {
+            head.push_str("no output captured");
+        }
+        return truncate_end(&head, budget);
+    };
+    if !message.is_empty() {
+        head.push_str(" · ");
+    }
+    head.push_str(&format!("{label}: "));
+    let body = tail
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let room = budget.saturating_sub(head.len());
+    if body.len() <= room {
+        head.push_str(&body);
+    } else if room > 4 {
+        let mut start = body.len() - (room - '…'.len_utf8());
+        while !body.is_char_boundary(start) {
+            start += 1;
+        }
+        head.push('…');
+        head.push_str(&body[start..]);
+    }
+    truncate_end(&head, budget)
+}
+
+fn truncate_end(text: &str, budget: usize) -> String {
+    let mut end = text.len().min(budget);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text[..end].to_string()
 }
 
 pub fn check_request(worktree: &Path, task: &Task, mission: &str) -> Result<ExecutionRequest> {
@@ -528,6 +684,10 @@ pub async fn start_observed(
             .plan_for_task(task_id)
             .and_then(|plan| plan.scope.as_deref()),
         claimed.acceptance_for_task(task_id),
+        claimed
+            .repair_root(task_id)
+            .and_then(|root| claimed.plan_for_task(root))
+            .map_or("", |plan| plan.prompt.as_str()),
     )
     .await;
     observer.stage("Saving evidence and receipt");
@@ -679,6 +839,7 @@ async fn perform(
     repair: Option<String>,
     scope: Option<&crate::understanding::Binding>,
     acceptance: &[String],
+    goal: &str,
 ) -> Result<()> {
     let (cancel, observer) = observation;
     observer.stage("Preparing worktree");
@@ -720,8 +881,36 @@ async fn perform(
             "(new file)".into()
         };
         context.push_str(&format!("\nFILE {path}\n{content}\n"));
-        if context.len() > 96 * 1024 {
+        if context.len() > SOURCE_CONTEXT {
             return Err("Approved source context exceeds 96 KiB".into());
+        }
+    }
+    // Committed files the check runs or the goal/task names: reference only, never
+    // writable. They share the source bound after the approved files; omissions are explicit.
+    let named = crate::planning_context::named_sources(
+        worktree,
+        &run.baseline,
+        &policy.check,
+        &[goal, &task.title],
+        &policy.files,
+    )
+    .await?;
+    if !named.is_empty() {
+        context.push_str("\nREAD-ONLY REFERENCE FILES (committed baseline; reference only; not in the allowed files, so never return them as edits)\n");
+        let mut omitted = Vec::new();
+        for source in named {
+            match source.content {
+                Ok(content)
+                    if context.len() + source.path.len() + content.len() + 18 <= SOURCE_CONTEXT =>
+                {
+                    context.push_str(&format!("READ-ONLY FILE {}\n{content}\n", source.path));
+                }
+                Ok(_) => omitted.push(format!("{} (source context bound)", source.path)),
+                Err(reason) => omitted.push(format!("{} ({reason})", source.path)),
+            }
+        }
+        for item in omitted {
+            context.push_str(&format!("READ-ONLY REFERENCE OMITTED {item}\n"));
         }
     }
     if !acceptance.is_empty() {
@@ -864,17 +1053,9 @@ async fn perform(
     })
     .await
     .map_err(|_| "Execution provider stopped; command outcome unknown")??;
-    let success =
-        check.status == "completed" && check.exit_code == Some(0) && !check.reconciliation_required;
-    let detail = format!(
-        "Check {} (exit {}): {}",
-        check.status,
-        check
-            .exit_code
-            .map(|code| code.to_string())
-            .unwrap_or_else(|| "unknown".into()),
-        check.error_message
-    );
+    let success = check_passed(&check);
+    // Finish receipts bound details to 1 KiB; stay below the 900-character cut.
+    let detail = failure_summary(&check, 880);
     evidence.check = Some(check);
     if !success {
         return Err(detail);

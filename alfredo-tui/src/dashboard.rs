@@ -84,14 +84,24 @@ pub fn state_word(task: &Task) -> &'static str {
     }
 }
 
-pub fn done_total(snapshot: &Snapshot) -> (usize, usize) {
+/// Original tasks done and total, plus repair tasks counted separately. An
+/// original task resolved by an accepted repair counts as done.
+pub fn done_total(snapshot: &Snapshot) -> (usize, usize, usize) {
+    let originals: Vec<&Task> = snapshot
+        .tasks
+        .iter()
+        .filter(|task| task.repair_of.is_none())
+        .collect();
+    let done = originals
+        .iter()
+        .filter(|task| {
+            task.status == TaskStatus::Accepted || snapshot.resolution_for_family(task.id).is_some()
+        })
+        .count();
     (
-        snapshot
-            .tasks
-            .iter()
-            .filter(|task| task.status == TaskStatus::Accepted)
-            .count(),
-        snapshot.tasks.len(),
+        done,
+        originals.len(),
+        snapshot.tasks.len() - originals.len(),
     )
 }
 
@@ -111,13 +121,7 @@ pub fn clock(elapsed: std::time::Duration) -> String {
 
 /// Header row: glyph, state, done/total, failures, elapsed, branch when done, goal.
 pub fn autopilot_row(status: &crate::autopilot::Status, width: usize) -> String {
-    use crate::autopilot::RunState;
-    let marker = match status.state {
-        RunState::Paused => "‖",
-        RunState::Done => "✓",
-        RunState::Failed => "■",
-        _ => "▶",
-    };
+    let marker = status.state.marker();
     let mut row = format!(
         " Autopilot {marker} {} · {}/{} done · {} failed",
         status.state.label(),
@@ -214,7 +218,21 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
                 .add_modifier(Modifier::BOLD),
         )
     };
-    let detail = single_line(&evidence.detail);
+    let failed_check = evidence
+        .check
+        .as_ref()
+        .filter(|check| !crate::worker::check_passed(check));
+    let tail = failed_check.and_then(crate::worker::output_tail);
+    let mut detail = single_line(&evidence.detail);
+    if failed_check.is_some() {
+        // The compact tail in the detail is shown below as formatted lines instead.
+        for marker in [": stderr: ", ": stdout: ", " · stderr: ", " · stdout: "] {
+            if let Some(index) = detail.find(marker) {
+                detail.truncate(index);
+            }
+        }
+        detail = detail.trim_end().trim_end_matches(':').to_string();
+    }
     let (text, color) = match evidence.status {
         TaskStatus::ReviewReady | TaskStatus::Accepted => {
             ("✓ Check passed".to_owned(), Color::Green)
@@ -241,6 +259,13 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
     )];
     match &evidence.check {
         Some(_) if passed => {}
+        // The outcome line already states the check result; do not repeat it.
+        Some(check) if detail.starts_with("Check ") => {
+            let message = single_line(&check.error_message);
+            if !message.is_empty() && !detail.contains(&message) {
+                lines.push(Line::styled(message, Style::default().fg(Color::Red)));
+            }
+        }
         Some(check) => {
             lines.push(Line::from(format!(
                 "Check · {}{exit}",
@@ -254,6 +279,14 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
             }
         }
         None => lines.push(Line::from("Check · no check result retained")),
+    }
+    if let Some((label, tail)) = &tail {
+        lines.push(Line::default());
+        lines.push(heading(&format!("{label} · last lines")));
+        lines.extend(
+            tail.lines()
+                .map(|line| Line::styled(line.to_owned(), Style::default().fg(Color::Red))),
+        );
     }
     lines.push(Line::default());
     lines.push(heading("Diff"));
@@ -283,7 +316,11 @@ pub fn outcome_lines(raw: &str) -> Result<Vec<Line<'static>>, String> {
             ("Check stdout", &check.stdout),
             ("Check stderr", &check.stderr),
         ] {
-            if !output.trim().is_empty() {
+            // A stream already shown whole as the tail above is not repeated.
+            let shown = tail.as_ref().is_some_and(|(stream, text)| {
+                label.ends_with(stream) && text.lines().count() >= output.trim_end().lines().count()
+            });
+            if !output.trim().is_empty() && !shown {
                 lines.push(Line::default());
                 lines.push(heading(label));
                 lines.extend(safe(output).lines().map(|line| Line::from(line.to_owned())));

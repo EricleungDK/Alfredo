@@ -690,11 +690,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
-            let autopilot = work.autopilot.status(&work.tasks);
-            if autopilot != work.tasks.autopilot {
-                work.tasks.autopilot = autopilot;
-                dirty = true;
-            }
+            dirty |= work.sync_autopilot();
             if dirty {
                 terminal.draw(|frame| ui::draw_with_tasks(frame, &work.app, &work.tasks))?;
                 dirty = false;

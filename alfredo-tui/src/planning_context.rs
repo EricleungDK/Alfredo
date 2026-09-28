@@ -32,6 +32,132 @@ fn path_valid(path: &str) -> bool {
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
 }
+/// Common secret material and generated/vendor trees are never model inputs.
+fn excluded(lower: &str) -> bool {
+    lower.split('/').any(|part| {
+        matches!(part, ".git" | "node_modules" | "target" | "dist" | "vendor")
+            || part.starts_with(".env")
+    }) || [".pem", ".key", ".p12", ".pfx"]
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
+}
+
+/// A committed file named by a check or task text; `content` is Err with the
+/// reason it was not read.
+#[derive(Debug)]
+pub struct NamedSource {
+    pub path: String,
+    pub content: Result<String, &'static str>,
+}
+
+const NAMED_LIMIT: usize = 16;
+const NAMED_BYTES: usize = 32 * 1024;
+
+fn tokens(text: &str) -> impl Iterator<Item = &str> {
+    text.split(|c: char| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '"' | '\''
+                    | '`'
+                    | ','
+                    | ';'
+                    | ':'
+                    | '('
+                    | ')'
+                    | '['
+                    | ']'
+                    | '{'
+                    | '}'
+                    | '<'
+                    | '>'
+                    | '='
+            )
+    })
+    .map(|token| {
+        let token = token.trim_end_matches(['.', '!', '?']);
+        token.strip_prefix("./").unwrap_or(token)
+    })
+    .filter(|token| !token.is_empty())
+}
+
+/// Tracked regular files at the exact `baseline` commit that the check argv names
+/// (first) or that `texts` mention verbatim (then), excluding `exclude`. Reads
+/// Git objects only, never working files.
+pub async fn named_sources(
+    root: &Path,
+    baseline: &str,
+    check: &[String],
+    texts: &[&str],
+    exclude: &[String],
+) -> Result<Vec<NamedSource>, String> {
+    if !sha(baseline) {
+        return Err("Reference baseline must be an exact commit identity".into());
+    }
+    let mut wanted: Vec<&str> = Vec::new();
+    for token in check
+        .iter()
+        .flat_map(|arg| tokens(arg))
+        .chain(texts.iter().flat_map(|text| tokens(text)))
+    {
+        if path_valid(token)
+            && !wanted.contains(&token)
+            && !exclude.iter().any(|path| path == token)
+        {
+            wanted.push(token);
+        }
+    }
+    wanted.truncate(64);
+    if wanted.is_empty() {
+        return Ok(vec![]);
+    }
+    // Only the named entries: literal pathspecs, no recursion into named directories.
+    let mut args = vec!["--literal-pathspecs", "ls-tree", "-l", "-z", baseline, "--"];
+    args.extend(wanted.iter().copied());
+    let tree = git(root, &args).await?;
+    let mut tracked = std::collections::BTreeMap::new();
+    for record in tree.split('\0').filter(|record| !record.is_empty()) {
+        let (metadata, path) = record.split_once('\t').ok_or("Malformed Git tree entry")?;
+        let fields: Vec<_> = metadata.split_whitespace().collect();
+        if fields.len() == 4 && matches!(fields[0], "100644" | "100755") && fields[1] == "blob" {
+            tracked.insert(path, (fields[2], fields[3]));
+        }
+    }
+    let mut result = Vec::new();
+    for path in wanted {
+        let Some((blob, size)) = tracked.get(path) else {
+            continue;
+        };
+        if result.len() == NAMED_LIMIT {
+            result.push(NamedSource {
+                path: path.into(),
+                content: Err("reference file limit"),
+            });
+            continue;
+        }
+        let content = if excluded(&path.to_lowercase()) {
+            Err("excluded as possible secret or generated file")
+        } else if size
+            .parse::<usize>()
+            .map_or(true, |size| size > NAMED_BYTES)
+        {
+            Err("exceeds 32 KiB")
+        } else {
+            match git(root, &["cat-file", "blob", blob]).await {
+                Ok(text) if !text.contains('\0') => Ok(text),
+                Ok(_) => Err("binary"),
+                Err(error) if error.contains("non-UTF-8") => Err("not UTF-8 text"),
+                Err(error) => return Err(error),
+            }
+        };
+        result.push(NamedSource {
+            path: path.into(),
+            content,
+        });
+    }
+    Ok(result)
+}
+
 impl RepositoryContext {
     pub fn validate(&self) -> Result<(), String> {
         if !sha(&self.baseline)
@@ -132,14 +258,7 @@ async fn capture_inner(
             continue;
         }
         let lower = path.to_lowercase();
-        // Do not select common secret material or generated/vendor trees as model inputs.
-        if lower.split('/').any(|part| {
-            matches!(part, ".git" | "node_modules" | "target" | "dist" | "vendor")
-                || part.starts_with(".env")
-        }) || [".pem", ".key", ".p12", ".pfx"]
-            .iter()
-            .any(|suffix| lower.ends_with(suffix))
-        {
+        if excluded(&lower) {
             continue;
         }
         let base = lower.rsplit('/').next().unwrap_or(&lower);

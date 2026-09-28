@@ -277,6 +277,13 @@ fn default_task_detail_hides_receipt_ids_and_revisions() {
 }
 
 fn finished_fixture() -> Fixture {
+    finished_fixture_with("Approved check failed with exit 1", None)
+}
+
+fn finished_fixture_with(
+    detail: &str,
+    check: Option<alfredo_tui::execution::ExecutionReceipt>,
+) -> Fixture {
     let fixture = Fixture::new(vec![]);
     let store = fixture.store.clone();
     let mut snapshot = store.snapshot().unwrap();
@@ -319,9 +326,9 @@ fn finished_fixture() -> Fixture {
         run: run.clone(),
         baseline: "a".repeat(40),
         status: TaskStatus::Failed,
-        detail: "Approved check failed with exit 1".into(),
+        detail: detail.into(),
         patch: "diff --git a/calc.py b/calc.py\n+def add(a, b):\n+    return a + b".into(),
-        check: None,
+        check,
     })
     .unwrap();
     let directory = store.run_directory(&run).unwrap();
@@ -332,7 +339,7 @@ fn finished_fixture() -> Fixture {
         run,
         status: TaskStatus::Failed,
         evidence_sha256: format!("{:x}", Sha256::digest(evidence.as_bytes())),
-        detail: "Approved check failed with exit 1".into(),
+        detail: detail.into(),
     });
     drop(owner);
     let mut fixture = fixture;
@@ -351,6 +358,62 @@ fn finished_task_shows_outcome_then_diff_and_failure_reason_in_the_pane() {
     let diff = screen.find("+def add(a, b):").expect(&screen);
     assert!(outcome < diff, "{screen}");
     assert!(!screen.contains("finish-"), "{screen}");
+}
+
+fn failed_check(stdout: &str, stderr: &str) -> alfredo_tui::execution::ExecutionReceipt {
+    serde_json::from_value(serde_json::json!({
+        "schema_version": 1, "request_id": "check:run", "request_digest": "d", "effect": "local-agent",
+        "status": "failed", "started_at": "0", "ended_at": "1", "exit_code": 1,
+        "stdout": stdout, "stderr": stderr, "stdout_bytes": stdout.len(), "stderr_bytes": stderr.len(),
+        "stdout_sha256": "", "stderr_sha256": "", "effect_started": true, "reconciliation_required": false,
+        "error_code": "", "error_message": "", "receipt_id": "r", "owner_pid": null, "owner_identity": "",
+        "process_pid": null, "process_identity": "", "provider": "fixture"
+    }))
+    .unwrap()
+}
+
+#[test]
+fn failed_task_pane_shows_the_check_output_tail_under_the_outcome_before_the_diff() {
+    let stderr = "F\n======\nFAIL: test_add (test_calc.T.test_add)\nTraceback (most recent call last):\n  File \"/home/u/.state/runs/task-1-run-1/worktree/test_calc.py\", line 6, in test_add\n    self.assertEqual(add(1, 2), 3)\nAssertionError: 4 != 3\n\nFAILED (failures=1)\n";
+    let detail = "Check failed (exit 1): stderr: F | ====== | FAIL: test_add | AssertionError: 4 != 3 | FAILED (failures=1)";
+    let fixture = finished_fixture_with(detail, Some(failed_check("", stderr)));
+    for (width, height) in [(80, 24), (100, 30)] {
+        let buffer = fixture.render(width, height);
+        assert_borders_closed(&buffer);
+        let screen = text(&buffer);
+        let outcome = screen
+            .find("✗ Run failed · Check failed (exit 1)")
+            .unwrap_or_else(|| panic!("{width}x{height}\n{screen}"));
+        let label = screen.find("stderr · last lines").expect(&screen);
+        let file = screen.find("File \"test_calc.py\", line 6").expect(&screen);
+        assert!(outcome < label && label < file, "{screen}");
+        assert!(!screen.contains("Check · failed"), "said once: {screen}");
+        // The final error line is on screen at 100x30 (and one scroll away at 80x24).
+        let error = screen.find("AssertionError: 4 != 3");
+        assert!(
+            height < 30 || error.is_some_and(|error| file < error),
+            "{screen}"
+        );
+        assert!(!screen.contains("/worktree/"), "{screen}");
+        assert!(!screen.contains("stderr: F | ======"), "{screen}");
+        if let Some(diff) = screen.find("+def add(a, b):") {
+            assert!(file < diff, "{screen}");
+        }
+    }
+    // Only stdout: labelled stdout; an older detail with an empty colon reads cleanly.
+    let fixture = finished_fixture_with(
+        "Check failed (exit 1):",
+        Some(failed_check("STDOUT_SENTINEL failure\n", "")),
+    );
+    let screen = text(&fixture.render(100, 30));
+    assert!(
+        screen.contains("✗ Run failed · Check failed (exit 1)\n")
+            || screen.contains("✗ Run failed · Check failed (exit 1) "),
+        "{screen}"
+    );
+    assert!(!screen.contains("(exit 1):"), "{screen}");
+    let label = screen.find("stdout · last lines").expect(&screen);
+    assert!(label < screen.find("STDOUT_SENTINEL").unwrap(), "{screen}");
 }
 
 #[test]

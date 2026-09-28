@@ -295,9 +295,12 @@ fn drive(
 }
 
 fn finished(autopilot: &Autopilot, control: &TaskControl) -> bool {
-    autopilot
-        .status(control)
-        .is_some_and(|status| matches!(status.state, RunState::Done | RunState::Failed))
+    autopilot.status(control).is_some_and(|status| {
+        matches!(
+            status.state,
+            RunState::Done | RunState::Partial | RunState::Failed
+        )
+    })
 }
 
 #[test]
@@ -405,6 +408,214 @@ fn go_plans_approves_dispatches_repairs_and_integrates_on_one_local_branch() {
     assert_eq!(server.count(), 4);
 }
 
+fn render_rows(
+    app: &alfredo_tui::model::App,
+    control: &TaskControl,
+    w: u16,
+    h: u16,
+) -> Vec<String> {
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, h)).unwrap();
+    terminal
+        .draw(|frame| alfredo_tui::ui::draw_with_tasks(frame, app, control))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol().to_string())
+                .collect::<String>()
+        })
+        .collect()
+}
+
+#[test]
+fn existing_test_is_worker_reference_repairs_carry_output_and_nothing_accepted_reads_failed() {
+    let fixture = Fixture::new();
+    let test_source = "import unittest\nfrom calc import answer\n\nclass T(unittest.TestCase):\n    def test_answer(self):\n        self.assertEqual(answer(), 42)  # EXISTING_TEST_SENTINEL\n";
+    fs::write(fixture.workspace.join("test_calc.py"), test_source).unwrap();
+    git(&fixture.workspace, &["add", "."]);
+    git(
+        &fixture.workspace,
+        &["-c", "core.hooksPath=/dev/null", "commit", "-qm", "test"],
+    );
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return json!({"tasks": [{"title": "Make test_calc.py pass", "acceptance": ["tests pass"],
+                "model": "fixture", "dependencies": [], "policy": {"files": ["calc.py"],
+                "check": ["/usr/bin/python3", "-B", "-m", "unittest", "test_calc.py"]}}]})
+            .to_string();
+        }
+        bad_calc()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start(
+            "Create calc.py so test_calc.py passes",
+            "fixture",
+            1,
+            &control,
+        )
+        .unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "failed", finished);
+
+    let prompts = server.prompts();
+    let first = prompts
+        .iter()
+        .find(|p| p.starts_with("Implement this task: Make test_calc.py pass"))
+        .unwrap();
+    assert!(first.contains("READ-ONLY FILE test_calc.py\n"), "{first}");
+    assert!(first.contains("EXISTING_TEST_SENTINEL"), "{first}");
+    let snapshot = fixture.store.snapshot().unwrap();
+    let repair = snapshot
+        .tasks
+        .iter()
+        .find(|t| t.repair_of == Some(1))
+        .unwrap();
+    assert!(
+        repair.title.contains("Check failed (exit 1): stderr: ")
+            && repair.title.contains("AssertionError: 41 != 42"),
+        "{}",
+        repair.title
+    );
+    assert!(!repair.title.contains("/worktree/"), "{}", repair.title);
+
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!(status.state, RunState::Failed, "{status:?}");
+    assert_eq!(
+        (status.done, status.total, status.failed, status.repairs),
+        (0, 1, 1, 1)
+    );
+    let row = alfredo_tui::dashboard::autopilot_row(&status, 100);
+    assert!(
+        row.contains("Autopilot ✗ failed · 0/1 done · 1 failed · 1 repair ·"),
+        "{row}"
+    );
+    let report = autopilot.report().unwrap();
+    assert!(report.starts_with("Autopilot failed: "), "{report}");
+    assert!(
+        report.contains("0/1 task(s) accepted · 1 repair"),
+        "{report}"
+    );
+    let notice = autopilot.take_finished_notice().unwrap();
+    assert!(
+        notice.starts_with("Autopilot failed · 0/1 accepted · 1 repair"),
+        "{notice}"
+    );
+    assert!(!notice.contains('\n'));
+    assert!(autopilot.take_finished_notice().is_none());
+
+    control.snapshot = Some(snapshot);
+    control.autopilot = Some(status);
+    control.set_visible(true);
+    let app = alfredo_tui::model::App::new("fixture".into());
+    let rows = render_rows(&app, &control, 100, 30);
+    assert!(
+        rows.iter()
+            .any(|row| row.contains("Mission Work · 0/1 done · 1 repair ")),
+        "{rows:#?}"
+    );
+}
+
+#[test]
+fn finished_autopilot_replaces_the_stale_start_notice_in_the_footer_once() {
+    let fixture = Fixture::new();
+    fixture.store.select_mission(true).unwrap();
+    let server = Server::new(|request, _| {
+        assert!(planner(request));
+        json!({"tasks": [{"title": "Bad", "acceptance": ["x"], "model": "fixture", "dependencies": [2],
+            "policy": {"files": ["calc.py"], "check": ["true"]}}]})
+        .to_string()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut work = alfredo_tui::workstation::Workstation::open(
+        &fixture.root.join("state"),
+        &fixture.workspace,
+        "mission",
+        "default",
+        "fixture",
+        server.provider(),
+    )
+    .unwrap();
+    work.tasks.refresh(&runtime);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while work.tasks.pending || work.tasks.scope_status.revision.is_none() {
+        work.tasks.poll();
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(2));
+    }
+    work.app.notice = work
+        .autopilot
+        .start("Improve calc", "fixture", 2, &work.tasks)
+        .unwrap();
+    work.sync_autopilot();
+    assert!(work.app.notice.starts_with("Autopilot started"));
+    drive(
+        &mut work.autopilot,
+        &mut work.tasks,
+        &runtime,
+        "failed",
+        finished,
+    );
+    assert!(work.sync_autopilot());
+    assert!(
+        work.app
+            .notice
+            .starts_with("Autopilot failed · Planning failed twice"),
+        "{}",
+        work.app.notice
+    );
+    let rows = render_rows(&work.app, &work.tasks, 100, 30);
+    let screen = rows.join("\n");
+    assert!(!screen.contains("Autopilot started"), "{screen}");
+    assert!(rows[29].contains("Autopilot failed"), "{screen}");
+    assert!(
+        rows[2].contains("Autopilot ✗ failed · 0/0 done"),
+        "{screen}"
+    );
+    // Reported once; a user notice afterwards is not overwritten.
+    work.app.notice = "USER_NOTICE".into();
+    work.sync_autopilot();
+    assert_eq!(work.app.notice, "USER_NOTICE");
+}
+
+#[test]
+fn finished_state_saved_by_an_older_build_still_loads_with_an_honest_state() {
+    use sha2::{Digest, Sha256};
+    let fixture = Fixture::new();
+    let directory = fixture.directory();
+    fs::create_dir_all(&directory).unwrap();
+    let path = directory.join(format!(
+        "autopilot-{:x}.json",
+        Sha256::digest("default".as_bytes())
+    ));
+    // Exact field set written before partial/failed finish states existed.
+    fs::write(
+        &path,
+        json!({"version": 1, "id": "0123456789abcdef", "goal": "Old goal", "model": "fixture",
+            "max_repairs": 2, "phase": "done", "paused": false, "started": 100, "finished": 160,
+            "plan_attempts": 0, "plan_error": null, "plan_request": "p", "save_request": "s",
+            "first": null, "count": 1, "retry_cancelled": [],
+            "notice": "Autopilot done · 0/1 accepted · no integration branch",
+            "report": "Autopilot finished: Old goal\nNo integration branch: no task was accepted",
+            "branch": null})
+        .to_string(),
+    )
+    .unwrap();
+    let control = TaskControl::new(fixture.store.clone());
+    let mut autopilot = Autopilot::open(&directory, "default").unwrap();
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!(status.state, RunState::Failed);
+    assert_eq!((status.done, status.total), (0, 1));
+    assert_eq!(status.elapsed, Duration::from_secs(60));
+    assert!(autopilot.report().unwrap().contains("Old goal"));
+    assert!(
+        autopilot.take_finished_notice().is_none(),
+        "no replayed notice"
+    );
+}
+
 #[test]
 fn invalid_plan_is_retried_once_with_its_validation_error_then_stops() {
     let fixture = Fixture::new();
@@ -470,8 +681,13 @@ fn exhausted_repairs_hold_the_task_block_dependents_and_integrate_independent_wo
         .unwrap();
     drive(&mut autopilot, &mut control, &runtime, "done", finished);
     let status = autopilot.status(&control).unwrap();
-    assert_eq!(status.state, RunState::Done);
+    assert_eq!(status.state, RunState::Partial);
     assert_eq!((status.done, status.total, status.failed), (1, 3, 2));
+    assert!(
+        alfredo_tui::dashboard::autopilot_row(&status, 100)
+            .contains("Autopilot ◐ partial · 1/3 done"),
+        "{status:?}"
+    );
     let snapshot = fixture.store.snapshot().unwrap();
     let find = |id| snapshot.tasks.iter().find(|task| task.id == id).unwrap();
     assert_eq!(find(1).status, TaskStatus::Failed);
@@ -484,7 +700,12 @@ fn exhausted_repairs_hold_the_task_block_dependents_and_integrate_independent_wo
         .filter(|task| task.repair_of.is_some())
         .collect();
     assert_eq!(repairs.len(), 1, "budget of one repair");
-    assert_eq!(repairs[0].status, TaskStatus::Failed);
+    assert_eq!(
+        repairs[0].status,
+        TaskStatus::Failed,
+        "{}",
+        autopilot.report().unwrap()
+    );
     let branch = status.branch.clone().expect("accepted subset branch");
     assert!(git(
         &fixture.workspace,
@@ -590,6 +811,7 @@ fn pause_stops_decisions_human_hold_is_never_resolved_and_restart_restores_pause
     assert_eq!(snapshot.tasks.len(), 1, "no repair of a human hold");
     let status = autopilot.status(&control).unwrap();
     assert_eq!((status.done, status.failed), (0, 1));
+    assert_eq!(status.state, RunState::Failed, "held with nothing accepted");
     assert!(status.branch.is_none());
     assert!(autopilot.report().unwrap().contains("human review"));
     assert_eq!(server.count(), requests);

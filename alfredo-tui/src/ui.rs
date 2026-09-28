@@ -334,7 +334,12 @@ fn draw_body(
                 .iter()
                 .map(|row| work_row(row, identity, row_width))
                 .collect();
-            let (done, total) = identity.map(dashboard::done_total).unwrap_or_default();
+            let (done, total, repairs) = identity.map(dashboard::done_total).unwrap_or_default();
+            let repairs = match repairs {
+                0 => String::new(),
+                1 => " · 1 repair".into(),
+                count => format!(" · {count} repairs"),
+            };
             let filter = if tasks.task_query.trim().is_empty() {
                 String::new()
             } else {
@@ -342,7 +347,7 @@ fn draw_body(
             };
             (
                 items,
-                format!(" Mission Work · {done}/{total} done{filter} "),
+                format!(" Mission Work · {done}/{total} done{repairs}{filter} "),
                 selected,
             )
         } else {
