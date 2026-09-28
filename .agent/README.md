@@ -1,6 +1,10 @@
 # Alfredo / Albert Project Documentation
 
-**Last Updated**: 2026-09-27
+> **Start here: [Tasks/STATUS.md](Tasks/STATUS.md)** — current truth. The product is
+> the native terminal `alfredo-tui`; the desktop/Python material below is legacy.
+> `Tasks/context.md` is a large historical log; do not rely on it for current state.
+
+**Last Updated**: 2026-09-28
 **Status**: Prompt-first Alfredo workstation with a persistent Apple-container canonical localhost environment, explicit Coding Workspace/Mission continuity, and receipt-bound conversational action truth; authenticated npm publication, registry-only install, and the documented human/release follow-up remain explicit
 
 ## Quick Start
