@@ -23,7 +23,7 @@
 | E1 fmt/clippy/test | Done 2026-09-28: fmt, clippy, 439 tests pass (11 ignored live) |
 | E2 PTY smokes on release binary | Done: 5 smokes incl. autopilot pass on installed archive |
 | E3 live 2-task goal, real model | Open: not verified in this pass |
-| E4 legacy gates | Recorded in `.agent/Reports/2026-09-28-launch-regression.md` |
+| E4 legacy gates | Run; 1 legacy defect (Python retirement /proc scan, 51 fails), not TUI; see `.agent/Reports/2026-09-28-launch-regression.md` |
 | F1 README | Done (root README leads with TUI) |
 | F2 CHANGELOG/LICENSE/notices/CI | Local done; CI green on GitHub not yet observed (not pushed) |
 | F3 archive + draft release | Archive + installed smoke done locally; draft release needs tag push by owner |
