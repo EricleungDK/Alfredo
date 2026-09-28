@@ -14,8 +14,10 @@ use crossterm::{
 };
 use ratatui::{
     layout::{Constraint, Layout},
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
+    text::Span,
     widgets::{Block, Paragraph, Wrap},
+    Frame,
 };
 use std::{
     io,
@@ -200,6 +202,209 @@ async fn prepare_effects(choice: WorkspaceChoice) -> Result<PathBuf> {
     Ok(target)
 }
 
+/// Mission opened without typed input at startup.
+pub const DEFAULT_MISSION: &str = "default";
+
+/// Zero-ceremony startup preflight: the repository containing `starting`, with
+/// mission `default` resumed or created. `Ok(None)` means not inside a repository.
+/// Nothing is created here; the launcher admits the choice like a selector choice.
+pub async fn automatic(starting: &Path, state: &Path) -> Result<Option<Choice>> {
+    let Ok(root) = git(starting, &["rev-parse", "--show-toplevel"]).await else {
+        return Ok(None);
+    };
+    let root = Path::new(root.trim())
+        .canonicalize()
+        .map_err(|e| format!("Repository unavailable: {e}"))?;
+    let workspace = prepare_workspace(&root, state, false).await?;
+    open_or_create(state, workspace, DEFAULT_MISSION).map(Some)
+}
+
+/// Resume `name` when it exists, otherwise start it. A resume refusal for an
+/// existing mission (e.g. corrupt identity) is reported, never replaced.
+pub fn open_or_create(state: &Path, workspace: WorkspaceChoice, name: &str) -> Result<Choice> {
+    mission_choice(state, workspace.clone(), name, false)
+        .or_else(|resume| mission_choice(state, workspace, name, true).map_err(|_| resume))
+}
+
+/// Typed selector text, or the placeholder when nothing was typed.
+pub fn entry<'a>(input: &'a Session, placeholder: &'a str) -> &'a str {
+    if input.draft.is_empty() {
+        placeholder
+    } else {
+        &input.draft
+    }
+}
+
+/// Everything the selector screen shows; rendering has no side effects.
+pub struct SelectorView<'a> {
+    pub starting: &'a Path,
+    pub accepted: Option<&'a WorkspaceChoice>,
+    pub create: bool,
+    pub start_new: bool,
+    pub notice: &'a str,
+    pub input: &'a Session,
+    pub placeholder: &'a str,
+    pub saved: &'a crate::missions::Discovery,
+    pub saved_index: usize,
+    pub loading: bool,
+    pub pending: bool,
+}
+
+fn printable(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() && c != '\n' {
+                '�'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Selector screen; the notice sits directly above the input so it is never missed.
+pub fn render_selector(frame: &mut Frame, view: &SelectorView) {
+    let area = frame.area();
+    let notice = Paragraph::new(printable(view.notice))
+        .style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .wrap(Wrap { trim: false });
+    let notice_height = if view.notice.is_empty() {
+        0
+    } else {
+        notice.line_count(area.width).clamp(1, 4) as u16
+    };
+    let rows = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(0),
+        Constraint::Length(notice_height),
+        Constraint::Length(3),
+        Constraint::Length(3),
+    ])
+    .split(area);
+    frame.render_widget(
+        Paragraph::new(" ALFREDO · Open your work").style(Style::default().fg(Color::Cyan)),
+        rows[0],
+    );
+    let saved = view.saved;
+    let description = if let Some(path) = view.accepted {
+        let names = saved
+            .names
+            .iter()
+            .skip(view.saved_index.saturating_sub(2))
+            .take(6)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(" · ");
+        let mode = if view.start_new {
+            "Start New Mission · existing names are refused"
+        } else {
+            "Open or create a mission · existing names resume"
+        };
+        let listed = if view.loading {
+            "loading…"
+        } else if names.is_empty() {
+            "none found"
+        } else {
+            &names
+        };
+        let guidance = if matches!(path, WorkspaceChoice::Create { .. }) {
+            "Choose a new mission name. Enter saves the request before creating anything."
+        } else if view.start_new {
+            "Choose an unused name; F2 returns to open or create."
+        } else if view.loading {
+            "Reading saved mission names…"
+        } else if saved.limited || saved.skipped > 0 {
+            "Some records omitted; manual names remain available."
+        } else if saved.names.is_empty() {
+            "Type a mission name, or Enter for the placeholder."
+        } else {
+            "Tab fills a saved name; Enter opens or creates it."
+        };
+        format!(
+            "Workspace: {}\nMission selection required\n\n{mode}\n\nSaved mission names: {listed}\n{guidance}",
+            path.path().display()
+        )
+    } else {
+        let intro = format!(
+            "Starting location: {}\nWorkspace selection required · no workspace or mission bound\n\n{}",
+            view.starting.display(),
+            if view.create {
+                "Create a new repository with an empty initial commit at an unused path."
+            } else {
+                "Open an existing repository by its exact root path."
+            }
+        );
+        if view.create {
+            intro
+        } else {
+            let paths = saved
+                .workspaces
+                .iter()
+                .skip(view.saved_index.saturating_sub(2))
+                .take(4)
+                .map(|p| p.display().to_string())
+                .collect::<Vec<_>>()
+                .join("\n");
+            let listed = if view.loading {
+                "loading…"
+            } else if paths.is_empty() {
+                "none found"
+            } else {
+                &paths
+            };
+            let guidance = if view.loading {
+                "Reading saved repositories…"
+            } else if saved.limited || saved.skipped > 0 {
+                "Some records omitted; type a path manually."
+            } else if saved.workspaces.is_empty() {
+                "Type a repository path to begin."
+            } else {
+                "Tab fills a saved path; Enter validates it."
+            };
+            format!("{intro}\n\nSaved repositories:\n{listed}\n{guidance}")
+        }
+    };
+    frame.render_widget(
+        Paragraph::new(printable(&description)).wrap(Wrap { trim: false }),
+        rows[1],
+    );
+    frame.render_widget(notice, rows[2]);
+    let title = match (view.accepted.is_some(), view.start_new, view.create) {
+        (true, true, _) => "New mission name",
+        (true, false, _) => "Mission to open or create",
+        (false, _, true) => "New repository path",
+        (false, _, false) => "Repository path",
+    };
+    let input = if view.input.draft.is_empty() && !view.placeholder.is_empty() {
+        Paragraph::new(Span::styled(
+            printable(view.placeholder),
+            Style::default().fg(Color::DarkGray),
+        ))
+    } else {
+        Paragraph::new(
+            view.input
+                .draft_view(rows[3].width.saturating_sub(2) as usize),
+        )
+    };
+    frame.render_widget(input.block(Block::bordered().title(title)), rows[3]);
+    let hint = match view.accepted {
+        _ if view.pending => "Validating selection · waiting for result",
+        Some(WorkspaceChoice::Create { .. }) => {
+            "Enter create repository and mission · Ctrl+U clear · Esc cancel"
+        }
+        Some(_) if view.start_new => {
+            "Enter start new · F2 open or create · Ctrl+U clear · Esc cancel"
+        }
+        Some(_) => "Tab names · Enter open or create · F2 start new only · Esc cancel",
+        None => "Tab saved paths · Enter validate · F2 open/create · Ctrl+U clear · Esc cancel",
+    };
+    frame.render_widget(Paragraph::new(hint).wrap(Wrap { trim: true }), rows[4]);
+}
+
 struct Guard;
 impl Drop for Guard {
     fn drop(&mut self) {
@@ -215,6 +420,7 @@ pub fn choose(
     mission: Option<String>,
     start_new: bool,
     state: &Path,
+    notice: &str,
 ) -> Result<Option<Choice>> {
     if let (Some(path), Some(name)) = (&explicit, &mission) {
         let workspace = runtime.block_on(prepare_workspace(path, state, false))?;
@@ -230,10 +436,12 @@ pub fn choose(
         mission,
         start_new,
         state,
+        notice,
         &mut terminal,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn choose_in_terminal(
     runtime: &Runtime,
     starting: &Path,
@@ -241,6 +449,7 @@ pub fn choose_in_terminal(
     mission: Option<String>,
     mut start_new: bool,
     state: &Path,
+    initial_notice: &str,
     terminal: &mut ratatui::DefaultTerminal,
 ) -> Result<Option<Choice>> {
     let mut accepted = match explicit {
@@ -250,14 +459,12 @@ pub fn choose_in_terminal(
     if let (Some(path), Some(name)) = (&accepted, &mission) {
         return Ok(Some(mission_choice(state, path.clone(), name, start_new)?));
     }
+    // Suggestions are placeholders, so typing never appends to them.
+    let mission_placeholder = mission.as_deref().unwrap_or(DEFAULT_MISSION).to_owned();
+    let path_placeholder = starting.to_str().unwrap_or("").to_owned();
     let mut input = Session::new("selection".into());
-    input.insert(if accepted.is_some() {
-        mission.as_deref().unwrap_or("default")
-    } else {
-        starting.to_str().unwrap_or("")
-    });
     let mut create = false;
-    let mut notice = String::new();
+    let mut notice = initial_notice.to_owned();
     let mut pending: Option<JoinHandle<Result<WorkspaceChoice>>> = None;
     let discovery_job = |path: Option<PathBuf>| {
         let state = state.to_owned();
@@ -286,7 +493,6 @@ pub fn choose_in_terminal(
                     saved_index = 0;
                     accepted = Some(path);
                     input = Session::new("selection".into());
-                    input.insert(mission.as_deref().unwrap_or("default"));
                     notice = if create { "New repository path validated. Nothing created yet; choose a mission to continue." } else { "Repository validated." }.into();
                 }
                 Err(error) => notice = error,
@@ -304,27 +510,30 @@ pub fn choose_in_terminal(
                 }
             }
         }
-        terminal.draw(|frame| {
-            let rows = Layout::vertical([Constraint::Length(2), Constraint::Min(2), Constraint::Length(3), Constraint::Length(3)]).split(frame.area());
-            frame.render_widget(Paragraph::new(" ALFREDO · Open your work").style(Style::default().fg(Color::Cyan)), rows[0]);
-            let description = if let Some(path) = &accepted {
-                format!("Workspace: {}\nMission selection required\n\n{}\n{}", path.path().display(), if start_new { "Start New Mission · existing names are refused" } else { "Resume Mission · saved identity required" }, notice)
-            } else {
-                format!("Starting location: {}\nWorkspace selection required · no workspace or mission bound\n\n{}\n{}", starting.display(), if create { "Create a new repository with an empty initial commit at an unused path." } else { "Open an existing repository by its exact root path." }, notice)
-            };
-            let description = if accepted.is_some() {
-                let names = saved.names.iter().skip(saved_index.saturating_sub(2)).take(6).cloned().collect::<Vec<_>>().join(" · ");
-                format!("{description}\n\nSaved mission names: {}\n{}", if discovery.is_some() { "loading…" } else if names.is_empty() { "none found" } else { &names }, if matches!(accepted, Some(WorkspaceChoice::Create { .. })) { "Choose a new mission name. Enter saves the request before creating anything." } else if start_new { "Choose an unused name; F2 returns to Resume." } else if discovery.is_some() { "Reading saved mission names…" } else if saved.limited || saved.skipped > 0 { "Some records omitted; manual names remain available." } else if saved.names.is_empty() { "Type a mission name to begin." } else { "Tab fills a saved name; Enter opens it." })
-            } else if !create {
-                let paths = saved.workspaces.iter().skip(saved_index.saturating_sub(2)).take(4).map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n");
-                format!("{description}\n\nSaved repositories:\n{}\n{}", if discovery.is_some() { "loading…" } else if paths.is_empty() { "none found" } else { &paths }, if discovery.is_some() { "Reading saved repositories…" } else if saved.limited || saved.skipped > 0 { "Some records omitted; type a path manually." } else if saved.workspaces.is_empty() { "Type a repository path to begin." } else { "Tab fills a saved path; Enter validates it." })
-            } else { description };
-            let description: String = description.chars().map(|c| if c.is_control() && c != '\n' { '�' } else { c }).collect();
-            frame.render_widget(Paragraph::new(description).wrap(Wrap {trim: false}), rows[1]);
-            let title = if accepted.is_some() { if start_new { "New mission name" } else { "Mission to resume" } } else if create { "New repository path" } else { "Repository path" };
-            frame.render_widget(Paragraph::new(input.draft_view(rows[2].width.saturating_sub(2) as usize)).block(Block::bordered().title(title)), rows[2]);
-            frame.render_widget(Paragraph::new(if pending.is_some() { "Validating selection · waiting for result" } else if accepted.is_some() { if matches!(accepted, Some(WorkspaceChoice::Create { .. })) { "Enter create repository and mission · Ctrl+U clear · Esc cancel" } else if start_new { "Enter start new · F2 resume · Ctrl+U clear · Esc cancel" } else { "Tab names · Enter resume · F2 start new · Esc cancel" } } else { "Tab saved paths · Enter validate · F2 open/create · Ctrl+U clear · Esc cancel" }).wrap(Wrap {trim: true}), rows[3]);
-        }).map_err(|e| e.to_string())?;
+        terminal
+            .draw(|frame| {
+                render_selector(
+                    frame,
+                    &SelectorView {
+                        starting,
+                        accepted: accepted.as_ref(),
+                        create,
+                        start_new,
+                        notice: &notice,
+                        input: &input,
+                        placeholder: if accepted.is_some() {
+                            &mission_placeholder
+                        } else {
+                            &path_placeholder
+                        },
+                        saved: &saved,
+                        saved_index,
+                        loading: discovery.is_some(),
+                        pending: pending.is_some(),
+                    },
+                )
+            })
+            .map_err(|e| e.to_string())?;
         if !event::poll(Duration::from_millis(40)).map_err(|e| e.to_string())? {
             continue;
         }
@@ -375,12 +584,18 @@ pub fn choose_in_terminal(
                 }
                 KeyCode::Enter => {
                     if let Some(path) = &accepted {
-                        match mission_choice(state, path.clone(), &input.draft, start_new) {
+                        let name = entry(&input, &mission_placeholder);
+                        let chosen = if start_new {
+                            mission_choice(state, path.clone(), name, true)
+                        } else {
+                            open_or_create(state, path.clone(), name)
+                        };
+                        match chosen {
                             Ok(choice) => return Ok(Some(choice)),
                             Err(error) => notice = error,
                         }
                     } else {
-                        let path = PathBuf::from(&input.draft);
+                        let path = PathBuf::from(entry(&input, &path_placeholder));
                         let state = state.to_owned();
                         pending =
                             Some(runtime.spawn(async move {

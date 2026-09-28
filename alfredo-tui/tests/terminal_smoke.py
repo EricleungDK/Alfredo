@@ -69,6 +69,93 @@ def visible_screen(output, height=24, width=100):
     return '\n'.join(''.join(line) for line in cells)
 
 
+class Pty:
+    """One real PTY-hosted alfredo-tui process with a reconstructed screen."""
+
+    def __init__(self, test, args, cwd, env):
+        self.test = test
+        self.master, self.slave = pty.openpty()
+        fcntl.ioctl(self.slave, termios.TIOCSWINSZ, struct.pack('HHHH', 24, 100, 0, 0))
+        self.output = bytearray()
+        self.process = subprocess.Popen(args, stdin=self.slave, stdout=self.slave, stderr=self.slave, env=env, cwd=cwd)
+
+    def screen(self):
+        return visible_screen(self.output)
+
+    def wait_for(self, text, timeout=10):
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if text in self.screen():
+                return
+            if select.select([self.master], [], [], 0.05)[0]:
+                chunk = os.read(self.master, 65536)
+                self.output.extend(chunk)
+                if b'\x1b[6n' in chunk:
+                    os.write(self.master, b'\x1b[1;1R')
+            self.test.assertIsNone(self.process.poll(), self.output.decode(errors='replace'))
+        self.test.fail(f'Missing {text!r}:\n{self.screen()}')
+
+    def write(self, data):
+        os.write(self.master, data)
+
+    def close(self):
+        if self.process.poll() is None:
+            self.process.kill()
+            self.process.wait(timeout=3)
+        os.close(self.master)
+        os.close(self.slave)
+
+
+class ZeroCeremonyStart(unittest.TestCase):
+    def test_repository_subdirectory_opens_default_mission_and_locked_start_falls_back(self):
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        with tempfile.TemporaryDirectory(prefix='alfredo-zero-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-zero-repo-') as repo:
+            root = os.path.realpath(repo)
+            subprocess.run(['git', '-C', root, 'init', '-q', '--template='], check=True)
+            nested = Path(root, 'src', 'deep')
+            nested.mkdir(parents=True)
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            args = [str(binary), '--model', 'fixture', '--endpoint', 'http://127.0.0.1:9']
+            first = Pty(self, args, nested, env)
+            second = None
+            try:
+                # A1: no flags, no typed input, from a subdirectory.
+                first.wait_for('Mission: default')
+                first.wait_for('Sessions')
+                self.assertNotIn('Open your work', first.screen())
+                self.assertIn(root, first.screen())
+                manifests = [json.loads(path.read_text()) for path in Path(state).rglob('mission.json')]
+                self.assertEqual([manifest['mission'] for manifest in manifests], ['default'])
+                # The conversation is owned by the first terminal: fall back with the reason shown.
+                second = Pty(self, args, nested, env)
+                second.wait_for('Workspace selection required')
+                second.wait_for('Automatic open failed')
+                second.wait_for('in use')
+                # Enter validates the placeholder (the subdirectory); the refusal sits on the line above the input.
+                second.write(b'\r')
+                second.wait_for('exact repository root')
+                lines = second.screen().split('\n')
+                notice = next(index for index, line in enumerate(lines) if 'exact repository root' in line)
+                self.assertTrue(lines[notice + 1].startswith('┌'), second.screen())
+                second.write(root.encode() + b'\r')
+                second.wait_for('Mission selection required')
+                second.wait_for('Enter open or create')
+                # Typing replaces the default placeholder; Enter creates the missing mission.
+                second.write(b'demo1\r')
+                second.wait_for('Mission: demo1')
+                self.assertNotIn('defaultdemo1', second.screen())
+                names = sorted(json.loads(path.read_text())['mission'] for path in Path(state).rglob('mission.json'))
+                self.assertEqual(names, ['default', 'demo1'])
+                for terminal in (first, second):
+                    terminal.write(b'\x11')
+                    self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                first.close()
+                if second is not None:
+                    second.close()
+
+
 class ScreenReconstruction(unittest.TestCase):
     def test_alternate_screen_does_not_match_stale_primary_text(self):
         entered = b'old text\x1b[?1049hnew text'
@@ -190,8 +277,8 @@ class TerminalSmoke(unittest.TestCase):
         )
         self.assertEqual(preflight.returncode, 0, preflight.stdout + preflight.stderr)
         self.assertIn('PASS model catalog: fixture is installed', preflight.stdout)
-        process = subprocess.Popen(
-            [str(binary), '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}'],
+        process = subprocess.Popen(  # --select: inside a repository the selector is opt-in.
+            [str(binary), '--select', '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}'],
             stdin=slave, stdout=slave, stderr=slave, env=env, cwd=workspace.name,
         )
         output = bytearray()
@@ -219,10 +306,8 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'Mission selection required')
             self.assertFalse(list(Path(state.name).rglob('conversations-*.json')))
             self.assertFalse(slow_started.is_set())
-            os.write(master, b'\r')
-            wait_for(b'Mission does not exist')
             self.assertFalse(list(Path(state.name).rglob('mission.json')))
-            os.write(master, b'\x1bOQ\r')  # F2 selects Start New.
+            os.write(master, b'\r')  # Enter on the placeholder creates the missing default mission.
             wait_for(b'Sessions')
             os.write(master, b'/scope\r')
             wait_for(b'Outside flow')

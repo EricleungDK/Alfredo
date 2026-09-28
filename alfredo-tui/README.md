@@ -111,7 +111,7 @@ substitutes for task policy, approval, execution evidence or acceptance.
 
 ## Switch work without restarting
 
-Use `/workspace` to choose another repository and Resume or Start New Mission.
+Use `/workspace` to choose another repository and open or create a mission.
 Esc cancels the selector and returns to your current work. The header identifies
 its mission and repository. Each mission restores its own conversations, drafts,
 models, task filter and selected task; automatic dispatch starts off.
@@ -187,8 +187,17 @@ finish/retry them or open another conversation to switch. Existing task assignme
 remain fixed, while newly proposed tasks use the conversation's selected model.
 See [Ollama model listing](https://docs.ollama.com/api/tags) for the provider protocol.
 
-Launch starts with **Workspace selection required**. The current directory is only
-an editable Starting Location. Enter validates an existing repository's exact root;
+Launched inside a Git repository (from any subdirectory) with no workspace or
+mission flags, Alfredo opens the repository root with mission `default`, resuming it
+if it exists and creating it otherwise; no input is needed. `--workspace DIR` alone
+does the same for the repository containing `DIR`. This uses the same validation,
+admission journal and locks as the selector. If that automatic open fails (for
+example, the conversation is open in another terminal, or mission state is
+corrupt), the selector appears with the reason shown above its input.
+
+Outside a repository, or with `--select`, launch starts with **Workspace selection
+required**. The current directory is only a placeholder Starting Location; typing
+replaces it. Enter validates an existing repository's exact root;
 F2 selects new-repository creation at an unused path. The picker collects the
 repository and mission choice without creating either. Existing files/directories
 and nested repositories are never overwritten. After final mission confirmation
@@ -196,9 +205,11 @@ and saved admission, creation initializes Git with an
 empty template and an empty initial commit, so planning and isolated workers have
 a baseline. No project files are staged or created. Existing repositories are not
 changed by selection.
-Then choose **Resume Mission** or **Start New Mission** with F2 and enter its name.
-Resume requires saved identity/state; Start New refuses every existing name with
-mission, task or conversation data. Opening a mission grants no scope/task approval.
+Then type a mission name (placeholder `default`) and press Enter: an existing
+mission resumes after identity validation, and a missing one is created. F2 is
+optional and switches to **Start New Mission**, which refuses every existing name
+with mission, task or conversation data. Validation errors appear on the line
+directly above the input. Opening a mission grants no scope/task approval.
 Esc exits the picker without creating a repository, mission or selection entry.
 After confirmation, preparation reports repository, mission, target loading and
 handoff separately; only the completed switch says **workspace selected**. A failed
@@ -207,7 +218,8 @@ See [selection recovery](#selection-history-and-recovery) for the independent st
 
 `--workspace DIR --mission NAME` resumes an existing mission directly. Use
 `--workspace DIR --new-mission NAME` to create a distinct mission name. These flags
-are mutually exclusive, and the repository is still validated. Omitting either selection opens its startup step. `--doctor`
+are mutually exclusive, and the repository is still validated. A mission flag without
+`--workspace` opens the repository step of the selector. `--doctor`
 remains noninteractive and uses current directory / `default` when flags are absent. `--state-dir DIR`
 or `ALFREDO_STATE_DIR` selects task storage, defaulting to `$HOME/.local/state/alfredo`.
 State must be outside the coding workspace. Each canonical workspace/mission pair

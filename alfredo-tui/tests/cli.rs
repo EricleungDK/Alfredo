@@ -15,6 +15,18 @@ fn help_and_version_work_without_a_terminal_or_model_server() {
 }
 
 #[test]
+fn help_documents_zero_ceremony_start_and_select_flag() {
+    let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .args(["--select", "--help"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(help.contains("--select"));
+    assert!(help.contains("mission default"));
+}
+
+#[test]
 fn invalid_arguments_fail_before_entering_terminal_mode() {
     for args in [
         vec!["--model"],
