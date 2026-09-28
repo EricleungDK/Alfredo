@@ -18,6 +18,7 @@ pub struct Workstation {
     pub tasks: TaskControl,
     pub wayfinder: crate::wayfinder::Router,
     pub autosave: Autosave,
+    pub autopilot: crate::autopilot::Autopilot,
     workspace: PathBuf,
     mission: String,
     state: PathBuf,
@@ -40,6 +41,8 @@ impl Workstation {
         store.select_mission(false)?;
         let snapshot = store.snapshot()?;
         let conversations = ConversationStore::open(&store, conversation)?;
+        let autopilot =
+            crate::autopilot::Autopilot::open(&store.conversation_directory()?, conversation)?;
         let restored = conversations.load()?;
         let plan = restored.as_ref().and_then(|saved| saved.plan_draft.clone());
         let view = restored.as_ref().and_then(|saved| saved.task_view.clone());
@@ -66,6 +69,7 @@ impl Workstation {
             tasks,
             wayfinder,
             autosave: Autosave::new(conversations),
+            autopilot,
             workspace: workspace.canonicalize().map_err(|e| e.to_string())?,
             mission: mission.into(),
             state: state.into(),
@@ -108,6 +112,9 @@ impl Workstation {
         }
         if self.app.models_pending {
             return Err("Wait for model discovery before switching work".into());
+        }
+        if self.autopilot.running() {
+            return Err("Pause autopilot (/pause or F5) before switching work".into());
         }
         self.tasks.can_switch()
     }

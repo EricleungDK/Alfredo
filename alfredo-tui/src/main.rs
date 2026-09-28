@@ -42,6 +42,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut qualification_output = None;
     let mut qualification_inspection = None;
     let mut qualification_repetitions = None;
+    let mut go_goal: Option<String> = None;
+    let mut max_repairs = alfredo_tui::autopilot::DEFAULT_MAX_REPAIRS;
     let mut model = std::env::var("ALFREDO_MODEL").unwrap_or_else(|_| "qwen3:14b".into());
     let mut endpoint =
         std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
@@ -50,6 +52,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         match arg.as_str() {
             "--doctor" => doctor = true,
             "--select" => select = true,
+            "--go" => {
+                let goal = args.next().ok_or("--go needs a GOAL")?;
+                if goal.trim().is_empty() {
+                    return Err("--go needs a nonempty GOAL".into());
+                }
+                go_goal = Some(goal);
+            }
+            "--max-repairs" => {
+                max_repairs = args
+                    .next()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .filter(|value| *value <= alfredo_tui::autopilot::MAX_REPAIRS)
+                    .ok_or("--max-repairs needs a number from 0 to 16")?
+            }
             "--qualify-inference" => {
                 qualification_output = Some(std::path::PathBuf::from(
                     args.next()
@@ -116,7 +132,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--model" => model = args.next().ok_or("--model needs a model name")?,
             "--endpoint" => endpoint = args.next().ok_or("--endpoint needs an HTTP(S) origin")?,
             "--help" | "-h" => {
-                println!("Alfredo Rust terminal — migration in progress\n\nUsage: alfredo-tui [--model NAME] [--endpoint URL]\n  [--select] [--workspace DIR] [--mission NAME | --new-mission NAME] [--state-dir DIR] [--conversation NAME] [--parallel-models 1..8] [--structured-thinking auto|on|off] [--keep-alive DURATION|default] [--connect-retries 0..10] [--doctor]\n\nInside a Git repository (or with --workspace DIR alone), opens the repository root with mission default, resumed or created; no typed input. Otherwise, or with --select, a selector chooses the repository and mission; Enter opens or creates the named mission. If the automatic open fails, the selector shows why. --workspace with --mission resumes; --new-mission creates a distinct name.\nDirect Ollama conversations and isolated Rust coding workers.\nTerminals using the same endpoint share --parallel-models capacity; live configurations must match.\nForeground conversations get bounded priority over queued workers.\n--keep-alive keeps the model loaded between requests (default 30m; seconds, -1 forever, default = server setting); the model is preloaded at start and on /model.\n--connect-retries retries model requests that fail before any reply text (default 3, backoff 1s/2s/4s…; 0 disables). The header shows server health.\nExplicit file/check permission and approval required. Conversation history and drafts restore without replaying interrupted requests.\n/task description · /after 1,2 description · /approve ID · /cancel-task ID\n/permit ID JSON · /run ID · /evidence ID · /recover ID · /review ID JSON · /accept ID · /reject ID · /repair ID reason · /resolve-repair ID · /branch ID\n@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry\n/plan REQUEST · /plan-revise REQUEST · /architect-revise ID · /plan-save · /plan-cancel · /assign ID MODEL · /dispatch on|off\n/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME\nEnter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry\nF2 Mission Work/chat · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit\n\n--doctor checks startup prerequisites without entering terminal mode or running inference.\n--qualify-inference REPORT [--qualification-repetitions 1..3] runs isolated diagnostic fixtures with baseline/candidate context profiles and one shared client slot. Default: three repetitions; artifacts are retained beside the new report.\n--inspect-qualification REPORT validates and summarizes a saved report without replay. No production profile changes or promotion.\nEnvironment: ALFREDO_MODEL, OLLAMA_HOST, ALFREDO_STATE_DIR, ALFREDO_KEEP_ALIVE");
+                println!("Alfredo Rust terminal — migration in progress\n\nUsage: alfredo-tui [--model NAME] [--endpoint URL]\n  [--select] [--workspace DIR] [--mission NAME | --new-mission NAME] [--state-dir DIR] [--conversation NAME] [--parallel-models 1..8] [--structured-thinking auto|on|off] [--keep-alive DURATION|default] [--connect-retries 0..10] [--doctor]\n  [--go GOAL] [--max-repairs 0..16]\n\nInside a Git repository (or with --workspace DIR alone), opens the repository root with mission default, resumed or created; no typed input. Otherwise, or with --select, a selector chooses the repository and mission; Enter opens or creates the named mission. If the automatic open fails, the selector shows why. --workspace with --mission resumes; --new-mission creates a distinct name.\nDirect Ollama conversations and isolated Rust coding workers.\nTerminals using the same endpoint share --parallel-models capacity; live configurations must match.\nForeground conversations get bounded priority over queued workers.\n--keep-alive keeps the model loaded between requests (default 30m; seconds, -1 forever, default = server setting); the model is preloaded at start and on /model.\n--connect-retries retries model requests that fail before any reply text (default 3, backoff 1s/2s/4s…; 0 disables). The header shows server health.\nExplicit file/check permission and approval required. Conversation history and drafts restore without replaying interrupted requests.\n--go GOAL starts autopilot after launch: plan, save, approve, dispatch, auto-review passing checks, bounded auto-repair (--max-repairs, default 2), one local alfredo/go-ID integration branch. Never pushes or moves your branch.\n/go GOAL · /pause · /resume · /stop · /autopilot · F5 pause/resume autopilot (restored paused after restart)\n/task description · /after 1,2 description · /approve ID · /cancel-task ID\n/permit ID JSON · /run ID · /evidence ID · /recover ID · /review ID JSON · /accept ID · /reject ID · /repair ID reason · /resolve-repair ID · /branch ID\n@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry\n/plan REQUEST · /plan-revise REQUEST · /architect-revise ID · /plan-save · /plan-cancel · /assign ID MODEL · /dispatch on|off\n/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME\nEnter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry\nF2 Mission Work/chat · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit\n\n--doctor checks startup prerequisites without entering terminal mode or running inference.\n--qualify-inference REPORT [--qualification-repetitions 1..3] runs isolated diagnostic fixtures with baseline/candidate context profiles and one shared client slot. Default: three repetitions; artifacts are retained beside the new report.\n--inspect-qualification REPORT validates and summarizes a saved report without replay. No production profile changes or promotion.\nEnvironment: ALFREDO_MODEL, OLLAMA_HOST, ALFREDO_STATE_DIR, ALFREDO_KEEP_ALIVE");
                 return Ok(());
             }
             "--version" | "-V" => {
@@ -260,6 +276,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     work.tasks.refresh(&runtime);
+    if let Some(goal) = &go_goal {
+        let model = work.app.sessions[work.app.selected].model.clone();
+        work.app.notice = work
+            .autopilot
+            .start(goal, &model, max_repairs, &work.tasks)
+            .map_err(|error| format!("--go refused: {error}"))?;
+    }
     let (mut sender, mut receiver) = mpsc::channel(128);
     let mut jobs: Vec<Option<JoinHandle<()>>> = (0..MAX_SESSIONS).map(|_| None).collect();
     let (mut model_sender, mut model_receiver) = mpsc::channel(1);
@@ -472,6 +495,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             dirty |= stage_ready_wayfinder(&mut work, &mut pending_command, quit_pending);
             if !quit_pending && !work.wayfinder.active() && pending_command.is_none() {
+                dirty |= submit_autopilot(&runtime, &mut work, &mut pending_command);
+            }
+            if !quit_pending && !work.wayfinder.active() && pending_command.is_none() {
                 let mut architect_selected = false;
                 match work.tasks.prepare_architect() {
                     Ok(Some(request)) => {
@@ -658,6 +684,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+            let autopilot = work.autopilot.status(&work.tasks);
+            if autopilot != work.tasks.autopilot {
+                work.tasks.autopilot = autopilot;
+                dirty = true;
+            }
             if dirty {
                 terminal.draw(|frame| ui::draw_with_tasks(frame, &work.app, &work.tasks))?;
                 dirty = false;
@@ -724,6 +755,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Ok(()) => work.app.notice.clear(),
                                 Err(error) => work.app.notice = error,
                             }
+                        }
+                        KeyCode::F(5) => {
+                            work.app.notice = match work.autopilot.toggle(&mut work.tasks) {
+                                Ok(notice) | Err(notice) => notice,
+                            };
                         }
                         KeyCode::F(2) => {
                             work.app.models_visible = false;
@@ -807,6 +843,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('u') if ctrl => work.app.sessions[index].clear_draft(),
                         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
                             work.app.sessions[index].insert("\n")
+                        }
+                        KeyCode::Enter
+                            if alfredo_tui::autopilot::is_command(
+                                &work.app.sessions[index].draft,
+                            ) =>
+                        {
+                            let text = work.app.sessions[index].draft.trim().to_owned();
+                            let model = work.app.sessions[index].model.clone();
+                            match work.autopilot.command(
+                                &runtime,
+                                &mut work.tasks,
+                                &text,
+                                &model,
+                                max_repairs,
+                            ) {
+                                Ok(notice) => {
+                                    work.app.sessions[index].remember_submission();
+                                    work.app.sessions[index].clear_draft();
+                                    work.app.notice = notice;
+                                }
+                                Err(error) => work.app.notice = error,
+                            }
                         }
                         KeyCode::Enter if work.app.sessions[index].draft.trim() == "/workspace" => {
                             if pending_command.is_some() {
@@ -951,6 +1009,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             let text = session.draft.trim().to_owned();
                             let model = session.model.clone();
+                            work.autopilot.observe_manual(&text, &mut work.tasks);
                             if text == "/dispatch off" {
                                 if let Some((origin, id)) = pending_command.as_ref() {
                                     let command = work.app.sessions[*origin]
@@ -1310,6 +1369,35 @@ fn withdraw_wayfinder(
                 .apply(attempt, alfredo_tui::model::Update::Failed(reason.into()));
         }
     }
+}
+
+/// Record autopilot's chosen command in an idle conversation, then release it
+/// through the same saved-intent barrier as typed commands.
+fn submit_autopilot(
+    runtime: &Runtime,
+    work: &mut Workstation,
+    pending: &mut Option<(usize, String)>,
+) -> bool {
+    let sessions = &work.app.sessions;
+    let Some(origin) = std::iter::once(work.app.selected)
+        .chain(0..sessions.len())
+        .find(|&index| {
+            !sessions[index].status.active() && sessions[index].messages.len().is_multiple_of(2)
+        })
+    else {
+        return false;
+    };
+    let Some(submission) = work.autopilot.tick(runtime, &mut work.tasks) else {
+        return false;
+    };
+    match work.app.sessions[origin].submit_command(submission.text, submission.intent) {
+        Ok(id) => *pending = Some((origin, id)),
+        Err(error) => {
+            work.autopilot.pause(&mut work.tasks);
+            work.app.notice = format!("Autopilot paused: command not recorded: {error}");
+        }
+    }
+    true
 }
 
 /// Locate immutable automatic provenance before admission. Session validation

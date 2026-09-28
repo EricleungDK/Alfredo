@@ -1,3 +1,4 @@
+pub mod autopilot;
 pub mod health;
 pub mod model;
 pub mod provider;

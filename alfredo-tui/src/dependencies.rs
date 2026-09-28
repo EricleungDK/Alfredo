@@ -9,7 +9,7 @@ pub async fn prepare(
     store: &TaskStore,
     snapshot: &Snapshot,
     task_id: u64,
-    mut baseline: String,
+    baseline: String,
 ) -> Result<(String, Vec<DependencyInput>), String> {
     let task = snapshot
         .tasks
@@ -86,37 +86,58 @@ pub async fn prepare(
             candidate,
         });
     }
-    let config = git(&snapshot.workspace, &["config", "--local", "--list"]).await?;
+    let candidates: Vec<_> = inputs
+        .iter()
+        .map(|input| (input.task, input.candidate.clone()))
+        .collect();
+    let baseline = compose(&snapshot.workspace, baseline, &candidates).await?;
+    git(
+        &snapshot.workspace,
+        &[
+            "update-ref",
+            &format!("refs/alfredo/bases/{baseline}"),
+            &baseline,
+        ],
+    )
+    .await?;
+    Ok((baseline, inputs))
+}
+
+/// Object-only composition of verified candidates onto a baseline. Ancestor and
+/// diamond inputs are reused, never applied twice; no branch, index or file moves.
+pub async fn compose(
+    workspace: &Path,
+    mut baseline: String,
+    candidates: &[(u64, String)],
+) -> Result<String, String> {
+    let config = git(workspace, &["config", "--local", "--list"]).await?;
     if config.lines().any(|line| line.starts_with("merge.")) {
         return Err(
             "Custom merge configuration needs qualification before dependency composition".into(),
         );
     }
-    for input in &inputs {
-        if ancestor(&snapshot.workspace, &input.candidate, &baseline).await {
+    for (task, candidate) in candidates {
+        if ancestor(workspace, candidate, &baseline).await {
             continue;
         }
-        if ancestor(&snapshot.workspace, &baseline, &input.candidate).await {
-            baseline = input.candidate.clone();
+        if ancestor(workspace, &baseline, candidate).await {
+            baseline = candidate.clone();
             continue;
         }
         let tree = git(
-            &snapshot.workspace,
-            &["merge-tree", "--write-tree", &baseline, &input.candidate],
+            workspace,
+            &["merge-tree", "--write-tree", &baseline, candidate],
         )
         .await
         .map_err(|error| {
-            format!(
-                "Dependency #{} could not compose cleanly; task remains unstarted: {error}",
-                input.task
-            )
+            format!("Dependency #{task} could not compose cleanly; task remains unstarted: {error}")
         })?;
         let tree = tree.lines().next().ok_or("Merge returned no tree")?;
         if tree.len() != 40 || !tree.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err("Invalid composed tree identity".into());
         }
         baseline = git(
-            &snapshot.workspace,
+            workspace,
             &[
                 "-c",
                 "user.name=Alfredo",
@@ -129,7 +150,7 @@ pub async fn prepare(
                 "-p",
                 &baseline,
                 "-p",
-                &input.candidate,
+                candidate,
                 "-m",
                 "Alfredo accepted dependency composition",
             ],
@@ -138,21 +159,12 @@ pub async fn prepare(
         .trim()
         .to_string();
     }
-    for input in &inputs {
-        if !ancestor(&snapshot.workspace, &input.candidate, &baseline).await {
+    for (_, candidate) in candidates {
+        if !ancestor(workspace, candidate, &baseline).await {
             return Err("Composed baseline does not contain an accepted input".into());
         }
     }
-    git(
-        &snapshot.workspace,
-        &[
-            "update-ref",
-            &format!("refs/alfredo/bases/{baseline}"),
-            &baseline,
-        ],
-    )
-    .await?;
-    Ok((baseline, inputs))
+    Ok(baseline)
 }
 
 async fn ancestor(workspace: &Path, ancestor: &str, descendant: &str) -> bool {

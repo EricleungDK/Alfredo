@@ -8,6 +8,39 @@ available through explicit file/check policy, isolated Git worktrees and durable
 Conversation transcripts, drafts, model choices, cursor positions and selected
 conversation now restore after restart.
 
+## Autopilot
+
+Type `/go GOAL` (or launch with `--go "GOAL"`) to run the whole loop without further
+commands: plan → `/plan-save` → approve every planned task → `/dispatch on`. When a
+worker's approved check passes and its evidence verifies, autopilot records an
+approved criterion review (reason `autopilot: check passed`). A failed or invalid
+run gets a linked `/repair` with the failure summary as reason, bounded by
+`--max-repairs N` per task (default 2, 0 disables); an accepted repair is
+`/resolve-repair`ed so dependents proceed. An exhausted task stays failed, its
+dependents stay blocked, and independent work continues. Invalid plans are retried
+once with the validation error appended, then autopilot stops.
+
+Each choice is an ordinary console command saved and dispatched through the same
+intent path as typed input; policy, evidence, locks and receipts stay authoritative.
+Risk-classified or human-hold reviews always wait for you, and manual commands keep
+working. `/pause` or F5 stops new starts and decisions (running workers finish);
+`/resume` or F5 continues; `/stop` also cancels running workers; `/autopilot` shows
+status. The header shows one status line. State lives in a small
+`autopilot-<conversation-sha256>.json` beside the task store; after restart the loop
+is restored **paused** and nothing is replayed until you resume (runs cancelled by
+quit or `/stop` are repaired after resume).
+
+When every planned task is accepted, held or failed, autopilot composes the accepted
+candidates on the plan's recorded baseline with the dependency merge-tree composition
+and creates one local branch `alfredo/go-<id>`. HEAD, the index and working files are
+untouched; nothing is pushed. The summary lists each task's outcome and the `git switch`
+/ `git merge` commands, and says when the branch holds only an accepted subset.
+
+Scope: a confirmed scope, or no scope with an ordinary goal, is used as is. A new-project
+goal (the case that would otherwise enter Wayfinder) records and confirms a minimal
+goal-derived scope through the normal scope transactions. A pending scope draft you
+wrote is never confirmed for you: `/go` asks you to review it first.
+
 ## Build and install a development archive
 
 On Linux x86-64 with Rust 1.96.0 and Python 3.11+, build a native locked candidate:
@@ -325,7 +358,7 @@ includes the original task, outcome, patch and check receipt as bounded referenc
 data (128 KiB maximum evidence). It generates complete corrected files; the prior
 patch is not executed or assumed applied. Original runs remain unchanged. Missing,
 tampered or oversized evidence blocks the repair workflow; uncertain runs need
-reconciliation first. Automatic repair routing and escalation remain unfinished.
+reconciliation first. Outside [autopilot](#autopilot), repair routing is manual; escalation remains unfinished.
 
 While an approved check runs, the selected task shows live stdout and stderr.
 Each stream retains an 8 KiB tail in memory, separate from task receipts. This is
@@ -415,7 +448,7 @@ measured from the model request. Timers refresh once a second even during model
 silence. These are local observations; only the saved receipt establishes task
 completion. Progress is not restored after a process restart.
 
-There is no automatic repair routing, worktree
+Apart from autopilot's bounded repairs there is no automatic repair routing, worktree
 retirement, aggregate disk budget or cross-process model capacity lease yet.
 
 After restart, `/tasks` or `/refresh` distinguishes a live worker owner, a stopped

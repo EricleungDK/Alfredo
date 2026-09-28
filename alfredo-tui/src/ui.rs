@@ -32,9 +32,10 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&crate::task_control::
         return;
     }
     let identity = tasks.and_then(|tasks| tasks.snapshot.as_ref());
+    let autopilot = tasks.and_then(|tasks| tasks.autopilot.as_ref());
     let rows = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(u16::from(identity.is_some())),
+        Constraint::Length(u16::from(identity.is_some()) + u16::from(autopilot.is_some())),
         Constraint::Min(3),
         Constraint::Length(3),
         Constraint::Length(2),
@@ -111,10 +112,15 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&crate::task_control::
         ])),
         rows[0],
     );
+    let header = Layout::vertical([
+        Constraint::Length(u16::from(identity.is_some())),
+        Constraint::Length(u16::from(autopilot.is_some())),
+    ])
+    .split(rows[1]);
     if let Some(snapshot) = identity {
-        let health_width = health_width.min(rows[1].width);
+        let health_width = health_width.min(header[0].width);
         let line = Layout::horizontal([Constraint::Min(0), Constraint::Length(health_width)])
-            .split(rows[1]);
+            .split(header[0]);
         if let Some(health) = mission_health {
             frame.render_widget(Paragraph::new(Line::from(health)), line[1]);
         }
@@ -126,6 +132,13 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&crate::task_control::
             ))
             .style(Style::default().fg(Color::Cyan)),
             line[0],
+        );
+    }
+    if let Some(status) = autopilot {
+        frame.render_widget(
+            Paragraph::new(format!(" {}", safe(&status.line())))
+                .style(Style::default().fg(Color::Yellow)),
+            header[1],
         );
     }
     let wide = area.width >= 88;
@@ -433,6 +446,17 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&crate::task_control::
                 tasks,
                 lines,
                 format!(" Saved task activity · {} ", safe(query)),
+            );
+        } else if let Some(report) = &tasks.autopilot_report {
+            task_panel(
+                frame,
+                panes[1],
+                tasks,
+                safe(report)
+                    .lines()
+                    .map(|s| Line::from(s.to_owned()))
+                    .collect(),
+                " Autopilot · /tasks returns to task details ".into(),
             );
         } else if let Some(scope) = &tasks.scope_view {
             task_panel(
