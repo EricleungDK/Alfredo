@@ -25,7 +25,13 @@ intent path as typed input; policy, evidence, locks and receipts stay authoritat
 Risk-classified or human-hold reviews always wait for you, and manual commands keep
 working. `/pause` or F5 stops new starts and decisions (running workers finish);
 `/resume` or F5 continues; `/stop` also cancels running workers; `/autopilot` shows
-status. The header shows one status line. State lives in a small
+status. The header shows one status line.
+
+`/go` opens the dashboard (F2): one line per task (`✓` accepted, `▶` running, `○` pending,
+`◐` awaiting review, `✗` failed, `‖` held/blocked) with `done/total`, and on the right the
+selected task's live worker output (following the tail) or, once finished, its outcome,
+diff and check output. While autopilot runs it follows the running task unless you moved
+the selection in the last 10 s. Receipt IDs and revisions stay in F3 evidence and F4 activity. State lives in a small
 `autopilot-<conversation-sha256>.json` beside the task store; after restart the loop
 is restored **paused** and nothing is replayed until you resume (runs cancelled by
 quit or `/stop` are repaired after resume).
