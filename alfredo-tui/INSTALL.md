@@ -39,9 +39,8 @@ alfredo-tui --model qwen2.5-coder:14b
 Type `/go GOAL` to run autopilot, F5 to pause/resume, `/stop` to cancel. When it
 finishes, review and merge the local branch it names (`alfredo/go-<id>`) with
 normal Git. F1 lists commands; `alfredo-tui --help` lists flags. Ollama is expected
-at `http://127.0.0.1:11434`; use `--endpoint URL` otherwise. If `OLLAMA_HOST` is a
-bind address such as `0.0.0.0`, startup fails with "Invalid Ollama URL"; pass
-`--endpoint`.
+at `http://127.0.0.1:11434`; use `--endpoint URL` otherwise. `OLLAMA_HOST` may
+use Ollama's own forms (`host:port`, `0.0.0.0`).
 
 ## State, upgrade and uninstall
 

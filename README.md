@@ -118,8 +118,8 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 - **Header shows `ollama ✗ retrying`, or doctor says "Cannot reach Ollama"**: start
   Ollama (`ollama serve` or your system service) and check `--endpoint`. Alfredo
   recovers automatically once the server is back; no restart needed.
-- **`Error: "Invalid Ollama URL"`**: `OLLAMA_HOST` is set to a bind address such as
-  `0.0.0.0`. Pass `--endpoint http://127.0.0.1:11434` or set a full URL.
+- **`OLLAMA_HOST`**: Ollama's own forms (`host:port`, `0.0.0.0`) are accepted;
+  `0.0.0.0` connects to `127.0.0.1`. `--endpoint` overrides it.
 - **Model not installed** (doctor: "is not listed"): `ollama pull MODEL`, or use
   `/models` then `/model NAME` inside the terminal.
 - **Doctor: `FAIL installed worker tool: /usr/bin/bwrap`** (or prlimit/git): install

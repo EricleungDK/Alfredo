@@ -15,7 +15,7 @@ Scope rule: no new governance/receipt/schema slices unless an item below needs o
 - B2 Passing check + complete evidence => task auto-accepted; dependents start.
 - B3 Failed task => automatic repair, bounded (default 2); then task is held and
   the loop continues with independent tasks.
-- B4 `p` pauses/resumes the loop; Esc/`/stop` cancels; state survives restart
+- B4 F5 (or `/pause`, `/resume`) pauses/resumes the loop; `/stop` cancels; state survives restart
   with the loop paused (never auto-replays).
 - B5 On completion, accepted work lands on one local integration branch; user's
   HEAD/working tree untouched. Summary shows branch and per-task outcome.
