@@ -42,6 +42,19 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&crate::task_control::
     .split(area);
     let session = &app.sessions[app.selected];
     let active = app.sessions.iter().filter(|s| s.status.active()).count();
+    let health = app.health.state(&session.model);
+    let health = health
+        .label(&session.model, area.width >= 100)
+        .map(|label| {
+            let color = if health.healthy() {
+                Color::Green
+            } else {
+                Color::Red
+            };
+            Span::styled(format!(" {label} "), Style::default().fg(color))
+        })
+        .unwrap_or_default();
+    let used = u16::try_from(health.width()).unwrap_or(u16::MAX);
     frame.render_widget(
         Paragraph::new(Line::from(vec![
             Span::styled(
@@ -51,6 +64,7 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&crate::task_control::
                     .bg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             ),
+            health,
             Span::raw(if let Some(tasks) = tasks {
                 let dispatch = if area.width >= 60 {
                     format!(
@@ -62,9 +76,9 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&crate::task_control::
                 };
                 let status = tasks
                     .work_status()
-                    .concise(area.width.saturating_sub(10 + dispatch.len() as u16));
+                    .concise(area.width.saturating_sub(10 + used + dispatch.len() as u16));
                 let mut header = format!(" {dispatch}{status}");
-                let remaining = usize::from(area.width)
+                let remaining = usize::from(area.width.saturating_sub(used))
                     .saturating_sub(9 + unicode_width::UnicodeWidthStr::width(header.as_str()));
                 if remaining >= 16 {
                     if tasks.visible {

@@ -417,9 +417,9 @@ async fn queued_cancellation_and_stale_guard_produce_no_record_or_http() {
                 "fixture".into(),
                 messages("source", "stale"),
                 sender,
-                move || async move {
+                move || {
                     observed.store(true, Ordering::SeqCst);
-                    Err("Canonical task changed".into())
+                    async move { Err("Canonical task changed".into()) }
                 },
             )
             .await;

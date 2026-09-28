@@ -90,9 +90,20 @@ impl Status {
     }
 }
 
+/// Automatic reconnection before any response content: same attempt identity,
+/// no side effects. `retry` counts from 1 up to `limit`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Retry {
+    pub retry: u32,
+    pub limit: u32,
+    pub delay: std::time::Duration,
+    pub reason: String,
+}
+
 #[derive(Debug)]
 pub enum Update {
     Metrics(crate::metrics::Metrics),
+    Retrying(Retry),
     Queued,
     QueueProgress(crate::inference_admission::Observation),
     Admitted,
@@ -137,6 +148,8 @@ pub struct Session {
     #[serde(skip)]
     thinking: bool,
     #[serde(skip)]
+    retry: Option<(Retry, std::time::Instant)>,
+    #[serde(skip)]
     pub metrics: Option<crate::metrics::Metrics>,
     #[serde(skip)]
     pub timing: Option<crate::client_timing::Timing>,
@@ -165,6 +178,7 @@ impl Session {
             queued: false,
             queue_observation: None,
             thinking: false,
+            retry: None,
             metrics: None,
             timing: None,
             history: Vec::new(),
@@ -173,20 +187,29 @@ impl Session {
         }
     }
 
-    pub fn status_label(&self) -> &str {
-        if self.status.active() && self.queued {
-            "Queued for Alfredo"
+    pub fn status_label(&self) -> std::borrow::Cow<'_, str> {
+        if let Some((retry, deadline)) = self.retry.as_ref().filter(|_| self.status.active()) {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            format!(
+                "Reconnecting in {}s · retry {}/{}",
+                left.as_millis().div_ceil(1000),
+                retry.retry,
+                retry.limit
+            )
+            .into()
+        } else if self.status.active() && self.queued {
+            "Queued for Alfredo".into()
         } else if self.status == Status::Connecting && self.thinking {
-            "Thinking / waiting for text"
+            "Thinking / waiting for text".into()
         } else if self.status == Status::Connecting
             && self
                 .timing
                 .as_ref()
                 .is_some_and(|timing| timing.has_admission())
         {
-            "Waiting for model server"
+            "Waiting for model server".into()
         } else {
-            self.status.label()
+            self.status.label().into()
         }
     }
 
@@ -219,6 +242,7 @@ impl Session {
         snapshot.queued = false;
         snapshot.queue_observation = None;
         snapshot.thinking = false;
+        snapshot.retry = None;
         snapshot.timing = None;
         snapshot
             .reading
@@ -456,6 +480,7 @@ impl Session {
         self.queued = false;
         self.queue_observation = None;
         self.thinking = false;
+        self.retry = None;
         self.metrics = None;
         self.timing = Some(crate::client_timing::Timing::new(std::time::Instant::now()));
         self.status = Status::Connecting;
@@ -467,6 +492,7 @@ impl Session {
     pub fn cancel(&mut self) {
         if self.status.active() {
             self.status = Status::Cancelled;
+            self.retry = None;
             self.queued = false;
             self.queue_observation = None;
             if let Some(timing) = &mut self.timing {
@@ -1051,8 +1077,19 @@ impl Session {
                     model: self.model.clone(),
                 });
         }
+        if !matches!(update, Update::Retrying(_) | Update::Metrics(_)) {
+            self.retry = None;
+        }
         match update {
             Update::Metrics(metrics) => self.metrics = Some(metrics),
+            Update::Retrying(retry) => {
+                if self.status == Status::Connecting {
+                    let deadline = std::time::Instant::now() + retry.delay;
+                    self.retry = Some((retry, deadline));
+                    self.queued = false;
+                    self.queue_observation = None;
+                }
+            }
             Update::Queued | Update::QueueProgress(_)
                 if self.status != Status::Connecting
                     || self.thinking
@@ -1097,6 +1134,7 @@ impl Session {
             Update::Failed(reason) => self.status = Status::Failed(reason),
         }
         if !self.status.active() {
+            self.retry = None;
             self.queued = false;
             self.queue_observation = None;
             if let Some(timing) = &mut self.timing {
@@ -1116,6 +1154,8 @@ pub struct App {
     pub models_notice: String,
     pub models_scroll: u16,
     pub completion: Option<crate::commands::Completion>,
+    /// Transient server health; inert until a workstation starts its monitor.
+    pub health: crate::health::HealthView,
 }
 
 impl App {
@@ -1130,6 +1170,7 @@ impl App {
             models_notice: String::new(),
             models_scroll: 0,
             completion: None,
+            health: Default::default(),
         }
     }
 
@@ -1164,6 +1205,7 @@ impl App {
             return Err("Active or interrupted turns retain their model; finish/retry or open a new conversation");
         }
         session.model = name.into();
+        self.health.preload(name);
         self.models_visible = false;
         self.notice =
             format!("Conversation model: {name}. Existing task assignments are unchanged");

@@ -24,6 +24,8 @@ pub struct Workstation {
     conversation: String,
     default_model: String,
     provider: Ollama,
+    /// Dropped with this workstation: switching or quitting stops the poll.
+    health: Option<crate::health::Monitor>,
 }
 impl Workstation {
     pub fn open(
@@ -70,7 +72,21 @@ impl Workstation {
             conversation: conversation.into(),
             default_model: model.into(),
             provider,
+            health: None,
         })
+    }
+    /// Start the server health poll and warm the selected model; neither blocks.
+    fn start_health(&mut self, runtime: &Runtime) {
+        let monitor = crate::health::Monitor::start(
+            runtime.handle(),
+            self.provider.clone(),
+            crate::health::POLL_INTERVAL,
+        );
+        self.app.health = monitor.view();
+        self.app
+            .health
+            .preload(&self.app.sessions[self.app.selected].model);
+        self.health = Some(monitor);
     }
     pub fn workspace(&self) -> &Path {
         &self.workspace
@@ -174,7 +190,7 @@ impl Workstation {
         let tasks = TaskStore::new(state, &target, request.choice.mission.name())?;
         tasks.select_mission(request.choice.mission.start_new())?;
         progress.advance(Phase::MissionReady)?;
-        let next = Self::open(
+        let mut next = Self::open(
             state,
             &target,
             request.choice.mission.name(),
@@ -183,6 +199,7 @@ impl Workstation {
             provider,
         )?;
         progress.advance(Phase::TargetLoaded)?;
+        next.start_health(runtime);
         Ok(next)
     }
     pub fn select(&mut self, runtime: &Runtime, request: Request) -> Result<bool, String> {

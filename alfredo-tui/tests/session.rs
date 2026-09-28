@@ -582,3 +582,67 @@ fn receipt_inserted_before_read_message_preserves_identity_where_numeric_anchor_
     );
     assert_eq!(render(&app, 70).as_deref(), Some(before.as_str()));
 }
+
+#[test]
+fn automatic_retry_countdown_is_attempt_bound_and_never_crosses_attempts() {
+    use alfredo_tui::model::Retry;
+    use std::time::Duration;
+    let retry = |n| {
+        Update::Retrying(Retry {
+            retry: n,
+            limit: 3,
+            delay: Duration::from_secs(4),
+            reason: "Cannot reach Ollama".into(),
+        })
+    };
+    let mut session = started();
+    session.apply(1, retry(1));
+    assert_eq!(session.status, Status::Connecting);
+    let label = session.status_label().to_string();
+    assert!(label.starts_with("Reconnecting in "), "{label}");
+    assert!(label.contains("retry 1/3"), "{label}");
+    let mut app = App::new("fixture".into());
+    app.sessions[0] = session.clone();
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 30)).unwrap();
+    terminal
+        .draw(|frame| alfredo_tui::ui::draw(frame, &app))
+        .unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("retry 1/3"));
+    assert!(serde_json::to_value(&session)
+        .unwrap()
+        .get("retry")
+        .is_none());
+    session.apply(1, Update::Admitted);
+    assert!(!session.status_label().contains("Reconnecting"));
+    session.apply(1, retry(2));
+    assert!(session.status_label().contains("retry 2/3"));
+    // Esc during backoff: terminal, and the abandoned attempt cannot resurrect it.
+    session.cancel();
+    let cancelled = session.clone();
+    session.apply(1, retry(3));
+    session.apply(1, Update::Token("late".into()));
+    session.apply(1, Update::Done);
+    assert_eq!(session, cancelled);
+    assert!(session.status_label().starts_with("Cancelled"));
+    session.retry().unwrap();
+    session.apply(1, retry(3));
+    session.apply(1, Update::Token("late".into()));
+    assert_eq!(session.status_label(), "Preparing request");
+    assert!(session.messages[1].content.is_empty());
+    session.apply(2, retry(1));
+    assert!(session.status_label().contains("retry 1/3"));
+    session.apply(2, Update::Token("fresh".into()));
+    assert_eq!(session.status_label(), "Streaming");
+    // A retry notice after content is impossible from the provider and ignored.
+    session.apply(2, retry(2));
+    assert_eq!(session.status_label(), "Streaming");
+    session.apply(2, Update::Done);
+    assert_eq!(session.messages[1].content, "fresh");
+}

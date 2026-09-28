@@ -200,6 +200,26 @@ fn unavailable_target_and_failed_final_save_keep_current_work_and_release_target
 }
 
 #[test]
+fn workspace_switch_replaces_and_stops_the_server_health_poll() {
+    let f = Fixture::new();
+    let runtime = Runtime::new().unwrap();
+    let mut work = f.open();
+    assert!(work.app.health.stopped());
+    assert!(work.switch_to(&runtime, &f.root.join("b"), "beta").unwrap());
+    Fixture::wait(&mut work);
+    let beta = work.app.health.clone();
+    assert!(!beta.stopped());
+    assert!(work
+        .switch_to(&runtime, &f.root.join("a"), "alpha")
+        .unwrap());
+    assert!(beta.stopped());
+    assert!(!work.app.health.stopped());
+    let alpha = work.app.health.clone();
+    drop(work);
+    assert!(alpha.stopped());
+}
+
+#[test]
 fn switching_requires_quiescence_without_cancelling_or_starting_work() {
     let f = Fixture::new();
     let mut work = f.open();

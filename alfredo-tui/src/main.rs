@@ -35,6 +35,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut parallel_models = 2;
     let mut parallel_models_explicit = false;
     let mut structured_thinking = Some(false);
+    let mut keep_alive = std::env::var("ALFREDO_KEEP_ALIVE").unwrap_or_else(|_| "30m".into());
+    let mut connect_retries = 3;
     let mut doctor = false;
     let mut qualification_output = None;
     let mut qualification_inspection = None;
@@ -91,6 +93,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .map_err(|_| "--parallel-models needs a number from 1 to 8")?
             }
             "--conversation" => conversation = args.next().ok_or("--conversation needs a name")?,
+            "--keep-alive" => {
+                keep_alive = args
+                    .next()
+                    .ok_or("--keep-alive needs a duration, seconds or default")?
+            }
+            "--connect-retries" => {
+                connect_retries = args
+                    .next()
+                    .and_then(|value| value.parse::<u32>().ok())
+                    .ok_or("--connect-retries needs a number from 0 to 10")?
+            }
             "--mission" | "--new-mission" => {
                 if mission.is_some() {
                     return Err("Choose only one --mission or --new-mission".into());
@@ -101,7 +114,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--model" => model = args.next().ok_or("--model needs a model name")?,
             "--endpoint" => endpoint = args.next().ok_or("--endpoint needs an HTTP(S) origin")?,
             "--help" | "-h" => {
-                println!("Alfredo Rust terminal — migration in progress\n\nUsage: alfredo-tui [--model NAME] [--endpoint URL]\n  [--workspace DIR] [--mission NAME | --new-mission NAME] [--state-dir DIR] [--conversation NAME] [--parallel-models 1..8] [--structured-thinking auto|on|off] [--doctor]\n\nChoose a repository and Resume or Start New Mission on launch. --workspace with --mission resumes; --new-mission creates a distinct name.\nDirect Ollama conversations and isolated Rust coding workers.\nTerminals using the same endpoint share --parallel-models capacity; live configurations must match.\nForeground conversations get bounded priority over queued workers.\nExplicit file/check permission and approval required. Conversation history and drafts restore without replaying interrupted requests.\n/task description · /after 1,2 description · /approve ID · /cancel-task ID\n/permit ID JSON · /run ID · /evidence ID · /recover ID · /review ID JSON · /accept ID · /reject ID · /repair ID reason · /resolve-repair ID · /branch ID\n@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry\n/plan REQUEST · /plan-revise REQUEST · /architect-revise ID · /plan-save · /plan-cancel · /assign ID MODEL · /dispatch on|off\n/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME\nEnter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry\nF2 Mission Work/chat · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit\n\n--doctor checks startup prerequisites without entering terminal mode or running inference.\n--qualify-inference REPORT [--qualification-repetitions 1..3] runs isolated diagnostic fixtures with baseline/candidate context profiles and one shared client slot. Default: three repetitions; artifacts are retained beside the new report.\n--inspect-qualification REPORT validates and summarizes a saved report without replay. No production profile changes or promotion.\nEnvironment: ALFREDO_MODEL, OLLAMA_HOST, ALFREDO_STATE_DIR");
+                println!("Alfredo Rust terminal — migration in progress\n\nUsage: alfredo-tui [--model NAME] [--endpoint URL]\n  [--workspace DIR] [--mission NAME | --new-mission NAME] [--state-dir DIR] [--conversation NAME] [--parallel-models 1..8] [--structured-thinking auto|on|off] [--keep-alive DURATION|default] [--connect-retries 0..10] [--doctor]\n\nChoose a repository and Resume or Start New Mission on launch. --workspace with --mission resumes; --new-mission creates a distinct name.\nDirect Ollama conversations and isolated Rust coding workers.\nTerminals using the same endpoint share --parallel-models capacity; live configurations must match.\nForeground conversations get bounded priority over queued workers.\n--keep-alive keeps the model loaded between requests (default 30m; seconds, -1 forever, default = server setting); the model is preloaded at start and on /model.\n--connect-retries retries model requests that fail before any reply text (default 3, backoff 1s/2s/4s…; 0 disables). The header shows server health.\nExplicit file/check permission and approval required. Conversation history and drafts restore without replaying interrupted requests.\n/task description · /after 1,2 description · /approve ID · /cancel-task ID\n/permit ID JSON · /run ID · /evidence ID · /recover ID · /review ID JSON · /accept ID · /reject ID · /repair ID reason · /resolve-repair ID · /branch ID\n@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry\n/plan REQUEST · /plan-revise REQUEST · /architect-revise ID · /plan-save · /plan-cancel · /assign ID MODEL · /dispatch on|off\n/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME\nEnter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry\nF2 Mission Work/chat · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit\n\n--doctor checks startup prerequisites without entering terminal mode or running inference.\n--qualify-inference REPORT [--qualification-repetitions 1..3] runs isolated diagnostic fixtures with baseline/candidate context profiles and one shared client slot. Default: three repetitions; artifacts are retained beside the new report.\n--inspect-qualification REPORT validates and summarizes a saved report without replay. No production profile changes or promotion.\nEnvironment: ALFREDO_MODEL, OLLAMA_HOST, ALFREDO_STATE_DIR, ALFREDO_KEEP_ALIVE");
                 return Ok(());
             }
             "--version" | "-V" => {
@@ -161,7 +174,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let provider = Ollama::new(&endpoint, Duration::from_secs(60))?
         .with_parallelism(parallel_models)?
-        .with_structured_thinking(structured_thinking);
+        .with_structured_thinking(structured_thinking)
+        .with_keep_alive(alfredo_tui::provider::parse_keep_alive(&keep_alive)?)
+        .with_connect_retries(connect_retries)?;
     if doctor {
         let runtime = Runtime::new()?;
         let report = runtime.block_on(alfredo_tui::doctor::inspect(
@@ -233,6 +248,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 last_timing_draw = std::time::Instant::now();
             }
             dirty |= work.tasks.poll();
+            dirty |= work.app.health.changed();
             for event in work.tasks.take_control_events() {
                 let intent = alfredo_tui::command_intent::Intent::Control {
                     request: event.request,
