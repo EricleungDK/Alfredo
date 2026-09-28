@@ -957,6 +957,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             let text = session.draft.trim().to_owned();
                             let model = session.model.clone();
+                            work.autopilot.observe_manual(&text, &mut work.tasks);
                             if text == "/dispatch off" {
                                 if let Some((origin, id)) = pending_command.as_ref() {
                                     let command = work.app.sessions[*origin]

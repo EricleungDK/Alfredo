@@ -848,3 +848,17 @@ fn cli_documents_and_validates_autopilot_flags() {
             .any(|(command, _)| *command == name));
     }
 }
+
+#[test]
+fn manual_dispatch_off_pauses_autopilot_instead_of_being_overridden() {
+    let fixture = Fixture::new();
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.snapshot = Some(fixture.store.snapshot().unwrap());
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start("Answer", "fixture", 2, &control).unwrap();
+    autopilot.observe_manual("/tasks", &mut control);
+    assert!(autopilot.running());
+    autopilot.observe_manual("/dispatch off", &mut control);
+    assert!(!autopilot.running());
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Paused);
+}

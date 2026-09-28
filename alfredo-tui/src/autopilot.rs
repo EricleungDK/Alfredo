@@ -404,6 +404,15 @@ impl Autopilot {
         self.notice.clone()
     }
 
+    /// A typed `/dispatch off` is the user taking control: pause rather than
+    /// re-enable dispatch behind their back. Other manual commands pass through.
+    pub fn observe_manual(&mut self, text: &str, tasks: &mut TaskControl) {
+        if text.trim() == "/dispatch off" && self.running() {
+            self.pause(tasks);
+            self.notice = "Autopilot paused by /dispatch off · /resume continues".into();
+        }
+    }
+
     pub fn resume(&mut self, tasks: &TaskControl) -> Result<String, String> {
         let saved = self
             .saved
