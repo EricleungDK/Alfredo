@@ -4,6 +4,14 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "/workspace",
         "switch repository or mission; save current work",
     ),
+    (
+        "/go",
+        "GOAL — autopilot: plan, approve, run, review/repair, integrate",
+    ),
+    ("/pause", "pause autopilot; running workers finish (F5)"),
+    ("/resume", "resume a paused or restored autopilot (F5)"),
+    ("/stop", "pause autopilot and cancel running workers"),
+    ("/autopilot", "show autopilot status and completion summary"),
     ("/scope", "[JSON] — inspect or draft project understanding"),
     (
         "/scope-confirm",

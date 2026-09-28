@@ -731,3 +731,120 @@ fn commands_and_header_line_expose_read_only_status() {
     }
     assert!(!line.contains('\n'));
 }
+
+#[test]
+fn workstation_restores_autopilot_paused_and_blocks_switching_while_it_runs() {
+    let fixture = Fixture::new();
+    fixture.store.select_mission(true).unwrap();
+    let open = |conversation: &str| {
+        alfredo_tui::workstation::Workstation::open(
+            &fixture.root.join("state"),
+            &fixture.workspace,
+            "mission",
+            conversation,
+            "fixture",
+            Ollama::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
+        )
+        .unwrap()
+    };
+    let mut work = open("default");
+    assert!(work.autopilot.status(&work.tasks).is_none());
+    work.autopilot
+        .start("Make answer return 42", "fixture", 2, &work.tasks)
+        .unwrap();
+    assert!(work.can_switch().unwrap_err().contains("autopilot"));
+    work.autopilot.pause(&mut work.tasks);
+    assert!(work.can_switch().is_ok());
+    work.autopilot.resume(&work.tasks).unwrap();
+    drop(work);
+    let work = open("default");
+    let status = work.autopilot.status(&work.tasks).unwrap();
+    assert_eq!(status.state, RunState::Paused);
+    assert!(work.can_switch().is_ok());
+    // Another conversation set owns an independent autopilot.
+    let other = open("second");
+    assert!(other.autopilot.status(&other.tasks).is_none());
+}
+
+#[test]
+fn header_shows_one_autopilot_line_and_the_report_opens_in_mission_work() {
+    let fixture = Fixture::new();
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.snapshot = Some(fixture.store.snapshot().unwrap());
+    let app = alfredo_tui::model::App::new("fixture".into());
+    let render = |control: &TaskControl| {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(110, 30)).unwrap();
+        terminal
+            .draw(|frame| alfredo_tui::ui::draw_with_tasks(frame, &app, control))
+            .unwrap();
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+    };
+    assert!(!render(&control).join("\n").contains("Autopilot"));
+    control.autopilot = Some(autopilot::Status {
+        state: RunState::Running,
+        goal: "Make answer return 42".into(),
+        done: 1,
+        total: 2,
+        failed: 0,
+        repairs: 1,
+        elapsed: Duration::from_secs(5),
+        branch: None,
+    });
+    let rows = render(&control);
+    let lines: Vec<_> = rows
+        .iter()
+        .filter(|row| row.contains("Autopilot"))
+        .collect();
+    assert_eq!(lines.len(), 1, "{rows:#?}");
+    assert!(lines[0].contains("running · 1/2 done"), "{}", lines[0]);
+    control.set_visible(true);
+    control.autopilot_report =
+        Some("Autopilot finished: goal\nREPORT_SENTINEL git switch alfredo/go-x".into());
+    assert!(render(&control).join("\n").contains("REPORT_SENTINEL"));
+    control.set_visible(false);
+    assert!(control.autopilot_report.is_none());
+}
+
+#[test]
+fn cli_documents_and_validates_autopilot_flags() {
+    let binary = env!("CARGO_BIN_EXE_alfredo-tui");
+    let help = Command::new(binary).arg("--help").output().unwrap();
+    let help = String::from_utf8(help.stdout).unwrap();
+    for text in [
+        "--go GOAL",
+        "--max-repairs",
+        "/go GOAL",
+        "/pause",
+        "/resume",
+        "/stop",
+        "F5",
+    ] {
+        assert!(help.contains(text), "{text} missing from help");
+    }
+    for args in [
+        vec!["--go"],
+        vec!["--go", " "],
+        vec!["--max-repairs"],
+        vec!["--max-repairs", "x"],
+        vec!["--max-repairs", "17"],
+    ] {
+        let output = Command::new(binary).args(&args).output().unwrap();
+        assert!(!output.status.success(), "{args:?}");
+        assert!(output.stdout.is_empty());
+    }
+    let completion = alfredo_tui::commands::Completion::open("/go").unwrap();
+    assert!(completion.choices.iter().any(|choice| choice.name == "/go"));
+    for name in ["/pause", "/resume", "/stop", "/autopilot"] {
+        assert!(alfredo_tui::commands::COMMANDS
+            .iter()
+            .any(|(command, _)| *command == name));
+    }
+}
