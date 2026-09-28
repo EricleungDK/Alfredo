@@ -220,6 +220,8 @@ pub struct Autopilot {
     last: Option<Intent>,
     attempts: BTreeMap<String, u32>,
     job: Option<oneshot::Receiver<Result<String, String>>>,
+    /// Monotonic process clock plus seconds already elapsed when it was taken.
+    clock: (std::time::Instant, u64),
     notice: String,
 }
 
@@ -251,6 +253,9 @@ impl Autopilot {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(format!("Cannot read autopilot state: {error}")),
         };
+        let saved_elapsed = saved
+            .as_ref()
+            .map(|saved: &Saved| now().saturating_sub(saved.started));
         let notice = saved
             .as_ref()
             .filter(|saved| saved.active())
@@ -262,8 +267,20 @@ impl Autopilot {
             last: None,
             attempts: BTreeMap::new(),
             job: None,
+            clock: (std::time::Instant::now(), saved_elapsed.unwrap_or_default()),
             notice,
         })
+    }
+
+    fn elapsed(&self) -> u64 {
+        match self.saved.as_ref().and_then(|saved| {
+            saved
+                .finished
+                .map(|finished| finished.saturating_sub(saved.started))
+        }) {
+            Some(fixed) => fixed,
+            None => self.clock.1 + self.clock.0.elapsed().as_secs(),
+        }
     }
 
     pub fn notice(&self) -> &str {
@@ -385,6 +402,7 @@ impl Autopilot {
         self.last = None;
         self.attempts.clear();
         self.job = None;
+        self.clock = (std::time::Instant::now(), 0);
         self.notice = format!(
             "Autopilot started · plan → approve → dispatch → review/repair (max {max_repairs} repairs per task) · F5 pauses"
         );
@@ -542,7 +560,6 @@ impl Autopilot {
                 }
             }
         }
-        let end = saved.finished.unwrap_or_else(now);
         Some(Status {
             state,
             goal: saved.goal.clone(),
@@ -550,7 +567,7 @@ impl Autopilot {
             total: saved.count as usize,
             failed,
             repairs,
-            elapsed: Duration::from_secs(end.saturating_sub(saved.started)),
+            elapsed: Duration::from_secs(self.elapsed()),
             branch: saved.branch.clone(),
         })
     }
@@ -623,9 +640,10 @@ impl Autopilot {
     }
 
     fn fail(&mut self, tasks: &mut TaskControl, notice: String) {
+        let elapsed = self.elapsed();
         if let Some(saved) = self.saved.as_mut() {
             saved.phase = Phase::Failed;
-            saved.finished = Some(now());
+            saved.finished = Some(saved.started + elapsed);
             saved.report = Some(format!("Autopilot stopped: {}\n{notice}", saved.goal));
         }
         self.set_notice(tasks, notice);
@@ -703,18 +721,29 @@ impl Autopilot {
         }
         let saved = self.saved.as_ref().unwrap().clone();
         if let Some(request) = &saved.plan_request {
-            if draft_matches(tasks, request) {
-                self.advance(Phase::Saving);
-                return Ok(None);
-            }
-            let error = clean(
-                tasks
-                    .planner
-                    .notice
-                    .trim_end_matches(" · no action taken")
-                    .trim_end_matches(" · previous draft retained"),
-                1024,
-            );
+            let error = if draft_matches(tasks, request) {
+                match tasks.planner.draft.as_ref().map(unattended_lint) {
+                    Some(Err(error)) => {
+                        // Same effect as /plan-cancel: discard the unsaved draft.
+                        tasks.planner.cancel();
+                        tasks.planner.draft = None;
+                        error
+                    }
+                    _ => {
+                        self.advance(Phase::Saving);
+                        return Ok(None);
+                    }
+                }
+            } else {
+                clean(
+                    tasks
+                        .planner
+                        .notice
+                        .trim_end_matches(" · no action taken")
+                        .trim_end_matches(" · previous draft retained"),
+                    1024,
+                )
+            };
             let error = if error.is_empty() {
                 "Planner stopped without a draft".to_string()
             } else {
@@ -1040,9 +1069,10 @@ impl Autopilot {
                 families.len()
             ),
         };
+        let elapsed = self.elapsed();
         if let Some(saved) = self.saved.as_mut() {
             saved.phase = Phase::Done;
-            saved.finished = Some(now());
+            saved.finished = Some(saved.started + elapsed);
             saved.report = Some(report.clone());
             saved.branch = branch;
         }
@@ -1051,6 +1081,23 @@ impl Autopilot {
         tasks.autopilot_report = Some(report);
         self.persist();
     }
+}
+
+/// Autopilot approves without a human reading each policy, so it also refuses
+/// checks that can only fail: a shell string where an argv program is required.
+fn unattended_lint(plan: &crate::planner::Plan) -> Result<(), String> {
+    for (index, step) in plan.tasks.iter().enumerate() {
+        if let Some(program) = step.policy.check.first() {
+            if program.chars().any(char::is_whitespace) {
+                return Err(format!(
+                    "Task {} check must be an argv array, not a shell string: split {:?} into separate program and argument strings",
+                    index + 1,
+                    clean(program, 200)
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn draft_matches(tasks: &TaskControl, request: &str) -> bool {
@@ -1094,6 +1141,12 @@ fn families(snapshot: &Snapshot, saved: &Saved, tasks: &TaskControl) -> Vec<Fami
         return vec![];
     };
     let find = |id: u64| snapshot.tasks.iter().find(|task| task.id == id);
+    let roots: BTreeMap<u64, u64> = snapshot
+        .tasks
+        .iter()
+        .filter(|task| task.id >= first)
+        .filter_map(|task| Some((task.id, snapshot.repair_root(task.id)?)))
+        .collect();
     let mut result: Vec<Family> = Vec::new();
     for root in first..first + saved.count {
         let Some(task) = find(root) else {
@@ -1102,7 +1155,7 @@ fn families(snapshot: &Snapshot, saved: &Saved, tasks: &TaskControl) -> Vec<Fami
         let members: Vec<&Task> = snapshot
             .tasks
             .iter()
-            .filter(|t| snapshot.repair_root(t.id) == Some(root))
+            .filter(|t| roots.get(&t.id) == Some(&root))
             .collect();
         let head = members.iter().map(|t| t.id).max().unwrap_or(root);
         let repairs = members

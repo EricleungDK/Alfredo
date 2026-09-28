@@ -862,3 +862,41 @@ fn manual_dispatch_off_pauses_autopilot_instead_of_being_overridden() {
     assert!(!autopilot.running());
     assert_eq!(autopilot.status(&control).unwrap().state, RunState::Paused);
 }
+
+#[test]
+fn shell_string_check_is_rejected_before_unattended_approval_and_replanned() {
+    let fixture = Fixture::new();
+    let server = Server::new(|request, index| {
+        assert!(planner(request), "no worker may start from a rejected plan");
+        let check = if index == 0 {
+            json!(["python3 -m unittest"])
+        } else {
+            json!(["/usr/bin/python3", "-m", "unittest"])
+        };
+        json!({"tasks": [{"title": "Add tests", "acceptance": ["tests pass"], "model": "fixture",
+            "dependencies": [], "policy": {"files": ["test_calc.py"], "check": check}}]})
+        .to_string()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Add calc tests", "fixture", 2, &control)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "plan saved",
+        |_, c| c.snapshot.as_ref().is_some_and(|s| !s.tasks.is_empty()),
+    );
+    autopilot.pause(&mut control);
+    let prompts = server.prompts();
+    assert_eq!(prompts.len(), 2);
+    assert!(prompts[1].contains("argv"), "{}", prompts[1]);
+    let task = &fixture.store.snapshot().unwrap().tasks[0];
+    assert_eq!(
+        task.policy.as_ref().unwrap().check,
+        vec!["/usr/bin/python3", "-m", "unittest"]
+    );
+}
