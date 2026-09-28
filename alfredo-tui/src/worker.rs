@@ -3,7 +3,7 @@ use crate::{
     execution::*,
     model::Update,
     provider::Ollama,
-    tasks::{Action, Request, Snapshot, Task, TaskStatus, TaskStore, WorkPolicy},
+    tasks::{Action, Refusal, Request, Snapshot, Task, TaskStatus, TaskStore, WorkPolicy},
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -552,6 +552,30 @@ pub async fn start_observed(
     cancel: Arc<AtomicBool>,
     observer: Observer,
 ) -> Result<(Snapshot, String)> {
+    start_checked(
+        store,
+        task_id,
+        correlation,
+        expected_revision,
+        provider,
+        cancel,
+        observer,
+    )
+    .await
+    .map_err(String::from)
+}
+
+/// `start_observed` with a typed refusal. Only the run claim can be transient
+/// (stale revision or busy store, nothing claimed); every later error is final.
+pub async fn start_checked(
+    store: TaskStore,
+    task_id: u64,
+    correlation: String,
+    expected_revision: u64,
+    provider: Ollama,
+    cancel: Arc<AtomicBool>,
+    observer: Observer,
+) -> std::result::Result<(Snapshot, String), Refusal> {
     let before = store.snapshot()?;
     if let Some(receipt) = before
         .receipts
@@ -632,7 +656,7 @@ pub async fn start_observed(
             while !cancel.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(25)).await; }
         } => return Err("Cancelled before run claim; task remains unstarted".into()),
     };
-    let (claimed, _) = store.transact(Request {
+    let (claimed, _) = store.transact_checked(Request {
         correlation,
         expected_revision,
         action: Action::Start {

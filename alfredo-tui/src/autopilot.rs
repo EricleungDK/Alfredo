@@ -6,6 +6,7 @@
 //! store; it never replays inference or effects on restart and restores paused.
 use crate::{
     command_intent::Intent,
+    dispatch::TRANSIENT_LIMIT,
     task_control::TaskControl,
     tasks::{Snapshot, Task, TaskStatus, TaskStore},
     understanding,
@@ -245,7 +246,11 @@ pub struct Autopilot {
     path: PathBuf,
     saved: Option<Saved>,
     last: Option<Intent>,
+    /// Attempt key of `last`.
+    last_key: Option<String>,
     attempts: BTreeMap<String, u32>,
+    /// Consecutive submissions refused without effect because task state moved.
+    transient: u32,
     job: Option<oneshot::Receiver<Result<String, String>>>,
     /// Monotonic process clock plus seconds already elapsed when it was taken.
     clock: (std::time::Instant, u64),
@@ -294,7 +299,9 @@ impl Autopilot {
             path,
             saved,
             last: None,
+            last_key: None,
             attempts: BTreeMap::new(),
+            transient: 0,
             job: None,
             clock: (std::time::Instant::now(), saved_elapsed.unwrap_or_default()),
             notice,
@@ -435,7 +442,9 @@ impl Autopilot {
             branch: None,
         });
         self.last = None;
+        self.last_key = None;
         self.attempts.clear();
+        self.transient = 0;
         self.job = None;
         self.finished_notice = None;
         self.clock = (std::time::Instant::now(), 0);
@@ -495,6 +504,8 @@ impl Autopilot {
         }
         self.attempts.clear();
         self.last = None;
+        self.last_key = None;
+        self.transient = 0;
         self.persist();
         self.notice = "Autopilot resumed".into();
         Ok(self.notice.clone())
@@ -615,6 +626,15 @@ impl Autopilot {
     /// acknowledgment, or when there is nothing to do.
     pub fn tick(&mut self, runtime: &Runtime, tasks: &mut TaskControl) -> Option<Submission> {
         self.poll_integration(tasks);
+        if let Some(reason) = tasks.dispatch.contended.take() {
+            if self.running() {
+                self.halt(
+                    tasks,
+                    format!("Autopilot paused: {reason} · /resume retries"),
+                );
+                return None;
+            }
+        }
         let saved = self.saved.as_ref()?;
         if saved.paused || !saved.active() || saved.phase == Phase::Finishing {
             return None;
@@ -638,6 +658,39 @@ impl Autopilot {
         };
         match result {
             Ok(Some((key, text, intent))) => {
+                // A refusal that wrote nothing (stale revision, busy store) is
+                // neither an attempt nor progress; the refusal loaded current
+                // state, so this decision was prepared again on it. Bounded.
+                if self
+                    .last
+                    .as_ref()
+                    .is_some_and(|last| tasks.intent_transient(last))
+                {
+                    if let Some(count) = self
+                        .last_key
+                        .as_ref()
+                        .and_then(|last| self.attempts.get_mut(last))
+                    {
+                        *count = count.saturating_sub(1);
+                    }
+                    self.transient += 1;
+                    if self.transient >= TRANSIENT_LIMIT {
+                        let reason = self
+                            .last
+                            .as_ref()
+                            .and_then(|intent| tasks.intent_error(intent))
+                            .unwrap_or_else(|| tasks.notice.clone());
+                        self.halt(
+                            tasks,
+                            format!(
+                                "Autopilot paused: “{text}” refused {TRANSIENT_LIMIT} times; task state kept changing: {reason} · /resume retries"
+                            ),
+                        );
+                        return None;
+                    }
+                } else {
+                    self.transient = 0;
+                }
                 let attempts = self.attempts.entry(key.clone()).or_default();
                 *attempts += 1;
                 if *attempts > ATTEMPTS {
@@ -655,6 +708,7 @@ impl Autopilot {
                     return None;
                 }
                 self.last = Some(intent.clone());
+                self.last_key = Some(key);
                 self.persist();
                 Some(Submission {
                     text: format!("Autopilot · {text}"),
