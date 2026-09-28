@@ -855,12 +855,16 @@ fn run_worker(
         .transpose()?
         .unwrap_or_default();
     let (observer, progress) = Observer::channel();
+    // Recorded profiles compare schema-constrained worker requests; pinned so
+    // reports stay comparable whatever the production worker format is.
     let worker = runtime.spawn(worker::start_observed(
         store.clone(),
         task,
         format!("qualification-worker-{task}"),
         revision,
-        provider.clone(),
+        provider
+            .clone()
+            .with_worker_format(worker::WorkerFormat::Json),
         cancel.clone(),
         observer,
     ));

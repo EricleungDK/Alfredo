@@ -243,6 +243,35 @@ fn running_task_shows_live_stage_model_text_and_check_output_following_the_tail(
 }
 
 #[test]
+fn running_task_shows_streamed_file_blocks_as_code_without_markers() {
+    let mut fixture = calc_plan();
+    fixture.select(2);
+    let (_sender, receiver) = tokio::sync::watch::channel(Progress {
+        stage: "Receiving model plan",
+        model_output: "I will add both files.\n=== FILE: todo.py ===\nimport json\nprint(f'{todo[\"task\"]}')\n=== END FILE ===\n=== FILE: test_todo.py ===\nimport unittest\nclass T(unittest.TestCase):\n".into(),
+        ..Default::default()
+    });
+    fixture
+        .control
+        .attach_progress(2, receiver, Arc::new(AtomicBool::new(false)));
+    let buffer = fixture.render(100, 30);
+    let screen = text(&buffer);
+    for shown in [
+        "▸ todo.py",
+        "import json",
+        "print(f'{todo[\"task\"]}')",
+        "▸ test_todo.py",
+        "class T(unittest.TestCase):",
+    ] {
+        assert!(screen.contains(shown), "{shown} missing: {screen}");
+    }
+    for hidden in ["=== FILE", "END FILE", "\\n"] {
+        assert!(!screen.contains(hidden), "{hidden} shown: {screen}");
+    }
+    assert_borders_closed(&buffer);
+}
+
+#[test]
 fn default_task_detail_hides_receipt_ids_and_revisions() {
     let mut fixture = calc_plan();
     let snapshot = fixture.control.snapshot.as_mut().unwrap();

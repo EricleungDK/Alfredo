@@ -982,8 +982,10 @@ fn work_inspector(
             Style::default().fg(Color::Yellow),
         );
         let mut output_lines = Vec::new();
+        // FILE blocks read as code: `▸ path` headings, marker lines hidden.
+        let model_output = crate::worker::display_output(&live.model_output);
         for (label, output) in [
-            ("Model output", &live.model_output),
+            ("Model output", &model_output),
             ("Check stdout", &live.stdout),
             ("Check stderr", &live.stderr),
         ] {

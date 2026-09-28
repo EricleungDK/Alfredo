@@ -202,6 +202,10 @@ class TerminalSmoke(unittest.TestCase):
                 model_requests.append(request)
                 if 'format' in request:
                     assert request['think'] is False
+                elif request['messages'][-1]['content'].startswith('Implement this task:'):
+                    # Default FILE-block workers keep the thinking policy without a schema.
+                    assert request['think'] is False
+                    assert '=== END FILE ===' in request['messages'][-1]['content']
                 else:
                     assert 'think' not in request
                 if request['messages'][-1]['content'].startswith('Implement this task:'):
@@ -251,7 +255,8 @@ class TerminalSmoke(unittest.TestCase):
                     if 'Implement this task: Planned calculation' in request['messages'][-1]['content']:
                         assert 'RECORDED ACCEPTANCE CRITERIA' in request['messages'][-1]['content']
                         assert 'Calculation returns 42' in request['messages'][-1]['content']
-                    content = json.dumps({'files': [{'path': 'answer.py', 'content': 'VALUE = 42\n'}]})
+                    # FILE-block answer; other fixtures keep legacy JSON answers.
+                    content = 'Updating answer.py.\n=== FILE: answer.py ===\nVALUE = 42\n=== END FILE ===\n'
                 else:
                     content = 'FAST_REPLY'
                 self.wfile.write((json.dumps({'message': {'content': content}, 'done': True, 'load_duration': 500000000, 'eval_duration': 2000000000, 'eval_count': 40}) + '\n').encode())

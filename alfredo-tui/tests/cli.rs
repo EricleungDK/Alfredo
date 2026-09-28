@@ -90,6 +90,39 @@ fn connection_flags_are_documented_and_invalid_environment_fails_early() {
 }
 
 #[test]
+fn worker_format_flag_is_documented_and_validated() {
+    let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .arg("--help")
+        .output()
+        .unwrap();
+    let help = String::from_utf8_lossy(&output.stdout);
+    assert!(help.contains("--worker-format blocks|json"), "{help}");
+    for args in [vec!["--worker-format"], vec!["--worker-format", "xml"]] {
+        let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr)
+            .contains("--worker-format needs blocks or json"));
+    }
+    for value in ["blocks", "json"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+            .args([
+                "--endpoint",
+                "http://127.0.0.1:1",
+                "--model",
+                "fixture",
+                "--worker-format",
+                value,
+            ])
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Interactive terminal required"));
+    }
+}
+
+#[test]
 fn piped_launch_reports_how_to_get_usage_without_terminal_escapes() {
     let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
         .args(["--endpoint", "http://127.0.0.1:1", "--model", "fixture"])

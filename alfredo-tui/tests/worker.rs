@@ -171,6 +171,29 @@ fn server_with_reason(
     thread::JoinHandle<()>,
     std::sync::mpsc::Receiver<()>,
 ) {
+    serve_reply(
+        serde_json::to_string(&plan).unwrap(),
+        delay,
+        expected,
+        capture,
+        complete,
+        done_reason,
+    )
+}
+
+/// One-request worker fixture replying with `content` verbatim.
+fn serve_reply(
+    content: String,
+    delay: Duration,
+    expected: &str,
+    capture: Option<std::sync::mpsc::Sender<serde_json::Value>>,
+    complete: bool,
+    done_reason: Option<&'static str>,
+) -> (
+    Ollama,
+    thread::JoinHandle<()>,
+    std::sync::mpsc::Receiver<()>,
+) {
     let expected = expected.to_string();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -212,7 +235,17 @@ fn server_with_reason(
         let mut request = vec![0; length];
         stream.read_exact(&mut request).unwrap();
         let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
-        assert_eq!(request["format"]["required"], serde_json::json!(["files"]));
+        // Default worker requests ask for FILE blocks without a schema; the
+        // legacy JSON request is explicit.
+        match request.get("format") {
+            Some(format) => assert_eq!(format["required"], serde_json::json!(["files"])),
+            None => assert!(
+                request["messages"].as_array().unwrap().last().unwrap()["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("=== END FILE ===")
+            ),
+        }
         // Repairs raise sampling temperature within the bounded schedule.
         assert!(request["options"]["temperature"]
             .as_f64()
@@ -236,7 +269,8 @@ fn server_with_reason(
                         || prompt.contains("CHECK_OK")
                         || prompt.contains("Worker stream ended before completion")
                         || prompt.contains("AssertionError")
-                        || prompt.contains("-token limit"))
+                        || prompt.contains("-token limit")
+                        || prompt.contains("(truncated)"))
             );
         }
         if let Some(capture) = capture {
@@ -244,7 +278,7 @@ fn server_with_reason(
         }
         let _ = notify.send(());
         thread::sleep(delay);
-        let mut frame = serde_json::json!({"message":{"content":serde_json::to_string(&plan).unwrap()},"done":complete,"load_duration":500000000,"eval_duration":2000000000,"eval_count":40});
+        let mut frame = serde_json::json!({"message":{"content":content},"done":complete,"load_duration":500000000,"eval_duration":2000000000,"eval_count":40});
         if let Some(reason) = done_reason {
             frame["done_reason"] = reason.into();
         }
@@ -320,10 +354,9 @@ async fn real_model_transport_edits_isolated_worktree_checks_and_restores_review
     assert!(!fixture.workspace.join("notes.txt").exists());
     let evidence = fixture.store.evidence(1).unwrap();
     let requested: worker::Evidence = serde_json::from_str(&evidence).unwrap();
-    assert_eq!(
-        requested.generation.as_ref().unwrap(),
-        &provider.structured_generation()
-    );
+    let mut expected = provider.structured_generation();
+    expected.answer_format = Some(worker::WorkerFormat::Blocks);
+    assert_eq!(requested.generation.as_ref().unwrap(), &expected);
 
     assert!(evidence.contains("CHECK_OK"));
     assert!(evidence.contains("notes.txt"));
@@ -2821,7 +2854,12 @@ async fn repairs_continue_recorded_agent_then_restart_fresh_after_second_rejecti
             assert_eq!(agent.continued_from.as_deref(), Some(prior_run.as_str()));
             assert_eq!(messages[0], first_request);
             assert_eq!(messages[1]["role"], "assistant");
-            assert_eq!(messages[1]["content"], first_answer);
+            // A retained legacy JSON answer is replayed in the requested block format.
+            assert!(first_answer.starts_with('{'));
+            assert_eq!(
+                messages[1]["content"],
+                worker::render_blocks(&worker::parse_answer(&first_answer).unwrap())
+            );
             assert!(messages[2]["content"]
                 .as_str()
                 .unwrap()
@@ -5645,10 +5683,8 @@ async fn worker_receives_committed_check_and_named_files_as_read_only_reference(
         prompt.contains("Allowed exact files: [\"calc.py\"]"),
         "{prompt}"
     );
-    assert_eq!(
-        request["format"]["properties"]["files"]["items"]["properties"]["path"]["enum"],
-        serde_json::json!(["calc.py"])
-    );
+    // Blocks answers are unconstrained; the allowed list is enforced after parsing.
+    assert!(request.get("format").is_none(), "{request}");
     let finished = snapshot.tasks.iter().find(|t| t.id == task).unwrap();
     assert_eq!(finished.policy.as_ref(), Some(&policy));
     assert_eq!(finished.status, TaskStatus::ReviewReady, "{detail}");
@@ -5873,13 +5909,13 @@ async fn identical_repair_is_named_no_progress_and_next_repair_leads_with_failur
     );
     assert!(detail.contains("AssertionError: 40 != 42"), "{detail}");
     assert!(detail.len() <= 900);
-    assert!(requested(&fixture, third).ends_with("temperature 0.3"));
+    assert!(requested(&fixture, third).ends_with("temperature 0.3 · answer format blocks"));
 
     let fourth = repair_of(&fixture, third);
     let (request, detail) =
         run_captured(&fixture, fourth, "def answer():\n    return 42\n", None).await;
     assert_eq!(request["options"]["temperature"], 0.8);
-    assert!(requested(&fixture, fourth).ends_with("temperature 0.8"));
+    assert!(requested(&fixture, fourth).ends_with("temperature 0.8 · answer format blocks"));
     // Its own repeated answer is not replayed as conversation history.
     assert_eq!(request["messages"].as_array().unwrap().len(), 1);
     let evidence: worker::Evidence =
@@ -5941,4 +5977,280 @@ fn failing_lines_lead_with_assertions_and_stay_bounded() {
     assert!(lines.len() <= 2048 + 64, "{}", lines.len());
     assert!(lines.ends_with("more failing lines omitted)"), "{lines}");
     assert_eq!(worker::failing_lines("all good\n"), "");
+}
+
+fn blocks(files: &[(&str, &str)]) -> String {
+    files
+        .iter()
+        .map(|(path, content)| format!("=== FILE: {path} ===\n{content}=== END FILE ===\n"))
+        .collect()
+}
+
+#[test]
+fn file_blocks_parse_verbatim_code_and_refuse_truncated_or_missing_blocks() {
+    // Quotes, backslashes and braces need no escaping; outside text is ignored.
+    let code = "def show(todo):\n    print(f'{1}. {todo[\"task\"]}')\n    return \"\\n\"\n";
+    let answer = format!(
+        "Here is the change.\n{}Done.\n",
+        blocks(&[("calc.py", code), ("notes.txt", "note\n\n\n")])
+    );
+    let plan = worker::parse_answer(&answer).unwrap();
+    assert_eq!(plan.files.len(), 2);
+    assert_eq!(plan.files[0].path, "calc.py");
+    assert_eq!(plan.files[0].content, code);
+    // A single trailing newline is normalized.
+    assert_eq!(plan.files[1].content, "note\n");
+    let crlf = worker::parse_answer(&answer.replace('\n', "\r\n")).unwrap();
+    assert_eq!(crlf.files[0].content, code);
+    let padded = worker::parse_answer("=== FILE: a.py ===\nx = 1\n\n\n=== END FILE ===\n").unwrap();
+    assert_eq!(padded.files[0].content, "x = 1\n");
+    // One markdown fence layer inside a block is stripped.
+    let fenced =
+        worker::parse_answer("=== FILE: a.py ===\n```python\nx = 1\n```\n=== END FILE ===")
+            .unwrap();
+    assert_eq!(fenced.files[0].content, "x = 1\n");
+    // Marker lines must start the line exactly.
+    assert_eq!(
+        worker::parse_answer("  === FILE: a.py ===\nx\n=== END FILE ===\n").unwrap_err(),
+        "Model returned no FILE blocks"
+    );
+    assert_eq!(
+        worker::parse_answer("I cannot do that.").unwrap_err(),
+        "Model returned no FILE blocks"
+    );
+    assert_eq!(
+        worker::parse_answer("=== FILE: todo.py ===\nimport json\nprint(f'{todo[").unwrap_err(),
+        "Model output ended inside FILE block for todo.py (truncated)"
+    );
+    // A marker line inside content is ambiguous and refused.
+    let nested =
+        worker::parse_answer("=== FILE: a.py ===\nx\n=== FILE: b.py ===\ny\n=== END FILE ===\n")
+            .unwrap_err();
+    assert!(
+        nested.contains("a.py") && nested.contains("marker"),
+        "{nested}"
+    );
+    // Legacy JSON answers remain accepted.
+    let legacy = worker::parse_answer(&serde_json::to_string(&good_plan()).unwrap()).unwrap();
+    assert_eq!(legacy.files.len(), 2);
+    assert_eq!(legacy.files[0].content, "def answer():\n    return 42\n");
+    // Rendering round-trips through the parser.
+    assert_eq!(
+        worker::parse_answer(&worker::render_blocks(&plan))
+            .unwrap()
+            .files[0]
+            .content,
+        code
+    );
+    // Duplicates, unapproved paths and binary content are refused by the policy.
+    let policy = WorkPolicy {
+        files: vec!["calc.py".into(), "notes.txt".into()],
+        check: vec!["true".into()],
+    };
+    let twice = worker::parse_answer(&blocks(&[("calc.py", "a\n"), ("calc.py", "b\n")])).unwrap();
+    assert!(worker::validate_plan(&twice, &policy)
+        .unwrap_err()
+        .contains("more than once"));
+    let other = worker::parse_answer(&blocks(&[("test_calc.py", "x\n")])).unwrap();
+    assert_eq!(
+        worker::validate_plan(&other, &policy).unwrap_err(),
+        "Returned unapproved file test_calc.py; only calc.py, notes.txt may be written"
+    );
+    let binary = worker::parse_answer(&blocks(&[("calc.py", "a\0b\n")])).unwrap();
+    assert!(worker::validate_plan(&binary, &policy).is_err());
+}
+
+#[test]
+fn worker_format_names_parse_and_legacy_generation_reads_unrecorded() {
+    assert_eq!(
+        worker::WorkerFormat::default(),
+        worker::WorkerFormat::Blocks
+    );
+    assert_eq!(
+        worker::WorkerFormat::parse("json"),
+        Ok(worker::WorkerFormat::Json)
+    );
+    assert_eq!(
+        worker::WorkerFormat::parse("blocks"),
+        Ok(worker::WorkerFormat::Blocks)
+    );
+    assert!(worker::WorkerFormat::parse("xml").is_err());
+    let legacy: alfredo_tui::provider::Generation =
+        serde_json::from_str(r#"{"thinking":"off","num_predict":4096,"temperature":0}"#).unwrap();
+    assert_eq!(legacy.answer_format, None);
+    let mut generation = legacy.clone();
+    generation.answer_format = Some(worker::WorkerFormat::Blocks);
+    assert!(generation
+        .summary()
+        .ends_with("temperature 0 · answer format blocks"));
+}
+
+#[tokio::test]
+async fn blocks_answer_is_requested_without_schema_and_applied_verbatim() {
+    let fixture = unittest_fixture();
+    let (capture, captured) = std::sync::mpsc::channel();
+    let answer = format!(
+        "Sure:\n{}",
+        blocks(&[("calc.py", "def answer():\n    return int(\"42\")\n")])
+    );
+    let (provider, server, _) = serve_reply(
+        answer.clone(),
+        Duration::ZERO,
+        "",
+        Some(capture),
+        true,
+        None,
+    );
+    let (snapshot, detail) = worker::start(
+        fixture.store.clone(),
+        1,
+        "blocks-run".into(),
+        fixture.store.snapshot().unwrap().revision,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        snapshot.tasks[0].status,
+        TaskStatus::ReviewReady,
+        "{detail}"
+    );
+    let request = captured.recv().unwrap();
+    assert!(request.get("format").is_none(), "{request}");
+    // No schema, but the worker keeps the structured thinking policy and sampling.
+    assert_eq!(request["think"], false);
+    assert_eq!(request["options"]["temperature"], 0);
+    let prompt = last_prompt(&request);
+    assert!(prompt.contains("=== FILE: <path> ==="), "{prompt}");
+    assert!(!prompt.contains("JSON schema"), "{prompt}");
+    let evidence: worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    assert_eq!(
+        evidence.generation.as_ref().unwrap().answer_format,
+        Some(worker::WorkerFormat::Blocks)
+    );
+    assert!(evidence.patch.contains("+    return int(\"42\")"));
+    let directory = fixture.store.run_directory(&evidence.run).unwrap();
+    assert_eq!(
+        fs::read_to_string(directory.join("model-response.txt")).unwrap(),
+        answer
+    );
+}
+
+#[tokio::test]
+async fn json_worker_format_keeps_the_constrained_schema_request() {
+    let fixture = unittest_fixture();
+    let (capture, captured) = std::sync::mpsc::channel();
+    let (provider, server, _) = server_with_capture(
+        one_file("calc.py", "def answer():\n    return 42\n"),
+        Duration::ZERO,
+        "",
+        Some(capture),
+    );
+    let (snapshot, detail) = worker::start(
+        fixture.store.clone(),
+        1,
+        "json-run".into(),
+        fixture.store.snapshot().unwrap().revision,
+        provider.with_worker_format(worker::WorkerFormat::Json),
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        snapshot.tasks[0].status,
+        TaskStatus::ReviewReady,
+        "{detail}"
+    );
+    let request = captured.recv().unwrap();
+    assert_eq!(
+        request["format"]["properties"]["files"]["items"]["properties"]["path"]["enum"],
+        serde_json::json!(["calc.py"])
+    );
+    assert_eq!(request["think"], false);
+    assert!(last_prompt(&request).contains("JSON schema"));
+    assert!(!last_prompt(&request).contains("=== FILE:"));
+    let evidence: worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    assert_eq!(
+        evidence.generation.unwrap().answer_format,
+        Some(worker::WorkerFormat::Json)
+    );
+}
+
+async fn run_reply(fixture: &Fixture, task: u64, answer: String) -> (serde_json::Value, String) {
+    let (capture, captured) = std::sync::mpsc::channel();
+    let (provider, server, _) = serve_reply(answer, Duration::ZERO, "", Some(capture), true, None);
+    let (_, detail) = worker::start(
+        fixture.store.clone(),
+        task,
+        format!("reply-{task}"),
+        fixture.store.snapshot().unwrap().revision,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    (captured.recv().unwrap(), detail)
+}
+
+#[tokio::test]
+async fn truncated_blocks_fail_named_and_repair_says_so_with_prior_files_as_blocks() {
+    let fixture = unittest_fixture();
+    let (_, detail) = run_reply(
+        &fixture,
+        1,
+        "=== FILE: calc.py ===\ndef answer():\n    return {todo[".into(),
+    )
+    .await;
+    assert_eq!(
+        detail,
+        "Model output ended inside FILE block for calc.py (truncated)"
+    );
+    let second = repair_of(&fixture, 1);
+    let (request, detail) = run_reply(
+        &fixture,
+        second,
+        blocks(&[("calc.py", "def answer():\n    return \"41\"\n")]),
+    )
+    .await;
+    let section = failing_section(&last_prompt(&request));
+    assert!(
+        section.contains("previous response was truncated inside the FILE block for calc.py"),
+        "{section}"
+    );
+    assert!(detail.starts_with("Check failed"), "{detail}");
+
+    // A fresh repair (different model) sees the prior attempt's files as blocks,
+    // and the prior patch unescaped rather than inside JSON evidence.
+    fixture.action(Action::Repair {
+        task: second,
+        reason: "Fix the failing test".into(),
+    });
+    let third = fixture.store.snapshot().unwrap().tasks.len() as u64;
+    fixture.action(Action::Assign {
+        task: third,
+        model: "other".into(),
+    });
+    fixture.action(Action::Approve { task: third });
+    let (request, _) = run_reply(
+        &fixture,
+        third,
+        blocks(&[("calc.py", "def answer():\n    return 42\n")]),
+    )
+    .await;
+    assert_eq!(request["messages"].as_array().unwrap().len(), 1);
+    let prompt = last_prompt(&request);
+    assert!(prompt.contains("WHAT IS STILL FAILING"), "{prompt}");
+    assert!(
+        prompt
+            .contains("=== FILE: calc.py ===\ndef answer():\n    return \"41\"\n=== END FILE ==="),
+        "{prompt}"
+    );
+    assert!(prompt.contains("+    return \"41\""), "{prompt}");
+    assert!(!prompt.contains("return \\\"41\\\""), "{prompt}");
 }

@@ -455,6 +455,39 @@ async fn repair_sampling_is_sent_bounded_and_recorded_as_requested_generation() 
 }
 
 #[tokio::test]
+async fn structured_text_requests_send_thinking_policy_and_sampling_without_schema() {
+    for (policy, expected) in [
+        (Some(false), Some(false)),
+        (Some(true), Some(true)),
+        (None, None),
+    ] {
+        let (endpoint, server, request) = server_capture(
+            vec![b"{\"message\":{\"content\":\"text\"},\"done\":true}\n".to_vec()],
+            Duration::ZERO,
+        );
+        let provider = Ollama::new(&endpoint, Duration::from_secs(3))
+            .unwrap()
+            .with_structured_thinking(policy)
+            .with_structured_text()
+            .with_sampling(0.3, 8192);
+        let (sender, mut events) = mpsc::channel(128);
+        provider
+            .chat(0, 1, "fixture".into(), prompt(), sender)
+            .await;
+        while events.recv().await.is_some() {}
+        let request = request.recv().unwrap();
+        assert!(request.get("format").is_none());
+        assert_eq!(
+            request.get("think").and_then(serde_json::Value::as_bool),
+            expected
+        );
+        assert_eq!(request["options"]["temperature"], 0.3);
+        assert_eq!(request["options"]["num_predict"], 8192);
+        server.join().unwrap();
+    }
+}
+
+#[tokio::test]
 async fn structured_thinking_policy_is_sent_only_for_schema_requests() {
     for (schema, policy, expected) in [
         (true, None, Some(false)),

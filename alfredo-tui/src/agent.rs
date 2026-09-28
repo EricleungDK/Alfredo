@@ -169,16 +169,27 @@ pub fn prepare(store: &TaskStore, snapshot: &Snapshot, task: &Task) -> Result<Pr
     let Some(digest) = &record.transcript_sha256 else {
         return Ok(fresh("Prior model exchange did not complete"));
     };
+    // The record's model equals the parent's, which equals this task's.
+    let transcript = read_transcript(store, &evidence.run, &record, digest)?;
+    Ok(Prepared {
+        prior: Some((record.agent, evidence.run)),
+        history: transcript.messages,
+        reason: "Repair continues the retained Local Agent exchange".into(),
+    })
+}
+/// Digest-verified retained conversation of `run`.
+fn read_transcript(
+    store: &TaskStore,
+    run: &str,
+    record: &Record,
+    digest: &str,
+) -> Result<Transcript> {
     let mut bytes = Vec::new();
-    crate::tasks::regular_file(
-        &store.run_directory(&evidence.run)?.join(FILE),
-        false,
-        false,
-    )?
-    .take(MAX_FILE as u64 + 1)
-    .read_to_end(&mut bytes)
-    .map_err(|e| e.to_string())?;
-    if bytes.len() > MAX_FILE || format!("{:x}", Sha256::digest(&bytes)) != *digest {
+    crate::tasks::regular_file(&store.run_directory(run)?.join(FILE), false, false)?
+        .take(MAX_FILE as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| e.to_string())?;
+    if bytes.len() > MAX_FILE || format!("{:x}", Sha256::digest(&bytes)) != digest {
         return Err(
             "Local Agent conversation size or digest mismatch; repair remains unstarted".into(),
         );
@@ -186,20 +197,30 @@ pub fn prepare(store: &TaskStore, snapshot: &Snapshot, task: &Task) -> Result<Pr
     let transcript: Transcript =
         serde_json::from_slice(&bytes).map_err(|_| "Malformed Local Agent conversation")?;
     if transcript.schema_version != 1
-        || transcript.run != evidence.run
+        || transcript.run != run
         || transcript.agent != record.agent
-        || transcript.model != task.model
+        || transcript.model != record.model
         || !valid_messages(&transcript.messages, true)
     {
         return Err("Local Agent conversation binding or history is invalid".into());
     }
-    Ok(Prepared {
-        prior: Some((record.agent, evidence.run)),
-        history: transcript.messages,
-        reason: "Repair continues the retained Local Agent exchange".into(),
-    })
+    Ok(transcript)
 }
+
+/// The verified final model answer of a prior run, when its exchange completed.
+pub fn retained_answer(store: &TaskStore, evidence: &crate::worker::Evidence) -> Option<String> {
+    let record = evidence.agent.as_ref()?;
+    let digest = record.transcript_sha256.as_deref()?;
+    let transcript = read_transcript(store, &evidence.run, record, digest).ok()?;
+    transcript.messages.last().map(|m| m.content.clone())
+}
+
 impl Prepared {
+    /// Whether the request continues a retained conversation.
+    pub fn continues(&self) -> bool {
+        self.prior.is_some()
+    }
+
     pub fn request(
         mut self,
         run: &str,

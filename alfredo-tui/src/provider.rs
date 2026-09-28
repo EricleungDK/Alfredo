@@ -97,6 +97,9 @@ pub struct Generation {
     pub thinking: RequestedThinking,
     pub num_predict: u32,
     pub temperature: f64,
+    /// Requested worker answer format; older evidence (JSON requests) omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_format: Option<crate::worker::WorkerFormat>,
 }
 impl Generation {
     pub fn valid(&self) -> bool {
@@ -108,8 +111,12 @@ impl Generation {
             RequestedThinking::On => "on",
             RequestedThinking::Off => "off",
         };
+        let format = self
+            .answer_format
+            .map(|format| format!(" · answer format {}", format.name()))
+            .unwrap_or_default();
         format!(
-            "Requested generation: thinking {thinking} · token limit {} · temperature {}",
+            "Requested generation: thinking {thinking} · token limit {} · temperature {}{format}",
             self.num_predict, self.temperature
         )
     }
@@ -121,7 +128,11 @@ pub struct Ollama {
     endpoint: reqwest::Url,
     idle_timeout: Duration,
     format: Option<serde_json::Value>,
+    /// Planner/worker output: sends the thinking policy and sampling temperature,
+    /// with or without a schema.
+    structured: bool,
     structured_thinking: Option<bool>,
+    worker_format: crate::worker::WorkerFormat,
     admission: Coordinator,
     priority: Class,
     capacity: usize,
@@ -237,7 +248,9 @@ impl Ollama {
             endpoint,
             idle_timeout,
             format: None,
+            structured: false,
             structured_thinking: Some(false),
+            worker_format: crate::worker::WorkerFormat::Blocks,
             admission,
             priority: Class::Foreground,
             capacity: 2,
@@ -413,10 +426,20 @@ impl Ollama {
         self
     }
 
-    /// Only affects schema-constrained planner/worker calls; None uses server defaults.
+    /// Only affects structured planner/worker calls; None uses server defaults.
     pub fn with_structured_thinking(mut self, thinking: Option<bool>) -> Self {
         self.structured_thinking = thinking;
         self
+    }
+
+    /// Answer format requested from coding workers (default FILE blocks).
+    pub fn with_worker_format(mut self, format: crate::worker::WorkerFormat) -> Self {
+        self.worker_format = format;
+        self
+    }
+
+    pub fn worker_format(&self) -> crate::worker::WorkerFormat {
+        self.worker_format
     }
 
     pub fn structured_generation(&self) -> Generation {
@@ -428,6 +451,7 @@ impl Ollama {
             },
             num_predict: self.num_predict,
             temperature: self.temperature,
+            answer_format: None,
         }
     }
 
@@ -502,6 +526,15 @@ impl Ollama {
 
     pub fn with_json_schema(mut self, schema: serde_json::Value) -> Self {
         self.format = Some(schema);
+        self.structured = true;
+        self
+    }
+
+    /// Structured free-text output (worker FILE blocks): thinking policy and
+    /// sampling as for schema calls, without constrained decoding.
+    pub fn with_structured_text(mut self) -> Self {
+        self.format = None;
+        self.structured = true;
         self
     }
 
@@ -680,6 +713,8 @@ impl Ollama {
         });
         if let Some(format) = &self.format {
             body["format"] = format.clone();
+        }
+        if self.structured {
             if let Some(thinking) = self.structured_thinking {
                 body["think"] = thinking.into();
             }
