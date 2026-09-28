@@ -156,6 +156,21 @@ fn server_with_completion(
     thread::JoinHandle<()>,
     std::sync::mpsc::Receiver<()>,
 ) {
+    server_with_reason(plan, delay, expected, capture, complete, None)
+}
+
+fn server_with_reason(
+    plan: FilePlan,
+    delay: Duration,
+    expected: &str,
+    capture: Option<std::sync::mpsc::Sender<serde_json::Value>>,
+    complete: bool,
+    done_reason: Option<&'static str>,
+) -> (
+    Ollama,
+    thread::JoinHandle<()>,
+    std::sync::mpsc::Receiver<()>,
+) {
     let expected = expected.to_string();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -198,7 +213,10 @@ fn server_with_completion(
         stream.read_exact(&mut request).unwrap();
         let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
         assert_eq!(request["format"]["required"], serde_json::json!(["files"]));
-        assert_eq!(request["options"]["temperature"], 0);
+        // Repairs raise sampling temperature within the bounded schedule.
+        assert!(request["options"]["temperature"]
+            .as_f64()
+            .is_some_and(|t| (0.0..=0.8).contains(&t)));
         for expected in expected.split('\0') {
             assert!(
                 request["messages"].as_array().unwrap().last().unwrap()["content"]
@@ -216,7 +234,9 @@ fn server_with_completion(
                     && prompt.contains("Prior task #1")
                     && (prompt.contains("Prior model exchange did not complete")
                         || prompt.contains("CHECK_OK")
-                        || prompt.contains("Worker stream ended before completion"))
+                        || prompt.contains("Worker stream ended before completion")
+                        || prompt.contains("AssertionError")
+                        || prompt.contains("-token limit"))
             );
         }
         if let Some(capture) = capture {
@@ -224,7 +244,11 @@ fn server_with_completion(
         }
         let _ = notify.send(());
         thread::sleep(delay);
-        let body = serde_json::to_string(&serde_json::json!({"message":{"content":serde_json::to_string(&plan).unwrap()},"done":complete,"load_duration":500000000,"eval_duration":2000000000,"eval_count":40})).unwrap();
+        let mut frame = serde_json::json!({"message":{"content":serde_json::to_string(&plan).unwrap()},"done":complete,"load_duration":500000000,"eval_duration":2000000000,"eval_count":40});
+        if let Some(reason) = done_reason {
+            frame["done_reason"] = reason.into();
+        }
+        let body = serde_json::to_string(&frame).unwrap();
         let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
     });
     (
@@ -5721,4 +5745,192 @@ async fn failed_check_detail_carries_a_sanitized_relative_output_tail() {
         "{}",
         tail.1
     );
+}
+
+/// Unittest check on calc.py; task 1 is permitted and approved.
+fn unittest_fixture() -> Fixture {
+    let fixture = Fixture::new();
+    commit_files(
+        &fixture,
+        &[(
+            "test_calc.py",
+            "import unittest\nfrom calc import answer\n\nclass T(unittest.TestCase):\n    def test_answer(self):\n        self.assertEqual(answer(), 42)\n",
+        )],
+    );
+    fixture.action(Action::Permit {
+        task: 1,
+        policy: WorkPolicy {
+            files: vec!["calc.py".into()],
+            check: ["/usr/bin/python3", "-B", "-m", "unittest", "test_calc.py"]
+                .map(String::from)
+                .to_vec(),
+        },
+    });
+    fixture.action(Action::Approve { task: 1 });
+    fixture
+}
+
+/// Run `task` against a one-reply fixture; returns the captured request and detail.
+async fn run_captured(
+    fixture: &Fixture,
+    task: u64,
+    content: &str,
+    done_reason: Option<&'static str>,
+) -> (serde_json::Value, String) {
+    let (capture, captured) = std::sync::mpsc::channel();
+    let (provider, server, _) = server_with_reason(
+        one_file("calc.py", content),
+        Duration::ZERO,
+        "",
+        Some(capture),
+        true,
+        done_reason,
+    );
+    let revision = fixture.store.snapshot().unwrap().revision;
+    let (_, detail) = worker::start(
+        fixture.store.clone(),
+        task,
+        format!("lineage-{task}"),
+        revision,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    (captured.recv().unwrap(), detail)
+}
+
+fn repair_of(fixture: &Fixture, parent: u64) -> u64 {
+    fixture.action(Action::Repair {
+        task: parent,
+        reason: "Fix the failing test".into(),
+    });
+    let id = fixture.store.snapshot().unwrap().tasks.len() as u64;
+    fixture.action(Action::Approve { task: id });
+    id
+}
+
+fn last_prompt(request: &serde_json::Value) -> String {
+    request["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// The "What is still failing" section, which must precede the policy and evidence.
+fn failing_section(prompt: &str) -> String {
+    let start = prompt
+        .find("WHAT IS STILL FAILING")
+        .unwrap_or_else(|| panic!("{prompt}"));
+    let end = prompt.find("Allowed exact files").unwrap();
+    assert!(start < end && end < prompt.find("REPAIR CONTEXT").unwrap());
+    prompt[start..end].to_string()
+}
+
+fn requested(fixture: &Fixture, task: u64) -> String {
+    serde_json::from_str::<worker::Evidence>(&fixture.store.evidence(task).unwrap())
+        .unwrap()
+        .generation
+        .unwrap()
+        .summary()
+}
+
+#[tokio::test]
+async fn identical_repair_is_named_no_progress_and_next_repair_leads_with_failures_hotter() {
+    let fixture = unittest_fixture();
+    let (request, detail) = run_captured(&fixture, 1, "def answer():\n    return 41\n", None).await;
+    assert_eq!(request["options"]["temperature"], 0);
+    assert!(!last_prompt(&request).contains("WHAT IS STILL FAILING"));
+    assert!(detail.starts_with("Check failed (exit 1)"), "{detail}");
+
+    // Repair 1 keeps the default temperature and leads with the failing assertions.
+    let second = repair_of(&fixture, 1);
+    let (request, detail) =
+        run_captured(&fixture, second, "def answer():\n    return 40\n", None).await;
+    assert_eq!(request["options"]["temperature"], 0);
+    let prompt = last_prompt(&request);
+    assert!(prompt.starts_with("Implement this task: Repair #1:"));
+    let section = failing_section(&prompt);
+    for line in [
+        "FAIL: test_answer",
+        "self.assertEqual(answer(), 42)",
+        "AssertionError: 41 != 42",
+    ] {
+        assert!(section.contains(line), "{line} missing: {section}");
+    }
+    assert!(!section.contains("Traceback") && !section.contains("identical"));
+    assert!(!detail.starts_with("No change"), "{detail}");
+
+    // Byte-identical to the previous attempt: named, check output kept, hotter.
+    let third = repair_of(&fixture, second);
+    let (request, detail) =
+        run_captured(&fixture, third, "def answer():\n    return 40\n", None).await;
+    assert_eq!(request["options"]["temperature"], 0.3);
+    assert!(
+        detail.starts_with("No change from previous attempt · Check failed (exit 1): stderr: "),
+        "{detail}"
+    );
+    assert!(detail.contains("AssertionError: 40 != 42"), "{detail}");
+    assert!(detail.len() <= 900);
+    assert!(requested(&fixture, third).ends_with("temperature 0.3"));
+
+    let fourth = repair_of(&fixture, third);
+    let (request, detail) =
+        run_captured(&fixture, fourth, "def answer():\n    return 42\n", None).await;
+    assert_eq!(request["options"]["temperature"], 0.8);
+    assert!(requested(&fixture, fourth).ends_with("temperature 0.8"));
+    let section = failing_section(&last_prompt(&request));
+    assert!(
+        section.contains("previous attempt returned identical code that still fails"),
+        "{section}"
+    );
+    assert!(section.contains("AssertionError: 40 != 42"), "{section}");
+    assert_eq!(
+        fixture.store.snapshot().unwrap().tasks[3].status,
+        TaskStatus::ReviewReady,
+        "{detail}"
+    );
+}
+
+#[tokio::test]
+async fn token_limit_failure_is_named_and_next_repair_requests_a_larger_bounded_limit() {
+    let fixture = unittest_fixture();
+    let content = "def answer():\n    return 42\n";
+    let (request, detail) = run_captured(&fixture, 1, content, Some("length")).await;
+    assert_eq!(request["options"]["num_predict"], 4096);
+    assert!(
+        detail.starts_with("Model output hit the 4096-token limit"),
+        "{detail}"
+    );
+    let second = repair_of(&fixture, 1);
+    let (request, detail) = run_captured(&fixture, second, content, Some("length")).await;
+    assert_eq!(request["options"]["num_predict"], 8192);
+    assert!(requested(&fixture, second).contains("token limit 8192"));
+    let section = failing_section(&last_prompt(&request));
+    assert!(section.contains("hit the 4096-token limit"), "{section}");
+    assert!(
+        detail.starts_with("Model output hit the 8192-token limit"),
+        "{detail}"
+    );
+    let third = repair_of(&fixture, second);
+    let (request, _) = run_captured(&fixture, third, content, None).await;
+    assert_eq!(request["options"]["num_predict"], 8192, "bounded");
+}
+
+#[test]
+fn failing_lines_lead_with_assertions_and_stay_bounded() {
+    let output = "F.\n======\nFAIL: test_unique (test_slug.T.test_unique)\n------\nTraceback (most recent call last):\n  File \"test_slug.py\", line 12, in test_unique\n    self.assertEqual(unique_slug(\"A b\", {\"a-b\", \"a-b-2\"}), \"a-b-3\")\nAssertionError: 'a-b-1' != 'a-b-3'\n- a-b-1\n?     ^\n+ a-b-3\n?     ^\n\n------\nRan 6 tests in 0.001s\n\nFAILED (failures=1)\n";
+    assert_eq!(
+        worker::failing_lines(output),
+        "FAIL: test_unique (test_slug.T.test_unique)\n    self.assertEqual(unique_slug(\"A b\", {\"a-b\", \"a-b-2\"}), \"a-b-3\")\nAssertionError: 'a-b-1' != 'a-b-3'\n- a-b-1\n+ a-b-3\nFAILED (failures=1)"
+    );
+    let noisy = "ModuleNotFoundError: No module named 'slug'\n".to_string()
+        + &"FAIL: test_many (t.T.test_many) with a long enough name to count\n".repeat(200);
+    let lines = worker::failing_lines(&noisy);
+    assert!(lines.starts_with("ModuleNotFoundError: No module named 'slug'"));
+    assert!(lines.lines().count() <= 31, "{lines}");
+    assert!(lines.len() <= 2048 + 64, "{}", lines.len());
+    assert!(lines.ends_with("more failing lines omitted)"), "{lines}");
+    assert_eq!(worker::failing_lines("all good\n"), "");
 }
