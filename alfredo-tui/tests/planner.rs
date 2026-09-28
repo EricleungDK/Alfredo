@@ -356,6 +356,12 @@ fn planner_instruction_runs_existing_tests_and_keeps_them_out_of_written_files()
         "When the goal references existing test files, set the check to run those tests",
         "Do not list existing test files in policy files unless the goal asks to change them",
         "workers receive them as read-only reference",
+        "Each task's check must run using only files that already exist, files that task writes, or files written by the tasks it depends on",
+        "the implementation task's check must be a direct smoke check of its own file (for example [\"python3\", \"-c\", \"import textutil\"])",
+        "or put the implementation and its tests in one task",
+        "Every task writes at least one policy file",
+        "Tasks that write the same file must be ordered by a dependency",
+        "The check program must be a bare program name on /usr/bin:/bin or an absolute path",
     ] {
         assert!(system.contains(text), "{text} missing: {system}");
     }
@@ -1260,4 +1266,57 @@ fn activity_refresh_after_failed_plan_save_preserves_complete_unsaved_checkpoint
     control.command(&runtime, "/plan", "fixture").unwrap();
     assert!(control.planner.visible);
     assert_eq!(control.planner.checkpoint(), Some(checkpoint));
+}
+
+#[test]
+fn empty_policy_files_name_the_task() {
+    let mut plan = plan();
+    plan.tasks[1].policy.files.clear();
+    assert_eq!(
+        plan.validate().unwrap_err(),
+        "Task 2 lists no policy files; every task must write at least one file."
+    );
+}
+
+#[test]
+fn manual_plan_shows_validation_warnings_without_blocking_save() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let fixture = Fixture::new();
+    confirm_scope(&fixture.store);
+    let mut tasks = plan().tasks;
+    tasks[0].policy = WorkPolicy {
+        files: vec!["textutil.py".into()],
+        check: vec![
+            "python3".into(),
+            "-m".into(),
+            "unittest".into(),
+            "test_textutil.py".into(),
+        ],
+    };
+    let (provider, server) = server(
+        serde_json::json!({ "tasks": tasks }).to_string(),
+        true,
+        Duration::ZERO,
+    );
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.set_provider(provider);
+    control.refresh(&runtime);
+    wait(&mut control, |c| !c.pending);
+    control
+        .command(&runtime, "/plan Implement calculation", "fixture")
+        .unwrap();
+    wait(&mut control, |c| c.planner.draft.is_some());
+    server.join().unwrap();
+    let preview = control.planner.preview();
+    assert!(
+        preview.contains("Validation warnings · /plan-save still allowed"),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("Task 1 check references test_textutil.py, which does not exist yet"),
+        "{preview}"
+    );
+    control.command(&runtime, "/plan-save", "fixture").unwrap();
+    wait(&mut control, |c| !c.pending);
+    assert_eq!(fixture.store.snapshot().unwrap().tasks.len(), 2);
 }
