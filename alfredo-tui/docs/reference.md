@@ -20,7 +20,8 @@ run gets a linked `/repair` with the failure summary as reason, bounded by
 "What is still failing" section (failing test names, assertion/error lines and
 `-`/`+` diff lines, at most 30 lines / 2 KiB) before the full prior evidence. A
 failed repair whose files equal its parent attempt's is recorded as `No change
-from previous attempt`, and the next repair says so. Repair sampling temperature
+from previous attempt`, and the next repair says so and starts a fresh Local Agent
+conversation. Repair sampling temperature
 stays 0 for the first repair, then steps 0.3 → 0.6 → 0.8 (cap) after two or more
 failed attempts, one extra step after no progress. When a reply hits the
 4096-token limit (`Model output hit the 4096-token limit`), the next repair

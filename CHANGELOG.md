@@ -21,7 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - A failed repair that returns byte-identical files is recorded as `No change from
-  previous attempt`, and the next repair is told so explicitly.
+  previous attempt`, and the next repair is told so explicitly and starts a fresh
+  Local Agent conversation instead of replaying the repeated answer.
 - Work status row pluralizes counts (`2 repairs`, `2 recorded runs`).
 
 ## [0.1.0] - 2026-09-28

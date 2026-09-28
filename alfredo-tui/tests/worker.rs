@@ -5880,6 +5880,14 @@ async fn identical_repair_is_named_no_progress_and_next_repair_leads_with_failur
         run_captured(&fixture, fourth, "def answer():\n    return 42\n", None).await;
     assert_eq!(request["options"]["temperature"], 0.8);
     assert!(requested(&fixture, fourth).ends_with("temperature 0.8"));
+    // Its own repeated answer is not replayed as conversation history.
+    assert_eq!(request["messages"].as_array().unwrap().len(), 1);
+    let evidence: worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(fourth).unwrap()).unwrap();
+    assert!(
+        evidence.agent.unwrap().reason.contains("no change"),
+        "fresh agent after no progress"
+    );
     let section = failing_section(&last_prompt(&request));
     assert!(
         section.contains("previous attempt returned identical code that still fails"),

@@ -158,6 +158,10 @@ pub fn prepare(store: &TaskStore, snapshot: &Snapshot, task: &Task) -> Result<Pr
     if parent.model != task.model {
         return Ok(fresh("Worker model changed"));
     }
+    // Replaying a repeated answer as history anchors the model to it again.
+    if evidence.detail.starts_with(crate::worker::NO_CHANGE) {
+        return Ok(fresh("Previous attempt made no change; fresh Local Agent"));
+    }
     let Some(record) = evidence.agent else {
         return Ok(fresh("Prior run has no recorded agent conversation"));
     };
