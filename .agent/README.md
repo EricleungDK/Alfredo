@@ -81,7 +81,7 @@ The active native Rust terminal rewrite is tracked in the
 ## Tasks
 
 - [Active orchestration context](Tasks/context.md) is the source of truth for the current mission, assignments, blockers, and release state.
-- [Consolidated project context](Tasks/consolidated_context.md) is a generated read-only snapshot of recent reports and System docs; `Tasks/context.md` remains authoritative.
+- `Tasks/consolidated_context.md` (local, gitignored) is a generated read-only snapshot of recent reports and System docs; `Tasks/context.md` remains authoritative.
 - [Roadmap](Tasks/README.md) summarizes completed work and explicitly separate human follow-up.
 - [Alfredo Agent Workstation PRD](issues/19-alfredo-agent-workstation-prd.md) and [Issue Slices 20–29](issues/) retain acceptance and current triage state.
 
