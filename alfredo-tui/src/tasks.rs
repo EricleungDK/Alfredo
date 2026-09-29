@@ -47,6 +47,14 @@ impl From<String> for Refusal {
         Self::Denied(reason)
     }
 }
+impl From<crate::understanding::LockError> for Refusal {
+    fn from(error: crate::understanding::LockError) -> Self {
+        match error {
+            crate::understanding::LockError::Busy => Self::Busy,
+            crate::understanding::LockError::Failed(reason) => Self::Denied(reason),
+        }
+    }
+}
 impl From<&str> for Refusal {
     fn from(reason: &str) -> Self {
         Self::Denied(reason.into())
@@ -2038,11 +2046,11 @@ impl TaskStore {
 
     /// Held from before the durable claim until the worker has stopped publishing.
     /// OS ownership is released on process death; it is never inferred from time.
-    pub fn claim_worker(&self, task: u64) -> Result<WorkerOwner> {
+    pub fn claim_worker(&self, task: u64) -> std::result::Result<WorkerOwner, Refusal> {
         let scope = self.understanding();
         let scope_guard = scope.lock()?;
         scope_guard.ensure_open()?;
-        let _store_lock = self.lock()?;
+        let _store_lock = self.lock_checked()?;
         let snapshot = self.read_locked()?;
         if snapshot.architecture_obsolete(task) {
             return Err("An adopted Architect revision supersedes this worker branch".into());

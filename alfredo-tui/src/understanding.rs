@@ -10,6 +10,32 @@ use std::{
     time::{Duration, Instant},
 };
 type Result<T> = std::result::Result<T, String>;
+
+/// Why the scope lock was not taken. `Busy` is transient (nothing was read or
+/// written; the same request may be retried); `Failed` is final.
+#[derive(Debug)]
+pub enum LockError {
+    Busy,
+    Failed(String),
+}
+impl std::fmt::Display for LockError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Busy => f.write_str("Understanding state busy; retry the same request"),
+            Self::Failed(reason) => f.write_str(reason),
+        }
+    }
+}
+impl From<String> for LockError {
+    fn from(reason: String) -> Self {
+        Self::Failed(reason)
+    }
+}
+impl From<LockError> for String {
+    fn from(error: LockError) -> Self {
+        error.to_string()
+    }
+}
 const LIMIT: usize = 1024 * 1024;
 static TEMP: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -259,13 +285,17 @@ impl Store {
             receipts: vec![],
         }
     }
-    pub fn lock(&self) -> Result<Guard<'_>> {
+    pub fn lock(&self) -> std::result::Result<Guard<'_>, LockError> {
         for path in self.root.ancestors() {
             match fs::symlink_metadata(path) {
                 Ok(m) if m.file_type().is_symlink() => {
-                    return Err("Understanding state ancestors must not be symlinks".into())
+                    return Err(
+                        String::from("Understanding state ancestors must not be symlinks").into(),
+                    )
                 }
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.to_string()),
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(e.to_string().into())
+                }
                 _ => {}
             }
         }
@@ -283,7 +313,8 @@ impl Store {
                 Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
                     std::thread::sleep(Duration::from_millis(2))
                 }
-                Err(_) => return Err("Understanding state busy; retry the same request".into()),
+                Err(std::fs::TryLockError::WouldBlock) => return Err(LockError::Busy),
+                Err(error) => return Err(error.to_string().into()),
             }
         }
     }

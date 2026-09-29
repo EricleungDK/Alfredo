@@ -1142,6 +1142,8 @@ enum Race {
     Claim,
     /// The store moves and this controller observes it before dispatching.
     Admission,
+    /// The scope lock is held by another writer until the refusal is observed.
+    ScopeBusy,
 }
 
 /// Another writer (a parallel worker receipt or a human) lands one unrelated receipt.
@@ -1173,10 +1175,12 @@ fn drive_racing(
     mut races: impl FnMut(&str) -> Option<Race>,
 ) {
     let deadline = Instant::now() + Duration::from_secs(60);
+    let scope = fixture.store.understanding();
     let mut race = |label: &str, control: &mut TaskControl| {
-        let Some(race) = races(label) else {
-            return;
-        };
+        let race = races(label)?;
+        if race == Race::ScopeBusy {
+            return Some(scope.lock().unwrap());
+        }
         concurrent_write(fixture);
         if race == Race::Admission {
             control.refresh(runtime);
@@ -1186,6 +1190,22 @@ fn drive_racing(
                 thread::sleep(Duration::from_millis(1));
             }
         }
+        None
+    };
+    let release = |held: &mut Option<_>, control: &mut TaskControl, launch: bool| {
+        while held.is_some() {
+            control.poll();
+            let seen = if launch {
+                !control.dispatch.transient.is_empty()
+            } else {
+                !control.pending
+            };
+            if seen {
+                *held = None;
+            }
+            assert!(Instant::now() < deadline, "scope busy: {}", control.notice);
+            thread::sleep(Duration::from_millis(1));
+        }
     };
     loop {
         control.poll();
@@ -1193,12 +1213,14 @@ fn drive_racing(
             return;
         }
         if let Some(submission) = autopilot.tick(runtime, control) {
-            race(&submission.text, control);
+            let mut held = race(&submission.text, control);
             let _ = control.dispatch_prepared(runtime, &submission.intent);
+            release(&mut held, control, false);
         }
         if let Ok(Some(request)) = control.prepare_dispatch() {
-            race(&format!("launch #{}", request.task), control);
+            let mut held = race(&format!("launch #{}", request.task), control);
             let _ = control.dispatch_prepared(runtime, &Intent::DispatchRun { request });
+            release(&mut held, control, true);
         }
         assert!(
             Instant::now() < deadline,
@@ -1426,6 +1448,57 @@ fn five_consecutive_overtaken_reviews_pause_then_resume_reviews_once() {
     drive(&mut autopilot, &mut control, &runtime, "done", finished);
     assert_eq!(autopilot.status(&control).unwrap().state, RunState::Done);
     assert_eq!(decisions(&fixture.store.snapshot().unwrap(), 1), 1);
+}
+
+#[test]
+fn busy_scope_lock_on_review_is_transient_and_spends_no_attempt() {
+    let fixture = Fixture::new();
+    let server = one_good_task();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start("Answer", "fixture", 1, &control).unwrap();
+    let mut raced = 0;
+    drive_racing(&fixture, &mut autopilot, &mut control, &runtime, |label| {
+        (label.contains("/review 1") && raced < 5).then(|| {
+            raced += 1;
+            Race::ScopeBusy
+        })
+    });
+    assert_eq!(raced, 5);
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Paused);
+    assert!(
+        autopilot.notice().contains("task state kept changing"),
+        "{}",
+        autopilot.notice()
+    );
+    assert_eq!(decisions(&fixture.store.snapshot().unwrap(), 1), 0);
+    autopilot.resume(&control).unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "done", finished);
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Done);
+    assert_eq!(decisions(&fixture.store.snapshot().unwrap(), 1), 1);
+}
+
+#[test]
+fn busy_scope_lock_on_launch_defers_without_spending_the_attempt() {
+    let fixture = Fixture::new();
+    let server = one_good_task();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start("Answer", "fixture", 1, &control).unwrap();
+    let mut raced = 0;
+    drive_racing(&fixture, &mut autopilot, &mut control, &runtime, |label| {
+        (label == "launch #1" && raced < 2).then(|| {
+            raced += 1;
+            Race::ScopeBusy
+        })
+    });
+    assert_eq!(raced, 2);
+    assert!(control.dispatch.failures.is_empty());
+    drive(&mut autopilot, &mut control, &runtime, "done", finished);
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Done);
+    assert_eq!(starts(&fixture.store.snapshot().unwrap(), 1), 1);
 }
 
 #[test]

@@ -774,6 +774,7 @@ fn plan_scope_changes_reject_publication_and_worker_claims_without_rewriting_his
         .claim_worker(1)
         .err()
         .unwrap()
+        .to_string()
         .contains("Plan scope changed"));
     assert!(fixture
         .store
