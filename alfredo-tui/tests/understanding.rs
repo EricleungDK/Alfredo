@@ -149,6 +149,7 @@ fn pending_scope_prevents_owner_claim_but_allows_cancellation() {
         .claim_worker(1)
         .err()
         .unwrap()
+        .to_string()
         .contains("Understanding pending"));
     f.a.transact(TaskRequest {
         correlation: "cancel".into(),
