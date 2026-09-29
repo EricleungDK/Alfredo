@@ -6,7 +6,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-30
+
+First release of the native terminal. It replaces the React/Tauri desktop app and
+Python orchestrator as the primary product; those remain in the repository as
+legacy (see `docs/legacy.md`).
+
 ### Added
+
+- Native Rust (ratatui) terminal, `alfredo-tui`, for Linux x86-64.
+- Zero-typing startup: inside a Git repository it opens the repository root with
+  mission `default`. `--select`, `--workspace`, `--mission` and `--new-mission`
+  choose explicitly; `/workspace` switches without restarting.
+- Concurrent streaming Ollama conversations (up to 8) with cancel (Esc), retry
+  (Ctrl+R), prompt history and restart-safe transcripts and drafts.
+- Server health in the header (polled `/api/ps`), model preload and `keep_alive`
+  (`--keep-alive`), bounded automatic reconnect before first content
+  (`--connect-retries`), recovery after an Ollama restart.
+- Shared per-endpoint inference capacity across terminals (`--parallel-models`),
+  with foreground priority over background workers.
+- Durable task queue with dependencies, explicit file/check policy (`/permit`),
+  approval, receipts, activity view (F4) and Mission Work tree (F2).
+- Planner (`/plan`, `/plan-revise`, `/plan-save`) using bounded committed repository
+  context, and per-task model assignment (`/assign`).
+- Coding workers in isolated Git worktrees; approved checks run in a bubblewrap
+  sandbox with no network; verified evidence (F3, `/evidence`), criterion review,
+  linked repairs, candidate commits, dependency composition and local review
+  branches (`/branch`).
+- Autopilot: `/go GOAL` or `--go GOAL` plans, approves and dispatches, auto-accepts
+  tasks whose approved check passes, repairs failures up to `--max-repairs`
+  (default 2), and composes accepted work onto one local `alfredo/go-<id>` branch.
+  F5, `/pause`, `/resume`, `/stop`, `/autopilot`. Restores paused after restart;
+  never pushes or moves your branch.
+- `--doctor` preflight for storage, model catalog, repository and worker tools.
+- Opt-in inference diagnostics (`--qualify-inference`, `--inspect-qualification`).
+- Reproducible release archive with `BUILD.json` provenance, `DEPENDENCIES.json`,
+  `THIRD_PARTY_NOTICES.txt`, MIT `LICENSE`, and an installed-binary smoke.
+- CI for fmt, clippy, tests, PTY smokes, dependency audit and packaging; tag-driven
+  draft release workflow.
 
 - Agent view: Enter on a task or the architect in the side pane (or `/watch
   ID|architect`) shows that agent's transcript in the right pane: instruction
@@ -90,8 +127,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A reply cut off by the token limit now fails with `Model output hit the
   4096-token limit`; the next repair requests 8192 tokens.
 
-### Fixed
-
 - A failed repair that returns byte-identical files is recorded as `No change from
   previous attempt`, and the next repair is told so explicitly and starts a fresh
   Local Agent conversation instead of replaying the repeated answer.
@@ -105,45 +140,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read-only references and are told the accepted implementation is authoritative.
 - A contended scope lock is a retryable busy refusal, not a final denial;
   autopilot spends no attempt on it.
-
-## [0.1.0] - 2026-09-28
-
-First release of the native terminal. It replaces the React/Tauri desktop app and
-Python orchestrator as the primary product; those remain in the repository as
-legacy (see `docs/legacy.md`).
-
-### Added
-
-- Native Rust (ratatui) terminal, `alfredo-tui`, for Linux x86-64.
-- Zero-typing startup: inside a Git repository it opens the repository root with
-  mission `default`. `--select`, `--workspace`, `--mission` and `--new-mission`
-  choose explicitly; `/workspace` switches without restarting.
-- Concurrent streaming Ollama conversations (up to 8) with cancel (Esc), retry
-  (Ctrl+R), prompt history and restart-safe transcripts and drafts.
-- Server health in the header (polled `/api/ps`), model preload and `keep_alive`
-  (`--keep-alive`), bounded automatic reconnect before first content
-  (`--connect-retries`), recovery after an Ollama restart.
-- Shared per-endpoint inference capacity across terminals (`--parallel-models`),
-  with foreground priority over background workers.
-- Durable task queue with dependencies, explicit file/check policy (`/permit`),
-  approval, receipts, activity view (F4) and Mission Work tree (F2).
-- Planner (`/plan`, `/plan-revise`, `/plan-save`) using bounded committed repository
-  context, and per-task model assignment (`/assign`).
-- Coding workers in isolated Git worktrees; approved checks run in a bubblewrap
-  sandbox with no network; verified evidence (F3, `/evidence`), criterion review,
-  linked repairs, candidate commits, dependency composition and local review
-  branches (`/branch`).
-- Autopilot: `/go GOAL` or `--go GOAL` plans, approves and dispatches, auto-accepts
-  tasks whose approved check passes, repairs failures up to `--max-repairs`
-  (default 2), and composes accepted work onto one local `alfredo/go-<id>` branch.
-  F5, `/pause`, `/resume`, `/stop`, `/autopilot`. Restores paused after restart;
-  never pushes or moves your branch.
-- `--doctor` preflight for storage, model catalog, repository and worker tools.
-- Opt-in inference diagnostics (`--qualify-inference`, `--inspect-qualification`).
-- Reproducible release archive with `BUILD.json` provenance, `DEPENDENCIES.json`,
-  `THIRD_PARTY_NOTICES.txt`, MIT `LICENSE`, and an installed-binary smoke.
-- CI for fmt, clippy, tests, PTY smokes, dependency audit and packaging; tag-driven
-  draft release workflow.
 
 ### Known limitations
 
