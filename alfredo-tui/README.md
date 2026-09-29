@@ -18,7 +18,7 @@ alfredo-tui --model qwen2.5-coder:14b
 Opens straight into the repository root, mission `default`. Then either:
 
 - **Autopilot**: `/go GOAL`. Plans, approves, dispatches, auto-accepts tasks whose
-  approved check passes, auto-repairs failures (`--max-repairs`, default 2), and
+  approved check passes, auto-repairs failures (`--max-repairs`, default 3), and
   composes accepted work onto `alfredo/go-<id>`. F5 or `/pause` / `/resume`;
   `/stop` also cancels running workers; `/autopilot` shows status. After a restart
   the loop comes back paused and never replays work.
@@ -58,10 +58,20 @@ are never modified.
 ## Dashboard
 
 `/go` opens the dashboard (F2): one line per task (`✓` accepted, `▶` running, `○` pending,
-`◐` awaiting review, `✗` failed, `‖` held/blocked) with `done/total`. The right pane shows
-the selected task's live worker output, or once finished its outcome, diff and check
+`◐` awaiting review, `✗` failed, `‖` held/blocked) with `done/total` over planned tasks
+(a task fixed by an accepted repair counts as done; repairs are counted separately). The
+right pane shows the selected task's live worker output, or once finished its outcome,
+the last 40 lines of failing check output (stderr, else stdout), diff and full check
 output. While autopilot runs it follows the running task unless you moved the selection
 in the last 10 s. Receipt IDs and revisions stay in F3 evidence and F4 activity.
+
+A finished autopilot reads `✓ done` (every planned task accepted), `◐ partial` (some
+accepted) or `✗ failed` (none accepted), and the footer shows its one-line result.
+
+Workers also receive, read-only, the committed files the approved check names (such as
+`test_cron.py` in `python3 -m unittest test_cron.py`) and files the goal or task names
+verbatim. They are never writable; returning one fails the run with the offending path and
+the allowed list. Repairs carry the failing check's output tail.
 
 ## Build from source
 

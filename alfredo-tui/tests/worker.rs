@@ -156,6 +156,44 @@ fn server_with_completion(
     thread::JoinHandle<()>,
     std::sync::mpsc::Receiver<()>,
 ) {
+    server_with_reason(plan, delay, expected, capture, complete, None)
+}
+
+fn server_with_reason(
+    plan: FilePlan,
+    delay: Duration,
+    expected: &str,
+    capture: Option<std::sync::mpsc::Sender<serde_json::Value>>,
+    complete: bool,
+    done_reason: Option<&'static str>,
+) -> (
+    Ollama,
+    thread::JoinHandle<()>,
+    std::sync::mpsc::Receiver<()>,
+) {
+    serve_reply(
+        serde_json::to_string(&plan).unwrap(),
+        delay,
+        expected,
+        capture,
+        complete,
+        done_reason,
+    )
+}
+
+/// One-request worker fixture replying with `content` verbatim.
+fn serve_reply(
+    content: String,
+    delay: Duration,
+    expected: &str,
+    capture: Option<std::sync::mpsc::Sender<serde_json::Value>>,
+    complete: bool,
+    done_reason: Option<&'static str>,
+) -> (
+    Ollama,
+    thread::JoinHandle<()>,
+    std::sync::mpsc::Receiver<()>,
+) {
     let expected = expected.to_string();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -197,8 +235,21 @@ fn server_with_completion(
         let mut request = vec![0; length];
         stream.read_exact(&mut request).unwrap();
         let request: serde_json::Value = serde_json::from_slice(&request).unwrap();
-        assert_eq!(request["format"]["required"], serde_json::json!(["files"]));
-        assert_eq!(request["options"]["temperature"], 0);
+        // Default worker requests ask for FILE blocks without a schema; the
+        // legacy JSON request is explicit.
+        match request.get("format") {
+            Some(format) => assert_eq!(format["required"], serde_json::json!(["files"])),
+            None => assert!(
+                request["messages"].as_array().unwrap().last().unwrap()["content"]
+                    .as_str()
+                    .unwrap()
+                    .contains("=== END FILE ===")
+            ),
+        }
+        // Repairs raise sampling temperature within the bounded schedule.
+        assert!(request["options"]["temperature"]
+            .as_f64()
+            .is_some_and(|t| (0.0..=0.8).contains(&t)));
         for expected in expected.split('\0') {
             assert!(
                 request["messages"].as_array().unwrap().last().unwrap()["content"]
@@ -216,7 +267,10 @@ fn server_with_completion(
                     && prompt.contains("Prior task #1")
                     && (prompt.contains("Prior model exchange did not complete")
                         || prompt.contains("CHECK_OK")
-                        || prompt.contains("Worker stream ended before completion"))
+                        || prompt.contains("Worker stream ended before completion")
+                        || prompt.contains("AssertionError")
+                        || prompt.contains("-token limit")
+                        || prompt.contains("(truncated)"))
             );
         }
         if let Some(capture) = capture {
@@ -224,7 +278,11 @@ fn server_with_completion(
         }
         let _ = notify.send(());
         thread::sleep(delay);
-        let body = serde_json::to_string(&serde_json::json!({"message":{"content":serde_json::to_string(&plan).unwrap()},"done":complete,"load_duration":500000000,"eval_duration":2000000000,"eval_count":40})).unwrap();
+        let mut frame = serde_json::json!({"message":{"content":content},"done":complete,"load_duration":500000000,"eval_duration":2000000000,"eval_count":40});
+        if let Some(reason) = done_reason {
+            frame["done_reason"] = reason.into();
+        }
+        let body = serde_json::to_string(&frame).unwrap();
         let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
     });
     (
@@ -296,10 +354,9 @@ async fn real_model_transport_edits_isolated_worktree_checks_and_restores_review
     assert!(!fixture.workspace.join("notes.txt").exists());
     let evidence = fixture.store.evidence(1).unwrap();
     let requested: worker::Evidence = serde_json::from_str(&evidence).unwrap();
-    assert_eq!(
-        requested.generation.as_ref().unwrap(),
-        &provider.structured_generation()
-    );
+    let mut expected = provider.structured_generation();
+    expected.answer_format = Some(worker::WorkerFormat::Blocks);
+    assert_eq!(requested.generation.as_ref().unwrap(), &expected);
 
     assert!(evidence.contains("CHECK_OK"));
     assert!(evidence.contains("notes.txt"));
@@ -560,6 +617,22 @@ fn file_policy_rejects_metadata_traversal_duplicates_and_binary_edits() {
         files: vec!["x".into()],
         check: vec!["true".into()],
     };
+    let twice = FilePlan {
+        files: vec![
+            FileEdit {
+                path: "x".into(),
+                content: "a".into(),
+            },
+            FileEdit {
+                path: "x".into(),
+                content: "b".into(),
+            },
+        ],
+    };
+    assert_eq!(
+        worker::validate_plan(&twice, &policy).unwrap_err(),
+        "Returned x more than once; return each file once with its complete content"
+    );
     assert!(worker::validate_plan(
         &FilePlan {
             files: vec![FileEdit {
@@ -2781,7 +2854,12 @@ async fn repairs_continue_recorded_agent_then_restart_fresh_after_second_rejecti
             assert_eq!(agent.continued_from.as_deref(), Some(prior_run.as_str()));
             assert_eq!(messages[0], first_request);
             assert_eq!(messages[1]["role"], "assistant");
-            assert_eq!(messages[1]["content"], first_answer);
+            // A retained legacy JSON answer is replayed in the requested block format.
+            assert!(first_answer.starts_with('{'));
+            assert_eq!(
+                messages[1]["content"],
+                worker::render_blocks(&worker::parse_answer(&first_answer).unwrap())
+            );
             assert!(messages[2]["content"]
                 .as_str()
                 .unwrap()
@@ -5478,4 +5556,708 @@ async fn queued_worker_rechecks_cancellation_after_capacity_before_http() {
 #[tokio::test]
 async fn queued_worker_admission_allows_unrelated_task_revision_changes() {
     queued_worker_admission_race(false).await;
+}
+
+fn commit_files(fixture: &Fixture, files: &[(&str, &str)]) {
+    for (path, content) in files {
+        let file = fixture.workspace.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(file, content).unwrap();
+    }
+    for args in [
+        vec!["add", "."],
+        vec!["-c", "core.hooksPath=/dev/null", "commit", "-qm", "more"],
+    ] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&fixture.workspace)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+}
+
+/// Plan one approved task with `policy`; returns its id.
+fn plan_task(fixture: &Fixture, prompt: &str, title: &str, policy: WorkPolicy) -> u64 {
+    use alfredo_tui::planner::{Plan, Step};
+    fixture.action(Action::Plan {
+        plan: Plan {
+            architecture: None,
+            prompt: prompt.into(),
+            planner: "fixture".into(),
+            context: None,
+            scope: None,
+            tasks: vec![Step {
+                acceptance: vec!["tests pass".into()],
+                title: title.into(),
+                model: "fixture".into(),
+                dependencies: vec![],
+                policy,
+            }],
+        },
+    });
+    let id = fixture.store.snapshot().unwrap().tasks.len() as u64;
+    fixture.action(Action::Approve { task: id });
+    id
+}
+
+#[tokio::test]
+async fn worker_receives_committed_check_and_named_files_as_read_only_reference() {
+    let fixture = Fixture::new();
+    let test_source = "import unittest\nfrom calc import answer\n\nclass T(unittest.TestCase):\n    def test_answer(self):\n        self.assertEqual(answer(), 42)  # TEST_SOURCE_SENTINEL\n";
+    let big = format!("# BIG_SENTINEL\n{}", "x = 1\n".repeat(8 * 1024));
+    commit_files(
+        &fixture,
+        &[
+            ("test_calc.py", test_source),
+            ("docs/spec.md", "SPEC_SENTINEL: answer is 42\n"),
+            ("GOAL_REF.md", "GOAL_SENTINEL\n"),
+            ("unrelated.py", "UNRELATED_SENTINEL = 1\n"),
+            ("big.py", &big),
+        ],
+    );
+    // Working-file edits are never model input; only the pinned commit is read.
+    fs::write(fixture.workspace.join("test_calc.py"), "DIRTY_SENTINEL\n").unwrap();
+    let policy = WorkPolicy {
+        files: vec!["calc.py".into()],
+        check: vec![
+            "/usr/bin/python3".into(),
+            "-B".into(),
+            "-m".into(),
+            "unittest".into(),
+            "test_calc.py".into(),
+        ],
+    };
+    let task = plan_task(
+        &fixture,
+        "Make test_calc.py pass; see GOAL_REF.md and big.py.",
+        "Implement calc.py per docs/spec.md",
+        policy.clone(),
+    );
+    let (capture, captured) = std::sync::mpsc::channel();
+    let plan = one_file("calc.py", "def answer():\n    return 42\n");
+    let (provider, server, _) = server_with_capture(plan, Duration::ZERO, "", Some(capture));
+    let revision = fixture.store.snapshot().unwrap().revision;
+    let (snapshot, detail) = worker::start(
+        fixture.store.clone(),
+        task,
+        "reference-run".into(),
+        revision,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    let request = captured.recv().unwrap();
+    let prompt = request["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let reference = prompt
+        .find("READ-ONLY REFERENCE FILES")
+        .unwrap_or_else(|| panic!("{prompt}"));
+    for text in [
+        "READ-ONLY FILE test_calc.py\n",
+        test_source,
+        "READ-ONLY FILE docs/spec.md\nSPEC_SENTINEL: answer is 42\n",
+        "READ-ONLY FILE GOAL_REF.md\nGOAL_SENTINEL\n",
+        "READ-ONLY REFERENCE OMITTED big.py",
+    ] {
+        assert!(
+            prompt[reference..].contains(text),
+            "{text} missing: {prompt}"
+        );
+    }
+    assert!(prompt.contains("never return them"), "{prompt}");
+    // Check-argv files come first, before goal/description mentions.
+    assert!(
+        prompt.find("READ-ONLY FILE test_calc.py").unwrap()
+            < prompt.find("READ-ONLY FILE docs/spec.md").unwrap()
+    );
+    for absent in ["DIRTY_SENTINEL", "UNRELATED_SENTINEL", "BIG_SENTINEL"] {
+        assert!(!prompt.contains(absent), "{absent} leaked: {prompt}");
+    }
+    assert!(
+        prompt.contains("Allowed exact files: [\"calc.py\"]"),
+        "{prompt}"
+    );
+    // Blocks answers are unconstrained; the allowed list is enforced after parsing.
+    assert!(request.get("format").is_none(), "{request}");
+    let finished = snapshot.tasks.iter().find(|t| t.id == task).unwrap();
+    assert_eq!(finished.policy.as_ref(), Some(&policy));
+    assert_eq!(finished.status, TaskStatus::ReviewReady, "{detail}");
+}
+
+#[tokio::test]
+async fn unapproved_returned_file_is_named_with_the_allowed_list_and_nothing_is_written() {
+    let fixture = Fixture::new();
+    fixture.permit();
+    let (provider, server, _) = server(one_file("test_calc.py", "hijack"), Duration::ZERO);
+    let (snapshot, detail) = worker::start(
+        fixture.store.clone(),
+        1,
+        "unapproved-name".into(),
+        3,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(snapshot.tasks[0].status, TaskStatus::Failed);
+    assert_eq!(
+        detail,
+        "Returned unapproved file test_calc.py; only calc.py, notes.txt may be written"
+    );
+    let directory = fixture
+        .store
+        .run_directory(&snapshot.tasks[0].run.as_ref().unwrap().id)
+        .unwrap();
+    assert!(!directory.join("worktree/test_calc.py").exists());
+}
+
+#[tokio::test]
+async fn failed_check_detail_carries_a_sanitized_relative_output_tail() {
+    let fixture = Fixture::new();
+    fixture.action(Action::Permit {
+        task: 1,
+        policy: WorkPolicy {
+            files: vec!["calc.py".into()],
+            check: vec![
+                "/usr/bin/python3".into(),
+                "-B".into(),
+                "-c".into(),
+                "import os, sys; print('OUT_LINE'); [sys.stderr.write(f'noise {i}\\n') for i in range(60)]; sys.stderr.write('  File \"' + os.getcwd() + '/calc.py\", line 2\\n\\x1b[31mAssertionError: TAIL_SENTINEL\\x1b[0m\\n'); sys.exit(1)".into(),
+            ],
+        },
+    });
+    fixture.action(Action::Approve { task: 1 });
+    let (provider, server, _) = server(
+        one_file("calc.py", "def answer():\n    return 0\n"),
+        Duration::ZERO,
+    );
+    let (snapshot, detail) = worker::start(
+        fixture.store.clone(),
+        1,
+        "tail-run".into(),
+        3,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(snapshot.tasks[0].status, TaskStatus::Failed);
+    let recorded = &snapshot.tasks[0].run.as_ref().unwrap().detail;
+    assert_eq!(recorded, &detail);
+    assert!(
+        detail.starts_with("Check failed (exit 1): stderr: "),
+        "{detail}"
+    );
+    assert!(
+        detail.ends_with("File \"calc.py\", line 2 | AssertionError: TAIL_SENTINEL"),
+        "{detail}"
+    );
+    assert!(!detail.contains("/worktree"), "{detail}");
+    assert!(
+        !detail.contains('\u{1b}') && !detail.contains("[31m"),
+        "{detail}"
+    );
+    assert!(detail.len() <= 1024, "{}", detail.len());
+    let tail = worker::output_tail(
+        &serde_json::from_str::<worker::Evidence>(&fixture.store.evidence(1).unwrap())
+            .unwrap()
+            .check
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(tail.0, "stderr");
+    assert_eq!(tail.1.lines().count(), 40, "{}", tail.1);
+    assert!(tail.1.len() <= 4096);
+    assert!(
+        tail.1.ends_with("AssertionError: TAIL_SENTINEL"),
+        "{}",
+        tail.1
+    );
+}
+
+/// Unittest check on calc.py; task 1 is permitted and approved.
+fn unittest_fixture() -> Fixture {
+    let fixture = Fixture::new();
+    commit_files(
+        &fixture,
+        &[(
+            "test_calc.py",
+            "import unittest\nfrom calc import answer\n\nclass T(unittest.TestCase):\n    def test_answer(self):\n        self.assertEqual(answer(), 42)\n",
+        )],
+    );
+    fixture.action(Action::Permit {
+        task: 1,
+        policy: WorkPolicy {
+            files: vec!["calc.py".into()],
+            check: ["/usr/bin/python3", "-B", "-m", "unittest", "test_calc.py"]
+                .map(String::from)
+                .to_vec(),
+        },
+    });
+    fixture.action(Action::Approve { task: 1 });
+    fixture
+}
+
+/// Run `task` against a one-reply fixture; returns the captured request and detail.
+async fn run_captured(
+    fixture: &Fixture,
+    task: u64,
+    content: &str,
+    done_reason: Option<&'static str>,
+) -> (serde_json::Value, String) {
+    let (capture, captured) = std::sync::mpsc::channel();
+    let (provider, server, _) = server_with_reason(
+        one_file("calc.py", content),
+        Duration::ZERO,
+        "",
+        Some(capture),
+        true,
+        done_reason,
+    );
+    let revision = fixture.store.snapshot().unwrap().revision;
+    let (_, detail) = worker::start(
+        fixture.store.clone(),
+        task,
+        format!("lineage-{task}"),
+        revision,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    (captured.recv().unwrap(), detail)
+}
+
+fn repair_of(fixture: &Fixture, parent: u64) -> u64 {
+    fixture.action(Action::Repair {
+        task: parent,
+        reason: "Fix the failing test".into(),
+    });
+    let id = fixture.store.snapshot().unwrap().tasks.len() as u64;
+    fixture.action(Action::Approve { task: id });
+    id
+}
+
+fn last_prompt(request: &serde_json::Value) -> String {
+    request["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// The "What is still failing" section, which must precede the policy and evidence.
+fn failing_section(prompt: &str) -> String {
+    let start = prompt
+        .find("WHAT IS STILL FAILING")
+        .unwrap_or_else(|| panic!("{prompt}"));
+    let end = prompt.find("Allowed exact files").unwrap();
+    assert!(start < end && end < prompt.find("REPAIR CONTEXT").unwrap());
+    prompt[start..end].to_string()
+}
+
+fn requested(fixture: &Fixture, task: u64) -> String {
+    serde_json::from_str::<worker::Evidence>(&fixture.store.evidence(task).unwrap())
+        .unwrap()
+        .generation
+        .unwrap()
+        .summary()
+}
+
+#[tokio::test]
+async fn identical_repair_is_named_no_progress_and_next_repair_leads_with_failures_hotter() {
+    let fixture = unittest_fixture();
+    let (request, detail) = run_captured(&fixture, 1, "def answer():\n    return 41\n", None).await;
+    assert_eq!(request["options"]["temperature"], 0);
+    assert!(!last_prompt(&request).contains("WHAT IS STILL FAILING"));
+    assert!(detail.starts_with("Check failed (exit 1)"), "{detail}");
+
+    // Repair 1 keeps the default temperature and leads with the failing assertions.
+    let second = repair_of(&fixture, 1);
+    let (request, detail) =
+        run_captured(&fixture, second, "def answer():\n    return 40\n", None).await;
+    assert_eq!(request["options"]["temperature"], 0);
+    let prompt = last_prompt(&request);
+    assert!(prompt.starts_with("Implement this task: Repair #1:"));
+    let section = failing_section(&prompt);
+    for line in [
+        "FAIL: test_answer",
+        "self.assertEqual(answer(), 42)",
+        "AssertionError: 41 != 42",
+    ] {
+        assert!(section.contains(line), "{line} missing: {section}");
+    }
+    assert!(!section.contains("Traceback") && !section.contains("identical"));
+    assert!(!detail.starts_with("No change"), "{detail}");
+
+    // Byte-identical to the previous attempt: named, check output kept, hotter.
+    let third = repair_of(&fixture, second);
+    let (request, detail) =
+        run_captured(&fixture, third, "def answer():\n    return 40\n", None).await;
+    assert_eq!(request["options"]["temperature"], 0.3);
+    assert!(
+        detail.starts_with("No change from previous attempt · Check failed (exit 1): stderr: "),
+        "{detail}"
+    );
+    assert!(detail.contains("AssertionError: 40 != 42"), "{detail}");
+    assert!(detail.len() <= 900);
+    assert!(requested(&fixture, third).ends_with("temperature 0.3 · answer format blocks"));
+
+    let fourth = repair_of(&fixture, third);
+    let (request, detail) =
+        run_captured(&fixture, fourth, "def answer():\n    return 42\n", None).await;
+    assert_eq!(request["options"]["temperature"], 0.8);
+    assert!(requested(&fixture, fourth).ends_with("temperature 0.8 · answer format blocks"));
+    // Its own repeated answer is not replayed as conversation history.
+    assert_eq!(request["messages"].as_array().unwrap().len(), 1);
+    let evidence: worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(fourth).unwrap()).unwrap();
+    assert!(
+        evidence.agent.unwrap().reason.contains("no change"),
+        "fresh agent after no progress"
+    );
+    let section = failing_section(&last_prompt(&request));
+    assert!(
+        section.contains("previous attempt returned identical code that still fails"),
+        "{section}"
+    );
+    assert!(section.contains("AssertionError: 40 != 42"), "{section}");
+    assert_eq!(
+        fixture.store.snapshot().unwrap().tasks[3].status,
+        TaskStatus::ReviewReady,
+        "{detail}"
+    );
+}
+
+#[tokio::test]
+async fn token_limit_failure_is_named_and_next_repair_requests_a_larger_bounded_limit() {
+    let fixture = unittest_fixture();
+    let content = "def answer():\n    return 42\n";
+    let (request, detail) = run_captured(&fixture, 1, content, Some("length")).await;
+    assert_eq!(request["options"]["num_predict"], 4096);
+    assert!(
+        detail.starts_with("Model output hit the 4096-token limit"),
+        "{detail}"
+    );
+    let second = repair_of(&fixture, 1);
+    let (request, detail) = run_captured(&fixture, second, content, Some("length")).await;
+    assert_eq!(request["options"]["num_predict"], 8192);
+    assert!(requested(&fixture, second).contains("token limit 8192"));
+    let section = failing_section(&last_prompt(&request));
+    assert!(section.contains("hit the 4096-token limit"), "{section}");
+    assert!(
+        detail.starts_with("Model output hit the 8192-token limit"),
+        "{detail}"
+    );
+    let third = repair_of(&fixture, second);
+    let (request, _) = run_captured(&fixture, third, content, None).await;
+    assert_eq!(request["options"]["num_predict"], 8192, "bounded");
+}
+
+#[test]
+fn failing_lines_lead_with_assertions_and_stay_bounded() {
+    let output = "F.\n======\nFAIL: test_unique (test_slug.T.test_unique)\n------\nTraceback (most recent call last):\n  File \"test_slug.py\", line 12, in test_unique\n    self.assertEqual(unique_slug(\"A b\", {\"a-b\", \"a-b-2\"}), \"a-b-3\")\nAssertionError: 'a-b-1' != 'a-b-3'\n- a-b-1\n?     ^\n+ a-b-3\n?     ^\n\n------\nRan 6 tests in 0.001s\n\nFAILED (failures=1)\n";
+    assert_eq!(
+        worker::failing_lines(output),
+        "FAIL: test_unique (test_slug.T.test_unique)\n    self.assertEqual(unique_slug(\"A b\", {\"a-b\", \"a-b-2\"}), \"a-b-3\")\nAssertionError: 'a-b-1' != 'a-b-3'\n- a-b-1\n+ a-b-3\nFAILED (failures=1)"
+    );
+    let noisy = "ModuleNotFoundError: No module named 'slug'\n".to_string()
+        + &"FAIL: test_many (t.T.test_many) with a long enough name to count\n".repeat(200);
+    let lines = worker::failing_lines(&noisy);
+    assert!(lines.starts_with("ModuleNotFoundError: No module named 'slug'"));
+    assert!(lines.lines().count() <= 31, "{lines}");
+    assert!(lines.len() <= 2048 + 64, "{}", lines.len());
+    assert!(lines.ends_with("more failing lines omitted)"), "{lines}");
+    assert_eq!(worker::failing_lines("all good\n"), "");
+}
+
+fn blocks(files: &[(&str, &str)]) -> String {
+    files
+        .iter()
+        .map(|(path, content)| format!("=== FILE: {path} ===\n{content}=== END FILE ===\n"))
+        .collect()
+}
+
+#[test]
+fn file_blocks_parse_verbatim_code_and_refuse_truncated_or_missing_blocks() {
+    // Quotes, backslashes and braces need no escaping; outside text is ignored.
+    let code = "def show(todo):\n    print(f'{1}. {todo[\"task\"]}')\n    return \"\\n\"\n";
+    let answer = format!(
+        "Here is the change.\n{}Done.\n",
+        blocks(&[("calc.py", code), ("notes.txt", "note\n\n\n")])
+    );
+    let plan = worker::parse_answer(&answer).unwrap();
+    assert_eq!(plan.files.len(), 2);
+    assert_eq!(plan.files[0].path, "calc.py");
+    assert_eq!(plan.files[0].content, code);
+    // A single trailing newline is normalized.
+    assert_eq!(plan.files[1].content, "note\n");
+    let crlf = worker::parse_answer(&answer.replace('\n', "\r\n")).unwrap();
+    assert_eq!(crlf.files[0].content, code);
+    let padded = worker::parse_answer("=== FILE: a.py ===\nx = 1\n\n\n=== END FILE ===\n").unwrap();
+    assert_eq!(padded.files[0].content, "x = 1\n");
+    // One markdown fence layer inside a block is stripped.
+    let fenced =
+        worker::parse_answer("=== FILE: a.py ===\n```python\nx = 1\n```\n=== END FILE ===")
+            .unwrap();
+    assert_eq!(fenced.files[0].content, "x = 1\n");
+    // Marker lines must start the line exactly.
+    assert_eq!(
+        worker::parse_answer("  === FILE: a.py ===\nx\n=== END FILE ===\n").unwrap_err(),
+        "Model returned no FILE blocks"
+    );
+    assert_eq!(
+        worker::parse_answer("I cannot do that.").unwrap_err(),
+        "Model returned no FILE blocks"
+    );
+    assert_eq!(
+        worker::parse_answer("=== FILE: todo.py ===\nimport json\nprint(f'{todo[").unwrap_err(),
+        "Model output ended inside FILE block for todo.py (truncated)"
+    );
+    // A marker line inside content is ambiguous and refused.
+    let nested =
+        worker::parse_answer("=== FILE: a.py ===\nx\n=== FILE: b.py ===\ny\n=== END FILE ===\n")
+            .unwrap_err();
+    assert!(
+        nested.contains("a.py") && nested.contains("marker"),
+        "{nested}"
+    );
+    // Legacy JSON answers remain accepted.
+    let legacy = worker::parse_answer(&serde_json::to_string(&good_plan()).unwrap()).unwrap();
+    assert_eq!(legacy.files.len(), 2);
+    assert_eq!(legacy.files[0].content, "def answer():\n    return 42\n");
+    // Rendering round-trips through the parser.
+    assert_eq!(
+        worker::parse_answer(&worker::render_blocks(&plan))
+            .unwrap()
+            .files[0]
+            .content,
+        code
+    );
+    // Duplicates, unapproved paths and binary content are refused by the policy.
+    let policy = WorkPolicy {
+        files: vec!["calc.py".into(), "notes.txt".into()],
+        check: vec!["true".into()],
+    };
+    let twice = worker::parse_answer(&blocks(&[("calc.py", "a\n"), ("calc.py", "b\n")])).unwrap();
+    assert!(worker::validate_plan(&twice, &policy)
+        .unwrap_err()
+        .contains("more than once"));
+    let other = worker::parse_answer(&blocks(&[("test_calc.py", "x\n")])).unwrap();
+    assert_eq!(
+        worker::validate_plan(&other, &policy).unwrap_err(),
+        "Returned unapproved file test_calc.py; only calc.py, notes.txt may be written"
+    );
+    let binary = worker::parse_answer(&blocks(&[("calc.py", "a\0b\n")])).unwrap();
+    assert!(worker::validate_plan(&binary, &policy).is_err());
+}
+
+#[test]
+fn worker_format_names_parse_and_legacy_generation_reads_unrecorded() {
+    assert_eq!(
+        worker::WorkerFormat::default(),
+        worker::WorkerFormat::Blocks
+    );
+    assert_eq!(
+        worker::WorkerFormat::parse("json"),
+        Ok(worker::WorkerFormat::Json)
+    );
+    assert_eq!(
+        worker::WorkerFormat::parse("blocks"),
+        Ok(worker::WorkerFormat::Blocks)
+    );
+    assert!(worker::WorkerFormat::parse("xml").is_err());
+    let legacy: alfredo_tui::provider::Generation =
+        serde_json::from_str(r#"{"thinking":"off","num_predict":4096,"temperature":0}"#).unwrap();
+    assert_eq!(legacy.answer_format, None);
+    let mut generation = legacy.clone();
+    generation.answer_format = Some(worker::WorkerFormat::Blocks);
+    assert!(generation
+        .summary()
+        .ends_with("temperature 0 · answer format blocks"));
+}
+
+#[tokio::test]
+async fn blocks_answer_is_requested_without_schema_and_applied_verbatim() {
+    let fixture = unittest_fixture();
+    let (capture, captured) = std::sync::mpsc::channel();
+    let answer = format!(
+        "Sure:\n{}",
+        blocks(&[("calc.py", "def answer():\n    return int(\"42\")\n")])
+    );
+    let (provider, server, _) = serve_reply(
+        answer.clone(),
+        Duration::ZERO,
+        "",
+        Some(capture),
+        true,
+        None,
+    );
+    let (snapshot, detail) = worker::start(
+        fixture.store.clone(),
+        1,
+        "blocks-run".into(),
+        fixture.store.snapshot().unwrap().revision,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        snapshot.tasks[0].status,
+        TaskStatus::ReviewReady,
+        "{detail}"
+    );
+    let request = captured.recv().unwrap();
+    assert!(request.get("format").is_none(), "{request}");
+    // No schema, but the worker keeps the structured thinking policy and sampling.
+    assert_eq!(request["think"], false);
+    assert_eq!(request["options"]["temperature"], 0);
+    let prompt = last_prompt(&request);
+    assert!(prompt.contains("=== FILE: <path> ==="), "{prompt}");
+    assert!(!prompt.contains("JSON schema"), "{prompt}");
+    // The format is restated after the long source context.
+    assert!(
+        prompt.trim_end().ends_with(
+            "Answer only with FILE blocks, one per changed file, each ending with === END FILE ==="
+        ),
+        "{prompt}"
+    );
+    let evidence: worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    assert_eq!(
+        evidence.generation.as_ref().unwrap().answer_format,
+        Some(worker::WorkerFormat::Blocks)
+    );
+    assert!(evidence.patch.contains("+    return int(\"42\")"));
+    let directory = fixture.store.run_directory(&evidence.run).unwrap();
+    assert_eq!(
+        fs::read_to_string(directory.join("model-response.txt")).unwrap(),
+        answer
+    );
+}
+
+#[tokio::test]
+async fn json_worker_format_keeps_the_constrained_schema_request() {
+    let fixture = unittest_fixture();
+    let (capture, captured) = std::sync::mpsc::channel();
+    let (provider, server, _) = server_with_capture(
+        one_file("calc.py", "def answer():\n    return 42\n"),
+        Duration::ZERO,
+        "",
+        Some(capture),
+    );
+    let (snapshot, detail) = worker::start(
+        fixture.store.clone(),
+        1,
+        "json-run".into(),
+        fixture.store.snapshot().unwrap().revision,
+        provider.with_worker_format(worker::WorkerFormat::Json),
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(
+        snapshot.tasks[0].status,
+        TaskStatus::ReviewReady,
+        "{detail}"
+    );
+    let request = captured.recv().unwrap();
+    assert_eq!(
+        request["format"]["properties"]["files"]["items"]["properties"]["path"]["enum"],
+        serde_json::json!(["calc.py"])
+    );
+    assert_eq!(request["think"], false);
+    assert!(last_prompt(&request).contains("JSON schema"));
+    assert!(!last_prompt(&request).contains("=== FILE:"));
+    let evidence: worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    assert_eq!(
+        evidence.generation.unwrap().answer_format,
+        Some(worker::WorkerFormat::Json)
+    );
+}
+
+async fn run_reply(fixture: &Fixture, task: u64, answer: String) -> (serde_json::Value, String) {
+    let (capture, captured) = std::sync::mpsc::channel();
+    let (provider, server, _) = serve_reply(answer, Duration::ZERO, "", Some(capture), true, None);
+    let (_, detail) = worker::start(
+        fixture.store.clone(),
+        task,
+        format!("reply-{task}"),
+        fixture.store.snapshot().unwrap().revision,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    (captured.recv().unwrap(), detail)
+}
+
+#[tokio::test]
+async fn truncated_blocks_fail_named_and_repair_says_so_with_prior_files_as_blocks() {
+    let fixture = unittest_fixture();
+    let (_, detail) = run_reply(
+        &fixture,
+        1,
+        "=== FILE: calc.py ===\ndef answer():\n    return {todo[".into(),
+    )
+    .await;
+    assert_eq!(
+        detail,
+        "Model output ended inside FILE block for calc.py (truncated)"
+    );
+    let second = repair_of(&fixture, 1);
+    let (request, detail) = run_reply(
+        &fixture,
+        second,
+        blocks(&[("calc.py", "def answer():\n    return \"41\"\n")]),
+    )
+    .await;
+    let section = failing_section(&last_prompt(&request));
+    assert!(
+        section.contains("previous response was truncated inside the FILE block for calc.py"),
+        "{section}"
+    );
+    assert!(detail.starts_with("Check failed"), "{detail}");
+
+    // A fresh repair (different model) sees the prior attempt's files as blocks,
+    // and the prior patch unescaped rather than inside JSON evidence.
+    fixture.action(Action::Repair {
+        task: second,
+        reason: "Fix the failing test".into(),
+    });
+    let third = fixture.store.snapshot().unwrap().tasks.len() as u64;
+    fixture.action(Action::Assign {
+        task: third,
+        model: "other".into(),
+    });
+    fixture.action(Action::Approve { task: third });
+    let (request, _) = run_reply(
+        &fixture,
+        third,
+        blocks(&[("calc.py", "def answer():\n    return 42\n")]),
+    )
+    .await;
+    assert_eq!(request["messages"].as_array().unwrap().len(), 1);
+    let prompt = last_prompt(&request);
+    assert!(prompt.contains("WHAT IS STILL FAILING"), "{prompt}");
+    assert!(
+        prompt
+            .contains("=== FILE: calc.py ===\ndef answer():\n    return \"41\"\n=== END FILE ==="),
+        "{prompt}"
+    );
+    assert!(prompt.contains("+    return \"41\""), "{prompt}");
+    assert!(!prompt.contains("return \\\"41\\\""), "{prompt}");
 }

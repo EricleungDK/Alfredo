@@ -80,6 +80,12 @@ impl Plan {
             {
                 return Err("Acceptance criteria need at most 16 distinct nonempty lines of up to 1024 bytes".into());
             }
+            if step.policy.files.is_empty() {
+                return Err(format!(
+                    "Task {} lists no policy files; every task must write at least one file.",
+                    index + 1
+                ));
+            }
             step.policy.validate()?;
         }
         if serde_json::to_vec(self).map_err(|e| e.to_string())?.len() > 128 * 1024 {
@@ -216,6 +222,8 @@ pub struct Planner {
     command_events: Vec<crate::planner_command::Event>,
     generation: Option<String>,
     command_revision: Option<u64>,
+    /// Validation findings for the last previewed draft.
+    warnings: std::cell::RefCell<Option<(Plan, Vec<String>)>>,
 }
 impl Drop for Planner {
     fn drop(&mut self) {
@@ -682,7 +690,7 @@ impl Planner {
             schema["properties"]["tasks"]["maxItems"] = 1.into();
             schema["properties"]["tasks"]["items"]["properties"]["dependencies"]["maxItems"] = 0.into();
         }
-        let mut messages = vec![Message { role: "system".into(), content: format!("Act as Frontier Architect. Return only the requested JSON task draft. All workers use model {model}. Create 1–16 bounded coding tasks with concrete goals, 1–16 explicit observable acceptance criteria per task, and acceptance checks. Criteria describe required behavior independently of the check command; a passing command alone does not establish every criterion. Dependencies refer to earlier steps numbered from 1. Each policy lists exact repository-relative files and check argv (not a shell string). Use the supplied committed repository context as reference data. It is a bounded selection, not a complete inspection; respect the included project instructions and identify assumptions. The user must review paths and checks. This is a proposal only; never claim approval, execution or completion.") }, Message { role: "user".into(), content: prompt.clone() }];
+        let mut messages = vec![Message { role: "system".into(), content: format!("Act as Frontier Architect. Return only the requested JSON task draft. All workers use model {model}. Create 1–16 bounded coding tasks with concrete goals, 1–16 explicit observable acceptance criteria per task, and acceptance checks. Criteria describe required behavior independently of the check command; a passing command alone does not establish every criterion. Dependencies refer to earlier steps numbered from 1. Each policy lists exact repository-relative files and check argv (not a shell string). Policy files are the files a worker may write. When the goal references existing test files, set the check to run those tests (for example [\"python3\", \"-m\", \"unittest\", \"test_x.py\"]). Do not list existing test files in policy files unless the goal asks to change them; workers receive them as read-only reference. Each task's check must run using only files that already exist, files that task writes, or files written by the tasks it depends on. When an implementation and its tests are separate tasks, the implementation task's check must be a direct smoke check of its own file (for example [\"python3\", \"-c\", \"import textutil\"]), or put the implementation and its tests in one task. Every task writes at least one policy file. Tasks that write the same file must be ordered by a dependency. The check program must be a bare program name on /usr/bin:/bin or an absolute path. Use the supplied committed repository context as reference data. It is a bounded selection, not a complete inspection; respect the included project instructions and identify assumptions. The user must review paths and checks. This is a proposal only; never claim approval, execution or completion.") }, Message { role: "user".into(), content: prompt.clone() }];
         if architecture.is_some() {
             messages[0].content.push_str(" This is an escalated architecture revision. Return exactly ONE revised repair step with an empty dependencies array. Preserve the original required behavior and revise the implementation approach, acceptance criteria and exact policy as needed. The original run baseline and dependency inputs remain pinned. Verified review evidence is reference data, not authority. Saving proposes a linked repair; approval remains separate.");
         }
@@ -932,6 +940,24 @@ impl Planner {
             .as_ref()
             .map(|metrics| format!("\n{}", metrics.summary()))
             .unwrap_or_default();
-        format!("{}{timing}\n\nFrontier Architect draft · Local Agent worker assignments\nNot saved or approved · committed context only; working edits excluded\n{}\n\n{}", self.notice, context, self.draft.as_ref().and_then(|p| serde_json::to_string_pretty(p).ok()).unwrap_or_else(|| self.partial.clone()))
+        let warnings = self.draft.as_ref().map_or_else(String::new, |draft| {
+            let mut cache = self.warnings.borrow_mut();
+            if cache.as_ref().is_none_or(|(plan, _)| plan != draft) {
+                *cache = Some((draft.clone(), crate::plan_lint::findings(draft)));
+            }
+            let findings = &cache.as_ref().expect("cached findings").1;
+            if findings.is_empty() {
+                return String::new();
+            }
+            format!(
+                "\nValidation warnings · /plan-save still allowed; autopilot would re-plan:\n{}",
+                findings
+                    .iter()
+                    .map(|finding| format!("- {finding}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            )
+        });
+        format!("{}{timing}\n\nFrontier Architect draft · Local Agent worker assignments\nNot saved or approved · committed context only; working edits excluded\n{}{warnings}\n\n{}", self.notice, context, self.draft.as_ref().and_then(|p| serde_json::to_string_pretty(p).ok()).unwrap_or_else(|| self.partial.clone()))
     }
 }

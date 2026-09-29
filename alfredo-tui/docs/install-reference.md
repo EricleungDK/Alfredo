@@ -382,6 +382,10 @@ budget, deadline, admission limit or Ollama server configuration changes. No sil
 retry or fallback occurs. This workaround is tested on synthetic coding cases;
 complete role/model quality qualification remains open.
 
+Coding workers in the default `--worker-format blocks` send no schema but keep
+this policy and repair sampling; see "Worker answer format" in
+[reference.md](reference.md#worker-answer-format).
+
 ## Requested generation settings in worker evidence
 
 New worker evidence records `generation` when preparing a schema-constrained model

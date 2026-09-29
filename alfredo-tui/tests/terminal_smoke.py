@@ -202,6 +202,10 @@ class TerminalSmoke(unittest.TestCase):
                 model_requests.append(request)
                 if 'format' in request:
                     assert request['think'] is False
+                elif request['messages'][-1]['content'].startswith('Implement this task:'):
+                    # Default FILE-block workers keep the thinking policy without a schema.
+                    assert request['think'] is False
+                    assert '=== END FILE ===' in request['messages'][-1]['content']
                 else:
                     assert 'think' not in request
                 if request['messages'][-1]['content'].startswith('Implement this task:'):
@@ -251,7 +255,8 @@ class TerminalSmoke(unittest.TestCase):
                     if 'Implement this task: Planned calculation' in request['messages'][-1]['content']:
                         assert 'RECORDED ACCEPTANCE CRITERIA' in request['messages'][-1]['content']
                         assert 'Calculation returns 42' in request['messages'][-1]['content']
-                    content = json.dumps({'files': [{'path': 'answer.py', 'content': 'VALUE = 42\n'}]})
+                    # FILE-block answer; other fixtures keep legacy JSON answers.
+                    content = 'Updating answer.py.\n=== FILE: answer.py ===\nVALUE = 42\n=== END FILE ===\n'
                 else:
                     content = 'FAST_REPLY'
                 self.wfile.write((json.dumps({'message': {'content': content}, 'done': True, 'load_duration': 500000000, 'eval_duration': 2000000000, 'eval_count': 40}) + '\n').encode())
@@ -414,7 +419,7 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'tok/s')
             self.assertFalse(release_slow.is_set())
             os.write(master, b'limit\r')
-            wait_for(b'generation limit')
+            wait_for(b'4096-token limit')
             wait_for(b'LIMIT_PARTIAL')
             os.write(master, b'\t\x1b')  # Return to slow session and cancel.
             wait_for(b'cancelled')
@@ -831,7 +836,7 @@ class TerminalSmoke(unittest.TestCase):
             self.assertEqual(termios.tcgetattr(slave), original)
             conversation_path = next(Path(state.name).glob('rust-tasks-v1/*/conversations-*.json'))
             preferences = json.loads(conversation_path.read_text())
-            self.assertIn('generation limit', preferences['sessions'][1]['status']['Failed'])
+            self.assertIn('Model output hit the 4096-token limit', preferences['sessions'][1]['status']['Failed'])
             self.assertEqual(preferences['sessions'][1]['messages'][-1]['content'], 'LIMIT_PARTIAL')
             sources = preferences['sessions'][0]['sources']
             self.assertEqual(sources['1']['kind'], 'wayfinder')

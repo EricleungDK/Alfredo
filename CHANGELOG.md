@@ -6,6 +6,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Coding workers now answer with plain-text FILE blocks
+  (`=== FILE: path ===` … `=== END FILE ===`) instead of schema-constrained JSON,
+  so code is written verbatim with no quote/newline escaping. The worker request
+  sends no schema; `think: false` and repair sampling are kept. A reply cut off
+  inside a block fails with `Model output ended inside FILE block for PATH
+  (truncated)`, and the next repair says so. Legacy JSON answers are still
+  accepted. `--worker-format json` restores the constrained JSON request;
+  evidence records the requested format. Qualification pins `json`.
+- Repair prompts show prior evidence as plain text (patch and check output
+  unescaped), a fresh repair gets the previous attempt's files as FILE blocks,
+  and retained legacy JSON answers are replayed as FILE blocks.
+- The running task pane shows streamed FILE blocks as code: `▸ path` headings,
+  marker lines hidden.
+
+- Autopilot repair budget default is now 3 (`--max-repairs` still overrides).
+- Repair prompts open with a short "What is still failing" section: failing test
+  names, assertion/error lines and `-`/`+` diff lines (max 30 lines / 2 KiB),
+  before the full prior evidence.
+- Repair sampling temperature rises within a lineage (0 → 0.3 → 0.6, cap 0.8)
+  after two or more failed attempts, one step more after no progress. Evidence
+  records the requested temperature.
+- A reply cut off by the token limit now fails with `Model output hit the
+  4096-token limit`; the next repair requests 8192 tokens.
+
+### Fixed
+
+- A failed repair that returns byte-identical files is recorded as `No change from
+  previous attempt`, and the next repair is told so explicitly and starts a fresh
+  Local Agent conversation instead of replaying the repeated answer.
+- Work status row pluralizes counts (`2 repairs`, `2 recorded runs`).
+
 ## [0.1.0] - 2026-09-28
 
 First release of the native terminal. It replaces the React/Tauri desktop app and

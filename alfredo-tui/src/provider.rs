@@ -11,6 +11,9 @@ use tokio::sync::mpsc::Sender;
 
 const MAX_FRAME: usize = 64 * 1024;
 const MAX_PREDICT: u32 = 4096;
+/// Upper bounds for repair sampling overrides (`with_sampling`).
+pub const REPAIR_TOKEN_LIMIT: u32 = 8192;
+pub const MAX_REPAIR_TEMPERATURE: f64 = 0.8;
 const MAX_CONNECT_RETRIES: u32 = 10;
 const PRELOAD_DEADLINE: Duration = Duration::from_secs(300);
 const HEALTH_DEADLINE: Duration = Duration::from_secs(2);
@@ -86,16 +89,21 @@ pub enum RequestedThinking {
     Off,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// Requested settings. Older evidence stored an integer temperature; it reads
+/// as the same JSON number.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Generation {
     pub thinking: RequestedThinking,
     pub num_predict: u32,
-    pub temperature: u8,
+    pub temperature: f64,
+    /// Requested worker answer format; older evidence (JSON requests) omits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answer_format: Option<crate::worker::WorkerFormat>,
 }
 impl Generation {
     pub fn valid(&self) -> bool {
-        (1..=131_072).contains(&self.num_predict) && self.temperature <= 2
+        (1..=131_072).contains(&self.num_predict) && (0.0..=2.0).contains(&self.temperature)
     }
     pub fn summary(&self) -> String {
         let thinking = match self.thinking {
@@ -103,8 +111,12 @@ impl Generation {
             RequestedThinking::On => "on",
             RequestedThinking::Off => "off",
         };
+        let format = self
+            .answer_format
+            .map(|format| format!(" · answer format {}", format.name()))
+            .unwrap_or_default();
         format!(
-            "Requested generation: thinking {thinking} · token limit {} · temperature {}",
+            "Requested generation: thinking {thinking} · token limit {} · temperature {}{format}",
             self.num_predict, self.temperature
         )
     }
@@ -116,7 +128,11 @@ pub struct Ollama {
     endpoint: reqwest::Url,
     idle_timeout: Duration,
     format: Option<serde_json::Value>,
+    /// Planner/worker output: sends the thinking policy and sampling temperature,
+    /// with or without a schema.
+    structured: bool,
     structured_thinking: Option<bool>,
+    worker_format: crate::worker::WorkerFormat,
     admission: Coordinator,
     priority: Class,
     capacity: usize,
@@ -125,6 +141,18 @@ pub struct Ollama {
     keep_alive: Option<String>,
     connect_retries: u32,
     retry_backoff: Duration,
+    /// Schema-constrained temperature; token limit applies to every request.
+    temperature: f64,
+    num_predict: u32,
+}
+
+/// Integral temperatures stay JSON integers, as recorded profiles expect.
+fn temperature_json(value: f64) -> serde_json::Value {
+    if value.fract() == 0.0 {
+        serde_json::Value::from(value as u64)
+    } else {
+        serde_json::Value::from(value)
+    }
 }
 
 #[derive(Default)]
@@ -220,7 +248,9 @@ impl Ollama {
             endpoint,
             idle_timeout,
             format: None,
+            structured: false,
             structured_thinking: Some(false),
+            worker_format: crate::worker::WorkerFormat::Blocks,
             admission,
             priority: Class::Foreground,
             capacity: 2,
@@ -229,6 +259,8 @@ impl Ollama {
             keep_alive: None,
             connect_retries: 0,
             retry_backoff: Duration::from_secs(1),
+            temperature: 0.0,
+            num_predict: MAX_PREDICT,
         })
     }
 
@@ -394,10 +426,20 @@ impl Ollama {
         self
     }
 
-    /// Only affects schema-constrained planner/worker calls; None uses server defaults.
+    /// Only affects structured planner/worker calls; None uses server defaults.
     pub fn with_structured_thinking(mut self, thinking: Option<bool>) -> Self {
         self.structured_thinking = thinking;
         self
+    }
+
+    /// Answer format requested from coding workers (default FILE blocks).
+    pub fn with_worker_format(mut self, format: crate::worker::WorkerFormat) -> Self {
+        self.worker_format = format;
+        self
+    }
+
+    pub fn worker_format(&self) -> crate::worker::WorkerFormat {
+        self.worker_format
     }
 
     pub fn structured_generation(&self) -> Generation {
@@ -407,9 +449,21 @@ impl Ollama {
                 Some(true) => RequestedThinking::On,
                 Some(false) => RequestedThinking::Off,
             },
-            num_predict: MAX_PREDICT,
-            temperature: 0,
+            num_predict: self.num_predict,
+            temperature: self.temperature,
+            answer_format: None,
         }
+    }
+
+    /// Repair sampling: temperature within 0..=0.8 and token limit within 1..=8192.
+    pub fn with_sampling(mut self, temperature: f64, num_predict: u32) -> Self {
+        self.temperature = if temperature.is_finite() {
+            temperature.clamp(0.0, MAX_REPAIR_TEMPERATURE)
+        } else {
+            0.0
+        };
+        self.num_predict = num_predict.clamp(1, REPAIR_TOKEN_LIMIT);
+        self
     }
 
     pub async fn models(&self) -> Result<Vec<String>, String> {
@@ -472,6 +526,15 @@ impl Ollama {
 
     pub fn with_json_schema(mut self, schema: serde_json::Value) -> Self {
         self.format = Some(schema);
+        self.structured = true;
+        self
+    }
+
+    /// Structured free-text output (worker FILE blocks): thinking policy and
+    /// sampling as for schema calls, without constrained decoding.
+    pub fn with_structured_text(mut self) -> Self {
+        self.format = None;
+        self.structured = true;
         self
     }
 
@@ -646,14 +709,16 @@ impl Ollama {
             "model": model,
             "messages": messages,
             "stream": true,
-            "options": { "num_predict": MAX_PREDICT }
+            "options": { "num_predict": self.num_predict }
         });
         if let Some(format) = &self.format {
             body["format"] = format.clone();
+        }
+        if self.structured {
             if let Some(thinking) = self.structured_thinking {
                 body["think"] = thinking.into();
             }
-            body["options"]["temperature"] = self.structured_generation().temperature.into();
+            body["options"]["temperature"] = temperature_json(self.temperature);
         }
         if let Some(context) = self.context_profile.context(self.priority) {
             body["options"]["num_ctx"] = context.into();
@@ -680,7 +745,7 @@ impl Ollama {
                 idle_timeout_ms: u64::try_from(self.idle_timeout.as_millis())
                     .map_err(|_| "Recorded idle deadline is too large")?,
                 stream: true,
-                num_predict: MAX_PREDICT,
+                num_predict: self.num_predict,
                 num_ctx: self.context_profile.context(self.priority),
                 temperature: self.format.as_ref().map(|_| 0),
                 think: self.format.as_ref().and(self.structured_thinking),
@@ -884,7 +949,7 @@ impl Ollama {
                     .map_err(|_| "Terminal closed")?;
             }
             if frame.done_reason.as_deref() == Some("length") {
-                return Err("Ollama reached its generation limit; partial reply retained. Shorten the request or choose another model before retrying".into());
+                return Err(format!("Model output hit the {}-token limit; partial reply retained. Shorten the request or choose another model before retrying", self.num_predict));
             }
             if trace.recording.is_none() {
                 sender

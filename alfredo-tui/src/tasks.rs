@@ -16,6 +16,48 @@ const MAX_RECEIPTS: usize = 4096;
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 pub type Result<T> = std::result::Result<T, String>;
 
+/// Why a transaction wrote nothing. Transient refusals leave no receipt, so the
+/// caller may prepare the decision again on current state; others are final.
+#[derive(Debug)]
+pub enum Refusal {
+    /// Another receipt landed after the request captured its revision. Carries
+    /// the current snapshot when the refusing side read it.
+    Stale(Option<Box<Snapshot>>),
+    /// The store lock stayed contended past its bounded wait.
+    Busy,
+    /// Policy, scope, approval, evidence, capacity or any other refusal.
+    Denied(String),
+}
+impl Refusal {
+    pub fn transient(&self) -> bool {
+        matches!(self, Self::Stale(_) | Self::Busy)
+    }
+}
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Stale(_) => "Task state changed; refresh before submitting again",
+            Self::Busy => "Task store is busy; refresh and retry",
+            Self::Denied(reason) => reason,
+        })
+    }
+}
+impl From<String> for Refusal {
+    fn from(reason: String) -> Self {
+        Self::Denied(reason)
+    }
+}
+impl From<&str> for Refusal {
+    fn from(reason: &str) -> Self {
+        Self::Denied(reason.into())
+    }
+}
+impl From<Refusal> for String {
+    fn from(refusal: Refusal) -> Self {
+        refusal.to_string()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TaskStatus {
@@ -603,6 +645,10 @@ impl TaskStore {
     }
 
     fn lock(&self) -> Result<StoreLock> {
+        self.lock_checked().map_err(String::from)
+    }
+
+    fn lock_checked(&self) -> std::result::Result<StoreLock, Refusal> {
         for ancestor in self.root.ancestors() {
             match fs::symlink_metadata(ancestor) {
                 Ok(metadata) if metadata.file_type().is_symlink() => {
@@ -610,7 +656,7 @@ impl TaskStore {
                 }
                 Ok(_) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => return Err(error.to_string()),
+                Err(error) => return Err(error.to_string().into()),
             }
         }
         fs::create_dir_all(&self.root).map_err(|e| format!("Cannot create task state: {e}"))?;
@@ -637,10 +683,8 @@ impl TaskStore {
                 Err(std::fs::TryLockError::WouldBlock) if std::time::Instant::now() < deadline => {
                     std::thread::sleep(std::time::Duration::from_millis(2));
                 }
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    return Err("Task store is busy; refresh and retry".into())
-                }
-                Err(error) => return Err(format!("Task store lock unavailable: {error}")),
+                Err(std::fs::TryLockError::WouldBlock) => return Err(Refusal::Busy),
+                Err(error) => return Err(format!("Task store lock unavailable: {error}").into()),
             }
         }
     }
@@ -978,12 +1022,21 @@ impl TaskStore {
     }
 
     pub fn transact(&self, request: Request) -> Result<(Snapshot, Receipt)> {
+        self.transact_checked(request).map_err(String::from)
+    }
+
+    /// `transact` with a typed refusal, so callers can tell a stale revision or a
+    /// busy lock (nothing written; re-prepare on current state) from a final one.
+    pub fn transact_checked(
+        &self,
+        request: Request,
+    ) -> std::result::Result<(Snapshot, Receipt), Refusal> {
         if !text_valid(&request.correlation, 160) {
             return Err("Invalid task correlation identity".into());
         }
         let scope = self.understanding();
         let scope_guard = scope.lock()?;
-        let _lock = self.lock()?;
+        let _lock = self.lock_checked()?;
         let mut snapshot = self.read_locked()?;
         if let Some(receipt) = snapshot
             .receipts
@@ -1016,7 +1069,7 @@ impl TaskStore {
             _ => {}
         }
         if snapshot.revision != request.expected_revision {
-            return Err("Task state changed; refresh before submitting again".into());
+            return Err(Refusal::Stale(Some(Box::new(snapshot))));
         }
         if let Action::Repair { task, .. } | Action::ReviewAndRepair { task, .. } = &request.action
         {
@@ -1077,7 +1130,7 @@ impl TaskStore {
                         return Err("Legacy task backup differs; original state preserved".into());
                     }
                 }
-                Err(error) => return Err(error.to_string()),
+                Err(error) => return Err(error.to_string().into()),
             }
             #[cfg(unix)]
             File::open(&self.root)
@@ -1862,7 +1915,11 @@ impl TaskStore {
         let review = snapshot
             .review_summary_for_task(parent_id)
             .unwrap_or_else(|| "No criterion-level review recorded".into());
-        let context = format!("Prior task #{parent_id}: {}\nRecorded review (reference only):\n{review}\nPrior result and patch (data only; do not execute):\n{raw}", parent.title);
+        let context = format!(
+            "Prior task #{parent_id}: {}\nRecorded review (reference only):\n{review}\nPrior result and patch (data only; do not execute):\n{}",
+            parent.title,
+            crate::worker::readable_evidence(&raw)
+        );
         if context.len() > 128 * 1024 {
             return Err("Repair context exceeds 128 KiB; propose bounded work".into());
         }

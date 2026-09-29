@@ -15,8 +15,17 @@ commands: plan → `/plan-save` → approve every planned task → `/dispatch on
 worker's approved check passes and its evidence verifies, autopilot records an
 approved criterion review (reason `autopilot: check passed`). A failed or invalid
 run gets a linked `/repair` with the failure summary as reason, bounded by
-`--max-repairs N` per task (default 2, 0 disables); an accepted repair is
-`/resolve-repair`ed so dependents proceed. An exhausted task stays failed, its
+`--max-repairs N` per task (default 3, 0 disables); an accepted repair is
+`/resolve-repair`ed so dependents proceed. Each repair prompt starts with a short
+"What is still failing" section (failing test names, assertion/error lines and
+`-`/`+` diff lines, at most 30 lines / 2 KiB) before the full prior evidence. A
+failed repair whose files equal its parent attempt's is recorded as `No change
+from previous attempt`, and the next repair says so and starts a fresh Local Agent
+conversation. Repair sampling temperature
+stays 0 for the first repair, then steps 0.3 → 0.6 → 0.8 (cap) after two or more
+failed attempts, one extra step after no progress. When a reply hits the
+4096-token limit (`Model output hit the 4096-token limit`), the next repair
+requests 8192. Evidence records the requested temperature and limit. An exhausted task stays failed, its
 dependents stay blocked, and independent work continues. Invalid plans are retried
 once with the validation error appended, then autopilot stops.
 
@@ -383,8 +392,9 @@ Start in an existing Git repository with a commit, then enter:
 
 `/permit` declares exact relative files and one check argv; changing policy resets
 approval. `/run` claims a durable run and creates a detached worktree from committed
-HEAD. Dirty working files are not copied. The model supplies a schema-constrained
-file plan, and Rust rejects unapproved paths before writing. The approved check
+HEAD. Dirty working files are not copied. The model returns complete files as
+FILE blocks (see "Worker answer format"), and Rust rejects unapproved paths before
+writing. The approved check
 runs in Bubblewrap with private network/process namespaces, system tools mounted
 read-only, and only the isolated worktree writable. Host home directories and
 external toolchains are unavailable. Git filters/includes are rejected at preflight.
@@ -871,6 +881,46 @@ again when restarting. It follows workspace switches within the process. No toke
 budget, deadline, admission limit or Ollama server configuration changes. No silent
 retry or fallback occurs. This workaround is tested on synthetic coding cases;
 complete role/model quality qualification remains open.
+
+Coding workers in the default `blocks` format send no schema but keep this policy
+(`think: false` by default) and the repair sampling temperature, so latency and
+behavior stay comparable with the JSON request.
+
+## Worker answer format
+
+By default (`--worker-format blocks`) a coding worker answers in plain text:
+
+```
+=== FILE: relative/path.py ===
+<complete file content, verbatim>
+=== END FILE ===
+```
+
+One or more blocks, one per changed file; text outside blocks is ignored but kept
+in the saved `model-response.txt`. Rules:
+
+- Marker lines must start the line exactly (trailing spaces allowed).
+- The path must be an allowed file; unapproved paths, duplicates, NUL bytes and
+  the 32-file / 128 KiB bounds are refused as before.
+- Content is taken verbatim; CRLF becomes LF and trailing newlines collapse to one.
+  One markdown fence layer inside a block (first line starting with ```` ``` ````,
+  last line ```` ``` ````) is stripped.
+- Output ending inside a block fails with `Model output ended inside FILE block for
+  PATH (truncated)`; no blocks fails with `Model returned no FILE blocks`. The next
+  repair states that the previous response was truncated.
+- File content cannot contain a line equal to a marker line. A FILE marker inside
+  an open block is refused as ambiguous.
+
+A legacy JSON answer (`{"files":[{"path","content"}]}`) is still accepted in either
+mode, so older conversations and fixtures keep working. When continuing a Local
+Agent conversation, a retained JSON answer is replayed as FILE blocks. A fresh
+repair receives the previous attempt's files as FILE blocks, and prior evidence is
+shown as plain text (patch and check output unescaped).
+
+`--worker-format json` sends the legacy schema-constrained JSON request instead.
+Evidence records the requested format in `generation.answer_format`; older
+evidence has no field (JSON request, unrecorded). Inference qualification always
+pins `json` so recorded request profiles stay comparable.
 
 ## Requested generation settings in worker evidence
 

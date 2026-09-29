@@ -193,8 +193,12 @@ fn hierarchy_names_task_counts_and_renders_dependency_edges_once() {
     let mut fixture = hierarchy();
     let buffer = fixture.render(140, 40);
     let tree = region(&buffer, 0, 2, 40, 33);
-    // Default view: done/total progress, plan request instead of its receipt revision.
-    assert!(tree.contains("Mission Work · 1/6 done"), "{tree}");
+    // Default view: done/total over planned tasks (#1 done via accepted repair #5),
+    // repairs counted separately; plan request instead of its receipt revision.
+    assert!(
+        tree.contains("Mission Work · 1/5 done · 1 repair"),
+        "{tree}"
+    );
     assert!(tree.contains("Build a parser · 5"), "{tree}");
     assert!(!tree.contains("Plan r1"), "{tree}");
     assert!(tree.contains("Manual tasks · 1"), "{tree}");
@@ -260,7 +264,7 @@ fn group_selection_removes_stale_task_model_evidence_and_actions() {
     let collapsed = all(&fixture.render(140, 40));
     assert!(collapsed.contains("▸ Build a parser · 5"), "{collapsed}");
     assert!(!collapsed.contains("#5 Repair parser"));
-    assert!(collapsed.contains("Mission Work · 1/6 done"));
+    assert!(collapsed.contains("Mission Work · 1/5 done · 1 repair"));
 }
 
 #[test]

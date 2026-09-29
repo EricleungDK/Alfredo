@@ -333,13 +333,21 @@ fn work_status_copy_distinguishes_unavailable_idle_and_recorded_runs_at_narrow_w
         "1 recorded run",
         "3 review",
         "1 held",
-        "2 repair",
+        "2 repairs",
         "1 Architect",
         "1 resolve",
     ] {
         assert!(wide.contains(expected), "Missing {expected}: {wide}");
     }
     assert!(!wide.contains("running"));
+    let single = WorkStatus {
+        recorded: 2,
+        repair: 1,
+        ..status
+    }
+    .concise(160);
+    assert!(single.contains("· 1 repair ·"), "{single}");
+    assert!(single.contains("2 recorded runs"), "{single}");
 }
 
 #[test]
