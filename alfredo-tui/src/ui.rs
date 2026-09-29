@@ -1,13 +1,23 @@
 use crate::dashboard::{self, single_line, truncate};
 use crate::model::{App, Status};
+use crate::side_pane::{self, MissionRow, Projection, RowKind, Section, WorkRow};
+use crate::task_control::TaskControl;
+use crate::theme::{ColorMode, Record, RowStatus, Theme, Tone};
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    buffer::Buffer,
+    layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Clear, List, ListItem, ListState, Padding, Paragraph, Wrap},
     Frame,
 };
+use std::time::Instant;
 use unicode_width::UnicodeWidthStr;
+
+/// Below this width the side pane collapses to one summary row (F6 overlay).
+pub const PANE_BREAKPOINT: u16 = 88;
+/// Detail label column; `Criteria ` is the longest label.
+const LABEL: usize = 9;
 
 fn safe(text: &str) -> String {
     dashboard::safe(text)
@@ -17,12 +27,19 @@ fn dim() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
-/// A bordered block only when the area can hold a complete box.
+/// Side pane width: a quarter of the terminal, 28 to 44 columns.
+pub fn pane_width(width: u16) -> u16 {
+    (width / 4).clamp(28, 44)
+}
+
+/// A bordered block with one column of padding, only when the area can hold a complete box.
 fn frame_block(area: Rect, title: String) -> Block<'static> {
     if area.height < 3 || area.width < 4 {
         Block::default()
     } else {
-        Block::bordered().title(title)
+        Block::bordered()
+            .title(title)
+            .padding(Padding::horizontal(1))
     }
 }
 
@@ -30,11 +47,11 @@ pub fn draw(frame: &mut Frame, app: &App) {
     draw_inner(frame, app, None);
 }
 
-pub fn draw_with_tasks(frame: &mut Frame, app: &App, tasks: &crate::task_control::TaskControl) {
+pub fn draw_with_tasks(frame: &mut Frame, app: &App, tasks: &TaskControl) {
     draw_inner(frame, app, Some(tasks));
 }
 
-fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&crate::task_control::TaskControl>) {
+fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
     let area = frame.area();
     if area.width < 32 || area.height < 10 {
         frame.render_widget(
@@ -44,38 +61,38 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&crate::task_control::
         );
         return;
     }
-    let identity = tasks.and_then(|tasks| tasks.snapshot.as_ref());
+    let now = Instant::now();
+    let theme = app.pane.theme;
+    let projection = side_pane::project(app, tasks, now);
     let autopilot = tasks.and_then(|tasks| tasks.autopilot.as_ref());
     let rows = Layout::vertical([
         Constraint::Length(1),
-        Constraint::Length(u16::from(identity.is_some()) + u16::from(autopilot.is_some())),
+        Constraint::Length(u16::from(autopilot.is_some())),
         Constraint::Min(3),
         Constraint::Length(3),
         Constraint::Length(2),
     ])
     .split(area);
     let session = &app.sessions[app.selected];
-    let active = app.sessions.iter().filter(|s| s.status.active()).count();
-    let dashboard_visible = tasks.is_some_and(|tasks| tasks.visible);
-    draw_status_row(frame, app, tasks, rows[0], identity.is_some(), active);
-    let header = Layout::vertical([
-        Constraint::Length(u16::from(identity.is_some())),
-        Constraint::Length(u16::from(autopilot.is_some())),
-    ])
-    .split(rows[1]);
-    if let Some(snapshot) = identity {
-        draw_mission_row(frame, app, snapshot, header[0]);
-    }
+    draw_header(frame, app, tasks, rows[0]);
     if let Some(status) = autopilot {
-        frame.render_widget(
-            Paragraph::new(dashboard::autopilot_row(
-                status,
-                usize::from(header[1].width),
-            ))
-            .style(Style::default().fg(Color::Yellow)),
-            header[1],
-        );
+        draw_autopilot(frame, &theme, status, rows[1]);
     }
+    let body = rows[2];
+    let wide = area.width >= PANE_BREAKPOINT;
+    let right = if wide {
+        let split = Layout::horizontal([
+            Constraint::Length(pane_width(area.width)),
+            Constraint::Min(1),
+        ])
+        .split(body);
+        draw_side_pane(frame, split[0], app, &projection, now);
+        split[1]
+    } else {
+        let split = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(body);
+        draw_summary(frame, split[0], app, &projection);
+        split[1]
+    };
     let help = app.completion.as_ref().filter(|completion| {
         completion
             .choices
@@ -83,16 +100,29 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&crate::task_control::
             .any(|choice| choice.group.is_some())
     });
     if let Some(help) = help {
-        draw_help(frame, help, rows[2]);
+        draw_help(frame, help, right);
     } else {
-        draw_body(frame, app, tasks, rows[2]);
+        draw_right(frame, app, tasks, right, now);
     }
-    let draft = session.draft_view(rows[3].width.saturating_sub(2) as usize);
+    if !wide && (app.pane.overlay || app.pane.focus.is_some()) {
+        draw_side_pane(frame, body, app, &projection, now);
+    }
+    let focused = app.pane.focus.is_some();
+    let draft = session.draft_view(rows[3].width.saturating_sub(4) as usize);
     frame.render_widget(
         Paragraph::new(safe(&draft)).block(
             Block::bordered()
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(" Prompt · Enter send "),
+                .padding(Padding::horizontal(1))
+                .border_style(Style::default().fg(if focused {
+                    theme.color(Tone::Dim)
+                } else {
+                    theme.color(Tone::Cyan)
+                }))
+                .title(if focused {
+                    " Prompt · Esc returns "
+                } else {
+                    " Prompt · Enter send "
+                }),
         ),
         rows[3],
     );
@@ -105,118 +135,462 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&crate::task_control::
     } else {
         String::new()
     };
+    let context = if focused {
+        dashboard::Footer::Pane
+    } else if tasks.is_some_and(|tasks| tasks.visible) {
+        dashboard::Footer::Tasks
+    } else {
+        dashboard::Footer::Chat
+    };
     frame.render_widget(
         Paragraph::new(vec![
             Line::styled(
-                dashboard::footer_hints(dashboard_visible, usize::from(area.width)),
-                dim(),
+                dashboard::footer(context, usize::from(area.width)),
+                Style::default().fg(theme.color(Tone::Dim)),
             ),
-            Line::styled(single_line(&note), Style::default().fg(Color::Yellow)),
+            Line::styled(
+                single_line(&note),
+                Style::default().fg(theme.color(Tone::Amber)),
+            ),
         ]),
         rows[4],
     );
+    if theme.color == ColorMode::None {
+        strip_colors(frame.buffer_mut());
+    }
 }
 
-fn draw_status_row(
-    frame: &mut Frame,
-    app: &App,
-    tasks: Option<&crate::task_control::TaskControl>,
-    area: Rect,
-    mission_row: bool,
-    active: usize,
-) {
-    let session = &app.sessions[app.selected];
-    // With a mission row, health sits at its right edge so this row keeps its width.
-    let health = if mission_row {
-        Span::default()
+/// NO_COLOR: keep text and modifiers, drop every foreground and background colour.
+fn strip_colors(buffer: &mut Buffer) {
+    for cell in buffer.content.iter_mut() {
+        cell.set_fg(Color::Reset);
+        cell.set_bg(Color::Reset);
+    }
+}
+
+/// Fields separated by three spaces, never chains of ` · `.
+const GAP: &str = "   ";
+
+/// Row 1: mission and repository name, attention items only when non-zero,
+/// server health right-aligned. The full path stays in F4 and `/workspace`.
+fn draw_header(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: Rect) {
+    let theme = app.pane.theme;
+    let health = health_span(app, area.width);
+    let health_width = u16::try_from(health.width())
+        .unwrap_or(u16::MAX)
+        .min(area.width);
+    let split =
+        Layout::horizontal([Constraint::Min(0), Constraint::Length(health_width)]).split(area);
+    frame.render_widget(Paragraph::new(Line::from(health)), split[1]);
+    let mut badge = Style::default().add_modifier(Modifier::BOLD);
+    badge = if theme.color == ColorMode::None {
+        badge.add_modifier(Modifier::REVERSED)
     } else {
-        health_span(app, area.width)
+        badge.fg(Color::Black).bg(theme.color(Tone::Cyan))
     };
-    let used = u16::try_from(health.width()).unwrap_or(u16::MAX);
-    let text = if let Some(tasks) = tasks {
-        let dispatch = if area.width >= 60 {
-            format!(
-                "dispatch {} · ",
-                if tasks.dispatch.enabled { "on" } else { "off" }
-            )
-        } else {
-            String::new()
-        };
-        let status = tasks
-            .work_status()
-            .concise(area.width.saturating_sub(10 + used + dispatch.len() as u16));
-        let mut header = format!(" {dispatch}{status}");
-        let remaining =
-            usize::from(area.width.saturating_sub(used)).saturating_sub(9 + header.width());
-        if remaining >= 16 && !tasks.visible {
-            header.push_str(&format!(" · {active} chats · {}", safe(&session.model)));
-            if tasks.scope_status.label.starts_with("Wayfinder /") {
-                header.push_str(&format!(" · {}", safe(&tasks.scope_status.label)));
-            }
+    let mut spans = vec![Span::styled(" ALFREDO ", badge), Span::raw(" ")];
+    let mut room = usize::from(split[0].width).saturating_sub(11);
+    let amber = Style::default().fg(theme.color(Tone::Amber));
+    if let Some(snapshot) = tasks.and_then(|tasks| tasks.snapshot.as_ref()) {
+        let repository = snapshot
+            .workspace
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| snapshot.workspace.display().to_string());
+        let mission = truncate(&single_line(&snapshot.mission), room);
+        room = room.saturating_sub(mission.width());
+        spans.push(Span::styled(
+            mission,
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        let repository = format!(" · {}", single_line(&repository));
+        if room > 4 {
+            let repository = truncate(&repository, room);
+            room = room.saturating_sub(repository.width());
+            spans.push(Span::styled(
+                repository,
+                Style::default().fg(theme.color(Tone::Dim)),
+            ));
         }
-        header
-    } else {
-        format!(
-            "  Conversations · {active} active · {}",
-            safe(&session.model)
-        )
-    };
-    let room = usize::from(area.width.saturating_sub(used)).saturating_sub(9);
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(
-                " ALFREDO ",
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            health,
-            Span::raw(truncate(&text, room)),
-        ])),
-        area,
-    );
+    }
+    if let Some(tasks) = tasks {
+        let status = tasks.work_status();
+        let mut attention = Vec::new();
+        if status.review > 0 {
+            attention.push(format!("{} review", status.review));
+        }
+        let decisions = status.held + status.architect;
+        if decisions > 0 {
+            attention.push(format!(
+                "{decisions} decision{}",
+                if decisions == 1 { "" } else { "s" }
+            ));
+        }
+        if tasks.dispatch.enabled {
+            attention.push("dispatch on".into());
+        }
+        if tasks.scope_status.label.starts_with("Wayfinder /") {
+            attention.push(single_line(&tasks.scope_status.label));
+        }
+        for item in attention {
+            let field = format!("{GAP}{item}");
+            if field.width() > room {
+                break;
+            }
+            room -= field.width();
+            spans.push(Span::styled(field, amber));
+        }
+    }
+    frame.render_widget(Paragraph::new(Line::from(spans)), split[0]);
 }
 
 fn health_span(app: &App, width: u16) -> Span<'static> {
     let session = &app.sessions[app.selected];
     let health = app.health.state(&session.model);
+    let theme = app.pane.theme;
     health
-        .label(&session.model, width >= 100)
+        .label(side_pane::short_model(&session.model), width >= 100)
         .map(|label| {
-            let color = if health.healthy() {
-                Color::Green
+            let tone = if health.healthy() {
+                Tone::Green
             } else {
-                Color::Red
+                Tone::Red
             };
-            Span::styled(format!(" {label} "), Style::default().fg(color))
+            Span::styled(format!(" {label} "), Style::default().fg(theme.color(tone)))
         })
         .unwrap_or_default()
 }
 
-fn draw_mission_row(frame: &mut Frame, app: &App, snapshot: &crate::tasks::Snapshot, area: Rect) {
-    let health = health_span(app, area.width);
-    let health_width = u16::try_from(health.width())
-        .unwrap_or(u16::MAX)
-        .min(area.width);
-    let line =
-        Layout::horizontal([Constraint::Min(0), Constraint::Length(health_width)]).split(area);
-    frame.render_widget(Paragraph::new(Line::from(health)), line[1]);
-    let text = format!(
-        " Mission: {} · {}",
-        single_line(&snapshot.mission),
-        single_line(&snapshot.workspace.display().to_string())
+/// Row 2, only while an autopilot run exists. The goal is the group title in the tree.
+fn draw_autopilot(frame: &mut Frame, theme: &Theme, status: &crate::autopilot::Status, area: Rect) {
+    use crate::autopilot::RunState;
+    let tone = match status.state {
+        RunState::Done => Tone::Green,
+        RunState::Partial | RunState::Paused => Tone::Amber,
+        RunState::Failed => Tone::Red,
+        _ => Tone::Lime,
+    };
+    let mut spans = vec![
+        Span::styled(" Autopilot ", Style::default().add_modifier(Modifier::BOLD)),
+        Span::styled(
+            format!("{} {}", status.state.marker(), status.state.label()),
+            Style::default().fg(theme.color(tone)),
+        ),
+    ];
+    for (index, field) in dashboard::autopilot_fields(status).into_iter().enumerate() {
+        let style = if index == 0 {
+            Style::default()
+        } else {
+            Style::default().fg(theme.color(Tone::Dim))
+        };
+        spans.push(Span::styled(format!("{GAP}{field}"), style));
+    }
+    let line = Line::from(spans);
+    frame.render_widget(Paragraph::new(line), area);
+}
+
+/// Narrow terminals: one summary row in place of the side pane.
+fn draw_summary(frame: &mut Frame, area: Rect, app: &App, projection: &Projection) {
+    let theme = app.pane.theme;
+    let mut fields = Vec::new();
+    if let Some(mission) = projection.missions.first() {
+        fields.push(mission.name.clone());
+    }
+    let summary = &projection.summary;
+    if summary.total > 0 {
+        fields.push(format!("{}/{} done", summary.done, summary.total));
+    }
+    if summary.working > 0 {
+        fields.push(format!("{} working", summary.working));
+    }
+    let chats = app
+        .sessions
+        .iter()
+        .filter(|session| session.status.active())
+        .count();
+    if chats > 0 {
+        fields.push(format!(
+            "{chats} chat{} active",
+            if chats == 1 { "" } else { "s" }
+        ));
+    }
+    let hint = " F6 pane ";
+    let text = truncate(
+        &format!(" {}", fields.join(GAP)),
+        usize::from(area.width).saturating_sub(hint.width() + 1),
     );
+    let gap = usize::from(area.width).saturating_sub(text.width() + hint.width());
     frame.render_widget(
-        Paragraph::new(truncate(&text, usize::from(line[0].width)))
-            .style(Style::default().fg(Color::Cyan)),
-        line[0],
+        Paragraph::new(Line::from(vec![
+            Span::raw(text),
+            Span::raw(" ".repeat(gap)),
+            Span::styled(hint, Style::default().fg(theme.color(Tone::Dim))),
+        ])),
+        area,
     );
 }
 
-/// F1: grouped command catalog over the whole body, scrolling with the selection.
+fn work_title(projection: &Projection) -> String {
+    let summary = &projection.summary;
+    if summary.total > 0 {
+        format!(" work  {}/{} done ", summary.done, summary.total)
+    } else {
+        " work ".into()
+    }
+}
+
+/// Missions above work, one bordered pane with a `├ work ┤` separator.
+fn draw_side_pane(frame: &mut Frame, area: Rect, app: &App, projection: &Projection, now: Instant) {
+    let pane = &app.pane;
+    let theme = pane.theme;
+    frame.render_widget(Clear, area);
+    if area.width < 8 || area.height < 3 {
+        return;
+    }
+    let title_style = |section: Section| {
+        if pane.focus == Some(section) {
+            Style::default()
+                .fg(theme.color(Tone::Cyan))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.color(Tone::Dim))
+        }
+    };
+    let inner = Block::bordered().inner(area);
+    let missions = if projection.missions.is_empty() {
+        0
+    } else {
+        let count = projection
+            .missions
+            .len()
+            .min(usize::from(inner.height / 3).max(1));
+        if usize::from(inner.height) >= count + 3 {
+            count
+        } else {
+            0
+        }
+    };
+    let title = if missions > 0 {
+        Span::styled(" missions ", title_style(Section::Missions))
+    } else {
+        Span::styled(work_title(projection), title_style(Section::Work))
+    };
+    frame.render_widget(Block::bordered().title(Line::from(title)), area);
+    let width = usize::from(inner.width);
+    let mut work = inner;
+    if missions > 0 {
+        let cursor = pane.mission_index(projection).unwrap_or(0);
+        let offset = if pane.focus == Some(Section::Missions) {
+            cursor.saturating_sub(missions - 1)
+        } else {
+            0
+        };
+        let lines: Vec<Line> = projection
+            .missions
+            .iter()
+            .enumerate()
+            .skip(offset)
+            .take(missions)
+            .map(|(index, row)| {
+                mission_line(
+                    row,
+                    width,
+                    &theme,
+                    pane.focus == Some(Section::Missions) && index == cursor,
+                )
+            })
+            .collect();
+        frame.render_widget(
+            Paragraph::new(lines),
+            Rect {
+                height: missions as u16,
+                ..inner
+            },
+        );
+        let y = inner.y + missions as u16 + 1;
+        let buffer = frame.buffer_mut();
+        buffer[(area.x, y)].set_symbol("├");
+        buffer[(area.right() - 1, y)].set_symbol("┤");
+        for x in area.x + 1..area.right() - 1 {
+            buffer[(x, y)].set_symbol("─");
+        }
+        buffer.set_stringn(
+            area.x + 1,
+            y,
+            work_title(projection),
+            usize::from(area.width.saturating_sub(2)),
+            title_style(Section::Work),
+        );
+        work = Rect {
+            y: y + 1,
+            height: inner.bottom().saturating_sub(y + 1),
+            ..inner
+        };
+    }
+    if work.height == 0 {
+        return;
+    }
+    let focused = pane.focus == Some(Section::Work);
+    let cursor = focused.then(|| pane.work_index(projection)).flatten();
+    let mut lines = Vec::new();
+    let mut selected = None;
+    for (index, row) in projection.work.iter().enumerate() {
+        let start = lines.len();
+        let highlighted = cursor == Some(index);
+        lines.push(work_line(row, width, &theme, now, highlighted));
+        if let Some(second) = &row.second {
+            let indent = 2 * row.depth.min(4) + 4;
+            lines.push(Line::from(vec![
+                Span::raw(" ".repeat(indent + 1)),
+                Span::styled(
+                    fit_second(second, width.saturating_sub(indent + 2)),
+                    Style::default().fg(theme.color(Tone::Dim)),
+                ),
+            ]));
+        }
+        if highlighted || (cursor.is_none() && row.current) {
+            selected = Some(lines.len());
+        }
+        let _ = start;
+    }
+    let height = usize::from(work.height);
+    let offset = selected.map_or(0, |end| end.saturating_sub(height));
+    frame.render_widget(
+        Paragraph::new(lines).scroll((offset.min(usize::from(u16::MAX)) as u16, 0)),
+        work,
+    );
+}
+
+fn mission_line(row: &MissionRow, width: usize, theme: &Theme, highlighted: bool) -> Line<'static> {
+    let ascii = theme.icons == crate::theme::IconSet::Ascii;
+    let marker = match (row.current, ascii) {
+        (true, false) => "●",
+        (false, false) => "·",
+        (true, true) => "*",
+        (false, true) => "-",
+    };
+    let right = row.progress.clone();
+    let room = width.saturating_sub(4 + right.width() + 2);
+    let name = truncate(&row.name, room);
+    let gap = width
+        .saturating_sub(4 + name.width() + right.width())
+        .max(1);
+    let mut spans = vec![
+        Span::raw(" "),
+        Span::styled(
+            marker,
+            Style::default().fg(theme.color(if row.current { Tone::Cyan } else { Tone::Dim })),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            name,
+            if row.current {
+                Style::default().add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            },
+        ),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(right, Style::default().fg(theme.color(Tone::Dim))),
+        Span::raw(" "),
+    ];
+    if highlighted {
+        for span in &mut spans {
+            span.style = span.style.add_modifier(Modifier::REVERSED);
+        }
+    }
+    Line::from(spans)
+}
+
+fn work_line(
+    row: &WorkRow,
+    width: usize,
+    theme: &Theme,
+    now: Instant,
+    highlighted: bool,
+) -> Line<'static> {
+    let indent = "  ".repeat(row.depth.min(4));
+    let content = width.saturating_sub(2);
+    let mut spans = vec![Span::raw(" "), Span::raw(indent.clone())];
+    let head = match row.kind {
+        RowKind::Group => {
+            let fold = theme.icons.fold(row.expanded);
+            spans.push(Span::styled(
+                format!("{fold} "),
+                Style::default().fg(theme.color(Tone::Dim)),
+            ));
+            indent.width() + 2
+        }
+        RowKind::Record(record) => {
+            let icon = theme.icons.record(record);
+            let status = row.status.unwrap_or(RowStatus::Idle);
+            spans.push(Span::styled(
+                format!("{icon} "),
+                Style::default().fg(theme.color(if record == Record::Agent {
+                    Tone::Blue
+                } else {
+                    Tone::Dim
+                })),
+            ));
+            spans.push(Span::styled(
+                format!("{} ", theme.status_glyph(status, now)),
+                Style::default().fg(theme.color(Theme::tone(status))),
+            ));
+            indent.width() + 4
+        }
+    };
+    let right = if row.right.is_empty() {
+        String::new()
+    } else {
+        format!(" {}", row.right)
+    };
+    let label = truncate(&row.label, content.saturating_sub(head + right.width()));
+    let gap = content.saturating_sub(head + label.width() + right.width());
+    let mut label_style = Style::default();
+    if row.current || row.kind == RowKind::Group {
+        label_style = label_style.add_modifier(Modifier::BOLD);
+    }
+    spans.push(Span::styled(label, label_style));
+    spans.push(Span::raw(" ".repeat(gap)));
+    spans.push(Span::styled(
+        right,
+        Style::default().fg(theme.color(Tone::Dim)),
+    ));
+    spans.push(Span::raw(" "));
+    if highlighted {
+        for span in &mut spans {
+            span.style = span.style.add_modifier(Modifier::REVERSED);
+        }
+    }
+    Line::from(spans)
+}
+
+/// `stage  model  elapsed`, shortening the model before dropping it.
+fn fit_second(text: &str, width: usize) -> String {
+    if text.width() <= width {
+        return text.into();
+    }
+    if let [stage, model, time] = text.split("  ").collect::<Vec<_>>()[..] {
+        let short = side_pane::short_model(model);
+        let candidate = format!("{stage}  {short}  {time}");
+        if candidate.width() <= width {
+            return candidate;
+        }
+        let room = width.saturating_sub(stage.width() + time.width() + 4);
+        if room >= 4 {
+            return format!("{stage}  {}  {time}", truncate(short, room));
+        }
+        let candidate = format!("{stage}  {time}");
+        if candidate.width() <= width {
+            return candidate;
+        }
+    }
+    truncate(text, width)
+}
+
+/// F1: grouped command catalog, scrolling with the selection.
 fn draw_help(frame: &mut Frame, help: &crate::commands::Completion, area: Rect) {
-    let width = usize::from(area.width.saturating_sub(4));
+    let width = usize::from(area.width.saturating_sub(6));
     let mut items = Vec::new();
     let mut selected = 0;
     let mut group = None;
@@ -243,8 +617,9 @@ fn draw_help(frame: &mut Frame, help: &crate::commands::Completion, area: Rect) 
         Block::default()
     } else {
         Block::bordered()
+            .padding(Padding::horizontal(1))
             .title(" Help · ↑↓ choose · Enter fills prompt · Esc close ")
-            .title_bottom(" F2 dashboard · F3 evidence · F4 activity · F5 pause ")
+            .title_bottom(" F2 tasks/chat  F3 evidence  F4 activity  F5 pause  F6 pane ")
     };
     frame.render_stateful_widget(
         List::new(items)
@@ -260,129 +635,13 @@ fn draw_help(frame: &mut Frame, help: &crate::commands::Completion, area: Rect) 
     );
 }
 
-fn draw_body(
-    frame: &mut Frame,
-    app: &App,
-    tasks: Option<&crate::task_control::TaskControl>,
-    body: Rect,
-) {
+/// The right pane: chat, task detail or one of the focused task views.
+fn draw_right(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: Rect, now: Instant) {
     let session = &app.sessions[app.selected];
-    let identity = tasks.and_then(|tasks| tasks.snapshot.as_ref());
-    let width = body.width;
-    let side = width >= 60;
-    let focused_review = app.models_visible
-        || app.completion.is_some()
-        || tasks.is_some_and(|tasks| {
-            tasks.visible
-                && (tasks.evidence.is_some()
-                    || tasks.planner.visible
-                    || tasks.scope_view.is_some()
-                    || tasks.activity.is_some())
-        });
-    let work_tree = tasks
-        .filter(|tasks| tasks.visible)
-        .map(|tasks| tasks.work_tree());
-    let compact_tree = !side && body.height < 7;
-    let list_size = if side {
-        if focused_review {
-            if width < 100 {
-                0
-            } else {
-                28
-            }
-        } else if work_tree.is_some() {
-            if width >= 100 {
-                40
-            } else {
-                (width * 2 / 5).clamp(26, 40)
-            }
-        } else if width >= 100 {
-            20
-        } else {
-            16
-        }
-    } else if focused_review {
-        0
-    } else if work_tree.is_some() {
-        if compact_tree {
-            1
-        } else {
-            (body.height / 3).clamp(3, 8)
-        }
-    } else if body.height >= 8 {
-        3
-    } else {
-        0
-    };
-    let panes = Layout::default()
-        .direction(if side {
-            Direction::Horizontal
-        } else {
-            Direction::Vertical
-        })
-        .constraints([Constraint::Length(list_size), Constraint::Min(1)])
-        .split(body);
-    let (items, list_title, selected): (Vec<ListItem>, String, Option<usize>) =
-        if let Some(tasks) = tasks.filter(|tasks| tasks.visible) {
-            let tree = work_tree.as_ref().unwrap();
-            let selected = tasks
-                .focused_work_node()
-                .and_then(|selected| tree.rows.iter().position(|row| row.id == selected));
-            let row_width = usize::from(panes[0].width.saturating_sub(4));
-            let items = tree
-                .rows
-                .iter()
-                .map(|row| work_row(row, identity, row_width))
-                .collect();
-            let (done, total, repairs) = identity.map(dashboard::done_total).unwrap_or_default();
-            let repairs = match repairs {
-                0 => String::new(),
-                1 => " · 1 repair".into(),
-                count => format!(" · {count} repairs"),
-            };
-            let filter = if tasks.task_query.trim().is_empty() {
-                String::new()
-            } else {
-                format!(" · {}/{} shown", tree.matched_tasks, tree.total_tasks)
-            };
-            (
-                items,
-                format!(" Mission Work · {done}/{total} done{repairs}{filter} "),
-                selected,
-            )
-        } else {
-            (
-                app.sessions
-                    .iter()
-                    .enumerate()
-                    .map(|(index, s)| ListItem::new(format!("{} {}", index + 1, s.short_status())))
-                    .collect(),
-                " Sessions ".into(),
-                Some(app.selected),
-            )
-        };
-    if panes[0].width > 0 && panes[0].height > 0 {
-        let list = List::new(items)
-            .block(if compact_tree && work_tree.is_some() {
-                Block::default()
-            } else {
-                frame_block(panes[0], list_title)
-            })
-            .highlight_style(
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            )
-            .highlight_symbol("› ");
-        frame.render_stateful_widget(
-            list,
-            panes[0],
-            &mut ListState::default().with_selected(selected),
-        );
-    }
     if tasks.is_none_or(|tasks| !tasks.visible) && !app.models_visible && app.completion.is_none() {
-        draw_transcript(frame, app, tasks, panes[1]);
+        draw_transcript(frame, app, tasks, area);
     }
+    let width = usize::from(area.width.saturating_sub(4));
     if let Some(tasks) =
         tasks.filter(|tasks| tasks.visible && !app.models_visible && app.completion.is_none())
     {
@@ -390,7 +649,7 @@ fn draw_body(
         if tasks.planner.visible {
             task_panel(
                 frame,
-                panes[1],
+                area,
                 tasks,
                 safe(&tasks.planner.preview())
                     .lines()
@@ -402,15 +661,15 @@ fn draw_body(
             );
         } else if let Some(evidence) = &tasks.evidence {
             let block = frame_block(
-                panes[1],
+                area,
                 format!(
                     " Verified run evidence · task #{} · /tasks to return ",
                     evidence.task
                 ),
             );
-            let inner = block.inner(panes[1]);
-            frame.render_widget(Clear, panes[1]);
-            frame.render_widget(block, panes[1]);
+            let inner = block.inner(area);
+            frame.render_widget(Clear, area);
+            frame.render_widget(block, area);
             let page = evidence.page(inner.width, inner.height, tasks.scroll);
             tasks.scroll_max.set(page.maximum);
             tasks.scroll_height.set(inner.height);
@@ -421,12 +680,8 @@ fn draw_body(
                 inner,
             );
         } else if let Some(query) = &tasks.activity {
-            frame.render_widget(Clear, panes[1]);
-            let mut lines = vec![
-                Line::from("Newest saved receipts first · /activity query · /activity #ID"),
-                Line::from("/tasks returns to details · PgUp/PgDn scroll · /refresh reloads"),
-                Line::default(),
-            ];
+            frame.render_widget(Clear, area);
+            let mut lines = vec![];
             if let Some(snapshot) = &tasks.snapshot {
                 let entries = crate::activity::entries(snapshot, query);
                 if entries.is_empty() {
@@ -455,7 +710,7 @@ fn draw_body(
             }
             task_panel(
                 frame,
-                panes[1],
+                area,
                 tasks,
                 lines,
                 format!(" Saved task activity · {} ", safe(query)),
@@ -464,39 +719,40 @@ fn draw_body(
         } else if let Some(report) = &tasks.autopilot_report {
             task_panel(
                 frame,
-                panes[1],
+                area,
                 tasks,
                 safe(report)
                     .lines()
                     .map(|s| Line::from(s.to_owned()))
                     .collect(),
-                " Autopilot · /tasks returns to task details ".into(),
+                " Autopilot ".into(),
                 false,
             );
         } else if let Some(scope) = &tasks.scope_view {
             task_panel(
                 frame,
-                panes[1],
+                area,
                 tasks,
                 safe(&scope.text())
                     .lines()
                     .map(|s| Line::from(s.to_owned()))
                     .collect(),
-                "Shared Understanding · project scope".into(),
+                " Shared Understanding · project scope ".into(),
                 false,
             );
         } else {
-            let tree = work_tree.as_ref().unwrap();
+            let tree = tasks.work_tree();
             let focused = tasks
                 .focused_work_node()
                 .and_then(|id| tree.rows.iter().find(|row| row.id == id));
-            let (lines, title, live, pinned) = work_inspector(tasks, tree, focused);
-            task_panel_pinned(frame, panes[1], tasks, lines, title, live, pinned);
+            let (lines, title, live, pinned) =
+                work_inspector(tasks, &tree, focused, width, &app.pane.theme, now);
+            task_panel_pinned(frame, area, tasks, lines, title, live, pinned);
         }
     }
 
     if app.models_visible {
-        frame.render_widget(Clear, panes[1]);
+        frame.render_widget(Clear, area);
         let mut lines = vec![
             Line::from(safe(&app.models_notice)),
             Line::from("Workers: /assign ID MODEL · fresh approval required"),
@@ -514,10 +770,10 @@ fn draw_body(
                 .wrap(Wrap { trim: false })
                 .scroll((app.models_scroll, 0))
                 .block(frame_block(
-                    panes[1],
+                    area,
                     " Models · /model NAME · Esc close ".into(),
                 )),
-            panes[1],
+            area,
         );
     }
     if let Some(completion) = &app.completion {
@@ -526,11 +782,11 @@ fn draw_body(
             .iter()
             .map(|choice| ListItem::new(format!("{}  {}", choice.name, choice.description)))
             .collect();
-        frame.render_widget(ratatui::widgets::Clear, panes[1]);
+        frame.render_widget(Clear, area);
         frame.render_stateful_widget(
             List::new(items)
                 .block(frame_block(
-                    panes[1],
+                    area,
                     " Complete · ↑↓ choose · Enter fills draft · Esc close ".into(),
                 ))
                 .highlight_symbol("› ")
@@ -539,18 +795,13 @@ fn draw_body(
                         .fg(Color::Cyan)
                         .add_modifier(Modifier::BOLD),
                 ),
-            panes[1],
+            area,
             &mut ListState::default().with_selected(Some(completion.selected)),
         );
     }
 }
 
-fn draw_transcript(
-    frame: &mut Frame,
-    app: &App,
-    tasks: Option<&crate::task_control::TaskControl>,
-    area: Rect,
-) {
+fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: Rect) {
     let session = &app.sessions[app.selected];
     let identity = tasks.and_then(|tasks| tasks.snapshot.as_ref());
     let mut lines = Vec::new();
@@ -568,10 +819,8 @@ fn draw_transcript(
         lines.push(Line::from(
             "Type /go GOAL and autopilot plans, runs and reviews it.",
         ));
-        lines.push(Line::from(
-            "Or chat with your local model · F1 help · F2 dashboard.",
-        ));
-        lines.push(Line::styled("Ctrl+N opens another concurrent chat.", dim()));
+        lines.push(Line::from("Or chat with your local model."));
+        lines.push(Line::default());
     }
     let mut receipts = session.task_receipts().iter().peekable();
     // A Wayfinder preparation can finish after a later command was admitted.
@@ -621,7 +870,7 @@ fn draw_transcript(
         };
         let start = lines.len();
         let (heading, color) = if message.role == "user" {
-            ("You".into(), Color::Cyan)
+            ("You".into(), Color::DarkGray)
         } else {
             response_heading(
                 session.source(index),
@@ -629,10 +878,13 @@ fn draw_transcript(
                 wayfinder_requests.get(&index.saturating_sub(1)).copied(),
             )
         };
-        lines.push(Line::styled(
-            heading,
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ));
+        // Speaker labels are quiet; only an unverified claim keeps its warning colour.
+        let color = if color == Color::Green {
+            Color::DarkGray
+        } else {
+            color
+        };
+        lines.push(Line::styled(heading, Style::default().fg(color)));
         for line in safe(&message.content).lines() {
             lines.push(Line::from(line.to_owned()));
         }
@@ -657,7 +909,7 @@ fn draw_transcript(
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let metadata = timing_line(session)
-        .map(|text| vec![Line::styled(text, dim())])
+        .map(|text| vec![Line::styled(text, dim()), Line::default()])
         .unwrap_or_default();
     let metadata = Paragraph::new(metadata).wrap(Wrap { trim: false });
     let metadata_height = metadata
@@ -720,341 +972,387 @@ fn timing_line(session: &crate::model::Session) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
-/// One line per row: groups show their name and size; tasks show glyph, id and title.
-fn work_row(
-    row: &crate::mission_work::Row,
-    snapshot: Option<&crate::tasks::Snapshot>,
-    width: usize,
-) -> ListItem<'static> {
-    use crate::mission_work::NodeId;
-    let indent = "  ".repeat(row.depth.min(3));
-    let Some(id) = row.task else {
-        let marker = if row.expanded { "▾" } else { "▸" };
-        let name = match row.id {
-            // The plan's receipt revision stays in F4; show its request instead.
-            NodeId::Plan(_) => row
-                .label
-                .split_once(" · ")
-                .map_or(row.label.as_str(), |(_, prompt)| prompt)
-                .to_owned(),
-            _ => "Manual tasks".into(),
+/// Greedy word wrap keeping runs of spaces inside a line; words longer than
+/// the width are split. Continuation lines never start with spaces.
+fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    let mut used = 0;
+    for word in text.trim().split(' ') {
+        if used > 0 && word.is_empty() {
+            if used < width {
+                current.push(' ');
+                used += 1;
+            }
+            continue;
+        }
+        let size = word.width();
+        if used > 0 && used + 1 + size > width {
+            lines.push(std::mem::take(&mut current));
+            used = 0;
+        }
+        if size > width {
+            for character in word.chars() {
+                let cell = unicode_width::UnicodeWidthChar::width(character).unwrap_or(0);
+                if used + cell > width {
+                    lines.push(std::mem::take(&mut current));
+                    used = 0;
+                }
+                current.push(character);
+                used += cell;
+            }
+            continue;
+        }
+        if used > 0 {
+            current.push(' ');
+            used += 1;
+        }
+        current.push_str(word);
+        used += size;
+    }
+    if !current.is_empty() || lines.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
+/// `Label    value`: dim label column, value wrapped with a hanging indent.
+fn labeled(label: &str, value: &str, width: usize, style: Style) -> Vec<Line<'static>> {
+    let room = width.saturating_sub(LABEL).max(12);
+    let mut lines = Vec::new();
+    for chunk in safe(value).lines().flat_map(|line| wrap_words(line, room)) {
+        let head = if lines.is_empty() {
+            format!("{label:<LABEL$}")
+        } else {
+            " ".repeat(LABEL)
         };
-        let count = format!(" · {}", row.task_count);
-        let name = truncate(
-            &single_line(&name),
-            width.saturating_sub(indent.width() + 2 + count.width()),
-        );
-        return ListItem::new(Line::styled(
-            format!("{indent}{marker} {name}{count}"),
-            Style::default().add_modifier(Modifier::BOLD),
-        ));
-    };
-    let task = snapshot.and_then(|state| state.tasks.iter().find(|task| task.id == id));
-    let (glyph, color) = match (snapshot, task) {
-        (Some(snapshot), Some(task)) => dashboard::glyph(snapshot, task),
-        _ => ("?", Color::Gray),
-    };
-    let repair = if matches!(row.parent, Some(NodeId::Task(_))) {
-        "↳ "
-    } else {
-        ""
-    };
-    let prefix = format!("{indent}{repair}");
-    let head = format!("{glyph} #{id} ");
-    let title = truncate(
-        &single_line(&row.label),
-        width.saturating_sub(prefix.width() + head.width()),
-    );
-    ListItem::new(Line::from(vec![
-        Span::raw(prefix),
-        Span::styled(head, Style::default().fg(color)),
-        Span::raw(title),
-    ]))
+        lines.push(Line::from(vec![
+            Span::styled(head, dim()),
+            Span::styled(chunk, style),
+        ]));
+    }
+    if lines.is_empty() {
+        lines.push(Line::styled(format!("{label:<LABEL$}"), dim()));
+    }
+    lines
 }
 
-fn dependency_ids(ids: &[u64]) -> String {
-    ids.iter()
-        .map(|id| format!("#{id}"))
+/// Readiness without embedded command instructions, or nothing when it only
+/// restates the status line.
+fn plain_readiness(text: &str) -> String {
+    const RESTATED: [&str; 8] = [
+        "Failed;",
+        "Rejected;",
+        "Cancelled;",
+        "Check passed;",
+        "Held for human review;",
+        "Accepted result",
+        "Repair requested;",
+        "Run claimed",
+    ];
+    if RESTATED.iter().any(|prefix| text.starts_with(prefix)) {
+        return String::new();
+    }
+    text.split(" · ")
+        .filter(|part| !part.trim_start().starts_with('/'))
+        .map(|part| {
+            part.split_once("; /")
+                .map_or(part, |(before, _)| before)
+                .trim()
+        })
+        .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
-        .join(", ")
+        .join(" · ")
 }
 
-fn section(text: &str) -> Line<'static> {
+fn status_word(snapshot: &crate::tasks::Snapshot, task: &crate::tasks::Task) -> &'static str {
+    use crate::tasks::TaskStatus;
+    let decided = |outcome| {
+        snapshot
+            .decision_for_task(task.id)
+            .is_some_and(|decision| decision.outcome == outcome)
+    };
+    match task.status {
+        TaskStatus::Proposed => "Needs approval",
+        TaskStatus::Approved => "Approved",
+        TaskStatus::Cancelled => "Cancelled",
+        TaskStatus::Running => "Running",
+        TaskStatus::NeedsHumanReview => "Held for human review",
+        TaskStatus::ReviewReady => "Check passed · needs review",
+        TaskStatus::Accepted if decided(crate::assessment::Outcome::ApprovedWithLimitations) => {
+            "Accepted with limitations"
+        }
+        TaskStatus::Rejected if decided(crate::assessment::Outcome::NeedsRepair) => "Needs repair",
+        TaskStatus::Accepted => "Accepted",
+        TaskStatus::Failed => "Failed",
+        TaskStatus::Rejected => "Rejected",
+    }
+}
+
+/// The command a user needs next, only when the task waits for a decision.
+fn next_action(snapshot: &crate::tasks::Snapshot, task: &crate::tasks::Task) -> Option<String> {
+    use crate::tasks::TaskStatus;
+    let id = task.id;
+    match task.status {
+        TaskStatus::Proposed if task.policy.is_none() => Some(format!("/permit {id} JSON")),
+        TaskStatus::Proposed => Some(format!("/approve {id}")),
+        TaskStatus::ReviewReady => Some(format!("/accept {id}{GAP}/reject {id}")),
+        TaskStatus::NeedsHumanReview => Some(format!("/review {id} JSON")),
+        TaskStatus::Rejected | TaskStatus::Failed if snapshot.architecture_required(id) => {
+            Some(format!("/architect-revise {id}"))
+        }
+        TaskStatus::Rejected | TaskStatus::Failed
+            if snapshot.resolved_by(id).is_none()
+                && !snapshot.architecture_obsolete(id)
+                && !snapshot
+                    .tasks
+                    .iter()
+                    .any(|child| child.repair_of == Some(id)) =>
+        {
+            Some(format!("/repair {id} REASON"))
+        }
+        TaskStatus::Accepted
+            if task.repair_of.is_some() && snapshot.resolution_for_family(id).is_none() =>
+        {
+            Some(format!("/resolve-repair {id}"))
+        }
+        _ => None,
+    }
+}
+
+fn heading(text: &str) -> Line<'static> {
     Line::styled(
-        format!("── {text} ──"),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
+        text.to_owned(),
+        Style::default().add_modifier(Modifier::BOLD),
     )
 }
 
-/// Selected task detail: status and next action first; live output while a
-/// worker runs, otherwise the verified outcome, diff and check result.
-/// Receipt identifiers and revisions stay in the F3/F4 views.
+/// Right pane detail. Task: glyph, id and title; status line; labeled facts;
+/// result and diff; live output while a worker runs. Group: goal, progress and
+/// tasks. Keys live in the footer and F1; receipts stay in F3/F4.
 fn work_inspector(
-    tasks: &crate::task_control::TaskControl,
+    tasks: &TaskControl,
     tree: &crate::mission_work::Tree,
     focused: Option<&crate::mission_work::Row>,
+    width: usize,
+    theme: &Theme,
+    now: Instant,
 ) -> (Vec<Line<'static>>, String, bool, usize) {
+    use crate::mission_work::NodeId;
     use crate::tasks::TaskStatus;
     let Some(snapshot) = tasks.snapshot.as_ref() else {
         return (
             vec![Line::from("Task state unavailable; /refresh to retry")],
-            " Mission Work · state unavailable ".into(),
+            " Tasks ".into(),
             false,
             0,
         );
     };
-    let counts = format!(
-        "Showing {} / {} tasks · {} local workers · {} start errors",
-        tree.matched_tasks,
-        tree.total_tasks,
-        tasks.workers.len(),
-        tasks.dispatch.failures.len()
-    );
-    let filter = format!(
-        "Filter: {} · /tasks QUERY or #ID",
-        if tasks.task_query.is_empty() {
-            "all".into()
-        } else {
-            single_line(&tasks.task_query)
-        }
-    );
+    let normal = Style::default();
+    let mut lines = Vec::new();
+    if !tasks.task_query.trim().is_empty() {
+        lines.extend(labeled(
+            "Filter",
+            &format!(
+                "{}{GAP}{}/{} tasks",
+                single_line(&tasks.task_query),
+                tree.matched_tasks,
+                tree.total_tasks
+            ),
+            width,
+            normal,
+        ));
+        lines.push(Line::default());
+    }
     let Some(row) = focused else {
-        return (
-            vec![
-                Line::from(if snapshot.tasks.is_empty() {
-                    "No tasks proposed · /go GOAL or /task to propose work"
-                } else if tree.rows.is_empty() {
-                    "No matching tasks · /tasks clears the filter"
-                } else {
-                    "Select a task or group with ↑↓"
-                }),
-                Line::from(counts),
-                Line::from(filter),
-            ],
-            " Mission Work ".into(),
-            false,
-            0,
-        );
+        if snapshot.tasks.is_empty() {
+            lines.push(Line::from("No tasks proposed yet."));
+            lines.push(Line::styled("/go GOAL plans and runs work.", dim()));
+        } else if tree.rows.is_empty() {
+            lines.push(Line::from("No matching tasks."));
+        } else {
+            lines.push(Line::from("Nothing selected."));
+        }
+        return (lines, " Tasks ".into(), false, 0);
+    };
+    let task_glyph = |task: &crate::tasks::Task| {
+        let status = side_pane::task_status(snapshot, task, tasks);
+        Span::styled(
+            theme.status_glyph(status, now),
+            Style::default().fg(theme.color(Theme::tone(status))),
+        )
     };
     let Some(task) = row
         .task
         .and_then(|id| snapshot.tasks.iter().find(|task| task.id == id))
     else {
-        let name = row
-            .label
-            .split_once(" · ")
-            .filter(|_| matches!(row.id, crate::mission_work::NodeId::Plan(_)))
-            .map_or(row.label.as_str(), |(_, prompt)| prompt);
-        return (
-            vec![
-                Line::styled(
-                    format!("Work group · {}", single_line(name)),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Line::from(format!(
-                    "{} tasks in this group, including repair descendants",
-                    row.task_count
-                )),
-                Line::from("Select a task with ↑↓ to inspect evidence or use task actions."),
-                Line::from("This group has no task action target."),
-                Line::from("Alt+← collapses · Alt+→ expands · PgUp/PgDn scrolls details"),
-                Line::from(counts),
-                Line::from(filter),
-            ],
-            " Work group ".into(),
-            false,
-            0,
-        );
-    };
-    let status = match task.status {
-        TaskStatus::Proposed => "Needs approval",
-        TaskStatus::Approved => "Approved · /run after explicit policy",
-        TaskStatus::Cancelled => "Cancelled",
-        TaskStatus::Running => "Running",
-        TaskStatus::NeedsHumanReview => "Held for human review · /review to resolve",
-        TaskStatus::ReviewReady => "Check passed · needs review",
-        TaskStatus::Accepted
-            if snapshot.decision_for_task(task.id).is_some_and(|decision| {
-                decision.outcome == crate::assessment::Outcome::ApprovedWithLimitations
-            }) =>
-        {
-            "Accepted with limitations · inspect recorded review"
+        let goal = match row.id {
+            NodeId::Plan(_) => row
+                .label
+                .split_once(" · ")
+                .map_or(row.label.as_str(), |(_, goal)| goal),
+            _ => "Manual tasks",
+        };
+        for chunk in wrap_words(&single_line(goal), width) {
+            lines.push(Line::styled(
+                chunk,
+                Style::default().add_modifier(Modifier::BOLD),
+            ));
         }
-        TaskStatus::Rejected
-            if snapshot.decision_for_task(task.id).is_some_and(|decision| {
-                decision.outcome == crate::assessment::Outcome::NeedsRepair
-            }) =>
-        {
-            "Needs repair · inspect linked repair or propose one with /repair"
-        }
-        TaskStatus::Accepted => "Accepted · changes retained in worktree",
-        TaskStatus::Failed => "Failed · inspect retained evidence",
-        TaskStatus::Rejected => "Rejected · propose a repair task",
-    };
-    let (glyph, color) = dashboard::glyph(snapshot, task);
-    let live = tasks.worker_live(task.id);
-    let mut lines = vec![
-        Line::styled(
-            format!("{glyph} #{} · {status}", task.id),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
-        Line::from(safe(&task.title)),
-        Line::styled(format!("Model: {}", single_line(&task.model)), dim()),
-    ];
-    if !row.detail.is_empty() {
-        lines.push(Line::styled(
-            safe(&row.detail),
-            Style::default().fg(Color::Yellow),
-        ));
-    }
-    if let Some(parent) = task.repair_of {
-        lines.push(Line::from(format!("Repair of #{parent}")));
-    }
-    if !task.dependencies.is_empty() {
-        lines.push(Line::from(format!(
-            "Depends on {}",
-            dependency_ids(&task.dependencies)
-        )));
-    }
-    if let Some(error) = tasks.dispatch.failures.get(&task.id) {
-        lines.push(Line::styled(
-            format!(
-                "Start paused: {} · /run {} retries explicitly",
-                safe(error),
-                task.id
-            ),
-            Style::default().fg(Color::Red),
-        ));
-    }
-    let actions = match task.status {
-        TaskStatus::Proposed => format!(
-            "/permit {} JSON · /approve {} · /cancel-task {}",
-            task.id, task.id, task.id
-        ),
-        TaskStatus::Approved => format!("/run {} · /cancel-task {}", task.id, task.id),
-        TaskStatus::Running => format!("/cancel-task {}", task.id),
-        TaskStatus::ReviewReady => format!(
-            "/evidence {} · /accept {} · /reject {}",
-            task.id, task.id, task.id
-        ),
-        TaskStatus::NeedsHumanReview => format!("/review {} JSON", task.id),
-        TaskStatus::Rejected | TaskStatus::Failed if snapshot.architecture_required(task.id) => {
-            format!("/architect-revise {}", task.id)
-        }
-        TaskStatus::Rejected | TaskStatus::Failed
-            if snapshot.resolved_by(task.id).is_some()
-                || snapshot.architecture_obsolete(task.id) =>
-        {
-            format!("/evidence {}", task.id)
-        }
-        TaskStatus::Rejected | TaskStatus::Failed => snapshot
-            .tasks
-            .iter()
-            .rev()
-            .find(|child| child.repair_of == Some(task.id))
-            .map(|child| format!("/tasks #{} to inspect repair", child.id))
-            .unwrap_or_else(|| format!("/evidence {} · /repair {} REASON", task.id, task.id)),
-        TaskStatus::Accepted
-            if task.repair_of.is_some() && snapshot.resolution_for_family(task.id).is_none() =>
-        {
-            format!("/resolve-repair {}", task.id)
-        }
-        TaskStatus::Accepted => format!("/evidence {}", task.id),
-        TaskStatus::Cancelled => "No execution action · inspect retained history".into(),
-    };
-    lines.push(Line::styled(format!("Task actions · {actions}"), dim()));
-    lines.push(Line::default());
-    let is_live = live.is_some();
-    let mut live_parts = None;
-    if let Some(live) = live {
-        let stage = Line::styled(
-            format!(
-                "{}Live · {}",
-                if live.cancelling {
-                    "Cancellation requested · "
-                } else {
-                    ""
-                },
-                safe(&live.stage)
-            ),
-            Style::default().fg(Color::Yellow),
-        );
-        let mut output_lines = Vec::new();
-        // FILE blocks read as code: `▸ path` headings, marker lines hidden.
-        let model_output = crate::worker::display_output(&live.model_output);
-        for (label, output) in [
-            ("Model output", &model_output),
-            ("Check stdout", &live.stdout),
-            ("Check stderr", &live.stderr),
-        ] {
-            if output.trim().is_empty() {
-                continue;
-            }
-            output_lines.push(section(label));
-            let text = safe(output);
-            let all: Vec<&str> = text.lines().collect();
-            // The panel follows the tail; keep a bounded window of recent lines.
-            output_lines.extend(
-                all[all.len().saturating_sub(400)..]
-                    .iter()
-                    .map(|line| Line::from((*line).to_owned())),
-            );
-        }
-        live_parts = Some((stage, output_lines));
-    } else if task.status == TaskStatus::Running {
-        let observation = tasks
-            .run_observations
-            .get(&task.id)
-            .map(|text| safe(text))
-            .unwrap_or_else(|| {
-                if tasks.workers.contains_key(&task.id) {
-                    "Local worker registered · current activity not recorded".into()
-                } else {
-                    "Current observation unavailable · recorded run does not prove a live worker"
-                        .into()
-                }
-            });
-        lines.push(Line::styled(
-            observation,
-            Style::default().fg(Color::Yellow),
-        ));
-    } else if let Some(run) = &task.run {
-        match tasks.outcome(task).as_deref() {
-            Some(Ok(outcome)) => lines.extend(outcome.iter().cloned()),
-            _ => lines.push(Line::from(format!(
-                "Last run · {}",
-                single_line(&run.detail)
-            ))),
-        }
-    }
-    if !is_live {
         lines.push(Line::default());
-        lines.push(Line::styled(
-            if task
-                .run
-                .as_ref()
-                .is_some_and(|run| run.evidence_sha256.is_some())
-            {
-                format!(
-                    "Evidence recorded for this run · F3 or /evidence {} verifies and opens it",
-                    task.id
+        // Every member, regardless of folding or filtering.
+        let full = crate::mission_work::project(
+            snapshot,
+            &tasks.scope_status,
+            "",
+            &std::collections::BTreeSet::new(),
+        );
+        let members: Vec<_> = full
+            .rows
+            .iter()
+            .skip_while(|member| member.id != row.id)
+            .skip(1)
+            .take_while(|member| member.depth > 0)
+            .filter_map(|member| {
+                let task = snapshot
+                    .tasks
+                    .iter()
+                    .find(|task| Some(task.id) == member.task)?;
+                Some((member.depth, task))
+            })
+            .collect();
+        let originals: Vec<_> = members
+            .iter()
+            .filter(|(_, task)| task.repair_of.is_none())
+            .collect();
+        let done = originals
+            .iter()
+            .filter(|(_, task)| {
+                task.status == TaskStatus::Accepted
+                    || snapshot.resolution_for_family(task.id).is_some()
+            })
+            .count();
+        let repairs = members.len() - originals.len();
+        let mut progress = format!("{done}/{} done", originals.len());
+        if repairs > 0 {
+            progress.push_str(&format!(
+                "{GAP}{repairs} repair{}",
+                if repairs == 1 { "" } else { "s" }
+            ));
+        }
+        lines.push(Line::from(progress));
+        lines.push(Line::default());
+        for (depth, task) in members {
+            lines.push(Line::from(vec![
+                Span::raw("  ".repeat(depth.saturating_sub(1).min(4))),
+                task_glyph(task),
+                Span::raw(format!(" #{} {}", task.id, single_line(&task.title))),
+            ]));
+        }
+        return (lines, " Group ".into(), false, 0);
+    };
+    let status = side_pane::task_status(snapshot, task, tasks);
+    let color = theme.color(Theme::tone(status));
+    let head = format!("{} #{}  ", theme.status_glyph(status, now), task.id);
+    for (index, chunk) in wrap_words(
+        &single_line(&task.title),
+        width.saturating_sub(head.width()),
+    )
+    .into_iter()
+    .enumerate()
+    {
+        lines.push(Line::from(vec![
+            if index == 0 {
+                Span::styled(
+                    head.clone(),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
                 )
             } else {
-                "Evidence: no completed run evidence recorded".into()
+                Span::raw(" ".repeat(head.width()))
             },
-            dim(),
+            Span::styled(chunk, Style::default().add_modifier(Modifier::BOLD)),
+        ]));
+    }
+    let stage = tasks.worker_stage(task.id);
+    let mut facts = format!(" · {}", single_line(&task.model));
+    if let Some((_, elapsed, _)) = stage {
+        facts.push_str(&format!(" · {}", side_pane::elapsed(elapsed)));
+    }
+    lines.push(Line::from(vec![
+        Span::styled(status_word(snapshot, task), Style::default().fg(color)),
+        Span::styled(facts, dim()),
+    ]));
+    lines.push(Line::default());
+    let live = tasks.worker_live(task.id);
+    let amber = Style::default().fg(theme.color(Tone::Amber));
+    if let (Some(live), Some((stage, _, queued))) = (&live, stage) {
+        let word = if queued {
+            "queued"
+        } else {
+            side_pane::stage_word(stage)
+        };
+        let mut text = format!("{word}{GAP}{}", safe(&live.stage));
+        if live.cancelling {
+            text = format!("cancellation requested{GAP}{text}");
+        }
+        lines.extend(labeled("Stage", &text, width, amber));
+    }
+    let pinned = if live.is_some() { lines.len() } else { 0 };
+    if let Some(policy) = &task.policy {
+        lines.extend(labeled("Files", &policy.files.join(", "), width, normal));
+        lines.extend(labeled("Check", &policy.check.join(" "), width, normal));
+    }
+    if !task.dependencies.is_empty() {
+        let text = task
+            .dependencies
+            .iter()
+            .map(|id| match snapshot.dependency_source(*id) {
+                Ok(source) if source.id != *id => format!("#{id} via repair #{}", source.id),
+                _ => format!("#{id}"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.extend(labeled("Depends", &text, width, normal));
+    }
+    if let Some(parent) = task.repair_of {
+        lines.extend(labeled("Repair", &format!("of #{parent}"), width, normal));
+    }
+    if !matches!(task.status, TaskStatus::Running)
+        && (task.status != TaskStatus::Accepted || task.repair_of.is_some())
+    {
+        let text = plain_readiness(&tasks.scope_status.readiness(snapshot, task));
+        if !text.is_empty() {
+            lines.extend(labeled("State", &text, width, amber));
+        }
+    }
+    if let Some(error) = tasks.dispatch.failures.get(&task.id) {
+        lines.extend(labeled(
+            "Error",
+            &format!("start paused: {}", single_line(error)),
+            width,
+            Style::default().fg(theme.color(Tone::Red)),
         ));
     }
-    if let Some(policy) = &task.policy {
-        lines.push(Line::styled(
-            safe(&format!(
-                "Files: {} · check: {}",
-                policy.files.join(", "),
-                policy.check.join(" ")
-            )),
-            dim(),
+    // A run blocker (such as pending scope) names its own command first.
+    let mut actions: Vec<String> = tasks
+        .scope_status
+        .run_blocker(snapshot, task)
+        .map(|blocker| {
+            blocker
+                .split(" · ")
+                .filter(|part| part.trim_start().starts_with('/'))
+                .map(|part| part.trim().to_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    actions.extend(next_action(snapshot, task));
+    if !actions.is_empty() {
+        lines.extend(labeled(
+            "Next",
+            &actions.join(GAP),
+            width,
+            Style::default().fg(theme.color(Tone::Cyan)),
         ));
     }
     if let Some(name) =
@@ -1067,39 +1365,95 @@ fn work_inspector(
                 _ => None,
             })
     {
-        lines.push(Line::from(format!("Review branch: {}", safe(name))));
+        lines.extend(labeled("Branch", name, width, normal));
     }
     if let Some(summary) = snapshot.review_summary_for_task(task.id) {
-        lines.extend(summary.lines().map(|line| Line::from(safe(line))));
+        lines.extend(labeled("Review", &summary, width, normal));
     }
-    let criteria = snapshot.acceptance_for_task(task.id);
-    if criteria.is_empty() {
-        lines.push(Line::styled("Acceptance criteria: not recorded", dim()));
-    } else {
-        lines.push(Line::from(
-            "Acceptance criteria · review each before accepting",
+    for (index, item) in snapshot.acceptance_for_task(task.id).iter().enumerate() {
+        lines.extend(labeled(
+            if index == 0 { "Criteria" } else { "" },
+            &format!("{}. {}", index + 1, single_line(item)),
+            width,
+            normal,
         ));
-        lines.extend(
-            criteria
-                .iter()
-                .enumerate()
-                .map(|(index, item)| Line::from(format!("{}. {}", index + 1, safe(item)))),
+    }
+    if live.is_none() {
+        if task.status == TaskStatus::Running {
+            let observation = tasks
+                .run_observations
+                .get(&task.id)
+                .map(|text| safe(text))
+                .unwrap_or_else(|| {
+                    if tasks.workers.contains_key(&task.id) {
+                        "Local worker registered · current activity not recorded".into()
+                    } else {
+                        "Current observation unavailable · recorded run does not prove a live worker"
+                            .into()
+                    }
+                });
+            lines.push(Line::default());
+            lines.extend(labeled("Stage", &observation, width, amber));
+        } else if let Some(run) = &task.run {
+            lines.push(Line::default());
+            match tasks.outcome(task).as_deref() {
+                Some(Ok(outcome)) => {
+                    let mut outcome = outcome.iter();
+                    if let Some(first) = outcome.next() {
+                        let text: String = first
+                            .spans
+                            .iter()
+                            .map(|span| span.content.as_ref())
+                            .collect();
+                        let text = text
+                            .trim_start_matches(['✓', '✗', '–', '‖', ' '])
+                            .to_owned();
+                        lines.extend(labeled("Result", &text, width, first.style));
+                    }
+                    lines.extend(outcome.cloned());
+                }
+                _ => lines.extend(labeled("Result", &single_line(&run.detail), width, normal)),
+            }
+            if run.evidence_sha256.is_some() {
+                lines.push(Line::default());
+                lines.extend(labeled("Evidence", "recorded", width, dim()));
+            }
+        }
+    }
+    if let Some(live) = live {
+        // FILE blocks read as code: `▸ path` headings, marker lines hidden.
+        let model_output = crate::worker::display_output(&live.model_output);
+        for (label, output) in [
+            ("Model output", &model_output),
+            ("Check stdout", &live.stdout),
+            ("Check stderr", &live.stderr),
+        ] {
+            if output.trim().is_empty() {
+                continue;
+            }
+            lines.push(Line::default());
+            lines.push(heading(label));
+            let text = safe(output);
+            let all: Vec<&str> = text.lines().collect();
+            // The panel follows the tail; keep a bounded window of recent lines.
+            lines.extend(
+                all[all.len().saturating_sub(400)..]
+                    .iter()
+                    .map(|line| Line::from((*line).to_owned())),
+            );
+        }
+        return (
+            lines,
+            format!(" Task #{} · {} ", task.id, dashboard::state_word(task)),
+            true,
+            pinned,
         );
     }
-    // Live: status, title and stage stay pinned above the streaming output tail.
-    let pinned = match live_parts {
-        Some((stage, output)) => {
-            lines.insert(2, stage);
-            lines.extend(output);
-            3
-        }
-        None => 0,
-    };
     (
         lines,
         format!(" Task #{} · {} ", task.id, dashboard::state_word(task)),
-        is_live,
-        pinned,
+        false,
+        0,
     )
 }
 

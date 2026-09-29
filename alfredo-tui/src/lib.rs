@@ -83,3 +83,7 @@ pub mod qualification;
 pub mod qualification_oracle;
 
 pub mod plan_lint;
+
+pub mod side_pane;
+
+pub mod theme;

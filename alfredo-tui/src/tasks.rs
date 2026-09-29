@@ -2016,6 +2016,11 @@ impl TaskStore {
         })
     }
 
+    /// This mission's state directory path, without locking or creating it.
+    pub fn state_directory(&self) -> &Path {
+        &self.root
+    }
+
     pub fn conversation_directory(&self) -> Result<PathBuf> {
         let _lock = self.lock()?;
         Ok(self.root.clone())

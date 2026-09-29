@@ -59,6 +59,7 @@ struct WorkTreeKey {
     scope_label: String,
     query: String,
     collapsed: BTreeSet<NodeId>,
+    expanded: BTreeSet<NodeId>,
 }
 
 pub struct TaskControl {
@@ -100,6 +101,8 @@ pub struct TaskControl {
     selected_task: Option<u64>,
     focused_work_node: Option<NodeId>,
     collapsed_work_nodes: BTreeSet<NodeId>,
+    /// Groups the user opened; completed groups otherwise start collapsed.
+    expanded_work_nodes: BTreeSet<NodeId>,
     work_tree_cache: std::cell::RefCell<Option<(WorkTreeKey, Arc<Tree>)>>,
     pending_evidence: Option<u64>,
     pub task_query: String,
@@ -179,6 +182,7 @@ impl TaskControl {
             selected_task: None,
             focused_work_node: None,
             collapsed_work_nodes: BTreeSet::new(),
+            expanded_work_nodes: BTreeSet::new(),
             work_tree_cache: Default::default(),
             pending_evidence: None,
             task_query: String::new(),
@@ -665,6 +669,7 @@ impl TaskControl {
         self.selected_task = view.selected;
         self.focused_work_node = view.selected.map(NodeId::Task);
         self.collapsed_work_nodes.clear();
+        self.expanded_work_nodes.clear();
         self.pending_evidence = None;
         self.task_query = view.query;
         self.activity = None;
@@ -694,6 +699,7 @@ impl TaskControl {
             scope_label: self.scope_status.label.clone(),
             query: self.task_query.clone(),
             collapsed: self.collapsed_work_nodes.clone(),
+            expanded: self.expanded_work_nodes.clone(),
         };
         if let Some((previous, tree)) = self.work_tree_cache.borrow().as_ref() {
             if *previous == key {
@@ -707,11 +713,12 @@ impl TaskControl {
                 matched_tasks: 0,
             },
             |snapshot| {
-                crate::mission_work::project(
+                crate::mission_work::project_with(
                     snapshot,
                     &self.scope_status,
                     &self.task_query,
                     &self.collapsed_work_nodes,
+                    Some(&self.expanded_work_nodes),
                 )
             },
         ));
@@ -767,6 +774,7 @@ impl TaskControl {
             .and_then(|row| row.parent);
         while let Some(node) = parent {
             self.collapsed_work_nodes.remove(&node);
+            self.expanded_work_nodes.insert(node);
             parent = tree
                 .rows
                 .iter()
@@ -791,6 +799,7 @@ impl TaskControl {
         if row.expandable && !row.expanded {
             self.remember_initial_work_focus();
             self.collapsed_work_nodes.remove(&focused);
+            self.expanded_work_nodes.insert(focused);
             self.scroll = 0;
             return true;
         }
@@ -817,6 +826,7 @@ impl TaskControl {
         if row.expandable && row.expanded && self.task_query.trim().is_empty() {
             self.remember_initial_work_focus();
             self.collapsed_work_nodes.insert(focused);
+            self.expanded_work_nodes.remove(&focused);
             self.scroll = 0;
             return true;
         }
@@ -868,6 +878,26 @@ impl TaskControl {
             (None, false) => tree.rows.len() - 1,
         };
         self.focus_work_node(tree.rows[next].id);
+    }
+
+    /// Focus a visible work node chosen by the user (side pane cursor or Enter).
+    pub fn focus_node(&mut self, node: NodeId) {
+        if self.pending || !self.work_tree().rows.iter().any(|row| row.id == node) {
+            return;
+        }
+        self.manual_selection = Some(std::time::Instant::now());
+        self.focus_work_node(node);
+    }
+
+    /// Live worker stage and elapsed time without copying streamed output.
+    /// The flag is true while the worker waits for shared model capacity.
+    pub fn worker_stage(&self, task: u64) -> Option<(&'static str, std::time::Duration, bool)> {
+        let progress = self.progress.get(&task)?.borrow();
+        Some((
+            progress.stage,
+            progress.started.elapsed(),
+            progress.queue.is_some(),
+        ))
     }
 
     /// While autopilot is active, focus the running task unless the user moved

@@ -262,7 +262,8 @@ fn task_panel_pages_reach_every_marker_in_both_directions_after_resize() {
             vec![
                 "Selected task".into(),
                 "file-11.rs".into(),
-                "Acceptance criteria".into(),
+                // Last detail row; empty criteria are no longer listed.
+                "/approve 2".into(),
             ],
         ),
     ] {

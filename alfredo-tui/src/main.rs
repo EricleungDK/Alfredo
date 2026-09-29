@@ -48,9 +48,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut model = std::env::var("ALFREDO_MODEL").unwrap_or_else(|_| "qwen3:14b".into());
     let mut endpoint =
         std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
+    let mut theme = alfredo_tui::theme::Theme::from_env(|key| std::env::var(key).ok())?;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--icons" => {
+                theme.icons = alfredo_tui::theme::IconSet::parse(
+                    &args.next().ok_or("--icons needs nerd, unicode or ascii")?,
+                )?
+            }
+            "--no-motion" => theme.motion = false,
             "--doctor" => doctor = true,
             "--select" => select = true,
             "--go" => {
@@ -138,7 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--model" => model = args.next().ok_or("--model needs a model name")?,
             "--endpoint" => endpoint = args.next().ok_or("--endpoint needs an HTTP(S) origin")?,
             "--help" | "-h" => {
-                println!("Quickstart: cd YOUR-GIT-REPO && alfredo-tui    opens the repository, nothing to type\n            /go add calc.py with tests        autopilot: plan, run, review, branch\n            F2 dashboard · F5 pause · F1 help · Ctrl+Q quit\n\nAlfredo — local multi-agent coding terminal for Ollama\n\nUsage: alfredo-tui [--model NAME] [--endpoint URL]\n  [--select] [--workspace DIR] [--mission NAME | --new-mission NAME] [--state-dir DIR] [--conversation NAME] [--parallel-models 1..8] [--structured-thinking auto|on|off] [--worker-format blocks|json] [--keep-alive DURATION|default] [--connect-retries 0..10] [--doctor]\n  [--go GOAL] [--max-repairs 0..16]\n\nInside a Git repository (or with --workspace DIR alone), opens the repository root with mission default, resumed or created; no typed input. Otherwise, or with --select, a selector chooses the repository and mission; Enter opens or creates the named mission. If the automatic open fails, the selector shows why. --workspace with --mission resumes; --new-mission creates a distinct name.\nDirect Ollama conversations and isolated Rust coding workers.\nTerminals using the same endpoint share --parallel-models capacity; live configurations must match.\nForeground conversations get bounded priority over queued workers.\n--worker-format blocks|json: coding workers answer with plain-text FILE blocks (default, no schema) or the legacy schema-constrained JSON file plan. Either answer is accepted; qualification always requests json.\n--keep-alive keeps the model loaded between requests (default 30m; seconds, -1 forever, default = server setting); the model is preloaded at start and on /model.\n--connect-retries retries model requests that fail before any reply text (default 3, backoff 1s/2s/4s…; 0 disables). The header shows server health.\nExplicit file/check permission and approval required. Conversation history and drafts restore without replaying interrupted requests.\n--go GOAL starts autopilot after launch: plan, save, approve, dispatch, auto-review passing checks, bounded auto-repair (--max-repairs, default 3), one local alfredo/go-ID integration branch. Never pushes or moves your branch.\n/go GOAL · /pause · /resume · /stop · /autopilot · F5 pause/resume autopilot (restored paused after restart)\n/task description · /after 1,2 description · /approve ID · /cancel-task ID\n/permit ID JSON · /run ID · /evidence ID · /recover ID · /review ID JSON · /accept ID · /reject ID · /repair ID reason · /resolve-repair ID · /branch ID\n@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry\n/plan REQUEST · /plan-revise REQUEST · /architect-revise ID · /plan-save · /plan-cancel · /assign ID MODEL · /dispatch on|off\n/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME\nEnter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry\nF2 Mission Work/chat · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit\n\n--doctor checks startup prerequisites without entering terminal mode or running inference.\n--qualify-inference REPORT [--qualification-repetitions 1..3] runs isolated diagnostic fixtures with baseline/candidate context profiles and one shared client slot. Default: three repetitions; artifacts are retained beside the new report.\n--inspect-qualification REPORT validates and summarizes a saved report without replay. No production profile changes or promotion.\nEnvironment: ALFREDO_MODEL, OLLAMA_HOST, ALFREDO_STATE_DIR, ALFREDO_KEEP_ALIVE");
+                println!("Quickstart: cd YOUR-GIT-REPO && alfredo-tui    opens the repository, nothing to type\n            /go add calc.py with tests        autopilot: plan, run, review, branch\n            F2 tasks/chat · F6 side pane · F5 pause · F1 help · Ctrl+Q quit\n\nAlfredo — local multi-agent coding terminal for Ollama\n\nUsage: alfredo-tui [--model NAME] [--endpoint URL]\n  [--select] [--workspace DIR] [--mission NAME | --new-mission NAME] [--state-dir DIR] [--conversation NAME] [--parallel-models 1..8] [--structured-thinking auto|on|off] [--worker-format blocks|json] [--keep-alive DURATION|default] [--connect-retries 0..10] [--doctor]\n  [--go GOAL] [--max-repairs 0..16] [--icons nerd|unicode|ascii] [--no-motion]\n\nSide pane: missions of this repository and the work tree (plan groups, tasks, repairs, architect and chats). F6 focuses it (an overlay below 88 columns): Up/Down move, Tab switches missions/work, Enter opens, Alt+Left/Right fold, Esc returns to the prompt. Enter on another mission switches to it under the /workspace rules.\n--icons nerd|unicode|ascii picks record icons (default unicode; env ALFREDO_ICONS). --no-motion (or ALFREDO_NO_MOTION=1) shows a static ▶ instead of the spinner. Colours: truecolor when COLORTERM is truecolor or 24bit, otherwise 16 colours; NO_COLOR disables colour.\n\nInside a Git repository (or with --workspace DIR alone), opens the repository root with mission default, resumed or created; no typed input. Otherwise, or with --select, a selector chooses the repository and mission; Enter opens or creates the named mission. If the automatic open fails, the selector shows why. --workspace with --mission resumes; --new-mission creates a distinct name.\nDirect Ollama conversations and isolated Rust coding workers.\nTerminals using the same endpoint share --parallel-models capacity; live configurations must match.\nForeground conversations get bounded priority over queued workers.\n--worker-format blocks|json: coding workers answer with plain-text FILE blocks (default, no schema) or the legacy schema-constrained JSON file plan. Either answer is accepted; qualification always requests json.\n--keep-alive keeps the model loaded between requests (default 30m; seconds, -1 forever, default = server setting); the model is preloaded at start and on /model.\n--connect-retries retries model requests that fail before any reply text (default 3, backoff 1s/2s/4s…; 0 disables). The header shows server health.\nExplicit file/check permission and approval required. Conversation history and drafts restore without replaying interrupted requests.\n--go GOAL starts autopilot after launch: plan, save, approve, dispatch, auto-review passing checks, bounded auto-repair (--max-repairs, default 3), one local alfredo/go-ID integration branch. Never pushes or moves your branch.\n/go GOAL · /pause · /resume · /stop · /autopilot · F5 pause/resume autopilot (restored paused after restart)\n/task description · /after 1,2 description · /approve ID · /cancel-task ID\n/permit ID JSON · /run ID · /evidence ID · /recover ID · /review ID JSON · /accept ID · /reject ID · /repair ID reason · /resolve-repair ID · /branch ID\n@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry\n/plan REQUEST · /plan-revise REQUEST · /architect-revise ID · /plan-save · /plan-cancel · /assign ID MODEL · /dispatch on|off\n/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME\nEnter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry\nF2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit\n\n--doctor checks startup prerequisites without entering terminal mode or running inference.\n--qualify-inference REPORT [--qualification-repetitions 1..3] runs isolated diagnostic fixtures with baseline/candidate context profiles and one shared client slot. Default: three repetitions; artifacts are retained beside the new report.\n--inspect-qualification REPORT validates and summarizes a saved report without replay. No production profile changes or promotion.\nEnvironment: ALFREDO_MODEL, OLLAMA_HOST, ALFREDO_STATE_DIR, ALFREDO_KEEP_ALIVE, ALFREDO_ICONS, ALFREDO_NO_MOTION, COLORTERM, NO_COLOR");
                 return Ok(());
             }
             "--version" | "-V" => {
@@ -305,7 +312,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut last_task_refresh = std::time::Instant::now();
         let mut last_save = std::time::Instant::now();
         let mut last_timing_draw = std::time::Instant::now();
+        let mut spinner = alfredo_tui::theme::SpinnerSchedule::default();
+        // Other missions are read off the render path at most every 2 s.
+        let (missions_sender, missions_receiver) = std::sync::mpsc::channel();
+        let mut missions_loading = false;
+        let mut last_missions: Option<std::time::Instant> = None;
         loop {
+            work.app.pane.theme = theme;
+            if !missions_loading
+                && last_missions.is_none_or(|at| at.elapsed() >= Duration::from_secs(2))
+            {
+                missions_loading = true;
+                last_missions = Some(std::time::Instant::now());
+                let key = (work.workspace().to_path_buf(), work.mission().to_owned());
+                let state = state_dir.clone();
+                let conversation = conversation.clone();
+                let sender = missions_sender.clone();
+                runtime.spawn_blocking(move || {
+                    let entries = alfredo_tui::side_pane::load_missions(
+                        &state,
+                        &key.0,
+                        &key.1,
+                        &conversation,
+                    );
+                    let _ = sender.send((key, entries));
+                });
+            }
+            if let Ok((key, entries)) = missions_receiver.try_recv() {
+                missions_loading = false;
+                if key.0 == work.workspace()
+                    && key.1 == work.mission()
+                    && entries != work.app.pane.missions
+                {
+                    work.app.pane.missions = entries;
+                    dirty = true;
+                }
+            }
+            dirty |= spinner.due(
+                std::time::Instant::now(),
+                alfredo_tui::side_pane::any_working(&work.app, Some(&work.tasks)),
+                theme.motion,
+            );
             if last_timing_draw.elapsed() >= Duration::from_millis(250) {
                 dirty |= work
                     .app
@@ -733,6 +780,118 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
                             _ => work.app.completion = None,
+                        }
+                    }
+                    if key.code == KeyCode::F(6) {
+                        let narrow = terminal.size()?.width < ui::PANE_BREAKPOINT;
+                        work.app.pane.toggle_focus(narrow);
+                        continue;
+                    }
+                    // A focused side pane takes navigation keys; typed characters
+                    // never reach the prompt and its draft is preserved.
+                    if work.app.pane.focus.is_some() && !ctrl {
+                        use alfredo_tui::side_pane::{PaneAction, PaneKey, RowKey};
+                        let alt = key.modifiers.contains(KeyModifiers::ALT);
+                        let pane_key = match key.code {
+                            KeyCode::Up if !alt => Some(PaneKey::Up),
+                            KeyCode::Down if !alt => Some(PaneKey::Down),
+                            KeyCode::Tab | KeyCode::BackTab => Some(PaneKey::Tab),
+                            KeyCode::Enter => Some(PaneKey::Enter),
+                            KeyCode::Esc => Some(PaneKey::Esc),
+                            _ => None,
+                        };
+                        if let Some(pane_key) = pane_key {
+                            let projection = alfredo_tui::side_pane::project(
+                                &work.app,
+                                Some(&work.tasks),
+                                std::time::Instant::now(),
+                            );
+                            match work.app.pane.key(pane_key, &projection) {
+                                PaneAction::Moved(RowKey::Node(node)) if work.tasks.visible => {
+                                    work.tasks.focus_node(node)
+                                }
+                                PaneAction::Open(alfredo_tui::side_pane::OpenTarget::Mission(
+                                    name,
+                                )) => {
+                                    if name == work.mission() {
+                                        work.app.notice = "Already in this mission".into();
+                                    } else if pending_command.is_some() {
+                                        work.app.notice = "Wait for the command intent to finish saving before switching work".into();
+                                    } else if let Err(error) = work.can_switch() {
+                                        work.app.notice = error;
+                                    } else {
+                                        let workspace = work.workspace().to_path_buf();
+                                        terminal.draw(|frame| {
+                                            frame.render_widget(ratatui::widgets::Paragraph::new("Preparing mission switch · saving history and checking the target…"), frame.area());
+                                        })?;
+                                        match work.switch_to(&runtime, &workspace, &name) {
+                                            Ok(true) => {
+                                                for job in jobs.iter_mut().filter_map(Option::take) {
+                                                    job.abort();
+                                                }
+                                                (sender, receiver) = mpsc::channel(128);
+                                                (model_sender, model_receiver) = mpsc::channel(1);
+                                                last_task_refresh = std::time::Instant::now();
+                                                last_save = std::time::Instant::now();
+                                                last_missions = None;
+                                            }
+                                            Ok(false) => {
+                                                work.app.notice =
+                                                    "Already in the selected workspace and mission"
+                                                        .into()
+                                            }
+                                            Err(error) => {
+                                                work.app.notice = format!(
+                                                    "Could not switch work: {error}; current work retained"
+                                                )
+                                            }
+                                        }
+                                        terminal.clear()?;
+                                    }
+                                }
+                                PaneAction::Open(target) => {
+                                    alfredo_tui::side_pane::open_work_target(
+                                        &mut work.app,
+                                        &mut work.tasks,
+                                        &target,
+                                    );
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+                        match key.code {
+                            KeyCode::Left | KeyCode::Right if alt => {
+                                let projection = alfredo_tui::side_pane::project(
+                                    &work.app,
+                                    Some(&work.tasks),
+                                    std::time::Instant::now(),
+                                );
+                                if let Some(RowKey::Node(node)) = work
+                                    .app
+                                    .pane
+                                    .work_index(&projection)
+                                    .map(|index| projection.work[index].key)
+                                {
+                                    work.tasks.focus_node(node);
+                                    if key.code == KeyCode::Left {
+                                        work.tasks.collapse_work_node();
+                                    } else {
+                                        work.tasks.expand_work_node();
+                                    }
+                                    work.app.pane.work_cursor =
+                                        work.tasks.focused_work_node().map(RowKey::Node);
+                                }
+                                continue;
+                            }
+                            KeyCode::Char(_)
+                            | KeyCode::Backspace
+                            | KeyCode::Delete
+                            | KeyCode::Left
+                            | KeyCode::Right
+                            | KeyCode::Home
+                            | KeyCode::End => continue,
+                            _ => {}
                         }
                     }
                     match key.code {
@@ -1228,6 +1387,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         _ => {}
                     }
                 }
+                Event::Paste(_) if work.app.pane.focus.is_some() => {}
                 Event::Paste(text) => {
                     work.app.completion = None;
                     work.app.sessions[work.app.selected].insert(&text);

@@ -248,6 +248,37 @@ struct Family {
     repairs: u32,
 }
 
+/// The autopilot state file of one conversation set in a mission directory.
+pub fn state_path(directory: &Path, conversation: &str) -> PathBuf {
+    directory.join(format!(
+        "autopilot-{:x}.json",
+        Sha256::digest(conversation.as_bytes())
+    ))
+}
+
+/// Read another mission's saved loop state without locks or writes.
+/// `Ok(None)`: no loop was ever started. The word is the saved phase as
+/// written; a loop left active by another process is reported as saved.
+pub fn peek(path: &Path) -> Result<Option<&'static str>, String> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    if bytes.len() > MAX_STATE {
+        return Err("Autopilot state exceeds its size bound".into());
+    }
+    let saved: Saved = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    saved.validate()?;
+    Ok(Some(match saved.phase {
+        Phase::Done => "done",
+        Phase::Failed => "failed",
+        _ if saved.paused => "paused",
+        Phase::Scoping | Phase::Planning | Phase::Saving => "planning",
+        Phase::Running | Phase::Finishing => "running",
+    }))
+}
+
 pub struct Autopilot {
     path: PathBuf,
     saved: Option<Saved>,
@@ -269,10 +300,7 @@ impl Autopilot {
     /// Load this conversation set's autopilot. A saved active loop is always
     /// restored paused; nothing is replayed until an explicit resume.
     pub fn open(directory: &Path, conversation: &str) -> Result<Self, String> {
-        let path = directory.join(format!(
-            "autopilot-{:x}.json",
-            Sha256::digest(conversation.as_bytes())
-        ));
+        let path = state_path(directory, conversation);
         let saved = match fs::read(&path) {
             Ok(bytes) => {
                 if bytes.len() > MAX_STATE {

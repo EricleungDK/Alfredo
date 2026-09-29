@@ -775,7 +775,8 @@ fn terminal_shows_waiting_worker_and_cancellation_until_durable_result() {
             text.contains("Waiting for model"),
             "{width}x{height}: {text}"
         );
-        assert!(text.contains("Mission: mission"), "{text}");
+        // Header row 1 names the mission and repository directory.
+        assert!(text.contains("ALFREDO  mission · workspace"), "{text}");
         assert!(!text.contains("Check passed"));
     }
     control

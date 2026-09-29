@@ -95,6 +95,22 @@ fn row(tree: &Tree, id: NodeId) -> &Row {
     tree.rows.iter().find(|row| row.id == id).unwrap()
 }
 
+#[test]
+fn group_title_is_the_users_goal_without_planner_retry_or_revision_text() {
+    for prompt in [
+        "check the docs | The previous plan was rejected by validation: Task 1 check must be an argv array, not a shell string. Return a corrected complete plan.",
+        "check the docs | Earlier plans were rejected by validation; fix every issue: attempt 1: bad check. Return a corrected complete plan.",
+        "check the docs | Revision request: split task 2",
+        "check the docs",
+    ] {
+        let mut state = snapshot(vec![task(1, "Check README", &[], None)]);
+        plan(&mut state, 1, 1, 1, prompt);
+        let tree = project(&state, &scope(), "", &BTreeSet::new());
+        assert_eq!(row(&tree, NodeId::Plan(1)).label, "Plan r1 · check the docs");
+        assert_eq!(alfredo_tui::planner::goal(prompt), "check the docs");
+    }
+}
+
 fn diamond() -> Snapshot {
     let mut state = snapshot(vec![
         task(1, "Shared input", &[], None),

@@ -119,36 +119,37 @@ pub fn clock(elapsed: std::time::Duration) -> String {
     }
 }
 
-/// Header row: glyph, state, done/total, failures, elapsed, branch when done, goal.
-pub fn autopilot_row(status: &crate::autopilot::Status, width: usize) -> String {
-    let marker = status.state.marker();
-    let mut row = format!(
-        " Autopilot {marker} {} · {}/{} done · {} failed",
-        status.state.label(),
-        status.done,
-        status.total,
-        status.failed
-    );
+/// Autopilot header facts after its state: done/total, failures and repairs
+/// only when present, elapsed, branch. The goal is the group title instead.
+pub fn autopilot_fields(status: &crate::autopilot::Status) -> Vec<String> {
+    let mut fields = vec![format!("{}/{}", status.done, status.total)];
+    if status.failed > 0 {
+        fields.push(format!("{} failed", status.failed));
+    }
     if status.repairs > 0 {
-        row.push_str(&format!(
-            " · {} {}",
+        fields.push(format!(
+            "{} repair{}",
             status.repairs,
-            if status.repairs == 1 {
-                "repair"
-            } else {
-                "repairs"
-            }
+            if status.repairs == 1 { "" } else { "s" }
         ));
     }
-    row.push_str(&format!(" · {}", clock(status.elapsed)));
+    fields.push(clock(status.elapsed));
     if let Some(branch) = &status.branch {
-        row.push_str(&format!(" · {}", single_line(branch)));
+        fields.push(single_line(branch));
     }
-    let goal = single_line(&status.goal);
-    let room = width.saturating_sub(row.width() + 3);
-    if room >= 4 {
-        row.push_str(" · ");
-        row.push_str(&truncate(&goal, room));
+    fields
+}
+
+/// Header row 2: `Autopilot ✓ done   1/1   01:02   alfredo/go-…`.
+pub fn autopilot_row(status: &crate::autopilot::Status, width: usize) -> String {
+    let mut row = format!(
+        " Autopilot {} {}",
+        status.state.marker(),
+        status.state.label()
+    );
+    for field in autopilot_fields(status) {
+        row.push_str("   ");
+        row.push_str(&field);
     }
     truncate(&row, width)
 }
@@ -157,34 +158,62 @@ pub fn single_line(text: &str) -> String {
     safe(text).replace(['\n', '\t'], " ")
 }
 
-/// Footer hints in priority order; lower-priority hints drop first when narrow.
+/// Which area the footer describes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Footer {
+    /// The side pane has focus (F6).
+    Pane,
+    /// Task detail on the right.
+    Tasks,
+    /// Chat on the right.
+    Chat,
+}
+
+/// Footer hints for the right pane: task detail or chat.
 pub fn footer_hints(dashboard: bool, width: usize) -> String {
-    let hints: &[(&str, u8)] = if dashboard {
-        &[
+    footer(
+        if dashboard {
+            Footer::Tasks
+        } else {
+            Footer::Chat
+        },
+        width,
+    )
+}
+
+/// One line, at most eight hints separated by two spaces, relevant to the
+/// focused area; lower-priority hints drop first when narrow.
+pub fn footer(context: Footer, width: usize) -> String {
+    let hints: &[(&str, u8)] = match context {
+        Footer::Pane => &[
+            ("↑↓ move", 1),
+            ("Tab section", 1),
+            ("Enter open", 1),
+            ("Esc prompt", 2),
+            ("Alt+←/→ fold", 3),
             ("F1 help", 0),
             ("^Q quit", 0),
+        ],
+        Footer::Tasks => &[
+            ("F6 pane", 1),
             ("↑↓ task", 1),
             ("F2 chat", 1),
-            ("F5 pause", 2),
-            ("PgUp/Dn scroll", 2),
-            ("F3 evidence", 3),
-            ("F4 activity", 3),
-            ("Alt+←/→ fold", 4),
-        ]
-    } else {
-        &[
+            ("F3 evidence", 2),
+            ("F5 pause", 3),
+            ("PgUp/Dn scroll", 3),
             ("F1 help", 0),
             ("^Q quit", 0),
-            ("F2 tasks", 1),
+        ],
+        Footer::Chat => &[
             ("Enter send", 1),
-            ("F5 pause", 2),
-            ("PgUp/Dn scroll", 2),
-            ("^N new", 3),
+            ("F6 pane", 1),
+            ("F2 tasks", 1),
+            ("^N new", 2),
             ("Tab switch", 3),
-            ("Esc cancel", 4),
-            ("^R retry", 4),
-            ("F4 activity", 5),
-        ]
+            ("PgUp/Dn scroll", 3),
+            ("F1 help", 0),
+            ("^Q quit", 0),
+        ],
     };
     let mut level = 5;
     loop {

@@ -489,7 +489,7 @@ fn existing_test_is_worker_reference_repairs_carry_output_and_nothing_accepted_r
     );
     let row = alfredo_tui::dashboard::autopilot_row(&status, 100);
     assert!(
-        row.contains("Autopilot ✗ failed · 0/1 done · 1 failed · 1 repair ·"),
+        row.contains("Autopilot ✗ failed   0/1   1 failed   1 repair   "),
         "{row}"
     );
     let report = autopilot.report().unwrap();
@@ -512,10 +512,10 @@ fn existing_test_is_worker_reference_repairs_carry_output_and_nothing_accepted_r
     let app = alfredo_tui::model::App::new("fixture".into());
     let rows = render_rows(&app, &control, 100, 30);
     assert!(
-        rows.iter()
-            .any(|row| row.contains("Mission Work · 0/1 done · 1 repair ")),
+        rows.iter().any(|row| row.contains("├ work  0/1 done ")),
         "{rows:#?}"
     );
+    assert!(rows[1].contains("   1 repair   "), "{rows:#?}");
 }
 
 #[test]
@@ -570,10 +570,7 @@ fn finished_autopilot_replaces_the_stale_start_notice_in_the_footer_once() {
     let screen = rows.join("\n");
     assert!(!screen.contains("Autopilot started"), "{screen}");
     assert!(rows[29].contains("Autopilot failed"), "{screen}");
-    assert!(
-        rows[2].contains("Autopilot ✗ failed · 0/0 done"),
-        "{screen}"
-    );
+    assert!(rows[1].contains("Autopilot ✗ failed   0/0"), "{screen}");
     // Reported once; a user notice afterwards is not overwritten.
     work.app.notice = "USER_NOTICE".into();
     work.sync_autopilot();
@@ -688,7 +685,7 @@ fn exhausted_repairs_hold_the_task_block_dependents_and_integrate_independent_wo
     assert_eq!((status.done, status.total, status.failed), (1, 3, 2));
     assert!(
         alfredo_tui::dashboard::autopilot_row(&status, 100)
-            .contains("Autopilot ◐ partial · 1/3 done"),
+            .contains("Autopilot ◐ partial   1/3   2 failed"),
         "{status:?}"
     );
     let snapshot = fixture.store.snapshot().unwrap();
@@ -1029,7 +1026,12 @@ fn header_shows_one_autopilot_line_and_the_report_opens_in_mission_work() {
         .filter(|row| row.contains("Autopilot"))
         .collect();
     assert_eq!(lines.len(), 1, "{rows:#?}");
-    assert!(lines[0].contains("running · 1/2 done"), "{}", lines[0]);
+    assert!(
+        lines[0].contains("running   1/2   1 repair"),
+        "{}",
+        lines[0]
+    );
+    assert!(!lines[0].contains("Make answer return 42"), "{}", lines[0]);
     control.set_visible(true);
     control.autopilot_report =
         Some("Autopilot finished: goal\nREPORT_SENTINEL git switch alfredo/go-x".into());

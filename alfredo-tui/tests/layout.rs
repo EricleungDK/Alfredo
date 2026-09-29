@@ -24,9 +24,12 @@ fn terminal_renders_at_wide_narrow_and_tiny_sizes_with_unicode() {
                 .collect();
             assert!(text.contains("ALFREDO"));
             assert!(text.contains("Prompt"));
-            // At 32x10 the session list gives way to the transcript.
-            if height >= 12 {
-                assert!(text.contains("Sessions"));
+            // Wide: the side pane lists chats; narrow: one summary row with F6.
+            if width >= 88 {
+                // A streaming chat shows its spinner between icon and label.
+                assert!(text.contains("◈ ") && text.contains(" chat 1 "), "{text}");
+            } else {
+                assert!(text.contains("F6 pane"), "{text}");
             }
         }
     }
@@ -138,15 +141,14 @@ fn chat_keeps_background_work_visible_without_moving_draft_or_reading_position()
         assert_eq!(work.review, 1);
         assert_eq!(work.held, 1);
         assert_eq!(work.attention(), 2);
+        // Attention items only, separated by spaces; no zero-value worker counts.
         if width >= 70 {
-            assert!(header.contains("Work 1 local"), "{header}");
-            assert!(
-                header.contains("1 review") && header.contains("1 held"),
-                "{header}"
-            );
-            assert!(header.contains("chat-fixture"), "{header}");
+            assert!(header.contains("   1 review   1 decision"), "{header}");
+            assert!(!header.contains("Work 1 local"), "{header}");
         } else {
-            assert!(header.contains("1 work · 2 alerts"), "{header}");
+            let summary: String = (0..width).map(|x| buffer[(x, 1)].symbol()).collect();
+            assert!(summary.contains("layout"), "{summary}");
+            assert!(summary.contains("F6 pane"), "{summary}");
         }
         assert!(text.contains("F1 help"), "{text}");
         assert!(text.contains("Prompt"));
@@ -167,12 +169,10 @@ fn chat_keeps_background_work_visible_without_moving_draft_or_reading_position()
         assert_eq!(tasks.work_status().workers, 0);
         assert_eq!(tasks.work_status().attention(), 3);
         if width >= 70 {
-            assert!(
-                header.contains("Work 0 local") && header.contains("2 review"),
-                "{header}"
-            );
+            assert!(header.contains("   2 review   1 decision"), "{header}");
+            assert!(!header.contains("Work 0 local"), "{header}");
         } else {
-            assert!(header.contains("0 work · 3 alerts"), "{header}");
+            assert!(header.contains("ALFREDO"), "{header}");
         }
         assert_eq!(
             serde_json::to_value(&app.sessions[0]).unwrap(),
@@ -1092,7 +1092,10 @@ fn restored_dispatch_outcome_is_historical_while_current_dispatch_stays_off() {
             .map(|cell| cell.symbol())
             .collect::<String>();
         assert!(text.contains("✓ Dispatch on"), "{text}");
-        assert!(text.contains("dispatch off"), "{text}");
+        // Current dispatch is off: the header names dispatch only while it is on.
+        let header: String = text.chars().take(usize::from(width)).collect();
+        assert!(header.contains("ALFREDO"), "{header}");
+        assert!(!header.contains("dispatch on"), "{header}");
         assert!(!text.contains("Task #"));
     }
     std::fs::remove_dir_all(root).unwrap();
@@ -1216,7 +1219,10 @@ fn automatic_launch_has_dispatch_actor_and_keeps_origin_reading_and_drafts() {
     let unknown = render(&restored, &tasks, 140, 32);
     assert!(unknown.contains("▶ Dispatch · run task #7"), "{unknown}");
     assert!(unknown.contains("Outcome unconfirmed"), "{unknown}");
-    assert!(unknown.contains("dispatch off"), "{unknown}");
+    // Current dispatch stays off: the header names dispatch only while it is on.
+    let header: String = unknown.chars().take(140).collect();
+    assert!(header.contains("ALFREDO"), "{header}");
+    assert!(!header.contains("dispatch on"), "{header}");
     assert!(!unknown.contains("Task #7 started"), "{unknown}");
     assert!(tasks.workers.is_empty());
     let snapshot = tasks.snapshot.as_mut().unwrap();
@@ -1829,7 +1835,8 @@ fn wayfinder_reply_header_requires_current_receipt_proof_and_bound_request() {
                 verified.contains("Wayfinder · scope receipt 1"),
                 "{verified}"
             );
-            assert_eq!(color, Color::Green);
+            // Speaker labels are dim; only an unverified claim is coloured.
+            assert_eq!(color, Color::DarkGray);
             for fault in [
                 "missing-scope",
                 "missing-receipt",
