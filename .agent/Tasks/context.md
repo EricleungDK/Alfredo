@@ -1,8 +1,10 @@
 # Central Context
 
-**Last Updated**: 2026-09-27
+**Last Updated**: 2026-09-29
 
 ## Active Orchestration Context
+
+- **TUI Phase 2 agent view (2026-09-29, branch agent/agent-view)**: Implemented per .agent/Tasks/tui-side-pane.md Phase 2: agent view (src/agent_view.rs, pure projection + verified record cache), owner instructions (src/instruct.rs, owner-SHA256(conversation).json beside autopilot state, version 1, no task-store schema change), prompt targeting, /watch and /tell, autopilot family holds, follow-up adoption/reopen, restyled Autopilot panel and collapsed chat steps. Steer is a repair child of the cancelled run (the store cannot rerun a task after a cancelled run); it is outside the repair budget. New PTY journey tests/agent_terminal_smoke.py (CI + release smoke). Live qwen2.5-coder:14b runs recorded in the branch report. Not pushed.
 
 - **Rendering baseline captured (2026-09-27)**: Root validated a746849-byte canonical4096receipt history through TaskStore replay and actual final evidence/Finish, then measured release draw_with_tasks cohorts with source/fixture hashes and preserved executable. Warm p50 inspector/evidence is~1.7–1.9ms; full Activity at32x10 is~27.5ms (p95~33.1ms). This is Ratatui TestBackend component timing, excluding terminal IO/model/network. render_activity owns lazy projection/tests; render_panels owns exclusive visible panel rendering; render_regressions owns independent visible-panel tests. Production edits released only after baseline. Root retains Cargo and benchmark ownership.
 

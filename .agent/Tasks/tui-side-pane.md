@@ -125,3 +125,13 @@ something is working.
   still stop.
 - Every instruction is recorded in the agent conversation and task activity.
 - Autopilot keeps running; a steered task is not double-handled by autopilot.
+
+### Phase 2 status (2026-09-29)
+
+Implemented on `agent/agent-view`: `src/agent_view.rs` (projection, view state,
+`/watch`, `/tell`), `src/instruct.rs` (owner instructions through existing
+commands, persisted beside autopilot state), autopilot holds and follow-up
+adoption, worker `OWNER INSTRUCTION` header, restyled Autopilot panel, collapsed
+chat steps. Instruction turns expand with Ctrl+O (Enter sends in this view).
+Steer is a repair child of the cancelled run: the store has no rerun of a task
+after a cancelled run; the child is outside the repair budget.
