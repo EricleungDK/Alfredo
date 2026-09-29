@@ -1,6 +1,6 @@
 use alfredo_tui::{
     task_control::parse,
-    tasks::{Action, Request, TaskStatus, TaskStore},
+    tasks::{Action, Refusal, Request, TaskStatus, TaskStore},
 };
 use std::{
     fs,
@@ -939,4 +939,32 @@ fn resolution_command_requires_one_explicit_source_id() {
     ] {
         assert!(parse(input, "worker").is_err());
     }
+}
+
+#[test]
+fn busy_scope_lock_is_a_transient_refusal_and_writes_nothing() {
+    let fixture = Fixture::new();
+    let store = fixture.store("mission");
+    store.transact(proposal("first", 0, vec![])).unwrap();
+    store
+        .transact(Request {
+            correlation: "approve".into(),
+            expected_revision: 1,
+            action: Action::Approve { task: 1 },
+        })
+        .unwrap();
+    let before = fs::read(fixture.file()).unwrap();
+    let scope = store.understanding();
+    let held = scope.lock().unwrap();
+    let refusal = store
+        .transact_checked(proposal("second", 2, vec![]))
+        .unwrap_err();
+    assert!(matches!(refusal, Refusal::Busy), "{refusal:?}");
+    assert!(refusal.transient());
+    let claim = store.claim_worker(1).err().unwrap();
+    assert!(matches!(claim, Refusal::Busy), "{claim:?}");
+    drop(held);
+    assert_eq!(fs::read(fixture.file()).unwrap(), before);
+    store.transact(proposal("second", 2, vec![])).unwrap();
+    drop(store.claim_worker(1).unwrap());
 }

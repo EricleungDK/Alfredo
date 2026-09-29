@@ -6293,3 +6293,143 @@ async fn owner_instruction_leads_the_repair_request_above_what_is_still_failing(
     let (request, _) = run_captured(&fixture, second, "def answer():\n    return 42\n", None).await;
     assert!(last_prompt(&request).starts_with("Implement this task: Repair #1:"));
 }
+
+fn policy_of(files: &[&str]) -> WorkPolicy {
+    WorkPolicy {
+        files: files.iter().map(|f| f.to_string()).collect(),
+        check: vec!["/bin/true".into()],
+    }
+}
+
+#[test]
+fn single_fence_is_the_file_when_policy_allows_exactly_one() {
+    let one = policy_of(&["calc.py"]);
+    for answer in [
+        "```\ndef answer():\n    return 42\n```",
+        "Here you go:\n```python\ndef answer():\n    return 42\n```\nDone.\n",
+        "```python\r\ndef answer():\r\n    return 42\r\n```\r\n",
+    ] {
+        let plan =
+            worker::parse_answer_for(answer, &one).unwrap_or_else(|e| panic!("{answer}: {e}"));
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.files[0].path, "calc.py");
+        assert_eq!(plan.files[0].content, "def answer():\n    return 42\n");
+    }
+}
+
+#[test]
+fn fence_fallback_refuses_multiple_fences_multiple_files_and_unclosed() {
+    let one = policy_of(&["calc.py"]);
+    let two_fences = "```\na = 1\n```\ntext\n```\nb = 2\n```";
+    assert_eq!(
+        worker::parse_answer_for(two_fences, &one).unwrap_err(),
+        "Model returned no FILE blocks"
+    );
+    let two_files = policy_of(&["calc.py", "util.py"]);
+    assert_eq!(
+        worker::parse_answer_for("```\na = 1\n```", &two_files).unwrap_err(),
+        "Model returned no FILE blocks"
+    );
+    assert_eq!(
+        worker::parse_answer_for("```\na = 1\n", &one).unwrap_err(),
+        "Model returned no FILE blocks"
+    );
+    // FILE blocks still win over the fallback.
+    let plan =
+        worker::parse_answer_for("=== FILE: calc.py ===\nx\n=== END FILE ===\n", &one).unwrap();
+    assert_eq!(plan.files[0].content, "x\n");
+}
+
+#[tokio::test]
+async fn repair_answering_with_one_bare_fence_is_applied() {
+    let fixture = unittest_fixture();
+    let (_, detail) = run_reply(&fixture, 1, "```\ndef answer():\n    return 41\n```".into()).await;
+    assert!(detail.starts_with("Check failed"), "{detail}");
+    let second = repair_of(&fixture, 1);
+    let (_, detail) = run_reply(
+        &fixture,
+        second,
+        "```python\ndef answer():\n    return 42\n```".into(),
+    )
+    .await;
+    assert!(!detail.contains("no FILE blocks"), "{detail}");
+    assert!(!detail.starts_with("Check failed"), "{detail}");
+}
+
+#[tokio::test]
+async fn test_repair_after_accepted_dependency_gets_its_source_and_authority_line() {
+    let fixture = Fixture::new();
+    fixture.action(Action::Permit {
+        task: 1,
+        policy: policy_of(&["calc.py"]),
+    });
+    fixture.action(Action::Approve { task: 1 });
+    run_dependency_fixture(
+        &fixture,
+        1,
+        one_file("calc.py", "def answer():\n    return 42  # DEP_SENTINEL\n"),
+        "",
+    )
+    .await;
+    fixture.action(Action::Review {
+        task: 1,
+        accept: true,
+    });
+    fixture.action(Action::Propose {
+        title: "Write test_calc.py".into(),
+        model: "fixture".into(),
+        dependencies: vec![1],
+    });
+    fixture.action(Action::Permit {
+        task: 2,
+        policy: WorkPolicy {
+            files: vec!["test_calc.py".into()],
+            check: ["/usr/bin/python3", "-B", "-m", "unittest", "test_calc.py"]
+                .map(String::from)
+                .to_vec(),
+        },
+    });
+    fixture.action(Action::Approve { task: 2 });
+    let wrong = "import unittest\nfrom calc import answer\n\nclass T(unittest.TestCase):\n    def test_answer(self):\n        self.assertEqual(answer(), 41)\n";
+    let (request, detail) = run_reply(&fixture, 2, blocks(&[("test_calc.py", wrong)])).await;
+    assert!(detail.starts_with("Check failed"), "{detail}");
+    let first = last_prompt(&request);
+    assert!(!first.contains("ACCEPTED IMPLEMENTATION"), "{first}");
+    assert!(!first.contains("DEP_SENTINEL"), "{first}");
+
+    let second = repair_of(&fixture, 2);
+    let (request, _) = run_reply(&fixture, second, blocks(&[("test_calc.py", wrong)])).await;
+    let prompt = last_prompt(&request);
+    assert!(
+        prompt.contains("READ-ONLY FILE calc.py\ndef answer():\n    return 42  # DEP_SENTINEL\n"),
+        "{prompt}"
+    );
+    let line = prompt
+        .find("ACCEPTED IMPLEMENTATION IS AUTHORITATIVE")
+        .unwrap_or_else(|| panic!("{prompt}"));
+    assert!(
+        prompt[line..].contains("for a test, fix its expectation"),
+        "{prompt}"
+    );
+    assert!(
+        prompt[line..].contains("unless the OWNER INSTRUCTION"),
+        "{prompt}"
+    );
+    // Reference only: the allowed list is unchanged.
+    assert!(
+        prompt.contains("Allowed exact files: [\"test_calc.py\"]"),
+        "{prompt}"
+    );
+}
+
+#[test]
+fn fence_fallback_never_rescues_a_truncated_or_malformed_file_block_answer() {
+    let one = policy_of(&["calc.py"]);
+    let truncated = "=== FILE: calc.py ===\n```python\ndef answer():\n    return 42\n```\n";
+    assert_eq!(
+        worker::parse_answer_for(truncated, &one).unwrap_err(),
+        "Model output ended inside FILE block for calc.py (truncated)"
+    );
+    let json = "{\"files\": [ ```\nx\n```";
+    assert!(worker::parse_answer_for(json, &one).is_err());
+}

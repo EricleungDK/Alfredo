@@ -148,6 +148,42 @@ fn references(check: &[String]) -> Vec<Vec<String>> {
     result
 }
 
+const DATA_EXTENSIONS: [&str; 8] = [
+    "json", "jsonl", "db", "sqlite", "sqlite3", "csv", "pkl", "log",
+];
+const FIXTURE_MARKERS: [&str; 8] = [
+    "fixture",
+    "testdata",
+    "test_data",
+    "sample",
+    "example",
+    "expected",
+    "mock",
+    "snapshot",
+];
+
+/// A data file a program writes at runtime (`todo.json`, `app.sqlite`), as
+/// opposed to a manifest, config or test fixture that is source-like work.
+fn runtime_data(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    let name = lower.rsplit('/').next().unwrap_or(&lower);
+    let Some((_, extension)) = name.rsplit_once('.') else {
+        return false;
+    };
+    if !DATA_EXTENSIONS.contains(&extension) {
+        return false;
+    }
+    let manifest = matches!(
+        name,
+        "package.json" | "composer.json" | "deno.json" | "manifest.json" | "renovate.json"
+    );
+    let config = ["config", "rc.", "lock.", "schema"]
+        .iter()
+        .any(|marker| name.contains(marker));
+    let fixture = FIXTURE_MARKERS.iter().any(|marker| lower.contains(marker));
+    !(manifest || config || fixture)
+}
+
 /// All findings for `plan`, using `tracked` (a committed file or directory at
 /// the plan baseline) and `program` (resolvable in the check sandbox).
 pub fn lint(
@@ -175,6 +211,13 @@ pub fn lint(
             findings.push(format!(
                 "Task {number} lists no policy files; every task must write at least one file."
             ));
+        }
+        for file in &step.policy.files {
+            if runtime_data(file) && !tracked(file) {
+                findings.push(format!(
+                    "Task {number} lists runtime data file {file}. Files a program writes when it runs become tracked work, and a later check that rewrites them is refused as modifying files outside approved paths. Do not list it: have the code and tests create it in a temp dir (or have the check use a temp path) and list only source, test and config files."
+                ));
+            }
         }
         if let Some(name) = step.policy.check.first() {
             if name.chars().any(char::is_whitespace) {

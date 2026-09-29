@@ -272,6 +272,53 @@ pub fn parse_answer(answer: &str) -> Result<FilePlan> {
     Ok(FilePlan { files })
 }
 
+/// `parse_answer`, plus: with no FILE blocks, one allowed file and exactly one
+/// fenced code block, the fence content is that file.
+pub fn parse_answer_for(answer: &str, policy: &WorkPolicy) -> Result<FilePlan> {
+    let error = match parse_answer(answer) {
+        Ok(plan) => return Ok(plan),
+        Err(error) => error,
+    };
+    // Only a fence-only answer: never rescue a FILE-block or JSON attempt that failed.
+    let text = answer.replace("\r\n", "\n");
+    let attempted =
+        answer.trim().starts_with('{') || text.split('\n').any(|l| file_marker(l).is_some());
+    if let ([path], Some(content), false) =
+        (policy.files.as_slice(), single_fence(answer), attempted)
+    {
+        return Ok(FilePlan {
+            files: vec![FileEdit {
+                path: path.clone(),
+                content,
+            }],
+        });
+    }
+    Err(error)
+}
+
+/// The content of the only fenced code block, when exactly one closed fence exists.
+fn single_fence(answer: &str) -> Option<String> {
+    let text = answer.replace("\r\n", "\n");
+    let mut blocks = Vec::new();
+    let mut open: Option<Vec<&str>> = None;
+    for line in text.split('\n') {
+        let fence = line.trim_start().starts_with("```");
+        match (&mut open, fence) {
+            (None, true) => open = Some(Vec::new()),
+            (Some(lines), true) => {
+                blocks.push(block_content(lines));
+                open = None;
+            }
+            (Some(lines), false) => lines.push(line),
+            (None, false) => {}
+        }
+    }
+    if open.is_some() || blocks.len() != 1 {
+        return None;
+    }
+    blocks.pop().filter(|content| !content.trim().is_empty())
+}
+
 /// FILE blocks for `plan`, the inverse of `parse_answer`.
 pub fn render_blocks(plan: &FilePlan) -> String {
     plan.files
@@ -749,7 +796,10 @@ fn lineage(store: &TaskStore, snapshot: &Snapshot, task: &Task) -> Option<Lineag
     let prior_files = parent
         .as_ref()
         .and_then(|p| crate::agent::retained_answer(store, p))
-        .and_then(|answer| parse_answer(&answer).ok())
+        .and_then(|answer| match task.policy.as_ref() {
+            Some(policy) => parse_answer_for(&answer, policy).ok(),
+            None => parse_answer(&answer).ok(),
+        })
         .map(|plan| render_blocks(&plan));
     // A cancelled run (a steer) failed nothing: no failing section.
     let cancelled = parent
@@ -1088,6 +1138,23 @@ pub async fn start_checked(
         generation: None,
         check: None,
     };
+    // A repair reads what its accepted dependencies implemented, as reference.
+    let dependency_files: Vec<String> = if task.repair_of.is_some() {
+        let mut files: Vec<String> = Vec::new();
+        for dependency in &task.dependencies {
+            let Ok(source) = claimed.dependency_source(*dependency) else {
+                continue;
+            };
+            for path in source.policy.iter().flat_map(|p| &p.files) {
+                if !files.contains(path) {
+                    files.push(path.clone());
+                }
+            }
+        }
+        files
+    } else {
+        Vec::new()
+    };
     let outcome = perform(
         &store,
         &before.workspace,
@@ -1109,6 +1176,7 @@ pub async fn start_checked(
             .and_then(|root| claimed.plan_for_task(root))
             .map_or("", |plan| plan.prompt.as_str()),
         owner.as_deref(),
+        &dependency_files,
     )
     .await;
     observer.stage("Saving evidence and receipt");
@@ -1275,6 +1343,7 @@ async fn perform(
     acceptance: &[String],
     goal: &str,
     owner: Option<&str>,
+    dependency_files: &[String],
 ) -> Result<()> {
     let (cancel, observer) = observation;
     observer.stage("Preparing worktree");
@@ -1326,7 +1395,7 @@ async fn perform(
         worktree,
         &run.baseline,
         &policy.check,
-        &[goal, &task.title],
+        &[&dependency_files.join(" "), goal, &task.title],
         &policy.files,
     )
     .await?;
@@ -1347,6 +1416,9 @@ async fn perform(
         for item in omitted {
             context.push_str(&format!("READ-ONLY REFERENCE OMITTED {item}\n"));
         }
+    }
+    if !dependency_files.is_empty() {
+        context.push_str("\nACCEPTED IMPLEMENTATION IS AUTHORITATIVE\nThe read-only reference files above from accepted dependency tasks are accepted and correct. If the check fails against them, change this task's own files to match (for a test, fix its expectation); do not expect behavior the accepted implementation lacks, unless the OWNER INSTRUCTION says otherwise.\n");
     }
     if !acceptance.is_empty() {
         context.push_str(&format!("\nRECORDED ACCEPTANCE CRITERIA\n{}\nSatisfy these observable requirements within the approved policy. A passing check does not by itself prove every criterion.\n", serde_json::to_string(acceptance).map_err(|e| e.to_string())?));
@@ -1482,7 +1554,7 @@ async fn perform(
         .and_then(|_| response_file.sync_all())
         .map_err(|e| e.to_string())?;
     observer.stage("Validating model plan");
-    let plan = parse_answer(&answer)?;
+    let plan = parse_answer_for(&answer, policy)?;
     validate_plan(&plan, policy)?;
     for edit in &plan.files {
         safe_file(worktree, &edit.path)?;
