@@ -59,6 +59,7 @@ struct WorkTreeKey {
     scope_label: String,
     query: String,
     collapsed: BTreeSet<NodeId>,
+    expanded: BTreeSet<NodeId>,
 }
 
 pub struct TaskControl {
@@ -100,6 +101,8 @@ pub struct TaskControl {
     selected_task: Option<u64>,
     focused_work_node: Option<NodeId>,
     collapsed_work_nodes: BTreeSet<NodeId>,
+    /// Groups the user opened; completed groups otherwise start collapsed.
+    expanded_work_nodes: BTreeSet<NodeId>,
     work_tree_cache: std::cell::RefCell<Option<(WorkTreeKey, Arc<Tree>)>>,
     pending_evidence: Option<u64>,
     pub task_query: String,
@@ -127,6 +130,17 @@ pub struct TaskControl {
     pub(crate) detail_live: std::cell::Cell<bool>,
     /// Compact verified outcome per task, keyed by the acknowledged evidence hash.
     outcomes: std::cell::RefCell<BTreeMap<u64, (String, OutcomeLines)>>,
+    /// Owner instructions given in the agent view; they hold their families from autopilot.
+    pub owner: crate::instruct::Instructions,
+    /// Task families autopilot covers, synced for the agent view.
+    pub autopilot_roots: BTreeSet<u64>,
+    /// The agent view in the right pane, when open.
+    pub agent: Option<crate::agent_view::View>,
+    /// Unsent prompt drafts per agent target.
+    pub agent_drafts: BTreeMap<crate::agent_view::Target, String>,
+    /// Retained records per task, keyed by the acknowledged evidence hash.
+    pub(crate) agent_records:
+        std::cell::RefCell<BTreeMap<u64, (String, crate::agent_view::Record)>>,
 }
 
 /// Rendered outcome lines, or why verified evidence could not be shown.
@@ -179,6 +193,7 @@ impl TaskControl {
             selected_task: None,
             focused_work_node: None,
             collapsed_work_nodes: BTreeSet::new(),
+            expanded_work_nodes: BTreeSet::new(),
             work_tree_cache: Default::default(),
             pending_evidence: None,
             task_query: String::new(),
@@ -207,6 +222,11 @@ impl TaskControl {
             follow_tail: std::cell::Cell::new(true),
             detail_live: Default::default(),
             outcomes: Default::default(),
+            owner: Default::default(),
+            autopilot_roots: BTreeSet::new(),
+            agent: None,
+            agent_drafts: BTreeMap::new(),
+            agent_records: Default::default(),
         }
     }
 
@@ -665,6 +685,7 @@ impl TaskControl {
         self.selected_task = view.selected;
         self.focused_work_node = view.selected.map(NodeId::Task);
         self.collapsed_work_nodes.clear();
+        self.expanded_work_nodes.clear();
         self.pending_evidence = None;
         self.task_query = view.query;
         self.activity = None;
@@ -694,6 +715,7 @@ impl TaskControl {
             scope_label: self.scope_status.label.clone(),
             query: self.task_query.clone(),
             collapsed: self.collapsed_work_nodes.clone(),
+            expanded: self.expanded_work_nodes.clone(),
         };
         if let Some((previous, tree)) = self.work_tree_cache.borrow().as_ref() {
             if *previous == key {
@@ -707,11 +729,12 @@ impl TaskControl {
                 matched_tasks: 0,
             },
             |snapshot| {
-                crate::mission_work::project(
+                crate::mission_work::project_with(
                     snapshot,
                     &self.scope_status,
                     &self.task_query,
                     &self.collapsed_work_nodes,
+                    Some(&self.expanded_work_nodes),
                 )
             },
         ));
@@ -767,6 +790,7 @@ impl TaskControl {
             .and_then(|row| row.parent);
         while let Some(node) = parent {
             self.collapsed_work_nodes.remove(&node);
+            self.expanded_work_nodes.insert(node);
             parent = tree
                 .rows
                 .iter()
@@ -791,6 +815,7 @@ impl TaskControl {
         if row.expandable && !row.expanded {
             self.remember_initial_work_focus();
             self.collapsed_work_nodes.remove(&focused);
+            self.expanded_work_nodes.insert(focused);
             self.scroll = 0;
             return true;
         }
@@ -817,6 +842,7 @@ impl TaskControl {
         if row.expandable && row.expanded && self.task_query.trim().is_empty() {
             self.remember_initial_work_focus();
             self.collapsed_work_nodes.insert(focused);
+            self.expanded_work_nodes.remove(&focused);
             self.scroll = 0;
             return true;
         }
@@ -868,6 +894,26 @@ impl TaskControl {
             (None, false) => tree.rows.len() - 1,
         };
         self.focus_work_node(tree.rows[next].id);
+    }
+
+    /// Focus a visible work node chosen by the user (side pane cursor or Enter).
+    pub fn focus_node(&mut self, node: NodeId) {
+        if self.pending || !self.work_tree().rows.iter().any(|row| row.id == node) {
+            return;
+        }
+        self.manual_selection = Some(std::time::Instant::now());
+        self.focus_work_node(node);
+    }
+
+    /// Live worker stage and elapsed time without copying streamed output.
+    /// The flag is true while the worker waits for shared model capacity.
+    pub fn worker_stage(&self, task: u64) -> Option<(&'static str, std::time::Duration, bool)> {
+        let progress = self.progress.get(&task)?.borrow();
+        Some((
+            progress.stage,
+            progress.started.elapsed(),
+            progress.queue.is_some(),
+        ))
     }
 
     /// While autopilot is active, focus the running task unless the user moved
@@ -951,6 +997,13 @@ impl TaskControl {
         self.workers.insert(task, cancel);
     }
 
+    /// Forget an observation registered with `attach_progress` (render and
+    /// instruction fixtures; real workers are released by their result).
+    pub fn detach_progress(&mut self, task: u64) {
+        self.progress.remove(&task);
+        self.workers.remove(&task);
+    }
+
     /// True once per batch of new worker output, so streaming redraws promptly.
     pub fn progress_changed(&mut self) -> bool {
         let mut changed = false;
@@ -1009,6 +1062,57 @@ impl TaskControl {
             .borrow_mut()
             .insert(task.id, (hash, Arc::clone(&lines)));
         Some(lines)
+    }
+
+    /// The open agent view, when it is what the right pane shows: an explicitly
+    /// opened plan, evidence, activity, report or scope view replaces it.
+    pub fn agent_shown(&self) -> Option<&crate::agent_view::View> {
+        self.agent.as_ref().filter(|_| {
+            self.visible
+                && !self.planner.visible
+                && self.evidence.is_none()
+                && self.activity.is_none()
+                && self.autopilot_report.is_none()
+                && self.scope_view.is_none()
+        })
+    }
+
+    /// Verified record of a finished attempt for the agent view, read once per
+    /// acknowledged evidence hash.
+    pub fn agent_record(&self, task: u64, hash: &str) -> crate::agent_view::Record {
+        if let Some((cached, record)) = self.agent_records.borrow().get(&task) {
+            if cached == hash {
+                return Arc::clone(record);
+            }
+        }
+        let record = Arc::new(crate::agent_view::read_record(&self.store, task));
+        self.agent_records
+            .borrow_mut()
+            .insert(task, (hash.to_owned(), Arc::clone(&record)));
+        record
+    }
+
+    /// Live worker observation for the agent view.
+    pub fn agent_live(&self, task: u64) -> Option<crate::agent_view::Live> {
+        let progress = self.progress.get(&task)?.borrow();
+        let stage = if progress.queue.is_some() {
+            "queued"
+        } else {
+            crate::side_pane::stage_word(progress.stage)
+        };
+        let stdout = String::from_utf8_lossy(&progress.check_stdout);
+        let stderr = String::from_utf8_lossy(&progress.check_stderr);
+        Some(crate::agent_view::Live {
+            stage: stage.into(),
+            prompt: progress.request.as_deref().map(str::to_owned),
+            output: progress.model_output.clone(),
+            check_output: format!("{stdout}{stderr}"),
+            checking: progress.stage == "Running approved check",
+            cancelling: self
+                .workers
+                .get(&task)
+                .is_some_and(|flag| flag.load(Ordering::SeqCst)),
+        })
     }
 
     pub fn worker_output(&self, task: u64) -> Option<(String, String)> {

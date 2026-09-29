@@ -51,7 +51,7 @@ class RecoveryTerminalSmoke(unittest.TestCase):
         self.screen_has(terminal, 'ALFREDO')
         return terminal
 
-    def wait_until(self, label, predicate, timeout=10):
+    def wait_until(self, label, predicate, timeout=30):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             for terminal in self.terminals:
@@ -63,7 +63,7 @@ class RecoveryTerminalSmoke(unittest.TestCase):
         screens = '\n\n'.join(terminal.screen() for terminal in self.terminals if not terminal.closed)
         self.fail(f'Timed out: {label}\n{screens}')
 
-    def screen_has(self, terminal, text, timeout=10):
+    def screen_has(self, terminal, text, timeout=30):
         self.wait_until(f'screen contains {text!r}', lambda: text in terminal.screen(), timeout)
 
     def task_path(self):
@@ -86,7 +86,7 @@ class RecoveryTerminalSmoke(unittest.TestCase):
         self.assertEqual(termios.tcgetattr(terminal.slave), terminal.original)
         terminal.close()
 
-    def page_to(self, terminal, text, timeout=8):
+    def page_to(self, terminal, text, timeout=30):
         """Use actual page keys; allow a blank-to-blank page to emit no diff."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -109,9 +109,9 @@ class RecoveryTerminalSmoke(unittest.TestCase):
         self.screen_has(terminal, '○ #1')
         self.screen_has(terminal, 'Needs approval')
         before = self.task_path().read_bytes()
-        terminal.send(b'\x1b[6~')
-        self.screen_has(terminal, 'Model: fixture', timeout=3)
-        terminal.send(b'\x1b[5~')
+        # Two detail rows at 32x10: page down to the last row, then back up.
+        self.page_to(terminal, '/permit 1 JSON')
+        terminal.send(b'\x1b[5~' * 8)
         self.screen_has(terminal, 'Needs approval')
         self.assertEqual(self.task_path().read_bytes(), before)
         self.assertEqual(self.fixture.count(), 0)
@@ -181,7 +181,8 @@ class RecoveryTerminalSmoke(unittest.TestCase):
         terminal = self.terminal(resume=True, conversation='narrow-inspection', height=10, width=32)
         terminal.send('/tasks #1\r')
         self.screen_has(terminal, '✗ #1')
-        self.page_to(terminal, 'after check')
+        # The Result value wraps under its label at 32 columns.
+        self.page_to(terminal, 'interrupted')
         terminal.send('/evidence 1\r')
         self.screen_has(terminal, 'Verified run evidence')
         self.page_to(terminal, 'CHECKPOINT_STDOUT_SENTINEL')

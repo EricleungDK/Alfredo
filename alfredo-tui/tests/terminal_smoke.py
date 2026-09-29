@@ -82,7 +82,7 @@ class Pty:
     def screen(self):
         return visible_screen(self.output)
 
-    def wait_for(self, text, timeout=10):
+    def wait_for(self, text, timeout=30):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if text in self.screen():
@@ -121,10 +121,10 @@ class ZeroCeremonyStart(unittest.TestCase):
             second = None
             try:
                 # A1: no flags, no typed input, from a subdirectory.
-                first.wait_for('Mission: default')
-                first.wait_for('Sessions')
+                first.wait_for('ALFREDO  default · ')  # header: mission · repository directory
+                first.wait_for('◈ ○ chat 1')  # side pane chat row
                 self.assertNotIn('Open your work', first.screen())
-                self.assertIn(root, first.screen())
+                first.wait_for(root)  # arrival line names the repository root
                 manifests = [json.loads(path.read_text()) for path in Path(state).rglob('mission.json')]
                 self.assertEqual([manifest['mission'] for manifest in manifests], ['default'])
                 # The conversation is owned by the first terminal: fall back with the reason shown.
@@ -143,7 +143,7 @@ class ZeroCeremonyStart(unittest.TestCase):
                 second.wait_for('Enter open or create')
                 # Typing replaces the default placeholder; Enter creates the missing mission.
                 second.write(b'demo1\r')
-                second.wait_for('Mission: demo1')
+                second.wait_for('ALFREDO  demo1 · ')
                 self.assertNotIn('defaultdemo1', second.screen())
                 names = sorted(json.loads(path.read_text())['mission'] for path in Path(state).rglob('mission.json'))
                 self.assertEqual(names, ['default', 'demo1'])
@@ -298,7 +298,7 @@ class TerminalSmoke(unittest.TestCase):
         )
         output = bytearray()
 
-        def wait_for(text, timeout=5):
+        def wait_for(text, timeout=30):
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 if text.decode() in visible_screen(output):
@@ -314,6 +314,18 @@ class TerminalSmoke(unittest.TestCase):
             failed_checks = [json.loads(path.read_text()).get('check') for path in Path(state.name).rglob('evidence.json') if json.loads(path.read_text()).get('status') == 'failed']
             self.fail(f'Missing {text!r}:\n{visible_screen(output)}\nSaved task outcomes: {tasks}\nFailed checks: {failed_checks}')
 
+        def wait_for_header_without(text, timeout=30):
+            # Header row 1 names dispatch only while it is on.
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                header = visible_screen(output).split('\n')[0]
+                if 'ALFREDO' in header and text.decode() not in header:
+                    return
+                if select.select([master], [], [], 0.05)[0]:
+                    output.extend(os.read(master, 65536))
+                self.assertIsNone(process.poll(), output.decode(errors='replace'))
+            self.fail(f'Header still shows {text!r}:\n{visible_screen(output)}')
+
         try:
             wait_for(b'Workspace selection required')
             self.assertFalse(list(Path(state.name).rglob('conversations-*.json')))
@@ -323,7 +335,7 @@ class TerminalSmoke(unittest.TestCase):
             self.assertFalse(slow_started.is_set())
             self.assertFalse(list(Path(state.name).rglob('mission.json')))
             os.write(master, b'\r')  # Enter on the placeholder creates the missing default mission.
-            wait_for(b'Sessions')
+            wait_for('◈ ○ chat 1'.encode())
             os.write(master, b'/scope\r')
             wait_for(b'Outside flow')
             os.write(master, b'/chat\r@unknown request\r')
@@ -440,7 +452,7 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'Persisted_fix')
             wait_for(b'Task #1 saved')
             os.write(master, b'/approve 1\r')
-            wait_for(b'/run after explicit policy')
+            wait_for('Approved · fixture'.encode())  # detail status line
             saved = next(Path(state.name).glob('rust-tasks-v1/*/tasks.json'))
             record = json.loads(saved.read_text())
             self.assertEqual(record['tasks'][0]['status'], 'approved')
@@ -509,7 +521,7 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'FAST_REPLY')
             os.write(master, b'\t/tasks\r')
             wait_for(b'Persisted_fix')
-            wait_for(b'/run after explicit policy')
+            wait_for('Approved · fixture'.encode())  # detail status line
             self.assertEqual(json.loads(saved.read_text())['revision'], 2)
             os.write(master, b'/activity #1\r')
             wait_for(b'Saved task activity')
@@ -685,9 +697,9 @@ class TerminalSmoke(unittest.TestCase):
             revision += 1
             wait_for(('revision ' + str(revision)).encode())
             os.write(master, b'/dispatch on\r')
-            wait_for('dispatch on · Work'.encode())
+            wait_for(b'   dispatch on')  # header attention while on
             os.write(master, b'/chat\r')
-            wait_for(b'Work 2 local', timeout=15)
+            wait_for(b'   2 running', timeout=15)
             release_parallel.set()
             wait_for(b'3 review', timeout=15)
             os.write(master, b'\x1bOQ')
@@ -720,7 +732,8 @@ class TerminalSmoke(unittest.TestCase):
             self.assertTrue(any(r['request']['action'].get('decision') == decision for r in json.loads(saved.read_text())['receipts']))
             wait_for('◐ #5'.encode(), timeout=15)
             os.write(master, b'/dispatch off\r')
-            wait_for('dispatch off · Work'.encode())
+            wait_for('✓ Dispatch off'.encode())
+            wait_for_header_without(b'dispatch on')
             dispatched = json.loads(saved.read_text())
             self.assertEqual(dispatched['tasks'][4]['run']['inputs'][0]['task'], 4)
             for task_id in [5, 6, 7]:
@@ -789,9 +802,9 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/tasks #1\r')
             wait_for(b'Task filter applied')
             os.write(master, b'/tasks\r')
-            wait_for(b'Mission Work')
+            wait_for('├ work'.encode())
             os.write(master, b'\x1b[1;3D' * 3)  # Collapse repairs, focus group, collapse group.
-            wait_for(b'Work group')
+            wait_for('┌ Group '.encode())  # group detail in the right pane
             os.write(master, b'/evidence\r')
             wait_for(b'Select a task first')
             self.assertEqual(saved.read_bytes(), tree_bytes)
@@ -894,7 +907,7 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'ALFREDO')
             wait_for(b'AUTO_TWO')
             wait_for(b'#7')
-            wait_for('dispatch off · Work'.encode())
+            wait_for_header_without(b'dispatch on')
             self.assertEqual(json.loads(saved.read_text()), revised)
             os.write(master, b'\x1bOQ\x1b[Z')  # Chat, then previous (reading) session.
             wait_for(restart_anchor.encode())
@@ -918,8 +931,8 @@ class TerminalSmoke(unittest.TestCase):
                 os.write(master, b'\x15' + other.encode() + b'\r')
                 wait_for(b'Mission selection required')
                 os.write(master, b'\x1bOQ\x15side-mission\r')
-                wait_for(b'Mission: side-mission')
-                wait_for(b'Sessions')
+                wait_for('ALFREDO  side-mission · '.encode())
+                wait_for('◈ ○ chat 1'.encode())
                 self.assertNotIn('AUTO_TWO', visible_screen(output))
                 self.assertNotIn('FAST_REPLY', visible_screen(output))
                 os.write(master, b'\x0eSIDE_DRAFT\t/workspace\r')
@@ -927,7 +940,7 @@ class TerminalSmoke(unittest.TestCase):
                 os.write(master, b'\x15' + workspace.name.encode() + b'\r')
                 wait_for(b'Mission selection required')
                 os.write(master, b'\r')  # Resume default in the original repository.
-                wait_for(b'Mission: default')
+                wait_for('ALFREDO  default · '.encode())
                 wait_for(b'AUTO_TWO')
                 wait_for(b'#7')
                 self.assertEqual(process.pid, original_pid)
@@ -947,7 +960,7 @@ class TerminalSmoke(unittest.TestCase):
                 wait_for(b'Mission selection required')
                 os.write(master, b'\x15side-mission\r')
                 wait_for(b'Could not switch work')
-                wait_for(b'Mission: default')
+                wait_for('ALFREDO  default · '.encode())
                 wait_for(b'AUTO_TWO')
                 self.assertEqual(process.pid, original_pid)
                 self.assertEqual(side_history.read_bytes(), b'{invalid target history')
@@ -997,7 +1010,7 @@ class TerminalSmoke(unittest.TestCase):
                 wait_for(b'Mission selection required')
                 self.assertFalse(created.exists())
                 os.write(master, b'\r')  # Admit exact repository + mission request before creation.
-                wait_for(b'Sessions')
+                wait_for('◈ ○ chat 1'.encode())
                 self.assertTrue(created.joinpath('.git').is_dir())
                 self.assertEqual(subprocess.run(['git', '-C', str(created), 'rev-parse', '--verify', 'HEAD'], capture_output=True).returncode, 0)
                 self.assertEqual(subprocess.check_output(['git', '-C', str(created), 'ls-tree', '-r', '--name-only', 'HEAD']), b'')

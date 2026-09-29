@@ -489,18 +489,18 @@ fn existing_test_is_worker_reference_repairs_carry_output_and_nothing_accepted_r
     );
     let row = alfredo_tui::dashboard::autopilot_row(&status, 100);
     assert!(
-        row.contains("Autopilot ✗ failed · 0/1 done · 1 failed · 1 repair ·"),
+        row.contains("Autopilot ✗ failed   0/1   1 failed   1 repair   "),
         "{row}"
     );
     let report = autopilot.report().unwrap();
-    assert!(report.starts_with("Autopilot failed: "), "{report}");
+    assert!(report.starts_with("✗ Autopilot failed\n"), "{report}");
     assert!(
-        report.contains("0/1 task(s) accepted · 1 repair"),
+        report.contains("\nTasks     0/1 accepted\nRepairs   1\n"),
         "{report}"
     );
     let notice = autopilot.take_finished_notice().unwrap();
     assert!(
-        notice.starts_with("Autopilot failed · 0/1 accepted · 1 repair"),
+        notice.starts_with("Autopilot failed   0/1 accepted   1 repair"),
         "{notice}"
     );
     assert!(!notice.contains('\n'));
@@ -512,10 +512,10 @@ fn existing_test_is_worker_reference_repairs_carry_output_and_nothing_accepted_r
     let app = alfredo_tui::model::App::new("fixture".into());
     let rows = render_rows(&app, &control, 100, 30);
     assert!(
-        rows.iter()
-            .any(|row| row.contains("Mission Work · 0/1 done · 1 repair ")),
+        rows.iter().any(|row| row.contains("├ work  0/1 done ")),
         "{rows:#?}"
     );
+    assert!(rows[1].contains("   1 repair   "), "{rows:#?}");
 }
 
 #[test]
@@ -562,7 +562,7 @@ fn finished_autopilot_replaces_the_stale_start_notice_in_the_footer_once() {
     assert!(
         work.app
             .notice
-            .starts_with("Autopilot failed · Planning failed 3 times"),
+            .starts_with("Autopilot failed   Planning failed 3 times"),
         "{}",
         work.app.notice
     );
@@ -570,10 +570,9 @@ fn finished_autopilot_replaces_the_stale_start_notice_in_the_footer_once() {
     let screen = rows.join("\n");
     assert!(!screen.contains("Autopilot started"), "{screen}");
     assert!(rows[29].contains("Autopilot failed"), "{screen}");
-    assert!(
-        rows[2].contains("Autopilot ✗ failed · 0/0 done"),
-        "{screen}"
-    );
+    // No plan was saved: no `0/0` progress.
+    assert!(rows[1].contains("Autopilot ✗ failed   00:"), "{screen}");
+    assert!(!rows[1].contains("0/0"), "{screen}");
     // Reported once; a user notice afterwards is not overwritten.
     work.app.notice = "USER_NOTICE".into();
     work.sync_autopilot();
@@ -688,7 +687,7 @@ fn exhausted_repairs_hold_the_task_block_dependents_and_integrate_independent_wo
     assert_eq!((status.done, status.total, status.failed), (1, 3, 2));
     assert!(
         alfredo_tui::dashboard::autopilot_row(&status, 100)
-            .contains("Autopilot ◐ partial · 1/3 done"),
+            .contains("Autopilot ◐ partial   1/3   2 failed"),
         "{status:?}"
     );
     let snapshot = fixture.store.snapshot().unwrap();
@@ -723,7 +722,10 @@ fn exhausted_repairs_hold_the_task_block_dependents_and_integrate_independent_wo
     let report = autopilot.report().unwrap();
     assert!(report.contains("repair budget exhausted"), "{report}");
     assert!(report.contains("blocked by #1"), "{report}");
-    assert!(report.contains("accepted subset"), "{report}");
+    assert!(
+        report.contains("the branch holds the accepted tasks only"),
+        "{report}"
+    );
 }
 
 #[test]
@@ -1029,7 +1031,12 @@ fn header_shows_one_autopilot_line_and_the_report_opens_in_mission_work() {
         .filter(|row| row.contains("Autopilot"))
         .collect();
     assert_eq!(lines.len(), 1, "{rows:#?}");
-    assert!(lines[0].contains("running · 1/2 done"), "{}", lines[0]);
+    assert!(
+        lines[0].contains("running   1/2   1 repair"),
+        "{}",
+        lines[0]
+    );
+    assert!(!lines[0].contains("Make answer return 42"), "{}", lines[0]);
     control.set_visible(true);
     control.autopilot_report =
         Some("Autopilot finished: goal\nREPORT_SENTINEL git switch alfredo/go-x".into());
@@ -1551,5 +1558,226 @@ fn check_needing_a_later_tasks_file_is_replanned_with_accumulated_errors() {
     assert_eq!(
         tasks[0].policy.as_ref().unwrap().check,
         vec!["/usr/bin/python3", "-c", "import textutil"]
+    );
+}
+
+/// `drive`, recording each choice in the conversation exactly as the terminal
+/// does: autopilot commands, automatic launches and controller/planner outcomes.
+fn drive_recorded(
+    app: &mut alfredo_tui::model::App,
+    autopilot: &mut Autopilot,
+    control: &mut TaskControl,
+    runtime: &Runtime,
+) {
+    use alfredo_tui::console_command::CommandState;
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut refreshed = Instant::now();
+    loop {
+        control.poll();
+        let session = &mut app.sessions[0];
+        for event in control.take_control_events() {
+            let intent = Intent::Control {
+                request: event.request,
+            };
+            let id = alfredo_tui::console_command::ConsoleCommand::identity(&intent);
+            session.set_command_state(
+                &id,
+                CommandState::Control {
+                    outcome: event.outcome,
+                },
+            );
+        }
+        for event in control.planner.take_command_events() {
+            let ids: Vec<_> = session
+                .commands()
+                .iter()
+                .filter(|command| command.intent.planner_request() == Some(&event.request))
+                .map(|command| command.id.clone())
+                .collect();
+            for id in ids {
+                session.set_command_state(
+                    &id,
+                    CommandState::Planner {
+                        outcome: event.outcome.clone(),
+                    },
+                );
+            }
+        }
+        if finished(autopilot, control) && control.workers.is_empty() && !control.owner.active() {
+            return;
+        }
+        let submission = alfredo_tui::instruct::Instructions::tick(control, autopilot)
+            .or_else(|| autopilot.tick(runtime, control));
+        if let Some(submission) = submission {
+            let id = session
+                .submit_autopilot_command(submission.text, submission.intent.clone())
+                .unwrap();
+            let state = match control.dispatch_prepared(runtime, &submission.intent) {
+                Ok(()) => CommandState::Submitted,
+                Err(reason) => CommandState::Refused { reason },
+            };
+            session.set_command_state(&id, state);
+        }
+        if let Ok(Some(request)) = control.prepare_dispatch() {
+            let parent = session
+                .commands()
+                .iter()
+                .find(|command| {
+                    matches!(&command.intent, Intent::Control { request: source } if *source == request.source)
+                })
+                .unwrap()
+                .sequence;
+            let intent = Intent::DispatchRun {
+                request: request.clone(),
+            };
+            let id = session
+                .submit_automatic_command(
+                    format!(
+                        "Automatic /run {} · dispatch command #{parent}",
+                        request.task
+                    ),
+                    intent.clone(),
+                )
+                .unwrap();
+            if control.dispatch_prepared(runtime, &intent).is_ok() {
+                session.set_command_state(&id, CommandState::Submitted);
+            }
+        }
+        if refreshed.elapsed() > Duration::from_millis(100) {
+            control.refresh_background(runtime);
+            refreshed = Instant::now();
+        }
+        assert!(Instant::now() < deadline, "{}", control.notice);
+        thread::sleep(Duration::from_millis(3));
+    }
+}
+
+#[test]
+fn chat_collapses_autopilot_commands_into_one_line_per_task() {
+    let fixture = Fixture::new();
+    let server = one_good_task();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    let mut app = alfredo_tui::model::App::new("fixture".into());
+    autopilot.start("Answer", "fixture", 1, &control).unwrap();
+    drive_recorded(&mut app, &mut autopilot, &mut control, &runtime);
+    assert!(app.sessions[0].commands().len() >= 5);
+    control.set_visible(false);
+    let rows = render_rows(&app, &control, 100, 30);
+    let screen = rows.join("\n");
+    let start = alfredo_tui::ui::pane_width(100) as usize + 2;
+    let pane: Vec<String> = rows[2..rows.len() - 6]
+        .iter()
+        .map(|row| {
+            row.chars()
+                .skip(start)
+                .collect::<String>()
+                .trim_end_matches(['│', ' '])
+                .to_string()
+        })
+        .filter(|row| !row.is_empty())
+        .collect();
+    assert_eq!(
+        pane,
+        [
+            "✓ plan drafted",
+            "✓ #1 planned → approved → started → check passed → accepted"
+        ],
+        "{screen}"
+    );
+    // An owner follow-up's steps collapse too, wrapping under their text.
+    alfredo_tui::instruct::Instructions::give_to(
+        &mut control,
+        alfredo_tui::agent_view::Target::Task(1),
+        "keep answer at 42",
+    )
+    .unwrap();
+    drive_recorded(&mut app, &mut autopilot, &mut control, &runtime);
+    control.set_visible(false);
+    let rows = render_rows(&app, &control, 100, 30);
+    let screen = rows.join("\n");
+    let pane: Vec<String> = rows[2..rows.len() - 6]
+        .iter()
+        .map(|row| {
+            row.chars()
+                .skip(start)
+                .collect::<String>()
+                .trim_end_matches(['│', ' '])
+                .to_string()
+        })
+        .filter(|row| !row.is_empty())
+        .collect();
+    assert_eq!(
+        pane[2..],
+        [
+            "✓ #2 proposed → files and check set → approved → started → check",
+            "  passed → accepted"
+        ],
+        "{screen}"
+    );
+}
+
+#[test]
+fn finished_report_reads_as_labeled_sections_and_the_footer_uses_wide_gaps() {
+    let fixture = Fixture::new();
+    let server = one_good_task();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    let goal = "create calc.py so that answer() returns the integer forty-two, with a check that proves it and nothing else changed anywhere in the repository";
+    autopilot.start(goal, "fixture", 1, &control).unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "done", finished);
+    let branch = autopilot.status(&control).unwrap().branch.unwrap();
+    assert_eq!(
+        autopilot.report().unwrap(),
+        format!(
+            "✓ Autopilot done\n{goal}\n\nTasks     1/1 accepted\nRepairs   0\nBranch    {branch}\n\n✓ #1  Make answer return 42\n\nReview    git switch {branch}\nMerge     git merge {branch}"
+        )
+    );
+    assert_eq!(
+        autopilot.take_finished_notice().unwrap(),
+        format!("Autopilot done   1/1 accepted   git switch {branch}")
+    );
+    let app = alfredo_tui::model::App::new("fixture".into());
+    control.set_visible(true);
+    control.autopilot_report = autopilot.report().map(str::to_owned);
+    let rows = render_rows(&app, &control, 100, 30);
+    let screen = rows.join("\n");
+    let start = alfredo_tui::ui::pane_width(100) as usize + 2;
+    let pane: Vec<String> = rows
+        .iter()
+        .map(|row| {
+            row.chars()
+                .skip(start)
+                .collect::<String>()
+                .trim_end_matches(['│', ' '])
+                .to_string()
+        })
+        .collect();
+    let at = pane
+        .iter()
+        .position(|row| row == "✓ Autopilot done")
+        .unwrap_or_else(|| panic!("{screen}"));
+    // The goal takes one line, cut with an ellipsis.
+    assert!(
+        pane[at + 1].starts_with("create calc.py so that"),
+        "{screen}"
+    );
+    assert!(pane[at + 1].ends_with('…'), "{screen}");
+    assert_eq!(
+        pane[at + 2..at + 11],
+        [
+            "".to_string(),
+            "Tasks     1/1 accepted".into(),
+            "Repairs   0".into(),
+            format!("Branch    {branch}"),
+            "".into(),
+            "✓ #1  Make answer return 42".into(),
+            "".into(),
+            format!("Review    git switch {branch}"),
+            format!("Merge     git merge {branch}"),
+        ],
+        "{screen}"
     );
 }

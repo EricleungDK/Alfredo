@@ -201,17 +201,18 @@ fn header_renders_server_health_at_narrow_and_wide_widths() {
             Health::Ready {
                 model: "qwen3:14b".into(),
             },
-            "ollama ✓ qwen3:14b warm",
+            // The header names the model without its tag.
+            "ollama ✓ qwen3 warm",
             "ollama ✓ warm",
         ),
         (
             Health::Loading {
                 model: "qwen3:14b".into(),
             },
-            "ollama ✓ qwen3:14b loading",
+            "ollama ✓ qwen3 loading",
             "ollama ✓ loading",
         ),
-        (Health::Up, "ollama ✓ qwen3:14b", "ollama ✓"),
+        (Health::Up, "ollama ✓ qwen3", "ollama ✓"),
         (
             Health::Down {
                 since: Instant::now(),

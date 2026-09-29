@@ -224,6 +224,26 @@ pub struct Planner {
     command_revision: Option<u64>,
     /// Validation findings for the last previewed draft.
     warnings: std::cell::RefCell<Option<(Plan, Vec<String>)>>,
+    /// When the current generation was spawned (display only).
+    started: Option<std::time::Instant>,
+}
+
+/// Retry and revision text appended to a planner request. The user's goal is
+/// the text before the first marker; older saved plans used the first form.
+const GOAL_MARKERS: [&str; 3] = [
+    " | The previous plan was rejected by validation:",
+    " | Earlier plans were rejected by validation",
+    " | Revision request: ",
+];
+
+/// The user's original goal from a plan request, without planner retry text.
+pub fn goal(prompt: &str) -> &str {
+    let end = GOAL_MARKERS
+        .iter()
+        .filter_map(|marker| prompt.find(marker))
+        .min()
+        .unwrap_or(prompt.len());
+    prompt[..end].trim()
 }
 impl Drop for Planner {
     fn drop(&mut self) {
@@ -439,6 +459,18 @@ impl Planner {
     pub fn active(&self) -> bool {
         self.job.is_some()
     }
+    /// Planning request of the current or last generation.
+    pub fn prompt(&self) -> &str {
+        &self.prompt
+    }
+    /// Planner model of the current or last generation.
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+    /// Start of the generation in flight, if any.
+    pub fn started(&self) -> Option<std::time::Instant> {
+        self.started.filter(|_| self.active())
+    }
     fn finish_command(&mut self, outcome: crate::planner_command::Outcome) {
         if let Some(request) = self.command.take() {
             self.command_events
@@ -626,6 +658,7 @@ impl Planner {
         let (sender, receiver) = mpsc::channel(32);
         self.events = Some(receiver);
         self.notice = "Reading committed repository context · no tasks saved".into();
+        self.started = Some(std::time::Instant::now());
         self.job = Some(runtime.spawn(async move {
             if let Some(expected) = request.expected_revision {
                 let current_store = store.clone();

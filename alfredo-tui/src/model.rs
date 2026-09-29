@@ -1210,6 +1210,8 @@ pub struct App {
     pub completion: Option<crate::commands::Completion>,
     /// Transient server health; inert until a workstation starts its monitor.
     pub health: crate::health::HealthView,
+    /// Side pane focus, cursor, presentation settings and mission list (view state only).
+    pub pane: crate::side_pane::PaneUi,
 }
 
 impl App {
@@ -1225,6 +1227,7 @@ impl App {
             models_scroll: 0,
             completion: None,
             health: Default::default(),
+            pane: Default::default(),
         }
     }
 

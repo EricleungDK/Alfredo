@@ -23,6 +23,10 @@ use std::{
 use tokio::{runtime::Runtime, sync::oneshot};
 
 const VERSION: u32 = 1;
+/// Label column of the finished report.
+const LABEL: usize = 10;
+/// Fields of one-line results are separated by three spaces.
+const GAP: &str = "   ";
 /// Repeated submissions of one decision without effect pause the loop.
 const ATTEMPTS: u32 = 3;
 const MAX_STATE: usize = 256 * 1024;
@@ -81,8 +85,23 @@ struct Saved {
     report: Option<String>,
     #[serde(default)]
     branch: Option<String>,
+    /// Owner follow-up tasks adopted as further families of this run.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    adopted: BTreeSet<u64>,
+    /// Integrations already made; a reopened run integrates on `-N` branches.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    round: u32,
+}
+fn is_zero(value: &u32) -> bool {
+    *value == 0
 }
 impl Saved {
+    fn roots(&self) -> Vec<u64> {
+        let first = self.first.unwrap_or(0);
+        let mut roots: Vec<u64> = (first..first + self.count).collect();
+        roots.extend(self.adopted.iter().filter(|id| **id >= first + self.count));
+        roots
+    }
     fn active(&self) -> bool {
         !matches!(self.phase, Phase::Done | Phase::Failed)
     }
@@ -248,6 +267,53 @@ struct Family {
     repairs: u32,
 }
 
+/// The autopilot state file of one conversation set in a mission directory.
+pub fn state_path(directory: &Path, conversation: &str) -> PathBuf {
+    directory.join(format!(
+        "autopilot-{:x}.json",
+        Sha256::digest(conversation.as_bytes())
+    ))
+}
+
+/// Read another mission's saved loop state without locks or writes.
+/// `Ok(None)`: no loop was ever started. The word is the saved phase as
+/// written; a loop left active by another process is reported as saved.
+pub fn peek(path: &Path) -> Result<Option<&'static str>, String> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    if bytes.len() > MAX_STATE {
+        return Err("Autopilot state exceeds its size bound".into());
+    }
+    let saved: Saved = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+    saved.validate()?;
+    Ok(Some(match saved.phase {
+        // A finished loop's saved report names its outcome.
+        Phase::Done => {
+            // Older builds wrote `Autopilot partial: …`; newer ones `◐ Autopilot partial`.
+            let first = saved
+                .report
+                .as_deref()
+                .and_then(|report| report.lines().next())
+                .unwrap_or_default()
+                .trim_start_matches(['✓', '◐', '✗', ' ']);
+            if first.starts_with("Autopilot partial") {
+                "partial"
+            } else if first.starts_with("Autopilot failed") {
+                "failed"
+            } else {
+                "done"
+            }
+        }
+        Phase::Failed => "failed",
+        _ if saved.paused => "paused",
+        Phase::Scoping | Phase::Planning | Phase::Saving => "planning",
+        Phase::Running | Phase::Finishing => "running",
+    }))
+}
+
 pub struct Autopilot {
     path: PathBuf,
     saved: Option<Saved>,
@@ -269,10 +335,7 @@ impl Autopilot {
     /// Load this conversation set's autopilot. A saved active loop is always
     /// restored paused; nothing is replayed until an explicit resume.
     pub fn open(directory: &Path, conversation: &str) -> Result<Self, String> {
-        let path = directory.join(format!(
-            "autopilot-{:x}.json",
-            Sha256::digest(conversation.as_bytes())
-        ));
+        let path = state_path(directory, conversation);
         let saved = match fs::read(&path) {
             Ok(bytes) => {
                 if bytes.len() > MAX_STATE {
@@ -447,6 +510,8 @@ impl Autopilot {
             notice: String::new(),
             report: None,
             branch: None,
+            adopted: BTreeSet::new(),
+            round: 0,
         });
         self.last = None;
         self.last_key = None;
@@ -573,13 +638,35 @@ impl Autopilot {
                 let status = self
                     .status(tasks)
                     .ok_or("No autopilot goal; use /go GOAL")?;
-                let mut report = status.line();
-                if !self.notice.is_empty() {
-                    report.push_str(&format!("\n{}", self.notice));
-                }
-                if let Some(summary) = self.report() {
-                    report.push_str(&format!("\n\n{summary}"));
-                }
+                let report = match self.report() {
+                    Some(summary) => summary.to_owned(),
+                    None => {
+                        let mut lines = vec![
+                            format!(
+                                "{} Autopilot {}",
+                                status.state.marker(),
+                                status.state.label()
+                            ),
+                            clean(&status.goal, 400),
+                            String::new(),
+                            format!(
+                                "{:<LABEL$}{}/{} accepted",
+                                "Tasks", status.done, status.total
+                            ),
+                            format!("{:<LABEL$}{}", "Repairs", status.repairs),
+                            format!(
+                                "{:<LABEL$}{}",
+                                "Elapsed",
+                                crate::dashboard::clock(status.elapsed)
+                            ),
+                        ];
+                        if !self.notice.is_empty() {
+                            lines.push(String::new());
+                            lines.push(format!("{:<LABEL$}{}", "Note", clean(&self.notice, 400)));
+                        }
+                        lines.join("\n")
+                    }
+                };
                 tasks.set_visible(true);
                 tasks.autopilot_report = Some(report);
                 Ok("Autopilot status · /tasks returns to task details".into())
@@ -590,6 +677,66 @@ impl Autopilot {
                 }
                 _ => Err("Usage: /go GOAL".into()),
             },
+        }
+    }
+
+    /// Planned and adopted task families of this run.
+    pub fn roots(&self, _tasks: &TaskControl) -> BTreeSet<u64> {
+        self.saved
+            .as_ref()
+            .filter(|saved| saved.first.is_some())
+            .map(|saved| saved.roots().into_iter().collect())
+            .unwrap_or_default()
+    }
+
+    /// Adopt an owner follow-up as a further family. A finished run reopens: the
+    /// follow-up is reviewed like planned work and integrated on a new branch.
+    pub fn adopt(&mut self, task: u64) -> bool {
+        let Some(saved) = self.saved.as_mut().filter(|saved| saved.first.is_some()) else {
+            return false;
+        };
+        if !saved.adopted.insert(task) {
+            return false;
+        }
+        self.reopen();
+        self.attempts.clear();
+        self.persist();
+        true
+    }
+
+    /// Owner-instructed work in one of this run's families after it finished:
+    /// the run reopens to review it and integrates again on a new branch.
+    pub fn reopen(&mut self) {
+        let elapsed = self.elapsed();
+        let Some(saved) = self
+            .saved
+            .as_mut()
+            .filter(|saved| saved.phase == Phase::Done)
+        else {
+            return;
+        };
+        saved.phase = Phase::Running;
+        saved.paused = false;
+        saved.finished = None;
+        saved.report = None;
+        if saved.branch.is_some() {
+            saved.round += 1;
+        }
+        self.clock = (std::time::Instant::now(), elapsed);
+        self.notice = "Autopilot resumed for your instruction".into();
+        self.attempts.clear();
+        self.persist();
+    }
+
+    /// An owner revision of the draft replaces the plan request autopilot waits for.
+    pub fn adopt_revision(&mut self, correlation: &str) {
+        let Some(saved) = self.saved.as_mut() else {
+            return;
+        };
+        if matches!(saved.phase, Phase::Planning | Phase::Saving) && saved.save_request.is_none() {
+            saved.phase = Phase::Planning;
+            saved.plan_request = Some(correlation.to_owned());
+            self.persist();
         }
     }
 
@@ -614,14 +761,15 @@ impl Autopilot {
                 }
             }
         }
+        let total = saved.roots().len();
         if state == RunState::Done {
-            state = outcome(done, saved.count as usize);
+            state = outcome(done, total);
         }
         Some(Status {
             state,
             goal: saved.goal.clone(),
             done,
-            total: saved.count as usize,
+            total,
             failed,
             repairs,
             elapsed: Duration::from_secs(self.elapsed()),
@@ -744,9 +892,14 @@ impl Autopilot {
         if let Some(saved) = self.saved.as_mut() {
             saved.phase = Phase::Failed;
             saved.finished = Some(saved.started + elapsed);
-            saved.report = Some(format!("Autopilot failed: {}\n{notice}", saved.goal));
+            saved.report = Some(format!(
+                "✗ Autopilot failed\n{}\n\n{:<LABEL$}{}",
+                clean(&saved.goal, 400),
+                "Reason",
+                clean(&notice, 1024)
+            ));
         }
-        self.finished_notice = Some(clean(&format!("Autopilot failed · {notice}"), 1024));
+        self.finished_notice = Some(clean(&format!("Autopilot failed{GAP}{notice}"), 1024));
         self.set_notice(tasks, notice);
         tasks.autopilot_report = self.report().map(str::to_owned);
         self.persist();
@@ -817,7 +970,7 @@ impl Autopilot {
         &mut self,
         tasks: &mut TaskControl,
     ) -> Result<Option<(String, String, Intent)>, String> {
-        if tasks.planner.active() {
+        if tasks.planner.active() || tasks.owner.planning_held() {
             return Ok(None);
         }
         let saved = self.saved.as_ref().unwrap().clone();
@@ -901,6 +1054,9 @@ impl Autopilot {
         &mut self,
         tasks: &mut TaskControl,
     ) -> Result<Option<(String, String, Intent)>, String> {
+        if tasks.planner.active() || tasks.owner.planning_held() {
+            return Ok(None);
+        }
         let snapshot = tasks.snapshot.as_ref().unwrap();
         let saved = self.saved.as_ref().unwrap();
         if let Some(request) = &saved.save_request {
@@ -944,7 +1100,12 @@ impl Autopilot {
         let families = families(&snapshot, &saved, tasks);
         let find = |id: u64| snapshot.tasks.iter().find(|task| task.id == id);
         let mut command = None;
-        for family in families.iter().filter(|f| f.settled == Settled::Active) {
+        // Families the owner is instructing are theirs until the instructed run starts.
+        let held = tasks.owner.held();
+        for family in families
+            .iter()
+            .filter(|f| f.settled == Settled::Active && !held.contains(&f.root))
+        {
             let Some(head) = find(family.head) else {
                 continue;
             };
@@ -1078,7 +1239,10 @@ impl Autopilot {
             self.complete(tasks, Err("no recorded plan baseline".into()));
             return;
         };
-        let name = format!("alfredo/go-{}", &saved.id[..8]);
+        let name = match saved.round {
+            0 => format!("alfredo/go-{}", &saved.id[..8]),
+            round => format!("alfredo/go-{}-{}", &saved.id[..8], round + 1),
+        };
         let (sender, receiver) = oneshot::channel();
         let store = tasks.store().clone();
         let workspace = snapshot.workspace.clone();
@@ -1121,15 +1285,36 @@ impl Autopilot {
             .count();
         let repairs: u32 = families.iter().map(|family| family.repairs).sum();
         let state = outcome(accepted, families.len());
-        let tally = format!(
-            "{accepted}/{} task(s) accepted · {}",
-            families.len(),
-            plural(repairs, "repair")
-        );
+        // Labeled sections in the side pane language: dim labels, one blank
+        // row between sections, one line per task.
         let mut lines = vec![
-            format!("Autopilot {}: {}", state.label(), clean(&saved.goal, 200)),
-            tally,
+            format!("{} Autopilot {}", state.marker(), state.label()),
+            clean(&saved.goal, 400),
+            String::new(),
+            format!("{:<LABEL$}{accepted}/{} accepted", "Tasks", families.len()),
+            format!("{:<LABEL$}{repairs}", "Repairs"),
         ];
+        let branch = match &result {
+            Ok(value) => {
+                let (name, _) = value.split_once('\0').unwrap_or((value, ""));
+                lines.push(format!("{:<LABEL$}{name}", "Branch"));
+                Some(name.to_string())
+            }
+            Err(error) => {
+                lines.push(format!("{:<LABEL$}none", "Branch"));
+                lines.push(format!(
+                    "{:<LABEL$}{}",
+                    "Reason",
+                    if accepted > 0 {
+                        format!("the accepted tasks do not compose cleanly: {error}")
+                    } else {
+                        error.clone()
+                    }
+                ));
+                None
+            }
+        };
+        lines.push(String::new());
         let mut stuck = 0;
         for family in &families {
             let title = snapshot
@@ -1138,54 +1323,44 @@ impl Autopilot {
                 .find(|t| t.id == family.root)
                 .map(|t| clean(&t.title, 80))
                 .unwrap_or_default();
-            let outcome = match &family.settled {
-                Settled::Success(source) if *source == family.root => "accepted".to_string(),
-                Settled::Success(source) => format!("accepted via repair #{source}"),
+            let (glyph, detail) = match &family.settled {
+                Settled::Success(source) if *source == family.root => ("✓", None),
+                Settled::Success(source) => ("✓", Some(format!("via repair #{source}"))),
                 Settled::Stuck(reason) => {
                     stuck += 1;
-                    reason.clone()
+                    ("✗", Some(reason.clone()))
                 }
-                Settled::Active => "unfinished".into(),
+                Settled::Active => ("◌", Some("unfinished".into())),
             };
-            lines.push(format!("#{} {title} — {outcome}", family.root));
+            lines.push(format!("{glyph} #{}  {title}", family.root));
+            if let Some(detail) = detail {
+                lines.push(format!("      {detail}"));
+            }
         }
-        let branch = match result {
-            Ok(value) => {
-                let (name, commit) = value.split_once('\0').unwrap_or((&value, ""));
+        if let Some(name) = &branch {
+            lines.push(String::new());
+            lines.push(format!("{:<LABEL$}git switch {name}", "Review"));
+            lines.push(format!("{:<LABEL$}git merge {name}", "Merge"));
+            if stuck > 0 {
                 lines.push(format!(
-                    "Integration branch {name} at {} ({accepted} accepted task(s)); HEAD, index and working files unchanged",
-                    &commit[..commit.len().min(12)]
+                    "{:<LABEL$}the branch holds the accepted tasks only",
+                    "Note"
                 ));
-                lines.push(format!(
-                    "Review: git switch {name} · Merge: git merge {name}"
-                ));
-                if stuck > 0 {
-                    lines.push(format!(
-                        "Partial result: {stuck} task(s) held or failed; the branch contains the accepted subset only"
-                    ));
-                }
-                Some(name.to_string())
             }
-            Err(error) => {
-                lines.push(if accepted > 0 {
-                    format!("No integration branch: the accepted subset does not compose cleanly: {error}")
-                } else {
-                    format!("No integration branch: {error}")
-                });
-                None
-            }
-        };
+        }
         let report = lines.join("\n");
-        let notice = format!(
-            "Autopilot {} · {accepted}/{} accepted · {} · {}",
+        let mut notice = format!(
+            "Autopilot {}{GAP}{accepted}/{} accepted",
             state.label(),
-            families.len(),
-            plural(repairs, "repair"),
-            match &branch {
-                Some(name) => format!("git switch {name}"),
-                None => "no integration branch".into(),
-            }
+            families.len()
         );
+        if repairs > 0 {
+            notice.push_str(&format!("{GAP}{}", plural(repairs, "repair")));
+        }
+        notice.push_str(&match &branch {
+            Some(name) => format!("{GAP}git switch {name}"),
+            None => format!("{GAP}no integration branch"),
+        });
         self.finished_notice = Some(notice.clone());
         let elapsed = self.elapsed();
         if let Some(saved) = self.saved.as_mut() {
@@ -1203,7 +1378,7 @@ impl Autopilot {
 
 /// Repair reason detail: a failed check's bounded output tail from verified
 /// evidence (naming a no-progress attempt), else the recorded run detail. Never empty.
-fn failure_detail(tasks: &TaskControl, head: &Task) -> String {
+pub(crate) fn failure_detail(tasks: &TaskControl, head: &Task) -> String {
     let failure = tasks
         .store()
         .evidence(head.id)
@@ -1278,8 +1453,9 @@ fn families(snapshot: &Snapshot, saved: &Saved, tasks: &TaskControl) -> Vec<Fami
         .filter(|task| task.id >= first)
         .filter_map(|task| Some((task.id, snapshot.repair_root(task.id)?)))
         .collect();
+    let held = tasks.owner.held();
     let mut result: Vec<Family> = Vec::new();
-    for root in first..first + saved.count {
+    for root in saved.roots() {
         let Some(task) = find(root) else {
             continue;
         };
@@ -1289,8 +1465,11 @@ fn families(snapshot: &Snapshot, saved: &Saved, tasks: &TaskControl) -> Vec<Fami
             .filter(|t| roots.get(&t.id) == Some(&root))
             .collect();
         let head = members.iter().map(|t| t.id).max().unwrap_or(root);
+        // A repair cancelled before it started (replaced by an owner
+        // instruction) spent nothing; a steer's parent was cancelled, not failed.
         let repairs = members
             .iter()
+            .filter(|t| !(t.status == TaskStatus::Cancelled && t.run.is_none()))
             .filter(|t| {
                 t.repair_of
                     .and_then(find)
@@ -1307,7 +1486,9 @@ fn families(snapshot: &Snapshot, saved: &Saved, tasks: &TaskControl) -> Vec<Fami
                     .then(|| format!("blocked by #{dep}"))
             })
         };
-        let settled = if let Some(source) = snapshot.resolution_for_family(root) {
+        let settled = if held.contains(&root) {
+            Settled::Active
+        } else if let Some(source) = snapshot.resolution_for_family(root) {
             Settled::Success(source)
         } else if task.status == TaskStatus::Accepted {
             Settled::Success(root)

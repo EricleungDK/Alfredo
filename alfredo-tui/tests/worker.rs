@@ -775,7 +775,8 @@ fn terminal_shows_waiting_worker_and_cancellation_until_durable_result() {
             text.contains("Waiting for model"),
             "{width}x{height}: {text}"
         );
-        assert!(text.contains("Mission: mission"), "{text}");
+        // Header row 1 names the mission and repository directory.
+        assert!(text.contains("ALFREDO  mission · workspace"), "{text}");
         assert!(!text.contains("Check passed"));
     }
     control
@@ -6260,4 +6261,35 @@ async fn truncated_blocks_fail_named_and_repair_says_so_with_prior_files_as_bloc
     );
     assert!(prompt.contains("+    return \"41\""), "{prompt}");
     assert!(!prompt.contains("return \\\"41\\\""), "{prompt}");
+}
+
+#[tokio::test]
+async fn owner_instruction_leads_the_repair_request_above_what_is_still_failing() {
+    let fixture = unittest_fixture();
+    run_captured(&fixture, 1, "def answer():\n    return 41\n", None).await;
+    // A queued note carries the check tail after its separator; the request
+    // leads with the note alone and the failures follow in their own section.
+    fixture.action(Action::Repair {
+        task: 1,
+        reason: format!(
+            "{}answer must be the integer 42{}Check failed (exit 1)",
+            alfredo_tui::instruct::OWNER,
+            alfredo_tui::instruct::AFTER_CHECK
+        ),
+    });
+    fixture.action(Action::Approve { task: 2 });
+    let (request, _) = run_captured(&fixture, 2, "def answer():\n    return 42\n", None).await;
+    let prompt = last_prompt(&request);
+    let head = &prompt[..prompt.find("WHAT IS STILL FAILING").unwrap()];
+    assert_eq!(
+        head,
+        "OWNER INSTRUCTION (from the repository owner; follow it within the approved files and check below)\nanswer must be the integer 42\n\nImplement this task: Repair #1: Owner: answer must be the integer 42 · after check: Check failed (exit 1)\n"
+    );
+    assert!(failing_section(&prompt).contains("AssertionError: 41 != 42"));
+    // An ordinary repair keeps its first line.
+    let fixture = unittest_fixture();
+    run_captured(&fixture, 1, "def answer():\n    return 41\n", None).await;
+    let second = repair_of(&fixture, 1);
+    let (request, _) = run_captured(&fixture, second, "def answer():\n    return 42\n", None).await;
+    assert!(last_prompt(&request).starts_with("Implement this task: Repair #1:"));
 }

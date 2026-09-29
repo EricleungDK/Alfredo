@@ -51,6 +51,18 @@ pub fn project(
     query: &str,
     collapsed: &BTreeSet<NodeId>,
 ) -> Tree {
+    project_with(snapshot, scope, query, collapsed, None)
+}
+
+/// As `project`, and with `expanded` given, a completed plan group starts
+/// collapsed while another group still has open work, unless listed there.
+pub fn project_with(
+    snapshot: &Snapshot,
+    scope: &ScopeStatus,
+    query: &str,
+    collapsed: &BTreeSet<NodeId>,
+    expanded: Option<&BTreeSet<NodeId>>,
+) -> Tree {
     let tasks: BTreeMap<_, _> = snapshot.tasks.iter().map(|task| (task.id, task)).collect();
     let mut membership = BTreeMap::new();
     let mut plans = BTreeMap::new();
@@ -128,13 +140,57 @@ pub fn project(
         }
     }
 
+    let mut automatic = BTreeSet::new();
+    if let Some(expanded) = expanded {
+        use crate::tasks::TaskStatus;
+        // Canonical order: a repair's parent is resolved before the repair.
+        let mut root_of: BTreeMap<u64, NodeId> = BTreeMap::new();
+        let mut complete: BTreeMap<NodeId, bool> = BTreeMap::new();
+        let mut open = BTreeSet::new();
+        for task in tasks.values() {
+            let root = match rows[&NodeId::Task(task.id)].parent {
+                Some(NodeId::Task(parent)) => root_of[&parent],
+                Some(root) => root,
+                None => NodeId::Manual,
+            };
+            root_of.insert(task.id, root);
+            if task.repair_of.is_none() {
+                let done = task.status == TaskStatus::Accepted
+                    || snapshot.resolution_for_family(task.id).is_some();
+                *complete.entry(root).or_insert(true) &= done;
+            }
+            if matches!(
+                task.status,
+                TaskStatus::Proposed
+                    | TaskStatus::Approved
+                    | TaskStatus::Running
+                    | TaskStatus::ReviewReady
+                    | TaskStatus::NeedsHumanReview
+            ) {
+                open.insert(root);
+            }
+        }
+        for (root, done) in complete {
+            if done
+                && matches!(root, NodeId::Plan(_))
+                && !expanded.contains(&root)
+                && open.iter().any(|other| *other != root)
+            {
+                automatic.insert(root);
+            }
+        }
+    }
+
     for id in &roots {
         let task_count = counts[id];
         let (label, detail) = match id {
             NodeId::Plan(revision) => {
                 let plan = plans[id];
                 (
-                    bounded(&format!("Plan r{revision} · {}", plan.prompt), LABEL_BYTES),
+                    bounded(
+                        &format!("Plan r{revision} · {}", crate::planner::goal(&plan.prompt)),
+                        LABEL_BYTES,
+                    ),
                     bounded(
                         &format!(
                             "{task_count} tasks including repairs · {} original steps · planner {}",
@@ -185,7 +241,8 @@ pub fn project(
         row.task_count = counts[&id];
         let descendants = children.get(&id).map(Vec::as_slice).unwrap_or_default();
         row.expandable = descendants.iter().any(|id| included.contains(id));
-        row.expanded = row.expandable && (filtering || !collapsed.contains(&id));
+        row.expanded =
+            row.expandable && (filtering || !(collapsed.contains(&id) || automatic.contains(&id)));
         if row.expanded {
             pending.extend(descendants.iter().rev().map(|child| (*child, depth + 1)));
         }

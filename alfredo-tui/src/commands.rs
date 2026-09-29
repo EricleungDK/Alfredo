@@ -68,6 +68,14 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "/retry-command",
         "SESSION:COMMAND — explicitly retry a saved intent",
     ),
+    (
+        "/watch",
+        "ID|architect — open an agent's transcript (F6, Enter on its row)",
+    ),
+    (
+        "/tell",
+        "ID|architect TEXT — instruct an agent: steer, repair, follow up, revise",
+    ),
     ("/chat", "return to conversation"),
     ("/models", "list installed models"),
     ("/model", "NAME — select conversation model"),
@@ -137,6 +145,7 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
             "/branch",
         ],
     ),
+    ("Agents", &["/watch", "/tell"]),
     (
         "Chat",
         &[

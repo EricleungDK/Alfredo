@@ -48,9 +48,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut model = std::env::var("ALFREDO_MODEL").unwrap_or_else(|_| "qwen3:14b".into());
     let mut endpoint =
         std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
+    let mut theme = alfredo_tui::theme::Theme::from_env(|key| std::env::var(key).ok())?;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--icons" => {
+                theme.icons = alfredo_tui::theme::IconSet::parse(
+                    &args.next().ok_or("--icons needs nerd, unicode or ascii")?,
+                )?
+            }
+            "--no-motion" => theme.motion = false,
             "--doctor" => doctor = true,
             "--select" => select = true,
             "--go" => {
@@ -138,7 +145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--model" => model = args.next().ok_or("--model needs a model name")?,
             "--endpoint" => endpoint = args.next().ok_or("--endpoint needs an HTTP(S) origin")?,
             "--help" | "-h" => {
-                println!("Quickstart: cd YOUR-GIT-REPO && alfredo-tui    opens the repository, nothing to type\n            /go add calc.py with tests        autopilot: plan, run, review, branch\n            F2 dashboard · F5 pause · F1 help · Ctrl+Q quit\n\nAlfredo — local multi-agent coding terminal for Ollama\n\nUsage: alfredo-tui [--model NAME] [--endpoint URL]\n  [--select] [--workspace DIR] [--mission NAME | --new-mission NAME] [--state-dir DIR] [--conversation NAME] [--parallel-models 1..8] [--structured-thinking auto|on|off] [--worker-format blocks|json] [--keep-alive DURATION|default] [--connect-retries 0..10] [--doctor]\n  [--go GOAL] [--max-repairs 0..16]\n\nInside a Git repository (or with --workspace DIR alone), opens the repository root with mission default, resumed or created; no typed input. Otherwise, or with --select, a selector chooses the repository and mission; Enter opens or creates the named mission. If the automatic open fails, the selector shows why. --workspace with --mission resumes; --new-mission creates a distinct name.\nDirect Ollama conversations and isolated Rust coding workers.\nTerminals using the same endpoint share --parallel-models capacity; live configurations must match.\nForeground conversations get bounded priority over queued workers.\n--worker-format blocks|json: coding workers answer with plain-text FILE blocks (default, no schema) or the legacy schema-constrained JSON file plan. Either answer is accepted; qualification always requests json.\n--keep-alive keeps the model loaded between requests (default 30m; seconds, -1 forever, default = server setting); the model is preloaded at start and on /model.\n--connect-retries retries model requests that fail before any reply text (default 3, backoff 1s/2s/4s…; 0 disables). The header shows server health.\nExplicit file/check permission and approval required. Conversation history and drafts restore without replaying interrupted requests.\n--go GOAL starts autopilot after launch: plan, save, approve, dispatch, auto-review passing checks, bounded auto-repair (--max-repairs, default 3), one local alfredo/go-ID integration branch. Never pushes or moves your branch.\n/go GOAL · /pause · /resume · /stop · /autopilot · F5 pause/resume autopilot (restored paused after restart)\n/task description · /after 1,2 description · /approve ID · /cancel-task ID\n/permit ID JSON · /run ID · /evidence ID · /recover ID · /review ID JSON · /accept ID · /reject ID · /repair ID reason · /resolve-repair ID · /branch ID\n@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry\n/plan REQUEST · /plan-revise REQUEST · /architect-revise ID · /plan-save · /plan-cancel · /assign ID MODEL · /dispatch on|off\n/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME\nEnter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry\nF2 Mission Work/chat · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit\n\n--doctor checks startup prerequisites without entering terminal mode or running inference.\n--qualify-inference REPORT [--qualification-repetitions 1..3] runs isolated diagnostic fixtures with baseline/candidate context profiles and one shared client slot. Default: three repetitions; artifacts are retained beside the new report.\n--inspect-qualification REPORT validates and summarizes a saved report without replay. No production profile changes or promotion.\nEnvironment: ALFREDO_MODEL, OLLAMA_HOST, ALFREDO_STATE_DIR, ALFREDO_KEEP_ALIVE");
+                println!("Quickstart: cd YOUR-GIT-REPO && alfredo-tui    opens the repository, nothing to type\n            /go add calc.py with tests        autopilot: plan, run, review, branch\n            F2 tasks/chat · F6 side pane · F5 pause · F1 help · Ctrl+Q quit\n\nAlfredo — local multi-agent coding terminal for Ollama\n\nUsage: alfredo-tui [--model NAME] [--endpoint URL]\n  [--select] [--workspace DIR] [--mission NAME | --new-mission NAME] [--state-dir DIR] [--conversation NAME] [--parallel-models 1..8] [--structured-thinking auto|on|off] [--worker-format blocks|json] [--keep-alive DURATION|default] [--connect-retries 0..10] [--doctor]\n  [--go GOAL] [--max-repairs 0..16] [--icons nerd|unicode|ascii] [--no-motion]\n\nSide pane: missions of this repository and the work tree (plan groups, tasks, repairs, architect and chats). F6 focuses it (an overlay below 88 columns): Up/Down move, Tab switches missions/work, Enter opens, Alt+Left/Right fold, Esc returns to the prompt. Enter on another mission switches to it under the /workspace rules.\nAgents: Enter on a task or the architect opens its agent view: the instruction, read-only references, the answer as code per file, the check and outcome, then each repair. The prompt then talks to that agent: while it generates a note steers it (cancel, rerun with the note; not a repair), during its check it is queued for a failure, a failed, rejected or review-ready result is repaired with it, accepted work gets a follow-up task, and the architect revises its draft. Same files and check only; held reviews refuse. Esc back · Ctrl+O expand instructions · /watch ID · /tell ID TEXT.\n--icons nerd|unicode|ascii picks record icons (default unicode; env ALFREDO_ICONS). --no-motion (or ALFREDO_NO_MOTION=1) shows a static ▶ instead of the spinner. Colours: truecolor when COLORTERM is truecolor or 24bit, otherwise 16 colours; NO_COLOR disables colour.\n\nInside a Git repository (or with --workspace DIR alone), opens the repository root with mission default, resumed or created; no typed input. Otherwise, or with --select, a selector chooses the repository and mission; Enter opens or creates the named mission. If the automatic open fails, the selector shows why. --workspace with --mission resumes; --new-mission creates a distinct name.\nDirect Ollama conversations and isolated Rust coding workers.\nTerminals using the same endpoint share --parallel-models capacity; live configurations must match.\nForeground conversations get bounded priority over queued workers.\n--worker-format blocks|json: coding workers answer with plain-text FILE blocks (default, no schema) or the legacy schema-constrained JSON file plan. Either answer is accepted; qualification always requests json.\n--keep-alive keeps the model loaded between requests (default 30m; seconds, -1 forever, default = server setting); the model is preloaded at start and on /model.\n--connect-retries retries model requests that fail before any reply text (default 3, backoff 1s/2s/4s…; 0 disables). The header shows server health.\nExplicit file/check permission and approval required. Conversation history and drafts restore without replaying interrupted requests.\n--go GOAL starts autopilot after launch: plan, save, approve, dispatch, auto-review passing checks, bounded auto-repair (--max-repairs, default 3), one local alfredo/go-ID integration branch. Never pushes or moves your branch.\n/go GOAL · /pause · /resume · /stop · /autopilot · F5 pause/resume autopilot (restored paused after restart)\n/task description · /after 1,2 description · /approve ID · /cancel-task ID\n/permit ID JSON · /run ID · /evidence ID · /recover ID · /review ID JSON · /accept ID · /reject ID · /repair ID reason · /resolve-repair ID · /branch ID\n@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry\n/plan REQUEST · /plan-revise REQUEST · /architect-revise ID · /plan-save · /plan-cancel · /assign ID MODEL · /dispatch on|off\n/watch ID|architect · /tell ID|architect TEXT\n/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME\nEnter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry\nF2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit\n\n--doctor checks startup prerequisites without entering terminal mode or running inference.\n--qualify-inference REPORT [--qualification-repetitions 1..3] runs isolated diagnostic fixtures with baseline/candidate context profiles and one shared client slot. Default: three repetitions; artifacts are retained beside the new report.\n--inspect-qualification REPORT validates and summarizes a saved report without replay. No production profile changes or promotion.\nEnvironment: ALFREDO_MODEL, OLLAMA_HOST, ALFREDO_STATE_DIR, ALFREDO_KEEP_ALIVE, ALFREDO_ICONS, ALFREDO_NO_MOTION, COLORTERM, NO_COLOR");
                 return Ok(());
             }
             "--version" | "-V" => {
@@ -305,7 +312,47 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut last_task_refresh = std::time::Instant::now();
         let mut last_save = std::time::Instant::now();
         let mut last_timing_draw = std::time::Instant::now();
+        let mut spinner = alfredo_tui::theme::SpinnerSchedule::default();
+        // Other missions are read off the render path at most every 2 s.
+        let (missions_sender, missions_receiver) = std::sync::mpsc::channel();
+        let mut missions_loading = false;
+        let mut last_missions: Option<std::time::Instant> = None;
         loop {
+            work.app.pane.theme = theme;
+            if !missions_loading
+                && last_missions.is_none_or(|at| at.elapsed() >= Duration::from_secs(2))
+            {
+                missions_loading = true;
+                last_missions = Some(std::time::Instant::now());
+                let key = (work.workspace().to_path_buf(), work.mission().to_owned());
+                let state = state_dir.clone();
+                let conversation = conversation.clone();
+                let sender = missions_sender.clone();
+                runtime.spawn_blocking(move || {
+                    let entries = alfredo_tui::side_pane::load_missions(
+                        &state,
+                        &key.0,
+                        &key.1,
+                        &conversation,
+                    );
+                    let _ = sender.send((key, entries));
+                });
+            }
+            if let Ok((key, entries)) = missions_receiver.try_recv() {
+                missions_loading = false;
+                if key.0 == work.workspace()
+                    && key.1 == work.mission()
+                    && entries != work.app.pane.missions
+                {
+                    work.app.pane.missions = entries;
+                    dirty = true;
+                }
+            }
+            dirty |= spinner.due(
+                std::time::Instant::now(),
+                alfredo_tui::side_pane::any_working(&work.app, Some(&work.tasks)),
+                theme.motion,
+            );
             if last_timing_draw.elapsed() >= Duration::from_millis(250) {
                 dirty |= work
                     .app
@@ -507,9 +554,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             dirty |= stage_ready_wayfinder(&mut work, &mut pending_command, quit_pending);
+            // Owner instructions step before autopilot: the owner's note decides first.
+            if !quit_pending && !work.wayfinder.active() && pending_command.is_none() {
+                dirty |= submit_owner(&mut work, &mut pending_command);
+            }
             if !quit_pending && !work.wayfinder.active() && pending_command.is_none() {
                 dirty |= submit_autopilot(&runtime, &mut work, &mut pending_command);
             }
+            dirty |= withdraw_superseded_autopilot(&mut work, &mut pending_command);
             if !quit_pending && !work.wayfinder.active() && pending_command.is_none() {
                 let mut architect_selected = false;
                 match work.tasks.prepare_architect() {
@@ -698,6 +750,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             dirty |= work.sync_autopilot();
+            // Another view replaced the agent view: return its draft and the chat draft.
+            if work.tasks.agent.is_some() && work.tasks.agent_shown().is_none() {
+                alfredo_tui::agent_view::close(&mut work.app, &mut work.tasks, false);
+                dirty = true;
+            }
             if dirty {
                 terminal.draw(|frame| ui::draw_with_tasks(frame, &work.app, &work.tasks))?;
                 dirty = false;
@@ -735,6 +792,120 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             _ => work.app.completion = None,
                         }
                     }
+                    if key.code == KeyCode::F(6) {
+                        let narrow = terminal.size()?.width < ui::PANE_BREAKPOINT;
+                        work.app.pane.toggle_focus(narrow);
+                        continue;
+                    }
+                    // A focused side pane takes navigation keys; typed characters
+                    // never reach the prompt and its draft is preserved.
+                    if work.app.pane.focus.is_some() && !ctrl {
+                        use alfredo_tui::side_pane::{PaneAction, PaneKey, RowKey};
+                        let alt = key.modifiers.contains(KeyModifiers::ALT);
+                        let pane_key = match key.code {
+                            KeyCode::Up if !alt => Some(PaneKey::Up),
+                            KeyCode::Down if !alt => Some(PaneKey::Down),
+                            KeyCode::Tab | KeyCode::BackTab => Some(PaneKey::Tab),
+                            KeyCode::Enter => Some(PaneKey::Enter),
+                            KeyCode::Esc => Some(PaneKey::Esc),
+                            _ => None,
+                        };
+                        if let Some(pane_key) = pane_key {
+                            let projection = alfredo_tui::side_pane::project(
+                                &work.app,
+                                Some(&work.tasks),
+                                std::time::Instant::now(),
+                            );
+                            match work.app.pane.key(pane_key, &projection) {
+                                PaneAction::Moved(RowKey::Node(node))
+                                    if work.tasks.visible && work.tasks.agent_shown().is_none() =>
+                                {
+                                    work.tasks.focus_node(node)
+                                }
+                                PaneAction::Open(alfredo_tui::side_pane::OpenTarget::Mission(
+                                    name,
+                                )) => {
+                                    if name == work.mission() {
+                                        work.app.notice = "Already in this mission".into();
+                                    } else if pending_command.is_some() {
+                                        work.app.notice = "Wait for the command intent to finish saving before switching work".into();
+                                    } else if let Err(error) = work.can_switch() {
+                                        work.app.notice = error;
+                                    } else {
+                                        let workspace = work.workspace().to_path_buf();
+                                        terminal.draw(|frame| {
+                                            frame.render_widget(ratatui::widgets::Paragraph::new("Preparing mission switch · saving history and checking the target…"), frame.area());
+                                        })?;
+                                        match work.switch_to(&runtime, &workspace, &name) {
+                                            Ok(true) => {
+                                                for job in jobs.iter_mut().filter_map(Option::take) {
+                                                    job.abort();
+                                                }
+                                                (sender, receiver) = mpsc::channel(128);
+                                                (model_sender, model_receiver) = mpsc::channel(1);
+                                                last_task_refresh = std::time::Instant::now();
+                                                last_save = std::time::Instant::now();
+                                                last_missions = None;
+                                            }
+                                            Ok(false) => {
+                                                work.app.notice =
+                                                    "Already in the selected workspace and mission"
+                                                        .into()
+                                            }
+                                            Err(error) => {
+                                                work.app.notice = format!(
+                                                    "Could not switch work: {error}; current work retained"
+                                                )
+                                            }
+                                        }
+                                        terminal.clear()?;
+                                    }
+                                }
+                                PaneAction::Open(target) => {
+                                    alfredo_tui::side_pane::open_work_target(
+                                        &mut work.app,
+                                        &mut work.tasks,
+                                        &target,
+                                    );
+                                }
+                                _ => {}
+                            }
+                            continue;
+                        }
+                        match key.code {
+                            KeyCode::Left | KeyCode::Right if alt => {
+                                let projection = alfredo_tui::side_pane::project(
+                                    &work.app,
+                                    Some(&work.tasks),
+                                    std::time::Instant::now(),
+                                );
+                                if let Some(RowKey::Node(node)) = work
+                                    .app
+                                    .pane
+                                    .work_index(&projection)
+                                    .map(|index| projection.work[index].key)
+                                {
+                                    work.tasks.focus_node(node);
+                                    if key.code == KeyCode::Left {
+                                        work.tasks.collapse_work_node();
+                                    } else {
+                                        work.tasks.expand_work_node();
+                                    }
+                                    work.app.pane.work_cursor =
+                                        work.tasks.focused_work_node().map(RowKey::Node);
+                                }
+                                continue;
+                            }
+                            KeyCode::Char(_)
+                            | KeyCode::Backspace
+                            | KeyCode::Delete
+                            | KeyCode::Left
+                            | KeyCode::Right
+                            | KeyCode::Home
+                            | KeyCode::End => continue,
+                            _ => {}
+                        }
+                    }
                     match key.code {
                         KeyCode::Char('q' | 'c') if ctrl => {
                             work.tasks.disable_dispatch();
@@ -770,15 +941,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Ok(notice) | Err(notice) => notice,
                             };
                         }
+                        KeyCode::F(2) if work.tasks.agent_shown().is_some() => {
+                            alfredo_tui::agent_view::close(&mut work.app, &mut work.tasks, false);
+                            work.tasks.set_visible(false);
+                        }
                         KeyCode::F(2) => {
                             work.app.models_visible = false;
                             work.tasks.set_visible(!work.tasks.visible);
                         }
+                        KeyCode::Char('o') if ctrl && work.tasks.agent_shown().is_some() => {
+                            if let Some(view) = work.tasks.agent.as_mut() {
+                                view.expanded = !view.expanded;
+                            }
+                        }
                         KeyCode::F(1) if work.app.sessions[index].draft.is_empty() => {
                             work.app.completion = Some(alfredo_tui::commands::Completion::all())
                         }
-                        KeyCode::Up if work.tasks.visible => work.tasks.select_task(false),
-                        KeyCode::Down if work.tasks.visible => work.tasks.select_task(true),
+                        KeyCode::Up if work.tasks.visible && work.tasks.agent_shown().is_none() => {
+                            work.tasks.select_task(false)
+                        }
+                        KeyCode::Down
+                            if work.tasks.visible && work.tasks.agent_shown().is_none() =>
+                        {
+                            work.tasks.select_task(true)
+                        }
                         KeyCode::Left
                             if work.tasks.visible && key.modifiers.contains(KeyModifiers::ALT) =>
                         {
@@ -829,6 +1015,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 (index + work.app.sessions.len() - 1) % work.app.sessions.len()
                         }
                         KeyCode::Esc if work.app.models_visible => work.app.models_visible = false,
+                        KeyCode::Esc if work.tasks.agent_shown().is_some() => {
+                            alfredo_tui::agent_view::close(&mut work.app, &mut work.tasks, true);
+                        }
                         KeyCode::Esc => {
                             if let Some(job) = jobs[index].take() {
                                 job.abort();
@@ -992,6 +1181,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             work.tasks.set_visible(false);
                             request = Some(work.app.sessions[index].begin());
+                        }
+                        KeyCode::Enter
+                            if matches!(
+                                work.app.sessions[index].draft.split_whitespace().next(),
+                                Some("/watch" | "/tell")
+                            ) =>
+                        {
+                            // The command leaves the prompt before a view takes it over.
+                            let text = work.app.sessions[index].draft.trim().to_owned();
+                            work.app.sessions[index].remember_submission();
+                            work.app.sessions[index].clear_draft();
+                            match alfredo_tui::agent_view::console(
+                                &mut work.app,
+                                &mut work.tasks,
+                                &text,
+                            ) {
+                                Some(Ok(notice)) => work.app.notice = notice,
+                                Some(Err(error)) => {
+                                    work.app.sessions[index].insert(&text);
+                                    work.app.notice = error;
+                                }
+                                None => {}
+                            }
                         }
                         KeyCode::Enter
                             if work.app.sessions[index].draft.trim_start().starts_with('/') =>
@@ -1166,7 +1378,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                             work.app.sessions[index].remember_submission();
                                             work.app.sessions[index].clear_draft();
-                                            work.tasks.set_visible(false);
+                                            // A command typed to an agent keeps its view.
+                                            if work.tasks.agent_shown().is_none() {
+                                                work.tasks.set_visible(false);
+                                            }
                                             work.app.notice.clear();
                                             if origin != index {
                                                 work.app.notice = format!(
@@ -1190,6 +1405,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Err(error) => work.app.notice = error,
                             }
                         }
+                        // The agent view owns the prompt: text is an instruction to that agent.
+                        KeyCode::Enter if work.tasks.agent_shown().is_some() => {
+                            let target = work.tasks.agent_shown().map(|view| view.target).unwrap();
+                            let note = work.app.sessions[index].draft.clone();
+                            match alfredo_tui::instruct::Instructions::give_to(
+                                &mut work.tasks,
+                                target,
+                                &note,
+                            ) {
+                                Ok(notice) => {
+                                    work.app.sessions[index].remember_submission();
+                                    work.app.sessions[index].clear_draft();
+                                    work.app.notice = notice;
+                                    if let Some(view) = work.tasks.agent.as_ref() {
+                                        // Sending returns the reader to the newest turn.
+                                        view.scroll_rows(i32::MAX / 2);
+                                    }
+                                }
+                                Err(error) => work.app.notice = error,
+                            }
+                        }
                         KeyCode::Enter => {
                             work.app.models_visible = false;
                             work.tasks.set_visible(false);
@@ -1197,6 +1433,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         KeyCode::Backspace => {
                             work.app.sessions[index].backspace();
+                        }
+                        KeyCode::PageUp if work.tasks.agent_shown().is_some() => {
+                            work.tasks.agent_shown().unwrap().scroll_rows(-10)
+                        }
+                        KeyCode::PageDown if work.tasks.agent_shown().is_some() => {
+                            work.tasks.agent_shown().unwrap().scroll_rows(10)
                         }
                         KeyCode::PageUp => {
                             if work.app.models_visible {
@@ -1228,6 +1470,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         _ => {}
                     }
                 }
+                Event::Paste(_) if work.app.pane.focus.is_some() => {}
                 Event::Paste(text) => {
                     work.app.completion = None;
                     work.app.sessions[work.app.selected].insert(&text);
@@ -1284,6 +1527,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for job in jobs.into_iter().flatten() {
         job.abort();
     }
+    // Save the chat draft, not an agent's unsent note.
+    alfredo_tui::agent_view::close(&mut work.app, &mut work.tasks, false);
     work.tasks.cancel_all();
     for session in &mut work.app.sessions {
         session.cancel();
@@ -1411,6 +1656,65 @@ fn submit_autopilot(
             work.app.notice = format!("Autopilot paused: command not recorded: {error}");
         }
     }
+    true
+}
+
+/// Record an owner instruction's next step in an idle conversation, then release
+/// it through the same saved-intent barrier as typed commands.
+fn submit_owner(work: &mut Workstation, pending: &mut Option<(usize, String)>) -> bool {
+    let sessions = &work.app.sessions;
+    let Some(origin) = std::iter::once(work.app.selected)
+        .chain(0..sessions.len())
+        .find(|&index| {
+            !sessions[index].status.active() && sessions[index].messages.len().is_multiple_of(2)
+        })
+    else {
+        return false;
+    };
+    let Some(submission) =
+        alfredo_tui::instruct::Instructions::tick(&mut work.tasks, &mut work.autopilot)
+    else {
+        return false;
+    };
+    match work.app.sessions[origin].submit_autopilot_command(submission.text, submission.intent) {
+        Ok(id) => *pending = Some((origin, id)),
+        Err(error) => work.app.notice = format!("Instruction step not recorded: {error}"),
+    }
+    true
+}
+
+/// An autopilot decision still waiting at the saved-intent barrier for a family
+/// (or plan) the owner has since instructed is withdrawn, never dispatched.
+fn withdraw_superseded_autopilot(
+    work: &mut Workstation,
+    pending: &mut Option<(usize, String)>,
+) -> bool {
+    use alfredo_tui::console_command::CommandState;
+    let Some((origin, id)) = pending.as_ref() else {
+        return false;
+    };
+    let superseded = work.app.sessions[*origin]
+        .commands()
+        .iter()
+        .find(|command| command.id == *id)
+        .is_some_and(|command| {
+            command.text.starts_with("Autopilot · ")
+                && matches!(command.state, CommandState::Pending)
+                && work
+                    .tasks
+                    .owner
+                    .supersedes(&command.intent, work.tasks.snapshot.as_ref())
+        });
+    if !superseded {
+        return false;
+    }
+    work.app.sessions[*origin].set_command_state(
+        id,
+        CommandState::Refused {
+            reason: "Withdrawn: your instruction decides for this task".into(),
+        },
+    );
+    *pending = None;
     true
 }
 

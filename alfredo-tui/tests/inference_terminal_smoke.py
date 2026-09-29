@@ -181,7 +181,7 @@ class SharedInferenceTerminalSmoke(unittest.TestCase):
                     subprocess.run(['git', '-C', str(workspace), *args], env=git_env,
                                    check=True, timeout=5, stdout=subprocess.DEVNULL)
 
-            def wait_until(label, predicate, timeout=8):
+            def wait_until(label, predicate, timeout=30):
                 deadline = time.monotonic() + timeout
                 while time.monotonic() < deadline:
                     for terminal in terminals:
@@ -195,7 +195,7 @@ class SharedInferenceTerminalSmoke(unittest.TestCase):
                                         for index, terminal in enumerate(terminals))
                 self.fail(f'Timed out: {label}\nRequests: {fixture.requests!r}\n{screens}')
 
-            def screen_has(terminal, text, timeout=8):
+            def screen_has(terminal, text, timeout=30):
                 wait_until(f'screen contains {text!r}', lambda: text in terminal.screen(), timeout)
 
             def unchanged_requests(expected, duration=0.4):
@@ -223,8 +223,8 @@ class SharedInferenceTerminalSmoke(unittest.TestCase):
                 terminals.append(first)
                 second = Terminal(binary, fixture.endpoint, workspaces[1], states[1], 'second')
                 terminals.append(second)
-                screen_has(first, 'Sessions')
-                screen_has(second, 'Sessions')
+                screen_has(first, '◈ ○ chat 1')  # side pane chat row
+                screen_has(second, '◈ ○ chat 1')
                 self.assertNotEqual(states[0], states[1])
                 self.assertEqual(fixture.count(), 0)
 

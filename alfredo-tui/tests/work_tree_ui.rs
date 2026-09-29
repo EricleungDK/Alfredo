@@ -192,16 +192,22 @@ fn all(buffer: &Buffer) -> String {
 fn hierarchy_names_task_counts_and_renders_dependency_edges_once() {
     let mut fixture = hierarchy();
     let buffer = fixture.render(140, 40);
-    let tree = region(&buffer, 0, 2, 40, 33);
-    // Default view: done/total over planned tasks (#1 done via accepted repair #5),
-    // repairs counted separately; plan request instead of its receipt revision.
+    let tree = region(&buffer, 0, 1, 35, 33);
+    let row = |label: &str| {
+        tree.lines()
+            .find(|line| line.contains(label))
+            .unwrap_or_else(|| panic!("{label}: {tree}"))
+            .to_owned()
+    };
+    // Default view: done/total over planned tasks (#1 done via accepted repair #5);
+    // plan request instead of its receipt revision; group size right-aligned.
+    assert!(tree.contains("├ work  1/5 done "), "{tree}");
     assert!(
-        tree.contains("Mission Work · 1/5 done · 1 repair"),
+        row("▾ Build a parser").trim_end().ends_with(" 5 │"),
         "{tree}"
     );
-    assert!(tree.contains("Build a parser · 5"), "{tree}");
     assert!(!tree.contains("Plan r1"), "{tree}");
-    assert!(tree.contains("Manual tasks · 1"), "{tree}");
+    assert!(row("▾ Manual tasks").trim_end().ends_with(" 1 │"), "{tree}");
     for status in [
         "✗ #1 Original parser",
         "○ #2 Read inputs",
@@ -225,12 +231,13 @@ fn hierarchy_names_task_counts_and_renders_dependency_edges_once() {
     let column =
         |line: &str| unicode_width::UnicodeWidthStr::width(line.split('#').next().unwrap());
     assert!(column(repair) > column(original), "{tree}");
-    assert!(tree.contains("↳ ✓ #5"), "{tree}");
+    // The repair record icon marks lineage.
+    assert!(tree.contains("⑂ ✓ #5"), "{tree}");
     assert!(all(&buffer).contains("Resolved by accepted repair #5"));
     assert!(all(&buffer).contains("keep draft"));
     fixture.select(4);
-    let detail = region(&fixture.render(140, 40), 40, 2, 100, 33);
-    assert_eq!(detail.matches("Depends on #2, #3").count(), 1, "{detail}");
+    let detail = region(&fixture.render(140, 40), 35, 2, 105, 33);
+    assert_eq!(detail.matches("Depends  #2, #3").count(), 1, "{detail}");
     // The plan receipt revision stays available in the activity view.
     fixture.control.activity = Some(String::new());
     assert!(all(&fixture.render(140, 40)).contains("r1 · task #1"));
@@ -239,16 +246,15 @@ fn hierarchy_names_task_counts_and_renders_dependency_edges_once() {
 #[test]
 fn group_selection_removes_stale_task_model_evidence_and_actions() {
     let mut fixture = hierarchy();
-    assert!(all(&fixture.render(140, 40)).contains("Model: exact-worker-model"));
+    assert!(all(&fixture.render(140, 40)).contains("Rejected · exact-worker-model"));
     fixture.control.select_task(false);
     assert!(fixture.control.selected_task().is_none());
     let buffer = fixture.render(140, 40);
-    let inspector = region(&buffer, 40, 2, 100, 33);
-    assert!(inspector.contains("Work group"), "{inspector}");
-    assert!(inspector.contains("5 tasks in this group"), "{inspector}");
-    assert!(inspector.contains("Select a task"), "{inspector}");
-    assert!(inspector.contains("no task action target"), "{inspector}");
-    assert!(inspector.contains("0 local workers"), "{inspector}");
+    let inspector = region(&buffer, 35, 2, 105, 33);
+    // Group detail: goal, progress, tasks. Nothing else.
+    assert!(inspector.contains("Build a parser"), "{inspector}");
+    assert!(inspector.contains("1/4 done   1 repair"), "{inspector}");
+    assert!(inspector.contains("#5 Repair parser"), "{inspector}");
     for stale in [
         "exact-worker-model",
         "task-1-run-1",
@@ -257,14 +263,19 @@ fn group_selection_removes_stale_task_model_evidence_and_actions() {
         "/approve",
         "/run",
         "/repair",
+        "Work group",
+        "Select a task",
+        "no task action target",
+        "local workers",
     ] {
         assert!(!inspector.contains(stale), "stale {stale}: {inspector}");
     }
     assert!(fixture.control.collapse_work_node());
     let collapsed = all(&fixture.render(140, 40));
-    assert!(collapsed.contains("▸ Build a parser · 5"), "{collapsed}");
-    assert!(!collapsed.contains("#5 Repair parser"));
-    assert!(collapsed.contains("Mission Work · 1/5 done · 1 repair"));
+    assert!(collapsed.contains("│ ▸ Build a parser"), "{collapsed}");
+    let pane = region(&fixture.render(140, 40), 0, 1, 35, 33);
+    assert!(!pane.contains("#5 Repair parser"), "{pane}");
+    assert!(collapsed.contains("├ work  1/5 done "));
 }
 
 #[test]
@@ -276,18 +287,19 @@ fn minimum_size_keeps_selected_tree_row_composer_and_scrollable_exact_inspector(
     for _ in 0..100 {
         let buffer = fixture.render(32, 10);
         let text = all(&buffer);
-        assert!(text.contains("#5 Repair parser"), "{text}");
+        // The pane is a summary row here; the detail keeps the selected task.
+        assert!(text.contains("Task #5"), "{text}");
         assert!(text.contains("Prompt"), "{text}");
         assert!(text.contains("keep draft"), "{text}");
         assert!(text.contains("F1 help"), "{text}");
-        observed.push_str(&region(&buffer, 0, 3, 32, 2));
+        observed.push_str(&region(&buffer, 0, 2, 32, 2));
         observed.push('\n');
         fixture.control.scroll_rows(1);
     }
     for expected in [
         "Repair parser",
         "Recorded outcome",
-        "Repair of #1",
+        "Repair   of #1",
         "Evidence recorded",
         "exact-worker-model",
     ] {
@@ -309,12 +321,18 @@ fn minimum_size_keeps_selected_tree_row_composer_and_scrollable_exact_inspector(
     for _ in 0..20 {
         let buffer = fixture.render(32, 10);
         let text = all(&buffer);
-        assert!(text.contains("Build a parser · 5"), "{text}");
+        assert!(text.contains("Group"), "{text}");
         assert!(text.contains("keep draft"), "{text}");
-        group_details.push_str(&region(&buffer, 0, 3, 32, 2));
+        group_details.push_str(&region(&buffer, 0, 2, 32, 2));
+        group_details.push('\n');
         fixture.control.scroll_rows(1);
     }
-    assert!(group_details.contains("Select a task"), "{group_details}");
+    for expected in ["Build a parser", "1/4 done", "#5 Repair parser"] {
+        assert!(
+            group_details.contains(expected),
+            "{expected}: {group_details}"
+        );
+    }
 }
 
 #[test]
@@ -338,14 +356,15 @@ fn running_task_exposes_actual_model_run_and_missing_observation_without_claimin
     fixture.select(1);
     let text = all(&fixture.render(160, 40));
     for expected in [
-        "#1 · Running",
-        "Model: exact-worker-model",
+        "Running · exact-worker-model",
         "Current observation unavailable",
         "recorded run does not prove a live worker",
-        "Evidence: no completed run evidence recorded",
-        "Work 0 local",
     ] {
         assert!(text.contains(expected), "missing {expected}: {text}");
+    }
+    // Zero-value facts are not shown.
+    for noise in ["Work 0 local", "Evidence: no completed run"] {
+        assert!(!text.contains(noise), "{noise}: {text}");
     }
     // Run and receipt identifiers moved to the evidence and activity views.
     assert!(!text.contains("task-1-run-1"), "{text}");
@@ -388,7 +407,11 @@ fn empty_filtered_unavailable_and_untrusted_labels_remain_readable() {
     fixture.control.task_query = "missing query".into();
     let text = all(&fixture.render(140, 40));
     assert!(text.contains("No matching tasks"), "{text}");
-    assert!(text.contains("Showing 0 / 1 tasks"), "{text}");
+    // The filter shows only while active, in the detail title.
+    assert!(
+        text.contains("┌ Tasks   filter missing query   0/1 tasks "),
+        "{text}"
+    );
     assert!(!text.contains("Task actions"), "{text}");
 }
 

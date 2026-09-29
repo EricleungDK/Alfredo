@@ -215,6 +215,34 @@ pub fn retained_answer(store: &TaskStore, evidence: &crate::worker::Evidence) ->
     transcript.messages.last().map(|m| m.content.clone())
 }
 
+/// The verified last request and answer of a run, for the agent view. The
+/// error is one line on why the conversation is not shown.
+pub fn retained_exchange(
+    store: &TaskStore,
+    evidence: &crate::worker::Evidence,
+) -> Result<(String, String)> {
+    let record = evidence
+        .agent
+        .as_ref()
+        .ok_or("No retained conversation for this run")?;
+    let digest = record
+        .transcript_sha256
+        .as_deref()
+        .ok_or("The model exchange did not complete; no conversation retained")?;
+    let transcript = read_transcript(store, &evidence.run, record, digest)
+        .map_err(|error| format!("Retained conversation unavailable: {error}"))?;
+    let mut messages = transcript.messages.iter().rev();
+    let answer = messages
+        .next()
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    let prompt = messages
+        .next()
+        .map(|m| m.content.clone())
+        .unwrap_or_default();
+    Ok((prompt, answer))
+}
+
 impl Prepared {
     /// Whether the request continues a retained conversation.
     pub fn continues(&self) -> bool {

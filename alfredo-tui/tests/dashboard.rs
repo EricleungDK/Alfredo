@@ -139,6 +139,7 @@ fn region(buffer: &Buffer, x: u16, y: u16, width: u16, height: u16) -> String {
 }
 
 /// Every box corner must belong to a complete rectangle: no overlapping or clipped borders.
+/// A `├…┤` section separator inside a box counts as its edge.
 pub fn assert_borders_closed(buffer: &Buffer) {
     let width = buffer.area.width;
     let height = buffer.area.height;
@@ -156,10 +157,14 @@ pub fn assert_borders_closed(buffer: &Buffer) {
                 .unwrap_or_else(|| panic!("open left border at {x},{y}:\n{}", text(buffer)));
             assert_eq!(at(right, bottom), "┘", "box {x},{y}:\n{}", text(buffer));
             for row in y + 1..bottom {
-                assert_eq!(at(x, row), "│", "left edge {x},{row}:\n{}", text(buffer));
-                assert_eq!(
-                    at(right, row),
-                    "│",
+                let (left, edge) = (at(x, row), at(right, row));
+                assert!(
+                    left == "│" || (left == "├" && edge == "┤"),
+                    "left edge {x},{row}:\n{}",
+                    text(buffer)
+                );
+                assert!(
+                    edge == "│" || (left == "├" && edge == "┤"),
                     "right edge {right},{row}:\n{}",
                     text(buffer)
                 );
@@ -187,11 +192,22 @@ fn dashboard_lists_one_line_per_task_with_status_glyphs_and_progress() {
         let buffer = fixture.render(width, height);
         let screen = text(&buffer);
         assert!(screen.contains("1/6 done"), "{width}: {screen}");
+        // Below 88 columns the pane is one summary row; F6 opens it as an overlay.
+        let buffer = if width < 88 {
+            fixture.app.pane.toggle_focus(true);
+            let overlay = fixture.render(width, height);
+            fixture.app.pane.toggle_focus(true);
+            overlay
+        } else {
+            buffer
+        };
+        let screen = text(&buffer);
+        // Long titles are cut to the pane width.
         for row in [
             "✓ #1 Create calc.py",
-            "▶ #2 Create test_calc.py",
+            "▶ #2 Create test",
             "○ #3 Write README",
-            "◐ #4 Review edge cases",
+            "◐ #4 Review edge",
             "✗ #5 Old attempt",
             "‖ #6 Package it",
         ] {
@@ -411,7 +427,7 @@ fn failed_task_pane_shows_the_check_output_tail_under_the_outcome_before_the_dif
         assert_borders_closed(&buffer);
         let screen = text(&buffer);
         let outcome = screen
-            .find("✗ Run failed · Check failed (exit 1)")
+            .find("Result   Run failed · Check failed (exit 1)")
             .unwrap_or_else(|| panic!("{width}x{height}\n{screen}"));
         let label = screen.find("stderr · last lines").expect(&screen);
         let file = screen.find("File \"test_calc.py\", line 6").expect(&screen);
@@ -436,8 +452,7 @@ fn failed_task_pane_shows_the_check_output_tail_under_the_outcome_before_the_dif
     );
     let screen = text(&fixture.render(100, 30));
     assert!(
-        screen.contains("✗ Run failed · Check failed (exit 1)\n")
-            || screen.contains("✗ Run failed · Check failed (exit 1) "),
+        screen.contains("Result   Run failed · Check failed (exit 1) "),
         "{screen}"
     );
     assert!(!screen.contains("(exit 1):"), "{screen}");
@@ -565,25 +580,24 @@ fn header_is_status_mission_and_one_compact_autopilot_row() {
     for width in [80, 100, 140] {
         let buffer = fixture.render(width, 30);
         let lines = rows(&buffer);
+        // Row 1: mission, repository name, attention only when non-zero, health.
         assert!(lines[0].contains("ALFREDO"), "{}", lines[0]);
+        assert!(lines[0].contains("Dashboard · workspace"), "{}", lines[0]);
+        assert!(lines[0].contains("1 review"), "{width}: {}", lines[0]);
+        assert!(!lines[0].contains("dispatch"), "{width}: {}", lines[0]);
         assert!(
-            lines[0].contains("dispatch off · Work"),
+            lines[0].trim_end().ends_with("warm"),
             "{width}: {}",
             lines[0]
         );
-        assert!(lines[1].contains("Dashboard"), "{}", lines[1]);
-        assert!(
-            lines[1].trim_end().ends_with("warm"),
-            "{width}: {}",
-            lines[1]
-        );
-        let autopilot = &lines[2];
-        assert!(autopilot.contains("▶"), "{autopilot}");
-        assert!(autopilot.contains("2/3"), "{autopilot}");
+        // Row 2: autopilot facts separated by spaces; no goal text.
+        let autopilot = &lines[1];
+        assert!(autopilot.contains("▶ running"), "{autopilot}");
+        assert!(autopilot.contains("   2/3   "), "{autopilot}");
         assert!(autopilot.contains("1 failed"), "{autopilot}");
         assert!(autopilot.contains("01:23"), "{autopilot}");
-        assert!(autopilot.contains("create calc.py"), "{autopilot}");
-        assert!(autopilot.trim_end().ends_with('…'), "{width}: {autopilot}");
+        assert!(!autopilot.contains("create calc.py"), "{autopilot}");
+        assert!(!autopilot.contains(" · "), "{autopilot}");
         assert_eq!(
             lines
                 .iter()
@@ -594,9 +608,12 @@ fn header_is_status_mission_and_one_compact_autopilot_row() {
     }
     fixture.control.autopilot = Some(autopilot_status(RunState::Done, Some("alfredo/go-7")));
     let lines = rows(&fixture.render(140, 30));
-    let done = lines[2].find("alfredo/go-7").expect(&lines[2]);
-    assert!(lines[2].contains("✓"), "{}", lines[2]);
-    assert!(done < lines[2].find("create calc.py").unwrap());
+    assert!(lines[1].contains("✓ done"), "{}", lines[1]);
+    assert!(
+        lines[1].trim_end().ends_with("01:23   alfredo/go-7"),
+        "{}",
+        lines[1]
+    );
 }
 
 #[test]
@@ -619,19 +636,19 @@ fn health_stays_right_aligned_on_the_mission_row_with_a_task_snapshot() {
         fixture.app.health = HealthView::observed(state);
         for width in [80, 100, 140] {
             let lines = rows(&fixture.render(width, 30));
+            // Mission and health share the single header row.
             assert!(
-                lines[0].contains("dispatch off · Work"),
+                lines[0].starts_with(" ALFREDO  Dashboard · workspace"),
                 "{width}: {}",
                 lines[0]
             );
-            assert!(!lines[0].contains("ollama"), "{width}: {}", lines[0]);
-            assert!(lines[1].contains(label), "{width}: {}", lines[1]);
+            assert!(lines[0].contains(label), "{width}: {}", lines[0]);
             assert!(
-                lines[1].trim_end().ends_with(label),
+                lines[0].trim_end().ends_with(label),
                 "{width}: {}",
-                lines[1]
+                lines[0]
             );
-            assert!(lines[1].starts_with(" Mission"), "{width}: {}", lines[1]);
+            assert!(!lines[1].contains("ollama"), "{width}: {}", lines[1]);
         }
     }
 }
@@ -682,9 +699,25 @@ fn session_list_uses_short_status_words() {
         terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
         let buffer = terminal.backend().buffer().clone();
         let screen = text(&buffer);
-        assert!(screen.contains("1 ready"), "{screen}");
-        assert!(screen.contains("2 thinking"), "{screen}");
-        assert!(screen.contains("3 streaming"), "{screen}");
+        if width < 88 {
+            // Narrow: the summary row counts active chats; F6 shows the rows.
+            assert!(screen.contains("2 chats active"), "{screen}");
+            app.pane.toggle_focus(true);
+            terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+            app.pane.toggle_focus(true);
+        }
+        let buffer = terminal.backend().buffer().clone();
+        let screen = text(&buffer);
+        let row = |label: &str| {
+            screen
+                .lines()
+                .find(|line| line.contains(label))
+                .unwrap_or_else(|| panic!("{label}: {screen}"))
+                .to_owned()
+        };
+        assert!(row("chat 1").contains(" ready"), "{screen}");
+        assert!(row("chat 2").contains(" thinking"), "{screen}");
+        assert!(row("chat 3").contains(" streaming"), "{screen}");
         assert!(!screen.contains("Waiting for model ser"), "{screen}");
         assert_borders_closed(&buffer);
     }
@@ -727,6 +760,7 @@ fn f1_help_is_grouped_with_go_first_and_fits_80_by_24() {
             "Autopilot",
             "Tasks",
             "Review",
+            "Agents",
             "Chat",
             "Navigation",
             "Advanced"
