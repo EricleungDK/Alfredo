@@ -130,6 +130,17 @@ pub struct TaskControl {
     pub(crate) detail_live: std::cell::Cell<bool>,
     /// Compact verified outcome per task, keyed by the acknowledged evidence hash.
     outcomes: std::cell::RefCell<BTreeMap<u64, (String, OutcomeLines)>>,
+    /// Owner instructions given in the agent view; they hold their families from autopilot.
+    pub owner: crate::instruct::Instructions,
+    /// Task families autopilot covers, synced for the agent view.
+    pub autopilot_roots: BTreeSet<u64>,
+    /// The agent view in the right pane, when open.
+    pub agent: Option<crate::agent_view::View>,
+    /// Unsent prompt drafts per agent target.
+    pub agent_drafts: BTreeMap<crate::agent_view::Target, String>,
+    /// Retained records per task, keyed by the acknowledged evidence hash.
+    pub(crate) agent_records:
+        std::cell::RefCell<BTreeMap<u64, (String, crate::agent_view::Record)>>,
 }
 
 /// Rendered outcome lines, or why verified evidence could not be shown.
@@ -211,6 +222,11 @@ impl TaskControl {
             follow_tail: std::cell::Cell::new(true),
             detail_live: Default::default(),
             outcomes: Default::default(),
+            owner: Default::default(),
+            autopilot_roots: BTreeSet::new(),
+            agent: None,
+            agent_drafts: BTreeMap::new(),
+            agent_records: Default::default(),
         }
     }
 
@@ -981,6 +997,13 @@ impl TaskControl {
         self.workers.insert(task, cancel);
     }
 
+    /// Forget an observation registered with `attach_progress` (render and
+    /// instruction fixtures; real workers are released by their result).
+    pub fn detach_progress(&mut self, task: u64) {
+        self.progress.remove(&task);
+        self.workers.remove(&task);
+    }
+
     /// True once per batch of new worker output, so streaming redraws promptly.
     pub fn progress_changed(&mut self) -> bool {
         let mut changed = false;
@@ -1039,6 +1062,44 @@ impl TaskControl {
             .borrow_mut()
             .insert(task.id, (hash, Arc::clone(&lines)));
         Some(lines)
+    }
+
+    /// Verified record of a finished attempt for the agent view, read once per
+    /// acknowledged evidence hash.
+    pub fn agent_record(&self, task: u64, hash: &str) -> crate::agent_view::Record {
+        if let Some((cached, record)) = self.agent_records.borrow().get(&task) {
+            if cached == hash {
+                return Arc::clone(record);
+            }
+        }
+        let record = Arc::new(crate::agent_view::read_record(&self.store, task));
+        self.agent_records
+            .borrow_mut()
+            .insert(task, (hash.to_owned(), Arc::clone(&record)));
+        record
+    }
+
+    /// Live worker observation for the agent view.
+    pub fn agent_live(&self, task: u64) -> Option<crate::agent_view::Live> {
+        let progress = self.progress.get(&task)?.borrow();
+        let stage = if progress.queue.is_some() {
+            "queued"
+        } else {
+            crate::side_pane::stage_word(progress.stage)
+        };
+        let stdout = String::from_utf8_lossy(&progress.check_stdout);
+        let stderr = String::from_utf8_lossy(&progress.check_stderr);
+        Some(crate::agent_view::Live {
+            stage: stage.into(),
+            prompt: progress.request.as_deref().map(str::to_owned),
+            output: progress.model_output.clone(),
+            check_output: format!("{stdout}{stderr}"),
+            checking: progress.stage == "Running approved check",
+            cancelling: self
+                .workers
+                .get(&task)
+                .is_some_and(|flag| flag.load(Ordering::SeqCst)),
+        })
     }
 
     pub fn worker_output(&self, task: u64) -> Option<(String, String)> {

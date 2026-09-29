@@ -87,3 +87,7 @@ pub mod plan_lint;
 pub mod side_pane;
 
 pub mod theme;
+
+pub mod agent_view;
+
+pub mod instruct;
