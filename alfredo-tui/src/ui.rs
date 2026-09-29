@@ -2077,6 +2077,13 @@ fn phase_word(receipt: &crate::tasks::Receipt) -> Vec<Phase> {
     use crate::assessment::Outcome;
     use crate::tasks::{Action, TaskStatus};
     let done = |text: &str| vec![(text.to_owned(), StepKind::Done)];
+    let repair = |reason: &str| {
+        if reason.starts_with(crate::instruct::OWNER) {
+            format!("repair #{} with your note", receipt.task)
+        } else {
+            format!("repair #{}", receipt.task)
+        }
+    };
     let review = |outcome: Outcome, held: bool| {
         if held {
             vec![("held for review".to_owned(), StepKind::Stopped)]
@@ -2101,10 +2108,10 @@ fn phase_word(receipt: &crate::tasks::Receipt) -> Vec<Phase> {
             _ => vec![("failed".to_owned(), StepKind::Failed)],
         },
         Action::Cancel { .. } => vec![("cancelled".to_owned(), StepKind::Stopped)],
-        Action::Repair { .. } => vec![(format!("repair #{}", receipt.task), StepKind::Repair)],
+        Action::Repair { reason, .. } => vec![(repair(reason), StepKind::Repair)],
         Action::ReviewAndRepair { decision, .. } => {
             let mut phases = review(decision.outcome, false);
-            phases.push((format!("repair #{}", receipt.task), StepKind::Repair));
+            phases.push((repair(&decision.reason), StepKind::Repair));
             phases
         }
         Action::ReviewArchitecture { .. } => {
@@ -2222,9 +2229,7 @@ fn collapsed_step(
             crate::control_command::Operation::CancelWorker { task, .. } => Step {
                 task: Some(*task),
                 phases: match &command.state {
-                    CommandState::Control { .. } => {
-                        vec![("cancel requested".into(), StepKind::Stopped)]
-                    }
+                    CommandState::Control { .. } => vec![],
                     _ => unsettled(),
                 },
             },

@@ -1188,21 +1188,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Some("/watch" | "/tell")
                             ) =>
                         {
+                            // The command leaves the prompt before a view takes it over.
                             let text = work.app.sessions[index].draft.trim().to_owned();
+                            work.app.sessions[index].remember_submission();
+                            work.app.sessions[index].clear_draft();
                             match alfredo_tui::agent_view::console(
                                 &mut work.app,
                                 &mut work.tasks,
                                 &text,
                             ) {
-                                Some(Ok(notice)) => {
-                                    let session = &mut work.app.sessions[work.app.selected];
-                                    if text.starts_with("/tell") {
-                                        session.remember_submission();
-                                        session.clear_draft();
-                                    }
-                                    work.app.notice = notice;
+                                Some(Ok(notice)) => work.app.notice = notice,
+                                Some(Err(error)) => {
+                                    work.app.sessions[index].insert(&text);
+                                    work.app.notice = error;
                                 }
-                                Some(Err(error)) => work.app.notice = error,
                                 None => {}
                             }
                         }

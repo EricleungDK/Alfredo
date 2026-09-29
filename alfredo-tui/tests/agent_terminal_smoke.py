@@ -248,6 +248,9 @@ class AgentTerminalSmoke(unittest.TestCase):
         # The steered run passes and autopilot accepts it; the dependent task starts.
         self.wait_until('steer accepted', lambda: (3, 'accepted', 1) in self.statuses())
         self.assertIn((1, 'cancelled', None), self.statuses())
+        # F2: the chat reads the steer as one collapsed line.
+        terminal.send(b'\x1bOQ')
+        self.screen_has('cancelled → repair #3 with your note')
 
         # Task 2 is held; pause autopilot, then let it fail.
         self.wait_until('notes generation', lambda: 'NOTES' in self.fixture.markers())

@@ -171,6 +171,8 @@ fn repair_attempts_and_owner_notes_follow_in_order() {
             ("repair #3 started".into(), Tone::Dim)
         ]
     );
+    // The repair made from the note names it rather than repeating it.
+    assert_eq!(text(&turns[6])[0], "Repair #1 with your note");
     // A live attempt streams its answer; no outcome yet.
     assert_eq!(text(&turns[8]), ["▸ greet.py", "def greet(name):"]);
 }

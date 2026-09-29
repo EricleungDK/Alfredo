@@ -174,7 +174,20 @@ pub fn project(attempts: &[Attempt], notes: &[Note], expanded: bool) -> Vec<Turn
             .as_ref()
             .and_then(|live| live.prompt.as_deref())
             .or_else(|| recorded.and_then(|r| r.prompt.as_deref()));
-        let mut instruction = vec![(crate::dashboard::single_line(&attempt.title), Tone::Normal)];
+        // A repair made from an owner note shown just above names it, not repeats it.
+        let from_note = attempt.repair_of.is_some_and(|parent| {
+            let prefix = format!("Repair #{parent}: {}", crate::instruct::OWNER);
+            attempt.title.strip_prefix(&prefix).is_some_and(|rest| {
+                notes
+                    .iter()
+                    .any(|note| note.task == parent && rest.starts_with(note.text.as_str()))
+            })
+        });
+        let title = match attempt.repair_of {
+            Some(parent) if from_note => format!("Repair #{parent} with your note"),
+            _ => crate::dashboard::single_line(&attempt.title),
+        };
+        let mut instruction = vec![(title, Tone::Normal)];
         if !attempt.files.is_empty() || !attempt.check.is_empty() {
             instruction.push((
                 format!(
