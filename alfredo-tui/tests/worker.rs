@@ -6355,3 +6355,69 @@ async fn repair_answering_with_one_bare_fence_is_applied() {
     assert!(!detail.contains("no FILE blocks"), "{detail}");
     assert!(!detail.starts_with("Check failed"), "{detail}");
 }
+
+#[tokio::test]
+async fn test_repair_after_accepted_dependency_gets_its_source_and_authority_line() {
+    let fixture = Fixture::new();
+    fixture.action(Action::Permit {
+        task: 1,
+        policy: policy_of(&["calc.py"]),
+    });
+    fixture.action(Action::Approve { task: 1 });
+    run_dependency_fixture(
+        &fixture,
+        1,
+        one_file("calc.py", "def answer():\n    return 42  # DEP_SENTINEL\n"),
+        "",
+    )
+    .await;
+    fixture.action(Action::Review {
+        task: 1,
+        accept: true,
+    });
+    fixture.action(Action::Propose {
+        title: "Write test_calc.py".into(),
+        model: "fixture".into(),
+        dependencies: vec![1],
+    });
+    fixture.action(Action::Permit {
+        task: 2,
+        policy: WorkPolicy {
+            files: vec!["test_calc.py".into()],
+            check: ["/usr/bin/python3", "-B", "-m", "unittest", "test_calc.py"]
+                .map(String::from)
+                .to_vec(),
+        },
+    });
+    fixture.action(Action::Approve { task: 2 });
+    let wrong = "import unittest\nfrom calc import answer\n\nclass T(unittest.TestCase):\n    def test_answer(self):\n        self.assertEqual(answer(), 41)\n";
+    let (request, detail) = run_reply(&fixture, 2, blocks(&[("test_calc.py", wrong)])).await;
+    assert!(detail.starts_with("Check failed"), "{detail}");
+    let first = last_prompt(&request);
+    assert!(!first.contains("ACCEPTED IMPLEMENTATION"), "{first}");
+    assert!(!first.contains("DEP_SENTINEL"), "{first}");
+
+    let second = repair_of(&fixture, 2);
+    let (request, _) = run_reply(&fixture, second, blocks(&[("test_calc.py", wrong)])).await;
+    let prompt = last_prompt(&request);
+    assert!(
+        prompt.contains("READ-ONLY FILE calc.py\ndef answer():\n    return 42  # DEP_SENTINEL\n"),
+        "{prompt}"
+    );
+    let line = prompt
+        .find("ACCEPTED IMPLEMENTATION IS AUTHORITATIVE")
+        .unwrap_or_else(|| panic!("{prompt}"));
+    assert!(
+        prompt[line..].contains("fix the test expectation to match it"),
+        "{prompt}"
+    );
+    assert!(
+        prompt[line..].contains("unless the OWNER INSTRUCTION"),
+        "{prompt}"
+    );
+    // Reference only: the allowed list is unchanged.
+    assert!(
+        prompt.contains("Allowed exact files: [\"test_calc.py\"]"),
+        "{prompt}"
+    );
+}

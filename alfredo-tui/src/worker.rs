@@ -1132,6 +1132,23 @@ pub async fn start_checked(
         generation: None,
         check: None,
     };
+    // A repair reads what its accepted dependencies implemented, as reference.
+    let dependency_files: Vec<String> = if task.repair_of.is_some() {
+        let mut files: Vec<String> = Vec::new();
+        for dependency in &task.dependencies {
+            let Ok(source) = claimed.dependency_source(*dependency) else {
+                continue;
+            };
+            for path in source.policy.iter().flat_map(|p| &p.files) {
+                if !files.contains(path) {
+                    files.push(path.clone());
+                }
+            }
+        }
+        files
+    } else {
+        Vec::new()
+    };
     let outcome = perform(
         &store,
         &before.workspace,
@@ -1153,6 +1170,7 @@ pub async fn start_checked(
             .and_then(|root| claimed.plan_for_task(root))
             .map_or("", |plan| plan.prompt.as_str()),
         owner.as_deref(),
+        &dependency_files,
     )
     .await;
     observer.stage("Saving evidence and receipt");
@@ -1319,6 +1337,7 @@ async fn perform(
     acceptance: &[String],
     goal: &str,
     owner: Option<&str>,
+    dependency_files: &[String],
 ) -> Result<()> {
     let (cancel, observer) = observation;
     observer.stage("Preparing worktree");
@@ -1370,7 +1389,7 @@ async fn perform(
         worktree,
         &run.baseline,
         &policy.check,
-        &[goal, &task.title],
+        &[&dependency_files.join(" "), goal, &task.title],
         &policy.files,
     )
     .await?;
@@ -1391,6 +1410,9 @@ async fn perform(
         for item in omitted {
             context.push_str(&format!("READ-ONLY REFERENCE OMITTED {item}\n"));
         }
+    }
+    if !dependency_files.is_empty() {
+        context.push_str("\nACCEPTED IMPLEMENTATION IS AUTHORITATIVE\nThe read-only reference files above from accepted dependency tasks are already accepted and correct. If the check fails against them, fix the test expectation to match it; do not expect behavior the accepted implementation lacks, unless the OWNER INSTRUCTION says otherwise.\n");
     }
     if !acceptance.is_empty() {
         context.push_str(&format!("\nRECORDED ACCEPTANCE CRITERIA\n{}\nSatisfy these observable requirements within the approved policy. A passing check does not by itself prove every criterion.\n", serde_json::to_string(acceptance).map_err(|e| e.to_string())?));
