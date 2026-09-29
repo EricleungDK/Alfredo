@@ -18,6 +18,11 @@ use unicode_width::UnicodeWidthStr;
 pub const PANE_BREAKPOINT: u16 = 88;
 /// Detail label column; `Criteria ` is the longest label.
 const LABEL: usize = 9;
+/// Tree indentation stops at group › task › repair; repairs of repairs stay
+/// at the repair level (their titles name their parent).
+const MAX_DEPTH: usize = 2;
+/// Cells of an automatic command shown in the transcript.
+const COMMAND_SUMMARY: usize = 160;
 
 fn safe(text: &str) -> String {
     dashboard::safe(text)
@@ -449,7 +454,7 @@ fn draw_side_pane(frame: &mut Frame, area: Rect, app: &App, projection: &Project
         let highlighted = cursor == Some(index);
         lines.push(work_line(row, width, &theme, now, highlighted));
         if let Some(second) = &row.second {
-            let indent = 2 * row.depth.min(4) + 4;
+            let indent = 2 * row.depth.min(MAX_DEPTH) + 4;
             lines.push(Line::from(vec![
                 Span::raw(" ".repeat(indent + 1)),
                 Span::styled(
@@ -505,6 +510,7 @@ fn mission_line(row: &MissionRow, width: usize, theme: &Theme, highlighted: bool
         Span::raw(" "),
     ];
     if highlighted {
+        spans[0] = Span::raw("›");
         for span in &mut spans {
             span.style = span.style.add_modifier(Modifier::REVERSED);
         }
@@ -519,7 +525,7 @@ fn work_line(
     now: Instant,
     highlighted: bool,
 ) -> Line<'static> {
-    let indent = "  ".repeat(row.depth.min(4));
+    let indent = "  ".repeat(row.depth.min(MAX_DEPTH));
     let content = width.saturating_sub(2);
     let mut spans = vec![Span::raw(" "), Span::raw(indent.clone())];
     let head = match row.kind {
@@ -568,6 +574,7 @@ fn work_line(
     ));
     spans.push(Span::raw(" "));
     if highlighted {
+        spans[0] = Span::raw("›");
         for span in &mut spans {
             span.style = span.style.add_modifier(Modifier::REVERSED);
         }
@@ -579,6 +586,14 @@ fn work_line(
 fn fit_second(text: &str, width: usize) -> String {
     if text.width() <= width {
         return text.into();
+    }
+    if let [model, time] = text.split("  ").collect::<Vec<_>>()[..] {
+        let short = side_pane::short_model(model);
+        let room = width.saturating_sub(time.width() + 2);
+        if room >= 4 {
+            return format!("{}  {time}", truncate(short, room));
+        }
+        return truncate(time, width);
     }
     if let [stage, model, time] = text.split("  ").collect::<Vec<_>>()[..] {
         let short = side_pane::short_model(model);
@@ -1048,6 +1063,39 @@ fn labeled(label: &str, value: &str, width: usize, style: Style) -> Vec<Line<'st
     lines
 }
 
+/// Review summary without its label prefix; identical per-criterion notes
+/// (such as autopilot's) collapse into one line.
+fn compact_review(summary: &str) -> String {
+    let mut lines = Vec::new();
+    let mut criteria: Vec<(&str, &str)> = Vec::new();
+    for line in summary.lines() {
+        if let Some((number, note)) = line
+            .strip_prefix("Criterion ")
+            .and_then(|rest| rest.split_once(" · "))
+        {
+            criteria.push((number, note));
+            continue;
+        }
+        lines.push(
+            line.strip_prefix("Reviewer outcome: ")
+                .unwrap_or(line)
+                .to_owned(),
+        );
+    }
+    match criteria.as_slice() {
+        [] => {}
+        [(first, note), .., (last, _)] if criteria.iter().all(|(_, other)| other == note) => {
+            lines.push(format!("Criteria {first}–{last} · {note}"))
+        }
+        _ => lines.extend(
+            criteria
+                .iter()
+                .map(|(number, note)| format!("Criterion {number} · {note}")),
+        ),
+    }
+    lines.join("\n")
+}
+
 /// Readiness without embedded command instructions, or nothing when it only
 /// restates the status line.
 fn plain_readiness(text: &str) -> String {
@@ -1266,10 +1314,16 @@ fn work_detail(
         lines.push(Line::from(progress));
         lines.push(Line::default());
         for (depth, task) in members {
+            // One line per task; the task detail has the whole title.
+            let indent = "  ".repeat(depth.saturating_sub(1).min(MAX_DEPTH - 1));
+            let text = truncate(
+                &format!(" #{} {}", task.id, single_line(&task.title)),
+                width.saturating_sub(indent.width() + 1),
+            );
             lines.push(Line::from(vec![
-                Span::raw("  ".repeat(depth.saturating_sub(1).min(4))),
+                Span::raw(indent),
                 task_glyph(task),
-                Span::raw(format!(" #{} {}", task.id, single_line(&task.title))),
+                Span::raw(text),
             ]));
         }
         return (lines, " Group ".into(), false, 0);
@@ -1277,13 +1331,14 @@ fn work_detail(
     let status = side_pane::task_status(snapshot, task, tasks);
     let color = theme.color(Theme::tone(status));
     let head = format!("{} #{}  ", theme.status_glyph(status, now), task.id);
-    for (index, chunk) in wrap_words(
-        &single_line(&task.title),
-        width.saturating_sub(head.width()),
-    )
-    .into_iter()
-    .enumerate()
-    {
+    // At most two title lines; long repair titles carry whole check output.
+    let title_width = width.saturating_sub(head.width());
+    let mut title = wrap_words(&single_line(&task.title), title_width);
+    if title.len() > 2 {
+        title.truncate(2);
+        title[1] = truncate(&format!("{} …", title[1]), title_width);
+    }
+    for (index, chunk) in title.into_iter().enumerate() {
         lines.push(Line::from(vec![
             if index == 0 {
                 Span::styled(
@@ -1308,13 +1363,18 @@ fn work_detail(
     lines.push(Line::default());
     let live = tasks.worker_live(task.id);
     let amber = Style::default().fg(theme.color(Tone::Amber));
-    if let (Some(live), Some((stage, _, queued))) = (&live, stage) {
-        let word = if queued {
-            "queued"
-        } else {
-            side_pane::stage_word(stage)
+    if let Some(live) = &live {
+        // `STAGE · 3.6s · 757 B received`: elapsed is already on the status line.
+        let stage = safe(&live.stage);
+        let seconds = |part: &str| {
+            part.strip_suffix('s')
+                .is_some_and(|number| number.parse::<f64>().is_ok())
         };
-        let mut text = format!("{word}{GAP}{}", safe(&live.stage));
+        let mut text = stage
+            .split(" · ")
+            .filter(|part| !seconds(part))
+            .collect::<Vec<_>>()
+            .join(GAP);
         if live.cancelling {
             text = format!("cancellation requested{GAP}{text}");
         }
@@ -1389,16 +1449,35 @@ fn work_detail(
     {
         lines.extend(labeled("Branch", name, width, normal));
     }
-    if let Some(summary) = snapshot.review_summary_for_task(task.id) {
-        lines.extend(labeled("Review", &summary, width, normal));
+    let review = snapshot.review_summary_for_task(task.id);
+    let criteria = snapshot.acceptance_for_task(task.id);
+    if review.is_some() || !criteria.is_empty() {
+        lines.push(Line::default());
     }
-    for (index, item) in snapshot.acceptance_for_task(task.id).iter().enumerate() {
-        lines.extend(labeled(
-            if index == 0 { "Criteria" } else { "" },
-            &format!("{}. {}", index + 1, single_line(item)),
-            width,
-            normal,
-        ));
+    if let Some(summary) = review {
+        lines.extend(labeled("Review", &compact_review(&summary), width, normal));
+    }
+    for (index, item) in criteria.iter().enumerate() {
+        // Numbered items hang under their text, not under the number.
+        let number = format!("{}. ", index + 1);
+        let room = width.saturating_sub(LABEL + number.width()).max(12);
+        for (row, chunk) in wrap_words(&single_line(item), room).into_iter().enumerate() {
+            let label = if index == 0 && row == 0 {
+                "Criteria"
+            } else {
+                ""
+            };
+            let prefix = if row == 0 {
+                number.clone()
+            } else {
+                " ".repeat(number.width())
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{label:<LABEL$}"), dim()),
+                Span::raw(prefix),
+                Span::raw(chunk),
+            ]));
+        }
     }
     if live.is_none() {
         if task.status == TaskStatus::Running {
@@ -1874,7 +1953,14 @@ fn command_lines(
         _ => {
             let text = safe(&command.text);
             let mut parts = text.lines();
-            let first = parts.next().unwrap_or_default().to_owned();
+            // Automatic repair commands carry whole check output; the task
+            // detail and F3 evidence hold it, the transcript keeps a summary.
+            let first = parts.next().unwrap_or_default();
+            let first = if command.text.starts_with("Autopilot") {
+                truncate(first, COMMAND_SUMMARY)
+            } else {
+                first.to_owned()
+            };
             let rest: Vec<String> = parts.map(str::to_owned).collect();
             let mut lines = vec![Line::styled(
                 format!("› {first}"),

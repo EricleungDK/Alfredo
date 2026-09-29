@@ -378,6 +378,7 @@ pub fn project(app: &App, tasks: Option<&TaskControl>, now: Instant) -> Projecti
         projection.summary.total = total;
         projection.summary.repairs = repairs;
         let progress = match &tasks.autopilot {
+            Some(status) if status.total == 0 => crate::dashboard::clock(status.elapsed),
             Some(status) => format!(
                 "{}/{}   {}",
                 status.done,
@@ -417,11 +418,12 @@ pub fn project(app: &App, tasks: Option<&TaskControl>, now: Instant) -> Projecti
                 depth: 0,
                 label: "architect".into(),
                 right: if active { "planning" } else { "draft" }.into(),
+                // The state word is already on the row: model and elapsed only.
                 second: planner.started().map(|started| {
-                    second_line(
-                        "planning",
+                    format!(
+                        "{}  {}",
                         planner.model(),
-                        now.saturating_duration_since(started),
+                        elapsed(now.saturating_duration_since(started))
                     )
                 }),
                 expanded: false,

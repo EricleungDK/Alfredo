@@ -375,7 +375,10 @@ fn task_detail_is_labeled_sections_without_instructions() {
     fixture.select(2);
     let detail = region(&fixture.render(140, 40), 35, 2, 105, 30);
     assert!(detail.contains("Depends  #1"), "{detail}");
-    assert!(detail.contains("Stage    check"), "{detail}");
+    assert!(
+        detail.contains("Stage    Running approved check"),
+        "{detail}"
+    );
 }
 
 #[test]
@@ -479,6 +482,14 @@ fn f6_focus_highlights_the_section_title_and_footer_hints_follow_focus() {
         assert!(hints.contains(hint), "{hints}");
     }
     let lines = rows(&buffer);
+    // The cursor row is marked in the padding column (readable without colour).
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.starts_with("│›  ▤ ✓ #1 Create textutil")),
+        "{}",
+        lines.join("\n")
+    );
     let y = lines.iter().position(|l| l.starts_with("├ work")).unwrap() as u16;
     assert_eq!(buffer[(2, y)].fg, Color::Cyan);
     assert_eq!(buffer[(2, 1)].fg, Color::DarkGray);

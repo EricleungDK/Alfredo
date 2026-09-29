@@ -271,7 +271,12 @@ pub fn peek(path: &Path) -> Result<Option<&'static str>, String> {
     let saved: Saved = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
     saved.validate()?;
     Ok(Some(match saved.phase {
-        Phase::Done => "done",
+        // A finished loop's saved report names its outcome.
+        Phase::Done => match saved.report.as_deref() {
+            Some(report) if report.starts_with("Autopilot partial") => "partial",
+            Some(report) if report.starts_with("Autopilot failed") => "failed",
+            _ => "done",
+        },
         Phase::Failed => "failed",
         _ if saved.paused => "paused",
         Phase::Scoping | Phase::Planning | Phase::Saving => "planning",

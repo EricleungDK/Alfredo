@@ -494,7 +494,7 @@ fn other_missions_progress_comes_from_their_autopilot_state_read_only() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     let state = root.join("state");
-    for name in ["default", "docs-cleanup", "release", "broken"] {
+    for name in ["default", "docs-cleanup", "release", "broken", "shipped"] {
         let store = TaskStore::new(&state, &workspace, name).unwrap();
         store.select_mission(true).unwrap();
         alfredo_tui::missions::remember(&store, &workspace.canonicalize().unwrap(), name).unwrap();
@@ -516,6 +516,17 @@ fn other_missions_progress_comes_from_their_autopilot_state_read_only() {
     )
     .unwrap();
     let before = fs::read(&release).unwrap();
+    // A finished loop reports its outcome from the saved report.
+    fs::write(
+        alfredo_tui::autopilot::state_path(&directory("shipped"), "default"),
+        serde_json::json!({
+            "version": 1, "id": "0123456789abcdef", "goal": "ship", "model": "m",
+            "max_repairs": 3, "phase": "done", "paused": false, "started": 1,
+            "finished": 2, "report": "Autopilot partial: ship"
+        })
+        .to_string(),
+    )
+    .unwrap();
     fs::write(
         alfredo_tui::autopilot::state_path(&directory("broken"), "default"),
         "not json",
@@ -536,7 +547,8 @@ fn other_missions_progress_comes_from_their_autopilot_state_read_only() {
         [
             ("broken", "?"),
             ("docs-cleanup", "idle"),
-            ("release", "running")
+            ("release", "running"),
+            ("shipped", "partial"),
         ]
     );
     assert_eq!(fs::read(&release).unwrap(), before);

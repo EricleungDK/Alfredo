@@ -122,7 +122,11 @@ pub fn clock(elapsed: std::time::Duration) -> String {
 /// Autopilot header facts after its state: done/total, failures and repairs
 /// only when present, elapsed, branch. The goal is the group title instead.
 pub fn autopilot_fields(status: &crate::autopilot::Status) -> Vec<String> {
-    let mut fields = vec![format!("{}/{}", status.done, status.total)];
+    // No `0/0` while the plan is still being made.
+    let mut fields = Vec::new();
+    if status.total > 0 {
+        fields.push(format!("{}/{}", status.done, status.total));
+    }
     if status.failed > 0 {
         fields.push(format!("{} failed", status.failed));
     }

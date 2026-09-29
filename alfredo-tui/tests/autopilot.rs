@@ -570,7 +570,9 @@ fn finished_autopilot_replaces_the_stale_start_notice_in_the_footer_once() {
     let screen = rows.join("\n");
     assert!(!screen.contains("Autopilot started"), "{screen}");
     assert!(rows[29].contains("Autopilot failed"), "{screen}");
-    assert!(rows[1].contains("Autopilot ✗ failed   0/0"), "{screen}");
+    // No plan was saved: no `0/0` progress.
+    assert!(rows[1].contains("Autopilot ✗ failed   00:"), "{screen}");
+    assert!(!rows[1].contains("0/0"), "{screen}");
     // Reported once; a user notice afterwards is not overwritten.
     work.app.notice = "USER_NOTICE".into();
     work.sync_autopilot();
