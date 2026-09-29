@@ -6408,7 +6408,7 @@ async fn test_repair_after_accepted_dependency_gets_its_source_and_authority_lin
         .find("ACCEPTED IMPLEMENTATION IS AUTHORITATIVE")
         .unwrap_or_else(|| panic!("{prompt}"));
     assert!(
-        prompt[line..].contains("fix the test expectation to match it"),
+        prompt[line..].contains("for a test, fix its expectation"),
         "{prompt}"
     );
     assert!(
@@ -6420,4 +6420,16 @@ async fn test_repair_after_accepted_dependency_gets_its_source_and_authority_lin
         prompt.contains("Allowed exact files: [\"test_calc.py\"]"),
         "{prompt}"
     );
+}
+
+#[test]
+fn fence_fallback_never_rescues_a_truncated_or_malformed_file_block_answer() {
+    let one = policy_of(&["calc.py"]);
+    let truncated = "=== FILE: calc.py ===\n```python\ndef answer():\n    return 42\n```\n";
+    assert_eq!(
+        worker::parse_answer_for(truncated, &one).unwrap_err(),
+        "Model output ended inside FILE block for calc.py (truncated)"
+    );
+    let json = "{\"files\": [ ```\nx\n```";
+    assert!(worker::parse_answer_for(json, &one).is_err());
 }

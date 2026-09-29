@@ -279,7 +279,13 @@ pub fn parse_answer_for(answer: &str, policy: &WorkPolicy) -> Result<FilePlan> {
         Ok(plan) => return Ok(plan),
         Err(error) => error,
     };
-    if let ([path], Some(content)) = (policy.files.as_slice(), single_fence(answer)) {
+    // Only a fence-only answer: never rescue a FILE-block or JSON attempt that failed.
+    let text = answer.replace("\r\n", "\n");
+    let attempted =
+        answer.trim().starts_with('{') || text.split('\n').any(|l| file_marker(l).is_some());
+    if let ([path], Some(content), false) =
+        (policy.files.as_slice(), single_fence(answer), attempted)
+    {
         return Ok(FilePlan {
             files: vec![FileEdit {
                 path: path.clone(),
@@ -1412,7 +1418,7 @@ async fn perform(
         }
     }
     if !dependency_files.is_empty() {
-        context.push_str("\nACCEPTED IMPLEMENTATION IS AUTHORITATIVE\nThe read-only reference files above from accepted dependency tasks are already accepted and correct. If the check fails against them, fix the test expectation to match it; do not expect behavior the accepted implementation lacks, unless the OWNER INSTRUCTION says otherwise.\n");
+        context.push_str("\nACCEPTED IMPLEMENTATION IS AUTHORITATIVE\nThe read-only reference files above from accepted dependency tasks are accepted and correct. If the check fails against them, change this task's own files to match (for a test, fix its expectation); do not expect behavior the accepted implementation lacks, unless the OWNER INSTRUCTION says otherwise.\n");
     }
     if !acceptance.is_empty() {
         context.push_str(&format!("\nRECORDED ACCEPTANCE CRITERIA\n{}\nSatisfy these observable requirements within the approved policy. A passing check does not by itself prove every criterion.\n", serde_json::to_string(acceptance).map_err(|e| e.to_string())?));
