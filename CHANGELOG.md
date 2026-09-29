@@ -96,6 +96,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   previous attempt`, and the next repair is told so explicitly and starts a fresh
   Local Agent conversation instead of replaying the repeated answer.
 - Work status row pluralizes counts (`2 repairs`, `2 recorded runs`).
+- Plan lint rejects untracked runtime data files (e.g. `todo.json`, `app.sqlite`)
+  in task files and tells the planner to use temp paths; a later check rewriting
+  them was refused as modifying files outside approved paths.
+- A worker answer that is one bare code fence is taken as the file when the task
+  allows exactly one file (never when FILE blocks or JSON were attempted).
+- Repairs of tasks with accepted dependencies get the dependencies' files as
+  read-only references and are told the accepted implementation is authoritative.
+- A contended scope lock is a retryable busy refusal, not a final denial;
+  autopilot spends no attempt on it.
 
 ## [0.1.0] - 2026-09-28
 
