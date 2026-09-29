@@ -220,3 +220,49 @@ fn sandbox_program_lookup_mirrors_the_check_sandbox_path() {
     assert!(plan_lint::sandbox_program("./run.sh"));
     assert!(plan_lint::sandbox_program("scripts/check.sh"));
 }
+
+#[test]
+fn runtime_data_files_in_policy_are_rejected_with_a_fix() {
+    let bad = plan(vec![
+        step(&["todo.py", "todo.json"], &["true"], &[]),
+        step(&["data/app.sqlite"], &["true"], &[]),
+    ]);
+    let findings = lint(&bad);
+    assert_eq!(findings.len(), 2, "{findings:?}");
+    assert!(
+        findings[0].starts_with("Task 1 lists runtime data file todo.json"),
+        "{findings:?}"
+    );
+    assert!(findings[0].contains("temp dir"), "{findings:?}");
+    assert!(findings[1].starts_with("Task 2 lists runtime data file data/app.sqlite"));
+}
+
+#[test]
+fn manifests_configs_fixtures_and_docs_are_not_runtime_data() {
+    let ok = plan(vec![step(
+        &[
+            "package.json",
+            "package-lock.json",
+            "tsconfig.json",
+            "tsconfig.build.json",
+            "Cargo.toml",
+            ".eslintrc.json",
+            "app.config.json",
+            "tests/fixtures/sample.json",
+            "testdata/users.csv",
+            "expected_output.json",
+            "notes.txt",
+            "todo.py",
+        ],
+        &["true"],
+        &[],
+    )]);
+    assert_eq!(lint(&ok), Vec::<String>::new());
+}
+
+#[test]
+fn committed_data_file_may_be_edited() {
+    let edit = plan(vec![step(&["state.json"], &["true"], &[])]);
+    let findings = plan_lint::lint(&edit, &|p| p == "state.json", &|_| true);
+    assert_eq!(findings, Vec::<String>::new());
+}
