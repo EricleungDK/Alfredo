@@ -292,7 +292,7 @@ fn minimum_size_keeps_selected_tree_row_composer_and_scrollable_exact_inspector(
         assert!(text.contains("Prompt"), "{text}");
         assert!(text.contains("keep draft"), "{text}");
         assert!(text.contains("F1 help"), "{text}");
-        observed.push_str(&region(&buffer, 0, 3, 32, 1));
+        observed.push_str(&region(&buffer, 0, 2, 32, 2));
         observed.push('\n');
         fixture.control.scroll_rows(1);
     }
@@ -323,7 +323,7 @@ fn minimum_size_keeps_selected_tree_row_composer_and_scrollable_exact_inspector(
         let text = all(&buffer);
         assert!(text.contains("Group"), "{text}");
         assert!(text.contains("keep draft"), "{text}");
-        group_details.push_str(&region(&buffer, 0, 3, 32, 1));
+        group_details.push_str(&region(&buffer, 0, 2, 32, 2));
         group_details.push('\n');
         fixture.control.scroll_rows(1);
     }
@@ -407,9 +407,9 @@ fn empty_filtered_unavailable_and_untrusted_labels_remain_readable() {
     fixture.control.task_query = "missing query".into();
     let text = all(&fixture.render(140, 40));
     assert!(text.contains("No matching tasks"), "{text}");
-    // The filter shows only while active.
+    // The filter shows only while active, in the detail title.
     assert!(
-        text.contains("Filter   missing query   0/1 tasks"),
+        text.contains("┌ Tasks   filter missing query   0/1 tasks "),
         "{text}"
     );
     assert!(!text.contains("Task actions"), "{text}");

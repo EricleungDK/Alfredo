@@ -76,12 +76,15 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 | Enter | Send prompt or command |
 | Shift+Enter | New line (if the terminal reports it; paste also works) |
 | F1 | Command picker (empty prompt); Tab after `/prefix` completes |
-| F2 | Toggle Mission Work (task tree) / conversation |
-| F3 | Evidence for the selected task (in Mission Work) |
+| F2 | Right pane: task detail / conversation |
+| F3 | Evidence for the selected task (task detail) |
 | F4 | Activity (saved task receipts) |
 | F5 | Pause / resume autopilot |
-| Up / Down | Prompt history; in Mission Work, select task |
-| Alt+Left / Alt+Right | Collapse / expand a task branch (Mission Work) |
+| F6 | Focus the side pane (overlay below 88 columns); again or Esc returns to the prompt |
+| Up / Down | Prompt history; in task detail, select task; in the side pane, move |
+| Tab (side pane) | Switch between missions and work |
+| Enter (side pane) | Open the row: task/group detail, plan draft, chat, or switch mission |
+| Alt+Left / Alt+Right | Collapse / expand a task branch |
 | PageUp / PageDown | Scroll transcript, details or evidence |
 | Tab / Shift+Tab | Next / previous conversation |
 | Ctrl+N | New conversation (max 8) |
@@ -108,6 +111,8 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 | `--parallel-models N` | 2 | Concurrent model requests per endpoint across terminals, 1–8 |
 | `--structured-thinking auto\|on\|off` | `off` | Thinking mode for structured (plan/worker) requests |
 | `--worker-format blocks\|json` | `blocks` | Worker answer format: plain-text FILE blocks, or legacy schema-constrained JSON (see [reference](alfredo-tui/docs/reference.md#worker-answer-format)) |
+| `--icons nerd\|unicode\|ascii` | `unicode` (env `ALFREDO_ICONS`) | Record icons in the side pane (task, repair, agent) |
+| `--no-motion` | off (env `ALFREDO_NO_MOTION=1`) | Static `▶` instead of the working spinner |
 | `--doctor` | | Check storage, model, repo and worker tools; no TTY; exit 2 on failure |
 | `--qualify-inference REPORT` | | Opt-in model diagnostic run (see [reference](alfredo-tui/docs/reference.md#run-an-explicit-inference-diagnostic)) |
 | `--qualification-repetitions N` | 3 | Repetitions for `--qualify-inference`, 1–3 |

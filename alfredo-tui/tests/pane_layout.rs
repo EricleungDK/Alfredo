@@ -399,6 +399,7 @@ fn group_detail_is_goal_progress_and_tasks_only() {
         "Alt+",
         "Showing",
         "Filter",
+        "filter",
     ] {
         assert!(!detail.contains(noise), "{noise}: {detail}");
     }
@@ -408,7 +409,7 @@ fn group_detail_is_goal_progress_and_tasks_only() {
     }
     fixture.control.task_query = "textutil".into();
     let filtered = text(&fixture.render(100, 40));
-    assert!(filtered.contains("Filter"), "{filtered}");
+    assert!(filtered.contains("filter textutil   "), "{filtered}");
 }
 
 #[test]

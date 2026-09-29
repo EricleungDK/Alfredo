@@ -109,9 +109,9 @@ class RecoveryTerminalSmoke(unittest.TestCase):
         self.screen_has(terminal, '○ #1')
         self.screen_has(terminal, 'Needs approval')
         before = self.task_path().read_bytes()
-        terminal.send(b'\x1b[6~')
-        self.screen_has(terminal, 'Model: fixture', timeout=3)
-        terminal.send(b'\x1b[5~')
+        # Two detail rows at 32x10: page down to the last row, then back up.
+        self.page_to(terminal, '/permit 1 JSON')
+        terminal.send(b'\x1b[5~' * 8)
         self.screen_has(terminal, 'Needs approval')
         self.assertEqual(self.task_path().read_bytes(), before)
         self.assertEqual(self.fixture.count(), 0)
@@ -181,7 +181,8 @@ class RecoveryTerminalSmoke(unittest.TestCase):
         terminal = self.terminal(resume=True, conversation='narrow-inspection', height=10, width=32)
         terminal.send('/tasks #1\r')
         self.screen_has(terminal, '✗ #1')
-        self.page_to(terminal, 'after check')
+        # The Result value wraps under its label at 32 columns.
+        self.page_to(terminal, 'interrupted')
         terminal.send('/evidence 1\r')
         self.screen_has(terminal, 'Verified run evidence')
         self.page_to(terminal, 'CHECKPOINT_STDOUT_SENTINEL')

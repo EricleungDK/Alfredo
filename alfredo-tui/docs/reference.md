@@ -34,7 +34,9 @@ intent path as typed input; policy, evidence, locks and receipts stay authoritat
 Risk-classified or human-hold reviews always wait for you, and manual commands keep
 working. `/pause` or F5 stops new starts and decisions (running workers finish);
 `/resume` or F5 continues; `/stop` also cancels running workers; `/autopilot` shows
-status. The header shows one status line. State lives in a small
+status. The header's second row shows the run: state, `done/total`, failures and
+repairs when present, elapsed time and branch; the goal is the work group title.
+State lives in a small
 `autopilot-<conversation-sha256>.json` beside the task store; after restart the loop
 is restored **paused** and nothing is replayed until you resume (runs cancelled by
 quit or `/stop` are repaired after resume).
@@ -324,17 +326,39 @@ entry from the existing durable receipt ledger, including restored history and
 idempotent retries. Entries show revision order rather than invented wall-clock
 times or actor identities. It is not yet the full attributed Activity Journal.
 
-Mission Work groups tasks under their recorded Plan or **Manual tasks**, with
-repair descendants nested beneath their original task. Dependencies appear as
-`Depends on #ID` edges; shared dependencies do not duplicate work. Task counts
-include repairs and exclude group rows. Local-worker counts are separate, and a
-recorded run without a current observation is not presented as a live worker.
+The side pane's **work** section groups tasks under their recorded Plan (titled by
+the user's goal; planner retry and revision text is cut off, also for older saved
+plans) or **Manual tasks**, with repair descendants (`⑂`) nested beneath their
+original task. A completed group starts collapsed while another group has open
+work. Dependencies appear once, as `Depends` in the task detail. The section title
+counts original tasks done; repairs are counted in the autopilot row. A recorded
+run without a current observation is shown with a static `▶`, not a spinner: it
+is not presented as a live worker. The architect appears above the tree while it
+plans or holds a draft; chats appear below it.
 
-In Mission Work, Up/Down selects a task or group. Alt+Left collapses the current
-branch, or moves to its parent; Alt+Right expands it, or moves into its first child.
-Ordinary Left/Right still edit the prompt. A task row opens its lifecycle, actual
-model/run, readiness, recent saved activity and evidence controls. A group opens
-its description and counts and has no task action target. Selecting a group retains
+The **missions** section lists the current mission first, then the other missions
+of this repository discovered in the state directory. Their progress is the phase
+saved in their autopilot state file (`planning`, `running`, `paused`, `done`,
+`failed`), `idle` when none exists, or `?` when unreadable; the files are read
+without locks at most every 2 s, outside drawing.
+
+With task detail on the right, Up/Down selects a task or group. Alt+Left collapses
+the current branch, or moves to its parent; Alt+Right expands it, or moves into its
+first child. Ordinary Left/Right still edit the prompt. F6 focuses the side pane
+(an overlay below 88 columns): Up/Down move within a section, Tab switches missions
+and work, Enter opens the row, Alt+Left/Right fold, Esc (or F6) returns to the
+prompt. While it has focus, typed characters and paste do not reach the prompt and
+the draft is kept. Enter on a task or group opens its detail, on the architect the
+plan draft, on a chat that conversation; on another mission it switches work with
+the same admission rules as `/workspace` (refused with the same message while
+work is active).
+
+A task row opens labeled sections: status and model, `Stage` while a worker runs,
+`Files`, `Check`, `Depends`, `Repair`, `State` (readiness when it adds to the
+status), `Next` (the command a decision needs), `Branch`, `Review`, `Criteria`,
+then `Result`, the diff and check output. Long values wrap at word boundaries with
+a hanging indent. A group opens its goal, progress and tasks and has no task
+action target. An active filter is named in the detail title. Selecting a group retains
 the last task ID for restart without allowing shorthand to act on that hidden task.
 Selection stays anchored when background updates arrive. F3 opens selected-task
 evidence. `/approve`, `/run`, `/cancel-task`,
@@ -342,8 +366,8 @@ evidence. `/approve`, `/run`, `/cancel-task`,
 task; a selected group refuses shorthand, and explicit IDs still work. Selection
 waits while a storage request is pending. Navigation never approves or starts work.
 PageUp/PageDown scroll details or evidence; changing rows returns to details and
-resets its scroll position. At 32×10, a compact selected tree row stays above the
-scrollable inspector, with the prompt composer still reachable.
+resets its scroll position. At 32×10 the side pane and summary row give way to the
+scrollable detail, with the prompt composer still reachable.
 
 Task storage uses an exclusive OS file lock and atomic synced replacement. Every
 change carries an expected revision and unique correlation id, with its action
@@ -482,15 +506,17 @@ but running does not require the desktop or Python backend.
 | F1 | Open command picker when draft is empty |
 | Tab after `/prefix` | Open matching slash commands |
 | Up / Down in conversation | Browse prompt history and restore unsent draft |
-| Up / Down in Mission Work | Select a visible task or group |
-| Alt+Left / Alt+Right in Mission Work | Collapse / expand a branch, or move to parent / child |
+| Up / Down in task detail | Select a visible task or group |
+| Alt+Left / Alt+Right | Collapse / expand a branch, or move to parent / child |
+| F6 | Focus the side pane (overlay below 88 columns); F6 or Escape returns to the prompt |
+| Up / Down, Tab, Enter in the side pane | Move, switch missions/work, open the row |
 | Left / Right | Move through Unicode grapheme clusters |
 | Home / End | Move to the start / end of the draft |
 | Backspace / Delete | Delete the previous / next grapheme |
 | Ctrl+W / Ctrl+U | Delete previous whitespace-delimited word / clear draft |
 | Shift+Enter | Insert newline when supported by the terminal |
 | Ctrl+N | Create another conversation (up to eight) |
-| F2 | Switch between Mission Work and conversation |
+| F2 | Switch the right pane between task detail and conversation |
 | F3 | Open evidence for the selected task; groups require a task selection |
 | Tab / Shift+Tab | Select next / previous conversation |
 | Escape | Abort the selected client request and retain partial output |
@@ -513,7 +539,7 @@ cursor positions across sessions. Paste inserts at the cursor, strips terminal
 control characters and respects the 16 KiB limit without cutting a grapheme cluster.
 History is bounded to 100 entries and 128 KiB per session. Submission adds a history
 entry without granting new authority; recalled commands require explicit submission.
-Up/Down in Mission Work selects tree rows; Alt+Left/Right controls branch disclosure.
+Up/Down in task detail selects tree rows; Alt+Left/Right controls branch disclosure.
 The command picker uses Up/Down or Tab to
 select, Enter to fill the draft, and Escape to dismiss; a second Enter submits.
 Autosave during history browsing preserves the original unsent draft/cursor.
@@ -1304,8 +1330,9 @@ new draft/adoption can replace the cancelled proposal without restoring old poli
 
 ### Follow background coding work
 
-The header keeps local worker and pending review/hold/repair counts visible while
-you chat. F4 opens saved task Activity; F2 returns to the conversation without
+The header keeps running local workers, pending reviews and decisions visible while
+you chat (each only when non-zero), and the side pane keeps the work tree beside
+the conversation. F4 opens saved task Activity; F2 returns to the conversation without
 clearing your draft or moving its reading position. A “recorded run” means the
 saved task is Running but this terminal does not own its worker; inspect its
 retained evidence rather than assuming it is active or safe to replay.
@@ -1339,8 +1366,8 @@ A stale request never targets a replacement worker.
 
 `/dispatch on` and `/dispatch off` are also saved before application. Enabling checks
 the current scope asynchronously; disabling invalidates a pending enable and leaves
-active workers running. The chat header shows live dispatch state at wider terminal
-sizes. Saved outcomes describe the originating controller; restart starts dispatch
+active workers running. The header shows `dispatch on` while dispatch is on and
+nothing while it is off. Saved outcomes describe the originating controller; restart starts dispatch
 off and never replays controller requests. Conversation schema13 preserves exact
 older snapshots during migration.
 

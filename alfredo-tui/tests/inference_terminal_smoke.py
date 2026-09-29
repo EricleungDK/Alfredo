@@ -223,8 +223,8 @@ class SharedInferenceTerminalSmoke(unittest.TestCase):
                 terminals.append(first)
                 second = Terminal(binary, fixture.endpoint, workspaces[1], states[1], 'second')
                 terminals.append(second)
-                screen_has(first, 'Sessions')
-                screen_has(second, 'Sessions')
+                screen_has(first, '◈ ○ chat 1')  # side pane chat row
+                screen_has(second, '◈ ○ chat 1')
                 self.assertNotEqual(states[0], states[1])
                 self.assertEqual(fixture.count(), 0)
 

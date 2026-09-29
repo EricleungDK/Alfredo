@@ -88,10 +88,13 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
         .split(body);
         draw_side_pane(frame, split[0], app, &projection, now);
         split[1]
-    } else {
+    } else if body.height >= 6 {
         let split = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(body);
         draw_summary(frame, split[0], app, &projection);
         split[1]
+    } else {
+        // Tiny terminals keep every row for the detail; F6 still opens the pane.
+        body
     };
     let help = app.completion.as_ref().filter(|completion| {
         completion
@@ -191,31 +194,12 @@ fn draw_header(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: 
     let mut spans = vec![Span::styled(" ALFREDO ", badge), Span::raw(" ")];
     let mut room = usize::from(split[0].width).saturating_sub(11);
     let amber = Style::default().fg(theme.color(Tone::Amber));
-    if let Some(snapshot) = tasks.and_then(|tasks| tasks.snapshot.as_ref()) {
-        let repository = snapshot
-            .workspace
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| snapshot.workspace.display().to_string());
-        let mission = truncate(&single_line(&snapshot.mission), room);
-        room = room.saturating_sub(mission.width());
-        spans.push(Span::styled(
-            mission,
-            Style::default().add_modifier(Modifier::BOLD),
-        ));
-        let repository = format!(" · {}", single_line(&repository));
-        if room > 4 {
-            let repository = truncate(&repository, room);
-            room = room.saturating_sub(repository.width());
-            spans.push(Span::styled(
-                repository,
-                Style::default().fg(theme.color(Tone::Dim)),
-            ));
-        }
-    }
+    let mut attention = Vec::new();
     if let Some(tasks) = tasks {
         let status = tasks.work_status();
-        let mut attention = Vec::new();
+        if status.workers > 0 {
+            attention.push(format!("{} running", status.workers));
+        }
         if status.review > 0 {
             attention.push(format!("{} review", status.review));
         }
@@ -230,16 +214,42 @@ fn draw_header(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: 
             attention.push("dispatch on".into());
         }
         if tasks.scope_status.label.starts_with("Wayfinder /") {
-            attention.push(single_line(&tasks.scope_status.label));
+            // `Wayfinder / MODE`; the full scope state is in /scope.
+            let label = single_line(&tasks.scope_status.label);
+            attention.push(label.split(" · ").next().unwrap_or_default().to_owned());
         }
-        for item in attention {
-            let field = format!("{GAP}{item}");
-            if field.width() > room {
-                break;
-            }
-            room -= field.width();
-            spans.push(Span::styled(field, amber));
+    }
+    let attention_width: usize = attention.iter().map(|item| GAP.len() + item.width()).sum();
+    if let Some(snapshot) = tasks.and_then(|tasks| tasks.snapshot.as_ref()) {
+        let repository = snapshot
+            .workspace
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| snapshot.workspace.display().to_string());
+        let mission = truncate(&single_line(&snapshot.mission), room);
+        room = room.saturating_sub(mission.width());
+        spans.push(Span::styled(
+            mission,
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        // Attention items outrank the repository name when space is short.
+        let repository_room = room.saturating_sub(attention_width);
+        if repository_room > 4 {
+            let repository = truncate(&format!(" · {}", single_line(&repository)), repository_room);
+            room = room.saturating_sub(repository.width());
+            spans.push(Span::styled(
+                repository,
+                Style::default().fg(theme.color(Tone::Dim)),
+            ));
         }
+    }
+    for item in attention {
+        let field = format!("{GAP}{item}");
+        if field.width() > room {
+            break;
+        }
+        room -= field.width();
+        spans.push(Span::styled(field, amber));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), split[0]);
 }
@@ -1097,6 +1107,8 @@ fn next_action(snapshot: &crate::tasks::Snapshot, task: &crate::tasks::Task) -> 
     match task.status {
         TaskStatus::Proposed if task.policy.is_none() => Some(format!("/permit {id} JSON")),
         TaskStatus::Proposed => Some(format!("/approve {id}")),
+        TaskStatus::Approved if task.policy.is_none() => Some(format!("/permit {id} JSON")),
+        TaskStatus::Approved => Some(format!("/run {id}")),
         TaskStatus::ReviewReady => Some(format!("/accept {id}{GAP}/reject {id}")),
         TaskStatus::NeedsHumanReview => Some(format!("/review {id} JSON")),
         TaskStatus::Rejected | TaskStatus::Failed if snapshot.architecture_required(id) => {
@@ -1139,6 +1151,30 @@ fn work_inspector(
     theme: &Theme,
     now: Instant,
 ) -> (Vec<Line<'static>>, String, bool, usize) {
+    let (lines, title, live, pinned) = work_detail(tasks, tree, focused, width, theme, now);
+    // The filter shows only while active, in the title so it costs no row.
+    let title = if tasks.task_query.trim().is_empty() {
+        title
+    } else {
+        format!(
+            "{}{GAP}filter {}   {}/{} tasks ",
+            title.trim_end(),
+            single_line(&tasks.task_query),
+            tree.matched_tasks,
+            tree.total_tasks
+        )
+    };
+    (lines, title, live, pinned)
+}
+
+fn work_detail(
+    tasks: &TaskControl,
+    tree: &crate::mission_work::Tree,
+    focused: Option<&crate::mission_work::Row>,
+    width: usize,
+    theme: &Theme,
+    now: Instant,
+) -> (Vec<Line<'static>>, String, bool, usize) {
     use crate::mission_work::NodeId;
     use crate::tasks::TaskStatus;
     let Some(snapshot) = tasks.snapshot.as_ref() else {
@@ -1151,20 +1187,6 @@ fn work_inspector(
     };
     let normal = Style::default();
     let mut lines = Vec::new();
-    if !tasks.task_query.trim().is_empty() {
-        lines.extend(labeled(
-            "Filter",
-            &format!(
-                "{}{GAP}{}/{} tasks",
-                single_line(&tasks.task_query),
-                tree.matched_tasks,
-                tree.total_tasks
-            ),
-            width,
-            normal,
-        ));
-        lines.push(Line::default());
-    }
     let Some(row) = focused else {
         if snapshot.tasks.is_empty() {
             lines.push(Line::from("No tasks proposed yet."));

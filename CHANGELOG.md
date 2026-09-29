@@ -6,7 +6,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Side pane on every view: **missions** of this repository (current first; others
+  show their saved autopilot phase, `idle` or `?`, read without locks every 2 s)
+  and **work**: the architect while planning or holding a draft, plan groups with
+  tasks and repairs, then chats. Width is a quarter of the terminal (28–44
+  columns); below 88 columns it is one summary row and F6 opens it as an overlay.
+- F6 focuses the side pane: Up/Down, Tab (missions/work), Enter opens (task or
+  group detail, plan draft, chat, or switch mission under the `/workspace` rules),
+  Alt+Left/Right fold, Esc returns to the prompt with the draft kept.
+- Record icons (`▤` task, `⑂` repair, `◈` agent) and status glyphs; a braille
+  spinner (100 ms) for working rows, redrawn only while something works. Running
+  rows get a dim second line: stage, model, elapsed.
+- `--icons nerd|unicode|ascii` (env `ALFREDO_ICONS`), `--no-motion` (env
+  `ALFREDO_NO_MOTION=1`); truecolor palette when `COLORTERM` is `truecolor`/`24bit`,
+  16 colours otherwise, `NO_COLOR` respected.
+
 ### Changed
+
+- Header is two rows at most: mission and repository name, attention items only
+  when non-zero (`2 running`, `1 review`, `1 decision`, `dispatch on`), health with
+  the short model name; the autopilot row has no goal and no ` · ` chains.
+  `dispatch off`, `Work 0 local` and `no pending review` are gone.
+- Task detail is labeled sections (`Files`, `Check`, `Depends`, `State`, `Next`,
+  `Result`, then the diff) with hanging-indent wrapping; group detail is goal,
+  progress and tasks. Key help, counts and the filter line left the detail panes;
+  an active filter is named in the detail title.
+- One column of padding inside panes; chat speaker labels are dim on their own line.
+- Footer: one line of at most eight hints for the focused area.
+- Completed plan groups collapse while another group has open work.
+
+### Fixed
+
+- Work group titles showed planner retry text (`… | The previous plan was rejected
+  by validation: …`); the title is the user's goal, also for older saved plans.
 
 - Coding workers now answer with plain-text FILE blocks
   (`=== FILE: path ===` … `=== END FILE ===`) instead of schema-constrained JSON,

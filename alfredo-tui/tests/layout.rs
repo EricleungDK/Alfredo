@@ -25,10 +25,11 @@ fn terminal_renders_at_wide_narrow_and_tiny_sizes_with_unicode() {
             assert!(text.contains("ALFREDO"));
             assert!(text.contains("Prompt"));
             // Wide: the side pane lists chats; narrow: one summary row with F6.
+            // Tiny heights give every body row to the transcript.
             if width >= 88 {
                 // A streaming chat shows its spinner between icon and label.
                 assert!(text.contains("◈ ") && text.contains(" chat 1 "), "{text}");
-            } else {
+            } else if height >= 12 {
                 assert!(text.contains("F6 pane"), "{text}");
             }
         }
@@ -146,9 +147,8 @@ fn chat_keeps_background_work_visible_without_moving_draft_or_reading_position()
             assert!(header.contains("   1 review   1 decision"), "{header}");
             assert!(!header.contains("Work 1 local"), "{header}");
         } else {
-            let summary: String = (0..width).map(|x| buffer[(x, 1)].symbol()).collect();
-            assert!(summary.contains("layout"), "{summary}");
-            assert!(summary.contains("F6 pane"), "{summary}");
+            // 32x10 has no summary row; the header keeps the mission name.
+            assert!(header.contains("layout"), "{header}");
         }
         assert!(text.contains("F1 help"), "{text}");
         assert!(text.contains("Prompt"));

@@ -880,7 +880,7 @@ fn task_search_limits_navigation_and_shorthand_actions_to_visible_rows() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(text.contains("blocked by #1"), "{text}");
-    assert!(text.contains("Filter   blocked   1/3 tasks"), "{text}");
+    assert!(text.contains("filter blocked   1/3 tasks"), "{text}");
     control
         .command(&runtime, "/tasks no-such-task", "fixture")
         .unwrap();
