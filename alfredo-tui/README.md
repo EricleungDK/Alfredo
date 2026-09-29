@@ -95,9 +95,59 @@ are never modified.
 - **Footer**: one line of hints for the focused area; F1 lists everything.
 
 F6 focuses the side pane: Up/Down move, Tab switches missions/work, Enter opens the
-row (task or group detail, plan draft, chat; another mission switches to it under
-the `/workspace` rules), Alt+Left/Right fold, Esc returns to the prompt. Typed
-characters do not reach the prompt while the pane has focus; the draft is kept.
+row (a task or the architect opens its agent view, a group its detail, a chat that
+conversation; another mission switches to it under the `/workspace` rules),
+Alt+Left/Right fold, Esc returns to the prompt. Typed characters do not reach the
+prompt while the pane has focus; the draft is kept.
+
+### Agent view
+
+Enter on a task (or `/watch ID`) opens the transcript of that task's worker and its
+repairs, newest at the bottom, following the tail while it runs:
+
+```
+┌ Agent · worker #2 · running ────────────────────┐
+│ Autopilot → worker #2                           │
+│ Create greet.py and test_greet.py               │
+│ files greet.py, test_greet.py · check python3 … │
+│                                                 │
+│ References                                      │
+│ README.md                                       │
+│                                                 │
+│ Worker                                          │
+│ ▸ greet.py                                      │
+│ def greet(name):                                │
+└─────────────────────────────────────────────────┘
+```
+
+Turns: the instruction sent to the model (two lines; Ctrl+O shows the full request),
+read-only references (names only), the answer as code per file, the check command
+with its output tail, the outcome, then each repair attempt and your notes. A run
+without a retained conversation shows what its evidence holds, with a one-line note.
+PageUp/PageDown scroll like the chat. Enter on the architect shows the planning
+request and the streamed or saved draft.
+
+While an agent view is open the prompt reads `To worker #2 · Enter send · Esc back`
+and Enter instructs that agent (slash commands still run as commands):
+
+| Agent state | Your note |
+| --- | --- |
+| generating | steers: the generation is cancelled and the task reruns with your note (a repair that does not count against the autopilot budget) |
+| running its check | is queued; it becomes the repair reason if the check fails, and is dropped with `Note not needed: check passed` if it passes |
+| failed, rejected | repairs it with your note as the reason |
+| awaiting review | records the review as needs-repair, then repairs with your note |
+| accepted | creates a follow-up task depending on it with the same files and check |
+| architect planning or draft | revises the plan (`/plan-revise`) |
+| held for human review | is refused; resolve it with `/review ID JSON` |
+
+A note approves the inherited files and check only; it never widens them. It leads
+the next worker request (`OWNER INSTRUCTION`, above `WHAT IS STILL FAILING`) and is
+recorded in the repair reason or task title (F4 activity) and in the owner
+instruction file beside the autopilot state. Autopilot keeps running: a task you
+instructed is yours until the instructed run starts, then autopilot reviews it as
+usual (auto-accept on pass, bounded repair on failure); a follow-up joins the run
+and is integrated on a new `alfredo/go-ID-N` branch. `/tell ID TEXT` does the same
+from anywhere. Esc returns to the previous pane; each agent keeps its unsent draft.
 
 `--icons nerd|unicode|ascii` (env `ALFREDO_ICONS`) chooses record icons;
 `--no-motion` (or `ALFREDO_NO_MOTION=1`) shows a static `▶`. Colours are truecolor
@@ -105,7 +155,11 @@ when `COLORTERM` is `truecolor`/`24bit`, otherwise the 16 named colours; `NO_COL
 turns colour off.
 
 A finished autopilot reads `✓ done` (every planned task accepted), `◐ partial` (some
-accepted) or `✗ failed` (none accepted), and the footer shows its one-line result.
+accepted) or `✗ failed` (none accepted), and the footer shows its one-line result
+(`Autopilot done   1/1 accepted   git switch alfredo/go-…`). The Autopilot panel
+lists `Tasks`, `Repairs`, `Branch`, one line per task, then `Review` and `Merge`
+commands. In the chat, autopilot's steps for one task read as one line:
+`✓ #1 planned → approved → started → check passed → accepted`; details stay in F4.
 
 Workers also receive, read-only, the committed files the approved check names (such as
 `test_cron.py` in `python3 -m unittest test_cron.py`) and files the goal or task names

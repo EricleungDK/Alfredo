@@ -83,9 +83,12 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 | F6 | Focus the side pane (overlay below 88 columns); again or Esc returns to the prompt |
 | Up / Down | Prompt history; in task detail, select task; in the side pane, move |
 | Tab (side pane) | Switch between missions and work |
-| Enter (side pane) | Open the row: task/group detail, plan draft, chat, or switch mission |
+| Enter (side pane) | Open the row: a task's or the architect's agent view, group detail, chat, or switch mission |
+| Enter (agent view) | Instruct that agent: steer, queued note, repair, follow-up or plan revision |
+| Esc (agent view) | Back to the previous pane; the agent's unsent draft is kept |
+| Ctrl+O (agent view) | Expand / collapse the full instruction text |
 | Alt+Left / Alt+Right | Collapse / expand a task branch |
-| PageUp / PageDown | Scroll transcript, details or evidence |
+| PageUp / PageDown | Scroll transcript, agent view, details or evidence |
 | Tab / Shift+Tab | Next / previous conversation |
 | Ctrl+N | New conversation (max 8) |
 | Esc | Cancel the current model request (keeps partial reply); close pickers |

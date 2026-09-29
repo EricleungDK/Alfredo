@@ -648,7 +648,9 @@ fn draw_help(frame: &mut Frame, help: &crate::commands::Completion, area: Rect) 
         Block::bordered()
             .padding(Padding::horizontal(1))
             .title(" Help · ↑↓ choose · Enter fills prompt · Esc close ")
-            .title_bottom(" F2 tasks/chat  F3 evidence  F4 activity  F5 pause  F6 pane ")
+            .title_bottom(
+                " F2 tasks/chat  F3 evidence  F4 activity  F5 pause  F6 pane  Enter agent  ^O expand ",
+            )
     };
     frame.render_stateful_widget(
         List::new(items)

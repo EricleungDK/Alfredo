@@ -760,6 +760,7 @@ fn f1_help_is_grouped_with_go_first_and_fits_80_by_24() {
             "Autopilot",
             "Tasks",
             "Review",
+            "Agents",
             "Chat",
             "Navigation",
             "Advanced"

@@ -348,10 +348,63 @@ first child. Ordinary Left/Right still edit the prompt. F6 focuses the side pane
 (an overlay below 88 columns): Up/Down move within a section, Tab switches missions
 and work, Enter opens the row, Alt+Left/Right fold, Esc (or F6) returns to the
 prompt. While it has focus, typed characters and paste do not reach the prompt and
-the draft is kept. Enter on a task or group opens its detail, on the architect the
-plan draft, on a chat that conversation; on another mission it switches work with
-the same admission rules as `/workspace` (refused with the same message while
-work is active).
+the draft is kept. Enter on a task opens its agent view, on a group its detail, on
+the architect its agent view, on a chat that conversation; on another mission it
+switches work with the same admission rules as `/workspace` (refused with the same
+message while work is active).
+
+### Agent view and owner instructions
+
+The agent view (Enter on a task or the architect, or `/watch ID|architect`) is the
+transcript of one agent: a task family (the task, its repairs and repairs of
+repairs) or the architect. It is a projection only: the retained Local Agent
+conversation (`agent-conversation.json`, verified against the evidence digest),
+saved check evidence and the live worker observation. Turns, oldest first:
+`You → worker #N` or `Autopilot → worker #N` (repairs: `→ repair #N`) with the task
+title and `files … · check …` (Ctrl+O shows the retained request text),
+`References` (read-only reference names from the request), `Worker` (the answer,
+FILE blocks as `▸ path` then code, as in the live detail), `Check` (command, bounded
+output tail, `✓ passed · exit 0` or `✗ failed · exit 1`), `Outcome`, then the next
+attempt. Owner notes appear as `You` turns with their effect. A legacy, missing or
+corrupt conversation shows the evidence with a one-line reason and invents nothing.
+The title names the latest attempt (`Agent · worker #2 · running`,
+`Agent · repair #3 of #2 · failed`, `Agent · architect · draft`). It follows the
+tail while live; PageUp/PageDown keep the reading position like the chat.
+
+While it is shown, the prompt title is `To worker #N · Enter send · Esc back` and
+Enter records an owner instruction for the family's latest attempt. `/tell
+ID|architect TEXT` does the same from any view. Each instruction chooses the next
+command the owner could have typed and passes it through the saved-intent path, so
+policy, evidence, locks and receipts stay authoritative and typed refusals apply:
+
+| Latest attempt | Commands |
+| --- | --- |
+| generating (live worker, not in its check) | `/cancel-task N`; once the run is cancelled, `/repair N Owner: NOTE`, `/approve`, `/run` |
+| running its check | none yet; on failure `/repair N Owner: NOTE · after check: FAILURE`, on pass dropped with `Note not needed: check passed` |
+| failed, rejected, cancelled with a run | `/repair N Owner: NOTE`, `/approve`, `/run` (an unstarted autopilot repair of the same failure is cancelled first) |
+| awaiting review | `/review N` needs-repair with reason `Owner: NOTE` (the existing review-and-repair transaction), `/approve`, `/run` |
+| accepted | `/after ROOT NOTE` with the task's model, `/permit` with its exact files and check, `/approve`, `/run` |
+| architect planning or draft | `/plan-revise NOTE` once the draft is complete |
+| held for human review | refused: resolve it with `/review ID JSON` |
+
+The task store cannot rerun a task after a cancelled run, so a steer is a repair
+child of the cancelled run. Its parent was cancelled, not failed, so it is outside
+the autopilot repair budget, and its request has no `WHAT IS STILL FAILING`
+section. The worker request of an owner-instructed repair starts with
+`OWNER INSTRUCTION (...)` and the note, above `WHAT IS STILL FAILING`. A note
+approves the inherited policy only.
+
+Instructions are saved in `owner-SHA256(conversation).json` beside the autopilot
+state (version 1, atomic replace, the last 64 finished instructions kept for the
+view) and continue after a restart by re-deriving each step from task state. While
+an instruction is active its family is held from autopilot: autopilot makes no
+decision for it, treats it as unsettled, and an autopilot command for it still
+waiting at the saved-intent barrier is withdrawn (`Withdrawn: your instruction
+decides for this task`). When both were prepared against the same revision, the
+one that lands second is refused as stale and prepared again on current state.
+Once the instructed run starts the hold ends and autopilot reviews it as usual. A
+follow-up of a task in an autopilot run joins that run; a finished run reopens and
+integrates on `alfredo/go-ID-2`, leaving the first branch unchanged.
 
 A task row opens labeled sections: status and model, `Stage` while a worker runs,
 `Files`, `Check`, `Depends`, `Repair`, `State` (readiness when it adds to the
@@ -509,6 +562,9 @@ but running does not require the desktop or Python backend.
 | Up / Down in task detail | Select a visible task or group |
 | Alt+Left / Alt+Right | Collapse / expand a branch, or move to parent / child |
 | F6 | Focus the side pane (overlay below 88 columns); F6 or Escape returns to the prompt |
+| Enter in the agent view | Instruct that agent (text); slash commands still run |
+| Escape in the agent view | Return to the previous pane; the agent's draft is kept |
+| Ctrl+O in the agent view | Expand or collapse full instruction text |
 | Up / Down, Tab, Enter in the side pane | Move, switch missions/work, open the row |
 | Left / Right | Move through Unicode grapheme clusters |
 | Home / End | Move to the start / end of the draft |

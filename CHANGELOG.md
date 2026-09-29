@@ -8,6 +8,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Agent view: Enter on a task or the architect in the side pane (or `/watch
+  ID|architect`) shows that agent's transcript in the right pane: instruction
+  (Ctrl+O expands the full request), read-only references, the answer as code per
+  file, the check with its output tail, the outcome, then each repair and your
+  notes. Follows the tail while live; PageUp/PageDown keep the reading position.
+- Owner instructions: while an agent view is open the prompt reads
+  `To worker #N · Enter send · Esc back` and a note steers a generating worker
+  (cancel, rerun as a repair outside the autopilot budget), is queued during its
+  check (repair reason on failure, `Note not needed: check passed` on pass),
+  repairs a failed/rejected/review-ready result, adds a follow-up to accepted work
+  (same files and check), or revises the architect's draft. Held reviews refuse.
+  `/tell ID|architect TEXT` from anywhere. Every step goes through the existing
+  commands and receipts; notes lead the next worker request as `OWNER INSTRUCTION`.
+- Autopilot holds a family while you instruct it and resumes afterwards; follow-ups
+  join the run and integrate on `alfredo/go-ID-2`.
+
 - Side pane on every view: **missions** of this repository (current first; others
   show their saved autopilot phase, `idle` or `?`, read without locks every 2 s)
   and **work**: the architect while planning or holding a draft, plan groups with
@@ -24,6 +40,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   16 colours otherwise, `NO_COLOR` respected.
 
 ### Changed
+
+- Enter on a task row opens its agent view instead of the task detail (F2 and Esc
+  still reach the detail).
+- Autopilot panel: `✓ Autopilot done`, the goal on one line, `Tasks`, `Repairs`,
+  `Branch`, one line per task, `Review` and `Merge`; the footer result reads
+  `Autopilot done   1/1 accepted   git switch alfredo/go-…`.
+- Chat: autopilot's consecutive steps for one task collapse to one line
+  (`✓ #1 planned → approved → started → check passed → accepted`); detail stays in F4.
 
 - Header is two rows at most: mission and repository name, attention items only
   when non-zero (`2 running`, `1 review`, `1 decision`, `dispatch on`), health with
