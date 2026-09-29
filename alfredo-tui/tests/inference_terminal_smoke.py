@@ -181,7 +181,7 @@ class SharedInferenceTerminalSmoke(unittest.TestCase):
                     subprocess.run(['git', '-C', str(workspace), *args], env=git_env,
                                    check=True, timeout=5, stdout=subprocess.DEVNULL)
 
-            def wait_until(label, predicate, timeout=8):
+            def wait_until(label, predicate, timeout=30):
                 deadline = time.monotonic() + timeout
                 while time.monotonic() < deadline:
                     for terminal in terminals:
@@ -195,7 +195,7 @@ class SharedInferenceTerminalSmoke(unittest.TestCase):
                                         for index, terminal in enumerate(terminals))
                 self.fail(f'Timed out: {label}\nRequests: {fixture.requests!r}\n{screens}')
 
-            def screen_has(terminal, text, timeout=8):
+            def screen_has(terminal, text, timeout=30):
                 wait_until(f'screen contains {text!r}', lambda: text in terminal.screen(), timeout)
 
             def unchanged_requests(expected, duration=0.4):

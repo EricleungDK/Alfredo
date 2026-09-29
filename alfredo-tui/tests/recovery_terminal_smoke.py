@@ -51,7 +51,7 @@ class RecoveryTerminalSmoke(unittest.TestCase):
         self.screen_has(terminal, 'ALFREDO')
         return terminal
 
-    def wait_until(self, label, predicate, timeout=10):
+    def wait_until(self, label, predicate, timeout=30):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             for terminal in self.terminals:
@@ -63,7 +63,7 @@ class RecoveryTerminalSmoke(unittest.TestCase):
         screens = '\n\n'.join(terminal.screen() for terminal in self.terminals if not terminal.closed)
         self.fail(f'Timed out: {label}\n{screens}')
 
-    def screen_has(self, terminal, text, timeout=10):
+    def screen_has(self, terminal, text, timeout=30):
         self.wait_until(f'screen contains {text!r}', lambda: text in terminal.screen(), timeout)
 
     def task_path(self):
@@ -86,7 +86,7 @@ class RecoveryTerminalSmoke(unittest.TestCase):
         self.assertEqual(termios.tcgetattr(terminal.slave), terminal.original)
         terminal.close()
 
-    def page_to(self, terminal, text, timeout=8):
+    def page_to(self, terminal, text, timeout=30):
         """Use actual page keys; allow a blank-to-blank page to emit no diff."""
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:

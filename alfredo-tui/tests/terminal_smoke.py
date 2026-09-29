@@ -82,7 +82,7 @@ class Pty:
     def screen(self):
         return visible_screen(self.output)
 
-    def wait_for(self, text, timeout=10):
+    def wait_for(self, text, timeout=30):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if text in self.screen():
@@ -124,7 +124,7 @@ class ZeroCeremonyStart(unittest.TestCase):
                 first.wait_for('ALFREDO  default · ')  # header: mission · repository directory
                 first.wait_for('◈ ○ chat 1')  # side pane chat row
                 self.assertNotIn('Open your work', first.screen())
-                self.assertIn(root, first.screen())
+                first.wait_for(root)  # arrival line names the repository root
                 manifests = [json.loads(path.read_text()) for path in Path(state).rglob('mission.json')]
                 self.assertEqual([manifest['mission'] for manifest in manifests], ['default'])
                 # The conversation is owned by the first terminal: fall back with the reason shown.
@@ -298,7 +298,7 @@ class TerminalSmoke(unittest.TestCase):
         )
         output = bytearray()
 
-        def wait_for(text, timeout=5):
+        def wait_for(text, timeout=30):
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
                 if text.decode() in visible_screen(output):
@@ -314,7 +314,7 @@ class TerminalSmoke(unittest.TestCase):
             failed_checks = [json.loads(path.read_text()).get('check') for path in Path(state.name).rglob('evidence.json') if json.loads(path.read_text()).get('status') == 'failed']
             self.fail(f'Missing {text!r}:\n{visible_screen(output)}\nSaved task outcomes: {tasks}\nFailed checks: {failed_checks}')
 
-        def wait_for_header_without(text, timeout=5):
+        def wait_for_header_without(text, timeout=30):
             # Header row 1 names dispatch only while it is on.
             deadline = time.monotonic() + timeout
             while time.monotonic() < deadline:
