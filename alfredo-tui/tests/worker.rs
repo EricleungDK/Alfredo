@@ -6293,3 +6293,65 @@ async fn owner_instruction_leads_the_repair_request_above_what_is_still_failing(
     let (request, _) = run_captured(&fixture, second, "def answer():\n    return 42\n", None).await;
     assert!(last_prompt(&request).starts_with("Implement this task: Repair #1:"));
 }
+
+fn policy_of(files: &[&str]) -> WorkPolicy {
+    WorkPolicy {
+        files: files.iter().map(|f| f.to_string()).collect(),
+        check: vec!["/bin/true".into()],
+    }
+}
+
+#[test]
+fn single_fence_is_the_file_when_policy_allows_exactly_one() {
+    let one = policy_of(&["calc.py"]);
+    for answer in [
+        "```\ndef answer():\n    return 42\n```",
+        "Here you go:\n```python\ndef answer():\n    return 42\n```\nDone.\n",
+        "```python\r\ndef answer():\r\n    return 42\r\n```\r\n",
+    ] {
+        let plan =
+            worker::parse_answer_for(answer, &one).unwrap_or_else(|e| panic!("{answer}: {e}"));
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.files[0].path, "calc.py");
+        assert_eq!(plan.files[0].content, "def answer():\n    return 42\n");
+    }
+}
+
+#[test]
+fn fence_fallback_refuses_multiple_fences_multiple_files_and_unclosed() {
+    let one = policy_of(&["calc.py"]);
+    let two_fences = "```\na = 1\n```\ntext\n```\nb = 2\n```";
+    assert_eq!(
+        worker::parse_answer_for(two_fences, &one).unwrap_err(),
+        "Model returned no FILE blocks"
+    );
+    let two_files = policy_of(&["calc.py", "util.py"]);
+    assert_eq!(
+        worker::parse_answer_for("```\na = 1\n```", &two_files).unwrap_err(),
+        "Model returned no FILE blocks"
+    );
+    assert_eq!(
+        worker::parse_answer_for("```\na = 1\n", &one).unwrap_err(),
+        "Model returned no FILE blocks"
+    );
+    // FILE blocks still win over the fallback.
+    let plan =
+        worker::parse_answer_for("=== FILE: calc.py ===\nx\n=== END FILE ===\n", &one).unwrap();
+    assert_eq!(plan.files[0].content, "x\n");
+}
+
+#[tokio::test]
+async fn repair_answering_with_one_bare_fence_is_applied() {
+    let fixture = unittest_fixture();
+    let (_, detail) = run_reply(&fixture, 1, "```\ndef answer():\n    return 41\n```".into()).await;
+    assert!(detail.starts_with("Check failed"), "{detail}");
+    let second = repair_of(&fixture, 1);
+    let (_, detail) = run_reply(
+        &fixture,
+        second,
+        "```python\ndef answer():\n    return 42\n```".into(),
+    )
+    .await;
+    assert!(!detail.contains("no FILE blocks"), "{detail}");
+    assert!(!detail.starts_with("Check failed"), "{detail}");
+}

@@ -272,6 +272,47 @@ pub fn parse_answer(answer: &str) -> Result<FilePlan> {
     Ok(FilePlan { files })
 }
 
+/// `parse_answer`, plus: with no FILE blocks, one allowed file and exactly one
+/// fenced code block, the fence content is that file.
+pub fn parse_answer_for(answer: &str, policy: &WorkPolicy) -> Result<FilePlan> {
+    let error = match parse_answer(answer) {
+        Ok(plan) => return Ok(plan),
+        Err(error) => error,
+    };
+    if let ([path], Some(content)) = (policy.files.as_slice(), single_fence(answer)) {
+        return Ok(FilePlan {
+            files: vec![FileEdit {
+                path: path.clone(),
+                content,
+            }],
+        });
+    }
+    Err(error)
+}
+
+/// The content of the only fenced code block, when exactly one closed fence exists.
+fn single_fence(answer: &str) -> Option<String> {
+    let text = answer.replace("\r\n", "\n");
+    let mut blocks = Vec::new();
+    let mut open: Option<Vec<&str>> = None;
+    for line in text.split('\n') {
+        let fence = line.trim_start().starts_with("```");
+        match (&mut open, fence) {
+            (None, true) => open = Some(Vec::new()),
+            (Some(lines), true) => {
+                blocks.push(block_content(lines));
+                open = None;
+            }
+            (Some(lines), false) => lines.push(line),
+            (None, false) => {}
+        }
+    }
+    if open.is_some() || blocks.len() != 1 {
+        return None;
+    }
+    blocks.pop().filter(|content| !content.trim().is_empty())
+}
+
 /// FILE blocks for `plan`, the inverse of `parse_answer`.
 pub fn render_blocks(plan: &FilePlan) -> String {
     plan.files
@@ -749,7 +790,10 @@ fn lineage(store: &TaskStore, snapshot: &Snapshot, task: &Task) -> Option<Lineag
     let prior_files = parent
         .as_ref()
         .and_then(|p| crate::agent::retained_answer(store, p))
-        .and_then(|answer| parse_answer(&answer).ok())
+        .and_then(|answer| match task.policy.as_ref() {
+            Some(policy) => parse_answer_for(&answer, policy).ok(),
+            None => parse_answer(&answer).ok(),
+        })
         .map(|plan| render_blocks(&plan));
     // A cancelled run (a steer) failed nothing: no failing section.
     let cancelled = parent
@@ -1482,7 +1526,7 @@ async fn perform(
         .and_then(|_| response_file.sync_all())
         .map_err(|e| e.to_string())?;
     observer.stage("Validating model plan");
-    let plan = parse_answer(&answer)?;
+    let plan = parse_answer_for(&answer, policy)?;
     validate_plan(&plan, policy)?;
     for edit in &plan.files {
         safe_file(worktree, &edit.path)?;
