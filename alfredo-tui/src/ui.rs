@@ -750,10 +750,7 @@ fn draw_right(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: R
                 frame,
                 area,
                 tasks,
-                safe(report)
-                    .lines()
-                    .map(|s| Line::from(s.to_owned()))
-                    .collect(),
+                report_lines(report, width, &app.pane.theme),
                 " Autopilot ".into(),
                 false,
             );
@@ -830,6 +827,79 @@ fn draw_right(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: R
             &mut ListState::default().with_selected(Some(completion.selected)),
         );
     }
+}
+
+/// The autopilot report in the side pane language: coloured state line, the
+/// goal on one line, dim labels, glyph-coloured task lines, dim task details.
+fn report_lines(report: &str, width: usize, theme: &Theme) -> Vec<Line<'static>> {
+    const LABELS: [&str; 7] = [
+        "Tasks", "Repairs", "Branch", "Reason", "Review", "Merge", "Elapsed",
+    ];
+    let glyph_tone = |text: &str| match text.chars().next() {
+        Some('✓') => Some(Tone::Green),
+        Some('✗') => Some(Tone::Red),
+        Some('◐' | '‖') => Some(Tone::Amber),
+        Some('▶' | '◌') => Some(Tone::Lime),
+        _ => None,
+    };
+    let text = safe(report);
+    let structured = text
+        .lines()
+        .next()
+        .is_some_and(|first| glyph_tone(first).is_some() && first.contains("Autopilot"));
+    let mut lines = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        if !structured {
+            lines.push(Line::from(line.to_owned()));
+            continue;
+        }
+        let label = LABELS.iter().chain(["Note"].iter()).find(|label| {
+            line.strip_prefix(**label)
+                .is_some_and(|rest| rest.starts_with("  "))
+        });
+        if index == 0 {
+            let tone = glyph_tone(line).unwrap_or(Tone::Dim);
+            lines.push(Line::styled(
+                line.to_owned(),
+                Style::default()
+                    .fg(theme.color(tone))
+                    .add_modifier(Modifier::BOLD),
+            ));
+        } else if index == 1 {
+            lines.push(Line::from(truncate(line, width)));
+        } else if let Some(label) = label {
+            // A ten-column label: `Repairs   0`, values hang under themselves.
+            let value = line[label.len()..].trim_start();
+            for (row, chunk) in wrap_words(value, width.saturating_sub(10).max(12))
+                .into_iter()
+                .enumerate()
+            {
+                let head = if row == 0 {
+                    format!("{label:<10}")
+                } else {
+                    " ".repeat(10)
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(head, Style::default().fg(theme.color(Tone::Dim))),
+                    Span::raw(chunk),
+                ]));
+            }
+        } else if let Some(tone) = glyph_tone(line) {
+            let (glyph, rest) = line.split_at(line.chars().next().unwrap().len_utf8());
+            lines.push(Line::from(vec![
+                Span::styled(glyph.to_owned(), Style::default().fg(theme.color(tone))),
+                Span::raw(truncate(rest, width.saturating_sub(1))),
+            ]));
+        } else if line.starts_with("  ") {
+            lines.push(Line::styled(
+                truncate(line, width),
+                Style::default().fg(theme.color(Tone::Dim)),
+            ));
+        } else {
+            lines.push(Line::from(line.to_owned()));
+        }
+    }
+    lines
 }
 
 fn tone_style(theme: &Theme, tone: crate::agent_view::Tone) -> Style {
@@ -1000,6 +1070,9 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
             _ => None,
         })
         .collect();
+    // Consecutive automatic steps for one task share one line; only the
+    // latest such line can still grow.
+    let mut group: Option<(Option<u64>, usize, Vec<Phase>)> = None;
     for index in 0..=session.messages.len() {
         loop {
             let receipt = receipts.peek().filter(|item| item.after_messages == index);
@@ -1010,25 +1083,50 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
                 (None, Some(_)) => false,
                 (None, None) => break,
             };
-            let start = lines.len();
+            let mut start = lines.len();
             let key = if receipt_first {
                 let reference = receipts.next().unwrap();
+                group = None;
                 lines.extend(task_receipt_lines(reference, identity));
                 crate::reading::BlockKey::TaskReceipt(reference.revision)
             } else {
                 let command = commands.next().unwrap();
-                lines.extend(command_lines(command, tasks));
+                match collapsed_step(command, session.commands(), tasks) {
+                    Some(step) if step.phases.is_empty() => {}
+                    Some(step) => match group.as_mut() {
+                        Some((Some(task), at, phases)) if step.task == Some(*task) => {
+                            phases.extend(step.phases);
+                            lines[*at] = collapsed_line(Some(*task), phases);
+                            start = *at;
+                        }
+                        previous => {
+                            // Consecutive collapsed lines share one trailing blank row.
+                            if previous.is_some() && lines.last().is_some_and(|l| l.width() == 0) {
+                                lines.pop();
+                            }
+                            start = lines.len();
+                            lines.push(collapsed_line(step.task, &step.phases));
+                            lines.push(Line::default());
+                            group = Some((step.task, start, step.phases));
+                        }
+                    },
+                    None => {
+                        group = None;
+                        lines.extend(command_lines(command, tasks));
+                    }
+                }
                 crate::reading::BlockKey::Command(command.sequence)
             };
             blocks.push(crate::reading::Block {
                 key,
                 start,
-                len: lines.len() - start,
+                len: lines.len().saturating_sub(start),
             });
         }
         let Some(message) = session.messages.get(index) else {
             break;
         };
+        group = None;
         let start = lines.len();
         let (heading, color) = if message.role == "user" {
             ("You".into(), Color::DarkGray)
@@ -1940,6 +2038,276 @@ pub fn short_phase(receipt: &crate::tasks::Receipt) -> String {
             if *accept { "accepted" } else { "rejected" }
         ),
     }
+}
+
+/// How one collapsed step reads.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum StepKind {
+    Done,
+    Failed,
+    Stopped,
+    Pending,
+    /// A repair was proposed; the line's glyph is its task's own outcome.
+    Repair,
+}
+type Phase = (String, StepKind);
+
+struct Step {
+    task: Option<u64>,
+    /// Empty: nothing worth a line (such as an acknowledged `/dispatch on`).
+    phases: Vec<Phase>,
+}
+
+/// One word for what a canonical receipt did to its task.
+fn phase_word(receipt: &crate::tasks::Receipt) -> Vec<Phase> {
+    use crate::assessment::Outcome;
+    use crate::tasks::{Action, TaskStatus};
+    let done = |text: &str| vec![(text.to_owned(), StepKind::Done)];
+    let review = |outcome: Outcome, held: bool| {
+        if held {
+            vec![("held for review".to_owned(), StepKind::Stopped)]
+        } else if outcome.approves() {
+            done("accepted")
+        } else if outcome == Outcome::NeedsRepair {
+            vec![("needs repair".to_owned(), StepKind::Failed)]
+        } else {
+            vec![("rejected".to_owned(), StepKind::Failed)]
+        }
+    };
+    match &receipt.request.action {
+        Action::Plan { .. } => done("planned"),
+        Action::Propose { .. } => done("proposed"),
+        Action::Permit { .. } => done("files and check set"),
+        Action::Approve { .. } => done("approved"),
+        Action::Assign { .. } => done("assigned"),
+        Action::Start { .. } => done("started"),
+        Action::Finish { status, .. } => match status {
+            TaskStatus::ReviewReady => done("check passed"),
+            TaskStatus::Cancelled => vec![("cancelled".to_owned(), StepKind::Stopped)],
+            _ => vec![("failed".to_owned(), StepKind::Failed)],
+        },
+        Action::Cancel { .. } => vec![("cancelled".to_owned(), StepKind::Stopped)],
+        Action::Repair { .. } => vec![(format!("repair #{}", receipt.task), StepKind::Repair)],
+        Action::ReviewAndRepair { decision, .. } => {
+            let mut phases = review(decision.outcome, false);
+            phases.push((format!("repair #{}", receipt.task), StepKind::Repair));
+            phases
+        }
+        Action::ReviewArchitecture { .. } => {
+            vec![("architect revision".to_owned(), StepKind::Stopped)]
+        }
+        Action::Decide { decision, .. } => {
+            review(decision.outcome, decision.requires_human_review())
+        }
+        Action::Assess { assessment, .. } => {
+            if assessment.accept {
+                done("accepted")
+            } else {
+                vec![("rejected".to_owned(), StepKind::Failed)]
+            }
+        }
+        Action::Review { accept, .. } => {
+            if *accept {
+                done("accepted")
+            } else {
+                vec![("rejected".to_owned(), StepKind::Failed)]
+            }
+        }
+        Action::ResolveRepair { .. } => done("resolved"),
+        Action::Branch { .. } => done("branch saved"),
+    }
+}
+
+/// Automatic commands (autopilot's, owner-instruction steps and launches) read
+/// as short steps; typed commands keep their full entry. Detail stays in F4.
+fn collapsed_step(
+    command: &crate::console_command::ConsoleCommand,
+    all: &[crate::console_command::ConsoleCommand],
+    tasks: Option<&crate::task_control::TaskControl>,
+) -> Option<Step> {
+    use crate::command_intent::{Acknowledgment, Intent};
+    use crate::console_command::CommandState;
+    use crate::tasks::Action;
+    // A launch collapses when autopilot turned dispatch on for it.
+    let automatic = command.text.starts_with("Autopilot · ")
+        || command.text.starts_with("You · ")
+        || matches!(&command.intent, Intent::DispatchRun { request } if all.iter().any(|parent| {
+            parent.text.starts_with("Autopilot · ")
+                && matches!(&parent.intent, Intent::Control { request: source } if *source == request.source)
+        }));
+    if !automatic {
+        return None;
+    }
+    let snapshot = tasks.and_then(|tasks| tasks.snapshot.as_ref());
+    let receipt = |acknowledgment: Acknowledgment| match acknowledgment {
+        Acknowledgment::Task {
+            revision,
+            task,
+            correlation,
+        } => verified_receipt(snapshot, revision, task, &correlation).cloned(),
+        Acknowledgment::Scope { .. } => None,
+    };
+    let unsettled = || -> Vec<Phase> {
+        match &command.state {
+            CommandState::Refused { reason } if reason.starts_with("Withdrawn") => {
+                vec![("withdrawn".into(), StepKind::Stopped)]
+            }
+            CommandState::Refused { reason } => {
+                vec![(
+                    format!("refused: {}", single_line(reason)),
+                    StepKind::Failed,
+                )]
+            }
+            CommandState::Unknown { reason } => vec![(
+                format!("unconfirmed: {}", single_line(reason)),
+                StepKind::Pending,
+            )],
+            _ => vec![("…".into(), StepKind::Pending)],
+        }
+    };
+    let task_of = |action: &Action| match action {
+        Action::Approve { task }
+        | Action::Cancel { task }
+        | Action::Permit { task, .. }
+        | Action::Assign { task, .. }
+        | Action::Repair { task, .. }
+        | Action::ReviewAndRepair { task, .. }
+        | Action::ReviewArchitecture { task, .. }
+        | Action::Decide { task, .. }
+        | Action::Assess { task, .. }
+        | Action::Review { task, .. }
+        | Action::ResolveRepair { task }
+        | Action::Branch { task, .. } => Some(*task),
+        _ => None,
+    };
+    Some(match &command.intent {
+        Intent::DispatchRun { .. } | Intent::Run { .. } => {
+            let task = match &command.intent {
+                Intent::DispatchRun { request } => request.task,
+                Intent::Run { task, .. } => *task,
+                _ => unreachable!(),
+            };
+            let receipts: Vec<_> = command
+                .intent
+                .task_receipts(snapshot)
+                .into_iter()
+                .filter_map(receipt)
+                .collect();
+            let mut phases: Vec<Phase> = receipts.iter().flat_map(phase_word).collect();
+            if phases.is_empty() {
+                phases = unsettled();
+            } else if receipts.len() == 1 {
+                phases.push(("…".into(), StepKind::Pending));
+            }
+            Step {
+                task: Some(task),
+                phases,
+            }
+        }
+        Intent::Control { request } => match &request.operation {
+            crate::control_command::Operation::CancelWorker { task, .. } => Step {
+                task: Some(*task),
+                phases: match &command.state {
+                    CommandState::Control { .. } => {
+                        vec![("cancel requested".into(), StepKind::Stopped)]
+                    }
+                    _ => unsettled(),
+                },
+            },
+            crate::control_command::Operation::Dispatch { .. } => Step {
+                task: None,
+                phases: match &command.state {
+                    CommandState::Control { .. } => vec![],
+                    _ => unsettled()
+                        .into_iter()
+                        .map(|(text, kind)| (format!("dispatch {text}"), kind))
+                        .collect(),
+                },
+            },
+        },
+        Intent::Planner { request } => {
+            let revise = matches!(
+                request.operation,
+                crate::planner_command::Operation::Revise { .. }
+            );
+            Step {
+                task: None,
+                phases: match &command.state {
+                    CommandState::Planner { outcome } => vec![match outcome {
+                        crate::planner_command::Outcome::Generated { .. } if revise => {
+                            ("plan revised".into(), StepKind::Done)
+                        }
+                        crate::planner_command::Outcome::Generated { .. } => {
+                            ("plan drafted".into(), StepKind::Done)
+                        }
+                        crate::planner_command::Outcome::Stopped => {
+                            ("plan stopped".into(), StepKind::Stopped)
+                        }
+                        crate::planner_command::Outcome::Failed { reason } => (
+                            format!("plan failed: {}", single_line(reason)),
+                            StepKind::Failed,
+                        ),
+                    }],
+                    CommandState::Submitted | CommandState::Pending => {
+                        vec![("planning …".into(), StepKind::Pending)]
+                    }
+                    _ => unsettled(),
+                },
+            }
+        }
+        Intent::Task { request } => {
+            let acknowledged = command.intent.reconcile(snapshot, None).and_then(receipt);
+            let task = match &request.action {
+                Action::Plan { .. } => acknowledged.as_ref().map(|receipt| receipt.task),
+                action => task_of(action),
+            };
+            Step {
+                task,
+                phases: acknowledged
+                    .as_ref()
+                    .map(phase_word)
+                    .unwrap_or_else(unsettled),
+            }
+        }
+        Intent::Scope { .. } => Step {
+            task: None,
+            phases: match command.intent.reconcile(
+                snapshot,
+                tasks.and_then(|tasks| tasks.canonical_scope.as_ref()),
+            ) {
+                Some(_) => vec![("scope saved".into(), StepKind::Done)],
+                None => unsettled(),
+            },
+        },
+        _ => return None,
+    })
+}
+
+fn collapsed_line(task: Option<u64>, phases: &[Phase]) -> Line<'static> {
+    let outcome = phases
+        .iter()
+        .rev()
+        .find(|(_, kind)| *kind != StepKind::Repair)
+        .map_or(StepKind::Done, |(_, kind)| *kind);
+    let (glyph, color) = match outcome {
+        StepKind::Done | StepKind::Repair => ("✓", Color::Green),
+        StepKind::Failed => ("✗", Color::Red),
+        StepKind::Stopped => ("–", Color::Yellow),
+        StepKind::Pending => ("…", Color::Yellow),
+    };
+    let text = phases
+        .iter()
+        .map(|(text, _)| text.as_str())
+        .collect::<Vec<_>>()
+        .join(" → ");
+    let text = match task {
+        Some(task) => format!(" #{task} {text}"),
+        None => format!(" {text}"),
+    };
+    Line::from(vec![
+        Span::styled(glyph, Style::default().fg(color)),
+        Span::raw(safe(&text)),
+    ])
 }
 
 /// Transcript entry for a saved command: what was asked, then one short outcome line.

@@ -215,7 +215,7 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertTrue(branch.startswith('alfredo/go-'), branch)
         self.assertIn('Autopilot ✓ done   2/2   1 repair', terminal.screen())
         # The footer's stale notice is replaced by the one-line result.
-        self.screen_has(terminal, 'Autopilot done · 2/2 accepted · 1 repair · git switch')
+        self.screen_has(terminal, 'Autopilot done   2/2 accepted   1 repair   git switch')
         self.assertNotIn('Autopilot resumed', terminal.screen())
         self.assertEqual(self.git('show', f'{branch}:calc.py'), 'def answer():\n    return 42')
         self.assertIn("answer={answer()}", self.git('show', f'{branch}:app.py'))
