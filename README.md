@@ -1,9 +1,81 @@
+<div align="center">
+
 # Alfredo
 
-Alfredo is a native terminal (`alfredo-tui`) that runs local Ollama coding agents
-on your Git repository. Give it a goal; it plans tasks, runs each one in an isolated
-worktree and sandbox, checks the result, repairs failures, and leaves one local
-branch for you to review. Nothing leaves your machine and nothing is pushed.
+**Give a local model a goal. Get back a reviewed Git branch.**
+
+A native terminal that plans, runs, checks and repairs coding tasks with your own
+[Ollama](https://ollama.com) models, entirely on your machine.
+
+[![CI](https://github.com/EricleungDK/Alfredo/actions/workflows/rust-terminal.yml/badge.svg)](https://github.com/EricleungDK/Alfredo/actions/workflows/rust-terminal.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+[![Rust 1.96](https://img.shields.io/badge/rust-1.96-orange.svg)](alfredo-tui/Cargo.toml)
+[![Platform: Linux x86-64](https://img.shields.io/badge/platform-linux--x86--64-lightgrey.svg)](#requirements)
+
+[Quickstart](#60-second-quickstart) ·
+[Install](#install) ·
+[How it works](#how-it-works) ·
+[Keys](#keys) ·
+[Flags](#flags) ·
+[Docs](#documentation) ·
+[Contributing](CONTRIBUTING.md)
+
+</div>
+
+<p align="center">
+  <img src="docs/assets/demo.gif" alt="alfredo-tui running /go: plan, worker, failed check, automatic repair, accepted branch" width="860">
+</p>
+
+<sub>A real run, not a mock-up: `qwen2.5-coder:14b` on a scratch repo, 18 seconds of autopilot, one
+failed check repaired automatically. [Still: repair](docs/assets/screenshot-repair.png) ·
+[still: done](docs/assets/screenshot-done.png)</sub>
+
+Type `/go Add a --verbose flag to the CLI and a test for it`. Alfredo plans the work,
+runs each task in an isolated Git worktree inside a sandbox, runs the task's check,
+repairs failures, and leaves one local branch, `alfredo/go-<id>`, for you to review.
+Your branch, index and working files are never touched, nothing is pushed, and
+nothing leaves your machine.
+
+## Why Alfredo
+
+- **Local-first.** Ollama models on your hardware. No API keys, no cloud; the only
+  network peer is your Ollama endpoint.
+- **Your repo stays yours.** Workers edit detached worktrees from committed `HEAD`.
+  The result is a local branch you merge, or don't.
+- **Sandboxed.** Workers and their checks run under bubblewrap with resource limits
+  and a task-scoped file and command policy. A worker cannot widen its own scope.
+- **Checks decide, not vibes.** A task is accepted when its approved check passes.
+  Failures get bounded, targeted repairs (default 3 per task) with the failing test
+  output attached. Risky or held reviews always wait for you.
+- **You can watch and steer.** Open any agent to read its transcript live, then
+  instruct it: steer a running worker, queue a note, repair a failure, or add a
+  follow-up to accepted work.
+- **Durable.** Tasks, receipts and evidence survive restarts. After a crash the
+  autopilot comes back paused and never replays work.
+- **Native and fast.** One Rust binary on ratatui. No Node, Python or browser to run it.
+
+## How it works
+
+```text
+ /go GOAL
+    │
+    ▼
+ Architect ──▶ plan: tasks + files + checks + dependencies
+    │
+    ▼
+ for each ready task (dependencies respected, --parallel-models at a time)
+    ├─▶ worker (Ollama) writes the files in an isolated worktree
+    ├─▶ sandboxed check runs (bwrap + prlimit, read-only system)
+    ├─▶ pass ──▶ accepted        fail ──▶ repair with the failure output (bounded)
+    └─▶ risky or held ──▶ waits for your review
+    │
+    ▼
+ accepted work is composed onto one local branch: alfredo/go-<id>
+```
+
+Every autopilot choice is an ordinary command (`/plan`, `/approve`, `/run`,
+`/accept`, …) saved with a receipt, so you can take over at any step. Details:
+[alfredo-tui/docs/reference.md](alfredo-tui/docs/reference.md).
 
 ## Requirements
 
@@ -167,11 +239,21 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 
 ## Documentation
 
-- [alfredo-tui/README.md](alfredo-tui/README.md) — build, test and package from source.
-- [alfredo-tui/docs/reference.md](alfredo-tui/docs/reference.md) — detailed behavior
+- [alfredo-tui/README.md](alfredo-tui/README.md): day-to-day use, agent view, build,
+  test, package, source layout.
+- [alfredo-tui/docs/reference.md](alfredo-tui/docs/reference.md): detailed behavior
   (tasks, review, repair, storage, scope, diagnostics).
-- [CHANGELOG.md](CHANGELOG.md)
-- [.agent/Tasks/STATUS.md](.agent/Tasks/STATUS.md) — current project status.
+- [CHANGELOG.md](CHANGELOG.md): what changed, following Keep a Changelog.
+- [CONTRIBUTING.md](CONTRIBUTING.md): set up, test-first workflow, CI gates.
+- [.agent/Tasks/STATUS.md](.agent/Tasks/STATUS.md): current project and release status.
+- [CONTEXT.md](CONTEXT.md): domain vocabulary. [docs/](docs/README.md): index of the rest.
+
+## Project status
+
+Version 0.1.0, early. The terminal, autopilot, agent view and release packaging are
+in place; a live end-to-end run on a real model and the first tagged release are still
+open (see [STATUS](.agent/Tasks/STATUS.md)). Bug reports and reproductions are welcome
+as [issues](https://github.com/EricleungDK/Alfredo/issues).
 
 ## Legacy
 
