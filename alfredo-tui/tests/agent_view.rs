@@ -85,7 +85,7 @@ fn finished_attempt_reads_as_instruction_references_code_check_and_outcome() {
             "files greet.py, test_greet.py · check python3 -m unittest test_greet.py"
         ]
     );
-    assert_eq!(turns[0].lines[1].1, Tone::Dim);
+    assert_eq!(turns[0].lines[1].1, Tone::Summary);
     assert_eq!(text(&turns[1]), ["README.md, docs/usage.md"]);
     // FILE blocks read as code per file with the existing display rules.
     assert_eq!(

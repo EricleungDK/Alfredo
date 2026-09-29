@@ -23,6 +23,10 @@ pub enum Tone {
     Pass,
     Fail,
     Warn,
+    /// Dim, cut to one row (the instruction's files/check line).
+    Summary,
+    /// Check output: one row per line, cut rather than wrapped.
+    Output,
 }
 
 /// One speaker's contribution: a dim label and its lines.
@@ -178,7 +182,7 @@ pub fn project(attempts: &[Attempt], notes: &[Note], expanded: bool) -> Vec<Turn
                     attempt.files.join(", "),
                     attempt.check.join(" ")
                 ),
-                Tone::Dim,
+                Tone::Summary,
             ));
         }
         if expanded {
@@ -218,7 +222,7 @@ pub fn project(attempts: &[Attempt], notes: &[Note], expanded: bool) -> Vec<Turn
             }
             if live.checking {
                 let mut lines = vec![command()];
-                lines.extend(plain(&bounded(&live.check_output), Tone::Normal));
+                lines.extend(plain(&bounded(&live.check_output), Tone::Output));
                 lines.push((
                     if live.cancelling {
                         "… running · cancelling"
@@ -245,7 +249,7 @@ pub fn project(attempts: &[Attempt], notes: &[Note], expanded: bool) -> Vec<Turn
             }
             if let Some(check) = &recorded.check {
                 let mut lines = vec![command()];
-                lines.extend(plain(&check.tail, Tone::Normal));
+                lines.extend(plain(&check.tail, Tone::Output));
                 let exit = check
                     .exit
                     .map_or_else(|| "exit unknown".into(), |code| format!("exit {code}"));

@@ -915,6 +915,8 @@ fn tone_style(theme: &Theme, tone: crate::agent_view::Tone) -> Style {
         T::Pass => Style::default().fg(theme.color(Tone::Green)),
         T::Fail => Style::default().fg(theme.color(Tone::Red)),
         T::Warn => Style::default().fg(theme.color(Tone::Amber)),
+        T::Summary => Style::default().fg(theme.color(Tone::Dim)),
+        T::Output => Style::default(),
     }
 }
 
@@ -993,8 +995,13 @@ fn draw_agent(
             lines.push(Line::default());
         }
         lines.push(Line::styled(safe(&turn.label), label));
+        let room = usize::from(area.width.saturating_sub(4));
         for (text, tone) in &turn.lines {
-            lines.push(Line::styled(safe(text), tone_style(theme, *tone)));
+            let text = match tone {
+                agent::Tone::Summary | agent::Tone::Output => truncate(&safe(text), room),
+                _ => safe(text),
+            };
+            lines.push(Line::styled(text, tone_style(theme, *tone)));
         }
         blocks.push(crate::reading::Block {
             key: crate::reading::BlockKey::Message(index),
@@ -1038,7 +1045,7 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
     let session = &app.sessions[app.selected];
     let identity = tasks.and_then(|tasks| tasks.snapshot.as_ref());
     let mut lines = Vec::new();
-    let mut blocks = Vec::new();
+    let mut blocks: Vec<crate::reading::Block> = Vec::new();
     // A new chat suggests the common path, even below the workspace arrival line.
     if session.messages.is_empty()
         && session.task_receipts().is_empty()
@@ -1074,7 +1081,9 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         .collect();
     // Consecutive automatic steps for one task share one line; only the
     // latest such line can still grow.
-    let mut group: Option<(Option<u64>, usize, Vec<Phase>)> = None;
+    // (task, first line, block index, phases); the group is always last.
+    let mut group: Option<(Option<u64>, usize, usize, Vec<Phase>)> = None;
+    let width = usize::from(area.width.saturating_sub(4)).max(20);
     for index in 0..=session.messages.len() {
         loop {
             let receipt = receipts.peek().filter(|item| item.after_messages == index);
@@ -1096,10 +1105,13 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
                 match collapsed_step(command, session.commands(), tasks) {
                     Some(step) if step.phases.is_empty() => {}
                     Some(step) => match group.as_mut() {
-                        Some((Some(task), at, phases)) if step.task == Some(*task) => {
+                        Some((Some(task), at, block, phases)) if step.task == Some(*task) => {
                             phases.extend(step.phases);
-                            lines[*at] = collapsed_line(Some(*task), phases);
-                            start = *at;
+                            lines.truncate(*at);
+                            lines.extend(collapsed_lines(Some(*task), phases, width));
+                            lines.push(Line::default());
+                            blocks[*block].len = lines.len() - *at;
+                            start = lines.len();
                         }
                         previous => {
                             // Consecutive collapsed lines share one trailing blank row.
@@ -1107,9 +1119,9 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
                                 lines.pop();
                             }
                             start = lines.len();
-                            lines.push(collapsed_line(step.task, &step.phases));
+                            lines.extend(collapsed_lines(step.task, &step.phases, width));
                             lines.push(Line::default());
-                            group = Some((step.task, start, step.phases));
+                            group = Some((step.task, start, blocks.len(), step.phases));
                         }
                     },
                     None => {
@@ -2260,7 +2272,9 @@ fn collapsed_step(
         Intent::Task { request } => {
             let acknowledged = command.intent.reconcile(snapshot, None).and_then(receipt);
             let task = match &request.action {
-                Action::Plan { .. } => acknowledged.as_ref().map(|receipt| receipt.task),
+                Action::Plan { .. } | Action::Propose { .. } => {
+                    acknowledged.as_ref().map(|receipt| receipt.task)
+                }
                 action => task_of(action),
             };
             Step {
@@ -2283,6 +2297,25 @@ fn collapsed_step(
         },
         _ => return None,
     })
+}
+
+/// One collapsed entry, wrapped at word boundaries with a hanging indent.
+fn collapsed_lines(task: Option<u64>, phases: &[Phase], width: usize) -> Vec<Line<'static>> {
+    let line = collapsed_line(task, phases);
+    let glyph = line.spans[0].clone();
+    let text: String = line.spans[1].content.trim_start().to_owned();
+    let indent = 2;
+    wrap_words(&text, width.saturating_sub(indent))
+        .into_iter()
+        .enumerate()
+        .map(|(row, chunk)| {
+            if row == 0 {
+                Line::from(vec![glyph.clone(), Span::raw(format!(" {chunk}"))])
+            } else {
+                Line::from(format!("{}{chunk}", " ".repeat(indent)))
+            }
+        })
+        .collect()
 }
 
 fn collapsed_line(task: Option<u64>, phases: &[Phase]) -> Line<'static> {

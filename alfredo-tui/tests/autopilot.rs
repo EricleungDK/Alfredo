@@ -1603,10 +1603,12 @@ fn drive_recorded(
                 );
             }
         }
-        if finished(autopilot, control) && control.workers.is_empty() {
+        if finished(autopilot, control) && control.workers.is_empty() && !control.owner.active() {
             return;
         }
-        if let Some(submission) = autopilot.tick(runtime, control) {
+        let submission = alfredo_tui::instruct::Instructions::tick(control, autopilot)
+            .or_else(|| autopilot.tick(runtime, control));
+        if let Some(submission) = submission {
             let id = session
                 .submit_autopilot_command(submission.text, submission.intent.clone())
                 .unwrap();
@@ -1681,6 +1683,36 @@ fn chat_collapses_autopilot_commands_into_one_line_per_task() {
         [
             "✓ plan drafted",
             "✓ #1 planned → approved → started → check passed → accepted"
+        ],
+        "{screen}"
+    );
+    // An owner follow-up's steps collapse too, wrapping under their text.
+    alfredo_tui::instruct::Instructions::give_to(
+        &mut control,
+        alfredo_tui::agent_view::Target::Task(1),
+        "keep answer at 42",
+    )
+    .unwrap();
+    drive_recorded(&mut app, &mut autopilot, &mut control, &runtime);
+    control.set_visible(false);
+    let rows = render_rows(&app, &control, 100, 30);
+    let screen = rows.join("\n");
+    let pane: Vec<String> = rows[2..rows.len() - 6]
+        .iter()
+        .map(|row| {
+            row.chars()
+                .skip(start)
+                .collect::<String>()
+                .trim_end_matches(['│', ' '])
+                .to_string()
+        })
+        .filter(|row| !row.is_empty())
+        .collect();
+    assert_eq!(
+        pane[2..],
+        [
+            "✓ #2 proposed → files and check set → approved → started → check",
+            "  passed → accepted"
         ],
         "{screen}"
     );
