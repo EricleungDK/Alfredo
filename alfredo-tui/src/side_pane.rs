@@ -245,12 +245,23 @@ fn step(index: usize, len: usize, forward: bool) -> usize {
     }
 }
 
-/// Phase 2 seam: open a work row in the right pane. Today a task or group
-/// opens its detail, the architect opens the plan draft, a chat opens the
-/// transcript. Missions are handed off by the terminal (they switch work).
+/// Open a work row in the right pane: a task opens its agent view (the
+/// transcript of its repair lineage), the architect opens its agent view, a
+/// group opens its detail and a chat its transcript. Missions are handed off by
+/// the terminal (they switch work).
 pub fn open_work_target(app: &mut App, tasks: &mut TaskControl, target: &OpenTarget) {
     match target {
+        OpenTarget::Node(NodeId::Task(id)) => {
+            let root = tasks
+                .snapshot
+                .as_ref()
+                .and_then(|snapshot| snapshot.repair_root(*id))
+                .unwrap_or(*id);
+            tasks.focus_node(NodeId::Task(*id));
+            crate::agent_view::open(app, tasks, crate::agent_view::Target::Task(root));
+        }
         OpenTarget::Node(node) => {
+            crate::agent_view::close(app, tasks, false);
             app.models_visible = false;
             tasks.evidence = None;
             tasks.activity = None;
@@ -259,11 +270,10 @@ pub fn open_work_target(app: &mut App, tasks: &mut TaskControl, target: &OpenTar
             tasks.focus_node(*node);
         }
         OpenTarget::Architect => {
-            app.models_visible = false;
-            tasks.set_visible(true);
-            tasks.planner.visible = tasks.planner.active() || tasks.planner.checkpoint().is_some();
+            crate::agent_view::open(app, tasks, crate::agent_view::Target::Architect);
         }
         OpenTarget::Chat(index) if *index < app.sessions.len() => {
+            crate::agent_view::close(app, tasks, false);
             app.models_visible = false;
             app.selected = *index;
             tasks.set_visible(false);
@@ -427,7 +437,10 @@ pub fn project(app: &App, tasks: Option<&TaskControl>, now: Instant) -> Projecti
                     )
                 }),
                 expanded: false,
-                current: tasks.visible && planner.visible,
+                current: (tasks.visible && planner.visible)
+                    || tasks
+                        .agent_shown()
+                        .is_some_and(|view| view.target == crate::agent_view::Target::Architect),
                 target: OpenTarget::Architect,
             });
         }
@@ -439,6 +452,10 @@ pub fn project(app: &App, tasks: Option<&TaskControl>, now: Instant) -> Projecti
             .flatten()
             .filter(|_| {
                 !planner.visible
+                    && tasks
+                        .agent
+                        .as_ref()
+                        .is_none_or(|view| view.target != crate::agent_view::Target::Architect)
                     && tasks.evidence.is_none()
                     && tasks.activity.is_none()
                     && tasks.scope_view.is_none()

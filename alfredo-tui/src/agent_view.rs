@@ -536,3 +536,127 @@ pub fn project_architect(
     turns.extend(notes.iter().map(note_turn));
     turns
 }
+
+/// Open the agent view for `target`: it takes the right pane and the prompt.
+/// The chat draft is set aside and the target's own unsent draft restored.
+pub fn open(
+    app: &mut crate::model::App,
+    tasks: &mut crate::task_control::TaskControl,
+    target: Target,
+) {
+    let session = &mut app.sessions[app.selected];
+    let (chat_draft, previous) = match tasks.agent.take() {
+        Some(view) => {
+            tasks
+                .agent_drafts
+                .insert(view.target, session.draft.clone());
+            (view.chat_draft, view.previous)
+        }
+        None => (
+            session.draft.clone(),
+            Previous {
+                tasks_visible: tasks.visible,
+                planner_visible: tasks.planner.visible,
+            },
+        ),
+    };
+    session.clear_draft();
+    session.insert(&tasks.agent_drafts.remove(&target).unwrap_or_default());
+    let mut view = View::new(target, previous);
+    view.chat_draft = chat_draft;
+    app.models_visible = false;
+    tasks.set_visible(true);
+    tasks.planner.visible = false;
+    tasks.evidence = None;
+    tasks.activity = None;
+    tasks.autopilot_report = None;
+    tasks.scope_view = None;
+    tasks.agent = Some(view);
+}
+
+/// Leave the agent view, keeping its unsent draft for next time and restoring
+/// the chat draft. `restore` also returns the right pane to what it showed
+/// before; otherwise the view that replaced it stays.
+pub fn close(
+    app: &mut crate::model::App,
+    tasks: &mut crate::task_control::TaskControl,
+    restore: bool,
+) {
+    let Some(view) = tasks.agent.take() else {
+        return;
+    };
+    let session = &mut app.sessions[app.selected];
+    if session.draft.is_empty() {
+        tasks.agent_drafts.remove(&view.target);
+    } else {
+        tasks
+            .agent_drafts
+            .insert(view.target, session.draft.clone());
+    }
+    session.clear_draft();
+    session.insert(&view.chat_draft);
+    if restore {
+        tasks.set_visible(view.previous.tasks_visible);
+        tasks.planner.visible = view.previous.planner_visible;
+    }
+}
+
+fn parse_target(tasks: &crate::task_control::TaskControl, word: &str) -> Result<Target, String> {
+    if word == "architect" {
+        return Ok(Target::Architect);
+    }
+    let id: u64 = word
+        .trim_start_matches('#')
+        .parse()
+        .map_err(|_| "Use a task number or architect".to_string())?;
+    tasks
+        .snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.repair_root(id))
+        .map(Target::Task)
+        .ok_or(format!("Task #{id} not found"))
+}
+
+/// `/watch ID|architect` opens an agent view; `/tell ID|architect TEXT` sends it
+/// an instruction from anywhere. None for other input.
+pub fn console(
+    app: &mut crate::model::App,
+    tasks: &mut crate::task_control::TaskControl,
+    text: &str,
+) -> Option<Result<String, String>> {
+    let text = text.trim();
+    let (verb, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+    let rest = rest.trim();
+    match verb {
+        "/watch" => Some((|| {
+            let target = parse_target(tasks, rest)?;
+            if target == Target::Architect
+                && !tasks.planner.active()
+                && tasks.planner.checkpoint().is_none()
+            {
+                return Err("No plan is being drafted; /plan REQUEST starts one".into());
+            }
+            open(app, tasks, target);
+            Ok(match target {
+                Target::Architect => "Watching the architect".into(),
+                Target::Task(_) => format!(
+                    "Watching {}",
+                    prompt_title(tasks, target)
+                        .trim()
+                        .trim_start_matches("To ")
+                        .split(" · ")
+                        .next()
+                        .unwrap_or_default()
+                ),
+            })
+        })()),
+        "/tell" => Some((|| {
+            let (word, note) = rest
+                .split_once(char::is_whitespace)
+                .ok_or("Usage: /tell ID TEXT")?;
+            let target = parse_target(tasks, word)?;
+            crate::instruct::Instructions::give_to(tasks, target, note)
+        })()),
+        _ => None,
+    }
+}

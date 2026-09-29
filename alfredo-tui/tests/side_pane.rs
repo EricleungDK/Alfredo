@@ -459,11 +459,13 @@ fn pane_keys_move_switch_sections_open_and_return_to_the_prompt() {
 }
 
 #[test]
-fn opening_rows_uses_existing_detail_plan_and_chat_views() {
+fn opening_rows_uses_agent_views_group_detail_and_chat() {
+    use alfredo_tui::agent_view::Target;
     let mut fixture = textutil();
     fixture.app.add_session();
     fixture.app.selected = 0;
     fixture.control.set_visible(false);
+    // A task opens the agent view of its repair lineage.
     side_pane::open_work_target(
         &mut fixture.app,
         &mut fixture.control,
@@ -471,6 +473,18 @@ fn opening_rows_uses_existing_detail_plan_and_chat_views() {
     );
     assert!(fixture.control.visible);
     assert_eq!(fixture.control.selected_task().unwrap().id, 2);
+    assert_eq!(
+        fixture.control.agent_shown().map(|view| view.target),
+        Some(Target::Task(2))
+    );
+    // A group still opens its detail.
+    side_pane::open_work_target(
+        &mut fixture.app,
+        &mut fixture.control,
+        &OpenTarget::Node(NodeId::Plan(1)),
+    );
+    assert!(fixture.control.agent.is_none());
+    assert!(fixture.control.visible);
     side_pane::open_work_target(&mut fixture.app, &mut fixture.control, &OpenTarget::Chat(1));
     assert!(!fixture.control.visible);
     assert_eq!(fixture.app.selected, 1);
@@ -481,7 +495,10 @@ fn opening_rows_uses_existing_detail_plan_and_chat_views() {
         &OpenTarget::Architect,
     );
     assert!(fixture.control.visible);
-    assert!(fixture.control.planner.visible);
+    assert_eq!(
+        fixture.control.agent_shown().map(|view| view.target),
+        Some(Target::Architect)
+    );
 }
 
 #[test]

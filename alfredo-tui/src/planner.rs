@@ -459,6 +459,10 @@ impl Planner {
     pub fn active(&self) -> bool {
         self.job.is_some()
     }
+    /// Planning request of the current or last generation.
+    pub fn prompt(&self) -> &str {
+        &self.prompt
+    }
     /// Planner model of the current or last generation.
     pub fn model(&self) -> &str {
         &self.model

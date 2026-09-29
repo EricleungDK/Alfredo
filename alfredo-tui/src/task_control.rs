@@ -1064,6 +1064,19 @@ impl TaskControl {
         Some(lines)
     }
 
+    /// The open agent view, when it is what the right pane shows: an explicitly
+    /// opened plan, evidence, activity, report or scope view replaces it.
+    pub fn agent_shown(&self) -> Option<&crate::agent_view::View> {
+        self.agent.as_ref().filter(|_| {
+            self.visible
+                && !self.planner.visible
+                && self.evidence.is_none()
+                && self.activity.is_none()
+                && self.autopilot_report.is_none()
+                && self.scope_view.is_none()
+        })
+    }
+
     /// Verified record of a finished attempt for the agent view, read once per
     /// acknowledged evidence hash.
     pub fn agent_record(&self, task: u64, hash: &str) -> crate::agent_view::Record {

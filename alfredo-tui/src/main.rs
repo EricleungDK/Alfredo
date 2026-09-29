@@ -554,9 +554,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             dirty |= stage_ready_wayfinder(&mut work, &mut pending_command, quit_pending);
+            // Owner instructions step before autopilot: the owner's note decides first.
+            if !quit_pending && !work.wayfinder.active() && pending_command.is_none() {
+                dirty |= submit_owner(&mut work, &mut pending_command);
+            }
             if !quit_pending && !work.wayfinder.active() && pending_command.is_none() {
                 dirty |= submit_autopilot(&runtime, &mut work, &mut pending_command);
             }
+            dirty |= withdraw_superseded_autopilot(&mut work, &mut pending_command);
             if !quit_pending && !work.wayfinder.active() && pending_command.is_none() {
                 let mut architect_selected = false;
                 match work.tasks.prepare_architect() {
@@ -745,6 +750,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             dirty |= work.sync_autopilot();
+            // Another view replaced the agent view: return its draft and the chat draft.
+            if work.tasks.agent.is_some() && work.tasks.agent_shown().is_none() {
+                alfredo_tui::agent_view::close(&mut work.app, &mut work.tasks, false);
+                dirty = true;
+            }
             if dirty {
                 terminal.draw(|frame| ui::draw_with_tasks(frame, &work.app, &work.tasks))?;
                 dirty = false;
@@ -807,7 +817,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 std::time::Instant::now(),
                             );
                             match work.app.pane.key(pane_key, &projection) {
-                                PaneAction::Moved(RowKey::Node(node)) if work.tasks.visible => {
+                                PaneAction::Moved(RowKey::Node(node))
+                                    if work.tasks.visible && work.tasks.agent_shown().is_none() =>
+                                {
                                     work.tasks.focus_node(node)
                                 }
                                 PaneAction::Open(alfredo_tui::side_pane::OpenTarget::Mission(
@@ -929,15 +941,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Ok(notice) | Err(notice) => notice,
                             };
                         }
+                        KeyCode::F(2) if work.tasks.agent_shown().is_some() => {
+                            alfredo_tui::agent_view::close(&mut work.app, &mut work.tasks, false);
+                            work.tasks.set_visible(false);
+                        }
                         KeyCode::F(2) => {
                             work.app.models_visible = false;
                             work.tasks.set_visible(!work.tasks.visible);
                         }
+                        KeyCode::Char('o') if ctrl && work.tasks.agent_shown().is_some() => {
+                            if let Some(view) = work.tasks.agent.as_mut() {
+                                view.expanded = !view.expanded;
+                            }
+                        }
                         KeyCode::F(1) if work.app.sessions[index].draft.is_empty() => {
                             work.app.completion = Some(alfredo_tui::commands::Completion::all())
                         }
-                        KeyCode::Up if work.tasks.visible => work.tasks.select_task(false),
-                        KeyCode::Down if work.tasks.visible => work.tasks.select_task(true),
+                        KeyCode::Up if work.tasks.visible && work.tasks.agent_shown().is_none() => {
+                            work.tasks.select_task(false)
+                        }
+                        KeyCode::Down
+                            if work.tasks.visible && work.tasks.agent_shown().is_none() =>
+                        {
+                            work.tasks.select_task(true)
+                        }
                         KeyCode::Left
                             if work.tasks.visible && key.modifiers.contains(KeyModifiers::ALT) =>
                         {
@@ -988,6 +1015,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 (index + work.app.sessions.len() - 1) % work.app.sessions.len()
                         }
                         KeyCode::Esc if work.app.models_visible => work.app.models_visible = false,
+                        KeyCode::Esc if work.tasks.agent_shown().is_some() => {
+                            alfredo_tui::agent_view::close(&mut work.app, &mut work.tasks, true);
+                        }
                         KeyCode::Esc => {
                             if let Some(job) = jobs[index].take() {
                                 job.abort();
@@ -1151,6 +1181,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             work.tasks.set_visible(false);
                             request = Some(work.app.sessions[index].begin());
+                        }
+                        KeyCode::Enter
+                            if matches!(
+                                work.app.sessions[index].draft.split_whitespace().next(),
+                                Some("/watch" | "/tell")
+                            ) =>
+                        {
+                            let text = work.app.sessions[index].draft.trim().to_owned();
+                            match alfredo_tui::agent_view::console(
+                                &mut work.app,
+                                &mut work.tasks,
+                                &text,
+                            ) {
+                                Some(Ok(notice)) => {
+                                    let session = &mut work.app.sessions[work.app.selected];
+                                    if text.starts_with("/tell") {
+                                        session.remember_submission();
+                                        session.clear_draft();
+                                    }
+                                    work.app.notice = notice;
+                                }
+                                Some(Err(error)) => work.app.notice = error,
+                                None => {}
+                            }
                         }
                         KeyCode::Enter
                             if work.app.sessions[index].draft.trim_start().starts_with('/') =>
@@ -1325,7 +1379,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                             work.app.sessions[index].remember_submission();
                                             work.app.sessions[index].clear_draft();
-                                            work.tasks.set_visible(false);
+                                            // A command typed to an agent keeps its view.
+                                            if work.tasks.agent_shown().is_none() {
+                                                work.tasks.set_visible(false);
+                                            }
                                             work.app.notice.clear();
                                             if origin != index {
                                                 work.app.notice = format!(
@@ -1349,6 +1406,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Err(error) => work.app.notice = error,
                             }
                         }
+                        // The agent view owns the prompt: text is an instruction to that agent.
+                        KeyCode::Enter if work.tasks.agent_shown().is_some() => {
+                            let target = work.tasks.agent_shown().map(|view| view.target).unwrap();
+                            let note = work.app.sessions[index].draft.clone();
+                            match alfredo_tui::instruct::Instructions::give_to(
+                                &mut work.tasks,
+                                target,
+                                &note,
+                            ) {
+                                Ok(notice) => {
+                                    work.app.sessions[index].remember_submission();
+                                    work.app.sessions[index].clear_draft();
+                                    work.app.notice = notice;
+                                    if let Some(view) = work.tasks.agent.as_ref() {
+                                        // Sending returns the reader to the newest turn.
+                                        view.scroll_rows(i32::MAX / 2);
+                                    }
+                                }
+                                Err(error) => work.app.notice = error,
+                            }
+                        }
                         KeyCode::Enter => {
                             work.app.models_visible = false;
                             work.tasks.set_visible(false);
@@ -1356,6 +1434,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         KeyCode::Backspace => {
                             work.app.sessions[index].backspace();
+                        }
+                        KeyCode::PageUp if work.tasks.agent_shown().is_some() => {
+                            work.tasks.agent_shown().unwrap().scroll_rows(-10)
+                        }
+                        KeyCode::PageDown if work.tasks.agent_shown().is_some() => {
+                            work.tasks.agent_shown().unwrap().scroll_rows(10)
                         }
                         KeyCode::PageUp => {
                             if work.app.models_visible {
@@ -1444,6 +1528,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for job in jobs.into_iter().flatten() {
         job.abort();
     }
+    // Save the chat draft, not an agent's unsent note.
+    alfredo_tui::agent_view::close(&mut work.app, &mut work.tasks, false);
     work.tasks.cancel_all();
     for session in &mut work.app.sessions {
         session.cancel();
@@ -1571,6 +1657,65 @@ fn submit_autopilot(
             work.app.notice = format!("Autopilot paused: command not recorded: {error}");
         }
     }
+    true
+}
+
+/// Record an owner instruction's next step in an idle conversation, then release
+/// it through the same saved-intent barrier as typed commands.
+fn submit_owner(work: &mut Workstation, pending: &mut Option<(usize, String)>) -> bool {
+    let sessions = &work.app.sessions;
+    let Some(origin) = std::iter::once(work.app.selected)
+        .chain(0..sessions.len())
+        .find(|&index| {
+            !sessions[index].status.active() && sessions[index].messages.len().is_multiple_of(2)
+        })
+    else {
+        return false;
+    };
+    let Some(submission) =
+        alfredo_tui::instruct::Instructions::tick(&mut work.tasks, &mut work.autopilot)
+    else {
+        return false;
+    };
+    match work.app.sessions[origin].submit_autopilot_command(submission.text, submission.intent) {
+        Ok(id) => *pending = Some((origin, id)),
+        Err(error) => work.app.notice = format!("Instruction step not recorded: {error}"),
+    }
+    true
+}
+
+/// An autopilot decision still waiting at the saved-intent barrier for a family
+/// (or plan) the owner has since instructed is withdrawn, never dispatched.
+fn withdraw_superseded_autopilot(
+    work: &mut Workstation,
+    pending: &mut Option<(usize, String)>,
+) -> bool {
+    use alfredo_tui::console_command::CommandState;
+    let Some((origin, id)) = pending.as_ref() else {
+        return false;
+    };
+    let superseded = work.app.sessions[*origin]
+        .commands()
+        .iter()
+        .find(|command| command.id == *id)
+        .is_some_and(|command| {
+            command.text.starts_with("Autopilot · ")
+                && matches!(command.state, CommandState::Pending)
+                && work
+                    .tasks
+                    .owner
+                    .supersedes(&command.intent, work.tasks.snapshot.as_ref())
+        });
+    if !superseded {
+        return false;
+    }
+    work.app.sessions[*origin].set_command_state(
+        id,
+        CommandState::Refused {
+            reason: "Withdrawn: your instruction decides for this task".into(),
+        },
+    );
+    *pending = None;
     true
 }
 

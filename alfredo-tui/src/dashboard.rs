@@ -169,6 +169,8 @@ pub enum Footer {
     Pane,
     /// Task detail on the right.
     Tasks,
+    /// An agent view owns the right pane and the prompt.
+    Agent,
     /// Chat on the right.
     Chat,
 }
@@ -204,6 +206,15 @@ pub fn footer(context: Footer, width: usize) -> String {
             ("F2 chat", 1),
             ("F3 evidence", 2),
             ("F5 pause", 3),
+            ("PgUp/Dn scroll", 3),
+            ("F1 help", 0),
+            ("^Q quit", 0),
+        ],
+        Footer::Agent => &[
+            ("Enter send", 1),
+            ("Esc back", 1),
+            ("^O expand", 2),
+            ("F6 pane", 2),
             ("PgUp/Dn scroll", 3),
             ("F1 help", 0),
             ("^Q quit", 0),

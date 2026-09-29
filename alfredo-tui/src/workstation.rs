@@ -54,7 +54,13 @@ impl Workstation {
             app.notice = format!("Saved-mission discovery unavailable: {error}");
         }
         let wayfinder = crate::wayfinder::Router::new(store.understanding());
+        let owner =
+            crate::instruct::Instructions::open(&store.conversation_directory()?, conversation);
         let mut tasks = TaskControl::new(store);
+        match owner {
+            Ok(owner) => tasks.owner = owner,
+            Err(error) => app.notice = format!("{error}; file preserved, instructions start empty"),
+        }
         tasks.snapshot = Some(snapshot);
         if let Some(view) = view {
             tasks.restore_view(view)?;
@@ -108,6 +114,15 @@ impl Workstation {
             changed = true;
         }
         if let Some(notice) = self.autopilot.take_finished_notice() {
+            self.app.notice = notice;
+            changed = true;
+        }
+        let roots = self.autopilot.roots(&self.tasks);
+        if roots != self.tasks.autopilot_roots {
+            self.tasks.autopilot_roots = roots;
+            changed = true;
+        }
+        if let Some(notice) = self.tasks.owner.take_notice() {
             self.app.notice = notice;
             changed = true;
         }

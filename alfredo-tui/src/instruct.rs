@@ -390,9 +390,11 @@ impl Instructions {
                         "follow-up task",
                         format!("Follow-up of #{id} with the same files and check"),
                     ),
-                    TaskStatus::NeedsHumanReview => return Err(format!(
+                    TaskStatus::NeedsHumanReview => {
+                        return Err(format!(
                         "#{id} is held for human review; resolve it with /review {id} JSON first"
-                    )),
+                    ))
+                    }
                     // A repair proposed but not started: the note replaces it.
                     TaskStatus::Proposed | TaskStatus::Approved if head.repair_of.is_some() => {
                         let parent = head.repair_of.unwrap();

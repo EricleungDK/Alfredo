@@ -116,6 +116,12 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
         draw_side_pane(frame, body, app, &projection, now);
     }
     let focused = app.pane.focus.is_some();
+    let agent = tasks.and_then(|tasks| Some((tasks, tasks.agent_shown()?.target)));
+    let prompt_title = match agent {
+        _ if focused => " Prompt · Esc returns ".to_string(),
+        Some((tasks, target)) => crate::agent_view::prompt_title(tasks, target),
+        None => " Prompt · Enter send ".to_string(),
+    };
     let draft = session.draft_view(rows[3].width.saturating_sub(4) as usize);
     frame.render_widget(
         Paragraph::new(safe(&draft)).block(
@@ -126,11 +132,7 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
                 } else {
                     theme.color(Tone::Cyan)
                 }))
-                .title(if focused {
-                    " Prompt · Esc returns "
-                } else {
-                    " Prompt · Enter send "
-                }),
+                .title(prompt_title),
         ),
         rows[3],
     );
@@ -145,6 +147,8 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
     };
     let context = if focused {
         dashboard::Footer::Pane
+    } else if agent.is_some() {
+        dashboard::Footer::Agent
     } else if tasks.is_some_and(|tasks| tasks.visible) {
         dashboard::Footer::Tasks
     } else {
@@ -765,6 +769,8 @@ fn draw_right(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: R
                 " Shared Understanding · project scope ".into(),
                 false,
             );
+        } else if let Some(view) = &tasks.agent {
+            draw_agent(frame, area, tasks, view, &app.pane.theme);
         } else {
             let tree = tasks.work_tree();
             let focused = tasks
@@ -824,6 +830,136 @@ fn draw_right(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: R
             &mut ListState::default().with_selected(Some(completion.selected)),
         );
     }
+}
+
+fn tone_style(theme: &Theme, tone: crate::agent_view::Tone) -> Style {
+    use crate::agent_view::Tone as T;
+    match tone {
+        T::Normal => Style::default(),
+        T::Dim => Style::default().fg(theme.color(Tone::Dim)),
+        T::Path => Style::default()
+            .fg(theme.color(Tone::Cyan))
+            .add_modifier(Modifier::BOLD),
+        T::Pass => Style::default().fg(theme.color(Tone::Green)),
+        T::Fail => Style::default().fg(theme.color(Tone::Red)),
+        T::Warn => Style::default().fg(theme.color(Tone::Amber)),
+    }
+}
+
+/// Agent view: one dim speaker label per turn, one blank row between turns,
+/// newest at the bottom. It follows the tail until the reader scrolls away,
+/// with the chat transcript's reading-position rules.
+fn draw_agent(
+    frame: &mut Frame,
+    area: Rect,
+    tasks: &TaskControl,
+    view: &crate::agent_view::View,
+    theme: &Theme,
+) {
+    use crate::agent_view::{self as agent, Origin, Target};
+    let (turns, title) = match view.target {
+        Target::Task(root) => {
+            let attempts = agent::gather(tasks, root);
+            let notes = tasks.owner.notes(view.target);
+            (
+                agent::project(&attempts, &notes, view.expanded),
+                agent::title(&attempts),
+            )
+        }
+        Target::Architect => {
+            let planner = &tasks.planner;
+            let origin = if tasks
+                .autopilot
+                .as_ref()
+                .is_some_and(|status| status.state == crate::autopilot::RunState::Planning)
+            {
+                Origin::Autopilot
+            } else {
+                Origin::You
+            };
+            let request = if view.expanded {
+                planner.prompt().to_owned()
+            } else {
+                // Validation retries follow the goal; the goal is the request.
+                planner
+                    .prompt()
+                    .split(" | ")
+                    .next()
+                    .unwrap_or_default()
+                    .to_owned()
+            };
+            let draft = if planner.active() || planner.checkpoint().is_some() {
+                planner.preview()
+            } else {
+                String::new()
+            };
+            let state = if planner.active() {
+                "planning"
+            } else if planner.checkpoint().is_some() {
+                "draft"
+            } else {
+                "idle"
+            };
+            (
+                agent::project_architect(
+                    Some(&request),
+                    origin,
+                    &draft,
+                    &tasks.owner.notes(view.target),
+                    view.expanded,
+                ),
+                format!("Agent · architect · {state}"),
+            )
+        }
+    };
+    let label = Style::default().fg(theme.color(Tone::Dim));
+    let mut lines = Vec::new();
+    let mut blocks = Vec::new();
+    for (index, turn) in turns.iter().enumerate() {
+        let start = lines.len();
+        if index > 0 {
+            lines.push(Line::default());
+        }
+        lines.push(Line::styled(safe(&turn.label), label));
+        for (text, tone) in &turn.lines {
+            lines.push(Line::styled(safe(text), tone_style(theme, *tone)));
+        }
+        blocks.push(crate::reading::Block {
+            key: crate::reading::BlockKey::Message(index),
+            start,
+            len: lines.len() - start,
+        });
+    }
+    if lines.is_empty() {
+        lines.push(Line::styled("Nothing recorded for this agent yet.", label));
+    }
+    frame.render_widget(Clear, area);
+    let block = frame_block(area, format!(" {} ", safe(&title)));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let heights: Vec<usize> = lines
+        .iter()
+        .map(|line| {
+            if line.width() <= usize::from(inner.width) {
+                1
+            } else {
+                Paragraph::new(line.clone())
+                    .wrap(Wrap { trim: false })
+                    .line_count(inner.width)
+                    .max(1)
+            }
+        })
+        .collect();
+    let position = view.position(&heights, inner.height, &blocks);
+    frame.render_widget(
+        Paragraph::new(lines.into_iter().skip(position.line).collect::<Vec<_>>())
+            .wrap(Wrap { trim: false })
+            .scroll((position.row.min(u16::MAX as usize) as u16, 0)),
+        inner,
+    );
 }
 
 fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: Rect) {
