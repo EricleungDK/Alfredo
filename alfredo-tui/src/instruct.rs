@@ -612,8 +612,12 @@ impl Instructions {
         }) {
             if item.child != Some(child) {
                 item.child = Some(child);
-                if item.effect == Effect::FollowUp && autopilot.roots(tasks).contains(&item.root) {
-                    autopilot.adopt(child);
+                if autopilot.roots(tasks).contains(&item.root) {
+                    if item.effect == Effect::FollowUp {
+                        autopilot.adopt(child);
+                    } else {
+                        autopilot.reopen();
+                    }
                 }
             }
             return self.launch(item, snapshot, tasks, &task, child);

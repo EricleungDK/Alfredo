@@ -72,6 +72,9 @@ jobs:
       - name: PTY smoke - qualification CLI
         timeout-minutes: 10
         run: python3 alfredo-tui/tests/qualification_cli_smoke.py
+      - name: PTY smoke - agent view
+        timeout-minutes: 10
+        run: python3 alfredo-tui/tests/agent_terminal_smoke.py
       - name: Install dependency auditor
         run: |
           cargo audit --version 2>/dev/null | grep -q ' 0\.22\.2$' \

@@ -692,25 +692,40 @@ impl Autopilot {
     /// Adopt an owner follow-up as a further family. A finished run reopens: the
     /// follow-up is reviewed like planned work and integrated on a new branch.
     pub fn adopt(&mut self, task: u64) -> bool {
-        let elapsed = self.elapsed();
         let Some(saved) = self.saved.as_mut().filter(|saved| saved.first.is_some()) else {
             return false;
         };
         if !saved.adopted.insert(task) {
             return false;
         }
-        if saved.phase == Phase::Done {
-            saved.phase = Phase::Running;
-            saved.paused = false;
-            saved.finished = None;
-            saved.report = None;
-            saved.round += 1;
-            self.clock = (std::time::Instant::now(), elapsed);
-            self.notice = "Autopilot resumed for your follow-up".into();
-        }
+        self.reopen();
         self.attempts.clear();
         self.persist();
         true
+    }
+
+    /// Owner-instructed work in one of this run's families after it finished:
+    /// the run reopens to review it and integrates again on a new branch.
+    pub fn reopen(&mut self) {
+        let elapsed = self.elapsed();
+        let Some(saved) = self
+            .saved
+            .as_mut()
+            .filter(|saved| saved.phase == Phase::Done)
+        else {
+            return;
+        };
+        saved.phase = Phase::Running;
+        saved.paused = false;
+        saved.finished = None;
+        saved.report = None;
+        if saved.branch.is_some() {
+            saved.round += 1;
+        }
+        self.clock = (std::time::Instant::now(), elapsed);
+        self.notice = "Autopilot resumed for your instruction".into();
+        self.attempts.clear();
+        self.persist();
     }
 
     /// An owner revision of the draft replaces the plan request autopilot waits for.

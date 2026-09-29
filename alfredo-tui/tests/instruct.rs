@@ -563,6 +563,39 @@ fn same_revision_race_owner_first_leaves_autopilot_nothing_to_decide() {
     assert_eq!(fixture.store.snapshot().unwrap().tasks.len(), 2);
 }
 
+#[test]
+fn note_to_a_failed_task_of_a_finished_run_reopens_autopilot_to_review_the_repair() {
+    let fixture = Fixture::new();
+    let server = failing_then_owner_server();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    // No repair budget: the run finishes failed and makes no repair itself.
+    autopilot.start("Answer", "fixture", 0, &control).unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "failed run",
+        finished,
+    );
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+    Instructions::give_to(&mut control, Target::Task(1), "use 42, not 41").unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "reopened",
+        |a, c| finished(a, c) && a.status(c).unwrap().done == 1,
+    );
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!(status.state, RunState::Done, "{status:?}");
+    // The first finish made no branch, so the reopened run takes the first name.
+    let branch = status.branch.unwrap();
+    assert!(!branch.ends_with("-2"), "{branch}");
+    assert!(git(&fixture.workspace, &["show", &format!("{branch}:calc.py")]).contains("42"));
+}
+
 fn review_server() -> Server {
     Server::new(|request, _| {
         if planner(request) {
