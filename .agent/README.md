@@ -4,8 +4,8 @@
 > the native terminal `alfredo-tui`; the desktop/Python material below is legacy.
 > `Tasks/context.md` is a large historical log; do not rely on it for current state.
 
-**Last Updated**: 2026-09-28
-**Status**: Prompt-first Alfredo workstation with a persistent Apple-container canonical localhost environment, explicit Coding Workspace/Mission continuity, and receipt-bound conversational action truth; authenticated npm publication, registry-only install, and the documented human/release follow-up remain explicit
+**Last Updated**: 2026-09-29
+**Status**: Product is the native terminal `alfredo-tui` (v0.1.0 on `main`; side pane and agent view merged, `v0.1.0` tag and live-model run still open). The Python/Tauri workstation material below is legacy; its npm publication and human follow-up stay open there.
 
 ## Quick Start
 
@@ -19,7 +19,7 @@ The active native Rust terminal rewrite is tracked in the
 [check-result recovery](Tasks/native-check-result-recovery.md),
 [proposed Mission Work rendering slice](Tasks/native-mission-work-rendering.md),
 [browser coverage matrix](Tasks/browser-regression-matrix.md), with runnable commands in
-[`alfredo-tui/README.md`](../alfredo-tui/README.md) and current evidence in the
+[`alfredo-tui/README.md`](../alfredo-tui/README.md), [side pane and agent view](Tasks/tui-side-pane.md) and current evidence in the
 [terminal foundation report](Reports/2026-09-13-rust-terminal-foundation.md).
 
 1. Read [Project Architecture](System/project_architecture.md) for the current workstation, Orchestrator, and runner boundaries.
