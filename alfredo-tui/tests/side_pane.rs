@@ -350,6 +350,22 @@ fn missions_list_current_first_with_progress_then_others() {
             name: "release".into(),
             progress: MissionProgress::State("running".into()),
         },
+        MissionEntry {
+            name: "todo-cli".into(),
+            progress: MissionProgress::Counted {
+                done: 4,
+                total: 7,
+                word: "running".into(),
+            },
+        },
+        MissionEntry {
+            name: "slugify".into(),
+            progress: MissionProgress::Counted {
+                done: 2,
+                total: 3,
+                word: "paused".into(),
+            },
+        },
     ];
     let projection = side_pane::project(&fixture.app, Some(&fixture.control), Instant::now());
     let missions: Vec<_> = projection
@@ -364,6 +380,8 @@ fn missions_list_current_first_with_progress_then_others() {
             ("docs-cleanup", false, "idle"),
             ("broken", false, "?"),
             ("release", false, "running"),
+            ("todo-cli", false, "4/7   running"),
+            ("slugify", false, "2/3   paused"),
         ]
     );
     assert_eq!(
@@ -511,7 +529,15 @@ fn other_missions_progress_comes_from_their_autopilot_state_read_only() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     let state = root.join("state");
-    for name in ["default", "docs-cleanup", "release", "broken", "shipped"] {
+    for name in [
+        "default",
+        "docs-cleanup",
+        "release",
+        "broken",
+        "shipped",
+        "todo-cli",
+        "slugify",
+    ] {
         let store = TaskStore::new(&state, &workspace, name).unwrap();
         store.select_mission(true).unwrap();
         alfredo_tui::missions::remember(&store, &workspace.canonicalize().unwrap(), name).unwrap();
@@ -544,6 +570,21 @@ fn other_missions_progress_comes_from_their_autopilot_state_read_only() {
         .to_string(),
     )
     .unwrap();
+    // Counts saved by the other mission's own autopilot; done/total plus state.
+    for (name, paused, done, total) in [("todo-cli", false, 4, 7), ("slugify", true, 2, 3)] {
+        fs::write(
+            alfredo_tui::autopilot::state_path(&directory(name), "default"),
+            serde_json::json!({
+                "version": 1, "id": "0123456789abcdef", "goal": "ship", "model": "m",
+                "max_repairs": 3, "phase": "running", "paused": paused, "started": 1,
+                "done": done, "total": total
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+    let counted = alfredo_tui::autopilot::state_path(&directory("todo-cli"), "default");
+    let counted_before = fs::read(&counted).unwrap();
     fs::write(
         alfredo_tui::autopilot::state_path(&directory("broken"), "default"),
         "not json",
@@ -557,17 +598,25 @@ fn other_missions_progress_comes_from_their_autopilot_state_read_only() {
     );
     let found: Vec<_> = entries
         .iter()
-        .map(|entry| (entry.name.as_str(), entry.progress.label()))
+        .map(|entry| (entry.name.as_str(), entry.progress.summary()))
         .collect();
     assert_eq!(
         found,
         [
-            ("broken", "?"),
-            ("docs-cleanup", "idle"),
-            ("release", "running"),
-            ("shipped", "partial"),
+            ("broken", "?".to_string()),
+            ("docs-cleanup", "idle".into()),
+            ("release", "running".into()),
+            ("shipped", "partial".into()),
+            ("slugify", "2/3   paused".into()),
+            ("todo-cli", "4/7   running".into()),
         ]
     );
+    // A state file written before counts existed shows the state word alone.
+    assert_eq!(
+        entries[2].progress,
+        MissionProgress::State("running".into())
+    );
     assert_eq!(fs::read(&release).unwrap(), before);
+    assert_eq!(fs::read(&counted).unwrap(), counted_before);
     fs::remove_dir_all(root).unwrap();
 }

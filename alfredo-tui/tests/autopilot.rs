@@ -2019,3 +2019,42 @@ fn follow_up_adopted_while_integrating_survives_a_restart_before_the_job_complet
         "follow-up"
     );
 }
+
+fn peeked(fixture: &Fixture) -> Option<(&'static str, Option<(u32, u32)>)> {
+    let peek = autopilot::peek(&autopilot::state_path(&fixture.directory(), "default")).unwrap()?;
+    Some((peek.word, peek.counts))
+}
+
+#[test]
+fn saved_state_carries_done_and_total_for_read_only_peeks_of_other_missions() {
+    let fixture = Fixture::new();
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return two_task_plan();
+        }
+        if worker_prompt(request).starts_with("Implement this task: Add app") {
+            app()
+        } else {
+            good_calc()
+        }
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    assert_eq!(peeked(&fixture), None);
+    autopilot.start("Answer", "fixture", 1, &control).unwrap();
+    // No plan yet: no counts, the state word alone.
+    assert_eq!(peeked(&fixture).map(|peek| peek.1), Some(None));
+    let seen = std::cell::RefCell::new(vec![]);
+    drive(&mut autopilot, &mut control, &runtime, "done", |_, _| {
+        let now = peeked(&fixture).and_then(|peek| peek.1);
+        if now.is_some() && seen.borrow().last() != Some(&now) {
+            seen.borrow_mut().push(now);
+        }
+        now == Some((2, 2)) && peeked(&fixture).is_some_and(|peek| peek.0 == "done")
+    });
+    let seen = seen.into_inner();
+    assert!(seen.contains(&Some((0, 2))), "{seen:?}");
+    assert!(seen.contains(&Some((1, 2))), "{seen:?}");
+    assert_eq!(seen.last(), Some(&Some((2, 2))), "{seen:?}");
+}

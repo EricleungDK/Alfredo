@@ -103,18 +103,29 @@ pub struct MissionEntry {
 pub enum MissionProgress {
     /// No autopilot state saved.
     Idle,
-    /// Saved autopilot phase word.
+    /// Saved autopilot phase word, without counts (state saved before counts).
     State(String),
+    /// Accepted and total task families with the saved phase word.
+    Counted { done: u32, total: u32, word: String },
     /// State file unreadable.
     Unknown,
 }
 
 impl MissionProgress {
+    /// The state word alone.
     pub fn label(&self) -> &str {
         match self {
             Self::Idle => "idle",
-            Self::State(word) => word,
+            Self::State(word) | Self::Counted { word, .. } => word,
             Self::Unknown => "?",
+        }
+    }
+
+    /// The mission row text: `done/total` and state, as the current mission's.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Counted { done, total, word } => format!("{done}/{total}   {word}"),
+            other => other.label().to_string(),
         }
     }
 }
@@ -409,7 +420,7 @@ pub fn project(app: &App, tasks: Option<&TaskControl>, now: Instant) -> Projecti
             .extend(app.pane.missions.iter().map(|entry| MissionRow {
                 name: crate::dashboard::single_line(&entry.name),
                 current: false,
-                progress: entry.progress.label().into(),
+                progress: entry.progress.summary(),
                 target: OpenTarget::Mission(entry.name.clone()),
             }));
 
@@ -558,7 +569,14 @@ pub fn load_missions(
                 .and_then(|path| crate::autopilot::peek(&path));
             let progress = match progress {
                 Ok(None) => MissionProgress::Idle,
-                Ok(Some(word)) => MissionProgress::State(word.into()),
+                Ok(Some(peek)) => match peek.counts {
+                    Some((done, total)) => MissionProgress::Counted {
+                        done,
+                        total,
+                        word: peek.word.into(),
+                    },
+                    None => MissionProgress::State(peek.word.into()),
+                },
                 Err(_) => MissionProgress::Unknown,
             };
             MissionEntry { name, progress }

@@ -95,6 +95,12 @@ struct Saved {
     /// finishing job's result is discarded and the run integrates again.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     stale: bool,
+    /// Families settled as accepted and families in the run, kept current for
+    /// read-only peeks from other missions. Absent in older state files.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    done: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    total: u32,
 }
 fn is_zero(value: &u32) -> bool {
     *value == 0
@@ -279,10 +285,20 @@ pub fn state_path(directory: &Path, conversation: &str) -> PathBuf {
     ))
 }
 
+/// Another mission's saved loop state as read by `peek`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Peek {
+    /// The saved phase as written.
+    pub word: &'static str,
+    /// Accepted and total task families; absent before a plan or in state
+    /// files written before counts were saved.
+    pub counts: Option<(u32, u32)>,
+}
+
 /// Read another mission's saved loop state without locks or writes.
-/// `Ok(None)`: no loop was ever started. The word is the saved phase as
-/// written; a loop left active by another process is reported as saved.
-pub fn peek(path: &Path) -> Result<Option<&'static str>, String> {
+/// `Ok(None)`: no loop was ever started. A loop left active by another
+/// process is reported as saved.
+pub fn peek(path: &Path) -> Result<Option<Peek>, String> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -293,7 +309,8 @@ pub fn peek(path: &Path) -> Result<Option<&'static str>, String> {
     }
     let saved: Saved = serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
     saved.validate()?;
-    Ok(Some(match saved.phase {
+    let counts = (saved.total > 0).then_some((saved.done, saved.total));
+    let word = match saved.phase {
         // A finished loop's saved report names its outcome.
         Phase::Done => {
             // Older builds wrote `Autopilot partial: …`; newer ones `◐ Autopilot partial`.
@@ -315,7 +332,8 @@ pub fn peek(path: &Path) -> Result<Option<&'static str>, String> {
         _ if saved.paused => "paused",
         Phase::Scoping | Phase::Planning | Phase::Saving => "planning",
         Phase::Running | Phase::Finishing => "running",
-    }))
+    };
+    Ok(Some(Peek { word, counts }))
 }
 
 pub struct Autopilot {
@@ -518,6 +536,8 @@ impl Autopilot {
             adopted: BTreeSet::new(),
             round: 0,
             stale: false,
+            done: 0,
+            total: 0,
         });
         self.last = None;
         self.last_key = None;
@@ -795,10 +815,31 @@ impl Autopilot {
         })
     }
 
+    /// Keep the saved counts current so other missions can show them without
+    /// reading this mission's tasks. Writes only when a count changed.
+    fn record_progress(&mut self, tasks: &TaskControl) {
+        if tasks.snapshot.is_none() || !self.saved.as_ref().is_some_and(Saved::active) {
+            return;
+        }
+        let Some(status) = self.status(tasks) else {
+            return;
+        };
+        let (done, total) = (status.done as u32, status.total as u32);
+        let Some(saved) = self.saved.as_mut() else {
+            return;
+        };
+        if (saved.done, saved.total) != (done, total) {
+            saved.done = done;
+            saved.total = total;
+            self.persist();
+        }
+    }
+
     /// Choose at most one next command. Returns None while paused, waiting for an
     /// acknowledgment, or when there is nothing to do.
     pub fn tick(&mut self, runtime: &Runtime, tasks: &mut TaskControl) -> Option<Submission> {
         self.poll_integration(tasks);
+        self.record_progress(tasks);
         if let Some(reason) = tasks.dispatch.contended.take() {
             if self.running() {
                 self.halt(
@@ -1397,6 +1438,8 @@ impl Autopilot {
             saved.finished = Some(saved.started + elapsed);
             saved.report = Some(report.clone());
             saved.branch = branch;
+            saved.done = accepted as u32;
+            saved.total = saved.roots().len() as u32;
         }
         self.set_notice(tasks, notice);
         tasks.set_visible(true);
