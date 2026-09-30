@@ -1,49 +1,29 @@
 # Development Workflow
 
-**Last Updated**: 2026-08-03
-**For**: Alfredo/Albert contributors
+**Last Updated**: 2026-09-30
+**For**: Alfredo contributors
 
 ## Related Docs
 
-- [Project Architecture](../System/project_architecture.md) — components, authority, and trust boundaries
-- [API Endpoints](../System/api_endpoints.md) — Python/Tauri/React command contracts
-- [Persistence Schema](../System/database_schema.md) — versioned JSON stores and locking
-- [UX Guidelines](../System/ux_guidelines.md) — prompt-first layout and interaction rules
-- [Active Orchestration Context](../Tasks/context.md) — current mission, ownership, blockers, and release state
+- [Project Architecture](../System/project_architecture.md)
+- [Persistence migrations](database_migrations.md)
+- [Status](../Tasks/STATUS.md) and [historical context](../Tasks/context.md)
 
 ## Setup
 
-Alfredo is developed in Ubuntu. Python uses the standard library; the desktop application uses Node/npm, React, TypeScript, Tauri, and Rust. Ollama is optional for live local-model checks.
-
-```bash
-cd /path/to/local-coding-agent
-cd mission-control
-npm install
-cd ..
-python3 -m albert_mvp --help
-```
-
-For the native Tauri window, install the operating-system prerequisites documented by Tauri in addition to a current Rust toolchain. Browser development and all non-native frontend tests work without launching Tauri.
+Ubuntu/WSL2 Linux x86-64, Git, Rust 1.96.0, `bubblewrap` and `util-linux`. Python 3
+is test-only. Ollama is optional for live local-model checks.
 
 ## Before Making Changes
 
-1. Read `AGENTS.md`, `.agent/README.md`, and `.agent/Tasks/context.md`.
-2. Refresh the `## Active Orchestration Context` block before planning if it is stale or incomplete.
-3. Read the relevant files under `.agent/System/`, `.agent/SOP/`, and `.agent/Tasks/`.
-4. If no active planning artifact exists, read the relevant GitHub `[PRD]` parent and its ordered Issue Slice sub-issues; use `.scratch/` only for migrated-history provenance.
-5. Record implementation ownership, active delegations, blockers, and material decisions in `.agent/Tasks/context.md` as they change.
-6. Preserve unrelated work already present in the worktree.
-7. On the macOS development host, run `./scripts/apple-container-dev status` before starting a browser workstation. Reuse or restart the named container instead of creating a competing host process on port 1420.
+1. Read `AGENTS.md`, [STATUS](../Tasks/STATUS.md) and the relevant plan under `.agent/Tasks/`.
+2. If no active planning artifact exists, read the relevant GitHub `[PRD]` parent and its ordered Issue Slice sub-issues.
+3. Preserve unrelated work already present in the worktree.
 
-Python is authoritative for mission state and policy. Tauri transports typed data; React renders acknowledged projections. A UI implementation must not fabricate accepted work, launch state, evidence, or review outcomes.
-
-## Development Loops
-
-### Native Rust terminal migration
+## Build and test
 
 Run `cargo run --locked --manifest-path alfredo-tui/Cargo.toml -- --model qwen3:14b`
-from the repository root with Rust 1.96+. This terminal is independent of the
-desktop and persistent Apple browser workstation. Its current scope and test
+from the repository root with Rust 1.96+. Its current scope and test
 commands are in [`alfredo-tui/README.md`](../../alfredo-tui/README.md). Provider
 regressions need loopback socket permission; the Linux PTY gate needs a real PTY.
 The explicitly ignored live test contacts the installed model only when requested.
@@ -61,225 +41,25 @@ The installed check verifies payload hashes and individual notice byte ranges.
 This is a conservative resolved graph, not linked-code or license compatibility
 qualification. First-party code uses the root MIT LICENSE, which is fingerprinted
 and included in the seven-member archive. Third-party terms remain separate.
-Follow the [migration plan](../Tasks/rust-terminal-migration.md) for Rust authority
-cutover; existing Python-authority rules below remain applicable to the desktop.
-
-### Python orchestrator and CLI
-
-```bash
-python3 -m unittest discover -s tests
-python3 -m albert_mvp --help
-```
-
-Use a temporary runtime root for manual commands so development checks do not mutate the normal workstation state.
-
-```bash
-python3 -m albert_mvp agents \
-  --target-repo . \
-  --tracker-dir .agent/issues \
-  --runtime-root /tmp/alfredo-dev-runtime \
-  --mission-id agent-issues \
-  --agent-config .albert/agents.json
-```
-
-### Persistent Apple container browser UI (preferred on macOS)
-
-This workflow uses Apple's [`container`](https://github.com/apple/container) CLI, not Docker or Compose. Apple documents both [bind mounts and loopback port forwarding](https://github.com/apple/container/blob/main/docs/how-to.md); Alfredo wraps those primitives in one repository helper so agents do not have to reconstruct the run command.
-
-One-time setup from the repository root:
-
-```bash
-./scripts/apple-container-dev setup
-```
-
-Daily lifecycle:
-
-```bash
-./scripts/apple-container-dev status
-./scripts/apple-container-dev start
-./scripts/apple-container-dev restart
-./scripts/apple-container-dev logs
-./scripts/apple-container-dev test-layout
-./scripts/apple-container-dev stop
-```
-
-Keep `http://127.0.0.1:1420` open in the host browser. `setup` starts Apple's service and recommended kernel when required, creates the named `alfredo-dev` container from `node:22-bookworm`, and bootstraps Python 3, Git, Bubblewrap, pinned Rust 1.88.0, and `npm ci` dependencies inside that container. Subsequent `start` and `restart` reuse its root filesystem. Named volumes isolate Linux `node_modules`, `src-tauri/target`, Rust toolchain, and `.alfredo` runtime state from the macOS checkout; the host projects directory is bind-mounted at `/workspace`, and polling-backed Vite watching makes saved source changes hot-reload while sibling test repositories remain visible.
-
-The helper publishes guest port 1420 only to host `127.0.0.1:1420`, waits until `alfredo_launch_context` succeeds through the typed Rust/Python bridge, and then returns while the container stays detached. `restart` is the normal response to a process-level change. Use `rebuild` only when the named container itself must be recreated; named dependency, Cargo, toolchain, and runtime volumes are preserved. Resource defaults are four CPUs and 4 GiB and may be overridden with `ALFREDO_DEV_CPUS` and `ALFREDO_DEV_MEMORY` before the container is first created.
-
-When macOS prevents host Chromium from registering its bootstrap service, run the production layout gate through the persistent guest instead:
-
-```bash
-./scripts/apple-container-dev test-layout
-```
-
-The command keeps `alfredo-dev` running. It installs Chromium plus its Debian dependencies only when the installed Playwright version is not already cached, then runs `npm run test:layout` inside the guest. Browser binaries share the isolated `alfredo-dev-toolchain` volume, while the dependency marker is guest-local so a later `rebuild` reinstalls required Linux libraries without redownloading a valid browser cache. This is the preferred macOS automated-browser path; retain Linux CI coverage as the independent release environment.
-
-Future agents should use this persistent surface for user-led visual testing. They should still run focused automated tests appropriate to their code changes, but they should not launch a second host Vite or browser process merely to provide a manual preview that already exists here.
-
-### Host browser UI fallback
-
-```bash
-cd mission-control
-npm run dev
-```
-
-Use this only when Apple's container runtime is unavailable. Vite prints the local URL, binds only `127.0.0.1:1420`, and starts Alfredo's development-only localhost bridge. Do not run it while `alfredo-dev` is active. The rendered workstation uses the same typed Rust command dispatcher and authoritative Python Orchestrator as native development; it must not use prototype or fabricated Workspace data. The default Starting Location is the parent of the Alfredo source repository, keeping create-mode candidates outside the forbidden backend; `ALFREDO_STARTING_LOCATION=/path/to/projects npm run dev` overrides it. The first run may wait for Cargo to build the bridge. Stop the complete Vite/Rust/Python process tree with `Ctrl+C`; on Unix, owner-pipe loss also terminates the verified dedicated process group if Vite exits abnormally.
-
-### Tauri desktop UI
-
-```bash
-cd mission-control
-npm run desktop
-```
-
-Tauri starts its gateway-free Vite mode on `127.0.0.1:1422`. It can run while the browser-development workstation owns `1420`; Tauri IPC remains the native transport and takes precedence over any browser capability.
-
-### Managed workstation launcher
-
-From the repository root:
-
-```bash
-ALFREDO_RUNTIME_ROOT="$HOME/.alfredo/runtime" \
-  node mission-control/bin/alfredo.js workstation --agent qwen3-14b
-```
-
-The launcher validates required tools, starts the persistent Python transport, and opens the desktop application. Startup no longer prewarms the selected controller.
-
-### Focused frontend checks
-
-```bash
-cd mission-control
-npm test -- --run src/App.test.tsx
-npm run test:gateway
-npm run test:browser
-npm run typecheck
-```
-
-Prefer a focused red/green loop while implementing, then run every release gate below.
-
-`npm run test:browser` is the permanent functional-localhost regression. It uses fresh temporary runtime/Starting Location roots, proves there is no Tauri global, creates a real Git Coding Workspace, starts a Mission through Python authority, renders the canonical Agent Console, and rejects a return to `Alfredo workstation unavailable`.
-
-## Release Gates
-
-Run from the repository root unless a command changes directory:
-
-```bash
-PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests
-
-cd mission-control
-npm test -- --run
-npm run test:gateway
-npm run test:browser
-npm run typecheck
-npm run build
-npm run test:layout
-npm run release:verify
-npm run release:check
-
-cd src-tauri
-cargo fmt -- --check
-cargo test
-```
-
-The Playwright layout gate builds the production bundle and checks real Chromium geometry at desktop, compact-desktop, tablet, and phone viewports. It must remain free of page-level horizontal overflow and control/panel overlap. Test discovery or a successful production build is not a substitute for an actual browser run; on macOS, use `./scripts/apple-container-dev test-layout` when host Chromium is blocked. If both the host and guest execution environments block Chromium startup, record the gate as unverified and rerun it in an allowed environment.
-
-`npm run release:verify` is the local public-distribution gate. It builds a production AppImage plus the no-desktop Rust shadow execution provider, generates and exact-manifest-audits the minimal `alfredo-agent` meta package plus exact-version native adapter package, serves both from an isolated local npm registry, and installs **only** `alfredo-agent@<version>` into a clean global prefix. The gate asserts that npm fetched the optional platform tarball, resolves plain `alfredo` through PATH with no developer overrides, validates package/native versions and both AppImage/provider SHA-256 manifest entries, and runs exactly thirteen named/statused packaged-provider cohorts. The first four prove previous/current protocol compatibility independently for Local Agent and Shell effects; the remaining nine cover failure, timeout/cleanup, bounded output, cancellation, Python-authoritative replay, provider crash, missing resource wrapper, undeclared host read, and schema-version rejection. Publishable output requires every expected normalized receipt and per-sample store guard, external descendant-cleanup proof, full crash parity, exact canonical-root inventory, recomputed suite digest, and both explicit Python fallback selectors to pass. It then opens the installed application until the frontend and backend have returned the versioned `selection-required` launch context. That readiness marker records Starting Location with null Coding Workspace/Mission; it must not fabricate a Workspace Session snapshot. Only after every assertion passes does the gate stage those same two packed tarballs and replace `release/out/verified/` with their publish-order/digest/provider-evidence manifest. The replacement fails closed but is not a concurrent-reader transaction; do not run a checker or publisher concurrently with release generation. The currently verified artifact baseline is Ubuntu 24.04 x64 with glibc 2.39; do not infer broader Ubuntu or glibc compatibility from this gate. Tauri's first AppImage build downloads its official Linux packaging helpers and may require an unrestricted Linux packaging environment.
-
-`npm run release:check` reopens `release/out/verified/manifest.json` and fails closed unless the set declares production-AppImage verification. It verifies regular-file containment, exact names/version/order, byte counts, SHA-256 and npm SHA-512 integrity, contained package manifests, both CLI aliases, the meta package's exact optional platform dependency, and the Rust provider bytes/digest extracted directly from the platform tarball. Publishable evidence must also bind the production parity request and unchanged-store result. The tarballs and manifest are one same-job verification set, not an external signature: replacing both coherently is outside this local checker's trust boundary. Fixture output is deliberately non-publishable and requires explicit AppImage and provider fixtures. Never repack `release/out/<package>/` or publish from those mutable staging directories after verification; any later test that rebuilds or cleans release output requires a fresh production `release:verify`.
-
-The fast `tests/alfredo-entrypoint.test.js` gate uses a deterministic native fixture to test both package structure and the meta-only isolated-registry resolver without rebuilding the AppImage. It also proves that plain `alfredo` can open its desktop process when Ollama or the default model is absent. It cannot replace the production AppImage/GUI run in `release:verify`. Manual extraction, direct `node bin/alfredo.js`, and dry-run intent alone are never sufficient release evidence.
-
-### Registry promotion
-
-Publishing is an external maintainer action. As of 2026-07-13, local `npm whoami` returns `ENEEDAUTH`, and unauthenticated registry lookups return `E404` for both exact names; neither result proves name availability or publishing authority. npm provenance must be generated on a supported cloud-hosted CI runner, not by a local `npm publish --provenance` command. The manual `.github/workflows/publish-npm.yml` workflow is the authoritative promotion path:
-
-1. Decide the provenance boundary. GitHub currently reports this repository as private, while npm provenance requires a public repository. Make it public only with explicit user authorization; otherwise obtain an explicit decision to bootstrap without provenance and change/review the workflow accordingly.
-2. Review the complete diff, then commit and push the exact source revision only with user authorization. The provenance workflow fails closed unless it runs from `main` in a public repository; it also verifies exact SLSA v1 attestations with `npm audit signatures`, including when an exact-integrity version already exists after a partial run.
-3. In GitHub, create a protected `npm-production` environment with required reviewer approval. For the first publication, add a granular npm automation token as the environment secret `NPM_TOKEN`; never paste the token into repository files, logs, or chat. The workflow also supports token-free OIDC after both packages have npm trusted publishers configured, so the long-lived secret need not remain.
-4. Manually dispatch **Publish Alfredo npm release** with the exact version. The GitHub-hosted Ubuntu job runs the full Python/frontend/Rust matrix, `release:verify`, and `release:check`; publishes or safely reuses the exact verified platform version before publishing or reusing the exact meta version; then removes publish authentication. npm CLI tries trusted-publisher OIDC before falling back to `NPM_TOKEN`. An existing version is skipped only when its registry `dist.integrity` matches the verified manifest and its exact SLSA v1 provenance verifies cryptographically.
-5. Let the same job install only `alfredo-agent@<version>` from `https://registry.npmjs.org/` into a new prefix, prove the PATH target and backend root stay inside that prefix, and require a frontend-plus-installed-backend marker under Xvfb. Then run `alfredo` once from a coding workspace on a real display and confirm the visible Alfredo window/title; the headless CI marker cannot replace this HITL check.
-6. After the packages exist, configure npm trusted publishing separately for `alfredo-agent-linux-x64-gnu` and `alfredo-agent`, then remove `NPM_TOKEN` from the environment. Use GitHub owner `EricleungDK`, repository `Alfredo`, workflow filename `publish-npm.yml`, environment `npm-production`, and allow `npm publish`. A trusted publisher cannot bootstrap a package that does not yet exist.
-
-Before requesting promotion, the local candidate may be regenerated and inspected without mutating npm:
-
-```bash
-cd mission-control
-npm run release:verify
-npm run release:check
-npm publish release/out/verified/alfredo-agent-linux-x64-gnu-0.1.0.tgz --dry-run --access public
-npm publish release/out/verified/alfredo-agent-0.1.0.tgz --dry-run --access public
-```
-
-If manual post-publication confirmation is needed, install from the registry—not local tarballs—and open a real window before updating ticket 20:
-
-```bash
-npm install --global --prefix /tmp/alfredo-registry-check alfredo-agent@0.1.0
-cd /path/to/a/coding-workspace
-PATH="/tmp/alfredo-registry-check/bin:$PATH" alfredo
-```
-
-Ticket 20's remaining release blocker is the repository-visibility/provenance decision, authorized hosted publication of both packages, registry-only install/PATH/headless-GUI verification, and the final human-visible window/title smoke. If any is missing, keep the ticket open.
-
-Also run a launcher dry-run from the repository root:
-
-```bash
-ALFREDO_DESKTOP_DRY_RUN=1 \
-ALFREDO_RUNTIME_ROOT=/tmp/alfredo-launcher-dry-run \
-  node mission-control/bin/alfredo.js workstation --agent qwen3-14b
-```
-
-For documentation-bearing changes, run:
-
-```bash
-python3 /home/ericl/.codex/skills/documentation-consolidator/scripts/audit_documentation.py
-python3 /home/ericl/.codex/skills/documentation-consolidator/scripts/validate_standards.py
-```
-
-Record exact final counts and any intentional optional skips in `.agent/Tasks/context.md` and the current implementation report. Do not claim a live-model path was verified unless it actually ran.
-
-## Production performance evidence
-
-Validate measurement code and fixture templates during ordinary development:
-
-```bash
-cd mission-control
-npm run test:performance
-npm run performance:fixtures
-```
-
-Do not generate or compare product latency from a dirty source tree, Vite,
-jsdom, a reducer prototype, or the early GUI smoke marker. A production cohort
-must first record all five correctness gates against the same clean commit,
-fixture, and exact installed artifact, then pass `npm run performance:check`.
-Run the sequential cohort only through `npm run performance:run`; its driver
-enforces 30 process-cold and 100 process-warm pairs, preserves invalid samples,
-and exits 2 when no speed claim is eligible. The complete plan and command
-contract is in `mission-control/performance/README.md`.
+See the [migration plan](../Tasks/rust-terminal-migration.md) for remaining scope.
 
 ## Implementation Rules
 
-- Keep Python as the authority for scope, proposals, approvals, assignments, sessions, evidence, and review.
-- Use typed contracts at the CLI, persistent transport, Tauri, and TypeScript boundaries.
-- Make mutations correlation-idempotent and expected-revision guarded; retrying a lost response must not duplicate work.
-- Keep model work deferred, cancellable, observable, resource-bounded, and independent of UI polling.
-- Treat controller routing and worker assignment as different decisions. Controllers may classify/discuss; only eligible Local Agent roles may execute sessions.
-- Qualify mutable work by Mission and entity identity. An Active Mission switch must not redirect already-bound work.
-- Keep full Agent Console chronology durable while bounding only the Working Context assembled for a model turn.
-- Store bulky output and diffs as session artifacts. Expose only registered, review-safe, workspace-contained text through the bounded artifact reader. The separate `session-output` observer journal is transient exact-session output only: it is app-local, UTF-8 validated, capped at 128,000 aggregate bytes and 256 events per page, never returns a host path, and never becomes Agent Console or Activity Journal content.
-- Render failures inline while preserving the last acknowledged projection and offering a meaningful retry where safe.
-- Use `Ubuntu Sans` for interface copy and `Ubuntu Mono` only for code-like content; keep flexible children shrink-safe and long values wrappable.
-- Add regression tests at every changed boundary, including restart or replay behavior for persisted state.
+- Write the failing test first, then make it pass.
+- Keep model work cancellable, observable and resource-bounded; the UI never waits on inference.
+- Make mutations receipt-idempotent and expected-revision guarded; retrying a lost response must not duplicate work.
+- Model output is evidence, not authority: policy, approval and review stay with recorded receipts.
+- Add regression tests at every changed boundary, including restart or replay for persisted state.
 
 ## Git Workflow
 
 Use conventional commits when the user asks for a commit:
 
 ```text
-feat(console): route coding intent into governed delegation
-fix(runtime): replay an acknowledged launch receipt
-test(layout): cover compact desktop geometry
-docs(workflow): refresh Alfredo release gates
+feat(autopilot): bound repair attempts
+fix(tasks): replay an acknowledged receipt
+test(side-pane): cover narrow layout
+docs(workflow): refresh release gates
 ```
 
 Before committing, inspect `git status`, review the scoped diff, and preserve unrelated user changes. Do not commit, push, create a pull request, or delete branches unless the user asks.
@@ -287,31 +67,8 @@ Before committing, inspect `git status`, review the scoped diff, and preserve un
 ## Debugging and Recovery
 
 - Reproduce a failure at the narrowest public boundary before changing implementation.
-- Inspect structured stderr/error codes rather than parsing display copy.
-- Use a fresh `/tmp` runtime to distinguish corrupted local state from deterministic behavior.
-- If a persistent transport request fails, verify the one-process CLI path with the same arguments.
-- If the UI loses connection, preserve the last canonical state and reload a fresh snapshot; never infer completion from an interrupted request.
-- If localhost startup reports an occupied port, inspect `lsof -nP -iTCP:1420 -sTCP:LISTEN` and stop only the stale process you own. Do not move Tauri back to `1420`; the `1420` browser / `1422` native split is a regression boundary.
-- If the Apple container workstation is unavailable, run `./scripts/apple-container-dev status`, then `./scripts/apple-container-dev logs`. `start` installs the recommended Apple kernel only when the system service is absent; a first-ever kernel/init-image pull can take longer than later starts.
-- If `container build` stalls at `[resolver] fetching image` while `container run` can pull the same image, do not block development on BuildKit. Alfredo's supported helper intentionally creates a persistent named container directly from the verified Node base and bootstraps its toolchain inside that container.
-- If port 1420 is owned by a host `npm run dev`, stop that exact Alfredo process before starting the named container. Never stop an unrelated listener by pattern or move the service to a noncanonical port.
-- On macOS, compare canonical paths rather than display strings: `/var/folders/...` resolves to `/private/var/folders/...`. Rust must canonicalize Starting Location before emitting launch context so Python acknowledgements match the same boundary.
-- If a runner owner dies, use the bounded canonical recovery/requeue flow. Do not edit runtime JSON manually.
-- For a layout regression, add or tighten a rendered App assertion and the production Chromium geometry test.
-
-**Document Owner**: Engineering Team
-**Review Frequency**: whenever runtime contracts, launch flow, or release gates change
-
-### Browser acceptance during the native rewrite
-
-Track browser evidence in [the browser regression matrix](../Tasks/browser-regression-matrix.md)
-alongside the native issue inventory. Production layout uses fixture IPC; localhost
-entry/reload uses real Python authority; prototype tests remain prototype evidence.
-Run Chromium, not only test discovery or the production build. If the installed
-Playwright CLI requests a missing browser revision, install its matching Chromium
-with that checkout's CLI; a different cached revision is not equivalent. The current
-isolated test cache is `/tmp/alfredo-playwright-browsers`, selected with
-`PLAYWRIGHT_BROWSERS_PATH`. Localhost failures retain trace and screenshot artifacts.
+- Use a fresh temporary `--state-dir` to tell corrupted local state from deterministic behavior.
+- Never edit state JSON by hand; use `/recover` and the review and repair commands.
 
 ## Native dependency advisory gate
 

@@ -93,7 +93,7 @@ general quality or speed improvement. Integrated verification is pending.
 
 ## Interactive runtime
 
-The binary needs no checkout, Rust, Node, Python, Tauri or browser runtime. Ollama
+The binary needs no checkout, Rust, Node, Python or browser runtime. Ollama
 must be available at http://127.0.0.1:11434 to send prompts; use --endpoint for
 another origin and /models to discover installed models. A check you approve may
 need its own interpreter. Coding workers require Git, /usr/bin/bwrap and
@@ -298,7 +298,7 @@ existing rust-understanding-v1 namespace. Before the first v1 mutation, the exac
 bytes are saved in understanding-v1-backup.json; backup conflicts refuse unchanged.
 Older v1 readers reject the newer schema. Do not restore an old backup over newer
 scope history as a rollback; use a compatible binary and inspect retained receipts.
-At introduction, these scope changes left task v9 and conversation v2 unchanged. Desktop Wayfinder migration, complete
+At introduction, these scope changes left task v9 and conversation v2 unchanged. Wayfinder migration, complete
 Mission formation and governed skill/graph execution remain unfinished.
 
 ## Response attribution and conversation v3

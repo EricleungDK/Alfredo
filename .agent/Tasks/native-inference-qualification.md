@@ -14,9 +14,9 @@ This slice should make one comparison reproducible: can an explicit bounded cont
 
 ## Authority and legacy comparison bounds
 
-The [Issue #69 implementation report](../Reports/2026-08-13-issue-69-local-inference-governance.md) defines instrumented profiles, bounded metadata, digest/runtime evidence and separate inference admission. The [Issue #70 report](../Reports/2026-08-13-issue-70-inference-qualification.md) defines repeated governed outcomes, context/prefix measurements and exact runtime/configuration identity. The live #70 body fetched on September 26 still requires reviewed quality and latency, bounded context comparisons, exact-prefix/digest context, and pinned promotion with rollback. Its closed state is not native acceptance evidence.
+The Issue #69 implementation report defines instrumented profiles, bounded metadata, digest/runtime evidence and separate inference admission. The Issue #70 report defines repeated governed outcomes, context/prefix measurements and exact runtime/configuration identity. The live #70 body fetched on September 26 still requires reviewed quality and latency, bounded context comparisons, exact-prefix/digest context, and pinned promotion with rollback. Its closed state is not native acceptance evidence.
 
-The actual legacy values are in [`default_context_profiles()`](../../albert_mvp/inference_qualification.py) and are asserted by `test_default_controller_and_worker_profiles_use_bounded_v1_sizes` in [`tests/test_inference_qualification.py`](../../tests/test_inference_qualification.py):
+The actual legacy values are in `default_context_profiles()` and are asserted by `test_default_controller_and_worker_profiles_use_bounded_v1_sizes` in `tests/test_inference_qualification.py`:
 
 | Legacy role | Initial context | Expanded context | Legacy output budget | Legacy keep-alive |
 | --- | ---: | ---: | ---: | --- |
@@ -133,12 +133,12 @@ records the 357-test full native pass (7 opt-in ignored), followed by 48 final f
 library/runner/oracle checks, strict Clippy, formatting and all 5 installed tests.
 The final fixture-v2 archive source and payload hashes match the checkout.
 
-The [original fixture-v1 diagnostic](../Reports/2026-09-27-inference-fixture-v1-diagnostic.json)
+The original fixture-v1 diagnostic
 stopped after 4 cases, with no accepted work and one 240-second scenario cancellation.
 Its worker criteria omitted exact behavior checked by the oracle. Actual worker
 transcripts reproduced the omission; fixture-v2 criteria now carry the complete
 contract independently of planner task titles, verified through captured HTTP.
-The [corrected fixture-v2 diagnostic](../Reports/2026-09-27-inference-fixture-v2-diagnostic.json)
+The corrected fixture-v2 diagnostic
 completed all 8 cases and 16 dispatched generations. One required-source candidate
 reached canonical acceptance in 19,241 ms. Port parsing still admitted Unicode digits;
 baseline reference work modified pinned source; repair plans did not retain the seed

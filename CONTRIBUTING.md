@@ -1,9 +1,6 @@
 # Contributing to Alfredo
 
-The product is the native terminal in [`alfredo-tui/`](alfredo-tui/). The Python
-`albert_mvp/` and React/Tauri `mission-control/` code is [legacy](docs/legacy.md);
-`mission-control/src-tauri/src/execution.rs` is still compiled into the terminal, so
-keep it building.
+The product is the native terminal in [`alfredo-tui/`](alfredo-tui/).
 
 ## Set up
 

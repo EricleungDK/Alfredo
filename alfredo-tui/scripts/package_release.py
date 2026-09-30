@@ -25,8 +25,7 @@ def sha(data):
 
 
 def sources():
-    paths = [ROOT / 'LICENSE', CRATE / 'Cargo.toml', CRATE / 'Cargo.lock', CRATE / 'INSTALL.md',
-             ROOT / 'mission-control/src-tauri/src/execution.rs']
+    paths = [ROOT / 'LICENSE', CRATE / 'Cargo.toml', CRATE / 'Cargo.lock', CRATE / 'INSTALL.md']
     paths += sorted((CRATE / 'src').rglob('*.rs'))
     paths += sorted((CRATE / 'scripts').glob('*.py'))
     return {str(path.relative_to(ROOT)): sha(path.read_bytes()) for path in paths}

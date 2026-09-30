@@ -1,18 +1,12 @@
 # Persistence migrations — Alfredo
 
-**Last Updated:** 2026-09-27
+**Last Updated:** 2026-09-30
 
-Alfredo uses versioned JSON runtime stores, not SQL, Flutter, or sqflite. The
-previous contents of this SOP were an unrelated template; the current schema
-source of truth is [Persistence Schema](../System/database_schema.md).
-
-## Store ownership
-
-The existing desktop's Python Orchestrator owns its canonical mission, workspace,
-permission and evidence stores. The new Rust terminal owns only the separately
-namespaced task and conversation stores described in [Rust terminal commands](../../alfredo-tui/README.md).
-Do not infer migration compatibility from a similar field name. GitHub issue
-migration is a separate historical operation and is not runtime state migration.
+Alfredo uses versioned JSON runtime stores, not SQL. The Rust terminal owns the
+separately namespaced task and conversation stores described in
+[Rust terminal commands](../../alfredo-tui/README.md) and the
+[install reference](../../alfredo-tui/docs/install-reference.md).
+Do not infer migration compatibility from a similar field name.
 
 ## Changing a schema
 
@@ -43,7 +37,7 @@ and the Repair receipt. Earlier versions cannot carry Repair receipts; old tasks
 retain absent repair lineage and all existing identities/permissions. Version 4 adds dependency inputs to Start receipts and TaskRun records. Existing
 runs retain empty inputs; older schemas cannot claim composed dependencies. The
 migration regression covers each source version. Version 5 adds accepted-candidate
-Branch receipts, with no inferred branch links in older state. This is not a Python-store importer.
+Branch receipts, with no inferred branch links in older state.
 The migration regression proves exact backup, retained identity, denied bare
 approval execution and approval reset. Worker evidence is stored separately and
 verified by its digest before completion/review acknowledgement.
@@ -53,8 +47,7 @@ verified by its digest before completion/review acknowledgement.
 The check-result slice versions private run artifacts independently: the start
 marker remains schema1, new `check-launch-intent.json` files use schema2 with
 `contract_version: 1`, and `check-result.json` uses schema1. Task schema16,
-conversation schema17 and scope schema2 are unchanged. See the
-[exact artifact contract](../System/database_schema.md#native-check-intent-v2-and-result-checkpoint-v1).
+conversation schema17 and scope schema2 are unchanged. 
 
 Only new execution records may bind a complete authorized request and its canonical
 digest. Do not rewrite a legacy schema1 check intent, recreate a missing intent from
@@ -151,9 +144,9 @@ not provide the new exclusion guarantee.
 ## Native understanding journal v1
 
 The explicit /scope flow introduces a separate workspace-scoped journal; it does not
-upgrade old task/conversation or desktop Wayfinder state. Missing native state is
+upgrade old task/conversation state. Missing native state is
 outside the flow, not confirmed. Pending and confirmed projections must replay from
-revisioned Mission Commander receipts. Unknown versions or corrupt state refuse new
+revisioned owner receipts. Unknown versions or corrupt state refuse new
 governed work unchanged. Lock ordering is understanding before task namespace; exact
 replays and completion/review/cancellation remain distinct from new planning authority.
 Draft admission reserves count and encoded-byte capacity for its confirmation.
@@ -183,18 +176,18 @@ this binding does not yet provide scope provenance for every task-formation path
 The existing `rust-understanding-v1` namespace now accepts schema 1 or 2. V2 adds an
 optional flow (Chart/Work-through and originating prompt) and an Enter action with
 fixed `wayfinder-alfredo` actor. Only entry can create a flow, at revision zero; later
-Draft/Confirm receipts remain Mission Commander actions and retain that flow. Receipt
+Draft/Confirm receipts remain owner actions and retain that flow. Receipt
 replay verifies mode, prompt, brief, confirmation and revision. Entry cannot confirm
 its placeholder brief; a separate four-field Draft must precede Confirm.
 
 The first mutation of v1 preserves the exact original bytes in
 `understanding-v1-backup.json`; conflicting or non-regular backups refuse unchanged.
 Read-only loads and exact replay do not migrate. Missing state implies no active flow;
-no desktop Wayfinder state or agent acknowledgment is inferred. Existing v1 native
+no agent acknowledgment is inferred. Existing v1 native
 readers reject v2 instead of bypassing the gate. Receipt/byte bounds and scope-before-
 task lock ordering remain. Task v9 and conversation v2 are unchanged; Plan scope
 bindings still use the complete current brief/revision and require fresh generation
-after any new agreement revision. Desktop/native migration remains a separate workflow.
+after any new agreement revision.
 
 ## Native response attribution and conversation v3
 

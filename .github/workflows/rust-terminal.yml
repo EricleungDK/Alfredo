@@ -5,13 +5,11 @@ on:
     paths:
       - 'LICENSE'
       - 'alfredo-tui/**'
-      - 'mission-control/src-tauri/src/execution.rs'
       - '.github/workflows/rust-terminal.yml'
   push:
     paths:
       - 'LICENSE'
       - 'alfredo-tui/**'
-      - 'mission-control/src-tauri/src/execution.rs'
       - '.github/workflows/rust-terminal.yml'
   workflow_dispatch:
 

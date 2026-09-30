@@ -3,9 +3,6 @@
 Owner decisions (2026-09-29): option A. Missions + work tree with agent activity
 inline; braille spinner; enter an agent to watch and instruct it; less cramped UI.
 
-Sources: `mission-control/src/prototypes/MissionExecutionTreePrototype.tsx`
-(record icons ticket/branch/robot, statuses, attention tags).
-
 ## Phase 1: layout and spacing
 
 ### Left pane (persistent in every view)
