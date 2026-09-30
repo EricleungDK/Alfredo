@@ -13,6 +13,8 @@ use std::{
 const MAX_TICKETS: usize = 256;
 const MAX_BYTES: usize = 512 * 1024;
 const MAX_FILES: usize = 576;
+/// Poll interval while a different live capacity holds the endpoint.
+pub const CONFLICT_POLL: Duration = Duration::from_millis(250);
 static IDS: AtomicU64 = AtomicU64::new(0);
 type Result<T> = std::result::Result<T, String>;
 
@@ -43,6 +45,9 @@ pub struct Queue {
     class: Class,
     ticket: Option<Ticket>,
     observation: Option<Observation>,
+    /// Live capacity of a different configuration this queue is waiting out.
+    conflict: Option<usize>,
+    refuse_conflicts: bool,
     completed: bool,
 }
 pub struct Permit {
@@ -113,6 +118,8 @@ impl Coordinator {
             class,
             ticket: None,
             observation: None,
+            conflict: None,
+            refuse_conflicts: false,
             completed: false,
         }
     }
@@ -122,7 +129,12 @@ impl Coordinator {
             if let Some(permit) = queue.poll()? {
                 return Ok(permit);
             }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+            tokio::time::sleep(if queue.conflict.is_some() {
+                CONFLICT_POLL
+            } else {
+                Duration::from_millis(25)
+            })
+            .await;
         }
     }
     fn directory(&self) -> Result<PathBuf> {
@@ -222,6 +234,16 @@ impl Queue {
     pub fn observation(&self) -> Option<Observation> {
         self.observation
     }
+    /// Live capacity of another configuration while this queue waits for the
+    /// endpoint to drain; it holds no ticket then. `None` once it can proceed.
+    pub fn capacity_conflict(&self) -> Option<usize> {
+        self.conflict
+    }
+    /// Fail closed on a capacity conflict instead of waiting (qualification).
+    pub fn refusing_conflicts(mut self) -> Self {
+        self.refuse_conflicts = true;
+        self
+    }
     /// All IO is bounded and global lock acquisition is nonblocking. No lock spans an await.
     pub fn poll(&mut self) -> Result<Option<Permit>> {
         if self.completed {
@@ -235,14 +257,25 @@ impl Queue {
         let garbage = reap(&directory, &mut ledger)?;
         if ledger.capacity != self.coordinator.capacity {
             if !ledger.entries.is_empty() {
-                return Err(format!(
-                    "Shared inference capacity conflict: live endpoint uses {}, requested {}",
-                    ledger.capacity, self.coordinator.capacity
-                ));
+                if self.refuse_conflicts {
+                    return Err(format!(
+                        "Shared inference capacity conflict: live endpoint uses {}, requested {}",
+                        ledger.capacity, self.coordinator.capacity
+                    ));
+                }
+                // Wait for live requests to drain; no ticket exists while mismatched.
+                if ledger != before {
+                    publish(&directory, &ledger)?;
+                }
+                discard(garbage)?;
+                self.conflict = Some(ledger.capacity);
+                self.observation = None;
+                return Ok(None);
             }
             ledger.capacity = self.coordinator.capacity;
             ledger.foreground_streak = 0;
         }
+        self.conflict = None;
         if self.ticket.is_none() {
             if ledger.entries.len() >= MAX_TICKETS {
                 return Err("Shared inference queue is full".into());
@@ -650,20 +683,36 @@ mod tests {
         assert!(Coordinator::new("http://localhost".into(), 9).is_err());
     }
     #[test]
-    fn independent_coordinators_share_capacity_and_conflicts_only_clear_after_drain() {
+    fn independent_coordinators_share_capacity_and_conflicts_wait_until_drain() {
         let f = Fixture::new(1);
+        let entries = || {
+            let (directory, _lock) = f.coordinator.transaction().unwrap().unwrap();
+            f.coordinator.read(&directory).unwrap().entries.len()
+        };
         let mut first = f.queue(Class::Foreground);
         let first = first.poll().unwrap().unwrap();
         let mut another = f.coordinator.clone();
         another.capacity = 2;
-        assert!(another
+        // A mismatched capacity waits without a ticket, for any number of polls.
+        let mut blocked = another.queue(Class::Foreground);
+        for _ in 0..3 {
+            assert!(blocked.poll().unwrap().is_none());
+            assert_eq!(blocked.capacity_conflict(), Some(1));
+            assert!(blocked.observation().is_none());
+            assert_eq!(entries(), 1);
+        }
+        // Explicit refusal (qualification) keeps the fail-closed conflict error.
+        let refused = another
             .queue(Class::Foreground)
+            .refusing_conflicts()
             .poll()
             .err()
-            .unwrap()
-            .contains("conflict"));
+            .unwrap();
+        assert!(refused.contains("conflict"), "{refused}");
+        assert_eq!(entries(), 1);
         let mut waiting = f.queue(Class::Background);
         assert!(waiting.poll().unwrap().is_none());
+        assert_eq!(waiting.capacity_conflict(), None);
         assert_eq!(
             waiting.observation().unwrap(),
             Observation {
@@ -675,16 +724,15 @@ mod tests {
             }
         );
         drop(first);
-        assert!(another
-            .queue(Class::Foreground)
-            .poll()
-            .err()
-            .unwrap()
-            .contains("conflict"));
+        // The still-queued live ticket keeps the old capacity.
+        assert!(blocked.poll().unwrap().is_none());
+        assert_eq!(blocked.capacity_conflict(), Some(1));
+        assert_eq!(entries(), 1);
         let waiting = waiting.poll().unwrap().unwrap();
         drop(waiting);
-        let mut next = another.queue(Class::Foreground);
-        let next = next.poll().unwrap().unwrap();
+        // Drained: the waiter adopts its own capacity and is admitted.
+        let next = blocked.poll().unwrap().unwrap();
+        assert_eq!(blocked.capacity_conflict(), None);
         let mut simultaneous = another.queue(Class::Foreground);
         let simultaneous = simultaneous.poll().unwrap().unwrap();
         drop(next);

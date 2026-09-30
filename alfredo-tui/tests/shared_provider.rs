@@ -208,6 +208,23 @@ async fn independent_providers_prioritize_foreground_without_inferring_role_from
     assert_eq!(server.count.load(Ordering::SeqCst), 3);
 }
 
+/// Drains events for `span`; a waiting request must neither fail nor dispatch.
+async fn stays_waiting(events: &mut mpsc::Receiver<Event>, span: Duration) {
+    let end = tokio::time::Instant::now() + span;
+    while let Ok(Some(Event { update, .. })) = tokio::time::timeout_at(end, events.recv()).await {
+        match update {
+            Update::Failed(error) => panic!("Waiting request failed: {error}"),
+            Update::CapacityWait { .. } | Update::Queued | Update::QueueProgress(_) => {
+                panic!("Waiting request announced a change while nothing changed")
+            }
+            Update::Admitted | Update::Token(_) | Update::Done => {
+                panic!("Waiting request crossed admission")
+            }
+            _ => {}
+        }
+    }
+}
+
 #[tokio::test]
 async fn queued_cancellation_and_capacity_conflict_send_no_http_while_discovery_stays_available() {
     let mut server = Server::new();
@@ -220,24 +237,45 @@ async fn queued_cancellation_and_capacity_conflict_send_no_http_while_discovery_
     // Construction, configuring and discovery do not join or conflict with the live queue.
     let conflicting = server.provider(2);
     assert_eq!(conflicting.models().await.unwrap(), vec!["fixture"]);
+    // A different live capacity waits: no failure, no HTTP, for several polls.
     let (conflict, mut conflict_events) = spawn(conflicting.clone(), "conflicting");
-    let Update::Failed(error) = event(&mut conflict_events).await else {
-        panic!("Conflicting admission was not refused before dispatch");
-    };
-    assert!(error.to_ascii_lowercase().contains("capacity"), "{error}");
-    conflict.await.unwrap();
+    assert!(matches!(
+        event(&mut conflict_events).await,
+        Update::CapacityWait { live: 1 }
+    ));
+    stays_waiting(&mut conflict_events, Duration::from_millis(700)).await;
+    assert_eq!(server.count.load(Ordering::SeqCst), 1);
+    // Cancelling during the wait stops it at once and sends nothing, ever.
+    let (abandoned, mut abandoned_events) = spawn(conflicting.clone(), "abandoned");
+    assert!(matches!(
+        event(&mut abandoned_events).await,
+        Update::CapacityWait { live: 1 }
+    ));
+    abandoned.abort();
+    assert!(abandoned.await.unwrap_err().is_cancelled());
     assert_eq!(server.count.load(Ordering::SeqCst), 1);
     first.respond.send(()).unwrap();
     finished(holder, holder_events).await;
-    // No live ticket retains the former capacity; a new explicit configuration can proceed.
-    let (next, next_events) = spawn(conflicting, "new-capacity");
+    // The live ticket drained: the waiter adopts its own capacity and runs.
     server
-        .request("new-capacity")
+        .request("conflicting")
         .await
         .respond
         .send(())
         .unwrap();
-    finished(next, next_events).await;
+    tokio::time::timeout(Duration::from_secs(3), conflict)
+        .await
+        .unwrap()
+        .unwrap();
+    let mut done = false;
+    while let Some(Event { update, .. }) = conflict_events.recv().await {
+        match update {
+            Update::Done => done = true,
+            Update::Failed(error) => panic!("Unexpected provider failure: {error}"),
+            _ => {}
+        }
+    }
+    assert!(done);
     assert_eq!(server.count.load(Ordering::SeqCst), 2);
 }
 

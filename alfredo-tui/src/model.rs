@@ -106,6 +106,11 @@ pub enum Update {
     Retrying(Retry),
     Queued,
     QueueProgress(crate::inference_admission::Observation),
+    /// Another Alfredo process holds the endpoint with a different capacity
+    /// (`live`); no ticket is held and nothing is sent until it drains.
+    CapacityWait {
+        live: usize,
+    },
     Admitted,
     Thinking,
     Token(String),
@@ -145,6 +150,9 @@ pub struct Session {
     queued: bool,
     #[serde(skip)]
     queue_observation: Option<crate::inference_admission::Observation>,
+    /// Live capacity of another Alfredo process this request is waiting out.
+    #[serde(skip)]
+    capacity_wait: Option<usize>,
     #[serde(skip)]
     thinking: bool,
     #[serde(skip)]
@@ -181,6 +189,7 @@ impl Session {
             reading: Default::default(),
             queued: false,
             queue_observation: None,
+            capacity_wait: None,
             thinking: false,
             retry: None,
             metrics: None,
@@ -202,6 +211,8 @@ impl Session {
                 retry.limit
             )
             .into()
+        } else if let Some(live) = self.capacity_wait.filter(|_| self.status.active()) {
+            format!("Waiting for another Alfredo process (capacity {live})").into()
         } else if self.status.active() && self.queued {
             "Queued for Alfredo".into()
         } else if self.status == Status::Connecting && self.thinking {
@@ -257,6 +268,12 @@ impl Session {
         }
     }
 
+    /// Live capacity of another Alfredo process holding the endpoint, while this
+    /// request waits for it to drain.
+    pub fn capacity_wait(&self) -> Option<usize> {
+        self.capacity_wait.filter(|_| self.status.active())
+    }
+
     pub fn queue_observation(&self) -> Option<crate::inference_admission::Observation> {
         (self.status.active() && self.queued)
             .then_some(self.queue_observation)
@@ -290,6 +307,7 @@ impl Session {
         snapshot.aside = None;
         snapshot.queued = false;
         snapshot.queue_observation = None;
+        snapshot.capacity_wait = None;
         snapshot.thinking = false;
         snapshot.retry = None;
         snapshot.timing = None;
@@ -533,6 +551,7 @@ impl Session {
         self.attempt += 1;
         self.queued = false;
         self.queue_observation = None;
+        self.capacity_wait = None;
         self.thinking = false;
         self.retry = None;
         self.metrics = None;
@@ -549,6 +568,7 @@ impl Session {
             self.retry = None;
             self.queued = false;
             self.queue_observation = None;
+            self.capacity_wait = None;
             if let Some(timing) = &mut self.timing {
                 timing.finish(std::time::Instant::now());
             }
@@ -1135,6 +1155,7 @@ impl Session {
             update,
             Update::Queued
                 | Update::QueueProgress(_)
+                | Update::CapacityWait { .. }
                 | Update::Admitted
                 | Update::Thinking
                 | Update::Metrics(_)
@@ -1157,28 +1178,40 @@ impl Session {
                     self.retry = Some((retry, deadline));
                     self.queued = false;
                     self.queue_observation = None;
+                    self.capacity_wait = None;
                 }
             }
-            Update::Queued | Update::QueueProgress(_)
+            Update::Queued | Update::QueueProgress(_) | Update::CapacityWait { .. }
                 if self.status != Status::Connecting
                     || self.thinking
                     || self
                         .timing
                         .as_ref()
                         .is_some_and(|timing| timing.has_admission()) => {}
-            Update::Queued => self.queued = true,
+            Update::CapacityWait { live } => {
+                self.queued = true;
+                self.queue_observation = None;
+                self.capacity_wait = Some(live);
+            }
+            Update::Queued => {
+                self.queued = true;
+                self.capacity_wait = None;
+            }
             Update::QueueProgress(observation) => {
                 self.queued = true;
+                self.capacity_wait = None;
                 self.queue_observation = Some(observation);
             }
             Update::Thinking => {
                 self.thinking = true;
                 self.queued = false;
                 self.queue_observation = None;
+                self.capacity_wait = None;
             }
             Update::Admitted => {
                 self.queued = false;
                 self.queue_observation = None;
+                self.capacity_wait = None;
                 if let Some(timing) = &mut self.timing {
                     timing.admit(std::time::Instant::now());
                 }
@@ -1191,6 +1224,7 @@ impl Session {
                 }
                 self.queued = false;
                 self.queue_observation = None;
+                self.capacity_wait = None;
                 let total: usize = self.messages.iter().map(|m| m.content.len()).sum();
                 if total + text.len() > MAX_TEXT {
                     self.status = Status::Failed("Conversation output limit reached".into());
@@ -1206,6 +1240,7 @@ impl Session {
             self.retry = None;
             self.queued = false;
             self.queue_observation = None;
+            self.capacity_wait = None;
             if let Some(timing) = &mut self.timing {
                 timing.finish(std::time::Instant::now());
             }

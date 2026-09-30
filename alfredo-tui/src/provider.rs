@@ -1,5 +1,5 @@
 use crate::{
-    inference_admission::{Class, Coordinator},
+    inference_admission::{Class, Coordinator, CONFLICT_POLL},
     inference_profile::{
         self, ContextProfile, ProfileIdentity, Recording, RequestOutcome, RequestRecorder,
     },
@@ -136,6 +136,8 @@ pub struct Ollama {
     admission: Coordinator,
     priority: Class,
     capacity: usize,
+    /// Qualification only: refuse a conflicting live capacity instead of waiting.
+    refuse_capacity_conflict: bool,
     context_profile: ContextProfile,
     recorder: Option<RequestRecorder>,
     keep_alive: Option<String>,
@@ -254,6 +256,7 @@ impl Ollama {
             admission,
             priority: Class::Foreground,
             capacity: 2,
+            refuse_capacity_conflict: false,
             context_profile: ContextProfile::Baseline,
             recorder: None,
             keep_alive: None,
@@ -395,6 +398,13 @@ impl Ollama {
         self.admission = Coordinator::new(self.endpoint.origin().ascii_serialization(), capacity)?;
         self.capacity = capacity;
         Ok(self)
+    }
+
+    /// Qualification fixes one client slot: a live endpoint with another capacity
+    /// refuses the request. Ordinary chats and workers wait for it to drain.
+    pub fn refusing_capacity_conflicts(mut self) -> Self {
+        self.refuse_capacity_conflict = true;
+        self
     }
 
     /// Explicit experiments only; ordinary requests retain omitted context settings.
@@ -657,12 +667,34 @@ impl Ollama {
         // normalized endpoint. Dropping Queue removes eligibility before HTTP;
         // Permit retains shared capacity until this stream exits.
         let mut queue = self.admission.queue(self.priority);
+        if self.refuse_capacity_conflict {
+            queue = queue.refusing_conflicts();
+        }
         let mut queued = false;
         let mut observed = None;
+        let mut conflict = None;
         let _permit = loop {
             if let Some(permit) = queue.poll()? {
                 break permit;
             }
+            // A different live capacity is waited out without a ticket: nothing
+            // is sent or reserved, and dropping this future cancels the wait.
+            if let Some(live) = queue.capacity_conflict() {
+                if conflict != Some(live) {
+                    conflict = Some(live);
+                    sender
+                        .send(Event {
+                            session,
+                            attempt,
+                            update: Update::CapacityWait { live },
+                        })
+                        .await
+                        .map_err(|_| "Conversation closed while waiting for shared capacity")?;
+                }
+                tokio::time::sleep(CONFLICT_POLL).await;
+                continue;
+            }
+            conflict = None;
             if !queued {
                 sender
                     .send(Event {
@@ -872,7 +904,7 @@ impl Ollama {
         sender: &Sender<Event>,
         progress: &mut FrameProgress,
         trace: &mut Trace,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, Failure> {
         if bytes.iter().all(u8::is_ascii_whitespace) {
             return Ok(false);
         }
@@ -884,7 +916,14 @@ impl Ollama {
                 .filter(|c| !c.is_control())
                 .take(300)
                 .collect();
-            return Err(format!("Ollama: {safe}"));
+            let error = format!("Ollama: {safe}");
+            // Transient server errors before any output may be retried; a
+            // missing model never recovers by retrying.
+            return Err(if safe.to_lowercase().contains("not found") {
+                Failure::Final(error)
+            } else {
+                progress.failure(&error)
+            });
         }
         if frame.message.is_none() && !frame.done {
             return Err("Ollama frame has neither message nor completion".into());
@@ -949,7 +988,7 @@ impl Ollama {
                     .map_err(|_| "Terminal closed")?;
             }
             if frame.done_reason.as_deref() == Some("length") {
-                return Err(format!("Model output hit the {}-token limit; partial reply retained. Shorten the request or choose another model before retrying", self.num_predict));
+                return Err(format!("Model output hit the {}-token limit; partial reply retained. Shorten the request or choose another model before retrying", self.num_predict).into());
             }
             if trace.recording.is_none() {
                 sender

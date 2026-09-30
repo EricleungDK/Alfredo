@@ -213,3 +213,97 @@ fn spinner_redraws_only_while_something_is_working() {
         assert!(!schedule.due(start + Duration::from_millis(step * 50), false, true));
     }
 }
+
+#[test]
+fn capacity_cat_runs_along_the_dotted_track_with_alternating_paws() {
+    use alfredo_tui::theme::{cat_track, CAT_TRACK};
+    // Frame 1 is also the static frame: both paws, dotted track either side.
+    assert_eq!(
+        cat_track(IconSet::Unicode, 0, 80),
+        "· · · · ฅ(=^･ω･^=)ฅ · · ·"
+    );
+    // One cell right per frame; the paws alternate: left, right, both.
+    for (tick, frame) in [
+        (1, "· · · ·  ฅ(=^･ω･^=)   · ·"),
+        (2, "· · · · ·  (=^･ω･^=)ฅ · ·"),
+        (3, "· · · · ·  ฅ(=^･ω･^=)ฅ  ·"),
+    ] {
+        assert_eq!(cat_track(IconSet::Unicode, tick, 80), frame, "{tick}");
+        assert_eq!(cat_track(IconSet::Nerd, tick, 80), frame, "{tick}");
+    }
+    // Wraps around the track: clipped at the right edge, re-entering on the left.
+    assert_eq!(
+        cat_track(IconSet::Unicode, 14, 80),
+        "^･ω･^=)ฅ  · · · · · ·  (="
+    );
+    assert_eq!(
+        cat_track(IconSet::Unicode, 0, 80),
+        cat_track(IconSet::Unicode, 75, 80)
+    );
+    // Every frame of every icon set fills exactly the same number of cells.
+    for tick in 0..200 {
+        for icons in [IconSet::Unicode, IconSet::Nerd, IconSet::Ascii] {
+            assert_eq!(cat_track(icons, tick, 80).width(), CAT_TRACK, "{tick}");
+        }
+    }
+}
+
+#[test]
+fn capacity_cat_is_static_without_motion_and_ascii_only_in_ascii() {
+    use alfredo_tui::theme::cat_track;
+    let start = Instant::now();
+    let still = Theme {
+        motion: false,
+        ..Theme::default()
+    };
+    for step in 0..30 {
+        assert_eq!(
+            still.capacity_cat(start + Duration::from_millis(step * 100), 80),
+            "· · · · ฅ(=^･ω･^=)ฅ · · ·"
+        );
+    }
+    let moving = Theme::default();
+    let frames: std::collections::BTreeSet<_> = (0..6)
+        .map(|step| moving.capacity_cat(start + Duration::from_millis(step * 100), 80))
+        .collect();
+    assert!(frames.len() > 1);
+    assert_eq!(
+        cat_track(IconSet::Ascii, 0, 80),
+        ". . . . =^.^= . . . . . ."
+    );
+    assert_eq!(
+        cat_track(IconSet::Ascii, 5, 80),
+        ". . . . . .  =^.^=  . . ."
+    );
+    let ascii = Theme {
+        icons: IconSet::Ascii,
+        motion: false,
+        ..Theme::default()
+    };
+    assert!(ascii.capacity_cat(start, 80).is_ascii());
+    for tick in 0..100 {
+        assert!(cat_track(IconSet::Ascii, tick, 80).is_ascii(), "{tick}");
+    }
+}
+
+#[test]
+fn capacity_cat_clips_to_narrow_tracks_and_yields_when_nothing_fits() {
+    use alfredo_tui::theme::cat_track;
+    for icons in [IconSet::Unicode, IconSet::Ascii] {
+        for width in 0..40 {
+            for tick in 0..80 {
+                let track = cat_track(icons, tick, width);
+                assert!(track.width() <= width, "{icons:?} {width} {tick}");
+                if track.is_empty() {
+                    continue;
+                }
+                assert_eq!(track.width(), width.min(25), "{icons:?} {width} {tick}");
+            }
+        }
+    }
+    // The 13-cell cat needs a 13-cell track; below that only text is shown.
+    assert_eq!(cat_track(IconSet::Unicode, 0, 12), "");
+    assert_eq!(cat_track(IconSet::Unicode, 0, 13).width(), 13);
+    assert_eq!(cat_track(IconSet::Ascii, 0, 6), "");
+    assert_eq!(cat_track(IconSet::Ascii, 0, 7).width(), 7);
+}

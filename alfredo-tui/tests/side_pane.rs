@@ -415,6 +415,7 @@ fn short_model_and_stage_words() {
         ("Receiving model plan", "generating"),
         ("Thinking", "thinking"),
         ("Waiting for shared Alfredo capacity", "queued"),
+        ("Waiting for another Alfredo process", "queued"),
         ("Waiting for model server", "waiting"),
         ("Writing approved files", "writing"),
         ("Preparing worktree", "preparing"),

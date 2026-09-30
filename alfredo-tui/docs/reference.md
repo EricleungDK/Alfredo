@@ -108,7 +108,7 @@ requests with explicit foreground context 8,192/background context 16,384. Both
 profiles retain the other native request settings. The experiment uses one shared
 client slot, at most 24 scenario executions and 128 generation requests, and a
 1,800-second cohort deadline plus required cleanup. A conflicting live capacity
-refuses normally. Ordinary production defaults, including capacity two, stay unchanged.
+refuses normally (it does not wait for another capacity to drain). Ordinary production defaults, including capacity two, stay unchanged.
 
 Reports and `<report filename>.artifacts` retain bounded observations, isolated
 workspaces and review evidence beside the chosen report. Existing paths refuse;
@@ -185,8 +185,14 @@ The HTTP client ignores proxy environment variables and does not follow redirect
 
 Alfredo processes owned by the same user share a client inference limit for each
 normalized endpoint origin, even with different mission state directories. The
-default is two active requests; `--parallel-models N` sets 1 to 8. Conflicting
-capacities refuse while requests remain queued or active. Use the same endpoint
+default is two active requests; `--parallel-models N` sets 1 to 8. A request whose
+capacity differs from the live one waits, holding no queue ticket and sending
+nothing, until the live requests drain; it then adopts its own capacity. The chat
+shows **Waiting for another Alfredo process (capacity N) · Esc cancel** beside a
+kaomoji cat running along a dotted track (`(=^･ω･^=)`, paws alternating, one cell
+per animation frame; static with `--no-motion`, `=^.^=` with `--icons ascii`,
+clipped in narrow panes). Esc stops the wait at once. Corrupt or unsafe ledgers,
+missing owner proof and a full queue still fail closed. Use the same endpoint
 spelling across terminals: normalization does not merge DNS names or aliases such
 as `localhost` and `127.0.0.1`.
 
@@ -209,10 +215,11 @@ is loading or busy. Model discovery bypasses this queue.
   the inference queue; failure is only a status.
 - `--connect-retries N` (0–10, default 3; 0 disables): a model request that fails
   before any reply or thinking text (connection refused/reset, no response headers,
-  HTTP 5xx) retries automatically after 1 s, 2 s, 4 s… The session shows
+  HTTP 5xx, or an Ollama `{"error":...}` frame in a 200 stream) retries automatically after 1 s, 2 s, 4 s… The session shows
   **Reconnecting in Ns · retry i/N**; Esc cancels immediately. Once any text has
-  arrived, the partial reply is kept and retry stays manual (Ctrl+R). Checks and
-  tools are never retried.
+  arrived, the partial reply is kept and retry stays manual (Ctrl+R). An error naming
+  a missing model (`not found`), other 4xx, malformed frames, checks and tools are
+  never retried.
 - The header polls `GET /api/ps` every 5 s (2 s timeout, outside the queue):
   `ollama ✓ MODEL warm`, `ollama ✓ MODEL loading`, `ollama ✓ MODEL` (server up,
   model not loaded) or `ollama ✗ retrying`. Narrow terminals omit the model name.

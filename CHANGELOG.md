@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Shared inference: a chat whose `--parallel-models` differs from another live
+  Alfredo process waits for it to drain instead of failing with "capacity conflict".
+  No HTTP is sent and Esc cancels; a cat indicator shows the wait.
+  `--qualify-inference` still refuses.
+- Ollama `{"error":...}` frame before any output is retried like other connection
+  failures; "not found" and errors after output stay final.
 - Release workflow fetches crates before offline packaging.
 - Work tree: `/after` follow-ups appear in their plan group, not "Manual tasks".
 - Agent view: a steered run keeps its streamed partial output, shown with a dim

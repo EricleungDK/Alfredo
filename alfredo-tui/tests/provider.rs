@@ -691,6 +691,65 @@ async fn server_errors_and_resets_before_content_are_retried() {
 }
 
 #[tokio::test]
+async fn error_frame_before_any_content_is_retried_until_the_model_answers() {
+    let fixture = serve(reserve(), |_, index| match index {
+        0 => Reply::Stream(
+            vec![b"{\"error\":\"server is busy, try again\"}\n".to_vec()],
+            Duration::ZERO,
+        ),
+        1 => Reply::Stream(
+            vec![b"{\"error\":\"llama runner process has terminated\"}\n".to_vec()],
+            Duration::ZERO,
+        ),
+        _ => done("recovered"),
+    });
+    let provider = retrying(&fixture.endpoint, 3, Duration::from_millis(10));
+    let events = run(&provider).await;
+    let seen = retries(&events);
+    assert_eq!(seen.len(), 2);
+    assert!(seen[0].reason.contains("server is busy"), "{seen:?}");
+    assert!(matches!(events.last().unwrap().update, Update::Done));
+    assert_eq!(fixture.count("POST /api/chat"), 3);
+    // The same bound as every other pre-content failure.
+    let persistent = serve(reserve(), |_, _| {
+        Reply::Stream(vec![b"{\"error\":\"busy\"}\n".to_vec()], Duration::ZERO)
+    });
+    let events = run(&retrying(&persistent.endpoint, 2, Duration::from_millis(5))).await;
+    assert_eq!(retries(&events).len(), 2);
+    assert!(
+        matches!(&events.last().unwrap().update, Update::Failed(error) if error.contains("busy"))
+    );
+    assert_eq!(persistent.count("POST /api/chat"), 3);
+}
+
+#[tokio::test]
+async fn error_frame_after_partial_content_or_naming_a_missing_model_stays_final() {
+    for frames in [
+        vec![
+            b"{\"message\":{\"content\":\"partial\"}}\n".to_vec(),
+            b"{\"error\":\"server is busy\"}\n".to_vec(),
+        ],
+        vec![
+            b"{\"message\":{\"thinking\":\"hmm\"}}\n".to_vec(),
+            b"{\"error\":\"server is busy\"}\n".to_vec(),
+        ],
+        vec![b"{\"error\":\"model 'nope' not found, try pulling it first\"}\n".to_vec()],
+        vec![b"{\"error\":\"Model Not Found\"}\n".to_vec()],
+    ] {
+        let fixture = serve(reserve(), move |_, _| {
+            Reply::Stream(frames.clone(), Duration::ZERO)
+        });
+        let provider = retrying(&fixture.endpoint, 3, Duration::from_millis(10));
+        let events = run(&provider).await;
+        assert!(retries(&events).is_empty());
+        assert!(
+            matches!(&events.last().unwrap().update, Update::Failed(error) if error.starts_with("Ollama: "))
+        );
+        assert_eq!(fixture.count("POST /api/chat"), 1);
+    }
+}
+
+#[tokio::test]
 async fn failure_after_content_keeps_partial_and_is_never_retried() {
     for frame in [
         b"{\"message\":{\"content\":\"partial\"}}\n".to_vec(),

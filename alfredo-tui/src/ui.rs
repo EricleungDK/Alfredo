@@ -1181,9 +1181,16 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let metadata = timing_line(session)
-        .map(|text| vec![Line::styled(text, dim()), Line::default()])
-        .unwrap_or_default();
+    let mut metadata = capacity_wait_lines(
+        session,
+        &app.pane.theme,
+        Instant::now(),
+        usize::from(inner.width),
+    );
+    metadata.extend(timing_line(session).map(|text| Line::styled(text, dim())));
+    if !metadata.is_empty() {
+        metadata.push(Line::default());
+    }
     let metadata = Paragraph::new(metadata).wrap(Wrap { trim: false });
     let metadata_height = metadata
         .line_count(inner.width)
@@ -1217,6 +1224,34 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
     }
 }
 
+/// The cat running along its dotted track beside the capacity-wait text, or
+/// stacked above it when the pane is too narrow for both; text alone when even
+/// the cat does not fit. Every line is at most `width` columns wide.
+fn capacity_wait_lines(
+    session: &crate::model::Session,
+    theme: &Theme,
+    now: Instant,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let Some(live) = session.capacity_wait() else {
+        return Vec::new();
+    };
+    let text = format!("Waiting for another Alfredo process (capacity {live}) · Esc cancel");
+    let track = theme.capacity_cat(now, width);
+    let cat = Style::default().fg(theme.color(Tone::Amber));
+    if track.is_empty() {
+        vec![Line::styled(text, dim())]
+    } else if track.width() + 2 + text.width() <= width {
+        vec![Line::from(vec![
+            Span::styled(track, cat),
+            Span::raw("  "),
+            Span::styled(text, dim()),
+        ])]
+    } else {
+        vec![Line::styled(track, cat), Line::styled(text, dim())]
+    }
+}
+
 /// One dim line: queue position or elapsed time, plus generation speed.
 fn timing_line(session: &crate::model::Session) -> Option<String> {
     let mut parts = Vec::new();
@@ -1225,7 +1260,10 @@ fn timing_line(session: &crate::model::Session) -> Option<String> {
             "queued {}/{} · {}/{} active",
             observation.position, observation.waiting, observation.active, observation.capacity
         ));
-    } else if let Some(phase) = session.wait_phase() {
+    } else if let Some(phase) = session
+        .wait_phase()
+        .filter(|_| session.capacity_wait().is_none())
+    {
         parts.push(phase.into());
     }
     if let Some(timing) = &session.timing {
@@ -2625,5 +2663,46 @@ fn command_acknowledgment(
         crate::command_intent::Acknowledgment::Scope { .. } => {
             ("Scope saved".into(), "✓", Color::Green)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Session, Update};
+
+    #[test]
+    fn capacity_wait_lines_clip_the_cat_to_the_width_and_drop_it_when_it_cannot_fit() {
+        let mut session = Session::new("fixture".into());
+        session.insert("hi");
+        session.begin().unwrap();
+        let theme = Theme {
+            motion: false,
+            ..Theme::default()
+        };
+        let now = Instant::now();
+        assert!(capacity_wait_lines(&session, &theme, now, 80).is_empty());
+        session.apply(1, Update::CapacityWait { live: 2 });
+        let lines = |width| capacity_wait_lines(&session, &theme, now, width);
+        // The text wraps in its paragraph; only the cat track is sized here.
+        for width in 0..140 {
+            for line in lines(width) {
+                let track = line
+                    .spans
+                    .first()
+                    .filter(|span| !span.content.contains("Waiting"));
+                assert!(
+                    track.is_none_or(|span| span.content.width() <= width),
+                    "{width}"
+                );
+            }
+        }
+        // One line with room, stacked when tight, text alone below the cat's width.
+        assert_eq!(lines(120).len(), 1);
+        assert_eq!(lines(40).len(), 2);
+        assert_eq!(lines(20).len(), 2);
+        assert_eq!(lines(20)[0].width(), 20);
+        assert_eq!(lines(12).len(), 1);
+        assert!(!lines(12)[0].to_string().contains("=^"));
     }
 }

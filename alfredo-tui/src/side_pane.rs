@@ -304,7 +304,7 @@ pub fn stage_word(stage: &str) -> &'static str {
         "Running approved check" => "check",
         "Receiving model plan" => "generating",
         "Thinking" => "thinking",
-        "Waiting for shared Alfredo capacity" => "queued",
+        "Waiting for shared Alfredo capacity" | "Waiting for another Alfredo process" => "queued",
         "Waiting for model server" => "waiting",
         "Reconnecting to model server" => "reconnecting",
         "Validating model plan" => "validating",
@@ -375,6 +375,11 @@ pub fn any_working(app: &App, tasks: Option<&TaskControl>) -> bool {
     app.sessions
         .iter()
         .any(|session| chat_status(session) == RowStatus::Working)
+        // The capacity-wait cat runs on the spinner clock.
+        || app
+            .sessions
+            .iter()
+            .any(|session| session.capacity_wait().is_some())
         || tasks.is_some_and(|tasks| {
             tasks.planner.active()
                 || tasks.snapshot.as_ref().is_some_and(|snapshot| {

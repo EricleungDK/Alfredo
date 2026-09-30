@@ -7,6 +7,42 @@ use std::{sync::OnceLock, time::Instant};
 pub const BRAILLE: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 pub const ASCII_SPINNER: [&str; 4] = ["|", "/", "-", "\\"];
 const FRAME_MS: u128 = 100;
+/// Columns of the dotted track the capacity-wait cat runs along.
+pub const CAT_TRACK: usize = 25;
+/// Where the cat starts on frame 1, which is also the static `--no-motion` frame.
+const CAT_START: u64 = 7;
+const KAOMOJI: &str = "(=^･ω･^=)";
+const ASCII_CAT: &str = "=^.^=";
+
+/// One frame of the capacity-wait cat: a kaomoji (or `=^.^=` in ASCII mode) with
+/// a blank margin either side, one cell further right each `tick` and wrapping
+/// around a dotted track. Paws alternate left, right, both; frame 1 has both.
+/// The track is `CAT_TRACK` columns, or `width` when narrower; the result is
+/// empty when the cat itself cannot fit. Every glyph is one column wide, so
+/// frames always occupy exactly the returned width.
+pub fn cat_track(icons: IconSet, tick: u64, width: usize) -> String {
+    let ascii = icons == IconSet::Ascii;
+    let sprite: Vec<char> = if ascii {
+        format!(" {ASCII_CAT} ").chars().collect()
+    } else {
+        let left = if tick % 3 == 2 { ' ' } else { 'ฅ' };
+        let right = if tick % 3 == 1 { ' ' } else { 'ฅ' };
+        format!(" {left}{KAOMOJI}{right} ").chars().collect()
+    };
+    let track = width.min(CAT_TRACK);
+    if track < sprite.len() {
+        return String::new();
+    }
+    let dot = if ascii { '.' } else { '·' };
+    let mut cells: Vec<char> = (0..track)
+        .map(|cell| if cell % 2 == 0 { dot } else { ' ' })
+        .collect();
+    let origin = ((CAT_START + tick) % track as u64) as usize;
+    for (offset, glyph) in sprite.into_iter().enumerate() {
+        cells[(origin + offset) % track] = glyph;
+    }
+    cells.into_iter().collect()
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum IconSet {
@@ -209,6 +245,12 @@ impl Theme {
             };
         }
         self.icons.status(status)
+    }
+
+    /// The capacity-wait cat on the spinner clock; frame 1 without motion.
+    pub fn capacity_cat(&self, now: Instant, width: usize) -> String {
+        let tick = if self.motion { spinner_tick(now) } else { 0 };
+        cat_track(self.icons, tick, width)
     }
 
     pub fn tone(status: RowStatus) -> Tone {
