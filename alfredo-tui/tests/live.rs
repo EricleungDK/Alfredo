@@ -36,6 +36,7 @@ async fn live_ollama_completes_through_the_rust_transport() {
                 Update::Metrics(metrics) => println!("{}", metrics.summary()),
                 Update::Queued
                 | Update::QueueProgress(_)
+                | Update::CapacityWait { .. }
                 | Update::Admitted
                 | Update::Retrying(_) => {}
                 Update::Thinking => { thinking_started.get_or_insert_with(|| start.elapsed()); }

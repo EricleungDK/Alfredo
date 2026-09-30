@@ -859,6 +859,11 @@ impl Planner {
                     self.notice =
                         "Plan waiting for shared Alfredo capacity · no action taken".into()
                 }
+                Update::CapacityWait { live } => {
+                    self.notice = format!(
+                    "Plan waiting for another Alfredo process (capacity {live}) · no action taken"
+                )
+                }
                 Update::QueueProgress(queue) => {
                     self.notice = format!(
                         "{} · no action taken",

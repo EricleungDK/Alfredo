@@ -572,6 +572,7 @@ pub async fn run(
     }
     let provider = Ollama::new(endpoint, Duration::from_secs(60))?
         .with_parallelism(1)?
+        .refusing_capacity_conflicts()
         .with_structured_thinking(thinking);
     let origin = reqwest::Url::parse(endpoint)
         .map_err(|e| e.to_string())?

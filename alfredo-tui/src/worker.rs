@@ -1576,6 +1576,7 @@ async fn perform(
                 Some(Update::Thinking) => { if answer.is_empty() { observer.stage("Thinking"); } },
                 Some(Update::Queued) => observer.stage("Waiting for shared Alfredo capacity"),
                 Some(Update::QueueProgress(queue)) => observer.queue(queue),
+                Some(Update::CapacityWait { .. }) => observer.stage("Waiting for another Alfredo process"),
                 Some(Update::Admitted) => { inference_started = Instant::now(); observer.stage("Waiting for model server"); },
                 Some(Update::Retrying(_)) => observer.stage("Reconnecting to model server"),
                 Some(Update::Token(text)) => { observer.content(&text); answer.push_str(&text); },

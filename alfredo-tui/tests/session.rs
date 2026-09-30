@@ -670,3 +670,48 @@ fn automatic_retry_countdown_is_attempt_bound_and_never_crosses_attempts() {
     session.apply(2, Update::Done);
     assert_eq!(session.messages[1].content, "fresh");
 }
+
+#[test]
+fn capacity_wait_stays_with_the_attempt_until_the_endpoint_drains() {
+    let mut session = started();
+    session.apply(1, Update::CapacityWait { live: 1 });
+    assert_eq!(session.capacity_wait(), Some(1));
+    assert_eq!(
+        session.status_label(),
+        "Waiting for another Alfredo process (capacity 1)"
+    );
+    assert_eq!(session.short_status(), "queued");
+    assert_eq!(session.queue_observation(), None);
+    // Never saved: a restored chat does not claim a live wait.
+    assert!(serde_json::to_value(&session)
+        .unwrap()
+        .get("capacity_wait")
+        .is_none());
+    let restored: Session =
+        serde_json::from_value(serde_json::to_value(&session).unwrap()).unwrap();
+    assert_eq!(restored.capacity_wait(), None);
+    // Joining the queue ends the conflict wait and shows the ordinary queue.
+    session.apply(1, Update::Queued);
+    assert_eq!(session.capacity_wait(), None);
+    assert_eq!(session.status_label(), "Queued for Alfredo");
+    // A later conflict, admission, cancellation and stale attempts all clear or ignore it.
+    session.apply(1, Update::CapacityWait { live: 2 });
+    assert_eq!(session.capacity_wait(), Some(2));
+    session.apply(1, Update::Admitted);
+    assert_eq!(session.capacity_wait(), None);
+    session.apply(1, Update::CapacityWait { live: 2 });
+    assert_eq!(
+        session.capacity_wait(),
+        None,
+        "admitted requests cannot wait"
+    );
+    session.cancel();
+    session.apply(1, Update::CapacityWait { live: 1 });
+    assert_eq!(session.capacity_wait(), None);
+    session.retry().unwrap();
+    session.apply(1, Update::CapacityWait { live: 1 });
+    assert_eq!(session.capacity_wait(), None, "stale attempt");
+    session.apply(2, Update::CapacityWait { live: 3 });
+    session.apply(2, Update::Failed("boom".into()));
+    assert_eq!(session.capacity_wait(), None);
+}

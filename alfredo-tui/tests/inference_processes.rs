@@ -44,6 +44,9 @@ fn process_client() {
                 if queue.observation().is_some() {
                     marker(&root, id, "queued", "queued");
                 }
+                if queue.capacity_conflict().is_some() {
+                    marker(&root, id, "conflict", "conflict");
+                }
             }
             Err(error) => {
                 marker(&root, id, "error", &error);
@@ -208,20 +211,20 @@ fn killed_waiters_and_active_owners_release_capacity_without_replay() {
 }
 
 #[test]
-fn conflicting_process_capacity_refuses_until_live_requests_drain() {
+fn conflicting_process_capacity_waits_until_live_requests_drain() {
     let mut processes = Processes::new();
     processes.start("active", false, 1);
     processes.wait("active", "granted");
     processes.start("conflict", true, 2);
-    processes.wait("conflict", "error");
-    let error = fs::read_to_string(processes.root.join("conflict.error")).unwrap();
-    assert!(error.to_lowercase().contains("capacity"), "{error}");
+    processes.wait("conflict", "conflict");
+    // Waiting is not refusal, and it is not a queued ticket either.
+    assert!(!processes.root.join("conflict.error").exists());
+    assert!(!processes.root.join("conflict.granted").exists());
     processes.assert_waiting(&["conflict"]);
     processes.release("active");
-    processes.start("reconfigured", true, 2);
-    processes.wait("reconfigured", "granted");
+    processes.wait("conflict", "granted");
     processes.start("second", false, 2);
     processes.wait("second", "granted");
-    processes.release("reconfigured");
+    processes.release("conflict");
     processes.release("second");
 }
