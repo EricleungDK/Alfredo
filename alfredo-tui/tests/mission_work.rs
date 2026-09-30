@@ -388,3 +388,58 @@ fn empty_snapshot_has_no_fabricated_groups_or_workers() {
     let tree = project(&snapshot(vec![]), &scope(), "", &BTreeSet::new());
     assert_eq!(tree, Tree::default());
 }
+
+fn parent_of(tree: &Tree, id: u64) -> Option<NodeId> {
+    row(tree, NodeId::Task(id)).parent
+}
+
+#[test]
+fn follow_up_of_plan_task_joins_the_plan_group_transitively() {
+    let mut state = snapshot(vec![
+        task(1, "Planned", &[], None),
+        task(2, "Follow-up", &[1], None),
+        task(3, "Follow-up of follow-up", &[2], None),
+        task(4, "Truly manual", &[], None),
+    ]);
+    plan(&mut state, 1, 1, 1, "Ship it");
+    let tree = project(&state, &scope(), "", &BTreeSet::new());
+    for id in [1, 2, 3] {
+        assert_eq!(parent_of(&tree, id), Some(NodeId::Plan(1)), "#{id}");
+    }
+    assert_eq!(parent_of(&tree, 4), Some(NodeId::Manual));
+    assert_eq!(row(&tree, NodeId::Plan(1)).task_count, 3);
+    assert_eq!(row(&tree, NodeId::Manual).task_count, 1);
+}
+
+#[test]
+fn follow_up_of_a_repair_joins_the_repair_roots_group() {
+    let mut state = snapshot(vec![
+        task(1, "Planned", &[], None),
+        task(2, "Repair", &[1], Some(1)),
+        task(3, "Follow-up of repair", &[2], None),
+    ]);
+    plan(&mut state, 1, 1, 1, "Ship it");
+    let tree = project(&state, &scope(), "", &BTreeSet::new());
+    assert_eq!(parent_of(&tree, 2), Some(NodeId::Task(1)));
+    assert_eq!(parent_of(&tree, 3), Some(NodeId::Plan(1)));
+    assert!(!ids(&tree).contains(&NodeId::Manual));
+}
+
+#[test]
+fn follow_up_of_manual_task_stays_manual_and_first_dependency_decides() {
+    let mut state = snapshot(vec![
+        task(1, "Manual", &[], None),
+        task(2, "Planned", &[], None),
+        task(3, "Follow-up of manual", &[1, 2], None),
+        task(4, "Follow-up of planned", &[2, 1], None),
+        task(5, "Dangling dependency", &[9], None),
+        task(6, "Forward dependency", &[7], None),
+        task(7, "Later", &[], None),
+    ]);
+    plan(&mut state, 1, 2, 1, "Ship it");
+    let tree = project(&state, &scope(), "", &BTreeSet::new());
+    assert_eq!(parent_of(&tree, 3), Some(NodeId::Manual));
+    assert_eq!(parent_of(&tree, 4), Some(NodeId::Plan(1)));
+    assert_eq!(parent_of(&tree, 5), Some(NodeId::Manual));
+    assert_eq!(parent_of(&tree, 6), Some(NodeId::Manual));
+}
