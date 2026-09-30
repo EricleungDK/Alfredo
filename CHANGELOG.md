@@ -6,6 +6,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Side pane: other missions show `done/total` and their state (`4/7   running`).
+
+### Fixed
+
+- Work tree: `/after` follow-ups appear in their plan group, not "Manual tasks".
+- Agent view: a steered run keeps its streamed partial output, shown with a dim
+  `— steered at Ns · output cut` line; repairs never reuse the partial answer.
+- Agent view and live output hide markdown code fence lines.
+- Autopilot: a follow-up adopted while the integration branch is built is no longer
+  lost; the run resumes and integrates again on the next `-N` branch.
+
 ## [0.1.0] - 2026-09-30
 
 First release of the native terminal. It replaces the React/Tauri desktop app and
