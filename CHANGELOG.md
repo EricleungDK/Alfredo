@@ -6,6 +6,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Release workflow fetches crates before offline packaging.
+
 ## [0.1.0] - 2026-09-30
 
 First release of the native terminal. It replaces the React/Tauri desktop app and

@@ -40,6 +40,8 @@ jobs:
           # Ubuntu 24.04 AppArmor blocks unprivileged user namespaces that bwrap needs.
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net true
+      - name: Fetch crates (packaging resolves metadata offline)
+        run: cargo fetch --locked --manifest-path alfredo-tui/Cargo.toml
       - name: Package release archive
         run: python3 alfredo-tui/scripts/package_release.py --output dist
       - name: Installed release smoke
