@@ -24,7 +24,7 @@ class FixtureServer:
         self.requests = []
         self.errors = []
         self.gates = {name: threading.Event() for name in (
-            'HOLDER_A', 'HOLDER_WORKER', 'HOLDER_KILLED',
+            'HOLDER_A', 'HOLDER_WORKER', 'HOLDER_KILLED', 'HOLDER_CAPACITY',
         )}
         fixture = self
 
@@ -99,7 +99,7 @@ class FixtureServer:
 
 class Terminal:
     def __init__(self, binary, endpoint, workspace, state, mission, resume=False,
-                 conversation='default', height=36, width=140):
+                 conversation='default', height=36, width=140, parallel=1):
         self.master, self.slave = pty.openpty()
         self.original = termios.tcgetattr(self.slave)
         self.height, self.width = height, width
@@ -110,7 +110,7 @@ class Terminal:
         self.closed = False
         self.process = subprocess.Popen([
             str(binary), '--model', 'fixture', '--endpoint', endpoint,
-            '--parallel-models', '1', '--workspace', str(workspace),
+            '--parallel-models', str(parallel), '--workspace', str(workspace),
             '--state-dir', str(state), '--mission' if resume else '--new-mission', mission,
             '--conversation', conversation,
         ], stdin=self.slave, stdout=self.slave, stderr=self.slave, cwd=workspace,
@@ -315,6 +315,88 @@ class SharedInferenceTerminalSmoke(unittest.TestCase):
                     self.assertEqual(terminal.process.returncode, 0, terminal.screen())
                     self.assertEqual(termios.tcgetattr(terminal.slave), terminal.original)
                 print('Installed shared inference acceptance passed: two terminals, queued chat/worker cancellation, owner exit, restart without replay')
+            finally:
+                for terminal in terminals:
+                    terminal.close()
+                fixture.close()
+
+    def test_default_capacity_waits_for_a_single_slot_process_then_runs(self):
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+                      str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui'))).resolve()
+        fixture = FixtureServer()
+        terminals = []
+        with tempfile.TemporaryDirectory(prefix='alfredo capacity wait ') as directory:
+            root = Path(directory)
+            git_env = dict(os.environ, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null')
+            for name in ('workspace-a', 'workspace-b'):
+                workspace = root / name
+                workspace.mkdir()
+                (workspace / 'answer.py').write_text('VALUE = 0\n')
+                for args in [
+                    ['init', '-q', '--template=', '--initial-branch=main'],
+                    ['config', 'user.name', 'Fixture'],
+                    ['config', 'user.email', 'fixture@example.invalid'],
+                    ['add', 'answer.py'],
+                    ['-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false', 'commit', '-qm', 'fixture'],
+                ]:
+                    subprocess.run(['git', '-C', str(workspace), *args], env=git_env,
+                                   check=True, timeout=5, stdout=subprocess.DEVNULL)
+
+            def wait_until(label, predicate, timeout=30):
+                deadline = time.monotonic() + timeout
+                while time.monotonic() < deadline:
+                    for terminal in terminals:
+                        terminal.pump()
+                    with fixture.lock:
+                        self.assertFalse(fixture.errors, fixture.errors)
+                    if predicate():
+                        return
+                    time.sleep(0.025)
+                screens = '\n\n'.join(f'Terminal {index}:\n{terminal.screen()}'
+                                        for index, terminal in enumerate(terminals))
+                self.fail(f'Timed out: {label}\nRequests: {fixture.requests!r}\n{screens}')
+
+            def screen_has(terminal, text, timeout=30):
+                wait_until(f'screen contains {text!r}', lambda: text in terminal.screen(), timeout)
+
+            try:
+                # A keeps one slot and a live request; B runs the default capacity (2).
+                holder = Terminal(binary, fixture.endpoint, root / 'workspace-a', root / 'state-a',
+                                  'holder', parallel=1)
+                terminals.append(holder)
+                waiter = Terminal(binary, fixture.endpoint, root / 'workspace-b', root / 'state-b',
+                                  'waiter', parallel=2)
+                terminals.append(waiter)
+                screen_has(holder, '◈ ○ chat 1')
+                screen_has(waiter, '◈ ○ chat 1')
+                holder.send('Explain INFERENCE_HOLDER_CAPACITY\r')
+                wait_until('holder owns a live request', lambda: fixture.count('HOLDER_CAPACITY') == 1)
+                waiter.send('Explain INFERENCE_CAPACITY_WAITER\r')
+                # Waiting, not failing: the cat and its text are on screen, nothing is sent.
+                screen_has(waiter, 'Waiting for another Alfredo process (capacity 1)')
+                screen_has(waiter, 'Esc cancel')
+                self.assertIn('(=^', waiter.screen())
+                self.assertNotIn('Shared inference capacity conflict', waiter.screen())
+                self.assertEqual(fixture.count('CAPACITY_WAITER'), 0)
+                # Still waiting while the holder keeps its request open.
+                deadline = time.monotonic() + 0.6
+                while time.monotonic() < deadline:
+                    for terminal in terminals:
+                        terminal.pump()
+                    self.assertEqual(fixture.count('CAPACITY_WAITER'), 0, fixture.requests)
+                    time.sleep(0.025)
+                self.assertIn('Waiting for another Alfredo process', waiter.screen())
+                fixture.gates['HOLDER_CAPACITY'].set()
+                screen_has(holder, 'REPLY_HOLDER_CAPACITY')
+                screen_has(waiter, 'REPLY_CAPACITY_WAITER')
+                self.assertEqual(fixture.count('CAPACITY_WAITER'), 1)
+                self.assertNotIn('Waiting for another Alfredo process', waiter.screen())
+                for terminal in terminals:
+                    terminal.expected_exit = True
+                    terminal.send(b'\x11')
+                    wait_until('clean terminal exit', lambda: terminal.process.poll() is not None)
+                    self.assertEqual(terminal.process.returncode, 0, terminal.screen())
+                print('Capacity wait acceptance passed: default-capacity terminal waited for a single-slot holder, sent nothing, then replied')
             finally:
                 for terminal in terminals:
                     terminal.close()
