@@ -166,6 +166,117 @@ class ScreenReconstruction(unittest.TestCase):
         self.assertNotIn('new text', visible_screen(left))
 
 
+class ChatHarnessContext(unittest.TestCase):
+    def test_plain_chat_turn_carries_alfredo_harness_context(self):
+        # Regression: plain chat sent only the user text, so the model denied any harness work.
+        chats = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                body = json.dumps({'models': [{'name': 'fixture'}]}).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                request = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or b'{}')
+                if self.path == '/api/chat':
+                    chats.append(request)
+                body = (b'{"done":true,"done_reason":"load"}\n' if self.path == '/api/generate'
+                        else b'{"message":{"content":"CONTEXT_REPLY"},"done":true}\n')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/x-ndjson')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        with tempfile.TemporaryDirectory(prefix='alfredo-chat-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-chat-repo-') as repo:
+            git = ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t']
+            subprocess.run(git + ['init', '-q', '--template='], check=True)
+            subprocess.run(git + ['commit', '-q', '--allow-empty', '-m', 'init'], check=True)
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}'], repo, env)
+            try:
+                terminal.wait_for('◈ ○ chat 1')
+                terminal.write(b'what did you remove?\r')
+                terminal.wait_for('CONTEXT_REPLY')
+                request = next(chat for chat in chats if chat['messages'][-1]['content'] == 'what did you remove?')
+                self.assertEqual(request['messages'][0]['role'], 'system')
+                self.assertIn('Alfredo', request['messages'][0]['content'])
+                self.assertIn('No tasks in this mission yet.', request['messages'][0]['content'])
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                terminal.close()
+                server.shutdown()
+
+
+class ModelPicker(unittest.TestCase):
+    def test_arrow_keys_choose_a_model_from_the_list(self):
+        # Regression: /models listed models, but arrows fell through to prompt history.
+        chats = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                body = json.dumps({'models': [{'name': 'fixture'}, {'name': 'second-model'}]}).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                request = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or b'{}')
+                if self.path == '/api/chat':
+                    chats.append(request)
+                body = (b'{"done":true,"done_reason":"load"}\n' if self.path == '/api/generate'
+                        else b'{"message":{"content":"PICKED_REPLY"},"done":true}\n')
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/x-ndjson')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        with tempfile.TemporaryDirectory(prefix='alfredo-models-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-models-repo-') as repo:
+            git = ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t']
+            subprocess.run(git + ['init', '-q', '--template='], check=True)
+            subprocess.run(git + ['commit', '-q', '--allow-empty', '-m', 'init'], check=True)
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}'], repo, env)
+            try:
+                terminal.wait_for('◈ ○ chat 1')
+                terminal.write(b'/models\r')
+                terminal.wait_for('▸ › fixture')
+                terminal.write(b'\x1b[B')
+                terminal.wait_for('▸   second-model')
+                terminal.write(b'\r')
+                terminal.wait_for('Conversation model: second-model')
+                terminal.write(b'hello\r')
+                terminal.wait_for('PICKED_REPLY')
+                self.assertEqual(chats[-1]['model'], 'second-model')
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                terminal.close()
+                server.shutdown()
+
+
 class TerminalSmoke(unittest.TestCase):
     def test_stalled_model_does_not_block_other_session_or_terminal_restore(self):
         slow_started = threading.Event()

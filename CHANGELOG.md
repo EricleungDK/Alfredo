@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `/models`: Up/Down and Enter now pick a model; arrows used to fall through to
+  prompt history, so only `/model NAME` could switch.
+- Chat knew nothing of the harness: plain chat turns sent only conversation text, so
+  "what did you remove?" got "I'm an AI language model". Turns now carry a bounded
+  system message with Alfredo's role and the mission's tasks and verified patches.
 - Shared inference: a chat whose `--parallel-models` differs from another live
   Alfredo process waits for it to drain instead of failing with "capacity conflict".
   No HTTP is sent and Esc cancels; a cat indicator shows the wait.
