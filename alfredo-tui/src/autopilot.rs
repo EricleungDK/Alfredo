@@ -91,6 +91,10 @@ struct Saved {
     /// Integrations already made; a reopened run integrates on `-N` branches.
     #[serde(default, skip_serializing_if = "is_zero")]
     round: u32,
+    /// Follow-up work arrived while the integration branch was being built; the
+    /// finishing job's result is discarded and the run integrates again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    stale: bool,
 }
 fn is_zero(value: &u32) -> bool {
     *value == 0
@@ -349,6 +353,7 @@ impl Autopilot {
                     saved.paused = true;
                     if saved.phase == Phase::Finishing {
                         saved.phase = Phase::Running;
+                        saved.stale = false;
                     }
                 }
                 Some(saved)
@@ -512,6 +517,7 @@ impl Autopilot {
             branch: None,
             adopted: BTreeSet::new(),
             round: 0,
+            stale: false,
         });
         self.last = None;
         self.last_key = None;
@@ -708,6 +714,18 @@ impl Autopilot {
     /// the run reopens to review it and integrates again on a new branch.
     pub fn reopen(&mut self) {
         let elapsed = self.elapsed();
+        if let Some(saved) = self
+            .saved
+            .as_mut()
+            .filter(|saved| saved.phase == Phase::Finishing && !saved.stale)
+        {
+            // The branch being built may already exist without this work; the
+            // next integration takes a new name once the job is discarded.
+            saved.stale = true;
+            saved.round += 1;
+            self.persist();
+            return;
+        }
         let Some(saved) = self
             .saved
             .as_mut()
@@ -1270,6 +1288,17 @@ impl Autopilot {
             Err(oneshot::error::TryRecvError::Closed) => Err("integration stopped".into()),
         };
         self.job = None;
+        if self.saved.as_ref().is_some_and(|saved| saved.stale) {
+            // Follow-up work joined the run while the branch was built.
+            if let Some(saved) = self.saved.as_mut() {
+                saved.stale = false;
+                saved.phase = Phase::Running;
+            }
+            self.attempts.clear();
+            self.set_notice(tasks, "Autopilot resumed for your instruction".into());
+            self.persist();
+            return;
+        }
         self.complete(tasks, result);
     }
 
