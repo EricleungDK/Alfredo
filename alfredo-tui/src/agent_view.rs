@@ -591,6 +591,7 @@ pub fn open(
     };
     session.clear_draft();
     session.insert(&tasks.agent_drafts.remove(&target).unwrap_or_default());
+    session.set_aside_draft(Some(chat_draft.clone()));
     let mut view = View::new(target, previous);
     view.chat_draft = chat_draft;
     app.models_visible = false;
@@ -624,6 +625,9 @@ pub fn close(
     }
     session.clear_draft();
     session.insert(&view.chat_draft);
+    for session in &mut app.sessions {
+        session.set_aside_draft(None);
+    }
     if restore {
         tasks.set_visible(view.previous.tasks_visible);
         tasks.planner.visible = view.previous.planner_visible;

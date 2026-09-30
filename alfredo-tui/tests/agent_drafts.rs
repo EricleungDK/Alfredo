@@ -170,6 +170,58 @@ fn corrupt_state_starts_empty_is_kept_aside_and_never_blocks() {
 }
 
 #[test]
+fn the_conversation_snapshot_saves_the_chat_draft_while_an_agent_view_is_open() {
+    let snapshot_draft = |app: &App| {
+        alfredo_tui::conversations::Snapshot::capture(app, "default")
+            .restore()
+            .sessions[0]
+            .draft
+            .clone()
+    };
+    let f = Fixture::new();
+    let (mut app, mut control, _) = f.launch("default");
+    app.sessions[0].insert("real chat text");
+    type_in(&mut app, &mut control, Target::Task(1), "agent note");
+    assert_eq!(snapshot_draft(&app), "real chat text");
+    // Moving to another target keeps the same chat draft aside.
+    agent_view::open(&mut app, &mut control, Target::Architect);
+    app.sessions[0].insert("other note");
+    assert_eq!(snapshot_draft(&app), "real chat text");
+    agent_view::persist(&app, &mut control);
+    agent_view::close(&mut app, &mut control, false);
+    assert_eq!(snapshot_draft(&app), "real chat text");
+    // After close the snapshot follows what is typed in the chat again.
+    app.sessions[0].insert(" more");
+    assert_eq!(snapshot_draft(&app), "real chat text more");
+    drop((app, control));
+
+    let (mut app, mut control, _) = f.launch("default");
+    agent_view::open(&mut app, &mut control, Target::Task(1));
+    assert_eq!(app.sessions[0].draft, "agent note");
+    agent_view::open(&mut app, &mut control, Target::Architect);
+    assert_eq!(app.sessions[0].draft, "other note");
+}
+
+#[test]
+fn a_second_corruption_keeps_the_first_quarantined_copy() {
+    let f = Fixture::new();
+    let path = f.file("default");
+    fs::write(&path, "first bad").unwrap();
+    assert!(f.launch("default").2.is_some());
+    fs::write(&path, "second bad").unwrap();
+    let notice = f.launch("default").2.unwrap();
+    assert_eq!(
+        fs::read(path.with_extension("json.corrupt")).unwrap(),
+        b"first bad"
+    );
+    assert_eq!(
+        fs::read(path.with_extension("json.corrupt.1")).unwrap(),
+        b"second bad"
+    );
+    assert!(notice.contains("corrupt.1"), "{notice}");
+}
+
+#[test]
 fn an_unwritable_state_location_reports_once_and_keeps_the_draft_in_memory() {
     let f = Fixture::new();
     let (mut app, mut control, _) = f.launch("default");
@@ -268,6 +320,32 @@ mod workstation {
             work.app.notice
         );
         assert!(work.tasks.agent_drafts.is_empty());
+    }
+
+    #[test]
+    fn a_mission_switch_with_the_view_open_keeps_the_chat_draft_and_the_agent_note_apart() {
+        let f = Fixture::new();
+        let runtime = Runtime::new().unwrap();
+        let mut work = f.open();
+        work.app.sessions[0].insert("real chat text");
+        agent_view::open(&mut work.app, &mut work.tasks, Target::Task(7));
+        work.app.sessions[0].insert("agent note");
+        assert!(work.switch_to(&runtime, &f.root.join("b"), "beta").unwrap());
+        while work.tasks.pending {
+            work.tasks.poll();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(work
+            .switch_to(&runtime, &f.root.join("a"), "alpha")
+            .unwrap());
+        assert_eq!(work.app.sessions[0].draft, "real chat text");
+        assert_eq!(
+            work.tasks
+                .agent_drafts
+                .get(&Target::Task(7))
+                .map(String::as_str),
+            Some("agent note")
+        );
     }
 
     #[test]

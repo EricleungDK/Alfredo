@@ -15,6 +15,8 @@ use std::{
 
 const VERSION: u32 = 1;
 const MAX_STATE: usize = 256 * 1024;
+/// Quarantined copies of unreadable files kept per conversation.
+const KEPT: usize = 9;
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -71,7 +73,7 @@ impl Store {
         let (drafts, notice) = match read(&path) {
             Ok(drafts) => (drafts, None),
             Err(Bad::Invalid(why)) => {
-                let aside = path.with_extension("json.corrupt");
+                let aside = free_aside(&path);
                 let kept = match fs::rename(&path, &aside) {
                     Ok(()) => format!("kept as {}", file_name(&aside)),
                     Err(error) => format!("could not move it aside ({error})"),
@@ -117,6 +119,20 @@ impl Store {
             }
         }
     }
+}
+
+/// The first unused quarantine name (`.json.corrupt`, then `.corrupt.1` ...), so
+/// an earlier kept copy survives a later corruption; the last name is reused
+/// once all are taken.
+fn free_aside(path: &Path) -> PathBuf {
+    let base = path.with_extension("json.corrupt");
+    (0..KEPT)
+        .map(|n| match n {
+            0 => base.clone(),
+            n => path.with_extension(format!("json.corrupt.{n}")),
+        })
+        .find(|candidate| fs::symlink_metadata(candidate).is_err())
+        .unwrap_or_else(|| path.with_extension(format!("json.corrupt.{}", KEPT - 1)))
 }
 
 enum Bad {
