@@ -47,6 +47,15 @@ class LegacyTests(unittest.TestCase):
         self.assertNotIn('Tauri', text)
 
 
+class GlossaryTests(unittest.TestCase):
+    def test_context_is_about_the_terminal(self):
+        text = (ROOT / 'CONTEXT.md').read_text(encoding='utf-8')
+        for term in ('Frontier', 'Orchestrator', 'Mission Commander', 'Command Deck', 'Albert'):
+            self.assertNotIn(term, text)
+        for term in ('Autopilot', 'Wayfinder', 'Mission', 'Worker'):
+            self.assertIn(f'### {term}', text)
+
+
 class FlagTests(unittest.TestCase):
     def test_readme_documents_every_flag(self):
         source = (ROOT / 'alfredo-tui/src/main.rs').read_text(encoding='utf-8')
