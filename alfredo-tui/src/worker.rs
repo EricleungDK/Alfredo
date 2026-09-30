@@ -337,20 +337,79 @@ pub fn render_blocks(plan: &FilePlan) -> String {
         .collect()
 }
 
-/// Streamed model text for live display: FILE markers become `▸ path` headings
-/// and END markers are hidden.
+/// A complete markdown fence line: three backticks and an optional info string.
+fn fence_line(line: &str) -> bool {
+    line.trim()
+        .strip_prefix("```")
+        .is_some_and(|rest| !rest.contains('`'))
+}
+
+/// A streaming line that is, or may still become, a fence line.
+fn partial_fence(line: &str) -> bool {
+    let line = line.trim_start();
+    !line.is_empty() && (line.starts_with("```") || "```".starts_with(line))
+}
+
+/// Streamed model text for live display: FILE markers become `▸ path` headings,
+/// END markers and markdown fence lines are hidden. Inside a FILE block only the
+/// fence wrapping the whole file is hidden; the file's own fences are content.
+/// Display only: `parse_answer` reads the raw text.
 pub fn display_output(text: &str) -> String {
     let mut shown = String::with_capacity(text.len());
+    // Inside a FILE block: content seen yet, a wrapper fence was hidden, and the
+    // depth of the file's own fences within it.
+    let (mut in_block, mut seen, mut wrapped, mut depth) = (false, false, false, 0usize);
     for line in text.split_inclusive('\n') {
+        let complete = line.ends_with('\n');
         if let Some(path) = file_marker(line) {
             shown.push_str(&format!("▸ {path}\n"));
-        } else if end_marker(line) || (!line.ends_with('\n') && line.starts_with("===")) {
-            // A marker line still streaming stays hidden until complete.
+            (in_block, seen, wrapped, depth) = (true, false, false, 0);
+        } else if end_marker(line) {
+            in_block = false;
+        } else if (!complete && (line.starts_with("===") || partial_fence(line)))
+            || (fence_line(line)
+                && hides_fence(in_block, &mut seen, &mut wrapped, &mut depth, line))
+        {
+            // A marker or fence line still streaming stays hidden until complete.
         } else {
+            if in_block && !line.trim().is_empty() {
+                seen = true;
+            }
             shown.push_str(line);
         }
     }
     shown
+}
+
+/// Whether the complete fence `line` is hidden, updating the FILE block state.
+fn hides_fence(
+    in_block: bool,
+    seen: &mut bool,
+    wrapped: &mut bool,
+    depth: &mut usize,
+    line: &str,
+) -> bool {
+    if !in_block {
+        return true;
+    }
+    if !*seen {
+        *seen = true;
+        *wrapped = true;
+        return true;
+    }
+    if !*wrapped {
+        return false;
+    }
+    if line.trim() != "```" {
+        *depth += 1;
+        return false;
+    }
+    if *depth > 0 {
+        *depth -= 1;
+        return false;
+    }
+    *wrapped = false;
+    true
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1502,9 +1561,13 @@ async fn perform(
     let mut answer = String::new();
     let mut done = false;
     let mut error = None;
+    let mut cancelled = false;
+    // From model admission, so queue waits do not count as inference time.
+    let mut inference_started = Instant::now();
     loop {
         if cancel.load(Ordering::SeqCst) {
             error = Some("Worker cancelled during inference".to_string());
+            cancelled = true;
             break;
         }
         tokio::select! {
@@ -1513,7 +1576,7 @@ async fn perform(
                 Some(Update::Thinking) => { if answer.is_empty() { observer.stage("Thinking"); } },
                 Some(Update::Queued) => observer.stage("Waiting for shared Alfredo capacity"),
                 Some(Update::QueueProgress(queue)) => observer.queue(queue),
-                Some(Update::Admitted) => observer.stage("Waiting for model server"),
+                Some(Update::Admitted) => { inference_started = Instant::now(); observer.stage("Waiting for model server"); },
                 Some(Update::Retrying(_)) => observer.stage("Reconnecting to model server"),
                 Some(Update::Token(text)) => { observer.content(&text); answer.push_str(&text); },
                 Some(Update::Done) => { done = true; break; },
@@ -1527,6 +1590,23 @@ async fn perform(
     // Confirm the provider future dropped its queue/permit before publishing Finish.
     let _ = job.await;
     if !done {
+        // A steer keeps what actually streamed, marked as a cut exchange. Nothing
+        // streamed retains nothing; the cancellation outcome is unchanged either way.
+        if let (true, false, Some(directory), Some(record)) = (
+            cancelled,
+            answer.trim().is_empty(),
+            worktree.parent(),
+            evidence.agent.as_mut(),
+        ) {
+            let _ = crate::agent::retain_cut(
+                directory,
+                &run.id,
+                record,
+                retained_messages,
+                answer,
+                Some(inference_started.elapsed().as_secs()),
+            );
+        }
         return Err(error.unwrap_or_else(|| "Worker stream ended before completion".into()));
     }
     crate::agent::retain(

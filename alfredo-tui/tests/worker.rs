@@ -268,6 +268,7 @@ fn serve_reply(
                     && (prompt.contains("Prior model exchange did not complete")
                         || prompt.contains("CHECK_OK")
                         || prompt.contains("Worker stream ended before completion")
+                        || prompt.contains("Worker cancelled during inference")
                         || prompt.contains("AssertionError")
                         || prompt.contains("-token limit")
                         || prompt.contains("(truncated)"))
@@ -2842,6 +2843,8 @@ async fn repairs_continue_recorded_agent_then_restart_fresh_after_second_rejecti
         );
         let retained: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(retained["run"], evidence.run);
+        // A completed exchange carries no cut mark.
+        assert!(retained.get("cut").is_none() && agent.cut.is_none());
         if task == 1 {
             assert_eq!(messages.len(), 1);
             assert_eq!(agent.agent, evidence.run);
@@ -6432,4 +6435,241 @@ fn fence_fallback_never_rescues_a_truncated_or_malformed_file_block_answer() {
     );
     let json = "{\"files\": [ ```\nx\n```";
     assert!(worker::parse_answer_for(json, &one).is_err());
+}
+
+#[test]
+fn display_output_hides_markdown_fence_lines_and_partial_fences() {
+    // Wrapper fences inside a FILE block: code shows plain under its heading.
+    let wrapped = "=== FILE: a.py ===\n```python\nx = 1\n```\n=== END FILE ===\n";
+    assert_eq!(worker::display_output(wrapped), "▸ a.py\nx = 1\n");
+    // Fence-only and prose answers hide every fence line, keep the prose.
+    assert_eq!(
+        worker::display_output("Here you go:\n```python\nx = 1\n```\r\nDone.\n"),
+        "Here you go:\nx = 1\nDone.\n"
+    );
+    // A partial fence line stays hidden until complete; complete lines show.
+    for partial in ["`", "``", "```", "```pyth"] {
+        assert_eq!(worker::display_output(&format!("a\n{partial}")), "a\n");
+    }
+    assert_eq!(worker::display_output("a\n```py\n"), "a\n");
+    assert_eq!(worker::display_output("a\n`x` is code"), "a\n`x` is code");
+    // Backticks inside a line are content, not a fence.
+    assert_eq!(
+        worker::display_output("use ```x``` here\n"),
+        "use ```x``` here\n"
+    );
+    // Fences inside a file's own content (a markdown file) are content.
+    let markdown = "=== FILE: R.md ===\n# T\n```sh\nmake\n```\n=== END FILE ===\n";
+    assert_eq!(
+        worker::display_output(markdown),
+        "▸ R.md\n# T\n```sh\nmake\n```\n"
+    );
+    // The same file wrapped in an outer fence keeps its nested fence.
+    let nested = "=== FILE: R.md ===\n```markdown\n# T\n```sh\nmake\n```\n```\n=== END FILE ===\n";
+    assert_eq!(
+        worker::display_output(nested),
+        "▸ R.md\n# T\n```sh\nmake\n```\n"
+    );
+}
+
+/// Worker fixture that streams `content` as one non-final frame, then holds the
+/// connection open until the returned sender fires (or drops).
+fn serve_partial(content: &str) -> (Ollama, thread::JoinHandle<()>, std::sync::mpsc::Sender<()>) {
+    let content = content.to_string();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let job = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        let mut header = Vec::new();
+        let mut byte = [0];
+        while !header.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).unwrap();
+            header.push(byte[0]);
+        }
+        let length: usize = String::from_utf8(header)
+            .unwrap()
+            .lines()
+            .find_map(|line| {
+                line.to_lowercase()
+                    .strip_prefix("content-length: ")
+                    .map(str::to_string)
+            })
+            .unwrap()
+            .parse()
+            .unwrap();
+        let mut request = vec![0; length];
+        stream.read_exact(&mut request).unwrap();
+        let frame = serde_json::json!({"message":{"content":content},"done":false});
+        let _ = stream.write_all(
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nConnection: close\r\n\r\n{frame}\n"
+            )
+            .as_bytes(),
+        );
+        let _ = stream.flush();
+        let _ = released.recv_timeout(Duration::from_secs(30));
+    });
+    (
+        Ollama::new(&endpoint, Duration::from_secs(30)).unwrap(),
+        job,
+        release,
+    )
+}
+
+/// Run task 1 until `partial` has streamed, then cancel it (a steer).
+async fn steer_after_streaming(fixture: &Fixture, partial: &str) -> worker::Evidence {
+    let (provider, server, release) = serve_partial(partial);
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = cancel.clone();
+    let store = fixture.store.clone();
+    let (observer, mut progress) = worker::Observer::channel();
+    let running = tokio::spawn(async move {
+        worker::start_observed(store, 1, "steered".into(), 3, provider, flag, observer).await
+    });
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while progress.borrow().received_bytes < partial.len() {
+            progress.changed().await.unwrap();
+        }
+    })
+    .await
+    .expect("partial output streamed");
+    cancel.store(true, Ordering::SeqCst);
+    let (snapshot, _) = tokio::time::timeout(Duration::from_secs(60), running)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(snapshot.tasks[0].status, TaskStatus::Cancelled);
+    release.send(()).unwrap();
+    server.join().unwrap();
+    serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap()
+}
+
+const PARTIAL: &str = "=== FILE: calc.py ===\n```python\ndef answer():\n    return 42\n";
+
+#[tokio::test]
+async fn steered_run_retains_exactly_the_streamed_partial_output_as_a_cut_exchange() {
+    use sha2::{Digest, Sha256};
+    let fixture = Fixture::new();
+    fixture.permit();
+    let evidence = steer_after_streaming(&fixture, PARTIAL).await;
+    assert_eq!(evidence.detail, "Worker cancelled during inference");
+    let agent = evidence.agent.as_ref().unwrap();
+    assert!(agent.cut.is_some_and(|cut| cut.elapsed_secs.is_some()));
+    let path = fixture
+        .store
+        .run_directory(&evidence.run)
+        .unwrap()
+        .join("agent-conversation.json");
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(
+        agent.transcript_sha256.as_deref(),
+        Some(format!("{:x}", Sha256::digest(&bytes)).as_str())
+    );
+    let transcript: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    // Only what streamed, verbatim; explicitly marked as cut.
+    assert_eq!(transcript["messages"][1]["content"], PARTIAL);
+    assert!(transcript["cut"]["elapsed_secs"].is_u64());
+    // The agent view reads it back as the partial answer plus its cut mark.
+    let record = alfredo_tui::agent_view::read_record(&fixture.store, 1).unwrap();
+    assert_eq!(record.answer.as_deref(), Some(PARTIAL));
+    assert!(record.prompt.unwrap().contains("Implement this task"));
+    assert_eq!(record.cut, agent.cut);
+    assert!(record.note.is_none());
+    // A tampered partial conversation is refused like a complete one.
+    fs::write(&path, b"tampered").unwrap();
+    let record = alfredo_tui::agent_view::read_record(&fixture.store, 1).unwrap();
+    assert!(record.answer.is_none() && record.cut.is_none());
+    assert!(record
+        .note
+        .unwrap()
+        .contains("conversation size or digest mismatch"));
+}
+
+#[tokio::test]
+async fn steered_before_any_output_retains_nothing() {
+    let fixture = Fixture::new();
+    fixture.permit();
+    let (provider, server, received) = server(good_plan(), Duration::from_millis(300));
+    let cancel = Arc::new(AtomicBool::new(false));
+    let flag = cancel.clone();
+    let store = fixture.store.clone();
+    let (observer, _progress) = worker::Observer::channel();
+    let worker = tokio::spawn(async move {
+        worker::start_observed(store, 1, "silent".into(), 3, provider, flag, observer).await
+    });
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while received.try_recv().is_err() {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    cancel.store(true, Ordering::SeqCst);
+    worker.await.unwrap().unwrap();
+    server.join().unwrap();
+    let evidence: worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    let agent = evidence.agent.unwrap();
+    assert!(agent.transcript_sha256.is_none() && agent.cut.is_none());
+    assert!(!fixture
+        .store
+        .run_directory(&evidence.run)
+        .unwrap()
+        .join("agent-conversation.json")
+        .exists());
+    let record = alfredo_tui::agent_view::read_record(&fixture.store, 1).unwrap();
+    assert!(record.answer.is_none() && record.cut.is_none());
+}
+
+#[tokio::test]
+async fn repair_after_a_steer_starts_fresh_and_never_replays_or_parses_the_partial() {
+    for partial in [
+        // Truncated inside a block: parsing the partial fails.
+        PARTIAL,
+        // Complete blocks only: parsing the partial would succeed.
+        "=== FILE: calc.py ===\ndef answer():\n    return 42\n=== END FILE ===\n=== FILE: notes.txt ===\nWork",
+        "=== FILE: calc.py ===\ndef answer():\n    return 42\n=== END FILE ===\n",
+    ] {
+        let fixture = Fixture::new();
+        fixture.permit();
+        let evidence = steer_after_streaming(&fixture, partial).await;
+        fixture.action(Action::Repair {
+            task: 1,
+            reason: "Owner steered the approach".into(),
+        });
+        fixture.action(Action::Approve { task: 2 });
+        let (capture, received) = std::sync::mpsc::channel();
+        let (provider, job, _) =
+            server_with_capture(good_plan(), Duration::ZERO, "return 0", Some(capture));
+        let revision = fixture.store.snapshot().unwrap().revision;
+        let (snapshot, _) = worker::start(
+            fixture.store.clone(),
+            2,
+            "after-steer".into(),
+            revision,
+            provider,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .await
+        .unwrap();
+        job.join().unwrap();
+        assert_eq!(snapshot.tasks[1].status, TaskStatus::ReviewReady);
+        let repaired: worker::Evidence =
+            serde_json::from_str(&fixture.store.evidence(2).unwrap()).unwrap();
+        let agent = repaired.agent.unwrap();
+        assert_eq!(agent.agent, repaired.run);
+        assert_ne!(agent.agent, evidence.agent.unwrap().agent);
+        assert!(agent.continued_from.is_none());
+        assert!(agent.cut.is_none() && agent.transcript_sha256.is_some());
+        assert!(agent.reason.contains("steered"), "{}", agent.reason);
+        let request = received.recv().unwrap();
+        let messages = request["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        let prompt = messages[0]["content"].as_str().unwrap();
+        assert!(!prompt.contains("PREVIOUS ATTEMPT FILES"), "{prompt}");
+        assert!(!prompt.contains("    return 42"), "{prompt}");
+    }
 }
