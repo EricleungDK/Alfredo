@@ -31,9 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.1.0] - 2026-09-30
 
-First release of the native terminal. It replaces the React/Tauri desktop app and
-Python orchestrator as the primary product; those remain in the repository as
-legacy (see `docs/legacy.md`).
+First release of the native terminal. It replaces the earlier desktop app and orchestrator.
 
 ### Added
 

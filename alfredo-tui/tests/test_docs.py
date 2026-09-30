@@ -27,13 +27,14 @@ class LinkTests(unittest.TestCase):
 
 
 class LegacyTests(unittest.TestCase):
-    def test_entry_docs_do_not_mention_removed_apps(self):
+    def test_docs_do_not_mention_removed_apps(self):
+        names = [n for n in ENTRY_DOCS if not n.startswith('.agent/')]
+        names += ['AGENTS.md', 'CONTEXT.md']
+        names += sorted(p.relative_to(ROOT).as_posix() for p in (ROOT / 'docs/agents').glob('*.md'))
         found = []
-        for name in ENTRY_DOCS:
-            if name.startswith('.agent/'):
-                continue
+        for name in names:
             text = (ROOT / name).read_text(encoding='utf-8')
-            for word in ('mission' + '-control', 'albert' + '_mvp', 'docs/' + 'legacy.md'):
+            for word in ('mission' + '-control', 'albert' + '_mvp', 'docs/' + 'legacy.md', 'Tau' + 'ri'):
                 if word in text:
                     found.append(f'{name}: {word}')
         self.assertEqual([], found)

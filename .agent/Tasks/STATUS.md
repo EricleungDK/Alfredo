@@ -30,7 +30,6 @@
 | E1 fmt/clippy/test | Done 2026-09-28 (439 tests, 11 ignored live); rerun in CI on each push |
 | E2 PTY smokes on release binary | Done 2026-09-28 (5 smokes on installed archive); the agent-view smoke was added since |
 | E3 live 2-task goal, real model | Open: not verified |
-| E4 legacy gates | Removed with the legacy apps |
 | F1 README | Done (root README leads with TUI) |
 | F2 CHANGELOG/LICENSE/notices/CI | Done locally; `main` is pushed, CI run result not recorded here |
 | F3 archive + draft release | Done 2026-09-30: `release.yml` run 36746677600 built the archive, passed the installed smoke, created the draft; owner publishes |
@@ -45,4 +44,3 @@
   `feat/ui-followups`, PR pending merge.
 - Unexplained one-off instant chat failure after warm-up (2026-09-28): left open by
   owner decision (not reproduced).
-- Legacy Python suite failures: removed with the legacy apps.

@@ -140,7 +140,7 @@ Shared capacity control for one Ollama endpoint: queued turns wait for admission
 
 ### Runtime Pin
 
-The exact runtime version and binary and configuration SHA-256 identities a promoted profile depends on.
+The observed runtime identity (version, binary and configuration SHA-256) recorded with diagnostics. Hashes do not attest the upstream runtime, and no profile is promoted yet.
 
 ### Qualification Report
 
