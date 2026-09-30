@@ -2262,3 +2262,105 @@ fn selection_arrival_preserves_destination_reading_and_waits_for_actual_selectio
     assert!(!selected.contains("selection not recorded"), "{selected}");
     assert_eq!(app.sessions[0].messages, messages);
 }
+
+fn capacity_wait_app(icons: alfredo_tui::theme::IconSet, motion: bool) -> App {
+    let mut app = App::new("fixture".into());
+    app.pane.theme = alfredo_tui::theme::Theme {
+        icons,
+        motion,
+        ..Default::default()
+    };
+    app.sessions[0].insert("Discuss this change");
+    app.sessions[0].begin().unwrap();
+    app.sessions[0].apply(1, Update::CapacityWait { live: 1 });
+    app
+}
+
+fn screen_rows(app: &App, width: u16, height: u16) -> Vec<String> {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect()
+}
+
+#[test]
+fn capacity_wait_shows_a_static_cat_with_its_text_on_one_line_when_there_is_room() {
+    use alfredo_tui::theme::IconSet;
+    let app = capacity_wait_app(IconSet::Unicode, false);
+    let rows = screen_rows(&app, 160, 30);
+    let row = rows
+        .iter()
+        .find(|row| row.contains("ฅ(=^･ω･^=)ฅ"))
+        .unwrap_or_else(|| panic!("no cat: {rows:#?}"));
+    assert!(row.contains("· · · · ฅ(=^･ω･^=)ฅ · · ·"), "{row}");
+    assert!(
+        row.contains("Waiting for another Alfredo process (capacity 1) · Esc cancel"),
+        "{row}"
+    );
+    assert!(rows.iter().any(|row| row.contains("Chat 1 · queued")));
+    // The ordinary queue wording is not claimed while only the conflict is known.
+    assert!(rows.iter().all(|row| !row.contains("queued 1/")));
+    // Static without motion: the same frame on every draw.
+    assert_eq!(rows, screen_rows(&app, 160, 30));
+}
+
+#[test]
+fn capacity_wait_cat_and_text_stack_and_clip_in_narrow_panes() {
+    use alfredo_tui::theme::IconSet;
+    let app = capacity_wait_app(IconSet::Unicode, false);
+    // Transcript-only widths: cat line above the wrapped text, never overflowing the box.
+    for width in [80u16, 60, 40, 32] {
+        let rows = screen_rows(&app, width, 20);
+        let cat = rows
+            .iter()
+            .position(|row| row.contains("ฅ(=^･ω･^=)ฅ"))
+            .unwrap_or_else(|| panic!("{width}: {rows:#?}"));
+        assert!(rows[cat].ends_with('│'), "{width}: {:?}", rows[cat]);
+        assert!(rows[cat].starts_with('│'), "{width}: {:?}", rows[cat]);
+        let joined = rows[cat + 1..]
+            .iter()
+            .map(|row| row.trim_matches(|c| c == '│' || c == ' '))
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            joined.contains("Waiting for another Alfredo")
+                && joined.contains("(capacity 1)")
+                && joined.contains("Esc cancel"),
+            "{width}: {joined}"
+        );
+    }
+    // Below the minimum size the resize notice replaces the layout; never a panic.
+    for width in [31u16, 20, 10] {
+        screen_rows(&app, width, 20);
+    }
+}
+
+#[test]
+fn capacity_wait_cat_uses_ascii_only_in_ascii_icon_mode() {
+    use alfredo_tui::theme::IconSet;
+    let app = capacity_wait_app(IconSet::Ascii, false);
+    let rows = screen_rows(&app, 160, 30);
+    let row = rows.iter().find(|row| row.contains("=^.^=")).unwrap();
+    assert!(row.contains(". . . . =^.^= . . . . . ."), "{row}");
+    assert!(rows
+        .iter()
+        .all(|row| !row.contains('ฅ') && !row.contains('ω')));
+}
+
+#[test]
+fn capacity_wait_ends_with_the_ordinary_queue_or_admission_display() {
+    use alfredo_tui::theme::IconSet;
+    let mut app = capacity_wait_app(IconSet::Unicode, false);
+    app.sessions[0].apply(1, Update::Queued);
+    let rows = screen_rows(&app, 160, 30);
+    assert!(rows.iter().all(|row| !row.contains("=^")), "{rows:#?}");
+    assert!(rows
+        .iter()
+        .all(|row| !row.contains("another Alfredo process")));
+}
