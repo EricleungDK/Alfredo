@@ -12,10 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Release workflow fetches crates before offline packaging.
 - Work tree: `/after` follow-ups appear in their plan group, not "Manual tasks".
 - Agent view: a steered run keeps its streamed partial output, shown with a dim
   `— steered at Ns · output cut` line; repairs never reuse the partial answer.
 - Agent view and live output hide markdown code fence lines.
+- Agent view: unsent drafts survive quit, crash and mission switch, per task and
+  architect; the chat draft is never replaced by an agent's note.
 - Autopilot: a follow-up adopted while the integration branch is built is no longer
   lost; the run resumes and integrates again on the next `-N` branch.
 
