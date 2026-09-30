@@ -14,15 +14,9 @@ The native terminal `alfredo-tui` is documented outside this folder:
 - [Changelog](../CHANGELOG.md) lists user-visible changes.
 - [Current status](../.agent/Tasks/STATUS.md) is the source of truth for release readiness.
 
-## Legacy desktop workstation (Albert / Mission Control)
+## Decisions
 
-Superseded by the terminal; kept for reference.
-
-- [Legacy overview](legacy.md) is the previous root README for the React/Tauri app and Python orchestrator.
-- [Architecture and design](albert-architecture.md) explains the orchestrator boundaries, runtime flow, model roles, and design constraints.
-- [MVP mapping and status](albert-mvp-status.md) maps the original product idea to implemented code.
-- [Usage guide](albert-usage.md) gives the basic commands for the Python MVP.
-- [Architecture decision records](adr/) capture the Tauri, journal and provider decisions.
+- [Architecture decision records](adr/) capture design decisions.
 
 ## Agent Configuration
 
@@ -32,4 +26,4 @@ Superseded by the terminal; kept for reference.
 
 ## Historical Sources
 
-The `.agent/` directory contains implementation reports and orchestration history; start at [.agent/README.md](../.agent/README.md). `.scratch/` is the read-only archive of tracker records migrated to GitHub on 2026-07-23. Use the docs above and GitHub Issues as the current view, then consult the archive for provenance.
+The `.agent/` directory contains implementation reports and orchestration history; start at [.agent/README.md](../.agent/README.md). Use the docs above and GitHub Issues as the current view.

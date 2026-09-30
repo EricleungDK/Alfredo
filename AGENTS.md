@@ -22,7 +22,7 @@ An explicit current user request or GitHub issue, pull-request, or scheduled-aut
 
 ### Issue tracker
 
-GitHub Issues is the authoritative tracker. Each PRD is a `[PRD]` parent issue with ordered native Issue Slice sub-issues and native dependency edges. External PRs are not a triage surface. `.scratch/` is a read-only migration archive. See `docs/agents/issue-tracker.md`.
+GitHub Issues is the authoritative tracker. Each PRD is a `[PRD]` parent issue with ordered native Issue Slice sub-issues and native dependency edges. External PRs are not a triage surface. See `docs/agents/issue-tracker.md`.
 
 ### GitHub issue instruction
 
@@ -40,14 +40,3 @@ The default five-label triage vocabulary is used unchanged. See `docs/agents/tri
 ### Domain docs
 
 This is a single-context repo with a root `CONTEXT.md`. See `docs/agents/domain.md`.
-
-### Persistent Apple container development workstation
-
-On the macOS development host, use the repository's persistent Apple `container` environment for manual browser viewing and user acceptance:
-
-```bash
-./scripts/apple-container-dev status
-./scripts/apple-container-dev start
-```
-
-The canonical browser workstation is `http://127.0.0.1:1420`. Prefer `restart` after a process-level change and leave the named `alfredo-dev` container running for the user unless they ask to stop it. Do not start a competing host `npm run dev` process on port 1420 or use Docker/Compose. Use the persistent workstation for human visual testing; continue to run focused automated checks when implementation risk requires them, but do not launch an additional browser merely to reproduce a surface the user is already inspecting unless the task specifically requires automated browser evidence.

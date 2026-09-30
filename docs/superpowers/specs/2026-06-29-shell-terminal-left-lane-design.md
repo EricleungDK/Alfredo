@@ -14,7 +14,7 @@ The Mission Commander can run governed commands, resolve required approvals, ins
 - Switching modes preserves each mode's independent local draft and visible history for the current application session.
 - The existing industrial Command Deck visual language remains: dark high-contrast surfaces, restrained lime and cyan semantic accents, dense precise information, and minimal decorative framing.
 
-The prior-art prototype is `@visualization/albert-mission-control/variant-a.html`. It defines interaction responsibilities, not production HTML, CSS, or in-memory state architecture.
+The prior-art prototype is the approved Variant A HTML prototype. It defines interaction responsibilities, not production HTML, CSS, or in-memory state architecture.
 
 ## Left-Lane Structure
 

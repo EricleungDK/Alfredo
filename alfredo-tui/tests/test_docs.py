@@ -26,6 +26,27 @@ class LinkTests(unittest.TestCase):
         self.assertEqual([], broken)
 
 
+class LegacyTests(unittest.TestCase):
+    def test_entry_docs_do_not_mention_removed_apps(self):
+        found = []
+        for name in ENTRY_DOCS:
+            if name.startswith('.agent/'):
+                continue
+            text = (ROOT / name).read_text(encoding='utf-8')
+            for word in ('mission' + '-control', 'albert' + '_mvp', 'docs/' + 'legacy.md'):
+                if word in text:
+                    found.append(f'{name}: {word}')
+        self.assertEqual([], found)
+
+    def test_legacy_docs_are_gone(self):
+        left = [p.name for p in (ROOT / 'docs').glob('*.md') if p.name == 'legacy.md' or p.name.startswith('albert-')]
+        self.assertEqual([], left)
+
+    def test_agent_index_is_not_about_the_desktop_app(self):
+        text = (ROOT / '.agent/README.md').read_text(encoding='utf-8')
+        self.assertNotIn('Tauri', text)
+
+
 class FlagTests(unittest.TestCase):
     def test_readme_documents_every_flag(self):
         source = (ROOT / 'alfredo-tui/src/main.rs').read_text(encoding='utf-8')

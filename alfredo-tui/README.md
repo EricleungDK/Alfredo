@@ -177,9 +177,6 @@ cargo build --release --locked --manifest-path alfredo-tui/Cargo.toml
 cargo install --locked --path alfredo-tui
 ```
 
-The crate compiles the shared execution provider from
-`mission-control/src-tauri/src/execution.rs`, so build from a full checkout.
-
 ## Test
 
 ```bash
