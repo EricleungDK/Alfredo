@@ -1,13 +1,8 @@
 __pycache__/
 *.py[cod]
-mission-control/node_modules/
-mission-control/dist/
-mission-control/release/out/
-mission-control/tsconfig.tsbuildinfo
 @visualization/
 .codex/
 docs/superpowers/
-mission-control/src-tauri/target/
 .superpowers/
 .DS_Store
 .pytest_cache/
