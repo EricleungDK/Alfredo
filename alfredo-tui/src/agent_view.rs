@@ -628,6 +628,26 @@ pub fn close(
         tasks.set_visible(view.previous.tasks_visible);
         tasks.planner.visible = view.previous.planner_visible;
     }
+    persist(app, tasks);
+}
+
+/// Save every unsent agent draft, including the open view's prompt, when they
+/// changed since the last save. Returns a notice the first time saving fails;
+/// the drafts stay in memory either way.
+pub fn persist(
+    app: &crate::model::App,
+    tasks: &mut crate::task_control::TaskControl,
+) -> Option<String> {
+    let mut drafts = tasks.agent_drafts.clone();
+    if let Some(view) = tasks.agent.as_ref() {
+        let open = &app.sessions[app.selected].draft;
+        if open.is_empty() {
+            drafts.remove(&view.target);
+        } else {
+            drafts.insert(view.target, open.clone());
+        }
+    }
+    tasks.agent_store.as_mut()?.sync(&drafts)
 }
 
 fn parse_target(tasks: &crate::task_control::TaskControl, word: &str) -> Result<Target, String> {

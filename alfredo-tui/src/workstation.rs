@@ -61,6 +61,9 @@ impl Workstation {
             Ok(owner) => tasks.owner = owner,
             Err(error) => app.notice = format!("{error}; file preserved, instructions start empty"),
         }
+        if let Some(notice) = tasks.load_agent_drafts(conversation) {
+            app.notice = notice;
+        }
         tasks.snapshot = Some(snapshot);
         if let Some(view) = view {
             tasks.restore_view(view)?;
@@ -152,6 +155,8 @@ impl Workstation {
         &self.conversation
     }
     fn save(&mut self, runtime: &Runtime) -> Result<(), String> {
+        // A best-effort companion save; failing to keep a draft never blocks a handoff.
+        crate::agent_view::persist(&self.app, &mut self.tasks);
         self.autosave.finish(
             runtime,
             &self.app,

@@ -138,6 +138,8 @@ pub struct TaskControl {
     pub agent: Option<crate::agent_view::View>,
     /// Unsent prompt drafts per agent target.
     pub agent_drafts: BTreeMap<crate::agent_view::Target, String>,
+    /// Where agent drafts persist; none until a conversation is loaded.
+    pub(crate) agent_store: Option<crate::agent_drafts::Store>,
     /// Retained records per task, keyed by the acknowledged evidence hash.
     pub(crate) agent_records:
         std::cell::RefCell<BTreeMap<u64, (String, crate::agent_view::Record)>>,
@@ -226,6 +228,7 @@ impl TaskControl {
             autopilot_roots: BTreeSet::new(),
             agent: None,
             agent_drafts: BTreeMap::new(),
+            agent_store: None,
             agent_records: Default::default(),
         }
     }
@@ -667,6 +670,19 @@ impl TaskControl {
                 .or_else(|| self.selected_task().map(|task| task.id)),
             query: self.task_query.clone(),
         }
+    }
+
+    /// Restore this conversation's saved agent drafts and start saving them.
+    /// Returns a notice when the saved file was unusable; drafts then start empty.
+    pub fn load_agent_drafts(&mut self, conversation: &str) -> Option<String> {
+        let directory = match self.store.conversation_directory() {
+            Ok(directory) => directory,
+            Err(error) => return Some(format!("Agent drafts unavailable: {error}")),
+        };
+        let (store, drafts, notice) = crate::agent_drafts::Store::open(&directory, conversation);
+        self.agent_drafts = drafts;
+        self.agent_store = Some(store);
+        notice
     }
 
     /// Leaving Mission Work cancels a pending evidence view choice even if the

@@ -604,6 +604,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             if pending_command.is_some() || last_save.elapsed() >= Duration::from_secs(1) {
+                if let Some(notice) = alfredo_tui::agent_view::persist(&work.app, &mut work.tasks) {
+                    work.app.notice = notice;
+                    dirty = true;
+                }
                 match work.autosave.checkpoint(
                     &runtime,
                     &work.app,
@@ -1527,7 +1531,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for job in jobs.into_iter().flatten() {
         job.abort();
     }
-    // Save the chat draft, not an agent's unsent note.
+    // Save the chat draft, not an agent's unsent note; close keeps that note in
+    // the agent drafts file.
     alfredo_tui::agent_view::close(&mut work.app, &mut work.tasks, false);
     work.tasks.cancel_all();
     for session in &mut work.app.sessions {
