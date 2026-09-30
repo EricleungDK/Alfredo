@@ -80,6 +80,27 @@ pub fn project_with(
         }
     }
 
+    // Follow-ups (`/after`) carry no receipt: they inherit the group of their
+    // first dependency, resolved in id order so chains need no recursion.
+    let mut group: BTreeMap<u64, NodeId> = BTreeMap::new();
+    for task in tasks.values() {
+        let valid_repair = task
+            .repair_of
+            .filter(|parent| *parent < task.id && tasks.contains_key(parent));
+        let found = match valid_repair {
+            Some(parent) => group.get(&parent).copied(),
+            None => membership.get(&task.id).copied().or_else(|| {
+                task.dependencies
+                    .first()
+                    .filter(|dep| **dep < task.id)
+                    .and_then(|dep| group.get(dep).copied())
+            }),
+        };
+        if let Some(found) = found {
+            group.insert(task.id, found);
+        }
+    }
+
     let query = query.trim().to_lowercase();
     let filtering = !query.is_empty();
     let mut rows = BTreeMap::new();
@@ -97,7 +118,7 @@ pub fn project_with(
             .repair_of
             .filter(|parent| *parent < task.id && tasks.contains_key(parent))
             .map(NodeId::Task)
-            .unwrap_or_else(|| membership.get(&task.id).copied().unwrap_or(NodeId::Manual));
+            .unwrap_or_else(|| group.get(&task.id).copied().unwrap_or(NodeId::Manual));
         if !matches!(parent, NodeId::Task(_)) {
             roots.insert(parent);
         }
