@@ -963,6 +963,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::F(1) if work.app.sessions[index].draft.is_empty() => {
                             work.app.completion = Some(alfredo_tui::commands::Completion::all())
                         }
+                        // The open model list owns the arrows; Enter picks unless a command is typed.
+                        KeyCode::Up if work.app.models_visible => work.app.move_model_cursor(false),
+                        KeyCode::Down if work.app.models_visible => {
+                            work.app.move_model_cursor(true)
+                        }
+                        KeyCode::Enter
+                            if work.app.models_visible
+                                && work.app.sessions[index].draft.trim().is_empty() =>
+                        {
+                            if let Err(error) = work.app.choose_model() {
+                                work.app.notice = error.into();
+                            }
+                        }
                         KeyCode::Up if work.tasks.visible && work.tasks.agent_shown().is_none() => {
                             work.tasks.select_task(false)
                         }

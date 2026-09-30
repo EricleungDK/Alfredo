@@ -1257,6 +1257,8 @@ pub struct App {
     pub models_pending: bool,
     pub models_notice: String,
     pub models_scroll: u16,
+    /// Catalog row the model list's arrow keys point at.
+    pub models_cursor: usize,
     pub completion: Option<crate::commands::Completion>,
     /// Transient server health; inert until a workstation starts its monitor.
     pub health: crate::health::HealthView,
@@ -1275,6 +1277,7 @@ impl App {
             models_pending: false,
             models_notice: String::new(),
             models_scroll: 0,
+            models_cursor: 0,
             completion: None,
             health: Default::default(),
             pane: Default::default(),
@@ -1286,16 +1289,39 @@ impl App {
         match result {
             Ok(models) => {
                 self.models = models;
+                let current = &self.sessions[self.selected].model;
+                self.models_cursor = self
+                    .models
+                    .iter()
+                    .position(|model| model == current)
+                    .unwrap_or(0);
                 self.models_notice = if self.models.is_empty() {
                     "No installed models reported".into()
                 } else {
-                    "Installed models · /model NAME selects for this conversation".into()
+                    "Installed models · ↑↓ Enter or /model NAME selects for this chat".into()
                 };
             }
             Err(error) => {
                 self.models_notice = format!("{error}; previous catalog retained · /models retries")
             }
         }
+    }
+
+    pub fn move_model_cursor(&mut self, down: bool) {
+        self.models_cursor = if down {
+            (self.models_cursor + 1).min(self.models.len().saturating_sub(1))
+        } else {
+            self.models_cursor.saturating_sub(1)
+        };
+    }
+
+    pub fn choose_model(&mut self) -> Result<(), &'static str> {
+        let name = self
+            .models
+            .get(self.models_cursor)
+            .cloned()
+            .ok_or("No installed models to choose")?;
+        self.select_model(&name)
     }
 
     pub fn select_model(&mut self, name: &str) -> Result<(), &'static str> {
