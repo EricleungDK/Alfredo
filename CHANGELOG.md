@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Side pane: other missions show `done/total` and their state (`4/7   running`).
+- `execution.rs` moved into `alfredo-tui/src`; the crate builds without the rest of
+  the repository.
+
+### Removed
+
+- Legacy desktop app (React/Tauri `mission-control/`) and Python orchestrator
+  (`albert_mvp/`), with their docs, tests, scripts and the npm publish workflow.
 
 ### Fixed
 
