@@ -24,6 +24,9 @@ pub struct Record {
     pub continued_from: Option<String>,
     pub reason: String,
     pub transcript_sha256: Option<String>,
+    /// Set when the retained answer is what streamed before the run was cut short.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cut: Option<Cut>,
 }
 impl Record {
     pub fn validate(&self, run: &str, model: &str) -> Result<()> {
@@ -81,6 +84,8 @@ struct Transcript {
     agent: String,
     model: String,
     messages: Vec<Message>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    cut: Option<Cut>,
 }
 fn valid_messages(messages: &[Message], complete: bool) -> bool {
     !messages.is_empty()
@@ -178,6 +183,12 @@ pub fn prepare(store: &TaskStore, snapshot: &Snapshot, task: &Task) -> Result<Pr
     let Some(digest) = &record.transcript_sha256 else {
         return Ok(fresh("Prior model exchange did not complete"));
     };
+    // A cut answer is partial: never replayed as the agent's earlier turn.
+    if record.cut.is_some() {
+        return Ok(fresh(
+            "Previous attempt was steered mid-answer; fresh Local Agent",
+        ));
+    }
     // The record's model equals the parent's, which equals this task's.
     let transcript = read_transcript(store, &evidence.run, &record, digest)?;
     Ok(Prepared {
@@ -209,6 +220,7 @@ fn read_transcript(
         || transcript.run != run
         || transcript.agent != record.agent
         || transcript.model != record.model
+        || transcript.cut != record.cut
         || !valid_messages(&transcript.messages, true)
     {
         return Err("Local Agent conversation binding or history is invalid".into());
@@ -217,19 +229,24 @@ fn read_transcript(
 }
 
 /// The verified final model answer of a prior run, when its exchange completed.
+/// A cut (partial) answer is never returned.
 pub fn retained_answer(store: &TaskStore, evidence: &crate::worker::Evidence) -> Option<String> {
     let record = evidence.agent.as_ref()?;
+    if record.cut.is_some() {
+        return None;
+    }
     let digest = record.transcript_sha256.as_deref()?;
     let transcript = read_transcript(store, &evidence.run, record, digest).ok()?;
     transcript.messages.last().map(|m| m.content.clone())
 }
 
-/// The verified last request and answer of a run, for the agent view. The
-/// error is one line on why the conversation is not shown.
+/// The verified last request and answer of a run, and whether that answer was
+/// cut short, for the agent view. The error is one line on why the conversation
+/// is not shown.
 pub fn retained_exchange(
     store: &TaskStore,
     evidence: &crate::worker::Evidence,
-) -> Result<(String, String)> {
+) -> Result<(String, String, Option<Cut>)> {
     let record = evidence
         .agent
         .as_ref()
@@ -249,7 +266,7 @@ pub fn retained_exchange(
         .next()
         .map(|m| m.content.clone())
         .unwrap_or_default();
-    Ok((prompt, answer))
+    Ok((prompt, answer, transcript.cut))
 }
 
 impl Prepared {
@@ -293,6 +310,7 @@ impl Prepared {
                 continued_from,
                 reason: self.reason,
                 transcript_sha256: None,
+                cut: None,
             },
             self.history,
         ))
@@ -303,8 +321,39 @@ pub fn retain(
     directory: &Path,
     run: &str,
     record: &mut Record,
+    messages: Vec<Message>,
+    answer: String,
+) -> Result<()> {
+    write(directory, run, record, messages, answer, None)
+}
+
+/// Retain what streamed of a run cut short, marked as a cut exchange. Callers
+/// retain only text actually received.
+pub fn retain_cut(
+    directory: &Path,
+    run: &str,
+    record: &mut Record,
+    messages: Vec<Message>,
+    answer: String,
+    elapsed_secs: Option<u64>,
+) -> Result<()> {
+    write(
+        directory,
+        run,
+        record,
+        messages,
+        answer,
+        Some(Cut { elapsed_secs }),
+    )
+}
+
+fn write(
+    directory: &Path,
+    run: &str,
+    record: &mut Record,
     mut messages: Vec<Message>,
     answer: String,
+    cut: Option<Cut>,
 ) -> Result<()> {
     record.validate(run, &record.model)?;
     messages.push(Message {
@@ -320,6 +369,7 @@ pub fn retain(
         agent: record.agent.clone(),
         model: record.model.clone(),
         messages,
+        cut,
     };
     let bytes = serde_json::to_vec(&transcript).map_err(|e| e.to_string())?;
     if bytes.len() > MAX_FILE {
@@ -337,6 +387,7 @@ pub fn retain(
         .and_then(|f| f.sync_all())
         .map_err(|e| e.to_string())?;
     record.transcript_sha256 = Some(format!("{:x}", Sha256::digest(&bytes)));
+    record.cut = cut;
     Ok(())
 }
 
@@ -404,6 +455,7 @@ mod tests {
             continued_from: None,
             reason: "New task".into(),
             transcript_sha256: None,
+            cut: None,
         };
         record.validate("task-1-1", "model").unwrap();
         assert!(record.validate("task-2-2", "model").is_err());

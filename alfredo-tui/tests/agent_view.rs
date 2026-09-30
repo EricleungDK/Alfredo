@@ -343,10 +343,7 @@ fn steered_attempt_shows_partial_output_then_a_dim_cut_marker() {
     rec.cut = Some(alfredo_tui::agent::Cut { elapsed_secs: None });
     steered.recorded = Some(Ok(rec.clone()));
     let turns = agent_view::project(&[steered.clone()], &[], false);
-    assert_eq!(
-        text(&turns[2]).last().unwrap(),
-        &"— steered · output cut"
-    );
+    assert_eq!(text(&turns[2]).last().unwrap(), &"— steered · output cut");
     // Nothing streamed: no worker turn and no marker to fabricate.
     rec.answer = Some(String::new());
     steered.recorded = Some(Ok(rec.clone()));

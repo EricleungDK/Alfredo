@@ -515,9 +515,9 @@ pub fn read_record(store: &crate::tasks::TaskStore, task: u64) -> Result<Recorde
             .map(|(_, tail)| tail)
             .unwrap_or_default(),
     });
-    let (prompt, answer, note) = match crate::agent::retained_exchange(store, &evidence) {
-        Ok((prompt, answer)) => (Some(prompt), Some(answer), None),
-        Err(reason) => (None, None, Some(reason)),
+    let (prompt, answer, note, cut) = match crate::agent::retained_exchange(store, &evidence) {
+        Ok((prompt, answer, cut)) => (Some(prompt), Some(answer), None, cut),
+        Err(reason) => (None, None, Some(reason), None),
     };
     Ok(Recorded {
         prompt,
@@ -525,7 +525,7 @@ pub fn read_record(store: &crate::tasks::TaskStore, task: u64) -> Result<Recorde
         check,
         detail: evidence.detail,
         note,
-        cut: None,
+        cut,
     })
 }
 

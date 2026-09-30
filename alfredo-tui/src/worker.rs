@@ -1561,9 +1561,13 @@ async fn perform(
     let mut answer = String::new();
     let mut done = false;
     let mut error = None;
+    let mut cancelled = false;
+    // From model admission, so queue waits do not count as inference time.
+    let mut inference_started = Instant::now();
     loop {
         if cancel.load(Ordering::SeqCst) {
             error = Some("Worker cancelled during inference".to_string());
+            cancelled = true;
             break;
         }
         tokio::select! {
@@ -1572,7 +1576,7 @@ async fn perform(
                 Some(Update::Thinking) => { if answer.is_empty() { observer.stage("Thinking"); } },
                 Some(Update::Queued) => observer.stage("Waiting for shared Alfredo capacity"),
                 Some(Update::QueueProgress(queue)) => observer.queue(queue),
-                Some(Update::Admitted) => observer.stage("Waiting for model server"),
+                Some(Update::Admitted) => { inference_started = Instant::now(); observer.stage("Waiting for model server"); },
                 Some(Update::Retrying(_)) => observer.stage("Reconnecting to model server"),
                 Some(Update::Token(text)) => { observer.content(&text); answer.push_str(&text); },
                 Some(Update::Done) => { done = true; break; },
@@ -1586,6 +1590,23 @@ async fn perform(
     // Confirm the provider future dropped its queue/permit before publishing Finish.
     let _ = job.await;
     if !done {
+        // A steer keeps what actually streamed, marked as a cut exchange. Nothing
+        // streamed retains nothing; the cancellation outcome is unchanged either way.
+        if let (true, false, Some(directory), Some(record)) = (
+            cancelled,
+            answer.trim().is_empty(),
+            worktree.parent(),
+            evidence.agent.as_mut(),
+        ) {
+            let _ = crate::agent::retain_cut(
+                directory,
+                &run.id,
+                record,
+                retained_messages,
+                answer,
+                Some(inference_started.elapsed().as_secs()),
+            );
+        }
         return Err(error.unwrap_or_else(|| "Worker stream ended before completion".into()));
     }
     crate::agent::retain(
