@@ -90,4 +90,6 @@ pub mod theme;
 
 pub mod agent_view;
 
+pub mod agent_drafts;
+
 pub mod instruct;

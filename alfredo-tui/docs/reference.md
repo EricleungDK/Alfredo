@@ -337,10 +337,13 @@ is not presented as a live worker. The architect appears above the tree while it
 plans or holds a draft; chats appear below it.
 
 The **missions** section lists the current mission first, then the other missions
-of this repository discovered in the state directory. Their progress is the phase
-saved in their autopilot state file (`planning`, `running`, `paused`, `done`,
-`failed`), `idle` when none exists, or `?` when unreadable; the files are read
-without locks at most every 2 s, outside drawing.
+of this repository discovered in the state directory. Their progress is
+`done/total` task families and the phase saved in their autopilot state file
+(`4/7   running`; phases `planning`, `running`, `paused`, `done`, `failed`), the
+phase alone when the file has no counts (before a plan, or written by an older
+build), `idle` when none exists, or `?` when unreadable; the files are read
+without locks at most every 2 s, outside drawing. A running loop saves its counts
+whenever one changes.
 
 With task detail on the right, Up/Down selects a task or group. Alt+Left collapses
 the current branch, or moves to its parent; Alt+Right expands it, or moves into its
@@ -363,10 +366,16 @@ saved check evidence and the live worker observation. Turns, oldest first:
 `You → worker #N` or `Autopilot → worker #N` (repairs: `→ repair #N`) with the task
 title and `files … · check …` (Ctrl+O shows the retained request text),
 `References` (read-only reference names from the request), `Worker` (the answer,
-FILE blocks as `▸ path` then code, as in the live detail), `Check` (command, bounded
+FILE blocks as `▸ path` then code, as in the live detail; markdown fence lines are
+hidden, and inside a FILE block only the fence wrapping the whole file), `Check` (command, bounded
 output tail, `✓ passed · exit 0` or `✗ failed · exit 1`), `Outcome`, then the next
 attempt. Owner notes appear as `You` turns with their effect. A legacy, missing or
 corrupt conversation shows the evidence with a one-line reason and invents nothing.
+A steered or cancelled attempt keeps what streamed before the cut: its `Worker`
+turn is that partial output, then a dim `— steered at 12s · output cut` (seconds
+from model admission; `— steered · output cut` when unknown). The exchange is
+retained marked `cut`; nothing is retained when nothing streamed. A repair after a
+cut starts a fresh Local Agent and is never given the partial answer.
 The title names the latest attempt (`Agent · worker #2 · running`,
 `Agent · repair #3 of #2 · failed`, `Agent · architect · draft`). It follows the
 tail while live; PageUp/PageDown keep the reading position like the chat.
@@ -394,6 +403,13 @@ section. The worker request of an owner-instructed repair starts with
 `OWNER INSTRUCTION (...)` and the note, above `WHAT IS STILL FAILING`. A note
 approves the inherited policy only.
 
+Unsent agent-view drafts are saved per task family and the architect in
+`agent-drafts-SHA256(conversation).json` beside it (version 1, atomic replace,
+at most 256 KiB, removed when empty) on close, every second, on mission switch and
+on quit; the chat draft is saved separately and is never replaced by an agent's
+note. An unreadable file is renamed `.json.corrupt` (then `.corrupt.1` …) with a
+notice, and drafts start empty.
+
 Instructions are saved in `owner-SHA256(conversation).json` beside the autopilot
 state (version 1, atomic replace, the last 64 finished instructions kept for the
 view) and continue after a restart by re-deriving each step from task state. While
@@ -403,8 +419,12 @@ waiting at the saved-intent barrier is withdrawn (`Withdrawn: your instruction
 decides for this task`). When both were prepared against the same revision, the
 one that lands second is refused as stale and prepared again on current state.
 Once the instructed run starts the hold ends and autopilot reviews it as usual. A
-follow-up of a task in an autopilot run joins that run; a finished run reopens and
-integrates on `alfredo/go-ID-2`, leaving the first branch unchanged.
+follow-up of a task in an autopilot run joins that run and appears in its plan
+group in the work tree; a finished run reopens and integrates on
+`alfredo/go-ID-2`, leaving the first branch unchanged. A follow-up that arrives
+while the integration branch is being built discards that build when it finishes
+(a branch it created stays, unused), then the run resumes and integrates on the
+next `-N` branch.
 
 A task row opens labeled sections: status and model, `Stage` while a worker runs,
 `Files`, `Check`, `Depends`, `Repair`, `State` (readiness when it adds to the
@@ -563,7 +583,7 @@ but running does not require the desktop or Python backend.
 | Alt+Left / Alt+Right | Collapse / expand a branch, or move to parent / child |
 | F6 | Focus the side pane (overlay below 88 columns); F6 or Escape returns to the prompt |
 | Enter in the agent view | Instruct that agent (text); slash commands still run |
-| Escape in the agent view | Return to the previous pane; the agent's draft is kept |
+| Escape in the agent view | Return to the previous pane; the agent's draft is kept, also across restarts |
 | Ctrl+O in the agent view | Expand or collapse full instruction text |
 | Up / Down, Tab, Enter in the side pane | Move, switch missions/work, open the row |
 | Left / Right | Move through Unicode grapheme clusters |

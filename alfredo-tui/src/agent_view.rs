@@ -61,6 +61,8 @@ pub struct Recorded {
     pub detail: String,
     /// One line on why the retained conversation is not shown.
     pub note: Option<String>,
+    /// The retained answer is what streamed before the run was cut short.
+    pub cut: Option<crate::agent::Cut>,
 }
 
 /// Live, process-local observation of a running worker.
@@ -252,7 +254,16 @@ pub fn project(attempts: &[Attempt], notes: &[Note], expanded: bool) -> Vec<Turn
             }
         } else if let Some(recorded) = recorded {
             if let Some(answer) = &recorded.answer {
-                let lines = code(answer);
+                let mut lines = code(answer);
+                if let (false, Some(cut)) = (lines.is_empty(), &recorded.cut) {
+                    lines.push((
+                        match cut.elapsed_secs {
+                            Some(secs) => format!("— steered at {secs}s · output cut"),
+                            None => "— steered · output cut".into(),
+                        },
+                        Tone::Dim,
+                    ));
+                }
                 if !lines.is_empty() {
                     turns.push(Turn {
                         label: "Worker".into(),
@@ -504,9 +515,9 @@ pub fn read_record(store: &crate::tasks::TaskStore, task: u64) -> Result<Recorde
             .map(|(_, tail)| tail)
             .unwrap_or_default(),
     });
-    let (prompt, answer, note) = match crate::agent::retained_exchange(store, &evidence) {
-        Ok((prompt, answer)) => (Some(prompt), Some(answer), None),
-        Err(reason) => (None, None, Some(reason)),
+    let (prompt, answer, note, cut) = match crate::agent::retained_exchange(store, &evidence) {
+        Ok((prompt, answer, cut)) => (Some(prompt), Some(answer), None, cut),
+        Err(reason) => (None, None, Some(reason), None),
     };
     Ok(Recorded {
         prompt,
@@ -514,6 +525,7 @@ pub fn read_record(store: &crate::tasks::TaskStore, task: u64) -> Result<Recorde
         check,
         detail: evidence.detail,
         note,
+        cut,
     })
 }
 
@@ -579,6 +591,7 @@ pub fn open(
     };
     session.clear_draft();
     session.insert(&tasks.agent_drafts.remove(&target).unwrap_or_default());
+    session.set_aside_draft(Some(chat_draft.clone()));
     let mut view = View::new(target, previous);
     view.chat_draft = chat_draft;
     app.models_visible = false;
@@ -612,10 +625,33 @@ pub fn close(
     }
     session.clear_draft();
     session.insert(&view.chat_draft);
+    for session in &mut app.sessions {
+        session.set_aside_draft(None);
+    }
     if restore {
         tasks.set_visible(view.previous.tasks_visible);
         tasks.planner.visible = view.previous.planner_visible;
     }
+    persist(app, tasks);
+}
+
+/// Save every unsent agent draft, including the open view's prompt, when they
+/// changed since the last save. Returns a notice the first time saving fails;
+/// the drafts stay in memory either way.
+pub fn persist(
+    app: &crate::model::App,
+    tasks: &mut crate::task_control::TaskControl,
+) -> Option<String> {
+    let mut drafts = tasks.agent_drafts.clone();
+    if let Some(view) = tasks.agent.as_ref() {
+        let open = &app.sessions[app.selected].draft;
+        if open.is_empty() {
+            drafts.remove(&view.target);
+        } else {
+            drafts.insert(view.target, open.clone());
+        }
+    }
+    tasks.agent_store.as_mut()?.sync(&drafts)
 }
 
 fn parse_target(tasks: &crate::task_control::TaskControl, word: &str) -> Result<Target, String> {
