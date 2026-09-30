@@ -904,7 +904,7 @@ impl Ollama {
         sender: &Sender<Event>,
         progress: &mut FrameProgress,
         trace: &mut Trace,
-    ) -> Result<bool, String> {
+    ) -> Result<bool, Failure> {
         if bytes.iter().all(u8::is_ascii_whitespace) {
             return Ok(false);
         }
@@ -916,7 +916,14 @@ impl Ollama {
                 .filter(|c| !c.is_control())
                 .take(300)
                 .collect();
-            return Err(format!("Ollama: {safe}"));
+            let error = format!("Ollama: {safe}");
+            // Transient server errors before any output may be retried; a
+            // missing model never recovers by retrying.
+            return Err(if safe.to_lowercase().contains("not found") {
+                Failure::Final(error)
+            } else {
+                progress.failure(&error)
+            });
         }
         if frame.message.is_none() && !frame.done {
             return Err("Ollama frame has neither message nor completion".into());
@@ -981,7 +988,7 @@ impl Ollama {
                     .map_err(|_| "Terminal closed")?;
             }
             if frame.done_reason.as_deref() == Some("length") {
-                return Err(format!("Model output hit the {}-token limit; partial reply retained. Shorten the request or choose another model before retrying", self.num_predict));
+                return Err(format!("Model output hit the {}-token limit; partial reply retained. Shorten the request or choose another model before retrying", self.num_predict).into());
             }
             if trace.recording.is_none() {
                 sender
