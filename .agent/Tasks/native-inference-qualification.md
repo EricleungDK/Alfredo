@@ -133,12 +133,12 @@ records the 357-test full native pass (7 opt-in ignored), followed by 48 final f
 library/runner/oracle checks, strict Clippy, formatting and all 5 installed tests.
 The final fixture-v2 archive source and payload hashes match the checkout.
 
-The [original fixture-v1 diagnostic](../Reports/2026-09-27-inference-fixture-v1-diagnostic.json)
+The original fixture-v1 diagnostic
 stopped after 4 cases, with no accepted work and one 240-second scenario cancellation.
 Its worker criteria omitted exact behavior checked by the oracle. Actual worker
 transcripts reproduced the omission; fixture-v2 criteria now carry the complete
 contract independently of planner task titles, verified through captured HTTP.
-The [corrected fixture-v2 diagnostic](../Reports/2026-09-27-inference-fixture-v2-diagnostic.json)
+The corrected fixture-v2 diagnostic
 completed all 8 cases and 16 dispatched generations. One required-source candidate
 reached canonical acceptance in 19,241 ms. Port parsing still admitted Unicode digits;
 baseline reference work modified pinned source; repair plans did not retain the seed
