@@ -591,6 +591,7 @@ pub fn open(
     };
     session.clear_draft();
     session.insert(&tasks.agent_drafts.remove(&target).unwrap_or_default());
+    session.set_aside_draft(Some(chat_draft.clone()));
     let mut view = View::new(target, previous);
     view.chat_draft = chat_draft;
     app.models_visible = false;
@@ -624,10 +625,33 @@ pub fn close(
     }
     session.clear_draft();
     session.insert(&view.chat_draft);
+    for session in &mut app.sessions {
+        session.set_aside_draft(None);
+    }
     if restore {
         tasks.set_visible(view.previous.tasks_visible);
         tasks.planner.visible = view.previous.planner_visible;
     }
+    persist(app, tasks);
+}
+
+/// Save every unsent agent draft, including the open view's prompt, when they
+/// changed since the last save. Returns a notice the first time saving fails;
+/// the drafts stay in memory either way.
+pub fn persist(
+    app: &crate::model::App,
+    tasks: &mut crate::task_control::TaskControl,
+) -> Option<String> {
+    let mut drafts = tasks.agent_drafts.clone();
+    if let Some(view) = tasks.agent.as_ref() {
+        let open = &app.sessions[app.selected].draft;
+        if open.is_empty() {
+            drafts.remove(&view.target);
+        } else {
+            drafts.insert(view.target, open.clone());
+        }
+    }
+    tasks.agent_store.as_mut()?.sync(&drafts)
 }
 
 fn parse_target(tasks: &crate::task_control::TaskControl, word: &str) -> Result<Target, String> {

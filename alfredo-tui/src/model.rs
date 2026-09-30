@@ -159,6 +159,10 @@ pub struct Session {
     history_index: Option<usize>,
     #[serde(skip)]
     unsent: Option<(String, usize)>,
+    /// Chat draft set aside while an agent view owns the prompt; snapshots save
+    /// this, never the agent's note.
+    #[serde(skip)]
+    aside: Option<String>,
 }
 
 impl Session {
@@ -184,6 +188,7 @@ impl Session {
             history: Vec::new(),
             history_index: None,
             unsent: None,
+            aside: None,
         }
     }
 
@@ -278,6 +283,11 @@ impl Session {
             snapshot.draft = draft.clone();
             snapshot.cursor = *cursor;
         }
+        if let Some(chat) = &self.aside {
+            snapshot.draft = chat.clone();
+            snapshot.cursor = chat.len();
+        }
+        snapshot.aside = None;
         snapshot.queued = false;
         snapshot.queue_observation = None;
         snapshot.thinking = false;
@@ -359,6 +369,11 @@ impl Session {
                 self.cursor = cursor;
             }
         }
+    }
+
+    /// Record the chat draft an agent view set aside (None once it is restored).
+    pub fn set_aside_draft(&mut self, chat: Option<String>) {
+        self.aside = chat;
     }
 
     pub fn clear_draft(&mut self) {
