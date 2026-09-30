@@ -15,13 +15,10 @@ Plans live in [Tasks/](Tasks/README.md); runnable commands in
 
 ## Structure
 
-- `System/`: architecture, persistence, UX notes.
+- `System/`: architecture.
 - `Tasks/`: [status](Tasks/STATUS.md), [roadmap](Tasks/README.md), plans, historical `context.md`.
 - `SOP/`: [development workflow](SOP/development_workflow.md), [database migrations](SOP/database_migrations.md).
 - `Reports/`: dated evidence (JSON/Markdown) for the terminal.
-- `issues/`: archived PRD and Issue Slice records; GitHub Issues is authoritative.
 
 - [Domain terminology](../CONTEXT.md)
 - [Project architecture](System/project_architecture.md)
-- [Persistence schema](System/database_schema.md)
-- [UX guidelines](System/ux_guidelines.md)

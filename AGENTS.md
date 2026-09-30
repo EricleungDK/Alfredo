@@ -3,22 +3,13 @@
 
 Before planning or implementing any change:
 
-1. Read `.agent/README.md`.
-2. Read `.agent/Tasks/context.md`.
-3. Read the relevant docs under `.agent/System/`, `.agent/SOP/`, and `.agent/Tasks/`.
-4. If there is no active planning artifact, read the relevant GitHub PRD parent and its Issue Slice sub-issues.
+1. Read `.agent/README.md` and `.agent/Tasks/STATUS.md` (current state; `.agent/Tasks/context.md` is a historical log, not a source of truth).
+2. Read the relevant docs under `.agent/System/`, `.agent/SOP/`, and `.agent/Tasks/`.
+3. If there is no active planning artifact, read the relevant GitHub PRD parent and its Issue Slice sub-issues.
 
-This repository uses `.agent/Tasks/context.md` as the source of truth for agent orchestration:
+Update `.agent/Tasks/STATUS.md` after significant work changes durable project state.
 
-- The active mission/issue slice focus.
-- Active model roles and assignments for this cycle.
-- Pending blockers, risks, approvals, and next actions.
-- A short log of local orchestration-relevant decisions.
-
-Before planning or coding, verify `.agent/Tasks/context.md` contains a fresh `## Active Orchestration Context` section for this run. If the block is stale or incomplete, update it first when the run changes durable project orchestration state. A bounded scheduled-maintenance run may use its explicit GitHub trigger as the current run context and must not create a context-only change when its correct outcome is no change.
-After significant planning or implementation, update `.agent/Tasks/context.md` with any changes to the above before returning to coding.
-
-An explicit current user request or GitHub issue, pull-request, or scheduled-automation trigger is the authority for that run. Completed-run restrictions retained in an older orchestration block are historical constraints, not standing prohibitions on a newly authorized run. Preserve their factual history, but do not let stale `do not push`, `do not create a pull request`, or similar wording override the current trigger.
+An explicit current user request or GitHub issue, pull-request, or scheduled-automation trigger is the authority for that run. Completed-run restrictions retained in older notes are historical constraints, not standing prohibitions on a newly authorized run. Preserve their factual history, but do not let stale `do not push`, `do not create a pull request`, or similar wording override the current trigger.
 
 ### Issue tracker
 

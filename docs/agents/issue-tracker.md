@@ -50,7 +50,3 @@ GitHub shares one number space across issues and pull requests. If a bare `#42` 
 When a skill says "publish to the issue tracker", create a GitHub issue. When publishing a PRD, create the `[PRD]` parent first; when publishing its tickets, attach and order the Issue Slice sub-issues and create their native blocker edges.
 
 When a skill says "fetch the relevant ticket", run `gh issue view <number> --comments`. For a PRD, also inspect its native sub-issues and dependency relationships.
-
-## Migration manifest
-
-The frozen migration manifest is `.agent/Tasks/github-issue-migration.json`. It records the 2026-07-23 import and is not a second tracker; GitHub overrides it.
