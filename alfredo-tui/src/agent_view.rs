@@ -61,6 +61,8 @@ pub struct Recorded {
     pub detail: String,
     /// One line on why the retained conversation is not shown.
     pub note: Option<String>,
+    /// The retained answer is what streamed before the run was cut short.
+    pub cut: Option<crate::agent::Cut>,
 }
 
 /// Live, process-local observation of a running worker.
@@ -252,7 +254,16 @@ pub fn project(attempts: &[Attempt], notes: &[Note], expanded: bool) -> Vec<Turn
             }
         } else if let Some(recorded) = recorded {
             if let Some(answer) = &recorded.answer {
-                let lines = code(answer);
+                let mut lines = code(answer);
+                if let (false, Some(cut)) = (lines.is_empty(), &recorded.cut) {
+                    lines.push((
+                        match cut.elapsed_secs {
+                            Some(secs) => format!("— steered at {secs}s · output cut"),
+                            None => "— steered · output cut".into(),
+                        },
+                        Tone::Dim,
+                    ));
+                }
                 if !lines.is_empty() {
                     turns.push(Turn {
                         label: "Worker".into(),
@@ -514,6 +525,7 @@ pub fn read_record(store: &crate::tasks::TaskStore, task: u64) -> Result<Recorde
         check,
         detail: evidence.detail,
         note,
+        cut: None,
     })
 }
 

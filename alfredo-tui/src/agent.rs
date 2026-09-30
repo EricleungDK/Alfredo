@@ -64,6 +64,15 @@ impl Record {
         )
     }
 }
+/// A run cut short (steered or cancelled) while its answer streamed. What was
+/// received is retained as an explicitly partial exchange, never as a completed one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cut {
+    /// Whole seconds from model admission to the cut, when known.
+    pub elapsed_secs: Option<u64>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Transcript {

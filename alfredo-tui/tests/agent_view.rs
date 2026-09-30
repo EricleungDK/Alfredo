@@ -51,6 +51,7 @@ fn recorded(passed: bool) -> Recorded {
             "Check completed (exit 1): stderr: FAILED".into()
         },
         note: None,
+        cut: None,
     }
 }
 
@@ -230,6 +231,7 @@ fn missing_or_corrupt_conversation_shows_evidence_with_a_note_and_never_fabricat
         check: None,
         detail: "Model returned no FILE blocks".into(),
         note: Some("No retained conversation for this run".into()),
+        cut: None,
     }));
     let turns = agent_view::project(&[legacy], &[], true);
     assert_eq!(labels(&turns), ["Autopilot → worker #1", "Outcome"]);
@@ -306,4 +308,53 @@ fn worker_turn_hides_markdown_fences_but_keeps_code_under_path_headings() {
     let turns = agent_view::project(&[running], &[], false);
     let worker = turns.iter().find(|turn| turn.label == "Worker").unwrap();
     assert_eq!(text(worker), ["▸ greet.py"]);
+}
+
+#[test]
+fn steered_attempt_shows_partial_output_then_a_dim_cut_marker() {
+    let mut steered = attempt(1, TaskStatus::Cancelled);
+    let mut rec = recorded(false);
+    rec.check = None;
+    rec.detail = "Worker cancelled during inference".into();
+    rec.answer = Some("=== FILE: greet.py ===\n```python\ndef greet(name):\n    ret".into());
+    rec.cut = Some(alfredo_tui::agent::Cut {
+        elapsed_secs: Some(12),
+    });
+    steered.recorded = Some(Ok(rec.clone()));
+    let turns = agent_view::project(&[steered.clone()], &[], false);
+    assert_eq!(
+        labels(&turns),
+        ["Autopilot → worker #1", "References", "Worker", "Outcome"]
+    );
+    assert_eq!(
+        text(&turns[2]),
+        [
+            "▸ greet.py",
+            "def greet(name):",
+            "    ret",
+            "— steered at 12s · output cut"
+        ]
+    );
+    assert_eq!(turns[2].lines.last().unwrap().1, Tone::Dim);
+    assert_eq!(turns[2].lines[0].1, Tone::Path);
+    // The outcome still follows.
+    assert!(text(&turns[3])[0].starts_with("– Cancelled"));
+    // Elapsed unavailable: no invented number.
+    rec.cut = Some(alfredo_tui::agent::Cut { elapsed_secs: None });
+    steered.recorded = Some(Ok(rec.clone()));
+    let turns = agent_view::project(&[steered.clone()], &[], false);
+    assert_eq!(
+        text(&turns[2]).last().unwrap(),
+        &"— steered · output cut"
+    );
+    // Nothing streamed: no worker turn and no marker to fabricate.
+    rec.answer = Some(String::new());
+    steered.recorded = Some(Ok(rec.clone()));
+    let turns = agent_view::project(&[steered.clone()], &[], false);
+    assert!(!labels(&turns).contains(&"Worker"));
+    // Output hidden by the display rules only (a lone fence) is not shown either.
+    rec.answer = Some("```".into());
+    steered.recorded = Some(Ok(rec));
+    let turns = agent_view::project(&[steered], &[], false);
+    assert!(!labels(&turns).contains(&"Worker"));
 }
