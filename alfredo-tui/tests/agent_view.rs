@@ -277,3 +277,33 @@ fn titles_name_the_current_attempt() {
     );
     assert_eq!(agent_view::title(&[]), "Agent");
 }
+
+#[test]
+fn worker_turn_hides_markdown_fences_but_keeps_code_under_path_headings() {
+    let mut first = attempt(1, TaskStatus::Failed);
+    let mut rec = recorded(false);
+    rec.answer = Some(
+        "Sure:\n=== FILE: greet.py ===\n```python\ndef greet(name):\n    return name\n```\n=== END FILE ===\n"
+            .into(),
+    );
+    first.recorded = Some(Ok(rec));
+    let turns = agent_view::project(&[first], &[], false);
+    let worker = turns.iter().find(|turn| turn.label == "Worker").unwrap();
+    assert_eq!(
+        text(worker),
+        ["Sure:", "▸ greet.py", "def greet(name):", "    return name"]
+    );
+    // A live partial fence line is hidden until it is complete.
+    let mut running = attempt(2, TaskStatus::Running);
+    running.live = Some(Live {
+        stage: "generating".into(),
+        prompt: None,
+        output: "=== FILE: greet.py ===\n```pyth".into(),
+        check_output: String::new(),
+        checking: false,
+        cancelling: false,
+    });
+    let turns = agent_view::project(&[running], &[], false);
+    let worker = turns.iter().find(|turn| turn.label == "Worker").unwrap();
+    assert_eq!(text(worker), ["▸ greet.py"]);
+}

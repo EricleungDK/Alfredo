@@ -6433,3 +6433,38 @@ fn fence_fallback_never_rescues_a_truncated_or_malformed_file_block_answer() {
     let json = "{\"files\": [ ```\nx\n```";
     assert!(worker::parse_answer_for(json, &one).is_err());
 }
+
+#[test]
+fn display_output_hides_markdown_fence_lines_and_partial_fences() {
+    // Wrapper fences inside a FILE block: code shows plain under its heading.
+    let wrapped = "=== FILE: a.py ===\n```python\nx = 1\n```\n=== END FILE ===\n";
+    assert_eq!(worker::display_output(wrapped), "▸ a.py\nx = 1\n");
+    // Fence-only and prose answers hide every fence line, keep the prose.
+    assert_eq!(
+        worker::display_output("Here you go:\n```python\nx = 1\n```\r\nDone.\n"),
+        "Here you go:\nx = 1\nDone.\n"
+    );
+    // A partial fence line stays hidden until complete; complete lines show.
+    for partial in ["`", "``", "```", "```pyth"] {
+        assert_eq!(worker::display_output(&format!("a\n{partial}")), "a\n");
+    }
+    assert_eq!(worker::display_output("a\n```py\n"), "a\n");
+    assert_eq!(worker::display_output("a\n`x` is code"), "a\n`x` is code");
+    // Backticks inside a line are content, not a fence.
+    assert_eq!(
+        worker::display_output("use ```x``` here\n"),
+        "use ```x``` here\n"
+    );
+    // Fences inside a file's own content (a markdown file) are content.
+    let markdown = "=== FILE: R.md ===\n# T\n```sh\nmake\n```\n=== END FILE ===\n";
+    assert_eq!(
+        worker::display_output(markdown),
+        "▸ R.md\n# T\n```sh\nmake\n```\n"
+    );
+    // The same file wrapped in an outer fence keeps its nested fence.
+    let nested = "=== FILE: R.md ===\n```markdown\n# T\n```sh\nmake\n```\n```\n=== END FILE ===\n";
+    assert_eq!(
+        worker::display_output(nested),
+        "▸ R.md\n# T\n```sh\nmake\n```\n"
+    );
+}
