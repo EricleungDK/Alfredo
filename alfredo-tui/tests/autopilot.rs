@@ -1854,3 +1854,207 @@ fn finished_report_reads_as_labeled_sections_and_the_footer_uses_wide_gaps() {
         "{screen}"
     );
 }
+
+fn followup_server() -> Server {
+    Server::new(|request, _| {
+        if planner(request) {
+            return json!({"tasks": [
+                {"title": "Make answer return 42", "acceptance": ["answer() returns 42"], "model": "fixture",
+                 "dependencies": [], "policy": {"files": ["calc.py"], "check": check("from calc import answer; assert answer() == 42")}},
+            ]})
+            .to_string();
+        }
+        if worker_prompt(request).starts_with("Implement this task: Write notes") {
+            files("notes.txt", "follow-up\n")
+        } else {
+            good_calc()
+        }
+    })
+}
+
+/// The owner's follow-up task: proposed, permitted and approved through the store.
+fn owner_followup(fixture: &Fixture) -> u64 {
+    let snapshot = fixture.store.snapshot().unwrap();
+    let id = snapshot.tasks.iter().map(|task| task.id).max().unwrap() + 1;
+    let mut revision = snapshot.revision;
+    for (name, action) in [
+        (
+            "propose",
+            Action::Propose {
+                title: "Write notes".into(),
+                model: "fixture".into(),
+                dependencies: vec![],
+            },
+        ),
+        (
+            "permit",
+            Action::Permit {
+                task: id,
+                policy: alfredo_tui::tasks::WorkPolicy {
+                    files: vec!["notes.txt".into()],
+                    check: vec![
+                        "/usr/bin/python3".into(),
+                        "-B".into(),
+                        "-c".into(),
+                        "from pathlib import Path; assert Path('notes.txt').read_text()".into(),
+                    ],
+                },
+            },
+        ),
+        ("approve", Action::Approve { task: id }),
+    ] {
+        fixture
+            .store
+            .transact(Request {
+                correlation: format!("followup-{name}"),
+                expected_revision: revision,
+                action,
+            })
+            .unwrap();
+        revision = fixture.store.snapshot().unwrap().revision;
+    }
+    id
+}
+
+/// The terminal adopts a follow-up it already read from the store.
+fn observe(control: &mut TaskControl, runtime: &Runtime, task: u64) {
+    control.refresh(runtime);
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while control.pending
+        || !control
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .tasks
+            .iter()
+            .any(|t| t.id == task)
+    {
+        control.poll();
+        assert!(Instant::now() < deadline, "refresh: {}", control.notice);
+        thread::sleep(Duration::from_millis(1));
+    }
+}
+
+fn integrating(autopilot: &Autopilot, control: &TaskControl) -> bool {
+    autopilot
+        .status(control)
+        .is_some_and(|status| status.state == RunState::Finishing)
+}
+
+#[test]
+fn follow_up_adopted_while_the_branch_is_built_is_not_lost() {
+    let fixture = Fixture::new();
+    let server = followup_server();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start("Answer", "fixture", 1, &control).unwrap();
+    // Stops after the integration job spawned, before autopilot ever polls it.
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "integrating",
+        integrating,
+    );
+    let follow = owner_followup(&fixture);
+    observe(&mut control, &runtime, follow);
+    assert!(autopilot.adopt(follow));
+    drive(&mut autopilot, &mut control, &runtime, "done", |a, c| {
+        finished(a, c) && c.workers.is_empty()
+    });
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!(status.state, RunState::Done, "{status:?}");
+    assert_eq!((status.done, status.total), (2, 2), "{status:?}");
+    let branch = status.branch.expect("integration branch");
+    assert!(branch.ends_with("-2"), "new integration round: {branch}");
+    assert_eq!(
+        git(
+            &fixture.workspace,
+            &["show", &format!("{branch}:notes.txt")]
+        ),
+        "follow-up"
+    );
+    assert_eq!(
+        git(&fixture.workspace, &["show", &format!("{branch}:calc.py")]),
+        "def answer():\n    return 42"
+    );
+    assert_eq!(starts(&fixture.store.snapshot().unwrap(), follow), 1);
+}
+
+#[test]
+fn follow_up_adopted_while_integrating_survives_a_restart_before_the_job_completes() {
+    let fixture = Fixture::new();
+    let server = followup_server();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start("Answer", "fixture", 1, &control).unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "integrating",
+        integrating,
+    );
+    let follow = owner_followup(&fixture);
+    assert!(autopilot.adopt(follow));
+    drop(autopilot);
+    drop(control);
+    let mut control = self::control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Paused);
+    autopilot.resume(&control).unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "done", |a, c| {
+        finished(a, c) && c.workers.is_empty()
+    });
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!((status.done, status.total), (2, 2), "{status:?}");
+    let branch = status.branch.expect("integration branch");
+    assert_eq!(
+        git(
+            &fixture.workspace,
+            &["show", &format!("{branch}:notes.txt")]
+        ),
+        "follow-up"
+    );
+}
+
+fn peeked(fixture: &Fixture) -> Option<(&'static str, Option<(u32, u32)>)> {
+    let peek = autopilot::peek(&autopilot::state_path(&fixture.directory(), "default")).unwrap()?;
+    Some((peek.word, peek.counts))
+}
+
+#[test]
+fn saved_state_carries_done_and_total_for_read_only_peeks_of_other_missions() {
+    let fixture = Fixture::new();
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return two_task_plan();
+        }
+        if worker_prompt(request).starts_with("Implement this task: Add app") {
+            app()
+        } else {
+            good_calc()
+        }
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    assert_eq!(peeked(&fixture), None);
+    autopilot.start("Answer", "fixture", 1, &control).unwrap();
+    // No plan yet: no counts, the state word alone.
+    assert_eq!(peeked(&fixture).map(|peek| peek.1), Some(None));
+    let seen = std::cell::RefCell::new(vec![]);
+    drive(&mut autopilot, &mut control, &runtime, "done", |_, _| {
+        let now = peeked(&fixture).and_then(|peek| peek.1);
+        if now.is_some() && seen.borrow().last() != Some(&now) {
+            seen.borrow_mut().push(now);
+        }
+        now == Some((2, 2)) && peeked(&fixture).is_some_and(|peek| peek.0 == "done")
+    });
+    let seen = seen.into_inner();
+    assert!(seen.contains(&Some((0, 2))), "{seen:?}");
+    assert!(seen.contains(&Some((1, 2))), "{seen:?}");
+    assert_eq!(seen.last(), Some(&Some((2, 2))), "{seen:?}");
+}
