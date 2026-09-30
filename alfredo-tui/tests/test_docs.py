@@ -26,6 +26,37 @@ class LinkTests(unittest.TestCase):
         self.assertEqual([], broken)
 
 
+class LegacyTests(unittest.TestCase):
+    def test_docs_do_not_mention_removed_apps(self):
+        names = [n for n in ENTRY_DOCS if not n.startswith('.agent/')]
+        names += ['AGENTS.md', 'CONTEXT.md']
+        names += sorted(p.relative_to(ROOT).as_posix() for p in (ROOT / 'docs/agents').glob('*.md'))
+        found = []
+        for name in names:
+            text = (ROOT / name).read_text(encoding='utf-8')
+            for word in ('mission' + '-control', 'albert' + '_mvp', 'docs/' + 'legacy.md', 'Tau' + 'ri'):
+                if word in text:
+                    found.append(f'{name}: {word}')
+        self.assertEqual([], found)
+
+    def test_legacy_docs_are_gone(self):
+        left = [p.name for p in (ROOT / 'docs').glob('*.md') if p.name == 'legacy.md' or p.name.startswith('albert-')]
+        self.assertEqual([], left)
+
+    def test_agent_index_is_not_about_the_desktop_app(self):
+        text = (ROOT / '.agent/README.md').read_text(encoding='utf-8')
+        self.assertNotIn('Tauri', text)
+
+
+class GlossaryTests(unittest.TestCase):
+    def test_context_is_about_the_terminal(self):
+        text = (ROOT / 'CONTEXT.md').read_text(encoding='utf-8')
+        for term in ('Frontier', 'Orchestrator', 'Mission Commander', 'Command Deck', 'Albert'):
+            self.assertNotIn(term, text)
+        for term in ('Autopilot', 'Wayfinder', 'Mission', 'Worker'):
+            self.assertIn(f'### {term}', text)
+
+
 class FlagTests(unittest.TestCase):
     def test_readme_documents_every_flag(self):
         source = (ROOT / 'alfredo-tui/src/main.rs').read_text(encoding='utf-8')

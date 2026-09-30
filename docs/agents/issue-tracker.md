@@ -19,8 +19,6 @@ The GitHub hierarchy preserves the useful directory shape of the former local tr
 - Blocking relationships use GitHub's native issue dependencies. Body text may explain a dependency, but it is not the authoritative edge.
 - A PRD may itself be a sub-issue of a larger PRD when the product hierarchy requires it.
 
-The PRD parent is the GitHub equivalent of `.scratch/<feature-slug>/`; its ordered child list is the equivalent of that directory's `issues/` folder.
-
 ## Common operations
 
 - Create an issue: `gh issue create --title "..." --body-file <file> --label "..."`
@@ -52,13 +50,3 @@ GitHub shares one number space across issues and pull requests. If a bare `#42` 
 When a skill says "publish to the issue tracker", create a GitHub issue. When publishing a PRD, create the `[PRD]` parent first; when publishing its tickets, attach and order the Issue Slice sub-issues and create their native blocker edges.
 
 When a skill says "fetch the relevant ticket", run `gh issue view <number> --comments`. For a PRD, also inspect its native sub-issues and dependency relationships.
-
-## Local migration archive
-
-`.scratch/` retains the source Markdown imported on 2026-07-23. It is a read-only provenance archive, not a second tracker:
-
-- Do not create new PRDs, Issue Slices, comments, or status changes there.
-- Do not use archived Markdown state to override GitHub.
-- Do not delete the archive until the team makes a separate retention decision.
-
-The frozen migration manifest is `.agent/Tasks/github-issue-migration.json`. The historical importer and reconciler are `scripts/migrate_local_issues_to_github.py`. Do not run `--apply` after cutover as an ongoing synchronization mechanism: it treats archived Markdown as expected state and could overwrite legitimate GitHub changes. Likewise, `--reconcile` compares GitHub with the migration snapshot and is expected to report later GitHub lifecycle changes.

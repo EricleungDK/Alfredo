@@ -79,8 +79,7 @@ PTY coding/restart/repair journey. Python is a build/test dependency only.
 The GitHub workflow builds and retains a candidate artifact after these checks;
 remote CI has not been observed in this local run. Current qualification is Linux
 x86-64 GNU on this build host; older glibc, other operating systems, dependency
-license review and full product acceptance remain open. This does not replace the
-existing desktop npm distribution.
+license review and full product acceptance remain open.
 
 Responses identify their source separately from their text: the requested model name,
 or Wayfinder with a scope receipt reference when one was acknowledged. Labels survive
@@ -171,7 +170,7 @@ history. Choosing the current mission records **Already current** without reopen
 
 ## Run
 
-Requires Rust 1.96+ and an interactive terminal. No Node, Python, Tauri or browser
+Requires Rust 1.96+ and an interactive terminal. No Node, Python or browser
 is involved in this binary. Coding workers currently require Linux, Git, Bubblewrap
 and prlimit; an approved check may itself require its named interpreter or tool. Ollama and the selected model are needed to send prompts;
 the terminal opens even when the model server is unavailable.
@@ -287,8 +286,7 @@ are mutually exclusive, and the repository is still validated. A mission flag wi
 remains noninteractive and uses current directory / `default` when flags are absent. `--state-dir DIR`
 or `ALFREDO_STATE_DIR` selects task storage, defaulting to `$HOME/.local/state/alfredo`.
 State must be outside the coding workspace. Each canonical workspace/mission pair
-gets an independent `rust-tasks-v1/<sha256>/tasks.json`. Legacy Python mission
-stores are not read or modified.
+gets an independent `rust-tasks-v1/<sha256>/tasks.json`.
 
 `--conversation NAME` selects a named conversation set within that workspace/mission
 (default: `default`). Each set restores up to eight conversations. One terminal
@@ -569,9 +567,7 @@ require inspection. Recovery does not establish that surviving child processes h
 stopped or authorize worktree reuse or cleanup. Checks can leave untracked build
 output in the retained worktree. Full runner recovery remains in the migration plan.
 
-The binary compiles the shared Rust execution provider from
-`mission-control/src-tauri/src/execution.rs`; building requires the source checkout,
-but running does not require the desktop or Python backend.
+The crate is self-contained: the execution provider lives in `src/execution.rs`.
 
 | Key | Action |
 | --- | --- |
@@ -801,7 +797,7 @@ review that state and submit `/scope` followed by JSON, for example:
 Each field is required and bounded to 2 KiB. The draft becomes pending across all
 missions sharing this workspace and native runtime. Review it and use
 `/scope-confirm REVISION` with its displayed draft revision. Confirmation records
-Mission Commander agreement only; it creates no plan, approval, agent or invocation.
+owner agreement only; it creates no plan, approval, agent or invocation.
 A replacement draft requires fresh confirmation. `/scope-retry` repeats the exact
 last scope write after an uncertain acknowledgment; `/tasks` returns to supervision.
 
@@ -814,8 +810,7 @@ Absent native scope state means outside this explicit flow, never inferred confi
 
 The journal is bounded to 256 receipts / 1 MiB and reserves space for confirmation
 before accepting each draft. Malformed, future or inconsistent state fails closed
-for new governed work. This native journal does not import or govern the desktop's
-Wayfinder state or older binaries. Automatic first-contact classification, planner
+for new governed work. This native journal does not import or govern older binaries' state. Automatic first-contact classification, planner
 brief/provenance binding and full Wayfinder/mission-formation parity remain open.
 
 Task details show the last observed scope state and include pending scope in task

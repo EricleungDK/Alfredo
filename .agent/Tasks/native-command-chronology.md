@@ -3,7 +3,7 @@
 Date: 2026-09-20
 Status: partially implemented; prepared task/scope/run/branch/recovery intents and save barrier integrated; remaining adapters and complete lifecycle acceptance remain open
 Authority: current Rust rewrite goal; Agent Console chronology requirements in
-[UX guidelines](../System/ux_guidelines.md); current orchestration in
+UX guidelines; current orchestration in
 [context](context.md).
 
 ## Required outcome

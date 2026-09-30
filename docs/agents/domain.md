@@ -22,7 +22,7 @@ This is a single-context repo:
 
 ## Use the glossary's vocabulary
 
-When output names a domain concept, use the term as defined in `CONTEXT.md`. Avoid drifting to synonyms for established terms such as Frontier Model, Local Agent, Orchestrator, Evidence Package, Plan Grill Gate, Product Requirements Document, Issue Slice, and Issue Graph.
+When output names a domain concept, use the term as defined in `CONTEXT.md`. Avoid drifting to synonyms for established terms such as Mission, Task, Local Agent, Architect, Worker, Evidence, Review, Repair, Autopilot, and Wayfinder.
 
 ## Flag ADR conflicts
 

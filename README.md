@@ -91,8 +91,7 @@ Chat works without the worker tools; only coding tasks need them.
 
 ## Install
 
-From source (needs the full checkout; the build includes
-`mission-control/src-tauri/src/execution.rs`):
+From source:
 
 ```bash
 git clone https://github.com/EricleungDK/Alfredo.git
@@ -254,12 +253,6 @@ Version 0.1.0, early. The terminal, autopilot, agent view and release packaging 
 in place; a live end-to-end run on a real model and the first tagged release are still
 open (see [STATUS](.agent/Tasks/STATUS.md)). Bug reports and reproductions are welcome
 as [issues](https://github.com/EricleungDK/Alfredo/issues).
-
-## Legacy
-
-This repository also contains an earlier desktop workstation (React/Tauri
-`mission-control/` with a Python orchestrator `albert_mvp/`). It is no longer the
-primary product. Its documentation is in [docs/legacy.md](docs/legacy.md).
 
 ## License
 
