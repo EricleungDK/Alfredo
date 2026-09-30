@@ -146,7 +146,7 @@ not provide the new exclusion guarantee.
 The explicit /scope flow introduces a separate workspace-scoped journal; it does not
 upgrade old task/conversation state. Missing native state is
 outside the flow, not confirmed. Pending and confirmed projections must replay from
-revisioned Mission Commander receipts. Unknown versions or corrupt state refuse new
+revisioned owner receipts. Unknown versions or corrupt state refuse new
 governed work unchanged. Lock ordering is understanding before task namespace; exact
 replays and completion/review/cancellation remain distinct from new planning authority.
 Draft admission reserves count and encoded-byte capacity for its confirmation.
@@ -176,7 +176,7 @@ this binding does not yet provide scope provenance for every task-formation path
 The existing `rust-understanding-v1` namespace now accepts schema 1 or 2. V2 adds an
 optional flow (Chart/Work-through and originating prompt) and an Enter action with
 fixed `wayfinder-alfredo` actor. Only entry can create a flow, at revision zero; later
-Draft/Confirm receipts remain Mission Commander actions and retain that flow. Receipt
+Draft/Confirm receipts remain owner actions and retain that flow. Receipt
 replay verifies mode, prompt, brief, confirmation and revision. Entry cannot confirm
 its placeholder brief; a separate four-field Draft must precede Confirm.
 

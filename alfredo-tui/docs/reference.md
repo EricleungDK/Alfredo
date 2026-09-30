@@ -797,7 +797,7 @@ review that state and submit `/scope` followed by JSON, for example:
 Each field is required and bounded to 2 KiB. The draft becomes pending across all
 missions sharing this workspace and native runtime. Review it and use
 `/scope-confirm REVISION` with its displayed draft revision. Confirmation records
-Mission Commander agreement only; it creates no plan, approval, agent or invocation.
+owner agreement only; it creates no plan, approval, agent or invocation.
 A replacement draft requires fresh confirmation. `/scope-retry` repeats the exact
 last scope write after an uncertain acknowledgment; `/tasks` returns to supervision.
 
