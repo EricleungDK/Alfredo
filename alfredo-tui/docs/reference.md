@@ -403,6 +403,13 @@ section. The worker request of an owner-instructed repair starts with
 `OWNER INSTRUCTION (...)` and the note, above `WHAT IS STILL FAILING`. A note
 approves the inherited policy only.
 
+Unsent agent-view drafts are saved per task family and the architect in
+`agent-drafts-SHA256(conversation).json` beside it (version 1, atomic replace,
+at most 256 KiB, removed when empty) on close, every second, on mission switch and
+on quit; the chat draft is saved separately and is never replaced by an agent's
+note. An unreadable file is renamed `.json.corrupt` (then `.corrupt.1` …) with a
+notice, and drafts start empty.
+
 Instructions are saved in `owner-SHA256(conversation).json` beside the autopilot
 state (version 1, atomic replace, the last 64 finished instructions kept for the
 view) and continue after a restart by re-deriving each step from task state. While
@@ -576,7 +583,7 @@ but running does not require the desktop or Python backend.
 | Alt+Left / Alt+Right | Collapse / expand a branch, or move to parent / child |
 | F6 | Focus the side pane (overlay below 88 columns); F6 or Escape returns to the prompt |
 | Enter in the agent view | Instruct that agent (text); slash commands still run |
-| Escape in the agent view | Return to the previous pane; the agent's draft is kept |
+| Escape in the agent view | Return to the previous pane; the agent's draft is kept, also across restarts |
 | Ctrl+O in the agent view | Expand or collapse full instruction text |
 | Up / Down, Tab, Enter in the side pane | Move, switch missions/work, open the row |
 | Left / Right | Move through Unicode grapheme clusters |
