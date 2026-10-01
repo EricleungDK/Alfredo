@@ -788,21 +788,40 @@ fn draw_right(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: R
             Line::from("Workers: /assign ID MODEL · fresh approval required"),
             Line::default(),
         ];
-        lines.extend(app.models.iter().map(|name| {
-            Line::from(format!(
-                "{} {}",
+        let header = lines.len();
+        lines.extend(app.models.iter().enumerate().map(|(row, name)| {
+            let text = format!(
+                "{} {} {}",
+                if row == app.models_cursor { "▸" } else { " " },
                 if *name == session.model { "›" } else { " " },
                 safe(name)
-            ))
+            );
+            if row == app.models_cursor {
+                Line::styled(
+                    text,
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
+            } else {
+                Line::from(text)
+            }
         }));
+        // PageUp/PageDown scroll freely; the cursor row is always kept in view.
+        let cursor = (header + app.models_cursor) as u16;
+        let inner = area.height.saturating_sub(2).max(1);
+        let scroll = if app.models.is_empty() {
+            app.models_scroll
+        } else {
+            app.models_scroll
+                .min(cursor)
+                .max((cursor + 1).saturating_sub(inner))
+        };
         frame.render_widget(
-            Paragraph::new(lines)
-                .wrap(Wrap { trim: false })
-                .scroll((app.models_scroll, 0))
-                .block(frame_block(
-                    area,
-                    " Models · /model NAME · Esc close ".into(),
-                )),
+            Paragraph::new(lines).scroll((scroll, 0)).block(frame_block(
+                area,
+                " Models · ↑↓ choose · Enter select · Esc close ".into(),
+            )),
             area,
         );
     }

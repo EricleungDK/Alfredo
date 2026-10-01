@@ -1060,6 +1060,14 @@ impl TaskControl {
         })
     }
 
+    /// System message for a plain chat turn: Alfredo's role plus this mission's
+    /// task records and verified patches.
+    pub fn chat_context(&self) -> crate::model::Message {
+        crate::chat_context::system_message(self.snapshot.as_ref(), |task| {
+            self.store.evidence(task).ok()
+        })
+    }
+
     /// Compact verified outcome for a finished task. Evidence is read and verified
     /// through the store once per acknowledged evidence hash, then cached.
     pub fn outcome(&self, task: &crate::tasks::Task) -> Option<OutcomeLines> {

@@ -247,8 +247,9 @@ presence does not prove sandbox permission. Actual worker execution remains subj
 to the normal permission and sandbox checks. An occupied named conversation is
 reported as a storage issue; choose another `--conversation` when appropriate.
 
-Use `/models` to load installed models from the configured server, then `/model NAME`
-to select one for the current conversation. PageUp/PageDown scroll the catalog;
+Use `/models` to load installed models from the configured server, then Up/Down and
+Enter (or `/model NAME`) to select one for the current conversation. `▸` marks the
+cursor and `›` the conversation's model. PageUp/PageDown scroll the catalog;
 Escape closes it. Discovery runs asynchronously with a ten-second total deadline,
 a 1 MiB response bound and at most 256 entries. Errors retain the previous catalog
 and can be retried with `/models`. Listing a model does not prove it is loaded or
@@ -1415,7 +1416,7 @@ clearing your draft or moving its reading position. A “recorded run” means t
 saved task is Running but this terminal does not own its worker; inspect its
 retained evidence rather than assuming it is active or safe to replay.
 
-The chat console now shows **Observed task receipt** entries for newly observed task acknowledgments, including exact revision/correlation and phase. These are local observation positions, not claims about who requested an action. Model input remains conversation text only. Old receipts stay in F4 Activity; saved observation references survive restart. Receipt updates wait for an active selected model turn to finish so streaming does not insert blocks into the reading position.
+The chat console now shows **Observed task receipt** entries for newly observed task acknowledgments, including exact revision/correlation and phase. These are local observation positions, not claims about who requested an action. Receipts themselves are not sent; instead each ordinary chat turn (outside Wayfinder) starts with a system message naming Alfredo's role and this mission's task records: goal, status, files, check, outcome and verified patch (newest first, 3 KiB per patch, 16 KiB total). The records are reference data, not instructions, and are not saved in the conversation. Old receipts stay in F4 Activity; saved observation references survive restart. Receipt updates wait for an active selected model turn to finish so streaming does not insert blocks into the reading position.
 
 Task mutations, scope changes, explicit worker starts, branch creation and recovery now save their immutable command intent before dispatch. The console keeps the command and matching receipt in its originating session. Interrupted commands restore as unconfirmed without automatic replay. `/retry-command SESSION:COMMAND` explicitly retries a saved command number, including from another session; the exact intent and origin remain unchanged. `/retry-task` can use the selected session's latest unresolved saved command after restart. Planner generation and worker controls also use saved intent, with their separate outcomes described below.
 
