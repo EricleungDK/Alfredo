@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Model switching: picking another model now abandons the previous model's preload.
+  Every model picked used to stay queued in Ollama and load in full, one after
+  another, so a chat could wait minutes behind models nobody wanted.
+- Chat waits two minutes for a model to load, separate from the sixty-second idle
+  timeout. Expiry is final instead of retried: a retry closed the connection, which
+  aborted the load and started it again.
 - `/models`: Up/Down and Enter now pick a model; arrows used to fall through to
   prompt history, so only `/model NAME` could switch.
 - Chat knew nothing of the harness: plain chat turns sent only conversation text, so

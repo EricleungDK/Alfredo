@@ -610,7 +610,9 @@ the queue to inspect committed state after an interrupted save.
 
 Cancelling closes the client request; it does not claim that the server has
 unloaded the model or stopped all inference. A request has a five-second connection
-timeout, sixty-second loading/idle timeout and ten-minute total deadline. Keyboard
+timeout, two-minute loading deadline (final, never retried: a retry would restart
+the load), sixty-second idle timeout and ten-minute total deadline. Choosing another
+model abandons the previous model's preload. Keyboard
 input and rendering remain separate from inference. Completion requires Ollama's
 `done` marker; EOF alone is a failure. There is no automatic replay. Drafts are
 limited to 16 KiB, conversations to 128 KiB, frames to 64 KiB, and the event channel
