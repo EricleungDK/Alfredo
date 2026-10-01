@@ -127,6 +127,8 @@ pub struct Ollama {
     client: reqwest::Client,
     endpoint: reqwest::Url,
     idle_timeout: Duration,
+    /// Wait for response headers, which Ollama sends only once the model is loaded.
+    loading_deadline: Duration,
     format: Option<serde_json::Value>,
     /// Planner/worker output: sends the thinking policy and sampling temperature,
     /// with or without a schema.
@@ -249,6 +251,7 @@ impl Ollama {
             client,
             endpoint,
             idle_timeout,
+            loading_deadline: idle_timeout,
             format: None,
             structured: false,
             structured_thinking: Some(false),
@@ -282,6 +285,14 @@ impl Ollama {
         }
         self.connect_retries = retries;
         Ok(self)
+    }
+
+    /// Loading deadline separate from the idle deadline (default: the same).
+    /// Expiry is final: a retry would close the connection, abort the server's
+    /// load and start it again.
+    pub fn with_loading_deadline(mut self, deadline: Duration) -> Self {
+        self.loading_deadline = deadline;
+        self
     }
 
     /// First backoff delay; each later retry doubles it.
@@ -795,11 +806,13 @@ impl Ollama {
             .post(self.endpoint.clone())
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(payload);
-        let mut response = match tokio::time::timeout(self.idle_timeout, request.send()).await {
+        let mut response = match tokio::time::timeout(self.loading_deadline, request.send()).await
+        {
             Err(_) => {
-                return Err(Failure::BeforeContent(
-                    "Ollama did not respond before the loading deadline".into(),
-                ))
+                return Err(Failure::Final(format!(
+                    "Ollama did not respond before the {}s loading deadline; it may be busy with another model",
+                    self.loading_deadline.as_secs()
+                )))
             }
             Ok(Err(_)) => {
                 return Err(Failure::BeforeContent(

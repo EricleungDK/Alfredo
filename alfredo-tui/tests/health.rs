@@ -154,6 +154,48 @@ async fn preload_reports_loading_then_warm_and_failure_is_only_status() {
 }
 
 #[tokio::test]
+async fn choosing_another_model_abandons_the_superseded_preload() {
+    let abandoned = Arc::new(AtomicBool::new(false));
+    let flag = abandoned.clone();
+    let fixture = serve(reserve(), move |request, _| match request.path.as_str() {
+        "GET /api/ps" => running(&[]),
+        "POST /api/generate" if request.body["model"] == "first" => Reply::Hold(flag.clone()),
+        "POST /api/generate" => Reply::Json(200, "{\"done\":true,\"done_reason\":\"load\"}".into()),
+        _ => Reply::Json(404, "{}".into()),
+    });
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(3)).unwrap();
+    let monitor = Monitor::start(
+        &tokio::runtime::Handle::current(),
+        provider,
+        Duration::from_millis(40),
+    );
+    let view = monitor.view();
+    wait_for(&view, "first", |state| *state == Health::Up).await;
+    view.preload("first");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while fixture.count("POST /api/generate") == 0 {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Re-selecting the model already loading keeps its one request.
+    view.preload("first");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(fixture.count("POST /api/generate"), 1);
+    assert!(!abandoned.load(Ordering::SeqCst));
+    // The server would otherwise load every model ever picked, one by one.
+    view.preload("second");
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !abandoned.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < deadline,
+            "superseded preload still holds its connection"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(fixture.count("POST /api/generate"), 2);
+}
+
+#[tokio::test]
 async fn dropping_the_monitor_stops_polling_and_preloads() {
     let fixture = serve(reserve(), |_, _| running(&[]));
     let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(3)).unwrap();

@@ -67,10 +67,16 @@ struct State {
     fixed: Option<Health>,
 }
 
+#[derive(Default)]
+struct Tasks {
+    poll: Option<JoinHandle<()>>,
+    preload: Option<JoinHandle<()>>,
+}
+
 struct Control {
     handle: Handle,
     provider: Ollama,
-    tasks: Mutex<Vec<JoinHandle<()>>>,
+    tasks: Mutex<Tasks>,
 }
 
 #[derive(Default)]
@@ -140,8 +146,9 @@ impl HealthView {
         changed
     }
 
-    /// Warm `model` in the background. Replaces an earlier preload; failure is
-    /// recorded as status only. No-op without a running monitor.
+    /// Warm `model` in the background. Aborts an earlier preload of another
+    /// model, so the server drops that load instead of finishing it first;
+    /// failure is recorded as status only. No-op without a running monitor.
     pub fn preload(&self, model: &str) {
         let Some(control) = &self.inner.control else {
             return;
@@ -150,6 +157,16 @@ impl HealthView {
         if self.inner.state.lock().unwrap().stopped {
             return;
         }
+        let loading = tasks
+            .preload
+            .as_ref()
+            .is_some_and(|task| !task.is_finished());
+        if loading && self.inner.state.lock().unwrap().preloading.as_deref() == Some(model) {
+            return;
+        }
+        if let Some(task) = tasks.preload.take() {
+            task.abort();
+        }
         let model = model.to_string();
         self.inner.update(|state| {
             state.preloading = Some(model.clone());
@@ -157,8 +174,7 @@ impl HealthView {
         });
         let inner = self.inner.clone();
         let provider = control.provider.clone();
-        tasks.retain(|task| !task.is_finished());
-        tasks.push(control.handle.spawn(async move {
+        tasks.preload = Some(control.handle.spawn(async move {
             let result = provider.preload(&model).await;
             let running = provider.running_models().await.ok();
             inner.update(|state| {
@@ -216,7 +232,7 @@ impl Monitor {
             }
         });
         if let Some(control) = &inner.control {
-            control.tasks.lock().unwrap().push(task);
+            control.tasks.lock().unwrap().poll = Some(task);
         }
         Self {
             view: HealthView {
@@ -237,7 +253,7 @@ impl Drop for Monitor {
             // Same lock order as preload(): no task can be added after this.
             let mut tasks = control.tasks.lock().unwrap();
             self.view.inner.update(|state| state.stopped = true);
-            for task in tasks.drain(..) {
+            for task in tasks.poll.take().into_iter().chain(tasks.preload.take()) {
                 task.abort();
             }
         }

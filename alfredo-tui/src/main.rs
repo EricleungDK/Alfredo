@@ -205,6 +205,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("--qualification-repetitions requires --qualify-inference".into());
     }
     let provider = Ollama::new(&endpoint, Duration::from_secs(60))?
+        .with_loading_deadline(Duration::from_secs(120))
         .with_parallelism(parallel_models)?
         .with_structured_thinking(structured_thinking)
         .with_worker_format(worker_format)
