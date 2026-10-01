@@ -17,6 +17,8 @@ pub enum Reply {
     Stream(Vec<Vec<u8>>, Duration),
     /// Drop the connection without any response bytes.
     Close,
+    /// Never answer; set the flag once the client closes the connection.
+    Hold(Arc<AtomicBool>),
 }
 
 #[derive(Clone, Debug)]
@@ -153,6 +155,11 @@ where
     };
     match handler(&request, index) {
         Reply::Close => {}
+        Reply::Hold(closed) => {
+            if matches!(stream.read(&mut byte), Ok(0)) {
+                closed.store(true, Ordering::SeqCst);
+            }
+        }
         Reply::Json(status, body) => {
             let _ = stream.write_all(
                 format!(
