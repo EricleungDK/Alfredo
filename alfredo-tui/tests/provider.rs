@@ -676,6 +676,37 @@ async fn refused_connection_before_content_retries_with_backoff_until_server_sta
 }
 
 #[tokio::test]
+async fn slow_model_load_outlasts_the_idle_deadline_within_the_loading_deadline() {
+    let fixture = serve(reserve(), |_, _| {
+        thread::sleep(Duration::from_millis(300));
+        done("loaded")
+    });
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_millis(50))
+        .unwrap()
+        .with_loading_deadline(Duration::from_secs(3));
+    let events = run(&provider).await;
+    assert!(matches!(events.last().unwrap().update, Update::Done));
+    assert_eq!(fixture.count("POST /api/chat"), 1);
+}
+
+#[tokio::test]
+async fn loading_deadline_is_final_so_a_retry_never_restarts_the_load() {
+    let fixture = serve(reserve(), |_, _| {
+        thread::sleep(Duration::from_millis(400));
+        done("too late")
+    });
+    let provider = retrying(&fixture.endpoint, 3, Duration::from_millis(10))
+        .with_loading_deadline(Duration::from_millis(100));
+    let events = run(&provider).await;
+    assert!(retries(&events).is_empty());
+    assert!(matches!(
+        &events.last().unwrap().update,
+        Update::Failed(reason) if reason.contains("loading deadline")
+    ));
+    assert_eq!(fixture.count("POST /api/chat"), 1);
+}
+
+#[tokio::test]
 async fn server_errors_and_resets_before_content_are_retried() {
     let fixture = serve(reserve(), |_, index| match index {
         0 => Reply::Json(503, "{\"error\":\"loading model\"}".into()),
