@@ -114,3 +114,17 @@ fn insert_reports_truncation_only_when_the_limit_cut_text() {
     assert_eq!((tab.accepted, tab.truncated), (0, true));
     assert_eq!(editor.draft.len(), MAX_DRAFT - 3);
 }
+
+#[test]
+fn a_multibyte_character_straddling_the_limit_is_dropped_whole_and_lone_cr_is_stripped() {
+    let mut editor = Session::new("fixture".into());
+    editor.insert(&"a".repeat(MAX_DRAFT - 3));
+    let result = editor.insert("🦀");
+    assert_eq!((result.accepted, result.truncated), (0, true));
+    assert_eq!(editor.draft.len(), MAX_DRAFT - 3);
+    assert!(editor.draft.chars().all(|c| c == 'a'));
+    editor.clear_draft();
+    let result = editor.insert("a\rb\r\nc");
+    assert_eq!(editor.draft, "ab\nc");
+    assert!(!result.truncated);
+}

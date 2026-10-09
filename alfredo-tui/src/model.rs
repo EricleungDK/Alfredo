@@ -3,17 +3,20 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 pub const MAX_TEXT: usize = 128 * 1024;
+pub const MAX_DRAFT: usize = 16 * 1024;
+pub const MAX_SESSIONS: usize = 8;
+pub const MAX_MESSAGES: usize = 4096;
+/// Notice shown when a paste is cut by [`MAX_DRAFT`]. Typed keys show no notice.
+pub const PASTE_TRUNCATED_NOTICE: &str = "Paste truncated to 16 KiB";
+
 /// Outcome of [`Session::insert`]: bytes kept after sanitizing, and whether the
 /// 16 KiB draft limit cut the input short.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Inserted {
+    /// Bytes (not characters) added to the draft.
     pub accepted: usize,
     pub truncated: bool,
 }
-
-pub const MAX_DRAFT: usize = 16 * 1024;
-pub const MAX_SESSIONS: usize = 8;
-pub const MAX_MESSAGES: usize = 4096;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -1494,7 +1494,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Paste(text) => {
                     work.app.completion = None;
                     if work.app.sessions[work.app.selected].insert(&text).truncated {
-                        work.app.notice = "Paste truncated to 16 KiB".into();
+                        work.app.notice = alfredo_tui::model::PASTE_TRUNCATED_NOTICE.into();
                     }
                 }
                 _ => {}

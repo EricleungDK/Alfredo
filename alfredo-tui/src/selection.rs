@@ -621,7 +621,7 @@ pub fn choose_in_terminal(
             Event::Paste(text) => {
                 let inserted = input.insert(&text);
                 if inserted.truncated {
-                    notice = "Paste truncated to 16 KiB".into();
+                    notice = crate::model::PASTE_TRUNCATED_NOTICE.into();
                 }
             }
             _ => {}
