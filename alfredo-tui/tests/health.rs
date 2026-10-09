@@ -197,7 +197,10 @@ async fn choosing_another_model_abandons_the_superseded_preload() {
 
 #[tokio::test]
 async fn dropping_the_monitor_stops_polling_and_preloads() {
-    let fixture = serve(reserve(), |_, _| running(&[]));
+    let fixture = serve(reserve(), |request, _| match request.path.as_str() {
+        "GET /api/tags" => running(&["fixture"]),
+        _ => running(&[]),
+    });
     let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(3)).unwrap();
     let monitor = Monitor::start(
         &tokio::runtime::Handle::current(),
@@ -272,4 +275,44 @@ fn header_renders_server_health_at_narrow_and_wide_widths() {
         assert!(line.contains("ALFREDO"));
         assert_eq!(line.chars().count(), 80);
     }
+}
+
+#[tokio::test]
+async fn selected_model_missing_from_the_catalog_is_flagged_in_the_header() {
+    let fixture = serve(reserve(), |request, _| match request.path.as_str() {
+        "GET /api/ps" => running(&[]),
+        "GET /api/tags" => running(&["qwen2.5-coder:14b"]),
+        _ => Reply::Json(404, "{}".into()),
+    });
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(3)).unwrap();
+    let monitor = Monitor::start(
+        &tokio::runtime::Handle::current(),
+        provider,
+        Duration::from_millis(40),
+    );
+    let view = monitor.view();
+    let state = wait_for(&view, "qwen3:14b", |state| {
+        matches!(state, Health::Missing { .. })
+    })
+    .await;
+    assert_eq!(
+        state,
+        Health::Missing {
+            model: "qwen3:14b".into()
+        }
+    );
+    // Installed models, including an untagged name that means `:latest`, are fine.
+    assert_eq!(view.state("qwen2.5-coder:14b"), Health::Up);
+    let mut app = App::new("qwen3:14b".into());
+    app.health = HealthView::observed(state);
+    let wide = header(&app, 140);
+    assert!(
+        wide.contains("model qwen3:14b not installed · /models or ollama pull qwen3:14b"),
+        "{wide}"
+    );
+    assert!(!wide.contains("ollama ✓"), "{wide}");
+    let narrow = header(&app, 80);
+    assert!(narrow.contains("model not installed · /models"), "{narrow}");
+    assert!(!narrow.contains("ollama ✓"), "{narrow}");
+    assert_eq!(narrow.chars().count(), 80);
 }

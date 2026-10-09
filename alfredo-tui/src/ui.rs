@@ -270,10 +270,12 @@ fn health_span(app: &App, width: u16) -> Span<'static> {
     health
         .label(side_pane::short_model(&session.model), width >= 100)
         .map(|label| {
-            let tone = if health.healthy() {
-                Tone::Green
-            } else {
+            let tone = if !health.healthy() {
                 Tone::Red
+            } else if health.needs_attention() {
+                Tone::Amber
+            } else {
+                Tone::Green
             };
             Span::styled(format!(" {label} "), Style::default().fg(theme.color(tone)))
         })
