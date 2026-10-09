@@ -1732,22 +1732,33 @@ fn validate_resource_wrapper<'a>(
 /// not a defect in the worker's code, so it is never repaired.
 pub const SANDBOX_UNAVAILABLE: &str = "sandbox-unavailable";
 
-/// Reserved run-detail prefix that carries a `SANDBOX_UNAVAILABLE` failure
-/// through the string-valued run record.
-const SANDBOX_DETAIL_PREFIX: &str = "sandbox unavailable: ";
-
-/// Run detail for a provider failure; sandbox start failures keep their type.
-pub fn provider_failure_detail(failure: &StructuredFailure) -> String {
-    if failure.code == SANDBOX_UNAVAILABLE {
-        format!("{SANDBOX_DETAIL_PREFIX}{}", failure.message)
-    } else {
-        failure.message.clone()
+/// True when `receipt` shows the sandbox itself never started the check: the
+/// provider could not spawn Bubblewrap, or Bubblewrap refused its own setup
+/// (user namespaces, uid map, AppArmor) before any check output. Only this
+/// start stage counts; an ordinary failing check is never reclassified.
+pub fn sandbox_unavailable_receipt(receipt: &ExecutionReceipt) -> bool {
+    match receipt.status.as_str() {
+        "start-failed" => receipt.error_code == "provider-start-failed",
+        "failed" => {
+            receipt.exit_code == Some(1)
+                && receipt.stdout.is_empty()
+                && receipt.stderr.lines().next().is_some_and(|line| {
+                    line.strip_prefix("bwrap: ").is_some_and(|reason| {
+                        [
+                            "No permissions",
+                            "namespace",
+                            "uid map",
+                            "gid map",
+                            "Operation not permitted",
+                            "Permission denied",
+                        ]
+                        .iter()
+                        .any(|marker| reason.contains(marker))
+                    })
+                })
+        }
+        _ => false,
     }
-}
-
-/// The root cause when `detail` records a sandbox that could not start.
-pub fn sandbox_unavailable_cause(detail: &str) -> Option<&str> {
-    detail.strip_prefix(SANDBOX_DETAIL_PREFIX)
 }
 
 fn validate_prepared_argv(request: &ExecutionRequest) -> Result<(), StructuredFailure> {
@@ -2175,22 +2186,63 @@ mod tests {
     }
 
     #[test]
-    fn untrusted_bubblewrap_is_a_typed_sandbox_failure_that_survives_the_run_detail() {
+    fn untrusted_bubblewrap_is_a_typed_sandbox_failure() {
         let mut request = test_request("shadow-rust-no-bwrap");
         request.argv[0] = "/tmp/bwrap".to_owned();
         let failure = RustExecutionProvider::validate_request(&request)
             .expect_err("a bwrap outside the trusted install must be refused");
         assert_eq!(failure.code, SANDBOX_UNAVAILABLE);
-        let detail = provider_failure_detail(&failure);
-        assert_eq!(
-            sandbox_unavailable_cause(&detail),
-            Some("execution provider requires a trusted Bubblewrap executable")
-        );
-        let other = StructuredFailure::new("contract-failure", "other");
-        assert_eq!(
-            sandbox_unavailable_cause(&provider_failure_detail(&other)),
-            None
-        );
+    }
+
+    #[test]
+    fn only_sandbox_start_stage_receipts_are_unavailable() {
+        let request = test_request("shadow-rust-sandbox-receipt");
+        let receipt = |status: &str, exit: Option<i32>, stderr: &str, code: &str| {
+            ExecutionReceipt::make(
+                &request,
+                status,
+                exit,
+                Vec::new(),
+                stderr.as_bytes().to_vec(),
+                status != "start-failed",
+                false,
+                code,
+                "message",
+                None,
+                String::new(),
+            )
+            .expect("receipt")
+        };
+        assert!(sandbox_unavailable_receipt(&receipt(
+            "start-failed",
+            Some(127),
+            "",
+            "provider-start-failed"
+        )));
+        assert!(sandbox_unavailable_receipt(&receipt(
+            "failed",
+            Some(1),
+            "bwrap: No permissions to create new namespace\n",
+            "nonzero-exit"
+        )));
+        assert!(!sandbox_unavailable_receipt(&receipt(
+            "failed",
+            Some(1),
+            "assertion failed\nbwrap: No permissions to create new namespace\n",
+            "nonzero-exit"
+        )));
+        assert!(!sandbox_unavailable_receipt(&receipt(
+            "failed",
+            Some(2),
+            "bwrap: No permissions to create new namespace\n",
+            "nonzero-exit"
+        )));
+        assert!(!sandbox_unavailable_receipt(&receipt(
+            "failed",
+            Some(1),
+            "test failed\n",
+            "nonzero-exit"
+        )));
     }
 
     #[test]

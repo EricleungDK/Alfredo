@@ -65,6 +65,7 @@ fn evidence(patch: &str) -> String {
         agent: None,
         candidate_commit: None,
         model_metrics: None,
+        failure_code: None,
         generation: None,
         run: "run-2".into(),
         baseline: "a".repeat(40),

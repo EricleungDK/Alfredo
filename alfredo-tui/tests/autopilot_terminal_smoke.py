@@ -139,9 +139,9 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         return subprocess.run(['git', '-C', str(self.workspace), *args], env=self.git_env, check=True,
                               timeout=10, capture_output=True, text=True).stdout.strip()
 
-    def terminal(self, resume):
+    def terminal(self, resume, env=None):
         terminal = Terminal(self.binary, self.fixture.endpoint, self.workspace, self.state,
-                            'autopilot', resume=resume)
+                            'autopilot', resume=resume, env=env)
         self.terminals.append(terminal)
         self.screen_has(terminal, 'ALFREDO')
         return terminal
@@ -249,16 +249,7 @@ class AutopilotTerminalSmoke(unittest.TestCase):
 
     def test_go_without_bubblewrap_is_refused_with_the_fix_and_makes_no_model_calls(self):
         missing = str(self.workspace.parent / 'no-such-bwrap')
-        previous = os.environ.get('ALFREDO_TEST_BWRAP_PATH')
-        os.environ['ALFREDO_TEST_BWRAP_PATH'] = missing
-
-        def restore():
-            if previous is None:
-                os.environ.pop('ALFREDO_TEST_BWRAP_PATH', None)
-            else:
-                os.environ['ALFREDO_TEST_BWRAP_PATH'] = previous
-        self.addCleanup(restore)
-        terminal = self.terminal(resume=False)
+        terminal = self.terminal(resume=False, env={'ALFREDO_TEST_BWRAP_PATH': missing})
         terminal.send('/go Make answer return 42\r')
         self.screen_has(terminal, 'sudo apt install bubblewrap')
         time.sleep(0.5)

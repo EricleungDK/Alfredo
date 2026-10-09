@@ -11,7 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Without a usable `/usr/bin/bwrap`, `/go`, `--go` and `/run` now refuse at once with
   `Coding workers need bubblewrap: sudo apt install bubblewrap` (no planning or repair
   model calls). A sandbox start failure mid-run is classified as an environment
-  failure: autopilot stops without spending `--max-repairs` and the summary Reason
+  failure (typed `failure_code` in the run evidence; covers a refused or unspawnable
+  bwrap and a namespace/uid-map setup refusal): autopilot stops without spending
+  `--max-repairs`, even at 0, and the summary Reason
   quotes the cause. `--doctor` and the preflight share one executable probe.
 - In a repository with no commits, `/go` now stops at once (no planning retries) and
   says to make an initial commit; the launch footer and `--doctor` give the same fix.

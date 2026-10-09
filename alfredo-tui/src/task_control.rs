@@ -2749,6 +2749,7 @@ mod evidence_refresh_tests {
             agent: None,
             candidate_commit: None,
             model_metrics: None,
+            failure_code: None,
             generation: None,
             run: run.id.clone(),
             baseline: run.baseline.clone(),

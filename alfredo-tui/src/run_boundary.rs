@@ -125,7 +125,7 @@ pub(crate) fn interrupted_before_check(path: &Path, task: &Task) -> Result<Evide
         agent: None,
         run: run.id.clone(), baseline: run.baseline.clone(), status: TaskStatus::Failed,
         detail: "Worker interrupted before check launch; partial work retained, patch not reconstructed. Propose a repair and approve it separately; no effects replayed".into(),
-        patch: String::new(), candidate_commit: None, model_metrics: None, generation: None, check: None,
+        patch: String::new(), candidate_commit: None, model_metrics: None, failure_code: None, generation: None, check: None,
     })
 }
 /// Called only under the stopped-owner guard by explicit recovery. Never overwrites evidence.
@@ -519,6 +519,39 @@ pub fn execute_check(
     request: &ExecutionRequest,
     callbacks: &mut ExecutionCallbacks<'_>,
 ) -> Result<ExecutionReceipt> {
+    execute_check_classified(path, task, mission, request, callbacks).map_err(|e| e.message)
+}
+
+/// A check that could not run, with the provider's failure code when it has one.
+#[derive(Debug)]
+pub struct CheckError {
+    pub message: String,
+    pub code: Option<&'static str>,
+}
+
+impl From<String> for CheckError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            code: None,
+        }
+    }
+}
+
+impl From<&str> for CheckError {
+    fn from(message: &str) -> Self {
+        message.to_owned().into()
+    }
+}
+
+/// `execute_check` that keeps the typed provider failure code (sandbox start).
+pub fn execute_check_classified(
+    path: &Path,
+    task: &Task,
+    mission: &str,
+    request: &ExecutionRequest,
+    callbacks: &mut ExecutionCallbacks<'_>,
+) -> std::result::Result<ExecutionReceipt, CheckError> {
     if task.status != TaskStatus::Running {
         return Err("Task is not running".into());
     }
@@ -550,7 +583,11 @@ pub fn execute_check(
     let bytes = write_bounded(&path.join("check-launch-intent.json"), &intent, MAX_INTENT)?;
     let receipt = RustExecutionProvider::new()
         .execute_with_callbacks(request, callbacks)
-        .map_err(|e| crate::execution::provider_failure_detail(&e))?;
+        .map_err(|e| CheckError {
+            code: (e.code == crate::execution::SANDBOX_UNAVAILABLE)
+                .then_some(crate::execution::SANDBOX_UNAVAILABLE),
+            message: e.message,
+        })?;
     verify_receipt(&intent, &receipt)?;
     write_bounded(
         &path.join("check-result.json"),
@@ -592,7 +629,7 @@ pub(crate) fn interrupted_after_check(path: &Path, task: &Task, mission: &str) -
     Ok(Evidence {
         agent: None, run: intent.run, baseline: intent.baseline, status: TaskStatus::Failed,
         detail: "Worker interrupted after check; candidate not finalized. Check result retained; patch not reconstructed. Propose a repair and approve it separately; no effects replayed".into(),
-        patch: String::new(), candidate_commit: None, model_metrics: None, generation: None,
+        patch: String::new(), candidate_commit: None, model_metrics: None, failure_code: None, generation: None,
         check: Some(result.receipt),
     })
 }

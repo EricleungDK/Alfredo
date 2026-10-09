@@ -781,7 +781,7 @@ fn finish(fixture: &Fixture, status: TaskStatus, detail: &str) {
     let evidence = serde_json::to_vec(&alfredo_tui::worker::Evidence {
         agent: None,
         candidate_commit: None,
-        model_metrics: None,
+        model_metrics: None, failure_code: None,
         generation: None,
         run: run.id.clone(),
         baseline: run.baseline.clone(),

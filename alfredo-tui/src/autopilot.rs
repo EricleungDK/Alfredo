@@ -1164,6 +1164,14 @@ impl Autopilot {
         let saved = self.saved.as_ref().unwrap().clone();
         let families = families(&snapshot, &saved, tasks);
         let find = |id: u64| snapshot.tasks.iter().find(|task| task.id == id);
+        // An environment failure cannot be repaired, and says so even when the
+        // repair budget is zero or spent: stop with the root cause quoted.
+        for family in families.iter().filter(|f| !held_or_done(f, tasks)) {
+            if let Some(cause) = find(family.head).and_then(|head| sandbox_failure(tasks, head)) {
+                self.fail(tasks, format!("{cause}. {}", crate::doctor::BWRAP_FIX));
+                return Ok(None);
+            }
+        }
         let mut command = None;
         // Families the owner is instructing are theirs until the instructed run starts.
         let held = tasks.owner.held();
@@ -1174,12 +1182,6 @@ impl Autopilot {
             let Some(head) = find(family.head) else {
                 continue;
             };
-            if head.status == TaskStatus::Failed {
-                if let Some(cause) = sandbox_failure(head) {
-                    self.fail(tasks, format!("{cause}. {}", crate::doctor::BWRAP_FIX));
-                    return Ok(None);
-                }
-            }
             command = match head.status {
                 TaskStatus::Proposed if head.policy.is_some() => Some((
                     format!("approve-{}", head.id),
@@ -1460,15 +1462,24 @@ impl Autopilot {
     }
 }
 
-/// Repair reason detail: a failed check's bounded output tail from verified
-/// evidence (naming a no-progress attempt), else the recorded run detail. Never empty.
-/// Root cause when the sandbox could not start (typed at the execution
-/// provider, carried as a reserved detail prefix); repairing cannot fix it.
-fn sandbox_failure(head: &Task) -> Option<String> {
-    let detail = &head.run.as_ref()?.detail;
-    crate::execution::sandbox_unavailable_cause(detail).map(|cause| clean(cause, 300))
+/// Root cause when the head failed because the sandbox could not start. The
+/// run's evidence carries the typed `failure_code`; repairing cannot fix it.
+fn sandbox_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
+    if head.status != TaskStatus::Failed {
+        return None;
+    }
+    let evidence = tasks.store().evidence(head.id).ok()?;
+    let evidence = serde_json::from_str::<crate::worker::Evidence>(&evidence).ok()?;
+    (evidence.failure_code.as_deref() == Some(crate::execution::SANDBOX_UNAVAILABLE))
+        .then(|| clean(&evidence.detail, 300))
 }
 
+fn held_or_done(family: &Family, tasks: &TaskControl) -> bool {
+    matches!(family.settled, Settled::Success(_)) || tasks.owner.held().contains(&family.root)
+}
+
+/// Repair reason detail: a failed check's bounded output tail from verified
+/// evidence (naming a no-progress attempt), else the recorded run detail. Never empty.
 pub(crate) fn failure_detail(tasks: &TaskControl, head: &Task) -> String {
     let failure = tasks
         .store()

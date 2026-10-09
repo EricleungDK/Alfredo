@@ -728,6 +728,68 @@ fn exhausted_repairs_hold_the_task_block_dependents_and_integrate_independent_wo
     );
 }
 
+/// A worker whose check dies the way a sandbox refused by the host does (the
+/// check's own process prints Bubblewrap's setup error as its first stderr line),
+/// driven through the real worker finalize, evidence and settle path.
+fn sandbox_refused(max_repairs: u32) {
+    let fixture = Fixture::new();
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return json!({"tasks": [
+                {"title": "Make answer return 42", "acceptance": ["answer() returns 42"], "model": "fixture",
+                 "dependencies": [], "policy": {"files": ["calc.py"], "check": check(
+                    "import sys; sys.stderr.write('bwrap: No permissions to create new namespace\\n'); sys.exit(1)")}},
+            ]})
+            .to_string();
+        }
+        good_calc()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Make the answer 42", "fixture", max_repairs, &control)
+        .unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "sandbox", finished);
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!(status.state, RunState::Failed);
+    assert_eq!(status.repairs, 0);
+    let snapshot = fixture.store.snapshot().unwrap();
+    assert_eq!(snapshot.tasks.len(), 1, "no repair task is created");
+    assert_eq!(snapshot.tasks[0].status, TaskStatus::Failed);
+    let evidence: alfredo_tui::worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    assert_eq!(
+        evidence.failure_code.as_deref(),
+        Some(alfredo_tui::execution::SANDBOX_UNAVAILABLE)
+    );
+    let report = autopilot.report().unwrap();
+    assert!(
+        report.contains("bwrap: No permissions to create new namespace"),
+        "{report}"
+    );
+    assert!(report.contains("sudo apt install bubblewrap"), "{report}");
+    assert!(!report.contains("repair budget exhausted"), "{report}");
+    assert!(
+        !server
+            .prompts()
+            .iter()
+            .any(|prompt| prompt.contains("Repair")),
+        "{:?}",
+        server.prompts()
+    );
+}
+
+#[test]
+fn sandbox_refusal_stops_autopilot_without_repairs_and_quotes_the_cause() {
+    sandbox_refused(2);
+}
+
+#[test]
+fn sandbox_refusal_is_quoted_even_with_no_repair_budget() {
+    sandbox_refused(0);
+}
+
 #[test]
 fn pause_stops_decisions_human_hold_is_never_resolved_and_restart_restores_paused() {
     let fixture = Fixture::new();

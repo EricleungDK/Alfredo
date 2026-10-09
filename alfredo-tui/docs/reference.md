@@ -33,7 +33,12 @@ Without a usable `/usr/bin/bwrap`, `/go`, `--go` and `/run` refuse before any mo
 call with `Coding workers need bubblewrap: sudo apt install bubblewrap` (the same
 executable check as `--doctor`). If the sandbox still fails to start during a run, that
 is an environment failure, not a code failure: autopilot stops without repairs (no
-`--max-repairs` spent) and the Reason line quotes the cause and the fix.
+`--max-repairs` spent, even with `--max-repairs 0`) and the Reason line quotes the cause
+and the fix. Classified as a sandbox failure: the provider refusing an untrusted bwrap, a
+`start-failed` receipt (`provider-start-failed`), and Bubblewrap's own namespace/uid-map
+setup refusal as the first line of stderr; ordinary failing checks stay repairable. The
+class is the typed `failure_code` in the run's evidence. `ALFREDO_TEST_BWRAP_PATH` is a
+test-only seam that redirects only the preflight probe, never the executable a run uses.
 
 Each choice is an ordinary console command saved and dispatched through the same
 intent path as typed input; policy, evidence, locks and receipts stay authoritative.

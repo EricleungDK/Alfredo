@@ -99,7 +99,7 @@ class FixtureServer:
 
 class Terminal:
     def __init__(self, binary, endpoint, workspace, state, mission, resume=False,
-                 conversation='default', height=36, width=140, parallel=1):
+                 conversation='default', height=36, width=140, parallel=1, env=None):
         self.master, self.slave = pty.openpty()
         self.original = termios.tcgetattr(self.slave)
         self.height, self.width = height, width
@@ -114,7 +114,7 @@ class Terminal:
             '--state-dir', str(state), '--mission' if resume else '--new-mission', mission,
             '--conversation', conversation,
         ], stdin=self.slave, stdout=self.slave, stderr=self.slave, cwd=workspace,
-            env=dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=str(state)))
+            env=dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=str(state), **(env or {})))
 
     def send(self, text):
         os.write(self.master, text.encode() if isinstance(text, str) else text)
