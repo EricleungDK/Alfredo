@@ -495,6 +495,9 @@ impl Autopilot {
                 ));
             }
         }
+        if let Some(blocker) = crate::doctor::sandbox_blocker() {
+            return Err(blocker);
+        }
         if tasks.planner.active() || tasks.planner.checkpoint().is_some() {
             return Err("A plan draft is open; /plan-save or /plan-cancel it before /go".into());
         }
@@ -1171,6 +1174,12 @@ impl Autopilot {
             let Some(head) = find(family.head) else {
                 continue;
             };
+            if head.status == TaskStatus::Failed {
+                if let Some(cause) = sandbox_failure(head) {
+                    self.fail(tasks, format!("{cause}. {}", crate::doctor::BWRAP_FIX));
+                    return Ok(None);
+                }
+            }
             command = match head.status {
                 TaskStatus::Proposed if head.policy.is_some() => Some((
                     format!("approve-{}", head.id),
@@ -1453,6 +1462,13 @@ impl Autopilot {
 
 /// Repair reason detail: a failed check's bounded output tail from verified
 /// evidence (naming a no-progress attempt), else the recorded run detail. Never empty.
+/// Root cause when the sandbox could not start (typed at the execution
+/// provider, carried as a reserved detail prefix); repairing cannot fix it.
+fn sandbox_failure(head: &Task) -> Option<String> {
+    let detail = &head.run.as_ref()?.detail;
+    crate::execution::sandbox_unavailable_cause(detail).map(|cause| clean(cause, 300))
+}
+
 pub(crate) fn failure_detail(tasks: &TaskControl, head: &Task) -> String {
     let failure = tasks
         .store()

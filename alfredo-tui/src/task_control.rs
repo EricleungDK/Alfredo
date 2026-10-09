@@ -1417,6 +1417,9 @@ impl TaskControl {
         if self.workers.len() >= 4 || self.workers.contains_key(&task) {
             return Err("Worker already active or four-worker limit reached".into());
         }
+        if let Some(blocker) = crate::doctor::sandbox_blocker() {
+            return Err(blocker);
+        }
         if self
             .snapshot
             .as_ref()

@@ -247,6 +247,28 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertEqual(self.fixture.markers(), [])
         self.quit(terminal)
 
+    def test_go_without_bubblewrap_is_refused_with_the_fix_and_makes_no_model_calls(self):
+        missing = str(self.workspace.parent / 'no-such-bwrap')
+        previous = os.environ.get('ALFREDO_TEST_BWRAP_PATH')
+        os.environ['ALFREDO_TEST_BWRAP_PATH'] = missing
+
+        def restore():
+            if previous is None:
+                os.environ.pop('ALFREDO_TEST_BWRAP_PATH', None)
+            else:
+                os.environ['ALFREDO_TEST_BWRAP_PATH'] = previous
+        self.addCleanup(restore)
+        terminal = self.terminal(resume=False)
+        terminal.send('/go Make answer return 42\r')
+        self.screen_has(terminal, 'sudo apt install bubblewrap')
+        time.sleep(0.5)
+        terminal.pump()
+        screen = terminal.screen()
+        self.assertNotIn('Repair', screen)
+        self.assertNotIn('repair budget', screen)
+        self.assertEqual(self.fixture.markers(), [])
+        self.quit(terminal)
+
 
 if __name__ == '__main__':
     unittest.main()

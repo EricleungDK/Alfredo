@@ -550,7 +550,7 @@ pub fn execute_check(
     let bytes = write_bounded(&path.join("check-launch-intent.json"), &intent, MAX_INTENT)?;
     let receipt = RustExecutionProvider::new()
         .execute_with_callbacks(request, callbacks)
-        .map_err(|e| e.message)?;
+        .map_err(|e| crate::execution::provider_failure_detail(&e))?;
     verify_receipt(&intent, &receipt)?;
     write_bounded(
         &path.join("check-result.json"),

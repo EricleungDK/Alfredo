@@ -1728,6 +1728,28 @@ fn validate_resource_wrapper<'a>(
     Ok(&command[6..])
 }
 
+/// Receipt error code for a sandbox that cannot start: an environment problem,
+/// not a defect in the worker's code, so it is never repaired.
+pub const SANDBOX_UNAVAILABLE: &str = "sandbox-unavailable";
+
+/// Reserved run-detail prefix that carries a `SANDBOX_UNAVAILABLE` failure
+/// through the string-valued run record.
+const SANDBOX_DETAIL_PREFIX: &str = "sandbox unavailable: ";
+
+/// Run detail for a provider failure; sandbox start failures keep their type.
+pub fn provider_failure_detail(failure: &StructuredFailure) -> String {
+    if failure.code == SANDBOX_UNAVAILABLE {
+        format!("{SANDBOX_DETAIL_PREFIX}{}", failure.message)
+    } else {
+        failure.message.clone()
+    }
+}
+
+/// The root cause when `detail` records a sandbox that could not start.
+pub fn sandbox_unavailable_cause(detail: &str) -> Option<&str> {
+    detail.strip_prefix(SANDBOX_DETAIL_PREFIX)
+}
+
 fn validate_prepared_argv(request: &ExecutionRequest) -> Result<(), StructuredFailure> {
     if request.sandbox.mode != "bubblewrap" {
         return Err(StructuredFailure::new(
@@ -1739,7 +1761,7 @@ fn validate_prepared_argv(request: &ExecutionRequest) -> Result<(), StructuredFa
     canonical_path(&request.argv[0], "execution Bubblewrap executable")?;
     if !is_trusted_helper(&request.argv[0], "bwrap") {
         return Err(StructuredFailure::new(
-            "contract-failure",
+            SANDBOX_UNAVAILABLE,
             "execution provider requires a trusted Bubblewrap executable",
         ));
     }
@@ -2150,6 +2172,25 @@ mod tests {
         assert_eq!(receipt.stdout_bytes, 11);
         assert_eq!(receipt.stdout, "same output");
         assert_eq!(receipt.provider, "rust-shadow");
+    }
+
+    #[test]
+    fn untrusted_bubblewrap_is_a_typed_sandbox_failure_that_survives_the_run_detail() {
+        let mut request = test_request("shadow-rust-no-bwrap");
+        request.argv[0] = "/tmp/bwrap".to_owned();
+        let failure = RustExecutionProvider::validate_request(&request)
+            .expect_err("a bwrap outside the trusted install must be refused");
+        assert_eq!(failure.code, SANDBOX_UNAVAILABLE);
+        let detail = provider_failure_detail(&failure);
+        assert_eq!(
+            sandbox_unavailable_cause(&detail),
+            Some("execution provider requires a trusted Bubblewrap executable")
+        );
+        let other = StructuredFailure::new("contract-failure", "other");
+        assert_eq!(
+            sandbox_unavailable_cause(&provider_failure_detail(&other)),
+            None
+        );
     }
 
     #[test]
