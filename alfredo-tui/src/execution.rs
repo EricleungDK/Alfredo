@@ -1744,16 +1744,19 @@ pub fn sandbox_unavailable_receipt(receipt: &ExecutionReceipt) -> bool {
                 && receipt.stdout.is_empty()
                 && receipt.stderr.lines().next().is_some_and(|line| {
                     line.strip_prefix("bwrap: ").is_some_and(|reason| {
-                        [
-                            "No permissions",
-                            "namespace",
-                            "uid map",
-                            "gid map",
-                            "Operation not permitted",
-                            "Permission denied",
-                        ]
-                        .iter()
-                        .any(|marker| reason.contains(marker))
+                        // Only namespace / uid-map setup refusals; execvp and
+                        // bind-mount errors describe the check or its paths
+                        // (a repair can fix them), even when they say "Permission denied".
+                        !reason.starts_with("execvp")
+                            && !reason.starts_with("Can't")
+                            && [
+                                "No permissions",
+                                "namespace",
+                                "setting up uid map",
+                                "setting up gid map",
+                            ]
+                            .iter()
+                            .any(|marker| reason.contains(marker))
                     })
                 })
         }
@@ -2235,6 +2238,24 @@ mod tests {
             "failed",
             Some(2),
             "bwrap: No permissions to create new namespace\n",
+            "nonzero-exit"
+        )));
+        for line in [
+            "bwrap: execvp ./test.sh: Permission denied\n",
+            "bwrap: Can't bind mount /work on /newroot/work: Permission denied\n",
+            "bwrap: execvp python3: No such file or directory\n",
+        ] {
+            assert!(!sandbox_unavailable_receipt(&receipt(
+                "failed",
+                Some(1),
+                line,
+                "nonzero-exit"
+            )));
+        }
+        assert!(sandbox_unavailable_receipt(&receipt(
+            "failed",
+            Some(1),
+            "bwrap: setting up uid map: Permission denied\n",
             "nonzero-exit"
         )));
         assert!(!sandbox_unavailable_receipt(&receipt(
