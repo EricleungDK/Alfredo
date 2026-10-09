@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- F4 activity redraws with a 4096-receipt history take under 1 ms (was 9 ms wide, 37 ms
+  narrow): entries are cached per snapshot revision and query, row wrapping per width,
+  and only the visible window is rendered. An idle task refresh tick whose snapshot,
+  run observations and scope gate are unchanged no longer redraws the screen.
 - Side pane: other missions show `done/total` and their state (`4/7   running`).
 - `execution.rs` moved into `alfredo-tui/src`; the crate builds without the rest of
   the repository.
