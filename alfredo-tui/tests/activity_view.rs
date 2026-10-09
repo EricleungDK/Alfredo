@@ -9,8 +9,12 @@ use ratatui::{backend::TestBackend, Terminal};
 use sha2::{Digest, Sha256};
 
 fn control(count: u64) -> (TaskControl, std::path::PathBuf) {
+    // Tests run in parallel threads of one process: each fixture needs its own
+    // directory, or one test's cleanup deletes another's workspace.
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let root = std::env::temp_dir().join(format!(
-        "alfredo-activity-view-{}-{count}",
+        "alfredo-activity-view-{}-{count}-{id}",
         std::process::id()
     ));
     let workspace = root.join("workspace");
