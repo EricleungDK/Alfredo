@@ -203,7 +203,8 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 - **Model not installed** (doctor: "is not listed"): `ollama pull MODEL`, or use
   `/models` then Up/Down and Enter (or `/model NAME`) inside the terminal.
 - **Doctor: `FAIL installed worker tool: /usr/bin/bwrap`** (or prlimit/git): install
-  `bubblewrap` / `util-linux` / `git`. The paths are fixed.
+  `bubblewrap` / `util-linux` / `git`. The paths are fixed. Without bubblewrap, `/go`
+  and `/run` refuse with the same fix instead of spending repairs.
 - **Worker fails at sandbox start** (e.g. "Permission denied" setting up namespaces):
   your distro restricts unprivileged user namespaces (Ubuntu 24.04+ AppArmor). Test
   with `bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net true` and allow

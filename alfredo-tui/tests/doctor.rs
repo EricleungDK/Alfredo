@@ -197,3 +197,15 @@ fn doctor_names_the_fix_for_a_repository_without_commits() {
     );
     assert!(!text.contains("ambiguous argument"), "{text}");
 }
+
+#[test]
+fn sandbox_preflight_names_bubblewrap_and_the_fix_only_when_it_is_unusable() {
+    assert_eq!(
+        alfredo_tui::doctor::sandbox_blocker_at("/nonexistent/alfredo-test/bwrap").as_deref(),
+        Some("Coding workers need bubblewrap: sudo apt install bubblewrap")
+    );
+    // Any executable regular file is usable; the doctor and preflight share one probe.
+    assert_eq!(alfredo_tui::doctor::sandbox_blocker_at("/bin/sh"), None);
+    assert!(alfredo_tui::doctor::worker_tool_ready("/bin/sh"));
+    assert!(!alfredo_tui::doctor::worker_tool_ready("/etc"));
+}

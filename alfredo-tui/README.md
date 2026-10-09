@@ -199,6 +199,11 @@ The PTY smokes use `alfredo-tui/target/debug/alfredo-tui`; set
 `CARGO_TARGET_DIR`. They need Linux, Git and bubblewrap; Python is a test-only
 dependency.
 
+`ALFREDO_TEST_BWRAP_PATH` is a test-only seam: it redirects only the bubblewrap
+preflight probe (`--doctor`, `/go`, `--go`, `/run`) so a smoke can simulate a missing
+bwrap. It never changes the executable workers run, so it cannot weaken the sandbox.
+Do not set it outside tests.
+
 Optional live checks against a real local model (`ALFREDO_SMOKE_MODEL`, default
 `qwen2.5-coder:14b`):
 

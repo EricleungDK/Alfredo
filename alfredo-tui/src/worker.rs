@@ -420,6 +420,10 @@ pub struct Evidence {
     pub baseline: String,
     pub status: TaskStatus,
     pub detail: String,
+    /// Typed failure class when the run failed for an environment reason
+    /// (`execution::SANDBOX_UNAVAILABLE`); repairing the code cannot fix it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<String>,
     pub patch: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub candidate_commit: Option<String>,
@@ -1238,6 +1242,7 @@ pub async fn start_checked(
         patch: String::new(),
         candidate_commit: None,
         model_metrics: None,
+        failure_code: None,
         generation: None,
         check: None,
     };
@@ -1713,7 +1718,7 @@ async fn perform(
         };
         // Publish the terminal checkpoint before handing control back to async
         // finalization. A failed publication must never produce review success.
-        crate::run_boundary::execute_check(
+        crate::run_boundary::execute_check_classified(
             &run_directory,
             &check_task,
             &check_mission,
@@ -1726,7 +1731,19 @@ async fn perform(
         )
     })
     .await
-    .map_err(|_| "Execution provider stopped; command outcome unknown")??;
+    .map_err(|_| "Execution provider stopped; command outcome unknown")?;
+    let check = match check {
+        Ok(check) => check,
+        Err(error) => {
+            if error.code == Some(crate::execution::SANDBOX_UNAVAILABLE) {
+                evidence.failure_code = Some(crate::execution::SANDBOX_UNAVAILABLE.into());
+            }
+            return Err(error.message);
+        }
+    };
+    if crate::execution::sandbox_unavailable_receipt(&check) {
+        evidence.failure_code = Some(crate::execution::SANDBOX_UNAVAILABLE.into());
+    }
     let success = check_passed(&check);
     // Finish receipts bound details to 1 KiB; stay below the 900-character cut.
     let detail = failure_summary(&check, 880);
@@ -1821,6 +1838,7 @@ async fn save_candidate(worktree: &Path, evidence: &Evidence) -> Result<String> 
         baseline: evidence.baseline.clone(),
         status: evidence.status.clone(),
         detail: evidence.detail.clone(),
+        failure_code: evidence.failure_code.clone(),
         patch: evidence.patch.clone(),
         check: None,
         candidate_commit: Some(candidate.clone()),

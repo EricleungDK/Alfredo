@@ -11,6 +11,40 @@ fn clean(text: &str) -> String {
     text.chars().filter(|c| !c.is_control()).collect()
 }
 
+/// True when `path` is an executable regular file. The one probe behind the
+/// doctor's installed-tool checks and the runtime sandbox preflight.
+pub fn worker_tool_ready(path: &str) -> bool {
+    std::fs::metadata(path).is_ok_and(|metadata| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            metadata.is_file()
+        }
+    })
+}
+
+/// Trusted sandbox executable that every coding worker is launched through.
+pub const BWRAP: &str = "/usr/bin/bwrap";
+
+/// Fix hint shown when coding workers cannot start because bubblewrap is missing.
+pub const BWRAP_FIX: &str = "Coding workers need bubblewrap: sudo apt install bubblewrap";
+
+/// Why coding workers cannot start, or `None` when the sandbox is usable.
+/// `ALFREDO_TEST_BWRAP_PATH` redirects only this probe (a test seam for hosts
+/// that have bubblewrap); it never changes the executable workers run.
+pub fn sandbox_blocker() -> Option<String> {
+    let path = std::env::var("ALFREDO_TEST_BWRAP_PATH").unwrap_or_else(|_| BWRAP.to_owned());
+    sandbox_blocker_at(&path)
+}
+
+pub fn sandbox_blocker_at(path: &str) -> Option<String> {
+    (!worker_tool_ready(path)).then(|| BWRAP_FIX.to_owned())
+}
+
 pub async fn inspect(
     workspace: &Path,
     state: &Path,
@@ -106,18 +140,8 @@ pub async fn inspect(
             }
         }
     }
-    for path in ["/usr/bin/git", "/usr/bin/bwrap", "/usr/bin/prlimit"] {
-        let executable = std::fs::metadata(path).is_ok_and(|metadata| {
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
-            }
-            #[cfg(not(unix))]
-            {
-                metadata.is_file()
-            }
-        });
+    for path in ["/usr/bin/git", BWRAP, "/usr/bin/prlimit"] {
+        let executable = worker_tool_ready(path);
         if executable {
             lines.push(format!("PASS installed worker tool: {path}"));
         } else {
