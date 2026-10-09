@@ -223,7 +223,13 @@ is loading or busy. Model discovery bypasses this queue.
 - The header polls `GET /api/ps` every 5 s (2 s timeout, outside the queue):
   `ollama ✓ MODEL warm`, `ollama ✓ MODEL loading`, `ollama ✓ MODEL` (server up,
   model not loaded) or `ollama ✗ retrying`. Narrow terminals omit the model name.
-  A restarted server is picked up without restarting Alfredo.
+  A restarted server is picked up without restarting Alfredo. Each poll also reads
+  `GET /api/tags`; when the selected model is not listed (a name without a tag means
+  `:latest`) the header turns amber: `model X not installed · /models or ollama pull X`
+  (narrow: `model not installed · /models`). A failed catalog read never flags a model.
+- An HTTP 404 whose JSON body says the model was `not found` fails once with
+  `Model X is not installed (Ollama: …); /models … or ollama pull X`. Autopilot treats
+  it as deterministic and stops planning after that single request.
 
 Queued cancellation removes eligibility before HTTP dispatch; process exit releases
 its client slots. Saved queue records never replay inference. The ten-minute total
