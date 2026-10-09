@@ -45,7 +45,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut qualification_repetitions = None;
     let mut go_goal: Option<String> = None;
     let mut max_repairs = alfredo_tui::autopilot::DEFAULT_MAX_REPAIRS;
-    let mut model = std::env::var("ALFREDO_MODEL").unwrap_or_else(|_| "qwen3:14b".into());
+    let mut model = std::env::var("ALFREDO_MODEL").unwrap_or_else(|_| "qwen2.5-coder:14b".into());
     let mut endpoint =
         std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
     let mut theme = alfredo_tui::theme::Theme::from_env(|key| std::env::var(key).ok())?;

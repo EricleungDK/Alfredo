@@ -1,4 +1,5 @@
 //! Autopilot drives the existing governed transactions; real HTTP fixtures and workers.
+mod ollama_fixture;
 use alfredo_tui::{
     assessment::{Criterion, Decision, Outcome, ReviewRisk},
     autopilot::{self, Autopilot, RunState},
@@ -2057,4 +2058,42 @@ fn saved_state_carries_done_and_total_for_read_only_peeks_of_other_missions() {
     assert!(seen.contains(&Some((0, 2))), "{seen:?}");
     assert!(seen.contains(&Some((1, 2))), "{seen:?}");
     assert_eq!(seen.last(), Some(&Some((2, 2))), "{seen:?}");
+}
+
+#[test]
+fn missing_model_404_stops_planning_after_one_request_and_names_the_model() {
+    let fixture = Fixture::new();
+    let server = ollama_fixture::serve(ollama_fixture::reserve(), |request, _| {
+        match request.path.as_str() {
+            "GET /api/tags" => ollama_fixture::running(&["qwen2.5-coder:14b"]),
+            _ => ollama_fixture::Reply::Json(
+                404,
+                json!({"error": "model 'qwen3:14b' not found"}).to_string(),
+            ),
+        }
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.set_provider(
+        Ollama::new(&server.endpoint, Duration::from_secs(5))
+            .unwrap()
+            .with_retry_backoff(Duration::from_millis(5)),
+    );
+    control.refresh(&runtime);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while control.pending || control.scope_status.revision.is_none() {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.notice);
+        thread::sleep(Duration::from_millis(2));
+    }
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Improve calc", "qwen3:14b", 2, &control)
+        .unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "failure", finished);
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+    assert_eq!(server.count("POST /api/chat"), 1, "{:?}", server.paths());
+    let notice = autopilot.notice();
+    assert!(!notice.contains("Planning failed 3 times"), "{notice}");
+    assert!(notice.contains("ollama pull qwen3:14b"), "{notice}");
 }

@@ -171,7 +171,7 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--model NAME` | `qwen3:14b` (env `ALFREDO_MODEL`) | Model for new conversations |
+| `--model NAME` | `qwen2.5-coder:14b` (env `ALFREDO_MODEL`) | Model for new conversations |
 | `--endpoint URL` | `http://127.0.0.1:11434` (env `OLLAMA_HOST`) | Ollama HTTP origin |
 | `--go GOAL` | off | Start autopilot on launch |
 | `--max-repairs N` | 3 | Auto-repairs per task, 0–16 (0 disables) |

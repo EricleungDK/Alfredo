@@ -822,6 +822,11 @@ impl Ollama {
             Ok(Ok(response)) => response,
         };
         if !response.status().is_success() {
+            if response.status().as_u16() == 404 {
+                if let Some(error) = missing_model_error(&mut response, &model).await {
+                    return Err(Failure::Final(error));
+                }
+            }
             let error = format!(
                 "Ollama returned HTTP {}; check the model and server",
                 response.status().as_u16()
@@ -1016,4 +1021,42 @@ impl Ollama {
         }
         Ok(frame.done)
     }
+}
+
+/// Marker carried by every missing-model error so callers can classify it as
+/// deterministic (retrying cannot install a model).
+/// Autopilot matches this exact phrase to skip planning retries; only
+/// `missing_model_error` may produce it, so keep the two in sync.
+pub const MISSING_MODEL_MARKER: &str = " is not installed (Ollama: ";
+
+/// True when `installed` (an `/api/tags` listing) provides `model`. A name
+/// without a tag means `:latest`, as in Ollama.
+pub fn model_installed(installed: &[String], model: &str) -> bool {
+    installed.iter().any(|name| {
+        name == model || (!model.contains(':') && name.strip_suffix(":latest") == Some(model))
+    })
+}
+
+/// A 404 whose JSON body says the model was not found, mapped to an error that
+/// names the model, keeps Ollama's own text and says how to fix it.
+async fn missing_model_error(response: &mut reqwest::Response, model: &str) -> Option<String> {
+    let chunk = tokio::time::timeout(Duration::from_secs(2), response.chunk())
+        .await
+        .ok()?
+        .ok()??;
+    let value: serde_json::Value = serde_json::from_slice(&chunk[..chunk.len().min(4096)]).ok()?;
+    let text: String = value
+        .get("error")?
+        .as_str()?
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(300)
+        .collect();
+    if !text.to_lowercase().contains("not found") {
+        return None;
+    }
+    let safe: String = model.chars().filter(|c| !c.is_control()).collect();
+    Some(format!(
+        "Model {safe}{MISSING_MODEL_MARKER}{text}); /models picks an installed one, or ollama pull {safe}"
+    ))
 }
