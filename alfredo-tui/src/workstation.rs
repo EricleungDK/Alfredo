@@ -73,6 +73,9 @@ impl Workstation {
             tasks.visible = true;
         }
         tasks.set_provider(provider.clone());
+        if app.notice.is_empty() && crate::worker::lacks_commits(workspace) {
+            app.notice = crate::worker::NO_COMMITS.into();
+        }
         Ok(Self {
             app,
             tasks,

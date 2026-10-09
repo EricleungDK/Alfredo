@@ -225,6 +225,15 @@ async fn capture_inner(
         }
         pinned.to_string()
     } else {
+        if git(
+            workspace,
+            &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+        )
+        .await
+        .is_err()
+        {
+            return Err(crate::worker::NO_COMMITS.into());
+        }
         git(workspace, &["rev-parse", "HEAD^{commit}"])
             .await?
             .trim()

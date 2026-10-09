@@ -225,6 +225,28 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertEqual((self.workspace / 'calc.py').read_text(), 'def answer():\n    return 0\n')
         self.quit(terminal)
 
+    def test_go_in_repository_without_commits_fails_once_with_the_fix(self):
+        empty = self.workspace.parent / 'empty'
+        empty.mkdir()
+        subprocess.run(['git', '-C', str(empty), 'init', '-q', '--initial-branch=main'], env=self.git_env,
+                       check=True, timeout=10)
+        self.workspace = empty
+        terminal = self.terminal(resume=False)
+        self.screen_has(terminal, 'no commits yet')
+        terminal.send('/go hi\r')
+        self.screen_has(terminal, 'Autopilot')
+        self.screen_has(terminal, 'git commit --allow-empty')
+        self.screen_has(terminal, 'Autopilot ✗ failed')
+        time.sleep(0.5)
+        terminal.pump()
+        screen = terminal.screen()
+        self.assertEqual(screen.count('Autopilot ✗ failed'), 1, screen)
+        self.assertEqual(screen.count('Planning failed'), 0, screen)
+        self.assertNotIn('3 times', screen)
+        self.assertNotIn('ambiguous argument', screen)
+        self.assertEqual(self.fixture.markers(), [])
+        self.quit(terminal)
+
 
 if __name__ == '__main__':
     unittest.main()

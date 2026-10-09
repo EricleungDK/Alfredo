@@ -78,7 +78,9 @@ pub async fn inspect(
         {
             return Err("Choose the repository root with --workspace".to_string());
         }
-        crate::worker::git(workspace, &["rev-parse", "HEAD"]).await?;
+        if !crate::worker::has_head_commit(workspace) {
+            return Err(crate::worker::NO_COMMITS.to_string());
+        }
         let config = crate::worker::git(workspace, &["config", "--local", "--list"]).await?;
         if config.lines().any(|line| {
             line.starts_with("filter.")
@@ -97,7 +99,11 @@ pub async fn inspect(
         Ok(()) => lines.push("PASS worker workspace: Git root with a committed baseline".into()),
         Err(error) => {
             passed = false;
-            lines.push(format!("FAIL worker workspace: {}. Coding needs --workspace at a Git root with a commit; conversation-only use remains available.", clean(&error)));
+            if error == crate::worker::NO_COMMITS {
+                lines.push(format!("FAIL worker workspace: {error}"));
+            } else {
+                lines.push(format!("FAIL worker workspace: {}. Coding needs --workspace at a Git root with a commit; conversation-only use remains available.", clean(&error)));
+            }
         }
     }
     for path in ["/usr/bin/git", "/usr/bin/bwrap", "/usr/bin/prlimit"] {

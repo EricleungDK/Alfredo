@@ -446,6 +446,57 @@ fn read_generation<'de, D: serde::Deserializer<'de>>(
     Ok(value)
 }
 
+/// Git stderr as one line: control characters (newlines included) become
+/// spaces and runs of whitespace collapse, so adjacent lines never glue.
+pub(crate) fn git_error_text(stderr: &[u8]) -> String {
+    let spaced: String = String::from_utf8_lossy(stderr)
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    spaced
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(700)
+        .collect()
+}
+
+/// Shown when a repository has no commit to plan or work from.
+pub(crate) const NO_COMMITS: &str = "This repository has no commits yet; make an initial commit (git commit --allow-empty -m init) and run /go again";
+
+fn git_succeeds(workspace: &Path, args: &[&str]) -> bool {
+    std::process::Command::new("/usr/bin/git")
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("HOME", "/nonexistent")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .arg("-C")
+        .arg(workspace)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Whether `workspace` has a commit at HEAD (blocking; one quick local git call).
+pub fn has_head_commit(workspace: &Path) -> bool {
+    git_succeeds(
+        workspace,
+        &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+    )
+}
+
+/// True only for a readable Git work tree whose HEAD does not resolve. A
+/// non-Git folder or an unreadable repository (safe.directory) is not "no commits".
+pub fn lacks_commits(workspace: &Path) -> bool {
+    git_succeeds(workspace, &["rev-parse", "--is-inside-work-tree"]) && !has_head_commit(workspace)
+}
+
 pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
     let mut command = tokio::process::Command::new("/usr/bin/git");
     command
@@ -493,14 +544,7 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
             if args.contains(&"merge-tree") {
                 err.extend_from_slice(&out);
             }
-            return Err(format!(
-                "Git failed: {}",
-                String::from_utf8_lossy(&err)
-                    .chars()
-                    .filter(|c| !c.is_control())
-                    .take(700)
-                    .collect::<String>()
-            ));
+            return Err(format!("Git failed: {}", git_error_text(&err)));
         }
         String::from_utf8(out).map_err(|_| "Git returned non-UTF-8 output".into())
     })
@@ -1795,4 +1839,19 @@ async fn save_candidate(worktree: &Path, evidence: &Evidence) -> Result<String> 
     )
     .await?;
     Ok(candidate)
+}
+
+#[cfg(test)]
+mod git_error_tests {
+    use super::git_error_text;
+
+    #[test]
+    fn multi_line_stderr_keeps_words_apart() {
+        let text = git_error_text(
+            b"fatal: ambiguous argument 'HEAD': unknown revision or path not in the working tree.\nUse '--' to separate paths from revisions\r\n\n\tlike this:\n",
+        );
+        assert!(text.contains("working tree. Use '--'"), "{text}");
+        assert!(text.contains("revisions like this:"), "{text}");
+        assert!(!text.contains("tree.Use") && !text.contains("  "), "{text}");
+    }
 }

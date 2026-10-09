@@ -1065,7 +1065,10 @@ impl Autopilot {
             let saved = self.saved.as_mut().unwrap();
             saved.plan_attempts += 1;
             saved.plan_request = None;
-            if saved.plan_attempts >= PLAN_ATTEMPTS {
+            if error.contains(crate::worker::NO_COMMITS) {
+                // Deterministic: retrying cannot help.
+                self.fail(tasks, error);
+            } else if saved.plan_attempts >= PLAN_ATTEMPTS {
                 self.fail(
                     tasks,
                     format!("Planning failed {PLAN_ATTEMPTS} times; autopilot stopped: {error}"),

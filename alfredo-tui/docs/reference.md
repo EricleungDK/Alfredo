@@ -238,7 +238,9 @@ restored selected model against the bounded Ollama catalog, validates the Git ro
 and committed baseline, and checks installed worker executables. Exit 0 means these
 checks passed; exit 2 means one or more checks failed. Invalid CLI arguments still
 fail before diagnostics. Results distinguish storage, model server/catalog and
-worker prerequisites with corrective flags or actions.
+worker prerequisites with corrective flags or actions. A repository with no commits
+fails the worker check with `git commit --allow-empty -m init`; the same notice shows
+in the footer at launch, and `/go` there fails once without planning retries.
 
 Diagnostics can initialize private state directories and lock files, but do not
 save conversations, mutate task receipts, send inference, or run coding checks.
