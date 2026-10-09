@@ -21,6 +21,9 @@ struct Fixture {
 }
 impl Fixture {
     fn new() -> Self {
+        Self::build(true)
+    }
+    fn build(commit: bool) -> Self {
         let root = std::env::temp_dir().join(format!(
             "alfredo doctor {} {}",
             std::process::id(),
@@ -42,7 +45,10 @@ impl Fixture {
                 "-qm",
                 "baseline",
             ],
-        ] {
+        ]
+        .into_iter()
+        .take(if commit { 2 } else { 1 })
+        {
             assert!(Command::new("git")
                 .arg("-C")
                 .arg(&workspace)
@@ -175,4 +181,19 @@ fn doctor_reports_storage_and_server_failures_together_without_erasing_state() {
         fs::read_to_string(&fixture.state).unwrap(),
         "keep original bytes"
     );
+}
+
+#[test]
+fn doctor_names_the_fix_for_a_repository_without_commits() {
+    let fixture = Fixture::build(false);
+    let (endpoint, server) = catalog("initial-model");
+    let output = fixture.command(&endpoint).output().unwrap();
+    server.join().unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(2), "{text}");
+    assert!(
+        text.contains("FAIL worker workspace: This repository has no commits yet; make an initial commit (git commit --allow-empty -m init)"),
+        "{text}"
+    );
+    assert!(!text.contains("ambiguous argument"), "{text}");
 }

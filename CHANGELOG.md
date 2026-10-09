@@ -6,6 +6,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- In a repository with no commits, `/go` now stops at once (no planning retries) and
+  says to make an initial commit; the launch footer and `--doctor` give the same fix.
+  Git error text no longer glues lines together (`tree.Use`).
+
 ### Changed
 
 - Side pane: other missions show `done/total` and their state (`4/7   running`).
