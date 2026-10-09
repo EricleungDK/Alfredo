@@ -619,8 +619,11 @@ input and rendering remain separate from inference. Completion requires Ollama's
 `done` marker; EOF alone is a failure. There is no automatic replay. Drafts are
 limited to 16 KiB, conversations to 128 KiB, frames to 64 KiB, and the event channel
 to 128 entries. New sessions currently inherit the initial model. Draft editing preserves independent
-cursor positions across sessions. Paste inserts at the cursor, strips terminal
-control characters and respects the 16 KiB limit without cutting a grapheme cluster.
+cursor positions across sessions. Paste inserts at the cursor, expands each tab to four spaces
+(so indentation survives and no tab reaches the draft), normalizes `\r\n` to `\n`, strips
+other terminal control characters and respects the 16 KiB limit without cutting a grapheme
+cluster. Expanded spaces count against the limit. When a paste is cut by the limit the
+notice `Paste truncated to 16 KiB` is shown; nothing is shown when nothing was cut.
 History is bounded to 100 entries and 128 KiB per session. Submission adds a history
 entry without granting new authority; recalled commands require explicit submission.
 Up/Down in task detail selects tree rows; Alt+Left/Right controls branch disclosure.

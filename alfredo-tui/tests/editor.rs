@@ -77,3 +77,40 @@ fn session_switch_keeps_independent_drafts_and_cursor_positions() {
     assert_eq!(app.sessions[0].cursor(), 2);
     assert_eq!(app.sessions[1].cursor(), 6);
 }
+
+#[test]
+fn paste_keeps_tab_indentation_as_four_spaces_and_the_cursor_follows_them() {
+    let mut editor = Session::new("fixture".into());
+    let result = editor.insert("fn x() {\n\treturn 1;\r\n}\n");
+    assert_eq!(editor.draft, "fn x() {\n    return 1;\n}\n");
+    assert_eq!(result.accepted, editor.draft.len());
+    assert!(!result.truncated);
+    let mut editor = Session::new("fixture".into());
+    editor.insert("a");
+    editor.insert("b");
+    editor.home();
+    editor.right();
+    editor.insert("\t");
+    assert_eq!(editor.draft, "a    b");
+    assert_eq!(editor.cursor(), 5);
+    editor.insert("a\tb\x1b\x07");
+    assert_eq!(editor.draft, "a    a    bb");
+}
+
+#[test]
+fn insert_reports_truncation_only_when_the_limit_cut_text() {
+    let mut editor = Session::new("fixture".into());
+    let cut = editor.insert(&"a".repeat(MAX_DRAFT + 10));
+    assert_eq!(cut.accepted, MAX_DRAFT);
+    assert!(cut.truncated);
+    assert_eq!(editor.draft.len(), MAX_DRAFT);
+    editor.clear_draft();
+    let exact = editor.insert(&"a".repeat(MAX_DRAFT));
+    assert!(!exact.truncated);
+    // Tab expansion counts against the limit.
+    editor.clear_draft();
+    editor.insert(&"a".repeat(MAX_DRAFT - 3));
+    let tab = editor.insert("\t");
+    assert_eq!((tab.accepted, tab.truncated), (0, true));
+    assert_eq!(editor.draft.len(), MAX_DRAFT - 3);
+}
