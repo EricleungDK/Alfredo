@@ -1,5 +1,5 @@
 //! Rust task authority. All callers use the same locked revision/receipt transaction.
-pub const SCHEMA_VERSION: u32 = 16;
+pub const SCHEMA_VERSION: u32 = 17;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -213,6 +213,11 @@ pub enum Action {
         task: u64,
     },
     Cancel {
+        task: u64,
+    },
+    /// Return a run cancelled by the user to Approved so it dispatches again
+    /// as a new run of the same task; no repair is created.
+    Requeue {
         task: u64,
     },
     Permit {
@@ -789,6 +794,11 @@ impl TaskStore {
             if matches!(&receipt.request.action, Action::Decide { decision, .. } | Action::ReviewAndRepair { decision, .. } if decision.failure.is_some() && decision.proposes_repair())
             {
                 return Err("Architecture failure requires its governed review route".into());
+            }
+            if snapshot.schema_version < 17
+                && matches!(receipt.request.action, Action::Requeue { .. })
+            {
+                return Err("Requeue requires task schema v17".into());
             }
             if snapshot.schema_version < 16
                 && (matches!(receipt.request.action, Action::ReviewArchitecture { .. })
@@ -1685,6 +1695,21 @@ impl TaskStore {
                     }
                     _ => return Err("Task transition is not allowed from its current state".into()),
                 }
+                Ok(*task)
+            }
+            Action::Requeue { task } => {
+                let item = snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|t| t.id == *task)
+                    .ok_or("Unknown task")?;
+                if item.status != TaskStatus::Cancelled
+                    || item.run.is_none()
+                    || item.policy.is_none()
+                {
+                    return Err("Requeue requires a task cancelled during a run".into());
+                }
+                item.status = TaskStatus::Approved;
                 Ok(*task)
             }
             Action::Permit { task, policy } => {

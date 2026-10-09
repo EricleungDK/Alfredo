@@ -206,6 +206,7 @@ pub struct WorkStatus {
     pub recorded: usize,
     pub review: usize,
     pub held: usize,
+    pub cancelled: usize,
     pub repair: usize,
     pub architect: usize,
     pub resolve: usize,
@@ -213,7 +214,13 @@ pub struct WorkStatus {
 }
 impl WorkStatus {
     pub fn attention(&self) -> usize {
-        self.recorded + self.review + self.held + self.repair + self.architect + self.resolve
+        self.recorded
+            + self.review
+            + self.held
+            + self.cancelled
+            + self.repair
+            + self.architect
+            + self.resolve
     }
     pub fn concise(&self, width: u16) -> String {
         if !self.loaded {
@@ -226,6 +233,7 @@ impl WorkStatus {
         // Nouns pluralize; state words (held, review, resolve) stay as labels.
         for (count, label, plural) in [
             (self.held, "held", false),
+            (self.cancelled, "cancelled", false),
             (self.review, "review", false),
             (self.architect, "Architect", false),
             (self.repair, "repair", true),

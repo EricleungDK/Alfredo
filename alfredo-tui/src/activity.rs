@@ -66,6 +66,10 @@ pub fn iter_entries<'a>(snapshot: &'a Snapshot, query: &str) -> impl Iterator<It
                     "Task cancelled".into(),
                     "Unstarted task cancellation acknowledged".into(),
                 ),
+                Action::Requeue { .. } => (
+                    "Task requeued".into(),
+                    "Cancelled run returns to approved; a new run starts when dispatched".into(),
+                ),
                 Action::Start {
                     baseline, inputs, ..
                 } => (

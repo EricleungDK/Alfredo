@@ -65,12 +65,13 @@ fn task(id: u64, status: TaskStatus, parent: Option<u64>, executed: bool) -> Tas
         }),
     }
 }
-fn counts(status: &WorkStatus) -> [usize; 7] {
+fn counts(status: &WorkStatus) -> [usize; 8] {
     [
         status.workers,
         status.recorded,
         status.review,
         status.held,
+        status.cancelled,
         status.repair,
         status.architect,
         status.resolve,
@@ -178,7 +179,7 @@ fn work_status_separates_local_workers_from_recorded_runs_and_actionable_results
         .insert(99, Arc::new(AtomicBool::new(true)));
     let before = serde_json::to_vec(fixture.control.snapshot.as_ref().unwrap()).unwrap();
     let status = fixture.control.work_status();
-    assert_eq!(counts(&status), [2, 1, 1, 1, 3, 0, 0]);
+    assert_eq!(counts(&status), [2, 1, 1, 1, 1, 2, 0, 0]);
     assert_eq!(status.attention(), 6);
     assert_eq!(
         serde_json::to_vec(fixture.control.snapshot.as_ref().unwrap()).unwrap(),
@@ -187,12 +188,12 @@ fn work_status_separates_local_workers_from_recorded_runs_and_actionable_results
     fixture.control.workers.remove(&1);
     assert_eq!(
         counts(&fixture.control.work_status()),
-        [1, 2, 1, 1, 3, 0, 0]
+        [1, 2, 1, 1, 1, 2, 0, 0]
     );
     fixture.control.snapshot = None;
     assert_eq!(
         counts(&fixture.control.work_status()),
-        [1, 0, 0, 0, 0, 0, 0]
+        [1, 0, 0, 0, 0, 0, 0, 0]
     );
 }
 
@@ -209,24 +210,24 @@ fn work_status_counts_leaf_repairs_and_preserves_historical_human_holds() {
     ]);
     assert_eq!(
         counts(&fixture.control.work_status()),
-        [0, 0, 1, 1, 1, 0, 1]
+        [0, 0, 1, 1, 0, 1, 0, 1]
     );
     let snapshot = fixture.control.snapshot.as_mut().unwrap();
     receipt(snapshot, 7, Action::ResolveRepair { task: 7 });
     assert_eq!(
         counts(&fixture.control.work_status()),
-        [0, 0, 1, 1, 1, 0, 0]
+        [0, 0, 1, 1, 0, 1, 0, 0]
     );
     fixture.control.snapshot.as_mut().unwrap().tasks[2].status = TaskStatus::Accepted;
     assert_eq!(
         counts(&fixture.control.work_status()),
-        [0, 0, 0, 1, 1, 0, 1]
+        [0, 0, 0, 1, 0, 1, 0, 1]
     );
     let snapshot = fixture.control.snapshot.as_mut().unwrap();
     receipt(snapshot, 3, Action::ResolveRepair { task: 3 });
     assert_eq!(
         counts(&fixture.control.work_status()),
-        [0, 0, 0, 1, 1, 0, 0]
+        [0, 0, 0, 1, 0, 1, 0, 0]
     );
 }
 
@@ -235,7 +236,7 @@ fn work_status_tracks_architect_gate_through_adoption_and_unstarted_cancellation
     let mut fixture = architect_fixture();
     assert_eq!(
         counts(&fixture.control.work_status()),
-        [0, 0, 0, 0, 0, 1, 0]
+        [0, 0, 0, 0, 0, 0, 1, 0]
     );
     adopt(
         fixture.control.snapshot.as_mut().unwrap(),
@@ -243,7 +244,7 @@ fn work_status_tracks_architect_gate_through_adoption_and_unstarted_cancellation
     );
     assert_eq!(
         counts(&fixture.control.work_status()),
-        [0, 0, 0, 0, 1, 0, 0]
+        [0, 0, 0, 0, 0, 1, 0, 0]
     );
     let snapshot = fixture.control.snapshot.as_mut().unwrap();
     assert!(snapshot.architecture_obsolete(1));
@@ -252,7 +253,7 @@ fn work_status_tracks_architect_gate_through_adoption_and_unstarted_cancellation
     assert!(snapshot.architecture_required(2));
     assert_eq!(
         counts(&fixture.control.work_status()),
-        [0, 0, 0, 0, 0, 1, 0]
+        [0, 0, 0, 0, 0, 0, 1, 0]
     );
     let snapshot = fixture.control.snapshot.as_mut().unwrap();
     snapshot.tasks[2].status = TaskStatus::Accepted;
@@ -265,14 +266,14 @@ fn work_status_tracks_architect_gate_through_adoption_and_unstarted_cancellation
     });
     assert_eq!(
         counts(&fixture.control.work_status()),
-        [0, 0, 0, 0, 0, 0, 1]
+        [0, 0, 0, 0, 0, 0, 0, 1]
     );
     receipt(
         fixture.control.snapshot.as_mut().unwrap(),
         3,
         Action::ResolveRepair { task: 3 },
     );
-    assert_eq!(counts(&fixture.control.work_status()), [0; 7]);
+    assert_eq!(counts(&fixture.control.work_status()), [0; 8]);
 }
 
 #[test]
@@ -283,23 +284,25 @@ fn cancelled_unstarted_repair_restores_parent_attention_but_executed_child_owns_
     ]);
     assert_eq!(
         counts(&fixture.control.work_status()),
-        [0, 0, 0, 0, 1, 0, 0]
+        [0, 0, 0, 0, 0, 1, 0, 0]
     );
+    // An executed child cancelled by the user owns the parent's attention, as a
+    // cancelled run (requeued on resume) rather than a repair to propose.
     fixture.control.snapshot.as_mut().unwrap().tasks[1] =
         task(2, TaskStatus::Cancelled, Some(1), true);
     assert_eq!(
         counts(&fixture.control.work_status()),
-        [0, 0, 0, 0, 1, 0, 0]
+        [0, 0, 0, 0, 1, 0, 0, 0]
     );
     fixture.control.snapshot.as_mut().unwrap().tasks[1] =
         task(2, TaskStatus::Proposed, Some(1), false);
     assert_eq!(
         counts(&fixture.control.work_status()),
-        [0, 0, 0, 0, 1, 0, 0]
+        [0, 0, 0, 0, 0, 1, 0, 0]
     );
     assert_eq!(fixture.control.work_status().attention(), 1);
     fixture.control.snapshot.as_mut().unwrap().tasks[1].status = TaskStatus::Approved;
-    assert_eq!(counts(&fixture.control.work_status()), [0; 7]);
+    assert_eq!(counts(&fixture.control.work_status()), [0; 8]);
 }
 
 #[test]
@@ -318,14 +321,15 @@ fn work_status_copy_distinguishes_unavailable_idle_and_recorded_runs_at_narrow_w
         recorded: 1,
         review: 3,
         held: 1,
+        cancelled: 1,
         repair: 2,
         architect: 1,
         resolve: 1,
         loaded: true,
     };
-    assert_eq!(status.attention(), 9);
+    assert_eq!(status.attention(), 10);
     let narrow = status.concise(32);
-    assert!(narrow.contains("2 work") && narrow.contains("9 alerts"));
+    assert!(narrow.contains("2 work") && narrow.contains("10 alerts"));
     assert!(unicode_width::UnicodeWidthStr::width(narrow.as_str()) <= 32);
     let wide = status.concise(160);
     for expected in [
@@ -333,6 +337,7 @@ fn work_status_copy_distinguishes_unavailable_idle_and_recorded_runs_at_narrow_w
         "1 recorded run",
         "3 review",
         "1 held",
+        "1 cancelled",
         "2 repairs",
         "1 Architect",
         "1 resolve",
@@ -474,7 +479,7 @@ fn measure_deep_repair_history_chat_redraws() {
     let direct = Instant::now();
     let status = black_box(black_box(&fixture.control).work_status());
     let direct_us = direct.elapsed().as_micros();
-    assert_eq!(counts(&status), [0, 0, 1, 0, 0, 0, 0]);
+    assert_eq!(counts(&status), [0, 0, 1, 0, 0, 0, 0, 0]);
     println!(
         "{}",
         serde_json::json!({
@@ -485,4 +490,29 @@ fn measure_deep_repair_history_chat_redraws() {
             "direct_work_status_us": direct_us, "status_counts": counts(&status),
         })
     );
+}
+
+#[test]
+fn run_cancelled_by_the_user_is_not_counted_as_a_repair_to_propose() {
+    let fixture = Fixture::new(vec![
+        task(1, TaskStatus::Cancelled, None, true),
+        task(2, TaskStatus::Failed, None, true),
+    ]);
+    // Only the failed run needs a repair; the cancelled one is requeued on /resume.
+    let status = fixture.control.work_status();
+    assert_eq!(counts(&status), [0, 0, 0, 0, 1, 1, 0, 0]);
+    assert_eq!((status.cancelled, status.repair), (1, 1));
+    assert_eq!(status.attention(), 2);
+    assert!(
+        status.concise(100).contains("1 cancelled"),
+        "{}",
+        status.concise(100)
+    );
+    let only = Fixture::new(vec![task(1, TaskStatus::Cancelled, None, true)]);
+    let status = only.control.work_status();
+    assert_eq!(
+        (status.cancelled, status.repair, status.attention()),
+        (1, 0, 1)
+    );
+    assert!(!status.concise(100).contains("no pending review"));
 }

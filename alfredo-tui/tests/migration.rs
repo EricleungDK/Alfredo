@@ -3,7 +3,7 @@ use std::fs;
 
 #[test]
 fn legacy_upgrade_retains_exact_bytes_and_does_not_infer_execution_permission() {
-    for version in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15] {
+    for version in [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] {
         let root =
             std::env::temp_dir().join(format!("alfredo-task-upgrade-{}", std::process::id()));
         fs::create_dir(&root).unwrap();
@@ -66,7 +66,7 @@ fn legacy_upgrade_retains_exact_bytes_and_does_not_infer_execution_permission() 
                 },
             })
             .unwrap();
-        assert_eq!(upgraded.schema_version, 16);
+        assert_eq!(upgraded.schema_version, 17);
         assert_eq!(
             upgraded.tasks[0].status,
             alfredo_tui::tasks::TaskStatus::Proposed

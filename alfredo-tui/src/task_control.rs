@@ -319,9 +319,9 @@ impl TaskControl {
             match task.status {
                 TaskStatus::Proposed if task.repair_of.is_some() => status.repair += 1,
                 TaskStatus::ReviewReady => status.review += 1,
-                TaskStatus::Failed | TaskStatus::Rejected | TaskStatus::Cancelled
-                    if task.run.is_some() =>
-                {
+                // A run cancelled by the user is requeued, not repaired.
+                TaskStatus::Cancelled if task.run.is_some() => status.cancelled += 1,
+                TaskStatus::Failed | TaskStatus::Rejected if task.run.is_some() => {
                     status.repair += 1
                 }
                 TaskStatus::Accepted if task.repair_of.is_some() => status.resolve += 1,
@@ -1594,10 +1594,10 @@ impl TaskControl {
         };
         // Wait for an acknowledged claim before choosing another global revision.
         if self.workers.keys().any(|id| {
-            snapshot
-                .tasks
-                .iter()
-                .any(|task| task.id == *id && task.run.is_none())
+            snapshot.tasks.iter().any(|task| {
+                task.id == *id
+                    && (task.run.is_none() || task.status == crate::tasks::TaskStatus::Approved)
+            })
         }) {
             return Ok(None);
         }
@@ -2569,6 +2569,11 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
     if let Some(id) = text.strip_prefix("/resolve-repair ") {
         return Ok(Action::ResolveRepair {
             task: id.trim().parse().map_err(|_| "Usage: /resolve-repair ID")?,
+        });
+    }
+    if let Some(id) = text.strip_prefix("/requeue ") {
+        return Ok(Action::Requeue {
+            task: id.trim().parse().map_err(|_| "Usage: /requeue ID")?,
         });
     }
     if let Some(arguments) = text.strip_prefix("/repair ") {
