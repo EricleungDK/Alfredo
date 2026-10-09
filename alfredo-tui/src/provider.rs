@@ -1025,7 +1025,9 @@ impl Ollama {
 
 /// Marker carried by every missing-model error so callers can classify it as
 /// deterministic (retrying cannot install a model).
-pub const MISSING_MODEL_HINT: &str = "ollama pull ";
+/// Autopilot matches this exact phrase to skip planning retries; only
+/// `missing_model_error` may produce it, so keep the two in sync.
+pub const MISSING_MODEL_MARKER: &str = " is not installed (Ollama: ";
 
 /// True when `installed` (an `/api/tags` listing) provides `model`. A name
 /// without a tag means `:latest`, as in Ollama.
@@ -1055,6 +1057,6 @@ async fn missing_model_error(response: &mut reqwest::Response, model: &str) -> O
     }
     let safe: String = model.chars().filter(|c| !c.is_control()).collect();
     Some(format!(
-        "Model {safe} is not installed (Ollama: {text}); /models picks an installed one, or {MISSING_MODEL_HINT}{safe}"
+        "Model {safe}{MISSING_MODEL_MARKER}{text}); /models picks an installed one, or ollama pull {safe}"
     ))
 }

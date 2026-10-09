@@ -8,6 +8,9 @@ use std::{
 };
 use tokio::{runtime::Handle, task::JoinHandle};
 
+/// Keeps a hanging `/api/tags` from delaying up/down transitions.
+const CATALOG_DEADLINE: Duration = Duration::from_secs(2);
+
 pub const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -244,7 +247,10 @@ impl Monitor {
                 let observed = provider.running_models().await;
                 // A failed catalog fetch keeps the last listing; absence never flags.
                 let catalog = if observed.is_ok() {
-                    provider.models().await.ok()
+                    tokio::time::timeout(CATALOG_DEADLINE, provider.models())
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
                 } else {
                     None
                 };

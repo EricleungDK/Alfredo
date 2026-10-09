@@ -1066,7 +1066,7 @@ impl Autopilot {
             saved.plan_attempts += 1;
             saved.plan_request = None;
             if error.contains(crate::worker::NO_COMMITS)
-                || error.contains(crate::provider::MISSING_MODEL_HINT)
+                || error.contains(crate::provider::MISSING_MODEL_MARKER)
             {
                 // Deterministic: retrying cannot help.
                 self.fail(tasks, error);

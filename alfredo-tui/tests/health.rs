@@ -316,3 +316,38 @@ async fn selected_model_missing_from_the_catalog_is_flagged_in_the_header() {
     assert!(!narrow.contains("ollama ✓"), "{narrow}");
     assert_eq!(narrow.chars().count(), 80);
 }
+
+#[test]
+fn model_installed_matches_exact_names_and_untagged_latest_only() {
+    use alfredo_tui::provider::model_installed;
+    let installed = vec!["x:latest".to_string(), "y:7b".to_string()];
+    assert!(model_installed(&installed, "x"));
+    assert!(model_installed(&installed, "x:latest"));
+    assert!(model_installed(&installed, "y:7b"));
+    assert!(!model_installed(&installed, "x:7b"));
+    assert!(!model_installed(&installed, "y"));
+    assert!(!model_installed(&[], "x"));
+}
+
+#[tokio::test]
+async fn failing_catalog_read_never_flags_the_model_as_missing() {
+    let fixture = serve(reserve(), |request, _| match request.path.as_str() {
+        "GET /api/ps" => running(&[]),
+        "GET /api/tags" => Reply::Json(500, "{}".into()),
+        _ => Reply::Json(404, "{}".into()),
+    });
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(3)).unwrap();
+    let monitor = Monitor::start(
+        &tokio::runtime::Handle::current(),
+        provider,
+        Duration::from_millis(40),
+    );
+    let view = monitor.view();
+    wait_for(&view, "qwen3:14b", |state| *state == Health::Up).await;
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while fixture.count("GET /api/tags") < 2 {
+        assert!(Instant::now() < deadline);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(view.state("qwen3:14b"), Health::Up);
+}
