@@ -614,11 +614,16 @@ pub fn choose_in_terminal(
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
-                    input.insert(&c.to_string())
+                    input.insert(&c.to_string());
                 }
                 _ => {}
             },
-            Event::Paste(text) => input.insert(&text),
+            Event::Paste(text) => {
+                let inserted = input.insert(&text);
+                if inserted.truncated {
+                    notice = crate::model::PASTE_TRUNCATED_NOTICE.into();
+                }
+            }
             _ => {}
         }
     }

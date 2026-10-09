@@ -6,6 +6,17 @@ pub const MAX_TEXT: usize = 128 * 1024;
 pub const MAX_DRAFT: usize = 16 * 1024;
 pub const MAX_SESSIONS: usize = 8;
 pub const MAX_MESSAGES: usize = 4096;
+/// Notice shown when a paste is cut by [`MAX_DRAFT`]. Typed keys show no notice.
+pub const PASTE_TRUNCATED_NOTICE: &str = "Paste truncated to 16 KiB";
+
+/// Outcome of [`Session::insert`]: bytes kept after sanitizing, and whether the
+/// 16 KiB draft limit cut the input short.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Inserted {
+    /// Bytes (not characters) added to the draft.
+    pub accepted: usize,
+    pub truncated: bool,
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -447,18 +458,24 @@ impl Session {
         self.cursor = start;
     }
 
-    pub fn insert(&mut self, text: &str) {
+    /// Inserts sanitized text at the cursor. Tabs become four spaces, `\r\n` becomes
+    /// `\n`, other control characters are dropped, and the 16 KiB limit never splits
+    /// a grapheme cluster. The result reports what was kept so callers need not re-derive it.
+    pub fn insert(&mut self, text: &str) -> Inserted {
         let cursor = self.cursor();
         let mut clean = String::new();
+        let mut truncated = false;
         for grapheme in text.graphemes(true) {
-            if grapheme.len() > MAX_DRAFT {
-                break;
+            let mut filtered = String::new();
+            for c in grapheme.chars() {
+                if c == '\t' {
+                    filtered.push_str("    ");
+                } else if !c.is_control() || c == '\n' {
+                    filtered.push(c);
+                }
             }
-            let filtered: String = grapheme
-                .chars()
-                .filter(|c| !c.is_control() || *c == '\n')
-                .collect();
             if self.draft.len() + clean.len() + filtered.len() > MAX_DRAFT {
+                truncated = true;
                 break;
             }
             clean.push_str(&filtered);
@@ -473,6 +490,10 @@ impl Session {
             .chain(std::iter::once(self.draft.len()))
             .find(|index| *index >= cursor + accepted)
             .unwrap_or(self.draft.len());
+        Inserted {
+            accepted,
+            truncated,
+        }
     }
 
     /// Single-line viewport measured in terminal cells, never UTF-8 bytes.

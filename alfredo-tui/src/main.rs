@@ -1060,7 +1060,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('w') if ctrl => work.app.sessions[index].delete_word(),
                         KeyCode::Char('u') if ctrl => work.app.sessions[index].clear_draft(),
                         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                            work.app.sessions[index].insert("\n")
+                            work.app.sessions[index].insert("\n");
                         }
                         KeyCode::Enter
                             if alfredo_tui::autopilot::is_command(
@@ -1485,7 +1485,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char(ch)
                             if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) =>
                         {
-                            work.app.sessions[index].insert(&ch.to_string())
+                            work.app.sessions[index].insert(&ch.to_string());
                         }
                         _ => {}
                     }
@@ -1493,7 +1493,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Paste(_) if work.app.pane.focus.is_some() => {}
                 Event::Paste(text) => {
                     work.app.completion = None;
-                    work.app.sessions[work.app.selected].insert(&text);
+                    if work.app.sessions[work.app.selected].insert(&text).truncated {
+                        work.app.notice = alfredo_tui::model::PASTE_TRUNCATED_NOTICE.into();
+                    }
                 }
                 _ => {}
             }
