@@ -1087,7 +1087,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         work.tasks.set_visible(true);
                                     }
                                 }
-                                Err(error) => work.app.notice = error,
+                                Err(error) => {
+                                    work.app.notice = error;
+                                    work.app.sessions[index].reject_draft();
+                                }
                             }
                         }
                         KeyCode::Enter if work.app.sessions[index].draft.trim() == "/workspace" => {
@@ -1154,6 +1157,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &work.app.sessions[index].draft,
                             )
                             .unwrap_err();
+                            work.app.sessions[index].reject_draft();
                         }
                         KeyCode::Enter if work.app.sessions[index].draft.trim() == "/models" => {
                             work.app.models_visible = true;
@@ -1182,8 +1186,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     work.app.sessions[index].remember_submission();
                                     work.app.sessions[index].clear_draft();
                                 }
-                                Err(error) => work.app.notice = error.into(),
+                                Err(error) => {
+                                    work.app.notice = error.into();
+                                    work.app.sessions[index].reject_draft();
+                                }
                             }
+                        }
+                        KeyCode::Enter if work.app.sessions[index].draft.trim() == "/model" => {
+                            work.app.notice = "Usage: /model NAME (or /models)".into();
+                            work.app.sessions[index].reject_draft();
+                        }
+                        KeyCode::Enter if work.app.sessions[index].draft.trim() == "/help" => {
+                            work.app.sessions[index].remember_submission();
+                            work.app.sessions[index].clear_draft();
+                            work.app.notice.clear();
+                            work.app.completion = Some(alfredo_tui::commands::Completion::all());
                         }
                         KeyCode::Enter
                             if work
@@ -1221,6 +1238,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Some(Ok(notice)) => work.app.notice = notice,
                                 Some(Err(error)) => {
                                     work.app.sessions[index].insert(&text);
+                                    work.app.sessions[index].reject_draft();
                                     work.app.notice = error;
                                 }
                                 None => {}
@@ -1412,7 +1430,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                             pending_command = Some((origin, id));
                                         }
-                                        Err(error) => work.app.notice = error,
+                                        Err(error) => {
+                                            work.app.notice = error;
+                                            work.app.sessions[index].reject_draft();
+                                        }
                                     }
                                 }
                                 Ok(None) => match work.tasks.command(&runtime, &text, &model) {
@@ -1421,9 +1442,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         work.app.sessions[index].clear_draft();
                                         work.app.notice.clear();
                                     }
-                                    Err(error) => work.app.notice = error,
+                                    Err(error) => {
+                                        work.app.notice = error;
+                                        work.app.sessions[index].reject_draft();
+                                    }
                                 },
-                                Err(error) => work.app.notice = error,
+                                Err(error) => {
+                                    work.app.notice = error;
+                                    work.app.sessions[index].reject_draft();
+                                }
                             }
                         }
                         // The agent view owns the prompt: text is an instruction to that agent.
@@ -1486,7 +1513,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char(ch)
                             if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) =>
                         {
-                            work.app.sessions[index].insert(&ch.to_string())
+                            work.app.sessions[index].type_char(ch)
                         }
                         _ => {}
                     }
@@ -1494,7 +1521,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Paste(_) if work.app.pane.focus.is_some() => {}
                 Event::Paste(text) => {
                     work.app.completion = None;
-                    work.app.sessions[work.app.selected].insert(&text);
+                    let session = &mut work.app.sessions[work.app.selected];
+                    if session.replace_pending() {
+                        session.clear_draft();
+                    }
+                    session.insert(&text);
                 }
                 _ => {}
             }

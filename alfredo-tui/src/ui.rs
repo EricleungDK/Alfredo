@@ -28,6 +28,30 @@ fn safe(text: &str) -> String {
     dashboard::safe(text)
 }
 
+/// Fits a one-line notice into `width` cells, cutting at a word boundary with an ellipsis.
+fn fit_words(text: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    if text.width() <= width {
+        return text.to_string();
+    }
+    let mut used = 0;
+    let mut end = 0;
+    let mut boundary = None;
+    for (index, ch) in text.char_indices() {
+        let cells = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + cells > width.saturating_sub(1) {
+            break;
+        }
+        if ch == ' ' {
+            boundary = Some(index);
+        }
+        used += cells;
+        end = index + ch.len_utf8();
+    }
+    let cut = boundary.filter(|index| *index > 0).unwrap_or(end);
+    format!("{}…", text[..cut].trim_end())
+}
+
 fn dim() -> Style {
     Style::default().fg(Color::DarkGray)
 }
@@ -124,16 +148,23 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
     };
     let draft = session.draft_view(rows[3].width.saturating_sub(4) as usize);
     frame.render_widget(
-        Paragraph::new(safe(&draft)).block(
-            Block::bordered()
-                .padding(Padding::horizontal(1))
-                .border_style(Style::default().fg(if focused {
-                    theme.color(Tone::Dim)
-                } else {
-                    theme.color(Tone::Cyan)
-                }))
-                .title(prompt_title),
-        ),
+        Paragraph::new(safe(&draft))
+            .style(if session.replace_pending() {
+                // Rejected text reads as selected: the next character replaces it.
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            })
+            .block(
+                Block::bordered()
+                    .padding(Padding::horizontal(1))
+                    .border_style(Style::default().fg(if focused {
+                        theme.color(Tone::Dim)
+                    } else {
+                        theme.color(Tone::Cyan)
+                    }))
+                    .title(prompt_title),
+            ),
         rows[3],
     );
     let note = if !app.notice.is_empty() {
@@ -161,7 +192,7 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
                 Style::default().fg(theme.color(Tone::Dim)),
             ),
             Line::styled(
-                single_line(&note),
+                fit_words(&single_line(&note), usize::from(area.width)),
                 Style::default().fg(theme.color(Tone::Amber)),
             ),
         ]),
@@ -2773,5 +2804,18 @@ mod tests {
         assert_eq!(lines(20)[0].width(), 20);
         assert_eq!(lines(12).len(), 1);
         assert!(!lines(12)[0].to_string().contains("=^"));
+    }
+}
+
+#[cfg(test)]
+mod fit_words_tests {
+    use super::fit_words;
+
+    #[test]
+    fn notices_cut_at_a_word_boundary_within_the_width() {
+        assert_eq!(fit_words("short note", 20), "short note");
+        let cut = fit_words("Unknown command /help · F1 lists commands", 30);
+        assert_eq!(cut, "Unknown command /help · F1…");
+        assert!(unicode_width::UnicodeWidthStr::width(cut.as_str()) <= 30);
     }
 }

@@ -16,6 +16,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In a repository with no commits, `/go` now stops at once (no planning retries) and
   says to make an initial commit; the launch footer and `--doctor` give the same fix.
   Git error text no longer glues lines together (`tree.Use`).
+- Rejected slash commands no longer leave you stuck: unknown commands name themselves and
+  point to F1 and `/go GOAL` instead of a truncated manual-task list, `/help` opens the F1
+  picker, `/model` alone prints its usage, and the rejected text is replaced by the next
+  typed character (Up still recalls it) so `/go` then `/go GOAL` no longer becomes `/go/go GOAL`.
+  Footer notices are cut at a word boundary.
 
 ### Changed
 

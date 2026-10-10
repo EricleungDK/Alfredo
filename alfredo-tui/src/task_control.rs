@@ -2722,7 +2722,18 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
             });
         }
     }
-    Err("Commands: /task description · /permit ID JSON · /approve ID · /run ID · /cancel-task ID · /evidence ID · /recover ID · /accept ID · /reject ID · /tasks · /activity [query] · /chat · /refresh · /retry-task".into())
+    Err(unknown_command(text))
+}
+
+/// Short feedback for a command nobody handles; it names the command, points to
+/// F1 and shows the autopilot entry point, and stays within 80 columns.
+fn unknown_command(text: &str) -> String {
+    let verb = text.split_whitespace().next().unwrap_or(text);
+    let mut name: String = verb.chars().take(14).collect();
+    if verb.chars().count() > 14 {
+        name.push('…');
+    }
+    format!("Unknown command {name} · F1 lists commands · /go GOAL starts autopilot")
 }
 
 #[cfg(test)]
@@ -2885,5 +2896,31 @@ mod evidence_refresh_tests {
             fs::read(store.conversation_directory().unwrap().join("tasks.json")).unwrap(),
             canonical
         );
+    }
+}
+
+#[cfg(test)]
+mod unknown_command_tests {
+    use super::*;
+
+    #[test]
+    fn unknown_command_names_it_and_points_to_f1_and_go() {
+        for command in ["/help", "/quit", "/exit", "/clear", "/new"] {
+            let message = parse(command, "model").unwrap_err();
+            assert!(message.contains(command), "{message}");
+            assert!(message.contains("F1"), "{message}");
+            assert!(message.contains("/go GOAL"), "{message}");
+            assert!(message.chars().count() <= 80, "{message}");
+        }
+    }
+
+    #[test]
+    fn a_very_long_unknown_command_name_stays_short() {
+        let message = parse(&format!("/{} arg", "x".repeat(500)), "model").unwrap_err();
+        assert!(
+            message.contains("F1") && message.contains("/go GOAL"),
+            "{message}"
+        );
+        assert!(message.chars().count() <= 80, "{message}");
     }
 }

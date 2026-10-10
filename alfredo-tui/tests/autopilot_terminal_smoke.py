@@ -225,6 +225,32 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertEqual((self.workspace / 'calc.py').read_text(), 'def answer():\n    return 0\n')
         self.quit(terminal)
 
+    def test_rejected_commands_explain_themselves_and_never_concatenate_with_the_next_command(self):
+        terminal = self.terminal(resume=False)
+        terminal.send('/foo\r')
+        self.screen_has(terminal, 'Unknown command /foo')
+        screen = terminal.screen()
+        self.assertIn('F1 lists commands', screen)
+        self.assertIn('/go GOAL starts autopilot', screen)
+        terminal.send('/model\r')
+        self.screen_has(terminal, 'Usage: /model NAME (or /models)')
+        terminal.send('/help\r')
+        self.screen_has(terminal, 'Esc close')  # the F1 command picker opened
+        self.assertNotIn('Unknown command /help', terminal.screen())
+        terminal.send(b'\x1b')  # close the picker
+        self.wait_until('picker closed', lambda: 'Esc close' not in terminal.screen())
+        terminal.send('/go\r')
+        self.screen_has(terminal, 'Usage: /go GOAL')
+        # The next keystroke replaces the rejected text instead of appending to it.
+        terminal.send('/go Make answer return 42 and add app\r')
+        self.wait_until('autopilot planned', lambda: 'PLAN' in self.fixture.markers(), 60)
+        screen = terminal.screen()
+        self.assertNotIn('/go/go', screen)
+        self.assertNotIn('Unknown command', screen)
+        self.assertNotIn('Usage', screen)
+        self.screen_has(terminal, 'Autopilot')
+        self.quit(terminal)
+
     def test_stop_then_resume_runs_the_cancelled_task_again_without_a_repair(self):
         terminal = self.terminal(resume=False)
         terminal.send('/go Make answer return 42 and add app\r')
