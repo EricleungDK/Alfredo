@@ -968,3 +968,199 @@ fn busy_scope_lock_is_a_transient_refusal_and_writes_nothing() {
     store.transact(proposal("second", 2, vec![])).unwrap();
     drop(store.claim_worker(1).unwrap());
 }
+
+fn policy() -> alfredo_tui::tasks::WorkPolicy {
+    alfredo_tui::tasks::WorkPolicy {
+        files: vec!["calc.py".into()],
+        check: vec!["/bin/true".into()],
+    }
+}
+
+/// Task 1 permitted, approved, started and finished with `status`; returns the store.
+fn finished(fixture: &Fixture, status: TaskStatus) -> TaskStore {
+    let store = fixture.store("mission");
+    let steps = [
+        Action::Propose {
+            title: "Requeue me".into(),
+            model: "fixture".into(),
+            dependencies: vec![],
+        },
+        Action::Permit {
+            task: 1,
+            policy: policy(),
+        },
+        Action::Approve { task: 1 },
+        Action::Start {
+            task: 1,
+            baseline: "a".repeat(40),
+            inputs: vec![],
+        },
+    ];
+    for (index, action) in steps.into_iter().enumerate() {
+        store
+            .transact(Request {
+                correlation: format!("step-{index}"),
+                expected_revision: index as u64,
+                action,
+            })
+            .unwrap();
+    }
+    // Synthetic worker digest: the Finish receipt is written directly, as the
+    // activity tests do, and the store's full replay validator accepts it.
+    let mut snapshot = store.snapshot().unwrap();
+    let run = snapshot.tasks[0].run.clone().unwrap().id;
+    snapshot.receipts.push(alfredo_tui::tasks::Receipt {
+        revision: 5,
+        task: 1,
+        request: Request {
+            correlation: "finish".into(),
+            expected_revision: 4,
+            action: Action::Finish {
+                task: 1,
+                run,
+                status: status.clone(),
+                evidence_sha256: "b".repeat(64),
+                detail: "Worker cancelled during inference".into(),
+            },
+        },
+    });
+    snapshot.revision = 5;
+    snapshot.tasks[0].status = status;
+    let bound = snapshot.tasks[0].run.as_mut().unwrap();
+    bound.evidence_sha256 = Some("b".repeat(64));
+    bound.detail = "Worker cancelled during inference".into();
+    fs::write(
+        fixture.file(),
+        serde_json::to_vec_pretty(&snapshot).unwrap(),
+    )
+    .unwrap();
+    store
+}
+
+#[test]
+fn requeue_returns_a_cancelled_run_to_approved_and_the_next_start_gets_a_fresh_run() {
+    let fixture = Fixture::new();
+    let store = finished(&fixture, TaskStatus::Cancelled);
+    let first = store.snapshot().unwrap().tasks[0].run.clone().unwrap().id;
+    let (queued, _) = store
+        .transact(Request {
+            correlation: "requeue".into(),
+            expected_revision: 5,
+            action: Action::Requeue { task: 1 },
+        })
+        .unwrap();
+    assert_eq!(queued.tasks.len(), 1);
+    assert_eq!(queued.tasks[0].status, TaskStatus::Approved);
+    assert_eq!(queued.tasks[0].policy, Some(policy()));
+    assert!(queued.tasks[0].repair_of.is_none());
+    assert!(queued.receipts.iter().any(|r| matches!(
+        &r.request.action,
+        Action::Finish {
+            status: TaskStatus::Cancelled,
+            ..
+        }
+    )));
+    let (started, _) = store
+        .transact(Request {
+            correlation: "start-again".into(),
+            expected_revision: 6,
+            action: Action::Start {
+                task: 1,
+                baseline: "a".repeat(40),
+                inputs: vec![],
+            },
+        })
+        .unwrap();
+    assert_eq!(started.tasks[0].status, TaskStatus::Running);
+    assert_ne!(started.tasks[0].run.as_ref().unwrap().id, first);
+    assert_eq!(
+        parse("/requeue 1", "m").unwrap(),
+        Action::Requeue { task: 1 }
+    );
+    assert!(parse("/requeue x", "m").is_err());
+}
+
+#[test]
+fn requeue_is_refused_unless_the_task_was_cancelled_after_a_run() {
+    for status in [TaskStatus::Failed, TaskStatus::ReviewReady] {
+        let fixture = Fixture::new();
+        let store = finished(&fixture, status);
+        let before = fs::read(fixture.file()).unwrap();
+        assert!(store
+            .transact(Request {
+                correlation: "requeue".into(),
+                expected_revision: 5,
+                action: Action::Requeue { task: 1 },
+            })
+            .is_err());
+        assert_eq!(fs::read(fixture.file()).unwrap(), before);
+    }
+    // Cancelled before any run, unknown, and already-approved tasks.
+    let fixture = Fixture::new();
+    let store = fixture.store("mission");
+    for (index, action) in [
+        Action::Propose {
+            title: "Never ran".into(),
+            model: "fixture".into(),
+            dependencies: vec![],
+        },
+        Action::Cancel { task: 1 },
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        store
+            .transact(Request {
+                correlation: format!("s{index}"),
+                expected_revision: index as u64,
+                action,
+            })
+            .unwrap();
+    }
+    for (name, task) in [("unstarted", 1), ("unknown", 9)] {
+        assert!(store
+            .transact(Request {
+                correlation: name.into(),
+                expected_revision: 2,
+                action: Action::Requeue { task },
+            })
+            .is_err());
+    }
+}
+
+#[test]
+fn a_v16_store_cannot_replay_a_requeue_receipt_but_upgrades_on_write() {
+    let fixture = Fixture::new();
+    let store = finished(&fixture, TaskStatus::Cancelled);
+    store
+        .transact(Request {
+            correlation: "requeue".into(),
+            expected_revision: 5,
+            action: Action::Requeue { task: 1 },
+        })
+        .unwrap();
+    assert_eq!(store.snapshot().unwrap().schema_version, 17);
+    let path = fixture.file();
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    value["schema_version"] = 16.into();
+    fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    let error = store.snapshot().unwrap_err();
+    assert!(error.contains("v17"), "{error}");
+
+    // A genuine v16 store without Requeue receipts still opens and upgrades.
+    let other = Fixture::new();
+    let store = finished(&other, TaskStatus::Cancelled);
+    let path = other.file();
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    value["schema_version"] = 16.into();
+    fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    assert_eq!(store.snapshot().unwrap().schema_version, 16);
+    let (upgraded, _) = store
+        .transact(Request {
+            correlation: "requeue".into(),
+            expected_revision: 5,
+            action: Action::Requeue { task: 1 },
+        })
+        .unwrap();
+    assert_eq!(upgraded.schema_version, 17);
+}

@@ -117,6 +117,7 @@ pub struct TaskControl {
     provider: Option<Ollama>,
     pub evidence: Option<crate::review::View>,
     pub activity: Option<String>,
+    activity_view: std::cell::RefCell<crate::activity::View>,
     pub run_observations: BTreeMap<u64, String>,
     /// Read-only autopilot projection for rendering; the controller owns decisions.
     pub autopilot: Option<crate::autopilot::Status>,
@@ -217,6 +218,7 @@ impl TaskControl {
             provider: None,
             evidence: None,
             activity: None,
+            activity_view: Default::default(),
             run_observations: BTreeMap::new(),
             autopilot: None,
             autopilot_report: None,
@@ -319,9 +321,9 @@ impl TaskControl {
             match task.status {
                 TaskStatus::Proposed if task.repair_of.is_some() => status.repair += 1,
                 TaskStatus::ReviewReady => status.review += 1,
-                TaskStatus::Failed | TaskStatus::Rejected | TaskStatus::Cancelled
-                    if task.run.is_some() =>
-                {
+                // A run cancelled by the user is requeued, not repaired.
+                TaskStatus::Cancelled if task.run.is_some() => status.cancelled += 1,
+                TaskStatus::Failed | TaskStatus::Rejected if task.run.is_some() => {
                     status.repair += 1
                 }
                 TaskStatus::Accepted if task.repair_of.is_some() => status.resolve += 1,
@@ -356,6 +358,31 @@ impl TaskControl {
             })?;
         }
         Ok(())
+    }
+
+    /// Everything a background refresh can change that the screen shows.
+    /// Any new field a background refresh updates and the UI displays MUST be
+    /// added here, or `poll` will not report it and the screen will go stale.
+    fn refresh_fingerprint(&self) -> impl PartialEq {
+        (
+            self.snapshot.as_ref().map(|snapshot| {
+                (
+                    snapshot.revision,
+                    snapshot.receipts.len(),
+                    snapshot
+                        .receipts
+                        .last()
+                        .map(|receipt| receipt.request.correlation.clone()),
+                )
+            }),
+            self.run_observations.clone(),
+            self.notice.clone(),
+            self.dispatch.enabled,
+            self.scope_status.revision,
+            self.scope_status.blocked,
+            self.scope_status.label.clone(),
+            self.canonical_scope.as_ref().map(|scope| scope.revision),
+        )
     }
 
     pub fn poll(&mut self) -> bool {
@@ -416,7 +443,9 @@ impl TaskControl {
         }
         if let Ok(result) = self.background_receiver.try_recv() {
             self.refreshing = false;
-            changed = true;
+            // An unchanged re-read (same revision, observations, gate and notice)
+            // must not force a redraw; anything visible that moved still does.
+            let before = self.refresh_fingerprint();
             match result {
                 Ok(mut projection) => {
                     projection.notice = self.notice.clone();
@@ -427,6 +456,7 @@ impl TaskControl {
                     self.notice = format!("Task refresh failed; dispatch off: {error}");
                 }
             }
+            changed |= before != self.refresh_fingerprint();
         }
         while let Ok((task, result)) = self.worker_receiver.try_recv() {
             let intent = self.prepared_workers.remove(&task);
@@ -1032,8 +1062,38 @@ impl TaskControl {
         changed
     }
 
+    /// Visible slice of the cached F4 activity projection.
+    pub fn activity_window(
+        &self,
+        snapshot: &crate::tasks::Snapshot,
+        query: &str,
+        width: u16,
+        height: u16,
+    ) -> crate::activity::Window {
+        self.activity_view
+            .borrow_mut()
+            .window(snapshot, query, width, height, self.scroll)
+    }
+
+    /// Times the activity entry list was projected from a snapshot (cache misses).
+    pub fn activity_builds(&self) -> usize {
+        self.activity_view.borrow().builds()
+    }
+
     pub fn has_live_workers(&self) -> bool {
         !self.progress.is_empty()
+    }
+
+    /// Whether the 250 ms timing redraw is needed for task clocks. Independent of
+    /// pane visibility: the side pane and dashboard show elapsed times for live
+    /// workers (including queued ones) and the Architect row shows planning time.
+    pub fn timing_redraw_due(&self) -> bool {
+        self.has_live_workers() || self.planner.active()
+    }
+
+    /// A background read has been requested and not yet consumed by `poll`.
+    pub fn refresh_in_flight(&self) -> bool {
+        self.refreshing
     }
 
     /// Current live worker view for a task, if a local worker is observed.
@@ -1594,10 +1654,10 @@ impl TaskControl {
         };
         // Wait for an acknowledged claim before choosing another global revision.
         if self.workers.keys().any(|id| {
-            snapshot
-                .tasks
-                .iter()
-                .any(|task| task.id == *id && task.run.is_none())
+            snapshot.tasks.iter().any(|task| {
+                task.id == *id
+                    && (task.run.is_none() || task.status == crate::tasks::TaskStatus::Approved)
+            })
         }) {
             return Ok(None);
         }
@@ -2569,6 +2629,11 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
     if let Some(id) = text.strip_prefix("/resolve-repair ") {
         return Ok(Action::ResolveRepair {
             task: id.trim().parse().map_err(|_| "Usage: /resolve-repair ID")?,
+        });
+    }
+    if let Some(id) = text.strip_prefix("/requeue ") {
+        return Ok(Action::Requeue {
+            task: id.trim().parse().map_err(|_| "Usage: /requeue ID")?,
         });
     }
     if let Some(arguments) = text.strip_prefix("/repair ") {

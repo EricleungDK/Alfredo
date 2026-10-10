@@ -251,6 +251,31 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.screen_has(terminal, 'Autopilot')
         self.quit(terminal)
 
+    def test_stop_then_resume_runs_the_cancelled_task_again_without_a_repair(self):
+        terminal = self.terminal(resume=False)
+        terminal.send('/go Make answer return 42 and add app\r')
+        self.wait_until('dependent worker running after the real repair',
+                        lambda: self.fixture.markers().count('APP') == 1
+                        and (2, 'running', None) in self.statuses(), 60)
+        terminal.send('/stop\r')
+        self.wait_until('stopped worker cancelled', lambda: (2, 'cancelled', None) in self.statuses())
+        self.screen_has(terminal, 'Autopilot ‖ paused')
+        screen = terminal.screen()
+        # The one failure is the real check failure repaired as #3; the cancel adds none.
+        self.assertIn('1 repair', screen)
+        self.assertNotIn('2 failed', screen)
+        self.fixture.release_app.set()
+
+        terminal.send('/resume\r')
+        self.screen_has(terminal, 'git switch alfredo/go-', 60)
+        self.assertEqual(self.statuses(), [(1, 'failed', None), (2, 'accepted', None), (3, 'accepted', 1)])
+        self.assertEqual(self.fixture.markers(), ['PLAN', 'CALC', 'REPAIR', 'APP', 'APP'])
+        screen = terminal.screen()
+        self.assertNotIn('Repair #2', screen)
+        self.assertNotIn('Repair #4', screen)
+        self.assertIn('Autopilot ✓ done   2/2   1 repair', screen)
+        self.quit(terminal)
+
     def test_go_in_repository_without_commits_fails_once_with_the_fix(self):
         empty = self.workspace.parent / 'empty'
         empty.mkdir()

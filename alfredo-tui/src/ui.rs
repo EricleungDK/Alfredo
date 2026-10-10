@@ -743,41 +743,33 @@ fn draw_right(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: R
             );
         } else if let Some(query) = &tasks.activity {
             frame.render_widget(Clear, area);
-            let mut lines = vec![];
+            let title = format!(" Saved task activity · {} ", safe(query));
             if let Some(snapshot) = &tasks.snapshot {
-                let entries = crate::activity::entries(snapshot, query);
-                if entries.is_empty() {
-                    lines.push(Line::from("No saved task activity matches this query"));
-                }
-                for entry in entries {
-                    lines.push(Line::styled(
-                        format!(
-                            "r{} · task #{} · {}",
-                            entry.revision,
-                            entry.task,
-                            safe(&entry.summary)
-                        ),
-                        Style::default().fg(Color::Cyan),
-                    ));
-                    lines.extend(
-                        safe(&entry.detail)
-                            .lines()
-                            .map(|line| Line::from(line.to_owned())),
+                let block = frame_block(area, title);
+                let inner = block.inner(area);
+                frame.render_widget(block, area);
+                tasks.scroll_height.set(inner.height);
+                tasks.detail_live.set(false);
+                let window = tasks.activity_window(snapshot, query, inner.width, inner.height);
+                tasks.scroll_max.set(window.maximum);
+                if inner.width > 0 && inner.height > 0 {
+                    frame.render_widget(
+                        Paragraph::new(window.lines)
+                            .wrap(Wrap { trim: false })
+                            .scroll((window.row, 0)),
+                        inner,
                     );
-                    lines.push(Line::from(format!("Receipt: {}", safe(&entry.correlation))));
-                    lines.push(Line::default());
                 }
             } else {
-                lines.push(Line::from("Waiting for acknowledged task state"));
+                task_panel(
+                    frame,
+                    area,
+                    tasks,
+                    vec![Line::from("Waiting for acknowledged task state")],
+                    title,
+                    false,
+                );
             }
-            task_panel(
-                frame,
-                area,
-                tasks,
-                lines,
-                format!(" Saved task activity · {} ", safe(query)),
-                false,
-            );
         } else if let Some(report) = &tasks.autopilot_report {
             task_panel(
                 frame,
@@ -2104,6 +2096,7 @@ pub fn short_phase(receipt: &crate::tasks::Receipt) -> String {
         Action::Permit { .. } => format!("Task #{id} files and check set · needs approval"),
         Action::Approve { .. } => format!("Task #{id} approved"),
         Action::Cancel { .. } => format!("Task #{id} cancelled"),
+        Action::Requeue { .. } => format!("Task #{id} requeued"),
         Action::Start { .. } => format!("Task #{id} started"),
         Action::Finish { status, .. } => match status {
             TaskStatus::ReviewReady => format!("Task #{id} check passed · awaiting review"),
@@ -2188,6 +2181,7 @@ fn phase_word(receipt: &crate::tasks::Receipt) -> Vec<Phase> {
         Action::Propose { .. } => done("proposed"),
         Action::Permit { .. } => done("files and check set"),
         Action::Approve { .. } => done("approved"),
+        Action::Requeue { .. } => done("requeued"),
         Action::Assign { .. } => done("assigned"),
         Action::Start { .. } => done("started"),
         Action::Finish { status, .. } => match status {
@@ -2277,6 +2271,7 @@ fn collapsed_step(
     let task_of = |action: &Action| match action {
         Action::Approve { task }
         | Action::Cancel { task }
+        | Action::Requeue { task }
         | Action::Permit { task, .. }
         | Action::Assign { task, .. }
         | Action::Repair { task, .. }
