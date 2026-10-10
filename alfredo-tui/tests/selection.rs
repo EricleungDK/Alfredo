@@ -197,3 +197,38 @@ async fn mission_preflight_can_correct_resume_or_new_without_creating_state() {
         .unwrap_err()
         .contains("already exists"));
 }
+
+#[tokio::test]
+async fn plain_folder_selection_says_it_is_not_a_repository_and_names_the_next_step() {
+    use alfredo_tui::selection::prepare_workspace;
+    let f = Fixture::new();
+    let plain = f.0.canonicalize().unwrap().join("plain");
+    fs::create_dir(&plain).unwrap();
+    let error = prepare_workspace(&plain, &f.0.join("state"), false)
+        .await
+        .unwrap_err();
+    assert!(
+        error.starts_with(&format!("{} is not a Git repository", plain.display())),
+        "{error}"
+    );
+    assert!(error.contains("git init") && error.contains("cd into a repository"));
+    assert!(!error.contains("fatal"), "{error}");
+}
+
+#[tokio::test]
+async fn automatic_open_of_a_plain_folder_yields_the_not_a_repository_notice() {
+    use alfredo_tui::selection::{automatic, not_a_repository_notice};
+    let f = Fixture::new();
+    let plain = f.0.canonicalize().unwrap().join("plain");
+    fs::create_dir(&plain).unwrap();
+    assert!(automatic(&plain, &f.0.join("state"))
+        .await
+        .unwrap()
+        .is_none());
+    let notice = not_a_repository_notice(&plain);
+    assert!(
+        notice.starts_with(&format!("{} is not a Git repository", plain.display())),
+        "{notice}"
+    );
+    assert!(notice.contains("git init") && !notice.contains("fatal"));
+}

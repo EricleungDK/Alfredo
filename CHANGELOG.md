@@ -8,6 +8,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Outside a Git repository the selector, `--workspace` and `--doctor` say
+  `<path> is not a Git repository` and name the next step (`cd` into a repository, or
+  `git init` and make a first commit) instead of raw `fatal:` text. Startup errors
+  print as plain `Error: <message>`. `--doctor` no longer claims conversation-only use
+  and skips the storage check (no bogus `FAIL storage` from `$HOME`) until the
+  workspace is a Git root.
 - `/stop` then `/resume` no longer turns the cancelled task into a failure and an
   automatic Repair. The cancelled task runs again as a new run of itself; it no
   longer counts as `failed` and spends no `--max-repairs` budget. New `/requeue ID`

@@ -132,3 +132,15 @@ fn piped_launch_reports_how_to_get_usage_without_terminal_escapes() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("Interactive terminal required"));
     assert!(output.stdout.is_empty());
 }
+
+#[test]
+fn startup_errors_print_as_plain_text_without_debug_quotes() {
+    let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .arg("--model")
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.starts_with("Error: --model"), "{stderr}");
+    assert!(!stderr.contains('"'), "{stderr}");
+}
