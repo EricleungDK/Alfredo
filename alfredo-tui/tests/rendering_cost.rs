@@ -352,3 +352,57 @@ fn measure_dashboard_streaming_redraws() {
     );
     assert!(average < 16.0, "average redraw {average:.2} ms ≥ 16 ms");
 }
+
+/// Chat redraw while a reply streams into a long conversation (issue #122).
+#[test]
+#[ignore = "explicit release-mode chat transcript redraw measurement"]
+fn measure_chat_transcript_redraws() {
+    let mut app = App::new("fixture".into());
+    for index in 0..400 {
+        // About 4 KB per message: 25 lines of about 160 bytes, so each wraps at 140 columns.
+        let content = (0..25)
+            .map(|line| {
+                format!(
+                    "message {index} line {line:02} {}",
+                    "lorem ipsum ".repeat(12)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.sessions[0].messages.push(alfredo_tui::model::Message {
+            role: if index % 2 == 0 { "user" } else { "assistant" }.into(),
+            content,
+        });
+    }
+    let bytes: usize = app.sessions[0]
+        .messages
+        .iter()
+        .map(|m| m.content.len())
+        .sum();
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+    let mut frame = |app: &App| {
+        let start = Instant::now();
+        terminal.draw(|f| ui::draw(f, black_box(app))).unwrap();
+        black_box(terminal.backend().buffer());
+        start.elapsed().as_nanos()
+    };
+    let _cold = frame(&app);
+    let mut warm = vec![];
+    for token in 0..100 {
+        // A streaming token lands on the last message before each redraw.
+        app.sessions[0]
+            .messages
+            .last_mut()
+            .unwrap()
+            .content
+            .push_str(&format!(" token{token}"));
+        warm.push(frame(&app));
+    }
+    let (p50, p95) = (percentile(&warm, 50), percentile(&warm, 95));
+    println!(
+        "{}",
+        serde_json::json!({"fixture": "400 messages x 4 KB, 140x40, streaming last message", "transcript_bytes": bytes, "warm_p50_ms": p50 as f64 / 1e6, "warm_p95_ms": p95 as f64 / 1e6})
+    );
+    assert!(p50 < 5_000_000, "p50 {} ms >= 5 ms", p50 as f64 / 1e6);
+    assert!(p95 < 16_000_000, "p95 {} ms >= 16 ms", p95 as f64 / 1e6);
+}

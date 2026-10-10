@@ -124,3 +124,35 @@ fn transcript_output_matches_the_uncached_renderer() {
     let hashes = scenario();
     assert_eq!(hashes, GOLDEN);
 }
+
+#[test]
+fn streaming_a_token_rebuilds_only_the_last_message() {
+    let mut app = fixture();
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    frame(&mut terminal, &app);
+    let first = app.sessions[0].transcript_cache_stats();
+    assert_eq!(first.builds, 36, "cold draw builds each message once");
+
+    // An unchanged frame reuses every message.
+    frame(&mut terminal, &app);
+    assert_eq!(app.sessions[0].transcript_cache_stats(), first);
+
+    // A streamed token touches only the last message.
+    app.sessions[0]
+        .messages
+        .last_mut()
+        .unwrap()
+        .content
+        .push_str(" token");
+    frame(&mut terminal, &app);
+    let after = app.sessions[0].transcript_cache_stats();
+    assert_eq!(after.builds, first.builds + 1);
+    assert_eq!(after.height_passes, first.height_passes + 1);
+
+    // A resize re-measures cached bodies without rebuilding them.
+    terminal = Terminal::new(TestBackend::new(70, 30)).unwrap();
+    frame(&mut terminal, &app);
+    let resized = app.sessions[0].transcript_cache_stats();
+    assert_eq!(resized.builds, after.builds);
+    assert_eq!(resized.height_passes, after.height_passes + 36);
+}

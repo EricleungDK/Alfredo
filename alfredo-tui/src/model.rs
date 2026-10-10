@@ -147,6 +147,8 @@ pub struct Session {
     )]
     reading: std::cell::Cell<crate::reading::Viewport>,
     #[serde(skip)]
+    pub(crate) transcript_cache: crate::transcript_cache::TranscriptCache,
+    #[serde(skip)]
     queued: bool,
     #[serde(skip)]
     queue_observation: Option<crate::inference_admission::Observation>,
@@ -187,6 +189,7 @@ impl Session {
             attempt: 0,
             scroll: std::cell::Cell::new(0),
             reading: Default::default(),
+            transcript_cache: Default::default(),
             queued: false,
             queue_observation: None,
             capacity_wait: None,
@@ -579,6 +582,10 @@ impl Session {
         let mut reading = self.reading.get();
         reading.move_rows(rows);
         self.reading.set(reading);
+    }
+    /// How often cached transcript bodies were rebuilt or re-measured (for tests).
+    pub fn transcript_cache_stats(&self) -> crate::transcript_cache::Stats {
+        self.transcript_cache.stats()
     }
     pub fn reading_position(&self, heights: &[usize], height: u16) -> crate::reading::Position {
         let mut reading = self.reading.get();

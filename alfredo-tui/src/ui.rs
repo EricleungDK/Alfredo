@@ -1063,8 +1063,14 @@ fn draw_agent(
 fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: Rect) {
     let session = &app.sessions[app.selected];
     let identity = tasks.and_then(|tasks| tasks.snapshot.as_ref());
+    // `lines` is the current run of non-message rows; message bodies come from the
+    // session's cache and are never copied here. `base` counts rows before the run.
     let mut lines = Vec::new();
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut base = 0usize;
     let mut blocks: Vec<crate::reading::Block> = Vec::new();
+    let mut cache = session.transcript_cache.borrow_mut();
+    cache.sync(session.messages.iter().map(|m| m.content.as_str()));
     // A new chat suggests the common path, even below the workspace arrival line.
     if session.messages.is_empty()
         && session.task_receipts().is_empty()
@@ -1152,7 +1158,7 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
             };
             blocks.push(crate::reading::Block {
                 key,
-                start,
+                start: base + start,
                 len: lines.len().saturating_sub(start),
             });
         }
@@ -1160,7 +1166,6 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
             break;
         };
         group = None;
-        let start = lines.len();
         let (heading, color) = if message.role == "user" {
             ("You".into(), Color::DarkGray)
         } else {
@@ -1176,15 +1181,18 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         } else {
             color
         };
-        lines.push(Line::styled(heading, Style::default().fg(color)));
-        for line in safe(&message.content).lines() {
-            lines.push(Line::from(line.to_owned()));
-        }
-        lines.push(Line::default());
+        base += lines.len();
+        segments.push(Segment::Run(std::mem::take(&mut lines)));
+        let body = cache.entry(index).lines.len();
         blocks.push(crate::reading::Block {
             key: crate::reading::BlockKey::Message(index),
-            start,
-            len: lines.len() - start,
+            start: base,
+            len: body + 2,
+        });
+        base += body + 2;
+        segments.push(Segment::Message {
+            index,
+            heading: Line::styled(heading, Style::default().fg(color)),
         });
     }
     // A failed request keeps its reason in the transcript until the next attempt.
@@ -1194,6 +1202,7 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
             Style::default().fg(Color::Red),
         ));
     }
+    segments.push(Segment::Run(lines));
     let block = frame_block(
         area,
         format!(" Chat {} · {} ", app.selected + 1, session.short_status()),
@@ -1218,29 +1227,75 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         Layout::vertical([Constraint::Length(metadata_height), Constraint::Min(1)]).split(inner);
     frame.render_widget(metadata, content[0]);
     if content[1].width > 0 && content[1].height > 0 {
-        let heights: Vec<_> = lines
-            .iter()
-            .map(|line| {
-                if line.width() <= usize::from(content[1].width) {
-                    1
-                } else {
-                    Paragraph::new(line.clone())
-                        .wrap(Wrap { trim: false })
-                        .line_count(content[1].width)
-                        .max(1)
+        let width = content[1].width;
+        let mut heights = Vec::new();
+        for segment in &segments {
+            match segment {
+                Segment::Run(run) => heights.extend(
+                    run.iter()
+                        .map(|line| crate::transcript_cache::line_height(line, width)),
+                ),
+                Segment::Message { index, heading } => {
+                    cache.heights(*index, width);
+                    heights.push(crate::transcript_cache::line_height(heading, width));
+                    heights.extend_from_slice(&cache.entry(*index).heights);
+                    heights.push(1);
                 }
-            })
-            .collect();
+            }
+        }
         let position = session.reading_position_blocks(&heights, content[1].height, &blocks);
-        // Slice logical lines before the widget's u16 scroll, keeping long bounded
-        // responses navigable beyond 65,535 rendered rows.
-        let transcript = Paragraph::new(lines.into_iter().skip(position.line).collect::<Vec<_>>())
-            .wrap(Wrap { trim: false });
+        // Only rows that can reach the viewport are materialised; wrapping them is
+        // identical to wrapping the whole tail. Slicing logical lines before the
+        // widget's u16 scroll keeps long bounded responses navigable beyond 65,535 rows.
+        let wanted = position.row.saturating_add(usize::from(content[1].height));
+        let mut window: Vec<Line<'static>> = Vec::new();
+        let mut covered = 0usize;
+        let mut at = 0usize;
+        let mut done = false;
+        let mut take = |line: &Line<'static>, at: &mut usize| -> bool {
+            if *at >= position.line && covered <= wanted {
+                covered += heights[*at];
+                window.push(line.clone());
+            }
+            *at += 1;
+            covered > wanted
+        };
+        for segment in &segments {
+            match segment {
+                Segment::Run(run) => {
+                    for line in run {
+                        done |= take(line, &mut at);
+                    }
+                }
+                Segment::Message { index, heading } => {
+                    done |= take(heading, &mut at);
+                    for line in &cache.entry(*index).lines {
+                        done |= take(line, &mut at);
+                    }
+                    done |= take(&Line::default(), &mut at);
+                }
+            }
+            if done {
+                break;
+            }
+        }
         frame.render_widget(
-            transcript.scroll((position.row.min(u16::MAX as usize) as u16, 0)),
+            Paragraph::new(window)
+                .wrap(Wrap { trim: false })
+                .scroll((position.row.min(u16::MAX as usize) as u16, 0)),
             content[1],
         );
     }
+}
+
+/// A stretch of the transcript: rows built this frame, or a cached message body
+/// framed by its heading and a trailing blank row.
+enum Segment {
+    Run(Vec<Line<'static>>),
+    Message {
+        index: usize,
+        heading: Line<'static>,
+    },
 }
 
 /// The cat running along its dotted track beside the capacity-wait text, or
