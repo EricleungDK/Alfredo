@@ -2073,6 +2073,7 @@ pub fn short_phase(receipt: &crate::tasks::Receipt) -> String {
         Action::Permit { .. } => format!("Task #{id} files and check set · needs approval"),
         Action::Approve { .. } => format!("Task #{id} approved"),
         Action::Cancel { .. } => format!("Task #{id} cancelled"),
+        Action::Requeue { .. } => format!("Task #{id} requeued"),
         Action::Start { .. } => format!("Task #{id} started"),
         Action::Finish { status, .. } => match status {
             TaskStatus::ReviewReady => format!("Task #{id} check passed · awaiting review"),
@@ -2157,6 +2158,7 @@ fn phase_word(receipt: &crate::tasks::Receipt) -> Vec<Phase> {
         Action::Propose { .. } => done("proposed"),
         Action::Permit { .. } => done("files and check set"),
         Action::Approve { .. } => done("approved"),
+        Action::Requeue { .. } => done("requeued"),
         Action::Assign { .. } => done("assigned"),
         Action::Start { .. } => done("started"),
         Action::Finish { status, .. } => match status {
@@ -2246,6 +2248,7 @@ fn collapsed_step(
     let task_of = |action: &Action| match action {
         Action::Approve { task }
         | Action::Cancel { task }
+        | Action::Requeue { task }
         | Action::Permit { task, .. }
         | Action::Assign { task, .. }
         | Action::Repair { task, .. }

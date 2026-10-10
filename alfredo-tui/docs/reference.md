@@ -38,8 +38,12 @@ status. The header's second row shows the run: state, `done/total`, failures and
 repairs when present, elapsed time and branch; the goal is the work group title.
 State lives in a small
 `autopilot-<conversation-sha256>.json` beside the task store; after restart the loop
-is restored **paused** and nothing is replayed until you resume (runs cancelled by
-quit or `/stop` are repaired after resume).
+is restored **paused** and nothing is replayed until you resume. Runs cancelled by
+quit or `/stop` are not failures: `/resume` requeues the same task (`/requeue ID`,
+which returns a cancelled run to approved and starts a fresh run on dispatch), creates
+no Repair task, and spends none of the `--max-repairs` budget. Only a failed check or
+worker is repaired. A stopped task shows as `cancelled` in the work status and resumes with
+`/resume` (autopilot) or `/requeue ID`.
 
 When every planned task is accepted, held or failed, autopilot composes the accepted
 candidates on the plan's recorded baseline with the dependency merge-tree composition

@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `/stop` then `/resume` no longer turns the cancelled task into a failure and an
+  automatic Repair. The cancelled task runs again as a new run of itself; it no
+  longer counts as `failed` and spends no `--max-repairs` budget. New `/requeue ID`
+  command and task `Requeue` action; the task state schema is now v17 (older builds
+  cannot open v17 state; v16 state upgrades in place with a backup).
 - In a repository with no commits, `/go` now stops at once (no planning retries) and
   says to make an initial commit; the launch footer and `--doctor` give the same fix.
   Git error text no longer glues lines together (`tree.Use`).
