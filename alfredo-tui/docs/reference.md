@@ -338,6 +338,15 @@ entry from the existing durable receipt ledger, including restored history and
 idempotent retries. Entries show revision order rather than invented wall-clock
 times or actor identities. It is not yet the full attributed Activity Journal.
 
+The activity view caches its projected entries per mission, workspace, snapshot
+revision, receipt count, newest receipt and query, caches wrapped row offsets per
+width, and builds only the visible window each frame, so a warm redraw stays
+under 1 ms even with thousands of receipts. A background task refresh that
+changes nothing visible does not trigger a redraw. The ignored
+`tests/rendering_cost.rs` measurement (`cargo test --release -- --ignored`)
+asserts the warm p50 below 1 ms; it is timing-dependent and not part of the
+default test run.
+
 The side pane's **work** section groups tasks under their recorded Plan (titled by
 the user's goal; planner retry and revision text is cut off, also for older saved
 plans) or **Manual tasks**, with repair descendants (`⑂`) nested beneath their

@@ -360,8 +360,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .sessions
                     .iter()
                     .any(|session| session.status.active());
-                // Live worker stages and elapsed times keep moving on the dashboard.
-                dirty |= work.tasks.visible && work.tasks.has_live_workers();
+                // Worker and Architect elapsed times keep moving, pane hidden or not.
+                dirty |= work.tasks.timing_redraw_due();
                 last_timing_draw = std::time::Instant::now();
             }
             dirty |= work.tasks.poll();
@@ -728,7 +728,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Duration::from_secs(1)
                     }
             {
-                dirty = true;
+                // Redraw happens when the refreshed projection differs (`poll`),
+                // worker output arrives (`progress_changed`) or timers tick above.
                 work.tasks.refresh_background(&runtime);
                 last_task_refresh = std::time::Instant::now();
             }
