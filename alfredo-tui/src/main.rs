@@ -20,7 +20,14 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("Error: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let starting = std::env::current_dir()?;
     let mut workspace = None;
     let mut state_dir = std::env::var_os("ALFREDO_STATE_DIR")

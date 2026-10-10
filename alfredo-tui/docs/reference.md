@@ -241,6 +241,9 @@ fail before diagnostics. Results distinguish storage, model server/catalog and
 worker prerequisites with corrective flags or actions. A repository with no commits
 fails the worker check with `git commit --allow-empty -m init`; the same notice shows
 in the footer at launch, and `/go` there fails once without planning retries.
+Outside a Git repository the worker check reports `<path> is not a Git repository`
+with the next step (`cd` into a repository, or `git init` and make a first commit),
+and the storage check is skipped until the workspace is a validated Git root.
 
 Diagnostics can initialize private state directories and lock files, but do not
 save conversations, mutate task receipts, send inference, or run coding checks.
@@ -270,7 +273,9 @@ corrupt), the selector appears with the reason shown above its input.
 
 Outside a repository, or with `--select`, launch starts with **Workspace selection
 required**. The current directory is only a placeholder Starting Location; typing
-replaces it. Enter validates an existing repository's exact root;
+replaces it. Enter validates an existing repository's exact root; a folder that is
+not a repository is refused with `<path> is not a Git repository` and the next step
+(`cd` into a repository, or `git init` and make a first commit);
 F2 selects new-repository creation at an unused path. The picker collects the
 repository and mission choice without creating either. Existing files/directories
 and nested repositories are never overwritten. After final mission confirmation

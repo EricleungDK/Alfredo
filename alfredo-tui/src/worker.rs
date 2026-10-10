@@ -465,6 +465,14 @@ pub(crate) fn git_error_text(stderr: &[u8]) -> String {
 /// Shown when a repository has no commit to plan or work from.
 pub(crate) const NO_COMMITS: &str = "This repository has no commits yet; make an initial commit (git commit --allow-empty -m init) and run /go again";
 
+/// Plain-language error for a folder that is not inside a Git repository.
+pub(crate) fn not_a_repository(path: &Path) -> String {
+    format!(
+        "{} is not a Git repository; cd into a repository, or run git init and make a first commit",
+        path.display()
+    )
+}
+
 fn git_succeeds(workspace: &Path, args: &[&str]) -> bool {
     std::process::Command::new("/usr/bin/git")
         .env_clear()
@@ -544,7 +552,11 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
             if args.contains(&"merge-tree") {
                 err.extend_from_slice(&out);
             }
-            return Err(format!("Git failed: {}", git_error_text(&err)));
+            let text = git_error_text(&err);
+            if text.contains("not a git repository") {
+                return Err(not_a_repository(root));
+            }
+            return Err(format!("Git failed: {text}"));
         }
         String::from_utf8(out).map_err(|_| "Git returned non-UTF-8 output".into())
     })

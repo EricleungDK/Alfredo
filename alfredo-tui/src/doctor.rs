@@ -22,7 +22,25 @@ pub async fn inspect(
     let mut passed = true;
     let mut lines = vec!["Alfredo startup diagnostics".to_string()];
     let mut model = initial_model.to_string();
+    // Validate the Git root first: the storage-outside-workspace check only means
+    // something against a real repository root, not a non-repo working directory.
+    let root_check = async {
+        let root = crate::worker::git(workspace, &["rev-parse", "--show-toplevel"]).await?;
+        let expected = workspace
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        if Path::new(root.trim())
+            .canonicalize()
+            .map_err(|error| error.to_string())?
+            != expected
+        {
+            return Err("Choose the repository root with --workspace".to_string());
+        }
+        Ok::<_, String>(())
+    }
+    .await;
     let storage = (|| -> Result<(), String> {
+        root_check.clone()?;
         let store = TaskStore::new(state, workspace, mission)?;
         store.snapshot()?;
         let conversations = ConversationStore::open(&store, conversation)?;
@@ -32,6 +50,8 @@ pub async fn inspect(
         Ok(())
     })();
     match storage {
+        Err(_) if root_check.is_err() => lines
+            .push("SKIP storage: not checked until the workspace is a Git repository root".into()),
         Ok(()) => {
             lines.push("PASS storage: task state and named conversation can be opened".into())
         }
@@ -66,43 +86,35 @@ pub async fn inspect(
             lines.push(format!("FAIL model server: {}. Check Ollama is running and --endpoint points to its HTTP origin.", clean(&error)));
         }
     }
-    let git = async {
-        let root = crate::worker::git(workspace, &["rev-parse", "--show-toplevel"]).await?;
-        let expected = workspace
-            .canonicalize()
-            .map_err(|error| error.to_string())?;
-        if Path::new(root.trim())
-            .canonicalize()
-            .map_err(|error| error.to_string())?
-            != expected
-        {
-            return Err("Choose the repository root with --workspace".to_string());
+    let git = match root_check {
+        Err(error) => Err(error),
+        Ok(()) => async {
+            if !crate::worker::has_head_commit(workspace) {
+                return Err(crate::worker::NO_COMMITS.to_string());
+            }
+            let config = crate::worker::git(workspace, &["config", "--local", "--list"]).await?;
+            if config.lines().any(|line| {
+                line.starts_with("filter.")
+                    || line.starts_with("include.")
+                    || line.starts_with("includeif.")
+            }) {
+                return Err(
+                    "Repository checkout filters/includes need qualification before worker execution"
+                        .into(),
+                );
+            }
+            Ok::<_, String>(())
         }
-        if !crate::worker::has_head_commit(workspace) {
-            return Err(crate::worker::NO_COMMITS.to_string());
-        }
-        let config = crate::worker::git(workspace, &["config", "--local", "--list"]).await?;
-        if config.lines().any(|line| {
-            line.starts_with("filter.")
-                || line.starts_with("include.")
-                || line.starts_with("includeif.")
-        }) {
-            return Err(
-                "Repository checkout filters/includes need qualification before worker execution"
-                    .into(),
-            );
-        }
-        Ok::<_, String>(())
-    }
-    .await;
+        .await,
+    };
     match git {
         Ok(()) => lines.push("PASS worker workspace: Git root with a committed baseline".into()),
         Err(error) => {
             passed = false;
-            if error == crate::worker::NO_COMMITS {
+            if error == crate::worker::NO_COMMITS || error.contains("is not a Git repository;") {
                 lines.push(format!("FAIL worker workspace: {error}"));
             } else {
-                lines.push(format!("FAIL worker workspace: {}. Coding needs --workspace at a Git root with a commit; conversation-only use remains available.", clean(&error)));
+                lines.push(format!("FAIL worker workspace: {}. Coding needs --workspace at a Git root with a commit.", clean(&error)));
             }
         }
     }
