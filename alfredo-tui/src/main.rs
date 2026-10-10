@@ -268,10 +268,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(work) => launched = Some(work),
                 Err(error) => notice = format!("Automatic open failed: {error}"),
             },
-            Ok(None) if workspace.is_some() => {
-                notice = format!("Not inside a Git repository: {}", start.display())
-            }
-            Ok(None) => {}
+            Ok(None) => notice = alfredo_tui::selection::not_a_repository_notice(&start),
             Err(error) => notice = format!("Automatic open failed: {error}"),
         }
     }

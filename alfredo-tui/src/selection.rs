@@ -219,6 +219,11 @@ pub async fn automatic(starting: &Path, state: &Path) -> Result<Option<Choice>> 
     open_or_create(state, workspace, DEFAULT_MISSION).map(Some)
 }
 
+/// Notice shown above the selector when the automatic open found no repository at `start`.
+pub fn not_a_repository_notice(start: &Path) -> String {
+    crate::worker::not_a_repository(start)
+}
+
 /// Resume `name` when it exists, otherwise start it. A resume refusal for an
 /// existing mission (e.g. corrupt identity) is reported, never replaced.
 pub fn open_or_create(state: &Path, workspace: WorkspaceChoice, name: &str) -> Result<Choice> {

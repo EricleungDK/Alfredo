@@ -198,15 +198,12 @@ fn doctor_names_the_fix_for_a_repository_without_commits() {
     assert!(!text.contains("ambiguous argument"), "{text}");
 }
 
-fn plain_folder_report(state_inside: bool) -> (String, std::path::PathBuf) {
+fn plain_folder_report() -> (String, std::path::PathBuf) {
     let fixture = Fixture::new();
     let plain = fixture.root.join("plain");
     fs::create_dir_all(&plain).unwrap();
-    let state = if state_inside {
-        plain.join(".local/state/alfredo")
-    } else {
-        fixture.state.clone()
-    };
+    // The state dir lives inside the non-repo working directory, as with the default under $HOME.
+    let state = plain.join(".local/state/alfredo");
     let (endpoint, server) = catalog("initial-model");
     let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
         .args(["--doctor", "--model", "initial-model", "--endpoint"])
@@ -219,13 +216,12 @@ fn plain_folder_report(state_inside: bool) -> (String, std::path::PathBuf) {
     server.join().unwrap();
     assert_eq!(output.status.code(), Some(2));
     let text = String::from_utf8(output.stdout).unwrap();
-    // Keep the fixture alive until here; return the plain path for assertions.
     (text, plain.canonicalize().unwrap())
 }
 
 #[test]
 fn doctor_in_a_non_repository_names_the_next_step_and_skips_the_storage_check() {
-    let (text, plain) = plain_folder_report(true);
+    let (text, plain) = plain_folder_report();
     assert!(
         text.contains(&format!("{} is not a Git repository", plain.display())),
         "{text}"

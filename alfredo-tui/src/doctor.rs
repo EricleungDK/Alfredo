@@ -111,7 +111,8 @@ pub async fn inspect(
         Ok(()) => lines.push("PASS worker workspace: Git root with a committed baseline".into()),
         Err(error) => {
             passed = false;
-            if error == crate::worker::NO_COMMITS || error.contains("is not a Git repository;") {
+            if error == crate::worker::NO_COMMITS || error.contains(crate::worker::NOT_A_REPOSITORY)
+            {
                 lines.push(format!("FAIL worker workspace: {error}"));
             } else {
                 lines.push(format!("FAIL worker workspace: {}. Coding needs --workspace at a Git root with a commit.", clean(&error)));

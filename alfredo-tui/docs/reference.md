@@ -243,7 +243,9 @@ fails the worker check with `git commit --allow-empty -m init`; the same notice 
 in the footer at launch, and `/go` there fails once without planning retries.
 Outside a Git repository the worker check reports `<path> is not a Git repository`
 with the next step (`cd` into a repository, or `git init` and make a first commit),
-and the storage check is skipped until the workspace is a validated Git root.
+and the storage check is skipped until the workspace is a validated Git root
+(this includes a repository subdirectory, which is not the root). The same text is
+shown above the selector when automatic open finds no repository.
 
 Diagnostics can initialize private state directories and lock files, but do not
 save conversations, mutate task receipts, send inference, or run coding checks.
