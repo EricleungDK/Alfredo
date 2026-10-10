@@ -268,6 +268,8 @@ enum Settled {
     Active,
     Success(u64),
     Stuck(String),
+    /// Cancelled by /stop or quit before /resume; neither a failure nor a repair.
+    Cancelled,
 }
 
 struct Family {
@@ -795,7 +797,7 @@ impl Autopilot {
                 match family.settled {
                     Settled::Success(_) => done += 1,
                     Settled::Stuck(_) => failed += 1,
-                    Settled::Active => {}
+                    Settled::Active | Settled::Cancelled => {}
                 }
             }
         }
@@ -1196,7 +1198,13 @@ impl Autopilot {
                     format!("resolve-{}", head.id),
                     format!("/resolve-repair {}", head.id),
                 )),
-                TaskStatus::Failed | TaskStatus::Cancelled => {
+                // A run cancelled by the user is dispatched again as the same
+                // task: no repair, no failure and no repair budget spent.
+                TaskStatus::Cancelled => Some((
+                    format!("requeue-{}", head.id),
+                    format!("/requeue {}", head.id),
+                )),
+                TaskStatus::Failed => {
                     let reason =
                         clean(&format!("autopilot: {}", failure_detail(tasks, head)), 1800);
                     Some((
@@ -1215,7 +1223,6 @@ impl Autopilot {
                 family.settled == Settled::Active
                     && find(family.head).is_some_and(|task| {
                         task.status == TaskStatus::Approved
-                            && task.run.is_none()
                             && !tasks.workers.contains_key(&task.id)
                             && task
                                 .dependencies
@@ -1404,6 +1411,7 @@ impl Autopilot {
                     ("✗", Some(reason.clone()))
                 }
                 Settled::Active => ("◌", Some("unfinished".into())),
+                Settled::Cancelled => ("–", Some("cancelled; /resume runs it again".into())),
             };
             lines.push(format!("{glyph} #{}  {title}", family.root));
             if let Some(detail) = detail {
@@ -1579,7 +1587,7 @@ fn families(snapshot: &Snapshot, saved: &Saved, tasks: &TaskControl) -> Vec<Fami
                     Settled::Stuck("cancelled before start".into())
                 }
                 TaskStatus::Cancelled if !saved.retry_cancelled.contains(&head) => {
-                    Settled::Stuck("cancelled; /resume retries it".into())
+                    Settled::Cancelled
                 }
                 TaskStatus::Running if !tasks.workers.contains_key(&head) => {
                     Settled::Stuck(format!("run interrupted; inspect with /recover {head}"))
@@ -1587,7 +1595,6 @@ fn families(snapshot: &Snapshot, saved: &Saved, tasks: &TaskControl) -> Vec<Fami
                 TaskStatus::Proposed | TaskStatus::Approved => match blocked() {
                     Some(reason) => Settled::Stuck(reason),
                     None if head_task.status == TaskStatus::Approved
-                        && head_task.run.is_none()
                         && !tasks.workers.contains_key(&head)
                         && crate::dispatch::approval(snapshot, head).is_some_and(|approval| {
                             tasks.dispatch.attempts.get(&head) == Some(&approval)

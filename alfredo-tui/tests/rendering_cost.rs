@@ -1,4 +1,4 @@
-//! Opt-in real rendering cohorts; no model, network, subprocess or duration threshold.
+//! Opt-in real rendering cohorts; no model, network or subprocess. Only the ignored measurement asserts a duration (activity warm p50 under 1 ms).
 use alfredo_tui::{
     commands::Completion,
     conversations::TaskView,
@@ -203,6 +203,15 @@ fn measure_mission_work_redraws() {
                 ));
             }
             assert!(screen_hashes.iter().all(|value| value == &screen_hashes[0]));
+            if panel == "activity" {
+                // Issue #111: cached, windowed activity redraws. Only this explicit
+                // release measurement asserts time, so default CI cannot flake.
+                assert!(
+                    percentile(&warm, 50) < 1_000_000,
+                    "activity warm p50 {} ns at {width}x{height}",
+                    percentile(&warm, 50)
+                );
+            }
             cohorts.push(serde_json::json!({
                 "panel": panel, "viewport": [width,height], "cold_samples_ns": cold,
                 "cold_p50_ns": percentile(&cold,50), "cold_p95_ns": percentile(&cold,95),
