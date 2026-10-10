@@ -353,7 +353,9 @@ impl Session {
     }
     pub fn history_previous(&mut self) {
         if self.replace_pending() {
-            self.clear_draft();
+            // The first Up only releases the rejected text for editing.
+            self.rejected = None;
+            return;
         }
         if self.history.is_empty() {
             let prompts: Vec<_> = self
@@ -373,7 +375,13 @@ impl Session {
             Some(index) => index.saturating_sub(1),
             None => {
                 self.unsent = Some((self.draft.clone(), self.cursor()));
-                self.history.len() - 1
+                let last = self.history.len() - 1;
+                // Recalling the text already in the prompt would look like a no-op.
+                if last > 0 && self.history[last] == self.draft.trim() {
+                    last - 1
+                } else {
+                    last
+                }
             }
         };
         self.history_index = Some(next);

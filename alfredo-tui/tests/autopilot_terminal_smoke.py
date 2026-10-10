@@ -247,6 +247,7 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         screen = terminal.screen()
         self.assertNotIn('/go/go', screen)
         self.assertNotIn('Unknown command', screen)
+        self.assertNotIn('Usage', screen)
         self.screen_has(terminal, 'Autopilot')
         self.quit(terminal)
 

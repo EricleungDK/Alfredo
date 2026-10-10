@@ -253,8 +253,9 @@ A rejected slash command (unknown command, `Usage: …`, `Select a task first`, 
 found) keeps its text in the prompt so it can be corrected, but the text is marked
 "replace on next keystroke": it is drawn reversed and the next typed character or paste
 replaces it, so retyping the full command never concatenates (`/go/go …`). Left, Right,
-Home, End, Backspace, Delete or Ctrl+W drop the mark and edit the text normally; Ctrl+U
-clears it; Up recalls it from prompt history. An unknown command such as `/help`,
+Home, End, Backspace, Delete, Ctrl+W or the first Up drop the mark and keep the text for
+editing; the next Up continues into older prompts. Ctrl+U clears it, and Up then recalls it
+from prompt history. An unknown command such as `/help`,
 `/quit` or `/clear` answers `Unknown command /NAME · F1 lists commands · /go GOAL starts
 autopilot`; `/help` itself opens the F1 command picker and `/model` without a name
 answers `Usage: /model NAME (or /models)`. Footer notices wider than the terminal are
@@ -596,7 +597,7 @@ The crate is self-contained: the execution provider lives in `src/execution.rs`.
 | F1 | Open command picker when draft is empty (`/help` opens it too) |
 | Tab after `/prefix` | Open matching slash commands |
 | Up / Down in conversation | Browse prompt history and restore unsent draft |
-| First printable key after a rejected command | Replaces the rejected text (shown reversed); Left, Right, Home, End, Backspace, Delete and Ctrl+W keep it for editing; Up recalls it from history |
+| First printable key or paste after a rejected command | Replaces the rejected text (shown reversed); Left, Right, Home, End, Backspace, Delete, Ctrl+W and the first Up keep it for editing; Up again, or Up from an emptied prompt, browses history where it is the newest entry |
 | Up / Down in task detail | Select a visible task or group |
 | Alt+Left / Alt+Right | Collapse / expand a branch, or move to parent / child |
 | F6 | Focus the side pane (overlay below 88 columns); F6 or Escape returns to the prompt |

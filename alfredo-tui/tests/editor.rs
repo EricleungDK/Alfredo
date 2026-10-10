@@ -120,3 +120,33 @@ fn editing_or_moving_keys_keep_the_rejected_text_and_edit_it_normally() {
         );
     }
 }
+
+#[test]
+fn first_up_after_a_rejection_keeps_the_text_and_the_next_up_goes_older() {
+    let mut session = Session::new("fixture".into());
+    session.insert("/older");
+    session.remember_submission();
+    session.clear_draft();
+    session.insert("/go");
+    session.reject_draft();
+    session.history_previous();
+    assert!(!session.replace_pending());
+    assert_eq!(session.draft, "/go");
+    session.history_previous();
+    assert_eq!(session.draft, "/older");
+    session.history_next();
+    assert_eq!(session.draft, "/go");
+}
+
+#[test]
+fn pasting_over_a_rejected_command_replaces_it() {
+    let mut session = Session::new("fixture".into());
+    session.insert("/go");
+    session.reject_draft();
+    // The paste arm of the event loop performs exactly this sequence.
+    if session.replace_pending() {
+        session.clear_draft();
+    }
+    session.insert("/go build x");
+    assert_eq!(session.draft, "/go build x");
+}

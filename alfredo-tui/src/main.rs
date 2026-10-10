@@ -1520,7 +1520,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Paste(_) if work.app.pane.focus.is_some() => {}
                 Event::Paste(text) => {
                     work.app.completion = None;
-                    work.app.sessions[work.app.selected].insert(&text);
+                    let session = &mut work.app.sessions[work.app.selected];
+                    if session.replace_pending() {
+                        session.clear_draft();
+                    }
+                    session.insert(&text);
                 }
                 _ => {}
             }
