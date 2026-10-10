@@ -77,3 +77,46 @@ fn session_switch_keeps_independent_drafts_and_cursor_positions() {
     assert_eq!(app.sessions[0].cursor(), 2);
     assert_eq!(app.sessions[1].cursor(), 6);
 }
+
+#[test]
+fn rejected_command_is_replaced_by_the_next_typed_character_and_recalled_with_up() {
+    let mut session = Session::new("fixture".into());
+    session.insert("/go");
+    session.reject_draft();
+    assert!(session.replace_pending());
+    assert_eq!(session.draft, "/go");
+    session.type_char('/');
+    assert!(!session.replace_pending());
+    assert_eq!(session.draft, "/");
+    session.insert("go Make answer return 42");
+    assert_eq!(session.draft, "/go Make answer return 42");
+
+    let mut session = Session::new("fixture".into());
+    session.insert("/help");
+    session.reject_draft();
+    session.clear_draft();
+    session.history_previous();
+    assert_eq!(session.draft, "/help");
+}
+
+#[test]
+fn editing_or_moving_keys_keep_the_rejected_text_and_edit_it_normally() {
+    for edit in 0..5 {
+        let mut session = Session::new("fixture".into());
+        session.insert("/gp x");
+        session.reject_draft();
+        match edit {
+            0 => session.left(),
+            1 => session.home(),
+            2 => session.end(),
+            3 => session.backspace(),
+            _ => session.delete_word(),
+        }
+        assert!(!session.replace_pending(), "edit {edit}");
+        session.type_char('!');
+        assert!(
+            session.draft.contains('!') && session.draft.contains('/'),
+            "edit {edit}"
+        );
+    }
+}

@@ -167,6 +167,10 @@ pub struct Session {
     history_index: Option<usize>,
     #[serde(skip)]
     unsent: Option<(String, usize)>,
+    /// Draft text a rejected command left in the prompt; the next typed character
+    /// replaces it unless an editing or cursor key claimed it first.
+    #[serde(skip)]
+    rejected: Option<String>,
     /// Chat draft set aside while an agent view owns the prompt; snapshots save
     /// this, never the agent's note.
     #[serde(skip)]
@@ -197,6 +201,7 @@ impl Session {
             history: Vec::new(),
             history_index: None,
             unsent: None,
+            rejected: None,
             aside: None,
         }
     }
@@ -347,6 +352,9 @@ impl Session {
         }
     }
     pub fn history_previous(&mut self) {
+        if self.replace_pending() {
+            self.clear_draft();
+        }
         if self.history.is_empty() {
             let prompts: Vec<_> = self
                 .messages
@@ -394,19 +402,42 @@ impl Session {
         self.aside = chat;
     }
 
+    /// A rejected command stays visible for correction and Up recall, but the next
+    /// typed character replaces it. Cursor and editing keys keep it for editing.
+    pub fn reject_draft(&mut self) {
+        self.remember_submission();
+        self.history_index = None;
+        self.rejected = Some(self.draft.clone()).filter(|draft| !draft.trim().is_empty());
+    }
+    /// True while the prompt shows rejected text that the next character replaces.
+    pub fn replace_pending(&self) -> bool {
+        self.rejected.as_deref() == Some(self.draft.as_str())
+    }
+    /// Types one character; it replaces rejected text that is still pending.
+    pub fn type_char(&mut self, ch: char) {
+        if self.replace_pending() {
+            self.clear_draft();
+        }
+        self.insert(&ch.to_string());
+    }
+
     pub fn clear_draft(&mut self) {
+        self.rejected = None;
         self.history_index = None;
         self.unsent = None;
         self.draft.clear();
         self.cursor = 0;
     }
     pub fn home(&mut self) {
+        self.rejected = None;
         self.cursor = 0;
     }
     pub fn end(&mut self) {
+        self.rejected = None;
         self.cursor = self.draft.len();
     }
     pub fn left(&mut self) {
+        self.rejected = None;
         self.cursor = self.draft[..self.cursor()]
             .grapheme_indices(true)
             .next_back()
@@ -414,6 +445,7 @@ impl Session {
             .unwrap_or(0);
     }
     pub fn right(&mut self) {
+        self.rejected = None;
         let cursor = self.cursor();
         self.cursor = cursor
             + self.draft[cursor..]
@@ -423,17 +455,20 @@ impl Session {
                 .unwrap_or(0);
     }
     pub fn backspace(&mut self) {
+        self.rejected = None;
         let end = self.cursor();
         self.left();
         self.draft.replace_range(self.cursor..end, "");
     }
     pub fn delete(&mut self) {
+        self.rejected = None;
         let start = self.cursor();
         self.right();
         self.draft.replace_range(start..self.cursor, "");
         self.cursor = start;
     }
     pub fn delete_word(&mut self) {
+        self.rejected = None;
         let end = self.cursor();
         let before = &self.draft[..end];
         let trimmed = before.trim_end();
