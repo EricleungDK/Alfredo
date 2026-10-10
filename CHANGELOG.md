@@ -26,6 +26,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Side pane: other missions show `done/total` and their state (`4/7   running`).
 - `execution.rs` moved into `alfredo-tui/src`; the crate builds without the rest of
   the repository.
+- Chat redraw no longer re-wraps the whole conversation each frame: message bodies and
+  wrapped heights are cached per session and only the visible rows are rendered (400
+  messages x 4 KB: about 88 ms to 1 ms per frame, #122).
 
 ### Removed
 
