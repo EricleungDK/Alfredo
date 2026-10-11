@@ -824,7 +824,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/evidence 4\r')
             wait_for(b'Acceptance criteria')
             os.write(master, b'/accept 4\r')
-            wait_for(b'This task has acceptance criteria')
+            wait_for(b'Use /review 4 JSON here')
             self.assertEqual(json.loads(saved.read_text())['tasks'][3]['status'], 'review-ready')
             os.write(master, b'\x15')
             hold = {'outcome': 'rejected', 'risk': 'security', 'reason': 'Human inspection required',
