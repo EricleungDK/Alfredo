@@ -275,7 +275,16 @@ fn titles_name_the_current_attempt() {
     repair.repair_of = Some(2);
     assert_eq!(
         agent_view::title(&[attempt(2, TaskStatus::Failed), repair]),
-        "Agent · repair #3 of #2 · failed"
+        "Agent · repair 1 of #2 · failed"
+    );
+    // The number counts repairs of the original task, not task ids.
+    let mut second = attempt(4, TaskStatus::Running);
+    second.repair_of = Some(3);
+    let mut first = attempt(3, TaskStatus::Failed);
+    first.repair_of = Some(2);
+    assert_eq!(
+        agent_view::title(&[attempt(2, TaskStatus::Failed), first, second]),
+        "Agent · repair 2 of #2 · running"
     );
     assert_eq!(agent_view::title(&[]), "Agent");
 }

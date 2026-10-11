@@ -45,6 +45,16 @@ no Repair task, and spends none of the `--max-repairs` budget. Only a failed che
 worker is repaired. A stopped task shows as `cancelled` in the work status and resumes with
 `/resume` (autopilot) or `/requeue ID`.
 
+A failed autopilot summary says why. For a task whose repair budget is spent, the
+summary adds `Last failure:` (one line of the last attempt's recorded cause, such as
+`Model returned no FILE blocks`) and `Next:` (`Try a larger model, /repair ID <hint>,
+or raise --max-repairs`). A planner reply that is not the plan JSON is reported as
+`The model did not return a valid plan (expected JSON). Try a larger model or /plan
+to inspect its answer`; the parser detail stays in the saved planner command outcome.
+Identical consecutive `plan failed` lines in the chat collapse to one line with a
+count (`×3`), and `/autopilot` after a planning failure shows the summary instead of
+the stale plan draft panel.
+
 When every planned task is accepted, held or failed, autopilot composes the accepted
 candidates on the plan's recorded baseline with the dependency merge-tree composition
 and creates one local branch `alfredo/go-<id>`. HEAD, the index and working files are
@@ -417,7 +427,7 @@ from model admission; `— steered · output cut` when unknown). The exchange is
 retained marked `cut`; nothing is retained when nothing streamed. A repair after a
 cut starts a fresh Local Agent and is never given the partial answer.
 The title names the latest attempt (`Agent · worker #2 · running`,
-`Agent · repair #3 of #2 · failed`, `Agent · architect · draft`). It follows the
+`Agent · repair 2 of #1 · failed` (the second repair of original task #1), `Agent · architect · draft`). It follows the
 tail while live; PageUp/PageDown keep the reading position like the chat.
 
 While it is shown, the prompt title is `To worker #N · Enter send · Esc back` and

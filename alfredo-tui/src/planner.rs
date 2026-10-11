@@ -895,7 +895,7 @@ impl Planner {
                     );
                 }
                 Update::Failed(error) => {
-                    self.notice = format!("{error} · no action taken");
+                    self.notice = format!("{} · no action taken", plain_error(&error));
                     self.finish_command(crate::planner_command::Outcome::failed(&error));
                     self.cancel();
                     break;
@@ -943,7 +943,7 @@ impl Planner {
                             self.notice = format!("Review {} paths, checks and dependencies · /plan-revise REQUEST refines; /plan-save proposes; approval remains separate", if revised { "revised draft" } else { "draft" });
                         }
                         Err(error) => {
-                            self.notice = format!("{error} · no action taken");
+                            self.notice = format!("{} · no action taken", plain_error(&error));
                             self.finish_command(crate::planner_command::Outcome::failed(&error));
                         }
                     }
@@ -997,5 +997,16 @@ impl Planner {
             )
         });
         format!("{}{timing}\n\nFrontier Architect draft · Local Agent worker assignments\nNot saved or approved · committed context only; working edits excluded\n{}{warnings}\n\n{}", self.notice, context, self.draft.as_ref().and_then(|p| serde_json::to_string_pretty(p).ok()).unwrap_or_else(|| self.partial.clone()))
+    }
+}
+
+/// User-facing wording for a planner failure. A reply that is not the plan
+/// JSON is a model-capability problem, not a parser detail; the serde text
+/// stays in the planner command outcome (F4/receipts).
+pub fn plain_error(error: &str) -> String {
+    if error.starts_with("Invalid plan JSON") {
+        "The model did not return a valid plan (expected JSON). Try a larger model or /plan to inspect its answer".into()
+    } else {
+        error.to_string()
     }
 }

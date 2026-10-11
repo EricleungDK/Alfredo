@@ -346,7 +346,8 @@ fn bounded(text: &str) -> String {
     lines[lines.len().saturating_sub(40)..].join("\n")
 }
 
-/// `Agent · worker #2 · running`, `Agent · repair #3 of #2 · failed`.
+/// `Agent · worker #2 · running`, `Agent · repair 2 of #1 · failed` (the second
+/// repair of original task #1; never a task id rendered as a count).
 pub fn title(attempts: &[Attempt]) -> String {
     let Some(head) = attempts.last() else {
         return "Agent".into();
@@ -362,7 +363,15 @@ pub fn title(attempts: &[Attempt]) -> String {
         repair_of: head.repair_of,
     });
     match head.repair_of {
-        Some(parent) => format!("Agent · repair #{} of #{parent} · {state}", head.id),
+        Some(parent) => {
+            let number = attempts.iter().filter(|a| a.repair_of.is_some()).count();
+            let root = match attempts.first() {
+                Some(first) if first.repair_of.is_none() => first.id,
+                Some(first) => first.repair_of.unwrap_or(parent),
+                None => parent,
+            };
+            format!("Agent · repair {number} of #{root} · {state}")
+        }
         None => format!("Agent · worker #{} · {state}", head.id),
     }
 }

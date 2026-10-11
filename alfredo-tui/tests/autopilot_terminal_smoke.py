@@ -29,6 +29,7 @@ class AutopilotServer:
         self.requests = []
         self.errors = []
         self.release_app = threading.Event()
+        self.prose_worker = False
         fixture = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -65,6 +66,9 @@ class AutopilotServer:
                              'model': request['model'], 'dependencies': [1],
                              'policy': {'files': ['app.py'], 'check': CHECK_APP}},
                         ]})
+                    elif fixture.prose_worker:
+                        marker = 'PROSE'
+                        content = 'I would rather talk about it than write any code.'
                     elif prompt.startswith('Implement this task: Repair #1:'):
                         marker = 'REPAIR'
                         content = json.dumps({'files': [{'path': 'calc.py', 'content': 'def answer():\n    return 42\n'}]})
@@ -274,6 +278,18 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertNotIn('Repair #2', screen)
         self.assertNotIn('Repair #4', screen)
         self.assertIn('Autopilot ✓ done   2/2   1 repair', screen)
+        self.quit(terminal)
+
+    def test_failed_summary_shows_the_cause_and_a_next_step_when_the_model_writes_prose(self):
+        self.fixture.prose_worker = True
+        terminal = self.terminal(resume=False)
+        terminal.send('/go Make answer return 42 and add app\r')
+        self.screen_has(terminal, 'Autopilot ✗ failed', 90)
+        self.screen_has(terminal, 'Model returned no FILE blocks')
+        screen = terminal.screen()
+        self.assertIn('repair budget exhausted (3/3)', screen)
+        self.assertIn('raise --max-repairs', screen)
+        self.assertNotIn('Invalid plan JSON', screen)
         self.quit(terminal)
 
     def test_go_in_repository_without_commits_fails_once_with_the_fix(self):
