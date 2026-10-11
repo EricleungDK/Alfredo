@@ -1036,12 +1036,20 @@ mod publication_crash_tests {
         }
         // These are the real provider's serialized bytes, before publication.
         let result: CheckResult = serde_json::from_slice(bytes).unwrap();
-        assert_eq!(result.receipt.status, "completed");
-        assert_eq!(result.receipt.exit_code, Some(0));
-        assert!(result
-            .receipt
-            .stdout
-            .contains("PUBLICATION_CHECK_COMPLETED"));
+        assert_eq!(
+            result.receipt.status, "completed",
+            "fixture check did not complete: {:?}",
+            result.receipt
+        );
+        assert_eq!(result.receipt.exit_code, Some(0), "{:?}", result.receipt);
+        assert!(
+            result
+                .receipt
+                .stdout
+                .contains("PUBLICATION_CHECK_COMPLETED"),
+            "{:?}",
+            result.receipt
+        );
         println!("{READY}");
         std::io::stdout().flush().unwrap();
         loop {
@@ -1164,11 +1172,12 @@ mod publication_crash_tests {
                 .env("ALFREDO_PUBLICATION_CRASH_ROOT", &fixture.0)
                 .env("ALFREDO_PUBLICATION_CRASH_CUT", cut)
                 .stdout(Stdio::piped())
-                .stderr(Stdio::inherit())
+                .stderr(Stdio::piped())
                 .spawn()
                 .unwrap();
             let mut child = Self(child);
             let stdout = child.0.stdout.take().unwrap();
+            let mut stderr = child.0.stderr.take().unwrap();
             let (ready, wait) = mpsc::channel();
             thread::spawn(move || {
                 for line in BufReader::new(stdout).lines() {
@@ -1178,8 +1187,37 @@ mod publication_crash_tests {
                     }
                 }
             });
-            wait.recv_timeout(Duration::from_secs(15))
-                .expect("Child did not reach the result publication crash cut");
+            let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+            let sink = captured.clone();
+            let (drained, drain_done) = mpsc::channel();
+            thread::spawn(move || {
+                let mut buffer = [0u8; 4096];
+                while let Ok(read) = std::io::Read::read(&mut stderr, &mut buffer) {
+                    if read == 0 {
+                        break;
+                    }
+                    sink.lock().unwrap().extend_from_slice(&buffer[..read]);
+                }
+                let _ = drained.send(());
+            });
+            if let Err(error) = wait.recv_timeout(Duration::from_secs(15)) {
+                // Stop the child first, then report the status `wait` observed so
+                // a failed start can be diagnosed without racing its exit.
+                let _ = child.0.kill();
+                let status = match child.0.wait() {
+                    Ok(status) => format!("ended with {status}"),
+                    Err(error) => format!("status unavailable: {error}"),
+                };
+                // A descendant may hold stderr open, so do not wait forever.
+                let _ = drain_done.recv_timeout(Duration::from_secs(2));
+                let stderr = String::from_utf8_lossy(&captured.lock().unwrap()).into_owned();
+                panic!(
+                    "Child did not reach the result publication crash cut ({error}); \
+                     cut {cut}, child {status} (killed by the test if it was still running); \
+                     child stderr:\n{stderr}"
+                );
+            }
+            // The detached drain thread keeps reading so the child cannot block.
             child
         }
 

@@ -931,6 +931,12 @@ cleanup still requires a reaped leader and quiescent group before success. Failu
 prove cleanup remains outcome-unknown. This may use the full configured grace interval;
 no timeout bounds or execution permissions are expanded.
 
+On Linux, group liveness ignores zombie members (state `Z` in `/proc/<pid>/stat`): a
+killed descendant that its parent has not yet reaped cannot run, so it does not keep
+cleanup waiting or turn a clean cancel into `outcome-unknown` / `cleanup-uncertain`.
+Without a readable `/proc`, any group member counts as live, as before. Once only
+zombies remain, the leader is reaped and cleanup succeeds.
+
 ## Thinking-stream progress
 
 Ollama's [thinking protocol](https://docs.ollama.com/capabilities/thinking) can emit

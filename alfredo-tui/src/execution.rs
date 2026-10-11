@@ -1345,6 +1345,9 @@ fn terminate_child(
         }
         #[cfg(unix)]
         if !process_group_is_live(pid) {
+            // Nothing but zombies remain, so the leader's identity is no longer
+            // needed; reap it so cancellation does not leak it.
+            let _ = child.try_wait();
             return Ok(());
         }
         thread::sleep(Duration::from_millis(10));
@@ -1385,13 +1388,100 @@ fn terminate_child(
     Err("process cleanup did not prove quiescence".to_owned())
 }
 
+/// True while the process group has a member that can still run.
+///
+/// `kill(-pgid, 0)` also succeeds for zombies, which stay in the group until
+/// their parent reaps them (for orphaned descendants, an unrelated init that may
+/// be slow). A zombie cannot run or hold resources, so on Linux it does not count.
 #[cfg(unix)]
 fn process_group_is_live(pid: u32) -> bool {
     let result = unsafe { libc::kill(-(pid as libc::pid_t), 0) };
-    if result == 0 {
-        return true;
+    if result != 0 {
+        return io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
     }
-    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    #[cfg(target_os = "linux")]
+    if let Some(live) = linux_group_has_runnable_member(pid) {
+        return live;
+    }
+    true
+}
+
+/// Fields of `/proc/<pid>/stat` that group liveness needs.
+#[cfg(target_os = "linux")]
+#[derive(Debug, PartialEq, Eq)]
+struct ProcStat {
+    state: char,
+    pgrp: u32,
+    threads: u32,
+}
+
+#[cfg(target_os = "linux")]
+impl ProcStat {
+    /// Parses `pid (comm) state ppid pgrp ... num_threads ...`. `comm` may contain
+    /// spaces and parentheses, so fields are counted after the last `)`.
+    fn parse(stat: &str) -> Option<Self> {
+        let rest = stat.rsplit_once(')')?.1;
+        let mut fields = rest.split_whitespace();
+        let state = fields.next()?.chars().next()?;
+        let pgrp = fields.nth(1)?.parse().ok()?;
+        // Overall field 20 (num_threads) is index 17 here, counting state as 0.
+        let threads = fields.nth(17 - 3)?.parse().ok()?;
+        Some(Self {
+            state,
+            pgrp,
+            threads,
+        })
+    }
+
+    /// A zombie whose thread group still has other threads is not dead: the main
+    /// thread called `pthread_exit` and the remaining threads keep running.
+    fn can_still_run(&self) -> bool {
+        match self.state {
+            'X' => false,
+            'Z' => self.threads > 1,
+            _ => true,
+        }
+    }
+}
+
+/// Scans `/proc` for a runnable member of process group `pgid`. Returns
+/// `Some(false)` only when it saw at least one group member and none can run.
+/// Returns `None` whenever the answer is not trustworthy (unreadable or foreign
+/// `/proc`, `hidepid`, unparseable or unreadable entries, no member seen even
+/// though the caller's `kill(-pgid, 0)` succeeded), so the caller stays
+/// conservative and treats the group as live. Only a process that vanished
+/// mid-scan (`NotFound`/`ESRCH`) is skipped.
+#[cfg(target_os = "linux")]
+fn linux_group_has_runnable_member(pgid: u32) -> Option<bool> {
+    let entries = fs::read_dir("/proc").ok()?;
+    let mut saw_member = false;
+    for entry in entries {
+        let entry = entry.ok()?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if name.is_empty() || !name.bytes().all(|byte| byte.is_ascii_digit()) {
+            continue;
+        }
+        let stat = match fs::read_to_string(format!("/proc/{name}/stat")) {
+            Ok(stat) => stat,
+            Err(error)
+                if error.kind() == io::ErrorKind::NotFound
+                    || error.raw_os_error() == Some(libc::ESRCH) =>
+            {
+                continue
+            }
+            Err(_) => return None,
+        };
+        let stat = ProcStat::parse(&stat)?;
+        if stat.pgrp != pgid {
+            continue;
+        }
+        saw_member = true;
+        if stat.can_still_run() {
+            return Some(true);
+        }
+    }
+    saw_member.then_some(false)
 }
 
 fn configure_process(command: &mut Command, limits: &ExecutionLimits) {
@@ -2630,6 +2720,74 @@ mod tests {
         );
         assert!(!member_status.success());
         assert!(!process_group_is_live(pid));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn proc_stat_parser_handles_awkward_names_and_thread_counts() {
+        let line = "42 (we ird) name) Z 1 77 77 0 -1 4 0 0 0 0 0 0 0 0 20 0 3 0 5 0 0";
+        let stat = ProcStat::parse(line).unwrap();
+        assert_eq!(
+            stat,
+            ProcStat {
+                state: 'Z',
+                pgrp: 77,
+                threads: 3
+            }
+        );
+        assert!(stat.can_still_run(), "zombie main thread with live threads");
+        let single = ProcStat::parse(&line.replace(" 3 0 5", " 1 0 5")).unwrap();
+        assert!(!single.can_still_run());
+        let sleeping = ProcStat::parse(&line.replace(") Z 1", ") S 1")).unwrap();
+        assert!(sleeping.can_still_run());
+        assert!(ProcStat::parse("42 (short) S 1 2").is_none());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn cleanup_ignores_zombie_group_members_awaiting_their_parent() {
+        use std::os::unix::process::CommandExt;
+        let mut leader = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let pid = leader.id();
+        let identity = process_identity(pid);
+        // This test is the member's parent and deliberately does not reap it, so
+        // once cleanup kills the member it stays a zombie in the process group.
+        let mut member = Command::new("/bin/sleep")
+            .arg("30")
+            .process_group(pid as i32)
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+        let result = terminate_child(&mut leader, pid, &identity, 0.03);
+        let elapsed = started.elapsed();
+        let leader_reaped = !Path::new(&format!("/proc/{pid}")).exists();
+        let member_is_zombie = fs::read_to_string(format!("/proc/{}/stat", member.id()))
+            .map(|stat| {
+                stat.rsplit(')')
+                    .next()
+                    .unwrap_or("")
+                    .trim_start()
+                    .starts_with('Z')
+            })
+            .unwrap_or(false);
+        let _ = member.kill();
+        let _ = member.wait();
+        let _ = leader.kill();
+        let _ = leader.wait();
+        assert!(
+            member_is_zombie,
+            "fixture should leave an unreaped zombie member"
+        );
+        assert!(result.is_ok(), "{result:?} after {elapsed:?}");
+        assert!(
+            leader_reaped,
+            "cleanup should reap the leader before returning"
+        );
+        assert!(elapsed < Duration::from_millis(900), "{elapsed:?}");
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
