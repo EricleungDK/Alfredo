@@ -516,3 +516,40 @@ fn run_cancelled_by_the_user_is_not_counted_as_a_repair_to_propose() {
     );
     assert!(!status.concise(100).contains("no pending review"));
 }
+
+#[test]
+fn review_usage_uses_the_selected_tasks_real_criterion_count() {
+    let mut fixture = Fixture::new(vec![task(1, TaskStatus::ReviewReady, None, true)]);
+    let snapshot = fixture.control.snapshot.as_mut().unwrap();
+    receipt(
+        snapshot,
+        1,
+        Action::Plan {
+            plan: Plan {
+                prompt: "Plan".into(),
+                planner: "fixture".into(),
+                context: None,
+                scope: None,
+                architecture: None,
+                tasks: vec![Step {
+                    title: "Task 1".into(),
+                    acceptance: vec!["First".into(), "Second".into()],
+                    model: "fixture".into(),
+                    dependencies: vec![],
+                    policy: WorkPolicy {
+                        files: vec!["source.rs".into()],
+                        check: vec!["true".into()],
+                    },
+                }],
+            },
+        },
+    );
+    for text in ["/review 1", "/review 1 "] {
+        let message = fixture
+            .control
+            .prepare_command(text, "fixture")
+            .unwrap_err();
+        assert!(message.starts_with("Usage: /review 1 {"), "{message}");
+        assert!(message.contains(r#""criterion":2"#), "{message}");
+    }
+}

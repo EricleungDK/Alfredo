@@ -284,7 +284,7 @@ pub struct Snapshot {
 
 /// One-line `/review` template prefilled with the task's real criterion numbers.
 pub fn review_template(task: u64, criteria: usize) -> String {
-    let items = (1..=criteria.max(1))
+    let items = (1..=criteria)
         .map(|n| format!(r#"{{"criterion":{n},"met":true,"note":"…"}}"#))
         .collect::<Vec<_>>()
         .join(",");
@@ -1126,11 +1126,7 @@ impl TaskStore {
         if let Action::Review { task, accept: true } = &request.action {
             if !snapshot.acceptance_for_task(*task).is_empty() {
                 let count = snapshot.acceptance_for_task(*task).len();
-                return Err(format!(
-                    "Use /review {task} JSON here: this task has acceptance criteria. Template: {}",
-                    review_template(*task, count)
-                )
-                .into());
+                return Err(format!("Use {}", review_template(*task, count)).into());
             }
         }
         if snapshot.receipts.len() == MAX_RECEIPTS {

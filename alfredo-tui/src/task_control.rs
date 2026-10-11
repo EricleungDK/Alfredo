@@ -2006,12 +2006,16 @@ impl TaskControl {
                         correlation,
                         expected_revision: snapshot.revision,
                         action: parse(&text, model).map_err(|error| {
-                            match text.strip_prefix("/review ").map(str::trim) {
-                                Some(id) if id.parse::<u64>().is_ok() => {
-                                    let task = id.parse().unwrap_or_default();
+                            match error.strip_prefix("Usage: /review ") {
+                                Some(_) => {
+                                    let task = text
+                                        .strip_prefix("/review ")
+                                        .and_then(|rest| rest.split(' ').next())
+                                        .and_then(|id| id.parse().ok())
+                                        .unwrap_or_default();
                                     review_usage(task, snapshot.acceptance_for_task(task).len())
                                 }
-                                _ => error,
+                                None => error,
                             }
                         })?,
                     },
@@ -2621,10 +2625,7 @@ impl TaskControl {
 
 /// `/review` usage with a copy-pasteable template for the task's criteria.
 fn review_usage(task: u64, criteria: usize) -> String {
-    format!(
-        "Usage: /review ID JSON. Template: {}",
-        crate::tasks::review_template(task, criteria)
-    )
+    format!("Usage: {}", crate::tasks::review_template(task, criteria))
 }
 
 pub fn parse(text: &str, model: &str) -> Result<Action, String> {
@@ -2677,9 +2678,12 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
             .next()
             .and_then(|id| id.parse::<u64>().ok())
             .ok_or("Invalid task id")?;
-        let Some((_, json)) = arguments.split_once(' ') else {
+        let json = arguments
+            .split_once(' ')
+            .map_or("", |(_, json)| json.trim());
+        if json.is_empty() {
             return Err(review_usage(task, 1));
-        };
+        }
         #[derive(serde::Deserialize)]
         #[serde(untagged)]
         enum ReviewInput {
@@ -2954,7 +2958,12 @@ mod unknown_command_tests {
     #[test]
     fn review_usage_shows_a_template_with_the_real_criterion_numbers() {
         let message = parse("/review 3", "model").unwrap_err();
-        assert!(message.starts_with("Usage: /review ID JSON"), "{message}");
+        assert!(message.starts_with("Usage: /review 3 {"), "{message}");
+        assert_eq!(parse("/review 3 ", "model").unwrap_err(), message);
+        assert!(
+            !review_usage(3, 0).contains("criterion"),
+            "no fake criterion"
+        );
         let message = review_usage(3, 2);
         assert!(
             message.contains(

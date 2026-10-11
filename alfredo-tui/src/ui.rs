@@ -48,7 +48,9 @@ fn fit_words(text: &str, width: usize) -> String {
         used += cells;
         end = index + ch.len_utf8();
     }
-    let cut = boundary.filter(|index| *index > 0).unwrap_or(end);
+    // A word boundary that would discard most of the line (a long unbroken token such
+    // as a JSON template) loses to a plain cut, so the visible start stays copyable.
+    let cut = boundary.filter(|index| *index >= width / 2).unwrap_or(end);
     format!("{}…", text[..cut].trim_end())
 }
 
@@ -2868,6 +2870,15 @@ mod fit_words_tests {
                 },
             }],
         }
+    }
+
+    #[test]
+    fn fit_words_keeps_the_start_of_a_long_unbroken_token() {
+        let cut = fit_words(r#"Use /review 4 {"outcome":"approved","reason":"…"}"#, 40);
+        assert!(
+            cut.starts_with(r#"Use /review 4 {"outcome":"appr"#),
+            "{cut}"
+        );
     }
 
     #[test]
