@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A clean cancel (or timeout) is no longer sometimes recorded as `outcome-unknown` /
+  `cleanup-uncertain`. Process-group cleanup on Linux now ignores zombie members that
+  are only waiting to be reaped, instead of waiting out the deadline and failing to
+  prove quiescence. The publication-crash test fixture also reports the child's exit
+  status and stderr when it fails to start.
 - Outside a Git repository the selector, `--workspace` and `--doctor` say
   `<path> is not a Git repository` and name the next step (`cd` into a repository, or
   `git init` and make a first commit) instead of raw `fatal:` text. Startup errors
