@@ -1049,6 +1049,7 @@ fn commands_and_header_line_expose_read_only_status() {
         total: 2,
         failed: 0,
         repairs: 1,
+        max_repairs: 3,
         elapsed: Duration::from_secs(75),
         branch: None,
     };
@@ -1129,6 +1130,7 @@ fn header_shows_one_autopilot_line_and_the_report_opens_in_mission_work() {
         total: 2,
         failed: 0,
         repairs: 1,
+        max_repairs: 3,
         elapsed: Duration::from_secs(5),
         branch: None,
     });
@@ -2164,4 +2166,186 @@ fn saved_state_carries_done_and_total_for_read_only_peeks_of_other_missions() {
     assert!(seen.contains(&Some((0, 2))), "{seen:?}");
     assert!(seen.contains(&Some((1, 2))), "{seen:?}");
     assert_eq!(seen.last(), Some(&Some((2, 2))), "{seen:?}");
+}
+
+fn one_task_plan() -> String {
+    json!({"tasks": [
+        {"title": "Make answer return 42", "acceptance": ["answer() returns 42"], "model": "fixture",
+         "dependencies": [], "policy": {"files": ["calc.py"], "check": check("from calc import answer; assert answer() == 42")}},
+    ]})
+    .to_string()
+}
+
+#[test]
+fn failed_summary_names_the_last_failure_reason_and_a_next_step() {
+    let fixture = Fixture::new();
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            one_task_plan()
+        } else {
+            "I would rather talk about it than write code.".into()
+        }
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start("Answer", "fixture", 1, &control).unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "failed", finished);
+    let report = autopilot.report().unwrap().to_string();
+    assert!(report.contains("repair budget exhausted (1/1)"), "{report}");
+    assert!(report.contains("Model returned no FILE blocks"), "{report}");
+    assert!(
+        report.contains("Try a larger model, /repair 2 <hint>, or raise --max-repairs"),
+        "{report}"
+    );
+}
+
+#[test]
+fn planner_prose_is_reported_in_plain_words_without_serde_detail() {
+    let fixture = Fixture::new();
+    let server = Server::new(|request, _| {
+        assert!(planner(request));
+        "I think we should just refactor everything lol".into()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Improve calc", "fixture", 2, &control)
+        .unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "failure", finished);
+    let notice = autopilot.notice().to_string();
+    assert!(
+        notice.contains(
+            "The model did not return a valid plan (expected JSON). Try a larger model or /plan to inspect its answer"
+        ),
+        "{notice}"
+    );
+    assert!(!notice.contains("Invalid plan JSON"), "{notice}");
+    assert!(!notice.contains("line 1 column 1"), "{notice}");
+    // The retry feedback to the model keeps the parser detail.
+    let prompts = server.prompts();
+    assert_eq!(prompts.len(), 3, "{prompts:?}");
+    assert!(
+        prompts[1].contains("attempt 1: Invalid plan JSON"),
+        "{}",
+        prompts[1]
+    );
+    assert!(!prompts[1].contains("did not return a valid plan"));
+    let report = autopilot.report().unwrap();
+    assert!(report.contains("did not return a valid plan"), "{report}");
+    // Failure leaves no stale draft panel in front of the summary.
+    assert!(!control.planner.visible);
+    assert!(control.autopilot_report.is_some());
+}
+
+#[test]
+fn autopilot_command_after_a_planning_failure_shows_the_summary_not_the_stale_draft() {
+    let fixture = Fixture::new();
+    fixture.store.select_mission(true).unwrap();
+    let server = Server::new(|request, _| {
+        assert!(planner(request));
+        "I think we should just refactor everything lol".into()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut work = alfredo_tui::workstation::Workstation::open(
+        &fixture.root.join("state"),
+        &fixture.workspace,
+        "mission",
+        "default",
+        "fixture",
+        server.provider(),
+    )
+    .unwrap();
+    work.tasks.refresh(&runtime);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while work.tasks.pending || work.tasks.scope_status.revision.is_none() {
+        work.tasks.poll();
+        assert!(Instant::now() < deadline);
+        thread::sleep(Duration::from_millis(2));
+    }
+    work.autopilot
+        .start("Improve calc", "fixture", 2, &work.tasks)
+        .unwrap();
+    work.sync_autopilot();
+    drive(
+        &mut work.autopilot,
+        &mut work.tasks,
+        &runtime,
+        "failed",
+        finished,
+    );
+    work.sync_autopilot();
+    // /autopilot shows the summary, not the stale "Plan draft" panel.
+    work.autopilot
+        .command(&runtime, &mut work.tasks, "/autopilot", "fixture", 2)
+        .unwrap();
+    let screen = render_rows(&work.app, &work.tasks, 120, 30).join("\n");
+    assert!(screen.contains("Autopilot failed"), "{screen}");
+    assert!(!screen.contains("Plan draft"), "{screen}");
+    assert!(screen.contains("did not return a valid plan"), "{screen}");
+}
+
+#[test]
+fn repeated_plan_failures_collapse_to_one_counted_chat_line() {
+    use alfredo_tui::{
+        command_intent::Intent, console_command::CommandState, planner::Planner,
+        planner_command::Outcome,
+    };
+    let fixture = Fixture::new();
+    let control = TaskControl::new(fixture.store.clone());
+    let planner = Planner::default();
+    let mut app = alfredo_tui::model::App::new("fixture".into());
+    let snapshot = fixture.store.snapshot().unwrap();
+    for generation in ["g1", "g2", "g3"] {
+        let request = planner
+            .prepare_command(generation, "/plan Improve calc", "fixture", &snapshot)
+            .unwrap()
+            .unwrap();
+        let id = app.sessions[0]
+            .submit_command("Autopilot · plan".into(), Intent::Planner { request })
+            .unwrap();
+        app.sessions[0].set_command_state(
+            &id,
+            CommandState::Planner {
+                outcome: Outcome::failed("Invalid plan JSON: expected value at line 1 column 1"),
+            },
+        );
+    }
+    let chat = render_rows(&app, &control, 160, 40).join("\n");
+    assert_eq!(chat.matches("plan failed:").count(), 1, "{chat}");
+    assert!(chat.contains("did not return a valid plan"), "{chat}");
+    assert!(chat.contains("×3"), "{chat}");
+    assert!(!chat.contains("Invalid plan JSON"), "{chat}");
+}
+
+#[test]
+fn manual_repeated_plan_failures_are_not_collapsed() {
+    use alfredo_tui::{
+        command_intent::Intent, console_command::CommandState, planner::Planner,
+        planner_command::Outcome,
+    };
+    let fixture = Fixture::new();
+    let control = TaskControl::new(fixture.store.clone());
+    let planner = Planner::default();
+    let mut app = alfredo_tui::model::App::new("fixture".into());
+    let snapshot = fixture.store.snapshot().unwrap();
+    for generation in ["m1", "m2"] {
+        let request = planner
+            .prepare_command(generation, "/plan Improve calc", "fixture", &snapshot)
+            .unwrap()
+            .unwrap();
+        let id = app.sessions[0]
+            .submit_command("/plan Improve calc".into(), Intent::Planner { request })
+            .unwrap();
+        app.sessions[0].set_command_state(
+            &id,
+            CommandState::Planner {
+                outcome: Outcome::failed("Invalid plan JSON: expected value"),
+            },
+        );
+    }
+    let chat = render_rows(&app, &control, 160, 40).join("\n");
+    assert!(!chat.contains("×2"), "{chat}");
+    assert_eq!(chat.matches("/plan Improve calc").count(), 2, "{chat}");
 }

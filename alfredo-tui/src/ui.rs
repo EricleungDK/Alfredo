@@ -977,9 +977,14 @@ fn draw_agent(
         Target::Task(root) => {
             let attempts = agent::gather(tasks, root);
             let notes = tasks.owner.notes(view.target);
+            let budget = tasks
+                .autopilot
+                .as_ref()
+                .filter(|_| tasks.autopilot_roots.contains(&root))
+                .map(|status| status.max_repairs);
             (
                 agent::project(&attempts, &notes, view.expanded),
-                agent::title(&attempts),
+                agent::title(&attempts, budget),
             )
         }
         Target::Architect => {
@@ -1152,26 +1157,43 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
                 let command = commands.next().unwrap();
                 match collapsed_step(command, session.commands(), tasks) {
                     Some(step) if step.phases.is_empty() => {}
-                    Some(step) => match group.as_mut() {
-                        Some((Some(task), at, block, phases)) if step.task == Some(*task) => {
-                            phases.extend(step.phases);
-                            lines.truncate(*at);
-                            lines.extend(collapsed_lines(Some(*task), phases, width));
-                            lines.push(Line::default());
-                            blocks[*block].len = lines.len() - *at;
-                            start = lines.len();
-                        }
-                        previous => {
-                            // Consecutive collapsed lines share one trailing blank row.
-                            if previous.is_some() && lines.last().is_some_and(|l| l.width() == 0) {
-                                lines.pop();
+                    Some(step) => {
+                        let repeated = group
+                            .as_ref()
+                            .filter(|(task, ..)| task.is_none() && step.task.is_none())
+                            .filter(|_| command.text.starts_with("Autopilot · "))
+                            .and_then(|(.., phases)| repeated_failure(phases, &step.phases));
+                        match group.as_mut() {
+                            Some((None, at, block, phases)) if repeated.is_some() => {
+                                *phases = repeated.unwrap();
+                                lines.truncate(*at);
+                                lines.extend(collapsed_lines(None, phases, width));
+                                lines.push(Line::default());
+                                blocks[*block].len = lines.len() - *at;
+                                start = lines.len();
                             }
-                            start = lines.len();
-                            lines.extend(collapsed_lines(step.task, &step.phases, width));
-                            lines.push(Line::default());
-                            group = Some((step.task, start, blocks.len(), step.phases));
+                            Some((Some(task), at, block, phases)) if step.task == Some(*task) => {
+                                phases.extend(step.phases);
+                                lines.truncate(*at);
+                                lines.extend(collapsed_lines(Some(*task), phases, width));
+                                lines.push(Line::default());
+                                blocks[*block].len = lines.len() - *at;
+                                start = lines.len();
+                            }
+                            previous => {
+                                // Consecutive collapsed lines share one trailing blank row.
+                                if previous.is_some()
+                                    && lines.last().is_some_and(|l| l.width() == 0)
+                                {
+                                    lines.pop();
+                                }
+                                start = lines.len();
+                                lines.extend(collapsed_lines(step.task, &step.phases, width));
+                                lines.push(Line::default());
+                                group = Some((step.task, start, blocks.len(), step.phases));
+                            }
                         }
-                    },
+                    }
                     None => {
                         group = None;
                         lines.extend(command_lines(command, tasks));
@@ -2401,7 +2423,10 @@ fn collapsed_step(
                             ("plan stopped".into(), StepKind::Stopped)
                         }
                         crate::planner_command::Outcome::Failed { reason } => (
-                            format!("plan failed: {}", single_line(reason)),
+                            format!(
+                                "plan failed: {}",
+                                single_line(&crate::planner::plain_error(reason))
+                            ),
                             StepKind::Failed,
                         ),
                     }],
@@ -2440,6 +2465,19 @@ fn collapsed_step(
         },
         _ => return None,
     })
+}
+
+/// The same failure line twice in a row (a planner retried by autopilot)
+/// becomes one line with a count: `plan failed: … ×3`.
+fn repeated_failure(previous: &[Phase], next: &[Phase]) -> Option<Vec<Phase>> {
+    let ([(text, StepKind::Failed)], [(again, StepKind::Failed)]) = (previous, next) else {
+        return None;
+    };
+    let (base, count) = match text.rsplit_once(" ×") {
+        Some((base, count)) => (base, count.parse::<u32>().ok()?),
+        None => (text.as_str(), 1),
+    };
+    (base == again).then(|| vec![(format!("{base} ×{}", count + 1), StepKind::Failed)])
 }
 
 /// One collapsed entry, wrapped at word boundaries with a hanging indent.
