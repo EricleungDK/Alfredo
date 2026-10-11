@@ -217,6 +217,8 @@ pub struct Status {
     pub total: usize,
     pub failed: usize,
     pub repairs: u32,
+    /// Repair budget per task (`--max-repairs`).
+    pub max_repairs: u32,
     pub elapsed: Duration,
     pub branch: Option<String>,
 }
@@ -813,6 +815,7 @@ impl Autopilot {
             total,
             failed,
             repairs,
+            max_repairs: saved.max_repairs,
             elapsed: Duration::from_secs(self.elapsed()),
             branch: saved.branch.clone(),
         })
@@ -1075,9 +1078,13 @@ impl Autopilot {
                 // Deterministic: retrying cannot help.
                 self.fail(tasks, error);
             } else if saved.plan_attempts >= PLAN_ATTEMPTS {
+                // `error` stays raw for retry feedback; only the report is plain.
                 self.fail(
                     tasks,
-                    format!("Planning failed {PLAN_ATTEMPTS} times; autopilot stopped: {error}"),
+                    format!(
+                        "Planning failed {PLAN_ATTEMPTS} times; autopilot stopped: {}",
+                        crate::planner::plain_error(&error)
+                    ),
                 );
             } else {
                 saved.plan_errors.push(error);

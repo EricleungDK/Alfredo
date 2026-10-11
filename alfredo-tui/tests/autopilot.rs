@@ -1049,6 +1049,7 @@ fn commands_and_header_line_expose_read_only_status() {
         total: 2,
         failed: 0,
         repairs: 1,
+        max_repairs: 3,
         elapsed: Duration::from_secs(75),
         branch: None,
     };
@@ -1129,6 +1130,7 @@ fn header_shows_one_autopilot_line_and_the_report_opens_in_mission_work() {
         total: 2,
         failed: 0,
         repairs: 1,
+        max_repairs: 3,
         elapsed: Duration::from_secs(5),
         branch: None,
     });
@@ -2221,6 +2223,15 @@ fn planner_prose_is_reported_in_plain_words_without_serde_detail() {
     );
     assert!(!notice.contains("Invalid plan JSON"), "{notice}");
     assert!(!notice.contains("line 1 column 1"), "{notice}");
+    // The retry feedback to the model keeps the parser detail.
+    let prompts = server.prompts();
+    assert_eq!(prompts.len(), 3, "{prompts:?}");
+    assert!(
+        prompts[1].contains("attempt 1: Invalid plan JSON"),
+        "{}",
+        prompts[1]
+    );
+    assert!(!prompts[1].contains("did not return a valid plan"));
     let report = autopilot.report().unwrap();
     assert!(report.contains("did not return a valid plan"), "{report}");
     // Failure leaves no stale draft panel in front of the summary.
@@ -2306,4 +2317,35 @@ fn repeated_plan_failures_collapse_to_one_counted_chat_line() {
     assert!(chat.contains("did not return a valid plan"), "{chat}");
     assert!(chat.contains("×3"), "{chat}");
     assert!(!chat.contains("Invalid plan JSON"), "{chat}");
+}
+
+#[test]
+fn manual_repeated_plan_failures_are_not_collapsed() {
+    use alfredo_tui::{
+        command_intent::Intent, console_command::CommandState, planner::Planner,
+        planner_command::Outcome,
+    };
+    let fixture = Fixture::new();
+    let control = TaskControl::new(fixture.store.clone());
+    let planner = Planner::default();
+    let mut app = alfredo_tui::model::App::new("fixture".into());
+    let snapshot = fixture.store.snapshot().unwrap();
+    for generation in ["m1", "m2"] {
+        let request = planner
+            .prepare_command(generation, "/plan Improve calc", "fixture", &snapshot)
+            .unwrap()
+            .unwrap();
+        let id = app.sessions[0]
+            .submit_command("/plan Improve calc".into(), Intent::Planner { request })
+            .unwrap();
+        app.sessions[0].set_command_state(
+            &id,
+            CommandState::Planner {
+                outcome: Outcome::failed("Invalid plan JSON: expected value"),
+            },
+        );
+    }
+    let chat = render_rows(&app, &control, 160, 40).join("\n");
+    assert!(!chat.contains("×2"), "{chat}");
+    assert_eq!(chat.matches("/plan Improve calc").count(), 2, "{chat}");
 }

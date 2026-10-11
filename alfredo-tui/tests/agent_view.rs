@@ -270,11 +270,14 @@ fn missing_or_corrupt_conversation_shows_evidence_with_a_note_and_never_fabricat
 #[test]
 fn titles_name_the_current_attempt() {
     let first = attempt(2, TaskStatus::Running);
-    assert_eq!(agent_view::title(&[first]), "Agent · worker #2 · running");
+    assert_eq!(
+        agent_view::title(&[first], None),
+        "Agent · worker #2 · running"
+    );
     let mut repair = attempt(3, TaskStatus::Failed);
     repair.repair_of = Some(2);
     assert_eq!(
-        agent_view::title(&[attempt(2, TaskStatus::Failed), repair]),
+        agent_view::title(&[attempt(2, TaskStatus::Failed), repair], None),
         "Agent · repair 1 of #2 · failed"
     );
     // The number counts repairs of the original task, not task ids.
@@ -283,10 +286,19 @@ fn titles_name_the_current_attempt() {
     let mut first = attempt(3, TaskStatus::Failed);
     first.repair_of = Some(2);
     assert_eq!(
-        agent_view::title(&[attempt(2, TaskStatus::Failed), first, second]),
+        agent_view::title(&[attempt(2, TaskStatus::Failed), first, second], None),
         "Agent · repair 2 of #2 · running"
     );
-    assert_eq!(agent_view::title(&[]), "Agent");
+    // Inside an autopilot run the budget is shown.
+    let mut again = attempt(4, TaskStatus::Running);
+    again.repair_of = Some(3);
+    let mut prior = attempt(3, TaskStatus::Failed);
+    prior.repair_of = Some(2);
+    assert_eq!(
+        agent_view::title(&[attempt(2, TaskStatus::Failed), prior, again], Some(3)),
+        "Agent · repair 2/3 of #2 · running"
+    );
+    assert_eq!(agent_view::title(&[], None), "Agent");
 }
 
 #[test]

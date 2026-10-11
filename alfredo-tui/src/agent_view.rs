@@ -348,7 +348,9 @@ fn bounded(text: &str) -> String {
 
 /// `Agent · worker #2 · running`, `Agent · repair 2 of #1 · failed` (the second
 /// repair of original task #1; never a task id rendered as a count).
-pub fn title(attempts: &[Attempt]) -> String {
+/// `budget` is the autopilot repair budget when this family belongs to the run:
+/// `repair 2/3 of #1`.
+pub fn title(attempts: &[Attempt], budget: Option<u32>) -> String {
     let Some(head) = attempts.last() else {
         return "Agent".into();
     };
@@ -369,6 +371,10 @@ pub fn title(attempts: &[Attempt]) -> String {
                 Some(first) if first.repair_of.is_none() => first.id,
                 Some(first) => first.repair_of.unwrap_or(parent),
                 None => parent,
+            };
+            let number = match budget {
+                Some(max) => format!("{number}/{max}"),
+                None => number.to_string(),
             };
             format!("Agent · repair {number} of #{root} · {state}")
         }

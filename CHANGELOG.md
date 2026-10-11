@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   --max-repairs`). A planner reply that is not JSON reads `The model did not return a
   valid plan (expected JSON)…` instead of the raw parser text, repeated identical
   `plan failed` chat lines collapse to one line with `×N`, and the agent view title for
-  a repair reads `Agent · repair 2 of #1 · failed` instead of showing a task id as a
+  a repair reads `Agent · repair 2/3 of #1 · failed` instead of showing a task id as a
   count. `/autopilot` after a planning failure shows the summary rather than the stale
   plan draft panel.
 

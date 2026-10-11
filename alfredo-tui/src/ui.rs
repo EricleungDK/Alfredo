@@ -977,9 +977,14 @@ fn draw_agent(
         Target::Task(root) => {
             let attempts = agent::gather(tasks, root);
             let notes = tasks.owner.notes(view.target);
+            let budget = tasks
+                .autopilot
+                .as_ref()
+                .filter(|_| tasks.autopilot_roots.contains(&root))
+                .map(|status| status.max_repairs);
             (
                 agent::project(&attempts, &notes, view.expanded),
-                agent::title(&attempts),
+                agent::title(&attempts, budget),
             )
         }
         Target::Architect => {
@@ -1156,6 +1161,7 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
                         let repeated = group
                             .as_ref()
                             .filter(|(task, ..)| task.is_none() && step.task.is_none())
+                            .filter(|_| command.text.starts_with("Autopilot · "))
                             .and_then(|(.., phases)| repeated_failure(phases, &step.phases));
                         match group.as_mut() {
                             Some((None, at, block, phases)) if repeated.is_some() => {

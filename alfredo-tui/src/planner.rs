@@ -895,7 +895,7 @@ impl Planner {
                     );
                 }
                 Update::Failed(error) => {
-                    self.notice = format!("{} · no action taken", plain_error(&error));
+                    self.notice = format!("{error} · no action taken");
                     self.finish_command(crate::planner_command::Outcome::failed(&error));
                     self.cancel();
                     break;
@@ -943,7 +943,7 @@ impl Planner {
                             self.notice = format!("Review {} paths, checks and dependencies · /plan-revise REQUEST refines; /plan-save proposes; approval remains separate", if revised { "revised draft" } else { "draft" });
                         }
                         Err(error) => {
-                            self.notice = format!("{} · no action taken", plain_error(&error));
+                            self.notice = format!("{error} · no action taken");
                             self.finish_command(crate::planner_command::Outcome::failed(&error));
                         }
                     }
@@ -1002,7 +1002,8 @@ impl Planner {
 
 /// User-facing wording for a planner failure. A reply that is not the plan
 /// JSON is a model-capability problem, not a parser detail; the serde text
-/// stays in the planner command outcome (F4/receipts).
+/// stays in the planner notice, the command outcome (F4/receipts) and the retry
+/// feedback; only autopilot's report and the chat line use this wording.
 pub fn plain_error(error: &str) -> String {
     if error.starts_with("Invalid plan JSON") {
         "The model did not return a valid plan (expected JSON). Try a larger model or /plan to inspect its answer".into()
