@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The task panel's `Next` hint for a review-ready task with acceptance criteria now
+  says `/review N JSON` and `/reject N` instead of `/accept N`, which Alfredo refuses
+  for such tasks. The `/accept` refusal and the `/review N` usage message lead with the
+  command and show a one-line JSON template prefilled with the task's criterion
+  numbers. Malformed `/review` JSON reports `Review JSON is not valid JSON (line L
+  column C)`, separate from the missing-fields message.
 - A clean cancel (or timeout) is no longer sometimes recorded as `outcome-unknown` /
   `cleanup-uncertain`. Process-group cleanup on Linux now ignores zombie members that
   are only waiting to be reaped, instead of waiting out the deadline and failing to

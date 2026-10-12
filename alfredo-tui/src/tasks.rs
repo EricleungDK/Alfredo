@@ -282,6 +282,15 @@ pub struct Snapshot {
     pub receipts: Vec<Receipt>,
 }
 
+/// One-line `/review` template prefilled with the task's real criterion numbers.
+pub fn review_template(task: u64, criteria: usize) -> String {
+    let items = (1..=criteria)
+        .map(|n| format!(r#"{{"criterion":{n},"met":true,"note":"…"}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(r#"/review {task} {{"outcome":"approved","reason":"…","criteria":[{items}]}}"#)
+}
+
 impl Snapshot {
     pub fn architecture_failures(&self, mut id: u64) -> usize {
         let mut runs = BTreeSet::new();
@@ -1116,7 +1125,8 @@ impl TaskStore {
         }
         if let Action::Review { task, accept: true } = &request.action {
             if !snapshot.acceptance_for_task(*task).is_empty() {
-                return Err("This task has acceptance criteria; use /review ID JSON to record a reason and evidence notes for every criterion".into());
+                let count = snapshot.acceptance_for_task(*task).len();
+                return Err(format!("Use {}", review_template(*task, count)).into());
             }
         }
         if snapshot.receipts.len() == MAX_RECEIPTS {

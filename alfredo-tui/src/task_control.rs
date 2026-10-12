@@ -2005,7 +2005,19 @@ impl TaskControl {
                     request: Request {
                         correlation,
                         expected_revision: snapshot.revision,
-                        action: parse(&text, model)?,
+                        action: parse(&text, model).map_err(|error| {
+                            match error.strip_prefix("Usage: /review ") {
+                                Some(_) => {
+                                    let task = text
+                                        .strip_prefix("/review ")
+                                        .and_then(|rest| rest.split(' ').next())
+                                        .and_then(|id| id.parse().ok())
+                                        .unwrap_or_default();
+                                    review_usage(task, snapshot.acceptance_for_task(task).len())
+                                }
+                                None => error,
+                            }
+                        })?,
                     },
                 }
             }
@@ -2611,6 +2623,11 @@ impl TaskControl {
     }
 }
 
+/// `/review` usage with a copy-pasteable template for the task's criteria.
+fn review_usage(task: u64, criteria: usize) -> String {
+    format!("Usage: {}", crate::tasks::review_template(task, criteria))
+}
+
 pub fn parse(text: &str, model: &str) -> Result<Action, String> {
     if let Some(arguments) = text.trim().strip_prefix("/assign ") {
         let (id, model) = arguments.split_once(' ').ok_or("Usage: /assign ID MODEL")?;
@@ -2656,15 +2673,29 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
         return Ok(Action::Permit { task, policy });
     }
     if let Some(arguments) = text.strip_prefix("/review ") {
-        let (id, json) = arguments.split_once(' ').ok_or(
-            "Usage: /review ID JSON (outcome, reason, criteria; limitations for limited approval)",
-        )?;
-        let task = id.parse().map_err(|_| "Invalid task id")?;
+        let task = arguments
+            .split(' ')
+            .next()
+            .and_then(|id| id.parse::<u64>().ok())
+            .ok_or("Invalid task id")?;
+        let json = arguments
+            .split_once(' ')
+            .map_or("", |(_, json)| json.trim());
+        if json.is_empty() {
+            return Err(review_usage(task, 1));
+        }
         #[derive(serde::Deserialize)]
         #[serde(untagged)]
         enum ReviewInput {
             Decision(crate::assessment::Decision),
             Assessment(crate::assessment::Assessment),
+        }
+        if let Err(error) = serde_json::from_str::<serde_json::Value>(json) {
+            return Err(format!(
+                "Review JSON is not valid JSON (line {} column {})",
+                error.line(),
+                error.column()
+            ));
         }
         match serde_json::from_str::<ReviewInput>(json).map_err(|_| "Review JSON needs outcome (or legacy accept), reason, criteria; limited approval also needs limitations")? {
             ReviewInput::Decision(decision) => {
@@ -2922,5 +2953,32 @@ mod unknown_command_tests {
             "{message}"
         );
         assert!(message.chars().count() <= 80, "{message}");
+    }
+
+    #[test]
+    fn review_usage_shows_a_template_with_the_real_criterion_numbers() {
+        let message = parse("/review 3", "model").unwrap_err();
+        assert!(message.starts_with("Usage: /review 3 {"), "{message}");
+        assert_eq!(parse("/review 3 ", "model").unwrap_err(), message);
+        assert!(
+            !review_usage(3, 0).contains("criterion"),
+            "no fake criterion"
+        );
+        let message = review_usage(3, 2);
+        assert!(
+            message.contains(
+                r#"/review 3 {"outcome":"approved","reason":"…","criteria":[{"criterion":1,"met":true,"note":"…"},{"criterion":2,"met":true,"note":"…"}]}"#
+            ),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn review_json_syntax_errors_report_position_apart_from_missing_fields() {
+        let syntax = parse("/review 1 {oops", "model").unwrap_err();
+        assert_eq!(syntax, "Review JSON is not valid JSON (line 1 column 2)");
+        let fields = parse(r#"/review 1 {"accept":true}"#, "model").unwrap_err();
+        assert!(fields.starts_with("Review JSON needs outcome"), "{fields}");
+        assert!(!fields.contains("not valid JSON"), "{fields}");
     }
 }

@@ -48,7 +48,9 @@ fn fit_words(text: &str, width: usize) -> String {
         used += cells;
         end = index + ch.len_utf8();
     }
-    let cut = boundary.filter(|index| *index > 0).unwrap_or(end);
+    // A word boundary that would discard most of the line (a long unbroken token such
+    // as a JSON template) loses to a plain cut, so the visible start stays copyable.
+    let cut = boundary.filter(|index| *index >= width / 2).unwrap_or(end);
     format!("{}…", text[..cut].trim_end())
 }
 
@@ -1562,7 +1564,10 @@ fn next_action(snapshot: &crate::tasks::Snapshot, task: &crate::tasks::Task) -> 
         TaskStatus::Proposed => Some(format!("/approve {id}")),
         TaskStatus::Approved if task.policy.is_none() => Some(format!("/permit {id} JSON")),
         TaskStatus::Approved => Some(format!("/run {id}")),
-        TaskStatus::ReviewReady => Some(format!("/accept {id}{GAP}/reject {id}")),
+        TaskStatus::ReviewReady if snapshot.acceptance_for_task(id).is_empty() => {
+            Some(format!("/accept {id}{GAP}/reject {id}"))
+        }
+        TaskStatus::ReviewReady => Some(format!("/review {id} JSON{GAP}/reject {id}")),
         TaskStatus::NeedsHumanReview => Some(format!("/review {id} JSON")),
         TaskStatus::Rejected | TaskStatus::Failed if snapshot.architecture_required(id) => {
             Some(format!("/architect-revise {id}"))
@@ -2847,7 +2852,7 @@ mod tests {
 
 #[cfg(test)]
 mod fit_words_tests {
-    use super::fit_words;
+    use super::{fit_words, next_action};
 
     #[test]
     fn notices_cut_at_a_word_boundary_within_the_width() {
@@ -2855,5 +2860,79 @@ mod fit_words_tests {
         let cut = fit_words("Unknown command /help · F1 lists commands", 30);
         assert_eq!(cut, "Unknown command /help · F1…");
         assert!(unicode_width::UnicodeWidthStr::width(cut.as_str()) <= 30);
+    }
+
+    fn review_snapshot(criteria: &[&str]) -> crate::tasks::Snapshot {
+        use crate::tasks::{Action, Receipt, Request, WorkPolicy};
+        let step = crate::planner::Step {
+            title: "Task".into(),
+            acceptance: criteria.iter().map(|c| c.to_string()).collect(),
+            model: "fixture".into(),
+            dependencies: vec![],
+            policy: WorkPolicy {
+                files: vec!["a.rs".into()],
+                check: vec!["true".into()],
+            },
+        };
+        crate::tasks::Snapshot {
+            schema_version: crate::tasks::SCHEMA_VERSION,
+            workspace: std::path::PathBuf::from("."),
+            mission: "mission".into(),
+            revision: 1,
+            tasks: vec![crate::tasks::Task {
+                id: 1,
+                title: "Task".into(),
+                model: "fixture".into(),
+                dependencies: vec![],
+                status: crate::tasks::TaskStatus::ReviewReady,
+                policy: None,
+                repair_of: None,
+                run: None,
+            }],
+            receipts: vec![Receipt {
+                task: 1,
+                revision: 1,
+                request: Request {
+                    correlation: "plan".into(),
+                    expected_revision: 0,
+                    action: Action::Plan {
+                        plan: crate::planner::Plan {
+                            prompt: "p".into(),
+                            planner: "fixture".into(),
+                            context: None,
+                            scope: None,
+                            architecture: None,
+                            tasks: vec![step],
+                        },
+                    },
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn fit_words_keeps_the_start_of_a_long_unbroken_token() {
+        let cut = fit_words(r#"Use /review 4 {"outcome":"approved","reason":"…"}"#, 40);
+        assert!(
+            cut.starts_with(r#"Use /review 4 {"outcome":"appr"#),
+            "{cut}"
+        );
+    }
+
+    #[test]
+    fn review_ready_hint_matches_what_accept_allows() {
+        let with = review_snapshot(&["Returns 42"]);
+        let hint = next_action(&with, &with.tasks[0]).unwrap();
+        assert!(
+            hint.contains("/review 1 JSON") && hint.contains("/reject 1"),
+            "{hint}"
+        );
+        assert!(!hint.contains("/accept"), "{hint}");
+        let without = review_snapshot(&[]);
+        let hint = next_action(&without, &without.tasks[0]).unwrap();
+        assert!(
+            hint.contains("/accept 1") && hint.contains("/reject 1"),
+            "{hint}"
+        );
     }
 }

@@ -1260,7 +1260,11 @@ of at most 2048 UTF-8 bytes; each note is a nonempty single line of at most 1024
 bytes, with at most 16 ordered criteria. Unknown fields and mismatched coverage
 refuse. Legacy/manual tasks without recorded criteria use an empty criteria list.
 
-New `/accept` calls for tasks with criteria refuse and direct the user to `/review`.
+New `/accept` calls for tasks with criteria refuse and direct the user to `/review`;
+the refusal and the `/review ID` usage message show a one-line template prefilled
+with the task's criterion numbers, and the task panel's `Next` hint for such a task
+is `/review ID JSON` and `/reject ID` (`/accept ID` only when no criteria are
+recorded). Invalid JSON reports `Review JSON is not valid JSON (line L column C)`.
 `/accept` for tasks without criteria and `/reject` remain available. Historical
 boolean review receipts remain readable and exactly replayable without invented
 reasons or criterion assessments. Both review paths retain the existing successful
