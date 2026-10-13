@@ -500,6 +500,12 @@ impl Autopilot {
             }
         }
         if tasks.planner.active() || tasks.planner.checkpoint().is_some() {
+            if let Some(saved) = self.saved.as_ref().filter(|saved| saved.active()) {
+                if matches!(&saved.plan_request, Some(request) if tasks.planner.active() || draft_matches(tasks, request))
+                {
+                    return Err("The stopped autopilot's plan draft is open; /resume to continue it or /plan-cancel to discard".into());
+                }
+            }
             return Err("A plan draft is open; /plan-save or /plan-cancel it before /go".into());
         }
         if let Some(scope) = &tasks.canonical_scope {
@@ -629,6 +635,7 @@ impl Autopilot {
             .map(|saved| saved.model.clone())
             .unwrap_or_else(|| "pending".into());
         self.pause(tasks);
+        let planning_cancelled = self.cancel_planning(tasks);
         let workers: Vec<u64> = tasks.workers.keys().copied().collect();
         let mut errors = Vec::new();
         for task in &workers {
@@ -638,7 +645,12 @@ impl Autopilot {
         }
         self.notice = if errors.is_empty() {
             format!(
-                "Autopilot stopped · cancellation requested for {} worker(s) · /resume continues",
+                "Autopilot stopped · {}cancellation requested for {} worker(s) · /resume continues",
+                if planning_cancelled {
+                    "planning cancelled, no draft will appear · "
+                } else {
+                    ""
+                },
                 workers.len()
             )
         } else {
@@ -648,6 +660,23 @@ impl Autopilot {
             )
         };
         self.notice.clone()
+    }
+
+    /// Abort the planner generation autopilot itself requested, so a late
+    /// reply cannot surface as a draft. `/resume` plans again.
+    fn cancel_planning(&mut self, tasks: &mut TaskControl) -> bool {
+        let Some(saved) = self.saved.as_mut() else {
+            return false;
+        };
+        if saved.phase != Phase::Planning || saved.plan_request.is_none() || !tasks.planner.active()
+        {
+            return false;
+        }
+        tasks.planner.cancel();
+        tasks.planner.visible = false;
+        saved.plan_request = None;
+        self.persist();
+        true
     }
 
     /// Terminal command entry for `/go`, `/pause`, `/resume`, `/stop`, `/autopilot`.

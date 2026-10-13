@@ -870,6 +870,135 @@ fn stop_cancels_running_workers_through_the_cancel_path() {
     assert_eq!(autopilot.status(&control).unwrap().state, RunState::Paused);
 }
 
+/// A planner reply held until released; later requests answer immediately.
+fn slow_planning(release: std::sync::mpsc::Receiver<()>) -> Server {
+    let gate = Mutex::new(release);
+    Server::new(move |request, _| {
+        if planner(request) {
+            let _ = gate.lock().unwrap().recv_timeout(Duration::from_secs(10));
+            return one_task_plan();
+        }
+        good_calc()
+    })
+}
+
+fn planning_in_flight(control: &TaskControl, server: &Server) -> bool {
+    server.count() == 1 && control.planner.active()
+}
+
+#[test]
+fn stop_while_planning_cancels_the_planner_and_leaves_no_late_draft_so_go_starts() {
+    let fixture = Fixture::new();
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let server = slow_planning(gate);
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start("First", "fixture", 2, &control).unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "planning",
+        |_, c| planning_in_flight(c, &server),
+    );
+    let notice = autopilot.stop(&runtime, &mut control);
+    assert!(notice.contains("planning cancelled"), "{notice}");
+    assert!(!control.planner.active());
+    let _ = release.send(());
+    // The late reply must not surface as a draft.
+    for _ in 0..100 {
+        control.poll();
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(control.planner.checkpoint().is_none());
+    assert!(control.planner.draft.is_none());
+    autopilot
+        .start("Second goal", "fixture", 2, &control)
+        .expect("/go after a stopped planning phase starts");
+}
+
+#[test]
+fn stop_while_planning_then_resume_plans_again_and_finishes() {
+    let fixture = Fixture::new();
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let server = slow_planning(gate);
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start("First", "fixture", 2, &control).unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "planning",
+        |_, c| planning_in_flight(c, &server),
+    );
+    autopilot.stop(&runtime, &mut control);
+    assert!(autopilot.resume(&control).unwrap().contains("resumed"));
+    drop(release);
+    drive(&mut autopilot, &mut control, &runtime, "done", finished);
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Done);
+}
+
+#[test]
+fn go_after_stop_with_the_autopilots_finished_draft_open_names_resume_and_plan_cancel() {
+    let fixture = Fixture::new();
+    let server = Server::new(move |request, _| {
+        if planner(request) {
+            return one_task_plan();
+        }
+        good_calc()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start("First", "fixture", 2, &control).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(submission) = autopilot.tick(&runtime, &mut control) {
+            let _ = control.dispatch_prepared(&runtime, &submission.intent);
+        }
+        control.poll();
+        if control.planner.checkpoint().is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{}", control.planner.notice);
+        thread::sleep(Duration::from_millis(3));
+    }
+    autopilot.stop(&runtime, &mut control);
+    let error = autopilot
+        .start("Second", "fixture", 2, &control)
+        .unwrap_err();
+    assert!(
+        error.contains("stopped autopilot's plan draft") && error.contains("/resume"),
+        "{error}"
+    );
+}
+
+#[test]
+fn go_never_discards_a_users_own_plan_draft() {
+    let fixture = Fixture::new();
+    let server = Server::new(move |_, _| one_task_plan());
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    control
+        .command(&runtime, "/plan Make answer return 42", "fixture")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while control.planner.checkpoint().is_none() {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.planner.notice);
+        thread::sleep(Duration::from_millis(5));
+    }
+    let error = autopilot
+        .start("Other", "fixture", 2, &control)
+        .unwrap_err();
+    assert!(error.contains("/plan-cancel"), "{error}");
+    assert!(control.planner.checkpoint().is_some());
+}
+
 /// /stop cancels the running worker; /resume must run the same task again, not
 /// repair it, and the cancel must not read as a failure or spend repair budget.
 fn stopped_then_resumed(

@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `/stop` while autopilot is still planning now cancels the planner request, so no
+  plan draft appears later and a new `/go` starts; `/resume` plans again. If the
+  stopped autopilot's own draft is already open, `/go` says to `/resume` it or
+  `/plan-cancel` it. A draft from your own `/plan` is never discarded by `/go`.
 - A failed `/go` summary now says why: a task whose repair budget is spent shows its
   last failure line and a next step (`Try a larger model, /repair ID <hint>, or raise
   --max-repairs`). A planner reply that is not JSON reads `The model did not return a
