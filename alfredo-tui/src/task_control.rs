@@ -2713,20 +2713,23 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
             });
         }
     }
-    if let Some(title) = text.strip_prefix("/task ") {
-        if title.trim().is_empty() {
-            return Err("Usage: /task description".into());
+    if let Some(title) = word_arguments(text, "/task") {
+        if title.is_empty() {
+            return Err(bare_usage("/task").into());
         }
         return Ok(Action::Propose {
-            title: title.trim().into(),
+            title: title.into(),
             model: model.into(),
             dependencies: vec![],
         });
     }
-    if let Some(arguments) = text.strip_prefix("/after ") {
+    if let Some(arguments) = word_arguments(text, "/after") {
         let (ids, title) = arguments
-            .split_once(' ')
-            .ok_or("Usage: /after 1,2 description")?;
+            .split_once(char::is_whitespace)
+            .map_or((arguments, ""), |(ids, title)| (ids, title.trim()));
+        if ids.is_empty() || title.is_empty() {
+            return Err(bare_usage("/after").into());
+        }
         let dependencies = ids
             .split(',')
             .map(|id| {
@@ -2734,11 +2737,8 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
                     .map_err(|_| "Invalid dependency id".to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        if title.trim().is_empty() {
-            return Err("Task description is required".into());
-        }
         return Ok(Action::Propose {
-            title: title.trim().into(),
+            title: title.into(),
             model: model.into(),
             dependencies,
         });
@@ -2753,7 +2753,41 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
             });
         }
     }
+    if BARE_USAGE.iter().any(|(verb, _)| *verb == text) {
+        return Err(bare_usage(text).into());
+    }
     Err(unknown_command(text))
+}
+
+/// Usage for commands that need arguments, shown when typed bare. Each matches
+/// `VERB ` with a trailing space above, so the bare word would otherwise reach
+/// `unknown_command`.
+const BARE_USAGE: &[(&str, &str)] = &[
+    ("/task", "Usage: /task DESCRIPTION"),
+    ("/after", "Usage: /after IDS DESCRIPTION"),
+    ("/assign", "Usage: /assign ID MODEL"),
+    ("/permit", "Usage: /permit ID JSON"),
+    ("/repair", "Usage: /repair ID reason"),
+    ("/requeue", "Usage: /requeue ID"),
+    ("/resolve-repair", "Usage: /resolve-repair ID"),
+    ("/review", "Usage: /review ID JSON"),
+    ("/scope-confirm", "Usage: /scope-confirm REVISION"),
+    ("/architect-revise", "Usage: /architect-revise ID"),
+    ("/retry-command", "Usage: /retry-command SESSION:COMMAND"),
+];
+
+fn bare_usage(verb: &str) -> &'static str {
+    BARE_USAGE
+        .iter()
+        .find(|(known, _)| *known == verb)
+        .map_or("", |(_, usage)| usage)
+}
+
+/// Arguments after `word` in trimmed `text`: empty for the bare word, `None`
+/// when `text` is another command that merely starts with the same letters.
+fn word_arguments<'a>(text: &'a str, word: &str) -> Option<&'a str> {
+    let rest = text.strip_prefix(word)?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
 }
 
 /// Short feedback for a command nobody handles; it names the command, points to
@@ -2943,6 +2977,35 @@ mod unknown_command_tests {
             assert!(message.contains("/go GOAL"), "{message}");
             assert!(message.chars().count() <= 80, "{message}");
         }
+    }
+
+    #[test]
+    fn task_and_after_keep_parsing_valid_input_and_name_missing_arguments() {
+        let propose = |title: &str, dependencies: Vec<u64>| Action::Propose {
+            title: title.into(),
+            model: "model".into(),
+            dependencies,
+        };
+        assert_eq!(
+            parse("/task  fix it ", "model"),
+            Ok(propose("fix it", vec![]))
+        );
+        assert_eq!(
+            parse("/after 1,2 add tests", "model"),
+            Ok(propose("add tests", vec![1, 2]))
+        );
+        assert_eq!(
+            parse("/after x add tests", "model").unwrap_err(),
+            "Invalid dependency id"
+        );
+        assert_eq!(
+            parse("/tasks", "model").unwrap_err(),
+            unknown_command("/tasks")
+        );
+        assert_eq!(
+            parse("/after 1", "model").unwrap_err(),
+            bare_usage("/after")
+        );
     }
 
     #[test]

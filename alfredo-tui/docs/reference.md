@@ -356,7 +356,8 @@ sibling; invalid state or conflicting backups stop the save.
 Type `/task description` to propose a task, `/after 1,2 description` to propose
 a task depending on existing earlier tasks, `/approve ID` to approve it, or
 `/cancel-task ID` to cancel it. `/tasks` and F2 show the queue; `/chat` or F2 returns
-to the conversation. `/refresh` reads the latest committed state. Errors preserve
+to the conversation. A command typed without its arguments prints its `Usage:` line and
+changes nothing. `/refresh` reads the latest committed state. Errors preserve
 the last acknowledged queue; `/retry-task` repeats the exact failed request.
 Commands entered here are handled by Rust directly and never sent to a model.
 
