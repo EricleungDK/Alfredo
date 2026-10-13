@@ -90,6 +90,20 @@ fn submit(
     }
 }
 
+const BARE_USAGE_COMMANDS: &[&str] = &[
+    "/task",
+    "/after",
+    "/assign",
+    "/permit",
+    "/repair",
+    "/requeue",
+    "/resolve-repair",
+    "/review",
+    "/scope-confirm",
+    "/architect-revise",
+    "/retry-command",
+];
+
 #[test]
 fn every_listed_command_typed_bare_is_known() {
     let fixture = Fixture::new();
@@ -111,6 +125,12 @@ fn every_listed_command_typed_bare_is_known() {
             let message = submit(&runtime, &mut app, &mut tasks, &mut autopilot, &typed);
             if message.contains("Unknown command") {
                 unknown.push(format!("{typed:?}: {message}"));
+            }
+            // Every bare form is a hint; the other listed commands are exempt
+            // only when they act with no arguments (nothing in COMMANDS but
+            // the ones below does, so anything else must say "Usage:").
+            if BARE_USAGE_COMMANDS.contains(command) && !message.starts_with("Usage: ") {
+                unknown.push(format!("{typed:?} lacks Usage: {message}"));
             }
             assert!(
                 tasks.snapshot.as_ref().is_none_or(|s| s.tasks.is_empty()),
@@ -137,6 +157,13 @@ fn bare_task_and_after_print_usage_without_creating_work() {
         ("/after 1", "Usage: /after IDS DESCRIPTION"),
         ("/after 1,2", "Usage: /after IDS DESCRIPTION"),
         ("/after 1,2   ", "Usage: /after IDS DESCRIPTION"),
+        ("/review", "Usage: /review ID JSON"),
+        ("/review   ", "Usage: /review ID JSON"),
+        ("/scope-confirm", "Usage: /scope-confirm DRAFT_REVISION"),
+        (
+            "/permit",
+            "Usage: /permit ID {\"files\":[\"path\"],\"check\":[\"program\",\"arg\"]}",
+        ),
     ] {
         assert_eq!(
             submit(&runtime, &mut app, &mut tasks, &mut autopilot, typed),

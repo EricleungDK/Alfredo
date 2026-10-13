@@ -1932,7 +1932,7 @@ impl TaskControl {
                         .strip_prefix("/scope-confirm ")
                         .unwrap()
                         .parse()
-                        .map_err(|_| "Usage: /scope-confirm DRAFT_REVISION")?,
+                        .map_err(|_| USAGE_SCOPE_CONFIRM)?,
                 }
             };
             Intent::Scope {
@@ -2006,13 +2006,15 @@ impl TaskControl {
                         correlation,
                         expected_revision: snapshot.revision,
                         action: parse(&text, model).map_err(|error| {
-                            match error.strip_prefix("Usage: /review ") {
-                                Some(_) => {
-                                    let task = text
-                                        .strip_prefix("/review ")
-                                        .and_then(|rest| rest.split(' ').next())
-                                        .and_then(|id| id.parse().ok())
-                                        .unwrap_or_default();
+                            // Only rewrite into a template when the user named a task;
+                            // bare `/review` keeps its plain usage line.
+                            let task = error
+                                .strip_prefix("Usage: /review ")
+                                .and_then(|_| text.trim().strip_prefix("/review "))
+                                .and_then(|rest| rest.split(' ').next())
+                                .and_then(|id| id.parse().ok());
+                            match task {
+                                Some(task) => {
                                     review_usage(task, snapshot.acceptance_for_task(task).len())
                                 }
                                 None => error,
@@ -2292,7 +2294,7 @@ impl TaskControl {
                             .strip_prefix("/scope-confirm ")
                             .unwrap()
                             .parse()
-                            .map_err(|_| "Usage: /scope-confirm DRAFT_REVISION")?,
+                            .map_err(|_| USAGE_SCOPE_CONFIRM)?,
                     }
                 };
                 self.sequence += 1;
@@ -2419,7 +2421,7 @@ impl TaskControl {
             return Err("Wait for the pending task receipt".into());
         }
         if let Some(id) = text.trim().strip_prefix("/architect-revise ") {
-            let task = id.parse().map_err(|_| "Usage: /architect-revise ID")?;
+            let task = id.parse().map_err(|_| USAGE_ARCHITECT_REVISE)?;
             let provider = self
                 .provider
                 .clone()
@@ -2630,7 +2632,7 @@ fn review_usage(task: u64, criteria: usize) -> String {
 
 pub fn parse(text: &str, model: &str) -> Result<Action, String> {
     if let Some(arguments) = text.trim().strip_prefix("/assign ") {
-        let (id, model) = arguments.split_once(' ').ok_or("Usage: /assign ID MODEL")?;
+        let (id, model) = arguments.split_once(' ').ok_or(USAGE_ASSIGN)?;
         let task = id.parse().map_err(|_| "Use a numeric task id")?;
         let model = model.trim();
         if model.is_empty() || model.len() > 200 || model.chars().any(char::is_control) {
@@ -2645,27 +2647,23 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
     let text = text.trim();
     if let Some(id) = text.strip_prefix("/resolve-repair ") {
         return Ok(Action::ResolveRepair {
-            task: id.trim().parse().map_err(|_| "Usage: /resolve-repair ID")?,
+            task: id.trim().parse().map_err(|_| USAGE_RESOLVE_REPAIR)?,
         });
     }
     if let Some(id) = text.strip_prefix("/requeue ") {
         return Ok(Action::Requeue {
-            task: id.trim().parse().map_err(|_| "Usage: /requeue ID")?,
+            task: id.trim().parse().map_err(|_| USAGE_REQUEUE)?,
         });
     }
     if let Some(arguments) = text.strip_prefix("/repair ") {
-        let (id, reason) = arguments
-            .split_once(' ')
-            .ok_or("Usage: /repair ID reason")?;
+        let (id, reason) = arguments.split_once(' ').ok_or(USAGE_REPAIR)?;
         return Ok(Action::Repair {
             task: id.parse().map_err(|_| "Invalid task id")?,
             reason: reason.trim().into(),
         });
     }
     if let Some(arguments) = text.strip_prefix("/permit ") {
-        let (id, json) = arguments
-            .split_once(' ')
-            .ok_or("Usage: /permit ID {\"files\":[\"path\"],\"check\":[\"program\",\"arg\"]}")?;
+        let (id, json) = arguments.split_once(' ').ok_or(USAGE_PERMIT)?;
         let task = id.parse().map_err(|_| "Invalid task id")?;
         let policy: crate::tasks::WorkPolicy = serde_json::from_str(json)
             .map_err(|_| "Policy must be JSON with exact files and check argv")?;
@@ -2759,20 +2757,29 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
     Err(unknown_command(text))
 }
 
+const USAGE_ASSIGN: &str = "Usage: /assign ID MODEL";
+const USAGE_PERMIT: &str =
+    "Usage: /permit ID {\"files\":[\"path\"],\"check\":[\"program\",\"arg\"]}";
+const USAGE_REPAIR: &str = "Usage: /repair ID reason";
+const USAGE_REQUEUE: &str = "Usage: /requeue ID";
+const USAGE_RESOLVE_REPAIR: &str = "Usage: /resolve-repair ID";
+const USAGE_SCOPE_CONFIRM: &str = "Usage: /scope-confirm DRAFT_REVISION";
+const USAGE_ARCHITECT_REVISE: &str = "Usage: /architect-revise ID";
+
 /// Usage for commands that need arguments, shown when typed bare. Each matches
 /// `VERB ` with a trailing space above, so the bare word would otherwise reach
 /// `unknown_command`.
 const BARE_USAGE: &[(&str, &str)] = &[
     ("/task", "Usage: /task DESCRIPTION"),
     ("/after", "Usage: /after IDS DESCRIPTION"),
-    ("/assign", "Usage: /assign ID MODEL"),
-    ("/permit", "Usage: /permit ID JSON"),
-    ("/repair", "Usage: /repair ID reason"),
-    ("/requeue", "Usage: /requeue ID"),
-    ("/resolve-repair", "Usage: /resolve-repair ID"),
+    ("/assign", USAGE_ASSIGN),
+    ("/permit", USAGE_PERMIT),
+    ("/repair", USAGE_REPAIR),
+    ("/requeue", USAGE_REQUEUE),
+    ("/resolve-repair", USAGE_RESOLVE_REPAIR),
     ("/review", "Usage: /review ID JSON"),
-    ("/scope-confirm", "Usage: /scope-confirm REVISION"),
-    ("/architect-revise", "Usage: /architect-revise ID"),
+    ("/scope-confirm", USAGE_SCOPE_CONFIRM),
+    ("/architect-revise", USAGE_ARCHITECT_REVISE),
     ("/retry-command", "Usage: /retry-command SESSION:COMMAND"),
 ];
 
