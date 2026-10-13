@@ -1540,6 +1540,8 @@ fn status_word(snapshot: &crate::tasks::Snapshot, task: &crate::tasks::Task) -> 
     };
     match task.status {
         TaskStatus::Proposed => "Needs approval",
+        // A pre-policy save can hold an approval with no policy; never call it approved.
+        TaskStatus::Approved if task.policy.is_none() => "Needs files/check policy",
         TaskStatus::Approved => "Approved",
         TaskStatus::Cancelled => "Cancelled",
         TaskStatus::Running => "Running",

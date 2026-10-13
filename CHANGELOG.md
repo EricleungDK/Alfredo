@@ -19,6 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `/approve N` on a task with no files/check policy is now refused (the task stays
+  `Proposed`) with `Task #N has no files/check yet; set them with /permit N {...}`,
+  instead of reporting `approved` and then failing `/run` with a hint (`/refresh`) that
+  could not help. The `/permit` JSON error now includes an example, the `/task` receipt
+  names `/permit` before `/approve`, and an older save that already holds an approval
+  without a policy shows `needs policy` instead of `approved` in the task panel.
 - The task panel's `Next` hint for a review-ready task with acceptance criteria now
   says `/review N JSON` and `/reject N` instead of `/accept N`, which Alfredo refuses
   for such tasks. The `/accept` refusal and the `/review N` usage message lead with the

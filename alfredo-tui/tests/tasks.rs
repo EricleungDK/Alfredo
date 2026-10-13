@@ -49,6 +49,20 @@ impl Drop for Fixture {
         let _ = fs::remove_dir_all(&self.root);
     }
 }
+fn permit_request(correlation: &str, revision: u64, task: u64) -> Request {
+    Request {
+        correlation: correlation.into(),
+        expected_revision: revision,
+        action: Action::Permit {
+            task,
+            policy: alfredo_tui::tasks::WorkPolicy {
+                files: vec!["calc.py".into()],
+                check: vec!["/usr/bin/python3".into(), "-c".into(), "pass".into()],
+            },
+        },
+    }
+}
+
 fn proposal(correlation: &str, revision: u64, dependencies: Vec<u64>) -> Request {
     Request {
         correlation: correlation.into(),
@@ -67,9 +81,13 @@ fn committed_tasks_and_approvals_restore_and_exact_retry_does_not_duplicate() {
     let request = proposal("create", 0, vec![]);
     let (snapshot, receipt) = fixture.store("mission").transact(request.clone()).unwrap();
     assert_eq!(snapshot.tasks[0].status, TaskStatus::Proposed);
+    fixture
+        .store("mission")
+        .transact(permit_request("permit", 1, 1))
+        .unwrap();
     let approval = Request {
         correlation: "approve".into(),
-        expected_revision: 1,
+        expected_revision: 2,
         action: Action::Approve { task: 1 },
     };
     fixture.store("mission").transact(approval).unwrap();
@@ -77,7 +95,7 @@ fn committed_tasks_and_approvals_restore_and_exact_retry_does_not_duplicate() {
     assert_eq!(replay, receipt);
     assert_eq!(restored.tasks.len(), 1);
     assert_eq!(restored.tasks[0].status, TaskStatus::Approved);
-    assert_eq!(restored.revision, 2);
+    assert_eq!(restored.revision, 3);
 }
 
 #[test]
@@ -259,6 +277,7 @@ fn keyboard_task_selection_targets_one_task_and_survives_background_refresh() {
             .transact(proposal(&format!("task-{id}"), id, vec![]))
             .unwrap();
     }
+    store.transact(permit_request("permit-30", 30, 30)).unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let mut control = TaskControl::new(store.clone());
     control.snapshot = Some(store.snapshot().unwrap());
@@ -287,7 +306,7 @@ fn keyboard_task_selection_targets_one_task_and_survives_background_refresh() {
         TaskStatus::Proposed
     );
     store
-        .transact(proposal("background-new-task", 31, vec![]))
+        .transact(proposal("background-new-task", 32, vec![]))
         .unwrap();
     control.refresh(&runtime);
     while control.pending {
@@ -341,14 +360,15 @@ fn activity_is_ordered_receipt_truth_and_navigation_never_adds_events() {
     let store = fixture.store("activity");
     let original = proposal("first-proposal", 0, vec![]);
     store.transact(original.clone()).unwrap();
+    store.transact(permit_request("permit-one", 1, 1)).unwrap();
     store
         .transact(Request {
             correlation: "approval-one".into(),
-            expected_revision: 1,
+            expected_revision: 2,
             action: Action::Approve { task: 1 },
         })
         .unwrap();
-    for revision in 2..11 {
+    for revision in 3..12 {
         store
             .transact(proposal(&format!("proposal-{revision}"), revision, vec![]))
             .unwrap();
@@ -356,18 +376,18 @@ fn activity_is_ordered_receipt_truth_and_navigation_never_adds_events() {
     store.transact(original).unwrap();
     let snapshot = store.snapshot().unwrap();
     let entries = activity::entries(&snapshot, "");
-    assert_eq!(entries.len(), 11);
-    assert_eq!(entries[0].revision, 11);
+    assert_eq!(entries.len(), 12);
+    assert_eq!(entries[0].revision, 12);
     assert_eq!(entries.last().unwrap().revision, 1);
     let selected = activity::entries(&snapshot, "#1");
-    assert_eq!(selected.len(), 2);
+    assert_eq!(selected.len(), 3);
     assert!(selected.iter().all(|entry| entry.task == 1));
     assert_eq!(activity::entries(&snapshot, "APPROVAL-ONE").len(), 1);
     assert_eq!(activity::entries(&snapshot, "approved").len(), 1);
     assert!(store
         .transact(Request {
             correlation: "invalid".into(),
-            expected_revision: 11,
+            expected_revision: 12,
             action: Action::Approve { task: 999 }
         })
         .is_err());
@@ -422,7 +442,7 @@ fn activity_is_ordered_receipt_truth_and_navigation_never_adds_events() {
         "minimum terminal cannot inspect activity receipt"
     );
     assert_eq!(fs::read(fixture.file()).unwrap(), before);
-    assert_eq!(activity::entries(&store.snapshot().unwrap(), "#1").len(), 2);
+    assert_eq!(activity::entries(&store.snapshot().unwrap(), "#1").len(), 3);
 }
 
 fn capacity_seed(fixture: &Fixture) -> (TaskStore, alfredo_tui::tasks::Snapshot) {
@@ -773,6 +793,7 @@ fn background_dispatch_refresh_does_not_block_commands_or_clear_pending_write_st
     let fixture = Fixture::new();
     let store = fixture.store("background-refresh");
     store.transact(proposal("first", 0, vec![])).unwrap();
+    store.transact(permit_request("permit", 1, 1)).unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let mut control = TaskControl::new(store.clone());
     control.refresh(&runtime);
@@ -799,8 +820,8 @@ fn background_dispatch_refresh_does_not_block_commands_or_clear_pending_write_st
         control.poll();
         thread::sleep(Duration::from_millis(2));
     }
-    assert_eq!(control.snapshot.as_ref().unwrap().revision, 2);
-    assert!(control.notice.contains("revision 2"));
+    assert_eq!(control.snapshot.as_ref().unwrap().revision, 3);
+    assert!(control.notice.contains("revision 3"));
 }
 
 #[test]
@@ -828,6 +849,7 @@ fn task_search_limits_navigation_and_shorthand_actions_to_visible_rows() {
             })
             .unwrap();
     }
+    store.transact(permit_request("permit-2", 3, 2)).unwrap();
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let mut control = TaskControl::new(store.clone());
     control.snapshot = Some(store.snapshot().unwrap());
@@ -946,10 +968,11 @@ fn busy_scope_lock_is_a_transient_refusal_and_writes_nothing() {
     let fixture = Fixture::new();
     let store = fixture.store("mission");
     store.transact(proposal("first", 0, vec![])).unwrap();
+    store.transact(permit_request("permit", 1, 1)).unwrap();
     store
         .transact(Request {
             correlation: "approve".into(),
-            expected_revision: 1,
+            expected_revision: 2,
             action: Action::Approve { task: 1 },
         })
         .unwrap();
@@ -957,7 +980,7 @@ fn busy_scope_lock_is_a_transient_refusal_and_writes_nothing() {
     let scope = store.understanding();
     let held = scope.lock().unwrap();
     let refusal = store
-        .transact_checked(proposal("second", 2, vec![]))
+        .transact_checked(proposal("second", 3, vec![]))
         .unwrap_err();
     assert!(matches!(refusal, Refusal::Busy), "{refusal:?}");
     assert!(refusal.transient());
@@ -965,7 +988,7 @@ fn busy_scope_lock_is_a_transient_refusal_and_writes_nothing() {
     assert!(matches!(claim, Refusal::Busy), "{claim:?}");
     drop(held);
     assert_eq!(fs::read(fixture.file()).unwrap(), before);
-    store.transact(proposal("second", 2, vec![])).unwrap();
+    store.transact(proposal("second", 3, vec![])).unwrap();
     drop(store.claim_worker(1).unwrap());
 }
 
@@ -1163,4 +1186,92 @@ fn a_v16_store_cannot_replay_a_requeue_receipt_but_upgrades_on_write() {
         })
         .unwrap();
     assert_eq!(upgraded.schema_version, 17);
+}
+
+#[test]
+fn approve_without_policy_is_refused_with_the_permit_next_step() {
+    let fixture = Fixture::new();
+    let store = fixture.store("mission");
+    store.transact(proposal("first", 0, vec![])).unwrap();
+    let before = fs::read(fixture.file()).unwrap();
+    let error = store
+        .transact(Request {
+            correlation: "approve".into(),
+            expected_revision: 1,
+            action: Action::Approve { task: 1 },
+        })
+        .unwrap_err();
+    assert!(error.contains("Task #1 has no files/check yet"), "{error}");
+    assert!(error.contains("/permit 1 {\"files\":["), "{error}");
+    assert_eq!(
+        store.snapshot().unwrap().tasks[0].status,
+        TaskStatus::Proposed
+    );
+    assert_eq!(fs::read(fixture.file()).unwrap(), before);
+}
+
+#[test]
+fn approve_after_permit_is_accepted_and_the_run_guard_passes() {
+    let fixture = Fixture::new();
+    let store = fixture.store("mission");
+    store.transact(proposal("first", 0, vec![])).unwrap();
+    store.transact(permit_request("permit", 1, 1)).unwrap();
+    let (snapshot, _) = store
+        .transact(Request {
+            correlation: "approve".into(),
+            expected_revision: 2,
+            action: Action::Approve { task: 1 },
+        })
+        .unwrap();
+    assert_eq!(snapshot.tasks[0].status, TaskStatus::Approved);
+    let (snapshot, _) = store
+        .transact(Request {
+            correlation: "run".into(),
+            expected_revision: 3,
+            action: Action::Start {
+                inputs: vec![],
+                task: 1,
+                baseline: "a".repeat(40),
+            },
+        })
+        .unwrap();
+    assert_eq!(snapshot.tasks[0].status, TaskStatus::Running);
+}
+
+#[test]
+fn permit_error_shows_a_json_example() {
+    let error = parse("/permit 1 {}", "worker").unwrap_err();
+    assert!(error.contains("{\"files\":[\"calc.py\"]"), "{error}");
+    assert!(error.contains("\"check\":["), "{error}");
+}
+
+#[test]
+fn a_saved_approval_without_policy_still_loads_but_never_reads_approved() {
+    let fixture = Fixture::new();
+    let store = fixture.store("mission");
+    store.transact(proposal("first", 0, vec![])).unwrap();
+    store.transact(permit_request("permit", 1, 1)).unwrap();
+    store
+        .transact(Request {
+            correlation: "approve".into(),
+            expected_revision: 2,
+            action: Action::Approve { task: 1 },
+        })
+        .unwrap();
+    // Rewrite the history as a pre-rule save: approval receipt, no policy.
+    let path = fixture.file();
+    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let receipts = value["receipts"].as_array_mut().unwrap();
+    receipts.remove(1);
+    receipts[1]["request"]["expected_revision"] = 1.into();
+    receipts[1]["revision"] = 2.into();
+    value["revision"] = 2.into();
+    value["tasks"][0].as_object_mut().unwrap().remove("policy");
+    fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    let snapshot = fixture.store("mission").snapshot().unwrap();
+    let task = &snapshot.tasks[0];
+    assert_eq!(task.status, TaskStatus::Approved);
+    assert_eq!(alfredo_tui::dashboard::state_word(task), "needs policy");
+    let text = alfredo_tui::task_view::readiness(&snapshot, task);
+    assert!(text.contains("Needs exact file/check policy"), "{text}");
 }

@@ -73,6 +73,8 @@ fn blocked(snapshot: &Snapshot, task: &Task) -> bool {
 pub fn state_word(task: &Task) -> &'static str {
     match task.status {
         TaskStatus::Proposed => "proposed",
+        // A pre-policy save can hold an approval with no policy; the run guard refuses it.
+        TaskStatus::Approved if task.policy.is_none() => "needs policy",
         TaskStatus::Approved => "approved",
         TaskStatus::Cancelled => "cancelled",
         TaskStatus::Running => "running",
