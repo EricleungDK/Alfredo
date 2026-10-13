@@ -23,9 +23,11 @@ pub async fn publish(
         .tasks
         .iter()
         .find(|item| item.id == task)
-        .ok_or("Unknown task")?;
+        .ok_or_else(|| crate::tasks::unknown_task(task))?;
     if item.status != TaskStatus::Accepted {
-        return Err("Review and accept this task before /branch".into());
+        return Err(format!(
+            "Task #{task} is not accepted; /accept {task} before /branch {task}"
+        ));
     }
     let evidence: Evidence =
         serde_json::from_str(&store.evidence(task)?).map_err(|_| "Malformed branch evidence")?;

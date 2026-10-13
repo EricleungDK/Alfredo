@@ -16,6 +16,14 @@ const MAX_RECEIPTS: usize = 4096;
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 pub type Result<T> = std::result::Result<T, String>;
 
+pub fn unknown_task(task: u64) -> String {
+    format!("Unknown task {task}; the task panel lists ids")
+}
+
+pub fn not_run(task: u64) -> String {
+    format!("Task #{task} has not run; /run {task} first")
+}
+
 /// Why a transaction wrote nothing. Transient refusals leave no receipt, so the
 /// caller may prepare the decision again on current state; others are final.
 #[derive(Debug)]
@@ -27,10 +35,20 @@ pub enum Refusal {
     Busy,
     /// Policy, scope, approval, evidence, capacity or any other refusal.
     Denied(String),
+    /// A write or worker failed after the request may have taken effect, so the
+    /// outcome is unknown and an exact retry is the honest next step.
+    Uncertain(String),
 }
 impl Refusal {
     pub fn transient(&self) -> bool {
         matches!(self, Self::Stale(_) | Self::Busy)
+    }
+    pub fn uncertain(&self) -> bool {
+        matches!(self, Self::Uncertain(_))
+    }
+    /// Decided before any write: the same request can only be refused again.
+    pub fn final_refusal(&self) -> bool {
+        matches!(self, Self::Denied(_))
     }
 }
 impl std::fmt::Display for Refusal {
@@ -38,7 +56,7 @@ impl std::fmt::Display for Refusal {
         f.write_str(match self {
             Self::Stale(_) => "Task state changed; refresh before submitting again",
             Self::Busy => "Task store is busy; refresh and retry",
-            Self::Denied(reason) => reason,
+            Self::Denied(reason) | Self::Uncertain(reason) => reason,
         })
     }
 }
@@ -402,7 +420,7 @@ impl Snapshot {
             .tasks
             .iter()
             .find(|t| t.id == task)
-            .ok_or("Unknown task")?;
+            .ok_or_else(|| unknown_task(task))?;
         let run = item.run.as_ref().ok_or("Missing Architect source run")?;
         let review_revision = self.receipts.iter().rev().find(|r| matches!(r.request.action, Action::ReviewArchitecture { task: id, .. } if id == task && r.task == task)).ok_or("Missing Architect route receipt")?.revision;
         Ok(crate::architecture::Origin {
@@ -1211,8 +1229,8 @@ impl TaskStore {
                     .tasks
                     .iter()
                     .find(|item| item.id == *task)
-                    .ok_or("Unknown task")?;
-                let run = item.run.as_ref().ok_or("Task has no run")?;
+                    .ok_or_else(|| unknown_task(*task))?;
+                let run = item.run.as_ref().ok_or_else(|| not_run(*task))?;
                 let raw = self.read_evidence(
                     &run.id,
                     run.evidence_sha256
@@ -1266,8 +1284,8 @@ impl TaskStore {
                     .tasks
                     .iter()
                     .find(|t| t.id == *task)
-                    .ok_or("Unknown task")?;
-                let run = item.run.as_ref().ok_or("Task has no run evidence")?;
+                    .ok_or_else(|| unknown_task(*task))?;
+                let run = item.run.as_ref().ok_or_else(|| not_run(*task))?;
                 self.read_evidence(
                     &run.id,
                     run.evidence_sha256
@@ -1290,7 +1308,7 @@ impl TaskStore {
         if !matches!(receipt.request.action, Action::Finish { .. }) {
             Self::require_completion_capacity(&snapshot)?;
         }
-        self.save(&snapshot)?;
+        self.save(&snapshot).map_err(Refusal::Uncertain)?;
         Ok((snapshot, receipt))
     }
 
@@ -1522,7 +1540,7 @@ impl TaskStore {
                     .tasks
                     .iter_mut()
                     .find(|item| item.id == *task)
-                    .ok_or("Unknown task")?;
+                    .ok_or_else(|| unknown_task(*task))?;
                 item.validate_assignment(model)?;
                 item.model = model.clone();
                 item.status = TaskStatus::Proposed;
@@ -1594,7 +1612,7 @@ impl TaskStore {
                     .tasks
                     .iter()
                     .find(|item| item.id == *task)
-                    .ok_or("Unknown task")?;
+                    .ok_or_else(|| unknown_task(*task))?;
                 if item.status != TaskStatus::Accepted
                     || commit.len() != 40
                     || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
@@ -1693,7 +1711,7 @@ impl TaskStore {
                     .tasks
                     .iter_mut()
                     .find(|t| t.id == *task)
-                    .ok_or("Unknown task")?;
+                    .ok_or_else(|| unknown_task(*task))?;
                 match action {
                     Action::Approve { .. } if item.status == TaskStatus::Proposed => {
                         item.status = TaskStatus::Approved
@@ -1712,7 +1730,7 @@ impl TaskStore {
                     .tasks
                     .iter_mut()
                     .find(|t| t.id == *task)
-                    .ok_or("Unknown task")?;
+                    .ok_or_else(|| unknown_task(*task))?;
                 if item.status != TaskStatus::Cancelled
                     || item.run.is_none()
                     || item.policy.is_none()
@@ -1728,7 +1746,7 @@ impl TaskStore {
                     .tasks
                     .iter_mut()
                     .find(|t| t.id == *task)
-                    .ok_or("Unknown task")?;
+                    .ok_or_else(|| unknown_task(*task))?;
                 if !matches!(item.status, TaskStatus::Proposed | TaskStatus::Approved) {
                     return Err(
                         "Policy can only change before execution; propose a new repair task".into(),
@@ -1750,7 +1768,7 @@ impl TaskStore {
                     .tasks
                     .iter()
                     .find(|t| t.id == *task)
-                    .ok_or("Unknown task")?;
+                    .ok_or_else(|| unknown_task(*task))?;
                 if item.status != TaskStatus::Approved || item.policy.is_none() {
                     return Err("Task needs explicit /permit policy followed by /approve".into());
                 }
@@ -1825,7 +1843,7 @@ impl TaskStore {
                     .tasks
                     .iter_mut()
                     .find(|t| t.id == *task)
-                    .ok_or("Unknown task")?;
+                    .ok_or_else(|| unknown_task(*task))?;
                 let bound = item.run.as_mut().ok_or("Task has no run")?;
                 if item.status != TaskStatus::Running || bound.id != *run {
                     return Err("Stale or mismatched worker result".into());
@@ -1869,14 +1887,14 @@ impl TaskStore {
                     .tasks
                     .iter()
                     .find(|item| item.id == *task)
-                    .ok_or("Unknown task")?;
+                    .ok_or_else(|| unknown_task(*task))?;
                 if !matches!(
                     item.status,
                     TaskStatus::ReviewReady | TaskStatus::Failed | TaskStatus::NeedsHumanReview
                 ) {
                     return Err("Review outcomes require retained review-ready, failed or human-review work".into());
                 }
-                let run = item.run.as_ref().ok_or("Task has no run evidence")?;
+                let run = item.run.as_ref().ok_or_else(|| not_run(*task))?;
                 let passed = snapshot.receipts.iter().any(|receipt| matches!(&receipt.request.action,
                     Action::Finish { task: id, run: run_id, status: TaskStatus::ReviewReady, .. } if *id == *task && run_id == &run.id));
                 if decision.outcome.approves() && !passed {
@@ -1918,7 +1936,7 @@ impl TaskStore {
                     .tasks
                     .iter_mut()
                     .find(|t| t.id == *task)
-                    .ok_or("Unknown task")?;
+                    .ok_or_else(|| unknown_task(*task))?;
                 if item.status != TaskStatus::ReviewReady {
                     return Err("Task has no successful check evidence to review".into());
                 }
@@ -2129,7 +2147,7 @@ impl TaskStore {
             .tasks
             .iter()
             .find(|t| t.id == task)
-            .ok_or("Unknown task")?;
+            .ok_or_else(|| unknown_task(task))?;
         if item.status != TaskStatus::Running {
             return Err("Task does not need recovery".into());
         }
@@ -2195,7 +2213,7 @@ impl TaskStore {
             .tasks
             .iter()
             .find(|t| t.id == task)
-            .ok_or("Unknown task")?;
+            .ok_or_else(|| unknown_task(task))?;
         if item.status != TaskStatus::Running {
             self.evidence(task)?;
             return Ok((
@@ -2311,8 +2329,8 @@ impl TaskStore {
             .tasks
             .iter()
             .find(|t| t.id == task)
-            .ok_or("Unknown task")?;
-        let run = item.run.as_ref().ok_or("Task has not run")?;
+            .ok_or_else(|| unknown_task(task))?;
+        let run = item.run.as_ref().ok_or_else(|| not_run(task))?;
         self.read_evidence(
             &run.id,
             run.evidence_sha256

@@ -1273,7 +1273,7 @@ async fn accepted_branch_handoff_preserves_dirty_workspace_and_replays_without_n
     )
     .await
     .unwrap_err()
-    .contains("accept"));
+    .contains("Task #1 is not accepted; /accept 1 before /branch 1"));
     fixture.action(Action::Review {
         task: 1,
         accept: true,

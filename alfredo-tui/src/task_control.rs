@@ -81,6 +81,7 @@ pub struct TaskControl {
     prepared_errors: BTreeMap<String, String>,
     /// Correlations whose refusal was transient: nothing was written.
     prepared_transient: BTreeSet<String>,
+    prepared_refused: BTreeSet<String>,
     controller_epoch: u64,
     dispatch_origin: Option<crate::control_command::Request>,
     control_sender: mpsc::UnboundedSender<ControlResult>,
@@ -176,6 +177,7 @@ impl TaskControl {
             prepared_workers: BTreeMap::new(),
             prepared_errors: BTreeMap::new(),
             prepared_transient: BTreeSet::new(),
+            prepared_refused: BTreeSet::new(),
             controller_epoch: 0,
             dispatch_origin: None,
             control_sender,
@@ -536,15 +538,23 @@ impl TaskControl {
                 );
                 self.apply_outcome(Ok((*current, notice).into()));
             }
+            Err(refusal) if refusal.final_refusal() => {
+                // Decided before any write: retrying or refreshing cannot change it.
+                self.notice = refusal.to_string();
+            }
             Err(refusal) => self.apply_outcome(Err(refusal.into())),
         }
     }
 
     fn record_refusal(&mut self, correlation: &str, result: &Checked) {
         self.prepared_transient.remove(correlation);
+        self.prepared_refused.remove(correlation);
         if let Err(refusal) = result {
             self.prepared_errors
                 .insert(correlation.into(), refusal.to_string());
+            if refusal.final_refusal() {
+                self.prepared_refused.insert(correlation.into());
+            }
             if refusal.transient() {
                 self.prepared_transient.insert(correlation.into());
             }
@@ -573,6 +583,11 @@ impl TaskControl {
     }
 
     /// The intent was refused without effect because task state moved underneath it.
+    /// The intent was refused before any write, so it can only be refused again.
+    pub fn intent_refused(&self, intent: &crate::command_intent::Intent) -> bool {
+        self.prepared_refused.contains(intent.correlation())
+    }
+
     pub fn intent_transient(&self, intent: &crate::command_intent::Intent) -> bool {
         self.prepared_transient.contains(intent.correlation())
     }
@@ -1449,7 +1464,11 @@ impl TaskControl {
                 }).map_err(Refusal::from),
             })
             .await
-            .unwrap_or_else(|_| Err("Task storage worker stopped; outcome unknown".into()));
+            .unwrap_or_else(|_| {
+                Err(Refusal::Uncertain(
+                    "Task storage worker stopped; outcome unknown".into(),
+                ))
+            });
             let _ = sender.send(result).await;
         });
     }
@@ -2054,6 +2073,7 @@ impl TaskControl {
         }
         self.prepared_errors.remove(intent.correlation());
         self.prepared_transient.remove(intent.correlation());
+        self.prepared_refused.remove(intent.correlation());
         self.prepared_retry = Some(intent.clone());
         self.visible = true;
         let target = match intent {
@@ -2170,17 +2190,20 @@ impl TaskControl {
                             }
                             Ok(())
                         })
-                        .await
-                        .unwrap_or_else(|_| Err("Branch verifier stopped; outcome unknown".into()));
+                        .await;
                     let result = match checked {
-                        Ok(()) => {
+                        Ok(Ok(())) => {
                             crate::branch::publish(store, task, expected_revision, correlation)
                                 .await
                                 .map(Projection::from)
+                                .map_err(Refusal::from)
                         }
-                        Err(error) => Err(error),
+                        Ok(Err(error)) => Err(Refusal::from(error)),
+                        Err(_) => Err(Refusal::Uncertain(
+                            "Branch verifier stopped; outcome unknown".into(),
+                        )),
                     };
-                    let _ = sender.send(result.map_err(Refusal::from)).await;
+                    let _ = sender.send(result).await;
                 });
             }
             Intent::Recover { task, run, .. } => {
@@ -2192,7 +2215,7 @@ impl TaskControl {
                 self.prepared_active = Some(intent.clone());
                 runtime.spawn(async move {
                     let result =
-                        tokio::task::spawn_blocking(move || {
+                        match tokio::task::spawn_blocking(move || {
                             let snapshot = store.snapshot()?;
                             if !snapshot.tasks.iter().any(|t| {
                                 t.id == task && t.run.as_ref().is_some_and(|r| r.id == run)
@@ -2202,8 +2225,13 @@ impl TaskControl {
                             store.recover(task).map(Projection::from)
                         })
                         .await
-                        .unwrap_or_else(|_| Err("Recovery worker stopped; outcome unknown".into()));
-                    let _ = sender.send(result.map_err(Refusal::from)).await;
+                        {
+                            Ok(result) => result.map_err(Refusal::from),
+                            Err(_) => Err(Refusal::Uncertain(
+                                "Recovery worker stopped; outcome unknown".into(),
+                            )),
+                        };
+                    let _ = sender.send(result).await;
                 });
             }
         }
@@ -2534,13 +2562,17 @@ impl TaskControl {
             let store = self.store.clone();
             let sender = self.sender.clone();
             runtime.spawn(async move {
-                let result =
-                    tokio::task::spawn_blocking(move || store.recover(task).map(Projection::from))
-                        .await
-                        .unwrap_or_else(|_| {
-                            Err("Recovery stopped; refresh before retrying /recover".into())
-                        });
-                let _ = sender.send(result.map_err(Refusal::from)).await;
+                let result = match tokio::task::spawn_blocking(move || {
+                    store.recover(task).map(Projection::from)
+                })
+                .await
+                {
+                    Ok(result) => result.map_err(Refusal::from),
+                    Err(_) => Err(Refusal::Uncertain(
+                        "Recovery stopped; refresh before retrying /recover".into(),
+                    )),
+                };
+                let _ = sender.send(result).await;
             });
             return Ok(());
         }

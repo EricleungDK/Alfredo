@@ -1479,6 +1479,8 @@ The chat console now shows **Observed task receipt** entries for newly observed 
 
 Task mutations, scope changes, explicit worker starts, branch creation and recovery now save their immutable command intent before dispatch. The console keeps the command and matching receipt in its originating session. Interrupted commands restore as unconfirmed without automatic replay. `/retry-command SESSION:COMMAND` explicitly retries a saved command number, including from another session; the exact intent and origin remain unchanged. `/retry-task` can use the selected session's latest unresolved saved command after restart. Planner generation and worker controls also use saved intent, with their separate outcomes described below.
 
+A command refused before any write (unknown task id, a task that has not run, `/branch` before `/accept`) is recorded as `✗ Not dispatched` with the reason and next step, and the status line does not suggest `/retry-task`: repeating it can only be refused again. Only a failed save or a stopped storage worker leaves the outcome unknown and suggests `/retry-task`.
+
 ### Saved planner commands
 
 `/plan REQUEST`, `/plan-revise REQUEST`, `/architect-revise ID`, and `/plan-cancel`
