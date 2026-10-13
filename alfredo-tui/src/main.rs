@@ -249,6 +249,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         Workstation::launch(&runtime, &state_dir, request, &model, provider.clone()).map_err(
             |error| {
+                if alfredo_tui::conversations::is_namespace_in_use(&error) {
+                    return error;
+                }
                 format!(
                     "{error}. Inspect selection history at {}",
                     state_dir
@@ -266,6 +269,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         match runtime.block_on(alfredo_tui::selection::automatic(&start, &state_dir)) {
             Ok(Some(choice)) => match launch(choice) {
                 Ok(work) => launched = Some(work),
+                Err(error) if alfredo_tui::conversations::is_namespace_in_use(&error) => {
+                    return Err(error.into())
+                }
                 Err(error) => notice = format!("Automatic open failed: {error}"),
             },
             Ok(None) => notice = alfredo_tui::selection::not_a_repository_notice(&start),

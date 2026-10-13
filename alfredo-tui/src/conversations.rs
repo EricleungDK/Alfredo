@@ -280,6 +280,15 @@ impl Snapshot {
     }
 }
 
+const NAMESPACE_IN_USE_MARKER: &str = "already owns conversation";
+/// Startup refusal when another process holds the conversation namespace.
+pub fn namespace_in_use(namespace: &str) -> String {
+    format!("Another alfredo-tui {NAMESPACE_IN_USE_MARKER} '{namespace}' for this repo. Close it, or start this one with: alfredo-tui --conversation NAME")
+}
+/// True when `error` is the refusal produced by [`namespace_in_use`].
+pub fn is_namespace_in_use(error: &str) -> bool {
+    error.starts_with("Another alfredo-tui ") && error.contains(NAMESPACE_IN_USE_MARKER)
+}
 pub struct ConversationStore {
     root: PathBuf,
     path: PathBuf,
@@ -303,9 +312,7 @@ impl ConversationStore {
             true,
             true,
         )?;
-        owner
-            .try_lock()
-            .map_err(|_| "Conversation namespace is in use; choose another --conversation NAME")?;
+        owner.try_lock().map_err(|_| namespace_in_use(namespace))?;
         Ok(Self {
             path: root.join(format!("conversations-{digest}.json")),
             root,

@@ -193,7 +193,15 @@ impl Workstation {
         })();
         let (mut next, session, id) = match prepared {
             Ok(prepared) => prepared,
-            Err(error) => return Err(progress.fail(&error).1),
+            Err(error) => {
+                let wrapped = progress.fail(&error).1;
+                // A busy conversation is not a selection failure: report it plainly.
+                return Err(if crate::conversations::is_namespace_in_use(&error) {
+                    error
+                } else {
+                    wrapped
+                });
+            }
         };
         // Returning this workstation is the startup handoff; report publication
         // failures as a notice on the selected target, never as a fictitious rollback.
