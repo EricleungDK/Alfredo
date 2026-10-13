@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `/stop` with no active autopilot (none, finished or failed) now says `No active autopilot`, like `/pause`, instead of claiming `Autopilot stopped · /resume continues`; running manual workers are still cancelled and reported.
 - The task panel's `Next` hint for a review-ready task with acceptance criteria now
   says `/review N JSON` and `/reject N` instead of `/accept N`, which Alfredo refuses
   for such tasks. The `/accept` refusal and the `/review N` usage message lead with the

@@ -628,6 +628,7 @@ impl Autopilot {
             .as_ref()
             .map(|saved| saved.model.clone())
             .unwrap_or_else(|| "pending".into());
+        let was_active = self.saved.as_ref().is_some_and(|saved| saved.active());
         self.pause(tasks);
         let workers: Vec<u64> = tasks.workers.keys().copied().collect();
         let mut errors = Vec::new();
@@ -636,16 +637,26 @@ impl Autopilot {
                 errors.push(format!("#{task}: {error}"));
             }
         }
-        self.notice = if errors.is_empty() {
+        // Only a live loop can be "stopped" or "continued" by /resume.
+        let head = if was_active {
+            "Autopilot stopped"
+        } else {
+            "No active autopilot"
+        };
+        self.notice = if errors.is_empty() && !was_active && workers.is_empty() {
+            head.into()
+        } else if errors.is_empty() {
+            let tail = if was_active {
+                " · /resume continues"
+            } else {
+                ""
+            };
             format!(
-                "Autopilot stopped · cancellation requested for {} worker(s) · /resume continues",
+                "{head} · cancellation requested for {} worker(s){tail}",
                 workers.len()
             )
         } else {
-            format!(
-                "Autopilot stopped · cancellation issues: {}",
-                errors.join("; ")
-            )
+            format!("{head} · cancellation issues: {}", errors.join("; "))
         };
         self.notice.clone()
     }

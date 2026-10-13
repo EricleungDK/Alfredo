@@ -2349,3 +2349,71 @@ fn manual_repeated_plan_failures_are_not_collapsed() {
     assert!(!chat.contains("×2"), "{chat}");
     assert_eq!(chat.matches("/plan Improve calc").count(), 2, "{chat}");
 }
+
+#[derive(Clone, Copy, PartialEq)]
+enum Loop {
+    None,
+    Running,
+    Paused,
+    Finished,
+    Failed,
+}
+
+/// /stop, /pause and /resume must tell one story in every autopilot state:
+/// "/resume continues" only where /resume really continues the loop.
+#[test]
+fn stop_pause_and_resume_agree_across_autopilot_states() {
+    for state in [
+        Loop::None,
+        Loop::Running,
+        Loop::Paused,
+        Loop::Finished,
+        Loop::Failed,
+    ] {
+        let fixture = Fixture::new();
+        let server = match state {
+            Loop::Failed => Server::new(|_, _| {
+                json!({"tasks": [{"title": "Bad", "acceptance": ["x"], "model": "fixture", "dependencies": [2],
+                    "policy": {"files": ["calc.py"], "check": ["true"]}}]})
+                .to_string()
+            }),
+            _ => one_good_task(),
+        };
+        let runtime = Runtime::new().unwrap();
+        let mut control = control(&fixture, &server, &runtime);
+        let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+        if state != Loop::None {
+            autopilot.start("Answer", "fixture", 2, &control).unwrap();
+        }
+        if matches!(state, Loop::Finished | Loop::Failed) {
+            drive(&mut autopilot, &mut control, &runtime, "end", finished);
+        }
+        let say = |autopilot: &mut Autopilot, control: &mut TaskControl, text: &str| {
+            autopilot
+                .command(&runtime, control, text, "fixture", 2)
+                .unwrap_or_else(|error| error)
+        };
+        if state == Loop::Paused {
+            say(&mut autopilot, &mut control, "/pause");
+        }
+        let pause = say(&mut autopilot, &mut control, "/pause");
+        if state == Loop::Running {
+            say(&mut autopilot, &mut control, "/resume");
+        }
+        let stop = say(&mut autopilot, &mut control, "/stop");
+        let resume = say(&mut autopilot, &mut control, "/resume");
+        let active = matches!(state, Loop::Running | Loop::Paused);
+        if active {
+            assert!(pause.starts_with("Autopilot paused"), "{pause}");
+            assert!(
+                stop.starts_with("Autopilot stopped") && stop.contains("/resume continues"),
+                "{stop}"
+            );
+            assert_eq!(resume, "Autopilot resumed");
+        } else {
+            assert_eq!(pause, "No active autopilot");
+            assert_eq!(stop, "No active autopilot", "{stop}");
+            assert!(!resume.contains("continues") && resume != "Autopilot resumed");
+        }
+    }
+}
