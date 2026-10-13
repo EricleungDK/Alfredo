@@ -500,7 +500,11 @@ impl Autopilot {
             }
         }
         if tasks.planner.active() || tasks.planner.checkpoint().is_some() {
-            if let Some(saved) = self.saved.as_ref().filter(|saved| saved.active()) {
+            if let Some(saved) = self
+                .saved
+                .as_ref()
+                .filter(|saved| saved.active() && saved.paused)
+            {
                 if matches!(&saved.plan_request, Some(request) if tasks.planner.active() || draft_matches(tasks, request))
                 {
                     return Err("The stopped autopilot's plan draft is open; /resume to continue it or /plan-cancel to discard".into());
@@ -645,12 +649,7 @@ impl Autopilot {
         }
         self.notice = if errors.is_empty() {
             format!(
-                "Autopilot stopped · {}cancellation requested for {} worker(s) · /resume continues",
-                if planning_cancelled {
-                    "planning cancelled, no draft will appear · "
-                } else {
-                    ""
-                },
+                "Autopilot stopped · cancellation requested for {} worker(s) · /resume continues",
                 workers.len()
             )
         } else {
@@ -659,6 +658,10 @@ impl Autopilot {
                 errors.join("; ")
             )
         };
+        if planning_cancelled {
+            self.notice
+                .push_str(" · planning cancelled, no draft will appear");
+        }
         self.notice.clone()
     }
 
@@ -668,7 +671,11 @@ impl Autopilot {
         let Some(saved) = self.saved.as_mut() else {
             return false;
         };
-        if saved.phase != Phase::Planning || saved.plan_request.is_none() || !tasks.planner.active()
+        // A landed draft means any generation now running is the user's revision.
+        if saved.phase != Phase::Planning
+            || saved.plan_request.is_none()
+            || !tasks.planner.active()
+            || tasks.planner.checkpoint().is_some()
         {
             return false;
         }

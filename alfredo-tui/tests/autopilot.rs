@@ -977,6 +977,33 @@ fn go_after_stop_with_the_autopilots_finished_draft_open_names_resume_and_plan_c
 }
 
 #[test]
+fn stop_leaves_a_users_own_plan_generation_running() {
+    let fixture = Fixture::new();
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let server = slow_planning(gate);
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    control
+        .command(&runtime, "/plan Make answer return 42", "fixture")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !(server.count() == 1 && control.planner.active()) {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.planner.notice);
+        thread::sleep(Duration::from_millis(3));
+    }
+    autopilot.stop(&runtime, &mut control);
+    assert!(control.planner.active());
+    let _ = release.send(());
+    while control.planner.checkpoint().is_none() {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.planner.notice);
+        thread::sleep(Duration::from_millis(3));
+    }
+}
+
+#[test]
 fn go_never_discards_a_users_own_plan_draft() {
     let fixture = Fixture::new();
     let server = Server::new(move |_, _| one_task_plan());
