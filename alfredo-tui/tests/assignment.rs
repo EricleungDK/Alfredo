@@ -219,7 +219,7 @@ async fn concurrent_state_change_during_catalog_query_refuses_assignment() {
 fn terminal_retry_cannot_bypass_missing_model_and_legacy_state_rejects_assignment() {
     let fixture = Fixture::new();
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    let (provider, server) = catalog(r#"{"models":[{"name":"original"}]}"#, 2, || {});
+    let (provider, server) = catalog(r#"{"models":[{"name":"original"}]}"#, 1, || {});
     let mut control = TaskControl::new(fixture.store.clone());
     control.set_provider(provider);
     control.refresh(&runtime);
@@ -233,16 +233,21 @@ fn terminal_retry_cannot_bypass_missing_model_and_legacy_state_rejects_assignmen
     };
     wait(&mut control);
     let bytes = fs::read(fixture.path()).unwrap();
-    for command in ["/assign 1 replacement", "/retry-task"] {
-        control.command(&runtime, command, "original").unwrap();
-        wait(&mut control);
-        assert!(
-            control.notice.contains("not installed"),
-            "{}",
-            control.notice
-        );
-        assert_eq!(fs::read(fixture.path()).unwrap(), bytes);
-    }
+    control
+        .command(&runtime, "/assign 1 replacement", "original")
+        .unwrap();
+    wait(&mut control);
+    assert!(
+        control.notice.contains("not installed"),
+        "{}",
+        control.notice
+    );
+    assert_eq!(fs::read(fixture.path()).unwrap(), bytes);
+    // A final refusal is not retryable: nothing is left to repeat, and nothing is written.
+    assert!(control
+        .command(&runtime, "/retry-task", "original")
+        .is_err());
+    assert_eq!(fs::read(fixture.path()).unwrap(), bytes);
     server.join().unwrap();
     fixture.store.transact(fixture.request()).unwrap();
     let mut value: serde_json::Value =

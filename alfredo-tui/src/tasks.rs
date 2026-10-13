@@ -43,9 +43,6 @@ impl Refusal {
     pub fn transient(&self) -> bool {
         matches!(self, Self::Stale(_) | Self::Busy)
     }
-    pub fn uncertain(&self) -> bool {
-        matches!(self, Self::Uncertain(_))
-    }
     /// Decided before any write: the same request can only be refused again.
     pub fn final_refusal(&self) -> bool {
         matches!(self, Self::Denied(_))
@@ -2205,6 +2202,12 @@ impl TaskStore {
 
     /// Reconcile saved evidence or a proven check-boundary interruption. Never replay effects.
     pub fn recover(&self, task: u64) -> Result<(Snapshot, String)> {
+        self.recover_checked(task).map_err(String::from)
+    }
+
+    /// `recover` with a typed refusal: failures before any recovery write are
+    /// final; once a boundary record or receipt may have been written they are uncertain.
+    pub fn recover_checked(&self, task: u64) -> std::result::Result<(Snapshot, String), Refusal> {
         let _owner = self
             .recovery_owner(task)?
             .ok_or("Worker is still active; recovery refused")?;
@@ -2234,7 +2237,8 @@ impl TaskStore {
                 let detail = if crate::run_boundary::interrupted_before_check(&run_directory, item)
                     .is_ok()
                 {
-                    crate::run_boundary::record_interrupted(&run_directory, item)?;
+                    crate::run_boundary::record_interrupted(&run_directory, item)
+                        .map_err(Refusal::Uncertain)?;
                     "Interrupted worker recorded as failed before check launch; no effects replayed"
                 } else if crate::run_boundary::interrupted_after_check(
                     &run_directory,
@@ -2247,12 +2251,13 @@ impl TaskStore {
                         &run_directory,
                         item,
                         &snapshot.mission,
-                    )?;
+                    )
+                    .map_err(Refusal::Uncertain)?;
                     "Interrupted worker recorded as failed after check; candidate not finalized; no effects replayed"
                 } else {
-                    return Err(format!(
+                    return Err(Refusal::Uncertain(format!(
                         "Outcome unknown; retained evidence cannot be recovered: {error}. No effects replayed"
-                    ));
+                    )));
                 };
                 (self.recovery_request(task, &snapshot)?, detail)
             }
@@ -2261,12 +2266,12 @@ impl TaskStore {
         let directory = self.run_directory(&run.id)?;
         regular_file(&directory.join("evidence.json"), false, false)?
             .sync_all()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| Refusal::Uncertain(e.to_string()))?;
         #[cfg(unix)]
         File::open(&directory)
             .and_then(|file| file.sync_all())
-            .map_err(|e| e.to_string())?;
-        let (snapshot, _) = self.transact(request)?;
+            .map_err(|e| Refusal::Uncertain(e.to_string()))?;
+        let (snapshot, _) = self.transact_checked(request)?;
         Ok((snapshot, detail.into()))
     }
 

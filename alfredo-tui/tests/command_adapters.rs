@@ -446,8 +446,6 @@ fn planner_preparation_is_inert_and_never_a_task_receipt() {
 
 fn settle(control: &mut TaskControl) {
     wait(control);
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let _ = deadline;
 }
 
 fn refused_without_retry_hint(command: &str, expected: &str) {
@@ -513,9 +511,18 @@ fn evidence_on_a_task_that_never_ran_names_the_next_step_without_retry_hint() {
 }
 
 #[test]
-fn uncertain_failure_is_not_refused_and_keeps_retry_hint() {
-    let refusal = alfredo_tui::tasks::Refusal::Uncertain("Task save outcome uncertain".into());
-    assert!(!refusal.transient());
-    assert!(refusal.uncertain());
-    assert!(!alfredo_tui::tasks::Refusal::Denied("x".into()).uncertain());
+fn undecided_command_stays_unconfirmed() {
+    let fixture = Fixture::new();
+    fixture.propose("First");
+    let control = fixture.control();
+    let mut control = control;
+    let intent = control
+        .prepare_command("/approve 1", "fixture")
+        .unwrap()
+        .unwrap();
+    assert!(!control.intent_refused(&intent));
+    assert!(matches!(
+        control.unmatched_state(&intent),
+        alfredo_tui::console_command::CommandState::Unknown { .. }
+    ));
 }
