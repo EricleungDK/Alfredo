@@ -269,7 +269,7 @@ presence does not prove sandbox permission. Actual worker execution remains subj
 to the normal permission and sandbox checks. An occupied named conversation is
 reported as a storage issue; choose another `--conversation` when appropriate.
 Outside diagnostics, a start whose conversation another `alfredo-tui` already owns
-exits with code 1 and a two-line message (close the other one, or relaunch with
+exits with code 1 and a one-line message (close the other one, or relaunch with
 `--conversation NAME`) instead of opening the workspace selector.
 
 A rejected slash command (unknown command, `Usage: …`, `Select a task first`, task not

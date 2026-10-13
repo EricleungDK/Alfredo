@@ -159,7 +159,7 @@ fn unavailable_target_and_failed_final_save_keep_current_work_and_release_target
     assert!(work
         .switch_to(&runtime, &f.root.join("b"), "beta")
         .unwrap_err()
-        .contains("already owns conversation"));
+        .contains("already owns that mission's conversation"));
     drop(target_owner);
     assert_eq!(work.mission(), "alpha");
     assert!(ConversationStore::open(&f.a, "default").is_err());
@@ -429,7 +429,7 @@ fn startup_launch_on_a_busy_conversation_reports_a_short_actionable_error() {
         "{error}"
     );
     assert!(error.contains("alfredo-tui --conversation NAME"), "{error}");
-    assert!(error.lines().count() <= 2, "{error}");
+    assert!(error.lines().count() == 1, "{error}");
     for forbidden in [
         "inspect partial target artifacts",
         "Selection stopped after",

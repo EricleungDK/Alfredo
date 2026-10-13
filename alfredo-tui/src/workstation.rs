@@ -359,6 +359,11 @@ impl Workstation {
         let (next, arrival_session, arrival) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
+                let error = if crate::conversations::is_namespace_in_use(&error) {
+                    crate::conversations::namespace_in_use_in_session()
+                } else {
+                    error
+                };
                 let (state, reason) = progress.fail(&error);
                 self.app.sessions[session].set_command_state(&id, state);
                 let _ = self.save(runtime);
