@@ -2388,6 +2388,12 @@ fn stop_pause_and_resume_agree_across_autopilot_states() {
         if matches!(state, Loop::Finished | Loop::Failed) {
             drive(&mut autopilot, &mut control, &runtime, "end", finished);
         }
+        if state == Loop::Failed {
+            assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+        }
+        if state == Loop::Finished {
+            assert_eq!(autopilot.status(&control).unwrap().state, RunState::Done);
+        }
         let say = |autopilot: &mut Autopilot, control: &mut TaskControl, text: &str| {
             autopilot
                 .command(&runtime, control, text, "fixture", 2)
@@ -2405,15 +2411,74 @@ fn stop_pause_and_resume_agree_across_autopilot_states() {
         let active = matches!(state, Loop::Running | Loop::Paused);
         if active {
             assert!(pause.starts_with("Autopilot paused"), "{pause}");
-            assert!(
-                stop.starts_with("Autopilot stopped") && stop.contains("/resume continues"),
-                "{stop}"
+            assert_eq!(
+                stop,
+                "Autopilot stopped · cancellation requested for 0 worker(s) · /resume continues"
             );
             assert_eq!(resume, "Autopilot resumed");
         } else {
             assert_eq!(pause, "No active autopilot");
-            assert_eq!(stop, "No active autopilot", "{stop}");
-            assert!(!resume.contains("continues") && resume != "Autopilot resumed");
+            assert_eq!(stop, "No active autopilot");
+            assert_eq!(
+                resume,
+                if state == Loop::None {
+                    "No autopilot goal; use /go GOAL"
+                } else {
+                    "Autopilot already finished; /go GOAL starts a new loop"
+                }
+            );
         }
     }
+}
+
+/// Without an active autopilot, /stop still cancels running workers (here a
+/// worker started by an autopilot that this instance knows nothing about, so it
+/// is indistinguishable from a manual one) and must not claim autopilot stopped.
+#[test]
+fn stop_without_autopilot_still_cancels_running_workers() {
+    let fixture = Fixture::new();
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let gate = Mutex::new(gate);
+    let server = Server::new(move |request, _| {
+        if planner(request) {
+            return json!({"tasks": [
+                {"title": "Make answer return 42", "acceptance": ["answer() returns 42"], "model": "fixture",
+                 "dependencies": [], "policy": {"files": ["calc.py"], "check": check("from calc import answer; assert answer() == 42")}},
+            ]})
+            .to_string();
+        }
+        let _ = gate.lock().unwrap().recv_timeout(Duration::from_secs(10));
+        good_calc()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut starter = Autopilot::open(&fixture.directory(), "default").unwrap();
+    starter.start("Answer", "fixture", 2, &control).unwrap();
+    drive(
+        &mut starter,
+        &mut control,
+        &runtime,
+        "worker request",
+        |_, _| server.count() == 2,
+    );
+    let other = Fixture::new();
+    let mut idle = Autopilot::open(&other.directory(), "default").unwrap();
+    assert!(!control.workers.is_empty());
+    let notice = idle.stop(&runtime, &mut control);
+    assert_eq!(
+        notice,
+        "No active autopilot · cancellation requested for 1 worker(s)"
+    );
+    assert!(control
+        .workers
+        .values()
+        .all(|flag| flag.load(Ordering::SeqCst)));
+    drop(release);
+    drive(&mut starter, &mut control, &runtime, "cancelled", |_, c| {
+        c.workers.is_empty()
+    });
+    assert_eq!(
+        fixture.store.snapshot().unwrap().tasks[0].status,
+        TaskStatus::Cancelled
+    );
 }
