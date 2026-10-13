@@ -246,7 +246,8 @@ fn terminal_retry_cannot_bypass_missing_model_and_legacy_state_rejects_assignmen
     // A final refusal is not retryable: nothing is left to repeat, and nothing is written.
     assert!(control
         .command(&runtime, "/retry-task", "original")
-        .is_err());
+        .unwrap_err()
+        .contains("No failed task request to retry"));
     assert_eq!(fs::read(fixture.path()).unwrap(), bytes);
     server.join().unwrap();
     fixture.store.transact(fixture.request()).unwrap();

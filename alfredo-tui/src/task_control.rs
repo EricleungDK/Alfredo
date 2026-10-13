@@ -3092,6 +3092,34 @@ mod refusal_notice_tests {
     }
 
     #[test]
+    fn unmatched_state_is_refused_only_for_a_final_refusal() {
+        use crate::console_command::CommandState;
+        let (mut control, root) = control();
+        let intent = crate::command_intent::Intent::Task {
+            request: control.retry.clone().unwrap(),
+        };
+        control.record_refusal(
+            intent.correlation(),
+            &Err(Refusal::Denied(
+                "Unknown task 9; the task panel lists ids".into(),
+            )),
+        );
+        assert!(matches!(
+            control.unmatched_state(&intent),
+            CommandState::Refused { .. }
+        ));
+        control.record_refusal(
+            intent.correlation(),
+            &Err(Refusal::Uncertain("save outcome uncertain".into())),
+        );
+        assert!(matches!(
+            control.unmatched_state(&intent),
+            CommandState::Unknown { .. }
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn final_refusal_drops_the_retry_hint_and_the_pending_retry() {
         let (mut control, root) = control();
         control.apply_checked(Err(Refusal::Denied(

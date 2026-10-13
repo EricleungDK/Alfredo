@@ -142,7 +142,9 @@ pub async fn publish_checked(
                 .find(|receipt| receipt.request.correlation == correlation)
             {
                 if receipt.request.action != action {
-                    return Err("Branch exists, but receipt correlation conflicts".into());
+                    return Err(Refusal::Uncertain(
+                        "Branch exists, but receipt correlation conflicts".into(),
+                    ));
                 }
             }
             let request = Request {

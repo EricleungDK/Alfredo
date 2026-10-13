@@ -16,6 +16,15 @@ const MAX_RECEIPTS: usize = 4096;
 static TEMP_ID: AtomicU64 = AtomicU64::new(0);
 pub type Result<T> = std::result::Result<T, String>;
 
+/// A failure after a boundary record was written leaves the outcome unknown.
+fn after_write(wrote: bool, reason: String) -> Refusal {
+    if wrote {
+        Refusal::Uncertain(reason)
+    } else {
+        Refusal::Denied(reason)
+    }
+}
+
 pub fn unknown_task(task: u64) -> String {
     format!("Unknown task {task}; the task panel lists ids")
 }
@@ -2226,6 +2235,7 @@ impl TaskStore {
         }
         let run_directory =
             self.run_directory(&item.run.as_ref().ok_or("Missing run claim")?.id)?;
+        let mut wrote = false;
         let (request, detail) = match self.recovery_request(task, &snapshot) {
             Ok(request) => (
                 request,
@@ -2239,6 +2249,7 @@ impl TaskStore {
                 {
                     crate::run_boundary::record_interrupted(&run_directory, item)
                         .map_err(Refusal::Uncertain)?;
+                    wrote = true;
                     "Interrupted worker recorded as failed before check launch; no effects replayed"
                 } else if crate::run_boundary::interrupted_after_check(
                     &run_directory,
@@ -2253,25 +2264,38 @@ impl TaskStore {
                         &snapshot.mission,
                     )
                     .map_err(Refusal::Uncertain)?;
+                    wrote = true;
                     "Interrupted worker recorded as failed after check; candidate not finalized; no effects replayed"
                 } else {
                     return Err(Refusal::Uncertain(format!(
                         "Outcome unknown; retained evidence cannot be recovered: {error}. No effects replayed"
                     )));
                 };
-                (self.recovery_request(task, &snapshot)?, detail)
+                (
+                    self.recovery_request(task, &snapshot)
+                        .map_err(|e| after_write(wrote, e))?,
+                    detail,
+                )
             }
         };
         let run = item.run.as_ref().ok_or("Missing run claim")?;
-        let directory = self.run_directory(&run.id)?;
-        regular_file(&directory.join("evidence.json"), false, false)?
+        let directory = self
+            .run_directory(&run.id)
+            .map_err(|e| after_write(wrote, e))?;
+        regular_file(&directory.join("evidence.json"), false, false)
+            .map_err(|e| after_write(wrote, e))?
             .sync_all()
             .map_err(|e| Refusal::Uncertain(e.to_string()))?;
         #[cfg(unix)]
         File::open(&directory)
             .and_then(|file| file.sync_all())
             .map_err(|e| Refusal::Uncertain(e.to_string()))?;
-        let (snapshot, _) = self.transact_checked(request)?;
+        let (snapshot, _) = self
+            .transact_checked(request)
+            .map_err(|refusal| match refusal {
+                Refusal::Denied(reason) if wrote => Refusal::Uncertain(reason),
+                other => other,
+            })?;
         Ok((snapshot, detail.into()))
     }
 
