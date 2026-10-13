@@ -1,3 +1,4 @@
+mod common;
 use alfredo_tui::{
     task_control::parse,
     tasks::{Action, Refusal, Request, TaskStatus, TaskStore},
@@ -1258,20 +1259,70 @@ fn a_saved_approval_without_policy_still_loads_but_never_reads_approved() {
             action: Action::Approve { task: 1 },
         })
         .unwrap();
-    // Rewrite the history as a pre-rule save: approval receipt, no policy.
-    let path = fixture.file();
-    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    let receipts = value["receipts"].as_array_mut().unwrap();
-    receipts.remove(1);
-    receipts[1]["request"]["expected_revision"] = 1.into();
-    receipts[1]["revision"] = 2.into();
-    value["revision"] = 2.into();
-    value["tasks"][0].as_object_mut().unwrap().remove("policy");
-    fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
+    common::forge_legacy_approval(&store);
     let snapshot = fixture.store("mission").snapshot().unwrap();
     let task = &snapshot.tasks[0];
     assert_eq!(task.status, TaskStatus::Approved);
     assert_eq!(alfredo_tui::dashboard::state_word(task), "needs policy");
     let text = alfredo_tui::task_view::readiness(&snapshot, task);
     assert!(text.contains("Needs exact file/check policy"), "{text}");
+    // The rendered panel agrees: never "approved" while the task needs a policy.
+    let mut control = alfredo_tui::task_control::TaskControl::new(store.clone());
+    control.snapshot = Some(snapshot);
+    control.visible = true;
+    let mut terminal = ratatui::Terminal::new(ratatui::backend::TestBackend::new(140, 40)).unwrap();
+    terminal
+        .draw(|frame| {
+            alfredo_tui::ui::draw_with_tasks(
+                frame,
+                &alfredo_tui::model::App::new("fixture".into()),
+                &control,
+            )
+        })
+        .unwrap();
+    let screen: String = terminal
+        .backend()
+        .buffer()
+        .content
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(screen.contains("Needs files/check policy"), "{screen}");
+    assert!(screen.contains("needs policy"), "{screen}");
+    assert!(!screen.contains("Task #1 · approved"), "{screen}");
+}
+
+#[test]
+fn task_receipt_notice_names_permit_before_approve() {
+    use alfredo_tui::task_control::TaskControl;
+    use std::time::{Duration, Instant};
+    let fixture = Fixture::new();
+    let store = fixture.store("notice");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut control = TaskControl::new(store.clone());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    control.refresh(&runtime);
+    while control.pending {
+        control.poll();
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    control
+        .command(&runtime, "/task Add calc", "fixture")
+        .unwrap();
+    while control.pending {
+        control.poll();
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    assert!(
+        control.notice.contains("next /permit 1"),
+        "{}",
+        control.notice
+    );
+    assert!(
+        control.notice.contains("then /approve 1"),
+        "{}",
+        control.notice
+    );
 }

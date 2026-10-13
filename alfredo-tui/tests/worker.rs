@@ -1,3 +1,4 @@
+mod common;
 use alfredo_tui::{
     provider::Ollama,
     tasks::{Action, Request, TaskStatus, TaskStore, WorkPolicy},
@@ -576,25 +577,11 @@ async fn cancellation_during_inference_produces_terminal_receipt_without_edits()
     assert_eq!(snapshot.tasks[0].status, TaskStatus::Cancelled);
 }
 
-/// A save from before `/approve` required a policy: approved, no policy. The store
-/// refuses to create one now, so rewrite a permit+approve history without the permit.
-fn forge_legacy_approval(store: &TaskStore) {
-    let path = store.conversation_directory().unwrap().join("tasks.json");
-    let mut value: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    let receipts = value["receipts"].as_array_mut().unwrap();
-    receipts.remove(1);
-    receipts[1]["request"]["expected_revision"] = 1.into();
-    receipts[1]["revision"] = 2.into();
-    value["revision"] = 2.into();
-    value["tasks"][0].as_object_mut().unwrap().remove("policy");
-    fs::write(&path, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
-}
-
 #[tokio::test]
 async fn bare_legacy_approval_cannot_start_a_worker() {
     let fixture = Fixture::new();
     fixture.permit();
-    forge_legacy_approval(&fixture.store);
+    common::forge_legacy_approval(&fixture.store);
     let provider = Ollama::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap();
     assert!(worker::start(
         fixture.store.clone(),
