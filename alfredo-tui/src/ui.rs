@@ -1222,6 +1222,11 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
                 wayfinder_requests.get(&index.saturating_sub(1)).copied(),
             )
         };
+        let heading = if session.interrupted_turn(index - index % 2) {
+            format!("{heading} · interrupted, not sent as context")
+        } else {
+            heading
+        };
         // Speaker labels are quiet; only an unverified claim keeps its warning colour.
         let color = if color == Color::Green {
             Color::DarkGray

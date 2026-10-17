@@ -70,15 +70,13 @@ async fn malformed_control_and_oversized_catalogs_fail_without_partial_selection
 }
 
 #[test]
-fn model_selection_is_explicit_and_does_not_reassign_active_or_interrupted_turns() {
+fn model_selection_is_explicit_and_does_not_reassign_active_turns() {
     let mut app = App::new("original".into());
     app.receive_models(Ok(vec!["other".into()]));
     app.sessions[0].insert("draft");
     app.sessions[0].begin().unwrap();
     assert!(app.select_model("other").is_err());
     assert_eq!(app.sessions[0].model, "original");
-    app.sessions[0].cancel();
-    assert!(app.select_model("other").is_err());
     app.add_session();
     app.select_model("other").unwrap();
     assert_eq!(app.sessions[0].model, "original");
@@ -87,5 +85,5 @@ fn model_selection_is_explicit_and_does_not_reassign_active_or_interrupted_turns
     app.receive_models(Err("Disconnected".into()));
     assert_eq!(app.models, ["other"]);
     assert!(app.models_notice.contains("previous catalog retained"));
-    assert_eq!(app.sessions[0].status, Status::Cancelled);
+    assert_eq!(app.sessions[0].status, Status::Connecting);
 }

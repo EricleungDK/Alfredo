@@ -223,6 +223,9 @@ impl Snapshot {
             {
                 return Err("Conversation role order is invalid".into());
             }
+            if !session.valid_interrupted() {
+                return Err("Conversation interrupted turns are invalid".into());
+            }
             if (session.messages.is_empty() && session.status != Status::Ready)
                 || (!session.messages.is_empty()
                     && (session.status == Status::Ready || session.attempt == 0))
