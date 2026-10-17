@@ -326,7 +326,11 @@ See [selection recovery](#selection-history-and-recovery) for the independent st
 `--workspace DIR --mission NAME` resumes an existing mission directly. Use
 `--workspace DIR --new-mission NAME` to create a distinct mission name. These flags
 are mutually exclusive, and the repository is still validated. A mission flag without
-`--workspace` opens the repository step of the selector. `--doctor`
+`--workspace` inside a Git repository (any subdirectory) uses that repository root, as if
+it were passed as `--workspace`, with the same checks (`Mission does not exist…`,
+`Mission already exists…`). Outside a repository it exits naming `--workspace DIR`; with
+`--select` the flag only prefills the selector. Mission names are validated identically
+on every path (1–120 bytes, no control characters; `/` and spaces are allowed). `--doctor`
 remains noninteractive and uses current directory / `default` when flags are absent. `--state-dir DIR`
 or `ALFREDO_STATE_DIR` selects task storage, defaulting to `$HOME/.local/state/alfredo`.
 State must be outside the coding workspace. Each canonical workspace/mission pair

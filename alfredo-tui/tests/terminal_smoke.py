@@ -156,6 +156,57 @@ class ZeroCeremonyStart(unittest.TestCase):
                     second.close()
 
 
+class MissionFlagsInsideRepository(unittest.TestCase):
+    def test_mission_flags_without_workspace_use_the_repository_of_the_current_directory(self):
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        with tempfile.TemporaryDirectory(prefix='alfredo-flag-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-flag-repo-') as repo:
+            root = os.path.realpath(repo)
+            subprocess.run(['git', '-C', root, 'init', '-q', '--template='], check=True)
+            nested = Path(root, 'src')
+            nested.mkdir()
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            base = [str(binary), '--model', 'fixture', '--endpoint', 'http://127.0.0.1:9']
+
+            def missions():
+                return sorted(json.loads(path.read_text())['mission'] for path in Path(state).rglob('mission.json'))
+
+            def refused(extra, message):
+                terminal = Pty(self, base + extra, nested, env)
+                try:
+                    self.assertNotEqual(terminal.process.wait(timeout=10), 0)
+                    while select.select([terminal.master], [], [], 0.2)[0]:
+                        terminal.output.extend(os.read(terminal.master, 65536))
+                    self.assertIn(message, terminal.output.decode(errors='replace'))
+                finally:
+                    terminal.close()
+
+            # An unknown mission is refused exactly as with --workspace; nothing is created.
+            refused(['--mission', 'alpha'], 'Mission does not exist; choose Start New Mission')
+            self.assertEqual(missions(), [])
+            # --new-mission creates it in the repository root, even from a subdirectory.
+            for name in ('alpha', 'bad name/x'):
+                terminal = Pty(self, base + ['--new-mission', name], nested, env)
+                try:
+                    terminal.wait_for(f'ALFREDO  {name} · ')
+                    self.assertNotIn('Workspace selection required', terminal.screen())
+                    terminal.write(b'\x11')
+                    self.assertEqual(terminal.process.wait(timeout=5), 0)
+                finally:
+                    terminal.close()
+            self.assertEqual(missions(), ['alpha', 'bad name/x'])
+            # A second --new-mission with the same name is refused; --mission resumes.
+            refused(['--new-mission', 'alpha'], 'Mission already exists')
+            terminal = Pty(self, base + ['--mission', 'alpha'], nested, env)
+            try:
+                terminal.wait_for('ALFREDO  alpha · ')
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                terminal.close()
+            self.assertEqual(missions(), ['alpha', 'bad name/x'])
+
+
 class ScreenReconstruction(unittest.TestCase):
     def test_alternate_screen_does_not_match_stale_primary_text(self):
         entered = b'old text\x1b[?1049hnew text'
@@ -1092,7 +1143,7 @@ class TerminalSmoke(unittest.TestCase):
                 output.clear()
                 new_env = dict(env, ALFREDO_STATE_DIR=new_state)
                 process = subprocess.Popen(
-                    [str(binary), '--new-mission', 'fresh', '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}'],
+                    [str(binary), '--select', '--new-mission', 'fresh', '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}'],
                     stdin=slave, stdout=slave, stderr=slave, env=new_env, cwd=workspace.name,
                 )
                 wait_for(b'Workspace selection required')
@@ -1113,7 +1164,7 @@ class TerminalSmoke(unittest.TestCase):
                 self.assertEqual(list(Path(new_state).iterdir()), [])
                 output.clear()
                 process = subprocess.Popen(
-                    [str(binary), '--new-mission', 'fresh', '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}'],
+                    [str(binary), '--select', '--new-mission', 'fresh', '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}'],
                     stdin=slave, stdout=slave, stderr=slave, env=new_env, cwd=workspace.name,
                 )
                 wait_for(b'Workspace selection required')

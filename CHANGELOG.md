@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `--mission NAME` / `--new-mission NAME` without `--workspace` no longer silently open the
+  selector and drop the flag. Inside a Git repository they use the repository root and
+  resume or create NAME exactly as with `--workspace` (including `Mission does not exist`
+  and `Mission already exists`); outside one they exit with a message naming
+  `--workspace DIR`.
 - The task panel's `Next` hint for a review-ready task with acceptance criteria now
   says `/review N JSON` and `/reject N` instead of `/accept N`, which Alfredo refuses
   for such tasks. The `/accept` refusal and the `/review N` usage message lead with the
