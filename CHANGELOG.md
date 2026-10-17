@@ -19,12 +19,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Typing `/task` or `/after` with no arguments (or `/after 1,2` with no description)
-  now prints `Usage: /task DESCRIPTION` / `Usage: /after IDS DESCRIPTION` instead of
-  `Unknown command`. Bare `/assign`, `/permit`, `/repair`, `/requeue`,
-  `/resolve-repair`, `/review`, `/scope-confirm`, `/architect-revise` and
-  `/retry-command` get the same usage line. A test now submits every command in the
-  F1 registry bare and fails if any is reported unknown.
 - The task panel's `Next` hint for a review-ready task with acceptance criteria now
   says `/review N JSON` and `/reject N` instead of `/accept N`, which Alfredo refuses
   for such tasks. The `/accept` refusal and the `/review N` usage message lead with the
