@@ -1191,6 +1191,63 @@ fn a_v16_store_cannot_replay_a_requeue_receipt_but_upgrades_on_write() {
 }
 
 #[test]
+fn state_dir_with_dotdot_resolving_outside_the_workspace_is_accepted() {
+    let fixture = Fixture::new();
+    let workspace = fixture.root.join("workspace");
+    // Existing sibling, and a not-yet-existing sibling, both reached through `..`.
+    fs::create_dir(fixture.root.join("sibling")).unwrap();
+    for name in ["sibling", "missing/deeper"] {
+        let state = workspace.join("..").join(name);
+        TaskStore::new(&state, &workspace, "mission")
+            .unwrap_or_else(|e| panic!("{name} should be accepted: {e}"));
+    }
+}
+
+#[test]
+fn state_dir_with_dotdot_resolving_inside_the_workspace_is_rejected_with_both_paths() {
+    let fixture = Fixture::new();
+    let workspace = fixture.root.join("workspace");
+    fs::create_dir(workspace.join("sub")).unwrap();
+    for state in [
+        workspace.join("sub/../state"),
+        workspace.join("./state"),
+        workspace.join("missing/../state"),
+        fixture.root.join("workspace/sub/../../workspace/state"),
+    ] {
+        let message = TaskStore::new(&state, &workspace, "mission")
+            .err()
+            .unwrap_or_else(|| panic!("{} should be rejected", state.display()));
+        let resolved = workspace.canonicalize().unwrap();
+        assert!(
+            message.contains("outside the coding workspace"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&resolved.join("state").display().to_string()),
+            "{message}"
+        );
+        assert!(
+            message.contains(&resolved.display().to_string()),
+            "{message}"
+        );
+    }
+    assert!(!workspace.join("state").exists());
+}
+
+#[test]
+fn state_dir_through_a_symlink_into_the_workspace_is_rejected() {
+    let fixture = Fixture::new();
+    let workspace = fixture.root.join("workspace");
+    std::os::unix::fs::symlink(&workspace, fixture.root.join("link")).unwrap();
+    // `link/..` is the OS parent of the symlink target, not of `link`'s parent.
+    assert!(TaskStore::new(&fixture.root.join("link/state"), &workspace, "m").is_err());
+    fs::create_dir(workspace.join("sub")).unwrap();
+    std::os::unix::fs::symlink(workspace.join("sub"), fixture.root.join("sublink")).unwrap();
+    // Lexically `root/sublink/../state` is outside; the OS resolves it to workspace/state.
+    assert!(TaskStore::new(&fixture.root.join("sublink/../state"), &workspace, "m").is_err());
+}
+
+#[test]
 fn approve_without_policy_is_refused_with_the_permit_next_step() {
     let fixture = Fixture::new();
     let store = fixture.store("mission");

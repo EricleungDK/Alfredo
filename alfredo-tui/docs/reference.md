@@ -359,7 +359,8 @@ it were passed as `--workspace`, with the same checks (`Mission does not existâ€
 on every path (1â€“120 bytes, no control characters; `/` and spaces are allowed). `--doctor`
 remains noninteractive and uses current directory / `default` when flags are absent. `--state-dir DIR`
 or `ALFREDO_STATE_DIR` selects task storage, defaulting to `$HOME/.local/state/alfredo`.
-State must be outside the coding workspace. Each canonical workspace/mission pair
+State must be outside the coding workspace, judged on the resolved path (`..` and
+symlinks followed; `../state` from inside the repo is fine, `sub/../state` is not). Each canonical workspace/mission pair
 gets an independent `rust-tasks-v1/<sha256>/tasks.json`.
 
 `--conversation NAME` selects a named conversation set within that workspace/mission
