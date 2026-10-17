@@ -1562,7 +1562,9 @@ Full mission formation and production launch acceptance remain unfinished.
 Workspace and mission choices save before creation or handoff. An in-process
 **You · selection #N** entry stays in its originating conversation; a matching
 **Workspace · arrival #N** entry preserves the destination's existing messages,
-draft and reading position. These observations do not approve tasks. **Handoff
+draft and reading position. A destination keeps one arrival per workspace and
+mission: re-arriving at the same target replaces the earlier entry instead of adding
+another, while a different mission or workspace is recorded separately. These observations do not approve tasks. **Handoff
 prepared** means the destination history was saved, while **workspace selected**
 records the later switch. Historical selection does not change the current header.
 

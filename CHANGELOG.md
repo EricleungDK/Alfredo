@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Relaunching into the same workspace and mission no longer adds another `· Workspace … · mission …`
+  arrival line to the saved chat each time. A new arrival replaces the earlier one for the
+  same workspace and mission; arrivals for a different mission or workspace are kept, and
+  none are sent to the model.
 - The task panel's `Next` hint for a review-ready task with acceptance criteria now
   says `/review N JSON` and `/reject N` instead of `/accept N`, which Alfredo refuses
   for such tasks. The `/accept` refusal and the `/review N` usage message lead with the

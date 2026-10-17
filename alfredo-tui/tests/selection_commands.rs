@@ -402,3 +402,38 @@ fn handoff_keeps_captured_origin_session_and_destination_drafts_reading() {
     assert!(fixture.source.snapshot().unwrap().tasks.is_empty());
     assert!(fixture.target.snapshot().unwrap().tasks.is_empty());
 }
+
+#[test]
+fn arrival_supersedes_same_target_but_keeps_other_missions_and_stays_out_of_model_context() {
+    let fixture = Fixture::new();
+    let mut app = App::new("fixture".into());
+    let session = &mut app.sessions[0];
+    let mut first = fixture.request.clone();
+    first.correlation = "first".into();
+    let mut second = fixture.request.clone();
+    second.correlation = "second".into();
+    let mut other = fixture.request.clone();
+    other.correlation = "other".into();
+    other.choice.mission = MissionChoice::Resume {
+        name: "other-mission".into(),
+    };
+    session
+        .submit_selection_arrival(first, Outcome::at(Phase::HandoffPrepared))
+        .unwrap();
+    session
+        .submit_selection_arrival(other, Outcome::at(Phase::HandoffPrepared))
+        .unwrap();
+    session
+        .submit_selection_arrival(second, Outcome::at(Phase::HandoffPrepared))
+        .unwrap();
+    let kept: Vec<_> = session
+        .commands()
+        .iter()
+        .map(|c| c.intent.selection_request().unwrap().correlation.clone())
+        .collect();
+    assert_eq!(kept, ["other", "second"]);
+    session.insert("hello");
+    let sent = session.begin().unwrap();
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert!(sent.iter().all(|m| !m.content.contains("Workspace")));
+}
