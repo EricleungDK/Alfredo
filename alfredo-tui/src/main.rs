@@ -1214,14 +1214,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             let name = work.app.sessions[index].draft.trim()[7..]
                                 .trim()
                                 .to_string();
-                            match work.app.select_model(&name) {
-                                Ok(()) => {
-                                    work.app.sessions[index].remember_submission();
-                                    work.app.sessions[index].clear_draft();
+                            if work.app.queue_model(&name) {
+                                work.app.sessions[index].remember_submission();
+                                work.app.sessions[index].clear_draft();
+                                if !work.app.models_pending {
+                                    work.app.models_pending = true;
+                                    let provider = provider.clone();
+                                    let sender = model_sender.clone();
+                                    runtime.spawn(async move {
+                                        let _ = sender.send(provider.models().await).await;
+                                    });
                                 }
-                                Err(error) => {
-                                    work.app.notice = error.into();
-                                    work.app.sessions[index].reject_draft();
+                            } else {
+                                match work.app.select_model(&name) {
+                                    Ok(()) => {
+                                        work.app.sessions[index].remember_submission();
+                                        work.app.sessions[index].clear_draft();
+                                    }
+                                    Err(error) => {
+                                        work.app.notice = error.into();
+                                        work.app.sessions[index].reject_draft();
+                                    }
                                 }
                             }
                         }

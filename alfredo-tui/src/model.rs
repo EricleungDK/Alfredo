@@ -1326,6 +1326,10 @@ pub struct App {
     pub models: Vec<String>,
     pub models_visible: bool,
     pub models_pending: bool,
+    /// True once discovery has succeeded at least once, so `models` is trustworthy.
+    pub models_loaded: bool,
+    /// `/model NAME` typed before the catalog was loaded; resolved when discovery returns.
+    pub pending_model: Option<(usize, String)>,
     pub models_notice: String,
     pub models_scroll: u16,
     /// Catalog row the model list's arrow keys point at.
@@ -1346,6 +1350,8 @@ impl App {
             models: Vec::new(),
             models_visible: false,
             models_pending: false,
+            models_loaded: false,
+            pending_model: None,
             models_notice: String::new(),
             models_scroll: 0,
             models_cursor: 0,
@@ -1357,8 +1363,10 @@ impl App {
 
     pub fn receive_models(&mut self, result: Result<Vec<String>, String>) {
         self.models_pending = false;
+        let queued = self.pending_model.take();
         match result {
             Ok(models) => {
+                self.models_loaded = true;
                 self.models = models;
                 let current = &self.sessions[self.selected].model;
                 self.models_cursor = self
@@ -1371,10 +1379,52 @@ impl App {
                 } else {
                     "Installed models · ↑↓ Enter or /model NAME selects for this chat".into()
                 };
+                if let Some((index, name)) = queued {
+                    self.resolve_queued_model(index, &name);
+                }
             }
             Err(error) => {
-                self.models_notice = format!("{error}; previous catalog retained · /models retries")
+                self.models_notice =
+                    format!("{error}; previous catalog retained · /models retries");
+                if let Some((_, name)) = queued {
+                    self.notice = format!(
+                        "Cannot check installed models for {name}: {error}; /model NAME retries"
+                    );
+                }
             }
+        }
+    }
+
+    /// Whether `/model NAME` must wait for the first discovery. When it must,
+    /// the name is held and the caller starts discovery if none is running.
+    pub fn queue_model(&mut self, name: &str) -> bool {
+        if self.models_loaded {
+            return false;
+        }
+        self.pending_model = Some((self.selected, name.into()));
+        self.notice = "Checking installed models…".into();
+        true
+    }
+
+    fn resolve_queued_model(&mut self, index: usize, name: &str) {
+        if !self.models.iter().any(|model| model == name) {
+            let shown: Vec<&str> = self.models.iter().take(4).map(String::as_str).collect();
+            self.notice = if shown.is_empty() {
+                format!("Model {name} is not installed; no installed models reported · /models")
+            } else if self.models.len() > shown.len() {
+                format!(
+                    "Model {name} is not installed; installed: {} (+{} more) · /models lists all",
+                    shown.join(", "),
+                    self.models.len() - shown.len()
+                )
+            } else {
+                format!(
+                    "Model {name} is not installed; installed: {} · /models",
+                    shown.join(", ")
+                )
+            };
+        } else if let Err(error) = self.select_model_for(index, name) {
+            self.notice = format!("{error} (/model {name} was not applied)");
         }
     }
 
@@ -1396,13 +1446,19 @@ impl App {
     }
 
     pub fn select_model(&mut self, name: &str) -> Result<(), &'static str> {
+        self.select_model_for(self.selected, name)
+    }
+
+    fn select_model_for(&mut self, index: usize, name: &str) -> Result<(), &'static str> {
         if self.models_pending {
             return Err("Wait for model discovery to finish");
         }
         if !self.models.iter().any(|model| model == name) {
             return Err("Model not in the catalog; /models refreshes installed models");
         }
-        let session = &mut self.sessions[self.selected];
+        let Some(session) = self.sessions.get_mut(index) else {
+            return Err("The conversation is gone");
+        };
         if session.status.active()
             || matches!(session.status, Status::Failed(_) | Status::Cancelled)
         {

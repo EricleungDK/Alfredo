@@ -340,6 +340,58 @@ class ModelPicker(unittest.TestCase):
 
 
 class TerminalSmoke(unittest.TestCase):
+    def test_model_name_as_first_command_selects_after_discovery(self):
+        self._fresh_model_launch(first_bad=False)
+
+    def test_model_name_works_on_a_fresh_launch_without_opening_the_picker(self):
+        self._fresh_model_launch(first_bad=True)
+
+    def _fresh_model_launch(self, first_bad):
+        # Regression (#147): /model NAME used to say "not in the catalog" until /models ran.
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                body = json.dumps({'models': [{'name': 'fixture'}, {'name': 'second-model'}]}).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length', 0)))
+                body = b'{"done":true,"done_reason":"load"}\n'
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/x-ndjson')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        with tempfile.TemporaryDirectory(prefix='alfredo-model-fresh-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-model-fresh-repo-') as repo:
+            git = ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t']
+            subprocess.run(git + ['init', '-q', '--template='], check=True)
+            subprocess.run(git + ['commit', '-q', '--allow-empty', '-m', 'init'], check=True)
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}'], repo, env)
+            try:
+                terminal.wait_for('◈ ○ chat 1')
+                if first_bad:
+                    terminal.write(b'/model nope\r')
+                    terminal.wait_for('nope is not installed; installed: fixture, second-model · /models')
+                terminal.write(b'/model second-model\r')
+                terminal.wait_for('Conversation model: second-model')
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                terminal.close()
+                server.shutdown()
+
     def test_stalled_model_does_not_block_other_session_or_terminal_restore(self):
         slow_started = threading.Event()
         release_slow = threading.Event()
