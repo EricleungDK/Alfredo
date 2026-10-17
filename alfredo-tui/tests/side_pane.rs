@@ -395,6 +395,7 @@ fn missions_list_current_first_with_progress_then_others() {
         total: 2,
         failed: 0,
         repairs: 0,
+        max_repairs: 3,
         elapsed: Duration::from_secs(12),
         branch: None,
     });

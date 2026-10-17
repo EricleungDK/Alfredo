@@ -297,6 +297,7 @@ fn header_is_two_short_rows_without_zero_value_noise() {
         total: 1,
         failed: 0,
         repairs: 0,
+        max_repairs: 3,
         elapsed: Duration::from_secs(62),
         branch: Some("alfredo/go-1cdb9a81".into()),
     });

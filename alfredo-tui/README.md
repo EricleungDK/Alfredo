@@ -44,7 +44,7 @@ F1 on an empty prompt lists every command. Most used:
 | `/permit ID JSON`, `/approve [ID]`, `/assign ID MODEL` | Policy, approval, worker model |
 | `/run [ID]`, `/dispatch on\|off`, `/cancel-task [ID]` | Start work |
 | `/evidence [ID]`, `/review ID JSON`, `/accept [ID]`, `/reject [ID]` | Review |
-| `/repair ID REASON`, `/resolve-repair ID`, `/recover [ID]` | Repair and recovery |
+| `/repair ID REASON`, `/requeue ID`, `/resolve-repair ID`, `/recover [ID]` | Repair, rerun a cancelled task, recovery |
 | `/branch [ID]` | Local review branch for an accepted task |
 | `/tasks [QUERY\|#ID]`, `/activity [QUERY\|#ID]`, `/chat`, `/refresh` | Views |
 | `/models`, `/model NAME`, `/workspace` | Model and workspace switching |

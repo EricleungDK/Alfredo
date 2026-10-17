@@ -738,7 +738,7 @@ fn plan_scope_changes_reject_publication_and_worker_claims_without_rewriting_his
         },
     };
     let (saved, _) = fixture.store.transact(request.clone()).unwrap();
-    assert_eq!(saved.schema_version, 16);
+    assert_eq!(saved.schema_version, 17);
     assert_eq!(
         fixture
             .store

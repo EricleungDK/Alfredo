@@ -20,7 +20,14 @@ impl Drop for TerminalGuard {
     }
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() {
+    if let Err(error) = run() {
+        eprintln!("Error: {error}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let starting = std::env::current_dir()?;
     let mut workspace = None;
     let mut state_dir = std::env::var_os("ALFREDO_STATE_DIR")
@@ -145,7 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "--model" => model = args.next().ok_or("--model needs a model name")?,
             "--endpoint" => endpoint = args.next().ok_or("--endpoint needs an HTTP(S) origin")?,
             "--help" | "-h" => {
-                println!("Quickstart: cd YOUR-GIT-REPO && alfredo-tui    opens the repository, nothing to type\n            /go add calc.py with tests        autopilot: plan, run, review, branch\n            F2 tasks/chat · F6 side pane · F5 pause · F1 help · Ctrl+Q quit\n\nAlfredo — local multi-agent coding terminal for Ollama\n\nUsage: alfredo-tui [--model NAME] [--endpoint URL]\n  [--select] [--workspace DIR] [--mission NAME | --new-mission NAME] [--state-dir DIR] [--conversation NAME] [--parallel-models 1..8] [--structured-thinking auto|on|off] [--worker-format blocks|json] [--keep-alive DURATION|default] [--connect-retries 0..10] [--doctor]\n  [--go GOAL] [--max-repairs 0..16] [--icons nerd|unicode|ascii] [--no-motion]\n\nSide pane: missions of this repository and the work tree (plan groups, tasks, repairs, architect and chats). F6 focuses it (an overlay below 88 columns): Up/Down move, Tab switches missions/work, Enter opens, Alt+Left/Right fold, Esc returns to the prompt. Enter on another mission switches to it under the /workspace rules.\nAgents: Enter on a task or the architect opens its agent view: the instruction, read-only references, the answer as code per file, the check and outcome, then each repair. The prompt then talks to that agent: while it generates a note steers it (cancel, rerun with the note; not a repair), during its check it is queued for a failure, a failed, rejected or review-ready result is repaired with it, accepted work gets a follow-up task, and the architect revises its draft. Same files and check only; held reviews refuse. Esc back · Ctrl+O expand instructions · /watch ID · /tell ID TEXT.\n--icons nerd|unicode|ascii picks record icons (default unicode; env ALFREDO_ICONS). --no-motion (or ALFREDO_NO_MOTION=1) shows a static ▶ instead of the spinner. Colours: truecolor when COLORTERM is truecolor or 24bit, otherwise 16 colours; NO_COLOR disables colour.\n\nInside a Git repository (or with --workspace DIR alone), opens the repository root with mission default, resumed or created; no typed input. Otherwise, or with --select, a selector chooses the repository and mission; Enter opens or creates the named mission. If the automatic open fails, the selector shows why. --workspace with --mission resumes; --new-mission creates a distinct name.\nDirect Ollama conversations and isolated Rust coding workers.\nTerminals using the same endpoint share --parallel-models capacity; a terminal with a different capacity waits for the others to drain.\nForeground conversations get bounded priority over queued workers.\n--worker-format blocks|json: coding workers answer with plain-text FILE blocks (default, no schema) or the legacy schema-constrained JSON file plan. Either answer is accepted; qualification always requests json.\n--keep-alive keeps the model loaded between requests (default 30m; seconds, -1 forever, default = server setting); the model is preloaded at start and on /model.\n--connect-retries retries model requests that fail before any reply text, including Ollama error frames (default 3, backoff 1s/2s/4s…; 0 disables). The header shows server health.\nExplicit file/check permission and approval required. Conversation history and drafts restore without replaying interrupted requests.\n--go GOAL starts autopilot after launch: plan, save, approve, dispatch, auto-review passing checks, bounded auto-repair (--max-repairs, default 3), one local alfredo/go-ID integration branch. Never pushes or moves your branch.\n/go GOAL · /pause · /resume · /stop · /autopilot · F5 pause/resume autopilot (restored paused after restart)\n/task description · /after 1,2 description · /approve ID · /cancel-task ID\n/permit ID JSON · /run ID · /evidence ID · /recover ID · /review ID JSON · /accept ID · /reject ID · /repair ID reason · /resolve-repair ID · /branch ID\n@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry\n/plan REQUEST · /plan-revise REQUEST · /architect-revise ID · /plan-save · /plan-cancel · /assign ID MODEL · /dispatch on|off\n/watch ID|architect · /tell ID|architect TEXT\n/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME\nEnter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry\nF2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit\n\n--doctor checks startup prerequisites without entering terminal mode or running inference.\n--qualify-inference REPORT [--qualification-repetitions 1..3] runs isolated diagnostic fixtures with baseline/candidate context profiles and one shared client slot. Default: three repetitions; artifacts are retained beside the new report.\n--inspect-qualification REPORT validates and summarizes a saved report without replay. No production profile changes or promotion.\nEnvironment: ALFREDO_MODEL, OLLAMA_HOST, ALFREDO_STATE_DIR, ALFREDO_KEEP_ALIVE, ALFREDO_ICONS, ALFREDO_NO_MOTION, COLORTERM, NO_COLOR");
+                println!("Quickstart: cd YOUR-GIT-REPO && alfredo-tui    opens the repository, nothing to type\n            /go add calc.py with tests        autopilot: plan, run, review, branch\n            F2 tasks/chat · F6 side pane · F5 pause · F1 help · Ctrl+Q quit\n\nAlfredo — local multi-agent coding terminal for Ollama\n\nUsage: alfredo-tui [--model NAME] [--endpoint URL]\n  [--select] [--workspace DIR] [--mission NAME | --new-mission NAME] [--state-dir DIR] [--conversation NAME] [--parallel-models 1..8] [--structured-thinking auto|on|off] [--worker-format blocks|json] [--keep-alive DURATION|default] [--connect-retries 0..10] [--doctor]\n  [--go GOAL] [--max-repairs 0..16] [--icons nerd|unicode|ascii] [--no-motion]\n\nSide pane: missions of this repository and the work tree (plan groups, tasks, repairs, architect and chats). F6 focuses it (an overlay below 88 columns): Up/Down move, Tab switches missions/work, Enter opens, Alt+Left/Right fold, Esc returns to the prompt. Enter on another mission switches to it under the /workspace rules.\nAgents: Enter on a task or the architect opens its agent view: the instruction, read-only references, the answer as code per file, the check and outcome, then each repair. The prompt then talks to that agent: while it generates a note steers it (cancel, rerun with the note; not a repair), during its check it is queued for a failure, a failed, rejected or review-ready result is repaired with it, accepted work gets a follow-up task, and the architect revises its draft. Same files and check only; held reviews refuse. Esc back · Ctrl+O expand instructions · /watch ID · /tell ID TEXT.\n--icons nerd|unicode|ascii picks record icons (default unicode; env ALFREDO_ICONS). --no-motion (or ALFREDO_NO_MOTION=1) shows a static ▶ instead of the spinner. Colours: truecolor when COLORTERM is truecolor or 24bit, otherwise 16 colours; NO_COLOR disables colour.\n\nInside a Git repository (or with --workspace DIR alone), opens the repository root with mission default, resumed or created; no typed input. Otherwise, or with --select, a selector chooses the repository and mission; Enter opens or creates the named mission. If the automatic open fails, the selector shows why. --workspace with --mission resumes; --new-mission creates a distinct name.\nDirect Ollama conversations and isolated Rust coding workers.\nTerminals using the same endpoint share --parallel-models capacity; a terminal with a different capacity waits for the others to drain.\nForeground conversations get bounded priority over queued workers.\n--worker-format blocks|json: coding workers answer with plain-text FILE blocks (default, no schema) or the legacy schema-constrained JSON file plan. Either answer is accepted; qualification always requests json.\n--keep-alive keeps the model loaded between requests (default 30m; seconds, -1 forever, default = server setting); the model is preloaded at start and on /model.\n--connect-retries retries model requests that fail before any reply text, including Ollama error frames (default 3, backoff 1s/2s/4s…; 0 disables). The header shows server health.\nExplicit file/check permission and approval required. Conversation history and drafts restore without replaying interrupted requests.\n--go GOAL starts autopilot after launch: plan, save, approve, dispatch, auto-review passing checks, bounded auto-repair (--max-repairs, default 3), one local alfredo/go-ID integration branch. Never pushes or moves your branch.\n/go GOAL · /pause · /resume · /stop · /autopilot · F5 pause/resume autopilot (restored paused after restart)\n/task description · /after 1,2 description · /approve ID · /cancel-task ID\n/permit ID JSON · /run ID · /evidence ID · /recover ID · /review ID JSON · /accept ID · /reject ID · /repair ID reason · /requeue ID · /resolve-repair ID · /branch ID\n@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry\n/plan REQUEST · /plan-revise REQUEST · /architect-revise ID · /plan-save · /plan-cancel · /assign ID MODEL · /dispatch on|off\n/watch ID|architect · /tell ID|architect TEXT\n/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME\nEnter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry\nF2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit\n\n--doctor checks startup prerequisites without entering terminal mode or running inference.\n--qualify-inference REPORT [--qualification-repetitions 1..3] runs isolated diagnostic fixtures with baseline/candidate context profiles and one shared client slot. Default: three repetitions; artifacts are retained beside the new report.\n--inspect-qualification REPORT validates and summarizes a saved report without replay. No production profile changes or promotion.\nEnvironment: ALFREDO_MODEL, OLLAMA_HOST, ALFREDO_STATE_DIR, ALFREDO_KEEP_ALIVE, ALFREDO_ICONS, ALFREDO_NO_MOTION, COLORTERM, NO_COLOR");
                 return Ok(());
             }
             "--version" | "-V" => {
@@ -261,10 +268,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Ok(work) => launched = Some(work),
                 Err(error) => notice = format!("Automatic open failed: {error}"),
             },
-            Ok(None) if workspace.is_some() => {
-                notice = format!("Not inside a Git repository: {}", start.display())
-            }
-            Ok(None) => {}
+            Ok(None) => notice = alfredo_tui::selection::not_a_repository_notice(&start),
             Err(error) => notice = format!("Automatic open failed: {error}"),
         }
     }
@@ -360,8 +364,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     .sessions
                     .iter()
                     .any(|session| session.status.active());
-                // Live worker stages and elapsed times keep moving on the dashboard.
-                dirty |= work.tasks.visible && work.tasks.has_live_workers();
+                // Worker and Architect elapsed times keep moving, pane hidden or not.
+                dirty |= work.tasks.timing_redraw_due();
                 last_timing_draw = std::time::Instant::now();
             }
             dirty |= work.tasks.poll();
@@ -728,7 +732,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         Duration::from_secs(1)
                     }
             {
-                dirty = true;
+                // Redraw happens when the refreshed projection differs (`poll`),
+                // worker output arrives (`progress_changed`) or timers tick above.
                 work.tasks.refresh_background(&runtime);
                 last_task_refresh = std::time::Instant::now();
             }
@@ -1086,7 +1091,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         work.tasks.set_visible(true);
                                     }
                                 }
-                                Err(error) => work.app.notice = error,
+                                Err(error) => {
+                                    work.app.notice = error;
+                                    work.app.sessions[index].reject_draft();
+                                }
                             }
                         }
                         KeyCode::Enter if work.app.sessions[index].draft.trim() == "/workspace" => {
@@ -1153,6 +1161,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &work.app.sessions[index].draft,
                             )
                             .unwrap_err();
+                            work.app.sessions[index].reject_draft();
                         }
                         KeyCode::Enter if work.app.sessions[index].draft.trim() == "/models" => {
                             work.app.models_visible = true;
@@ -1181,8 +1190,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     work.app.sessions[index].remember_submission();
                                     work.app.sessions[index].clear_draft();
                                 }
-                                Err(error) => work.app.notice = error.into(),
+                                Err(error) => {
+                                    work.app.notice = error.into();
+                                    work.app.sessions[index].reject_draft();
+                                }
                             }
+                        }
+                        KeyCode::Enter if work.app.sessions[index].draft.trim() == "/model" => {
+                            work.app.notice = "Usage: /model NAME (or /models)".into();
+                            work.app.sessions[index].reject_draft();
+                        }
+                        KeyCode::Enter if work.app.sessions[index].draft.trim() == "/help" => {
+                            work.app.sessions[index].remember_submission();
+                            work.app.sessions[index].clear_draft();
+                            work.app.notice.clear();
+                            work.app.completion = Some(alfredo_tui::commands::Completion::all());
                         }
                         KeyCode::Enter
                             if work
@@ -1220,6 +1242,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Some(Ok(notice)) => work.app.notice = notice,
                                 Some(Err(error)) => {
                                     work.app.sessions[index].insert(&text);
+                                    work.app.sessions[index].reject_draft();
                                     work.app.notice = error;
                                 }
                                 None => {}
@@ -1411,7 +1434,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                             pending_command = Some((origin, id));
                                         }
-                                        Err(error) => work.app.notice = error,
+                                        Err(error) => {
+                                            work.app.notice = error;
+                                            work.app.sessions[index].reject_draft();
+                                        }
                                     }
                                 }
                                 Ok(None) => match work.tasks.command(&runtime, &text, &model) {
@@ -1420,9 +1446,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         work.app.sessions[index].clear_draft();
                                         work.app.notice.clear();
                                     }
-                                    Err(error) => work.app.notice = error,
+                                    Err(error) => {
+                                        work.app.notice = error;
+                                        work.app.sessions[index].reject_draft();
+                                    }
                                 },
-                                Err(error) => work.app.notice = error,
+                                Err(error) => {
+                                    work.app.notice = error;
+                                    work.app.sessions[index].reject_draft();
+                                }
                             }
                         }
                         // The agent view owns the prompt: text is an instruction to that agent.
@@ -1485,7 +1517,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char(ch)
                             if !ctrl && !key.modifiers.contains(KeyModifiers::ALT) =>
                         {
-                            work.app.sessions[index].insert(&ch.to_string());
+                            work.app.sessions[index].type_char(ch)
                         }
                         _ => {}
                     }
@@ -1493,7 +1525,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Paste(_) if work.app.pane.focus.is_some() => {}
                 Event::Paste(text) => {
                     work.app.completion = None;
-                    if work.app.sessions[work.app.selected].insert(&text).truncated {
+                    let session = &mut work.app.sessions[work.app.selected];
+                    if session.replace_pending() {
+                        session.clear_draft();
+                    }
+                    if session.insert(&text).truncated {
                         work.app.notice = alfredo_tui::model::PASTE_TRUNCATED_NOTICE.into();
                     }
                 }

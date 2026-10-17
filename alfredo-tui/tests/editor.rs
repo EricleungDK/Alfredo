@@ -128,3 +128,76 @@ fn a_multibyte_character_straddling_the_limit_is_dropped_whole_and_lone_cr_is_st
     assert_eq!(editor.draft, "ab\nc");
     assert!(!result.truncated);
 }
+
+#[test]
+fn rejected_command_is_replaced_by_the_next_typed_character_and_recalled_with_up() {
+    let mut session = Session::new("fixture".into());
+    session.insert("/go");
+    session.reject_draft();
+    assert!(session.replace_pending());
+    assert_eq!(session.draft, "/go");
+    session.type_char('/');
+    assert!(!session.replace_pending());
+    assert_eq!(session.draft, "/");
+    session.insert("go Make answer return 42");
+    assert_eq!(session.draft, "/go Make answer return 42");
+
+    let mut session = Session::new("fixture".into());
+    session.insert("/help");
+    session.reject_draft();
+    session.clear_draft();
+    session.history_previous();
+    assert_eq!(session.draft, "/help");
+}
+
+#[test]
+fn editing_or_moving_keys_keep_the_rejected_text_and_edit_it_normally() {
+    for edit in 0..5 {
+        let mut session = Session::new("fixture".into());
+        session.insert("/gp x");
+        session.reject_draft();
+        match edit {
+            0 => session.left(),
+            1 => session.home(),
+            2 => session.end(),
+            3 => session.backspace(),
+            _ => session.delete_word(),
+        }
+        assert!(!session.replace_pending(), "edit {edit}");
+        session.type_char('!');
+        assert!(
+            session.draft.contains('!') && session.draft.contains('/'),
+            "edit {edit}"
+        );
+    }
+}
+
+#[test]
+fn first_up_after_a_rejection_keeps_the_text_and_the_next_up_goes_older() {
+    let mut session = Session::new("fixture".into());
+    session.insert("/older");
+    session.remember_submission();
+    session.clear_draft();
+    session.insert("/go");
+    session.reject_draft();
+    session.history_previous();
+    assert!(!session.replace_pending());
+    assert_eq!(session.draft, "/go");
+    session.history_previous();
+    assert_eq!(session.draft, "/older");
+    session.history_next();
+    assert_eq!(session.draft, "/go");
+}
+
+#[test]
+fn pasting_over_a_rejected_command_replaces_it() {
+    let mut session = Session::new("fixture".into());
+    session.insert("/go");
+    session.reject_draft();
+    // The paste arm of the event loop performs exactly this sequence.
+    if session.replace_pending() {
+        session.clear_draft();
+    }
+    session.insert("/go build x");
+    assert_eq!(session.draft, "/go build x");
+}
