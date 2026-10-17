@@ -13,7 +13,7 @@ fn fixture() -> String {
     serde_json::to_string(&Evidence {
         agent: None,
         candidate_commit: None,
-        model_metrics: None,
+        model_metrics: None, failure_code: None,
         generation: None,
         run: "task-42-run-3".into(), baseline: "a".repeat(40), status: TaskStatus::Failed,
         detail: "Check did not run".into(),
