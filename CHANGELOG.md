@@ -19,6 +19,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A FILE block for a Markdown file that opens and closes with a code fence (and has
+  other fences inside) is no longer corrupted: only a single wrapping fence is stripped.
 - The task panel's `Next` hint for a review-ready task with acceptance criteria now
   says `/review N JSON` and `/reject N` instead of `/accept N`, which Alfredo refuses
   for such tasks. The `/accept` refusal and the `/review N` usage message lead with the

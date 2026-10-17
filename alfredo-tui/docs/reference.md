@@ -1064,7 +1064,8 @@ in the saved `model-response.txt`. Rules:
   the 32-file / 128 KiB bounds are refused as before.
 - Content is taken verbatim; CRLF becomes LF and trailing newlines collapse to one.
   One markdown fence layer inside a block (first line starting with ```` ``` ````,
-  last line ```` ``` ````) is stripped.
+  last line ```` ``` ````) is stripped, unless a fence line also appears
+  between them (a Markdown file with its own code blocks is kept verbatim).
 - Output ending inside a block fails with `Model output ended inside FILE block for
   PATH (truncated)`; no blocks fails with `Model returned no FILE blocks`. The next
   repair states that the previous response was truncated.
