@@ -81,6 +81,7 @@ pub struct TaskControl {
     prepared_errors: BTreeMap<String, String>,
     /// Correlations whose refusal was transient: nothing was written.
     prepared_transient: BTreeSet<String>,
+    prepared_refused: BTreeSet<String>,
     controller_epoch: u64,
     dispatch_origin: Option<crate::control_command::Request>,
     control_sender: mpsc::UnboundedSender<ControlResult>,
@@ -176,6 +177,7 @@ impl TaskControl {
             prepared_workers: BTreeMap::new(),
             prepared_errors: BTreeMap::new(),
             prepared_transient: BTreeSet::new(),
+            prepared_refused: BTreeSet::new(),
             controller_epoch: 0,
             dispatch_origin: None,
             control_sender,
@@ -536,15 +538,24 @@ impl TaskControl {
                 );
                 self.apply_outcome(Ok((*current, notice).into()));
             }
+            Err(refusal) if refusal.final_refusal() => {
+                // Decided before any write: retrying or refreshing cannot change it.
+                self.retry = None;
+                self.notice = refusal.to_string();
+            }
             Err(refusal) => self.apply_outcome(Err(refusal.into())),
         }
     }
 
     fn record_refusal(&mut self, correlation: &str, result: &Checked) {
         self.prepared_transient.remove(correlation);
+        self.prepared_refused.remove(correlation);
         if let Err(refusal) = result {
             self.prepared_errors
                 .insert(correlation.into(), refusal.to_string());
+            if refusal.final_refusal() {
+                self.prepared_refused.insert(correlation.into());
+            }
             if refusal.transient() {
                 self.prepared_transient.insert(correlation.into());
             }
@@ -569,6 +580,28 @@ impl TaskControl {
         } else {
             self.notice =
                 format!("Automatic launch #{task} deferred: {reason}; retrying on current state");
+        }
+    }
+
+    /// The intent was refused before any write, so it can only be refused again.
+    pub fn intent_refused(&self, intent: &crate::command_intent::Intent) -> bool {
+        self.prepared_refused.contains(intent.correlation())
+    }
+
+    /// State for a submitted command whose operation ended without a matching
+    /// receipt: refused when decided before any write, otherwise unconfirmed.
+    pub fn unmatched_state(
+        &self,
+        intent: &crate::command_intent::Intent,
+    ) -> crate::console_command::CommandState {
+        use crate::console_command::{bounded_reason, CommandState};
+        let reason = bounded_reason(&self.intent_error(intent).unwrap_or_else(|| {
+            "Operation ended without a matching receipt; inspect Activity before retry".into()
+        }));
+        if self.intent_refused(intent) {
+            CommandState::Refused { reason }
+        } else {
+            CommandState::Unknown { reason }
         }
     }
 
@@ -1412,12 +1445,12 @@ impl TaskControl {
             self.notice = "Checking installed worker model; awaiting assignment receipt".into();
             runtime.spawn(async move {
                 let result = match provider {
-                    Some(provider) => crate::assignment::assign(store, request, provider)
+                    Some(provider) => crate::assignment::assign_checked(store, request, provider)
                         .await
                         .map(Projection::from),
-                    None => Err("Worker provider unavailable".into()),
+                    None => Err(Refusal::from("Worker provider unavailable")),
                 };
-                let _ = sender.send(result.map_err(Refusal::from)).await;
+                let _ = sender.send(result).await;
             });
             return;
         }
@@ -1450,7 +1483,11 @@ impl TaskControl {
                 }).map_err(Refusal::from),
             })
             .await
-            .unwrap_or_else(|_| Err("Task storage worker stopped; outcome unknown".into()));
+            .unwrap_or_else(|_| {
+                Err(Refusal::Uncertain(
+                    "Task storage worker stopped; outcome unknown".into(),
+                ))
+            });
             let _ = sender.send(result).await;
         });
     }
@@ -1537,10 +1574,10 @@ impl TaskControl {
             ))
             .await
             .unwrap_or_else(|_| {
-                Err(
+                Err(Refusal::Uncertain(
                     "Worker stopped unexpectedly; inspect retained run, do not replay effects"
                         .into(),
-                )
+                ))
             });
             let _ = sender.send((task, result.map(Projection::from))).await;
         });
@@ -1962,7 +1999,7 @@ impl TaskControl {
                     .tasks
                     .iter()
                     .find(|t| t.id == task)
-                    .ok_or("Unknown task")?;
+                    .ok_or_else(|| crate::tasks::unknown_task(task))?;
                 match verb {
                     "/run" => Intent::Run {
                         correlation,
@@ -1978,13 +2015,23 @@ impl TaskControl {
                                 receipt.request.expected_revision
                             }),
                             task,
-                            run: item.run.as_ref().ok_or("Task has not run")?.id.clone(),
+                            run: item
+                                .run
+                                .as_ref()
+                                .ok_or_else(|| crate::tasks::not_run(task))?
+                                .id
+                                .clone(),
                         }
                     }
                     _ => Intent::Recover {
                         correlation,
                         task,
-                        run: item.run.as_ref().ok_or("Task has not run")?.id.clone(),
+                        run: item
+                            .run
+                            .as_ref()
+                            .ok_or_else(|| crate::tasks::not_run(task))?
+                            .id
+                            .clone(),
                     },
                 }
             } else if text == "/plan-save" {
@@ -2060,6 +2107,7 @@ impl TaskControl {
         }
         self.prepared_errors.remove(intent.correlation());
         self.prepared_transient.remove(intent.correlation());
+        self.prepared_refused.remove(intent.correlation());
         self.prepared_retry = Some(intent.clone());
         self.visible = true;
         let target = match intent {
@@ -2135,9 +2183,14 @@ impl TaskControl {
                 self.prepared_active = Some(intent.clone());
                 runtime.spawn(async move {
                     let result = tokio::task::spawn_blocking(move || {
-                        let state = store.understanding().transact(request)?;
+                        // The scope store mixes validation and write failures, so a
+                        // failure here is reported as uncertain rather than as refused.
+                        let state = store
+                            .understanding()
+                            .transact(request)
+                            .map_err(Refusal::Uncertain)?;
                         Ok(Projection {
-                            snapshot: store.snapshot()?,
+                            snapshot: store.snapshot().map_err(Refusal::Uncertain)?,
                             notice: format!("Scope receipt saved · revision {}", state.revision),
                             evidence: None,
                             run_observations: None,
@@ -2147,7 +2200,11 @@ impl TaskControl {
                         })
                     })
                     .await
-                    .unwrap_or_else(|_| Err("Scope worker stopped; outcome unknown".into()));
+                    .unwrap_or_else(|_| {
+                        Err(Refusal::Uncertain(
+                            "Scope worker stopped; outcome unknown".into(),
+                        ))
+                    });
                     let _ = sender.send(result).await;
                 });
             }
@@ -2176,17 +2233,22 @@ impl TaskControl {
                             }
                             Ok(())
                         })
-                        .await
-                        .unwrap_or_else(|_| Err("Branch verifier stopped; outcome unknown".into()));
+                        .await;
                     let result = match checked {
-                        Ok(()) => {
-                            crate::branch::publish(store, task, expected_revision, correlation)
-                                .await
-                                .map(Projection::from)
-                        }
-                        Err(error) => Err(error),
+                        Ok(Ok(())) => crate::branch::publish_checked(
+                            store,
+                            task,
+                            expected_revision,
+                            correlation,
+                        )
+                        .await
+                        .map(Projection::from),
+                        Ok(Err(error)) => Err(Refusal::from(error)),
+                        Err(_) => Err(Refusal::Uncertain(
+                            "Branch verifier stopped; outcome unknown".into(),
+                        )),
                     };
-                    let _ = sender.send(result.map_err(Refusal::from)).await;
+                    let _ = sender.send(result).await;
                 });
             }
             Intent::Recover { task, run, .. } => {
@@ -2198,18 +2260,23 @@ impl TaskControl {
                 self.prepared_active = Some(intent.clone());
                 runtime.spawn(async move {
                     let result =
-                        tokio::task::spawn_blocking(move || {
+                        match tokio::task::spawn_blocking(move || {
                             let snapshot = store.snapshot()?;
                             if !snapshot.tasks.iter().any(|t| {
                                 t.id == task && t.run.as_ref().is_some_and(|r| r.id == run)
                             }) {
                                 return Err("Recovery source run changed".into());
                             }
-                            store.recover(task).map(Projection::from)
+                            store.recover_checked(task).map(Projection::from)
                         })
                         .await
-                        .unwrap_or_else(|_| Err("Recovery worker stopped; outcome unknown".into()));
-                    let _ = sender.send(result.map_err(Refusal::from)).await;
+                        {
+                            Ok(result) => result,
+                            Err(_) => Err(Refusal::Uncertain(
+                                "Recovery worker stopped; outcome unknown".into(),
+                            )),
+                        };
+                    let _ = sender.send(result).await;
                 });
             }
         }
@@ -2526,10 +2593,10 @@ impl TaskControl {
             let store = self.store.clone();
             let sender = self.sender.clone();
             runtime.spawn(async move {
-                let result = crate::branch::publish(store, task, revision, correlation)
+                let result = crate::branch::publish_checked(store, task, revision, correlation)
                     .await
                     .map(Projection::from);
-                let _ = sender.send(result.map_err(Refusal::from)).await;
+                let _ = sender.send(result).await;
             });
             return Ok(());
         }
@@ -2540,13 +2607,17 @@ impl TaskControl {
             let store = self.store.clone();
             let sender = self.sender.clone();
             runtime.spawn(async move {
-                let result =
-                    tokio::task::spawn_blocking(move || store.recover(task).map(Projection::from))
-                        .await
-                        .unwrap_or_else(|_| {
-                            Err("Recovery stopped; refresh before retrying /recover".into())
-                        });
-                let _ = sender.send(result.map_err(Refusal::from)).await;
+                let result = match tokio::task::spawn_blocking(move || {
+                    store.recover_checked(task).map(Projection::from)
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(Refusal::Uncertain(
+                        "Recovery stopped; refresh before retrying /recover".into(),
+                    )),
+                };
+                let _ = sender.send(result).await;
             });
             return Ok(());
         }
@@ -3055,5 +3126,82 @@ mod unknown_command_tests {
         let fields = parse(r#"/review 1 {"accept":true}"#, "model").unwrap_err();
         assert!(fields.starts_with("Review JSON needs outcome"), "{fields}");
         assert!(!fields.contains("not valid JSON"), "{fields}");
+    }
+}
+
+#[cfg(test)]
+mod refusal_notice_tests {
+    use super::*;
+
+    fn control() -> (TaskControl, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "alfredo-refusal-notice-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("workspace")).unwrap();
+        let store =
+            crate::tasks::TaskStore::new(&root.join("state"), &root.join("workspace"), "mission")
+                .unwrap();
+        let mut control = TaskControl::new(store);
+        control.retry = Some(Request {
+            correlation: "retry".into(),
+            expected_revision: 0,
+            action: Action::Approve { task: 1 },
+        });
+        (control, root)
+    }
+
+    #[test]
+    fn uncertain_failure_keeps_the_retry_hint_and_the_pending_retry() {
+        let (mut control, root) = control();
+        control.apply_checked(Err(Refusal::Uncertain(
+            "Task save outcome uncertain".into(),
+        )));
+        assert!(control.notice.contains("/retry-task"), "{}", control.notice);
+        assert!(control.retry.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unmatched_state_is_refused_only_for_a_final_refusal() {
+        use crate::console_command::CommandState;
+        let (mut control, root) = control();
+        let intent = crate::command_intent::Intent::Task {
+            request: control.retry.clone().unwrap(),
+        };
+        control.record_refusal(
+            intent.correlation(),
+            &Err(Refusal::Denied(
+                "Unknown task 9; the task panel lists ids".into(),
+            )),
+        );
+        assert!(matches!(
+            control.unmatched_state(&intent),
+            CommandState::Refused { .. }
+        ));
+        control.record_refusal(
+            intent.correlation(),
+            &Err(Refusal::Uncertain("save outcome uncertain".into())),
+        );
+        assert!(matches!(
+            control.unmatched_state(&intent),
+            CommandState::Unknown { .. }
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn final_refusal_drops_the_retry_hint_and_the_pending_retry() {
+        let (mut control, root) = control();
+        control.apply_checked(Err(Refusal::Denied(
+            "Unknown task 9; the task panel lists ids".into(),
+        )));
+        assert_eq!(control.notice, "Unknown task 9; the task panel lists ids");
+        assert!(control.retry.is_none());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

@@ -1247,14 +1247,18 @@ pub async fn start_checked(
         .unwrap()
         .clone();
     let run = task.run.as_ref().unwrap().clone();
-    let directory = store.run_directory(&run.id)?;
-    fs::create_dir_all(directory.parent().unwrap()).map_err(|e| e.to_string())?;
+    let directory = store.run_directory(&run.id).map_err(Refusal::Uncertain)?;
+    fs::create_dir_all(directory.parent().unwrap())
+        .map_err(|e| Refusal::Uncertain(e.to_string()))?;
     // Exclusive directory creation is an effect claim. Existing runs are retained,
     // never deleted or re-executed even when the prior outcome is uncertain.
     fs::create_dir(&directory).map_err(|_| {
-        "Run effect directory already exists or cannot be created; outcome requires inspection"
+        Refusal::Uncertain(
+            "Run effect directory already exists or cannot be created; outcome requires inspection"
+                .into(),
+        )
     })?;
-    crate::run_boundary::record_start(&directory, &task)?;
+    crate::run_boundary::record_start(&directory, &task).map_err(Refusal::Uncertain)?;
     let worktree = directory.join("worktree");
     let mut evidence = Evidence {
         agent: None,
@@ -1383,20 +1387,21 @@ pub async fn start_checked(
         }
         observer.stage("Saving evidence and receipt");
     }
-    let bytes = serde_json::to_vec_pretty(&evidence).map_err(|e| e.to_string())?;
+    let bytes =
+        serde_json::to_vec_pretty(&evidence).map_err(|e| Refusal::Uncertain(e.to_string()))?;
     let digest = format!("{:x}", Sha256::digest(&bytes));
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(directory.join("evidence.json"))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Refusal::Uncertain(e.to_string()))?;
     file.write_all(&bytes)
         .and_then(|_| file.sync_all())
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Refusal::Uncertain(e.to_string()))?;
     #[cfg(unix)]
     fs::File::open(&directory)
         .and_then(|f| f.sync_all())
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Refusal::Uncertain(e.to_string()))?;
     // Independent workers may finish together. Retry only the receipt transaction,
     // never inference, file writes or the approved command.
     for _ in 0..32 {
@@ -1424,7 +1429,9 @@ pub async fn start_checked(
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    Err("Evidence saved, but task result receipt is not confirmed; do not rerun effects".into())
+    Err(Refusal::Uncertain(
+        "Evidence saved, but task result receipt is not confirmed; do not rerun effects".into(),
+    ))
 }
 
 // Admission does not approve work. It revalidates the already claimed exact

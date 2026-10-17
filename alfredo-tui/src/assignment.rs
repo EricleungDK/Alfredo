@@ -1,7 +1,7 @@
 //! Assignment admission queries the current model catalog; receipts remain task authority.
 use crate::{
     provider::Ollama,
-    tasks::{Action, Request, Snapshot, TaskStore},
+    tasks::{Action, Refusal, Request, Snapshot, TaskStore},
 };
 
 pub async fn assign(
@@ -9,6 +9,18 @@ pub async fn assign(
     request: Request,
     provider: Ollama,
 ) -> Result<(Snapshot, String), String> {
+    assign_checked(store, request, provider)
+        .await
+        .map_err(String::from)
+}
+
+/// `assign` with a typed refusal. Checks before publication are final; a stopped
+/// storage worker leaves the outcome unknown.
+pub async fn assign_checked(
+    store: TaskStore,
+    request: Request,
+    provider: Ollama,
+) -> Result<(Snapshot, String), Refusal> {
     let Action::Assign { task, model } = &request.action else {
         return Err("Assignment request required".into());
     };
@@ -34,14 +46,17 @@ pub async fn assign(
         if !models.contains(&model) {
             return Err(format!(
                 "Worker model {model} is not installed; /models lists available choices"
-            ));
+            )
+            .into());
         }
     }
     // The catalog query holds no store lock. Recheck revision/state during publication.
-    let (snapshot, receipt) = tokio::task::spawn_blocking(move || store.transact(request))
+    let (snapshot, receipt) = tokio::task::spawn_blocking(move || store.transact_checked(request))
         .await
         .map_err(|_| {
-            "Assignment storage stopped unexpectedly; retry the exact request".to_string()
+            Refusal::Uncertain(
+                "Assignment storage stopped unexpectedly; retry the exact request".into(),
+            )
         })??;
     let current = snapshot
         .tasks

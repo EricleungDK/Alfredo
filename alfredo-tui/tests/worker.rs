@@ -1267,15 +1267,18 @@ async fn accepted_branch_handoff_preserves_dirty_workspace_and_replays_without_n
     fixture.permit();
     run_dependency_fixture(&fixture, 1, good_plan(), "return 0").await;
     let before = fixture.store.snapshot().unwrap();
-    assert!(alfredo_tui::branch::publish(
+    let early = alfredo_tui::branch::publish_checked(
         fixture.store.clone(),
         1,
         before.revision,
-        "too-early".into()
+        "too-early".into(),
     )
     .await
-    .unwrap_err()
-    .contains("accept"));
+    .unwrap_err();
+    assert!(early.final_refusal(), "{early}");
+    assert!(early
+        .to_string()
+        .contains("Task #1 is not accepted; /accept 1 before /branch 1"));
     fixture.action(Action::Review {
         task: 1,
         accept: true,

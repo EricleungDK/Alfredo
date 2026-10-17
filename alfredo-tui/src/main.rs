@@ -445,16 +445,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         && !work.tasks.intent_pending(&command.intent)
                         && !matches!(&command.intent, alfredo_tui::command_intent::Intent::Wayfinder { request, .. } if work.wayfinder.request_pending(request))
                         && command.intent.acknowledgment(work.tasks.snapshot.as_ref(), work.tasks.canonical_scope.as_ref()).is_none()
-                }).map(|command| (command.id.clone(), work.tasks.intent_error(&command.intent)
-                    .unwrap_or_else(|| "Operation ended without a matching receipt; inspect Activity before retry".into())))
+                }).map(|command| (command.id.clone(), work.tasks.unmatched_state(&command.intent)))
                     .collect();
-                for (id, reason) in uncertain {
-                    session.set_command_state(
-                        &id,
-                        alfredo_tui::console_command::CommandState::Unknown {
-                            reason: alfredo_tui::console_command::bounded_reason(&reason),
-                        },
-                    );
+                for (id, state) in uncertain {
+                    session.set_command_state(&id, state);
                     dirty = true;
                 }
             }
@@ -1400,6 +1394,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         .rev()
                                         .find(|command| {
                                             command.intent.selection_request().is_none()
+                                                && !matches!(
+                                                    command.state,
+                                                    alfredo_tui::console_command::CommandState::Refused { .. }
+                                                )
                                                 && command
                                                     .intent
                                                     .acknowledgment(

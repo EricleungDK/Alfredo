@@ -687,6 +687,10 @@ class TerminalSmoke(unittest.TestCase):
             record = json.loads(saved.read_text())
             self.assertEqual(record['tasks'][0]['status'], 'approved')
             self.assertEqual(record['revision'], 3)
+            # A refusal decided before any write names its next step and never offers /retry-task.
+            os.write(master, b'/accept 1\r')
+            wait_for(b'Task #1 has not run; /run 1 first')
+            self.assertNotIn('/retry-task', visible_screen(output))
             os.write(master, b'/chat\r')
             wait_for(b'Task #1 approved')
             os.write(master, b'/tasks\r')
@@ -708,6 +712,7 @@ class TerminalSmoke(unittest.TestCase):
                 self.assertEqual(conversations['sessions'][0]['messages'][turn]['role'], 'user')
                 self.assertNotEqual(command['text'], conversations['sessions'][0]['messages'][turn]['content'])
             self.assertEqual(next(command for command in commands if command['text'] == '/task MUST_NOT_DISPATCH')['state']['kind'], 'refused')
+            self.assertEqual(next(command for command in commands if command['text'] == '/accept 1')['state']['kind'], 'refused')
             self.assertEqual(next(command for command in commands if command['text'] == '/task Persisted_fix')['intent']['request'], record['receipts'][0]['request'])
             observed = [ref for session in conversations['sessions'] for ref in session.get('task_receipts', [])]
             self.assertEqual(observed, [])  # Command acknowledgments stay at their origin, without duplicate observations.
