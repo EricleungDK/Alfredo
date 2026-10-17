@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Worker failure tails and repair prompts no longer show leftover escape-sequence text
+  such as `8;;file:///...` (hyperlinks), `0;title` (window titles) or a stray `B`
+  (from `tput sgr0`). OSC, DCS, APC and PM strings and charset selections are now
+  removed whole.
 - The task panel's `Next` hint for a review-ready task with acceptance criteria now
   says `/review N JSON` and `/reject N` instead of `/accept N`, which Alfredo refuses
   for such tasks. The `/accept` refusal and the `/review N` usage message lead with the

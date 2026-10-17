@@ -648,15 +648,32 @@ fn sanitize_output(text: &str) -> String {
     while let Some(c) = chars.next() {
         match c {
             '\u{1b}' => {
-                if chars.peek() == Some(&'[') {
-                    chars.next();
-                    for next in chars.by_ref() {
-                        if ('@'..='~').contains(&next) {
-                            break;
+                match chars.next() {
+                    // CSI: parameters, then a final byte in `@`..=`~`.
+                    Some('[') => {
+                        for next in chars.by_ref() {
+                            if ('@'..='~').contains(&next) {
+                                break;
+                            }
                         }
                     }
-                } else {
-                    chars.next();
+                    // OSC, DCS, APC, PM: a string ended by BEL or ST (`ESC \`).
+                    // An unterminated string drops the rest of the input.
+                    Some(']' | 'P' | '_' | '^') => {
+                        while let Some(next) = chars.next() {
+                            if next == '\u{7}'
+                                || (next == '\u{1b}' && chars.next_if_eq(&'\\').is_some())
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    // Charset designation takes one more character.
+                    Some('(' | ')' | '*' | '+') => {
+                        chars.next();
+                    }
+                    // Any other two-byte escape: the final byte is already consumed.
+                    _ => {}
                 }
             }
             '\r' if chars.peek() == Some(&'\n') => {}
@@ -1869,5 +1886,59 @@ mod git_error_tests {
         assert!(text.contains("working tree. Use '--'"), "{text}");
         assert!(text.contains("revisions like this:"), "{text}");
         assert!(!text.contains("tree.Use") && !text.contains("  "), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod sanitize_output_tests {
+    use super::sanitize_output;
+
+    #[test]
+    fn strips_escape_sequences_table() {
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "osc hyperlink bel",
+                "\x1b]8;;http://x\x07link\x1b]8;;\x07 end",
+                "link end",
+            ),
+            ("osc title bel", "\x1b]0;title\x07ok", "ok"),
+            (
+                "osc st terminator",
+                "\x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\ end",
+                "link end",
+            ),
+            ("dcs st", "a\x1bPq;payload\x1b\\b", "ab"),
+            ("apc st", "a\x1b_payload\x1b\\b", "ab"),
+            ("pm st", "a\x1b^payload\x1b\\b", "ab"),
+            (
+                "osc unterminated drops rest",
+                "keep\x1b]0;title and more",
+                "keep",
+            ),
+            ("osc lone trailing esc", "keep\x1b]0;title\x1b", "keep"),
+            ("charset b", "\x1b(B done", " done"),
+            ("charset paren", "a\x1b)0b", "ab"),
+            ("charset star", "a\x1b*Ab", "ab"),
+            ("charset plus", "a\x1b+Bb", "ab"),
+            ("charset at end", "a\x1b(", "a"),
+            ("keypad mode", "a\x1b=b\x1b>c", "abc"),
+            ("save cursor", "a\x1b7b\x1b8c", "abc"),
+            ("trailing esc", "a\x1b", "a"),
+            ("csi color", "\x1b[31mred\x1b[0m", "red"),
+            ("csi with params", "\x1b[1;32mgreen\x1b[K!", "green!"),
+            ("csi then osc", "\x1b[1m\x1b]0;t\x07x", "x"),
+            ("plain unchanged", "plain text", "plain text"),
+            ("line endings", "a\r\nb\rc\td", "a\nb\nc d"),
+        ];
+        for (name, input, want) in cases {
+            assert_eq!(sanitize_output(input), *want, "{name}");
+        }
+    }
+
+    #[test]
+    fn still_shortens_worktree_paths() {
+        let out = sanitize_output("\x1b]8;;file:///x\x07/tmp/run/worktree/src/a.rs\x1b]8;;\x07");
+        assert!(!out.contains("8;;") && !out.contains("/tmp/run"), "{out}");
+        assert!(out.contains("src/a.rs"), "{out}");
     }
 }
