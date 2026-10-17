@@ -278,7 +278,13 @@ class ModelPicker(unittest.TestCase):
 
 
 class TerminalSmoke(unittest.TestCase):
+    def test_model_name_as_first_command_selects_after_discovery(self):
+        self._fresh_model_launch(first_bad=False)
+
     def test_model_name_works_on_a_fresh_launch_without_opening_the_picker(self):
+        self._fresh_model_launch(first_bad=True)
+
+    def _fresh_model_launch(self, first_bad):
         # Regression (#147): /model NAME used to say "not in the catalog" until /models ran.
         class Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self, *_args):
@@ -313,8 +319,9 @@ class TerminalSmoke(unittest.TestCase):
             terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}'], repo, env)
             try:
                 terminal.wait_for('◈ ○ chat 1')
-                terminal.write(b'/model nope\r')
-                terminal.wait_for('nope is not installed; installed: fixture, second-model')
+                if first_bad:
+                    terminal.write(b'/model nope\r')
+                    terminal.wait_for('nope is not installed; installed: fixture, second-model · /models')
                 terminal.write(b'/model second-model\r')
                 terminal.wait_for('Conversation model: second-model')
                 terminal.write(b'\x11')

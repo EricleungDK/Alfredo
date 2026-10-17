@@ -201,7 +201,8 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 - **`OLLAMA_HOST`**: Ollama's own forms (`host:port`, `0.0.0.0`) are accepted;
   `0.0.0.0` connects to `127.0.0.1`. `--endpoint` overrides it.
 - **Model not installed** (doctor: "is not listed"): `ollama pull MODEL`, or use
-  `/models` then Up/Down and Enter (or `/model NAME`) inside the terminal.
+  `/model NAME` inside the terminal (it checks installed models first), or `/models`
+  then Up/Down and Enter.
 - **Doctor: `FAIL installed worker tool: /usr/bin/bwrap`** (or prlimit/git): install
   `bubblewrap` / `util-linux` / `git`. The paths are fixed.
 - **Worker fails at sandbox start** (e.g. "Permission denied" setting up namespaces):

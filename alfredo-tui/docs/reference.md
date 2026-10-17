@@ -283,9 +283,11 @@ cut at a word boundary with `…`.
 
 Use `/models` to load installed models from the configured server, then Up/Down and
 Enter to select one for the current conversation. `/model NAME` works without opening
-`/models`: the first use checks installed models, then applies the selection or lists
-what is installed. `▸` marks the
-cursor and `›` the conversation's model. PageUp/PageDown scroll the catalog;
+`/models`: the first use checks installed models, then applies the selection to the
+conversation that asked, even if you switch chats meanwhile. A missing name answers
+`Model NAME is not installed; installed: … · /models`, and an unreachable server answers
+`Cannot check installed models for NAME: …; /model NAME retries`. `▸` marks the cursor
+and `›` the conversation's model. PageUp/PageDown scroll the catalog;
 Escape closes it. Discovery runs asynchronously with a ten-second total deadline,
 a 1 MiB response bound and at most 256 entries. Errors retain the previous catalog
 and can be retried with `/models`. Listing a model does not prove it is loaded or

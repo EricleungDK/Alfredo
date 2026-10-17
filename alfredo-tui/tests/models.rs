@@ -128,6 +128,46 @@ fn model_name_before_first_discovery_reports_not_installed_with_the_catalog() {
         "{}",
         app.notice
     );
+    assert!(app.notice.ends_with("· /models"), "{}", app.notice);
+}
+
+#[test]
+fn not_installed_notice_caps_the_list_and_still_points_to_models() {
+    let mut app = App::new("original".into());
+    assert!(app.queue_model("missing"));
+    app.receive_models(Ok((1..=6).map(|n| format!("m{n}")).collect()));
+    assert!(
+        app.notice
+            .ends_with("m1, m2, m3, m4 (+2 more) · /models lists all"),
+        "{}",
+        app.notice
+    );
+}
+
+#[test]
+fn queued_model_applies_to_the_chat_that_asked_not_the_selected_one() {
+    let mut app = App::new("original".into());
+    app.add_session();
+    app.selected = 0;
+    assert!(app.queue_model("llama3:8b"));
+    app.selected = 1;
+    app.receive_models(Ok(vec!["llama3:8b".into()]));
+    assert_eq!(app.sessions[0].model, "llama3:8b");
+    assert_eq!(app.sessions[1].model, "original");
+}
+
+#[test]
+fn queued_model_is_refused_with_a_notice_when_its_chat_became_busy() {
+    let mut app = App::new("original".into());
+    app.add_session();
+    app.selected = 0;
+    assert!(app.queue_model("llama3:8b"));
+    app.sessions[0].status = Status::Failed("x".into());
+    app.selected = 1;
+    app.receive_models(Ok(vec!["llama3:8b".into()]));
+    assert_eq!(app.sessions[0].model, "original");
+    assert_eq!(app.sessions[1].model, "original");
+    assert!(app.notice.contains("was not applied"), "{}", app.notice);
 }
 
 #[test]
