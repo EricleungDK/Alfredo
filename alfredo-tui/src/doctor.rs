@@ -56,26 +56,18 @@ pub async fn inspect(
     let mut passed = true;
     let mut lines = vec!["Alfredo startup diagnostics".to_string()];
     let mut model = initial_model.to_string();
-    // Validate the Git root first: the storage-outside-workspace check only means
-    // something against a real repository root, not a non-repo working directory.
+    // Resolve the repository root first, as the startup path does: a subdirectory of a
+    // repository opens its root, and the storage check only means something against it.
     let root_check = async {
         let root = crate::worker::git(workspace, &["rev-parse", "--show-toplevel"]).await?;
-        let expected = workspace
+        Path::new(root.trim())
             .canonicalize()
-            .map_err(|error| error.to_string())?;
-        if Path::new(root.trim())
-            .canonicalize()
-            .map_err(|error| error.to_string())?
-            != expected
-        {
-            return Err("Choose the repository root with --workspace".to_string());
-        }
-        Ok::<_, String>(())
+            .map_err(|error| error.to_string())
     }
     .await;
     let storage = (|| -> Result<(), String> {
-        root_check.clone()?;
-        let store = TaskStore::new(state, workspace, mission)?;
+        let root = root_check.clone()?;
+        let store = TaskStore::new(state, &root, mission)?;
         store.snapshot()?;
         let conversations = ConversationStore::open(&store, conversation)?;
         if let Some(snapshot) = conversations.load()? {
@@ -122,7 +114,8 @@ pub async fn inspect(
     }
     let git = match root_check {
         Err(error) => Err(error),
-        Ok(()) => async {
+        Ok(root) => async {
+            let workspace = root.as_path();
             if !crate::worker::has_head_commit(workspace) {
                 return Err(crate::worker::NO_COMMITS.to_string());
             }
@@ -137,19 +130,25 @@ pub async fn inspect(
                         .into(),
                 );
             }
-            Ok::<_, String>(())
+            Ok::<_, String>(root)
         }
         .await,
     };
     match git {
-        Ok(()) => lines.push("PASS worker workspace: Git root with a committed baseline".into()),
+        Ok(root) => lines.push(format!(
+            "PASS worker workspace: {} (Git root with a committed baseline)",
+            clean(&root.display().to_string())
+        )),
         Err(error) => {
             passed = false;
             if error == crate::worker::NO_COMMITS || error.contains(crate::worker::NOT_A_REPOSITORY)
             {
                 lines.push(format!("FAIL worker workspace: {error}"));
             } else {
-                lines.push(format!("FAIL worker workspace: {}. Coding needs --workspace at a Git root with a commit.", clean(&error)));
+                lines.push(format!(
+                    "FAIL worker workspace: {}. Coding needs a Git repository with a commit.",
+                    clean(&error)
+                ));
             }
         }
     }
