@@ -52,7 +52,7 @@ pub struct Dispatch {
 }
 pub fn approval(snapshot: &Snapshot, task: u64) -> Option<u64> {
     snapshot.receipts.iter().rev().find_map(|receipt| {
-        matches!(receipt.request.action, Action::Approve {task:id} if id == task)
+        matches!(receipt.request.action, Action::Approve {task:id} | Action::Requeue {task:id} if id == task)
             .then_some(receipt.revision)
     })
 }
@@ -72,7 +72,6 @@ impl Dispatch {
         snapshot.tasks.iter().find_map(|task| {
             if task.status != TaskStatus::Approved
                 || task.policy.is_none()
-                || task.run.is_some()
                 || active.contains(&task.id)
                 || snapshot.architecture_blocker(task.id).is_some()
                 || snapshot.architecture_obsolete(task.id)

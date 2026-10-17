@@ -28,6 +28,32 @@ fn safe(text: &str) -> String {
     dashboard::safe(text)
 }
 
+/// Fits a one-line notice into `width` cells, cutting at a word boundary with an ellipsis.
+fn fit_words(text: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    if text.width() <= width {
+        return text.to_string();
+    }
+    let mut used = 0;
+    let mut end = 0;
+    let mut boundary = None;
+    for (index, ch) in text.char_indices() {
+        let cells = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + cells > width.saturating_sub(1) {
+            break;
+        }
+        if ch == ' ' {
+            boundary = Some(index);
+        }
+        used += cells;
+        end = index + ch.len_utf8();
+    }
+    // A word boundary that would discard most of the line (a long unbroken token such
+    // as a JSON template) loses to a plain cut, so the visible start stays copyable.
+    let cut = boundary.filter(|index| *index >= width / 2).unwrap_or(end);
+    format!("{}…", text[..cut].trim_end())
+}
+
 fn dim() -> Style {
     Style::default().fg(Color::DarkGray)
 }
@@ -124,16 +150,23 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
     };
     let draft = session.draft_view(rows[3].width.saturating_sub(4) as usize);
     frame.render_widget(
-        Paragraph::new(safe(&draft)).block(
-            Block::bordered()
-                .padding(Padding::horizontal(1))
-                .border_style(Style::default().fg(if focused {
-                    theme.color(Tone::Dim)
-                } else {
-                    theme.color(Tone::Cyan)
-                }))
-                .title(prompt_title),
-        ),
+        Paragraph::new(safe(&draft))
+            .style(if session.replace_pending() {
+                // Rejected text reads as selected: the next character replaces it.
+                Style::default().add_modifier(Modifier::REVERSED)
+            } else {
+                Style::default()
+            })
+            .block(
+                Block::bordered()
+                    .padding(Padding::horizontal(1))
+                    .border_style(Style::default().fg(if focused {
+                        theme.color(Tone::Dim)
+                    } else {
+                        theme.color(Tone::Cyan)
+                    }))
+                    .title(prompt_title),
+            ),
         rows[3],
     );
     let note = if !app.notice.is_empty() {
@@ -161,7 +194,7 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
                 Style::default().fg(theme.color(Tone::Dim)),
             ),
             Line::styled(
-                single_line(&note),
+                fit_words(&single_line(&note), usize::from(area.width)),
                 Style::default().fg(theme.color(Tone::Amber)),
             ),
         ]),
@@ -712,41 +745,33 @@ fn draw_right(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: R
             );
         } else if let Some(query) = &tasks.activity {
             frame.render_widget(Clear, area);
-            let mut lines = vec![];
+            let title = format!(" Saved task activity · {} ", safe(query));
             if let Some(snapshot) = &tasks.snapshot {
-                let entries = crate::activity::entries(snapshot, query);
-                if entries.is_empty() {
-                    lines.push(Line::from("No saved task activity matches this query"));
-                }
-                for entry in entries {
-                    lines.push(Line::styled(
-                        format!(
-                            "r{} · task #{} · {}",
-                            entry.revision,
-                            entry.task,
-                            safe(&entry.summary)
-                        ),
-                        Style::default().fg(Color::Cyan),
-                    ));
-                    lines.extend(
-                        safe(&entry.detail)
-                            .lines()
-                            .map(|line| Line::from(line.to_owned())),
+                let block = frame_block(area, title);
+                let inner = block.inner(area);
+                frame.render_widget(block, area);
+                tasks.scroll_height.set(inner.height);
+                tasks.detail_live.set(false);
+                let window = tasks.activity_window(snapshot, query, inner.width, inner.height);
+                tasks.scroll_max.set(window.maximum);
+                if inner.width > 0 && inner.height > 0 {
+                    frame.render_widget(
+                        Paragraph::new(window.lines)
+                            .wrap(Wrap { trim: false })
+                            .scroll((window.row, 0)),
+                        inner,
                     );
-                    lines.push(Line::from(format!("Receipt: {}", safe(&entry.correlation))));
-                    lines.push(Line::default());
                 }
             } else {
-                lines.push(Line::from("Waiting for acknowledged task state"));
+                task_panel(
+                    frame,
+                    area,
+                    tasks,
+                    vec![Line::from("Waiting for acknowledged task state")],
+                    title,
+                    false,
+                );
             }
-            task_panel(
-                frame,
-                area,
-                tasks,
-                lines,
-                format!(" Saved task activity · {} ", safe(query)),
-                false,
-            );
         } else if let Some(report) = &tasks.autopilot_report {
             task_panel(
                 frame,
@@ -954,9 +979,14 @@ fn draw_agent(
         Target::Task(root) => {
             let attempts = agent::gather(tasks, root);
             let notes = tasks.owner.notes(view.target);
+            let budget = tasks
+                .autopilot
+                .as_ref()
+                .filter(|_| tasks.autopilot_roots.contains(&root))
+                .map(|status| status.max_repairs);
             (
                 agent::project(&attempts, &notes, view.expanded),
-                agent::title(&attempts),
+                agent::title(&attempts, budget),
             )
         }
         Target::Architect => {
@@ -1063,8 +1093,14 @@ fn draw_agent(
 fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: Rect) {
     let session = &app.sessions[app.selected];
     let identity = tasks.and_then(|tasks| tasks.snapshot.as_ref());
+    // `lines` is the current run of non-message rows; message bodies come from the
+    // session's cache and are never copied here. `base` counts rows before the run.
     let mut lines = Vec::new();
+    let mut segments: Vec<Segment> = Vec::new();
+    let mut base = 0usize;
     let mut blocks: Vec<crate::reading::Block> = Vec::new();
+    let mut cache = session.transcript_cache.borrow_mut();
+    cache.sync(session.messages.iter().map(|m| m.content.as_str()));
     // A new chat suggests the common path, even below the workspace arrival line.
     if session.messages.is_empty()
         && session.task_receipts().is_empty()
@@ -1123,26 +1159,43 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
                 let command = commands.next().unwrap();
                 match collapsed_step(command, session.commands(), tasks) {
                     Some(step) if step.phases.is_empty() => {}
-                    Some(step) => match group.as_mut() {
-                        Some((Some(task), at, block, phases)) if step.task == Some(*task) => {
-                            phases.extend(step.phases);
-                            lines.truncate(*at);
-                            lines.extend(collapsed_lines(Some(*task), phases, width));
-                            lines.push(Line::default());
-                            blocks[*block].len = lines.len() - *at;
-                            start = lines.len();
-                        }
-                        previous => {
-                            // Consecutive collapsed lines share one trailing blank row.
-                            if previous.is_some() && lines.last().is_some_and(|l| l.width() == 0) {
-                                lines.pop();
+                    Some(step) => {
+                        let repeated = group
+                            .as_ref()
+                            .filter(|(task, ..)| task.is_none() && step.task.is_none())
+                            .filter(|_| command.text.starts_with("Autopilot · "))
+                            .and_then(|(.., phases)| repeated_failure(phases, &step.phases));
+                        match group.as_mut() {
+                            Some((None, at, block, phases)) if repeated.is_some() => {
+                                *phases = repeated.unwrap();
+                                lines.truncate(*at);
+                                lines.extend(collapsed_lines(None, phases, width));
+                                lines.push(Line::default());
+                                blocks[*block].len = lines.len() - *at;
+                                start = lines.len();
                             }
-                            start = lines.len();
-                            lines.extend(collapsed_lines(step.task, &step.phases, width));
-                            lines.push(Line::default());
-                            group = Some((step.task, start, blocks.len(), step.phases));
+                            Some((Some(task), at, block, phases)) if step.task == Some(*task) => {
+                                phases.extend(step.phases);
+                                lines.truncate(*at);
+                                lines.extend(collapsed_lines(Some(*task), phases, width));
+                                lines.push(Line::default());
+                                blocks[*block].len = lines.len() - *at;
+                                start = lines.len();
+                            }
+                            previous => {
+                                // Consecutive collapsed lines share one trailing blank row.
+                                if previous.is_some()
+                                    && lines.last().is_some_and(|l| l.width() == 0)
+                                {
+                                    lines.pop();
+                                }
+                                start = lines.len();
+                                lines.extend(collapsed_lines(step.task, &step.phases, width));
+                                lines.push(Line::default());
+                                group = Some((step.task, start, blocks.len(), step.phases));
+                            }
                         }
-                    },
+                    }
                     None => {
                         group = None;
                         lines.extend(command_lines(command, tasks));
@@ -1152,7 +1205,7 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
             };
             blocks.push(crate::reading::Block {
                 key,
-                start,
+                start: base + start,
                 len: lines.len().saturating_sub(start),
             });
         }
@@ -1160,7 +1213,6 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
             break;
         };
         group = None;
-        let start = lines.len();
         let (heading, color) = if message.role == "user" {
             ("You".into(), Color::DarkGray)
         } else {
@@ -1176,15 +1228,18 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         } else {
             color
         };
-        lines.push(Line::styled(heading, Style::default().fg(color)));
-        for line in safe(&message.content).lines() {
-            lines.push(Line::from(line.to_owned()));
-        }
-        lines.push(Line::default());
+        base += lines.len();
+        segments.push(Segment::Run(std::mem::take(&mut lines)));
+        let body = cache.entry(index).lines.len();
         blocks.push(crate::reading::Block {
             key: crate::reading::BlockKey::Message(index),
-            start,
-            len: lines.len() - start,
+            start: base,
+            len: body + 2,
+        });
+        base += body + 2;
+        segments.push(Segment::Message {
+            index,
+            heading: Line::styled(heading, Style::default().fg(color)),
         });
     }
     // A failed request keeps its reason in the transcript until the next attempt.
@@ -1194,6 +1249,7 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
             Style::default().fg(Color::Red),
         ));
     }
+    segments.push(Segment::Run(lines));
     let block = frame_block(
         area,
         format!(" Chat {} · {} ", app.selected + 1, session.short_status()),
@@ -1218,29 +1274,75 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         Layout::vertical([Constraint::Length(metadata_height), Constraint::Min(1)]).split(inner);
     frame.render_widget(metadata, content[0]);
     if content[1].width > 0 && content[1].height > 0 {
-        let heights: Vec<_> = lines
-            .iter()
-            .map(|line| {
-                if line.width() <= usize::from(content[1].width) {
-                    1
-                } else {
-                    Paragraph::new(line.clone())
-                        .wrap(Wrap { trim: false })
-                        .line_count(content[1].width)
-                        .max(1)
+        let width = content[1].width;
+        let mut heights = Vec::new();
+        for segment in &segments {
+            match segment {
+                Segment::Run(run) => heights.extend(
+                    run.iter()
+                        .map(|line| crate::transcript_cache::line_height(line, width)),
+                ),
+                Segment::Message { index, heading } => {
+                    cache.heights(*index, width);
+                    heights.push(crate::transcript_cache::line_height(heading, width));
+                    heights.extend_from_slice(&cache.entry(*index).heights);
+                    heights.push(1);
                 }
-            })
-            .collect();
+            }
+        }
         let position = session.reading_position_blocks(&heights, content[1].height, &blocks);
-        // Slice logical lines before the widget's u16 scroll, keeping long bounded
-        // responses navigable beyond 65,535 rendered rows.
-        let transcript = Paragraph::new(lines.into_iter().skip(position.line).collect::<Vec<_>>())
-            .wrap(Wrap { trim: false });
+        // Only rows that can reach the viewport are materialised; wrapping them is
+        // identical to wrapping the whole tail. Slicing logical lines before the
+        // widget's u16 scroll keeps long bounded responses navigable beyond 65,535 rows.
+        let wanted = position.row.saturating_add(usize::from(content[1].height));
+        let mut window: Vec<Line<'static>> = Vec::new();
+        let mut covered = 0usize;
+        let mut at = 0usize;
+        let mut done = false;
+        let mut take = |line: &Line<'static>, at: &mut usize| -> bool {
+            if *at >= position.line && covered <= wanted {
+                covered += heights[*at];
+                window.push(line.clone());
+            }
+            *at += 1;
+            covered > wanted
+        };
+        for segment in &segments {
+            match segment {
+                Segment::Run(run) => {
+                    for line in run {
+                        done |= take(line, &mut at);
+                    }
+                }
+                Segment::Message { index, heading } => {
+                    done |= take(heading, &mut at);
+                    for line in &cache.entry(*index).lines {
+                        done |= take(line, &mut at);
+                    }
+                    done |= take(&Line::default(), &mut at);
+                }
+            }
+            if done {
+                break;
+            }
+        }
         frame.render_widget(
-            transcript.scroll((position.row.min(u16::MAX as usize) as u16, 0)),
+            Paragraph::new(window)
+                .wrap(Wrap { trim: false })
+                .scroll((position.row.min(u16::MAX as usize) as u16, 0)),
             content[1],
         );
     }
+}
+
+/// A stretch of the transcript: rows built this frame, or a cached message body
+/// framed by its heading and a trailing blank row.
+enum Segment {
+    Run(Vec<Line<'static>>),
+    Message {
+        index: usize,
+        heading: Line<'static>,
+    },
 }
 
 /// The cat running along its dotted track beside the capacity-wait text, or
@@ -1462,7 +1564,10 @@ fn next_action(snapshot: &crate::tasks::Snapshot, task: &crate::tasks::Task) -> 
         TaskStatus::Proposed => Some(format!("/approve {id}")),
         TaskStatus::Approved if task.policy.is_none() => Some(format!("/permit {id} JSON")),
         TaskStatus::Approved => Some(format!("/run {id}")),
-        TaskStatus::ReviewReady => Some(format!("/accept {id}{GAP}/reject {id}")),
+        TaskStatus::ReviewReady if snapshot.acceptance_for_task(id).is_empty() => {
+            Some(format!("/accept {id}{GAP}/reject {id}"))
+        }
+        TaskStatus::ReviewReady => Some(format!("/review {id} JSON{GAP}/reject {id}")),
         TaskStatus::NeedsHumanReview => Some(format!("/review {id} JSON")),
         TaskStatus::Rejected | TaskStatus::Failed if snapshot.architecture_required(id) => {
             Some(format!("/architect-revise {id}"))
@@ -2073,6 +2178,7 @@ pub fn short_phase(receipt: &crate::tasks::Receipt) -> String {
         Action::Permit { .. } => format!("Task #{id} files and check set · needs approval"),
         Action::Approve { .. } => format!("Task #{id} approved"),
         Action::Cancel { .. } => format!("Task #{id} cancelled"),
+        Action::Requeue { .. } => format!("Task #{id} requeued"),
         Action::Start { .. } => format!("Task #{id} started"),
         Action::Finish { status, .. } => match status {
             TaskStatus::ReviewReady => format!("Task #{id} check passed · awaiting review"),
@@ -2157,6 +2263,7 @@ fn phase_word(receipt: &crate::tasks::Receipt) -> Vec<Phase> {
         Action::Propose { .. } => done("proposed"),
         Action::Permit { .. } => done("files and check set"),
         Action::Approve { .. } => done("approved"),
+        Action::Requeue { .. } => done("requeued"),
         Action::Assign { .. } => done("assigned"),
         Action::Start { .. } => done("started"),
         Action::Finish { status, .. } => match status {
@@ -2246,6 +2353,7 @@ fn collapsed_step(
     let task_of = |action: &Action| match action {
         Action::Approve { task }
         | Action::Cancel { task }
+        | Action::Requeue { task }
         | Action::Permit { task, .. }
         | Action::Assign { task, .. }
         | Action::Repair { task, .. }
@@ -2320,7 +2428,10 @@ fn collapsed_step(
                             ("plan stopped".into(), StepKind::Stopped)
                         }
                         crate::planner_command::Outcome::Failed { reason } => (
-                            format!("plan failed: {}", single_line(reason)),
+                            format!(
+                                "plan failed: {}",
+                                single_line(&crate::planner::plain_error(reason))
+                            ),
                             StepKind::Failed,
                         ),
                     }],
@@ -2359,6 +2470,19 @@ fn collapsed_step(
         },
         _ => return None,
     })
+}
+
+/// The same failure line twice in a row (a planner retried by autopilot)
+/// becomes one line with a count: `plan failed: … ×3`.
+fn repeated_failure(previous: &[Phase], next: &[Phase]) -> Option<Vec<Phase>> {
+    let ([(text, StepKind::Failed)], [(again, StepKind::Failed)]) = (previous, next) else {
+        return None;
+    };
+    let (base, count) = match text.rsplit_once(" ×") {
+        Some((base, count)) => (base, count.parse::<u32>().ok()?),
+        None => (text.as_str(), 1),
+    };
+    (base == again).then(|| vec![(format!("{base} ×{}", count + 1), StepKind::Failed)])
 }
 
 /// One collapsed entry, wrapped at word boundaries with a hanging indent.
@@ -2723,5 +2847,92 @@ mod tests {
         assert_eq!(lines(20)[0].width(), 20);
         assert_eq!(lines(12).len(), 1);
         assert!(!lines(12)[0].to_string().contains("=^"));
+    }
+}
+
+#[cfg(test)]
+mod fit_words_tests {
+    use super::{fit_words, next_action};
+
+    #[test]
+    fn notices_cut_at_a_word_boundary_within_the_width() {
+        assert_eq!(fit_words("short note", 20), "short note");
+        let cut = fit_words("Unknown command /help · F1 lists commands", 30);
+        assert_eq!(cut, "Unknown command /help · F1…");
+        assert!(unicode_width::UnicodeWidthStr::width(cut.as_str()) <= 30);
+    }
+
+    fn review_snapshot(criteria: &[&str]) -> crate::tasks::Snapshot {
+        use crate::tasks::{Action, Receipt, Request, WorkPolicy};
+        let step = crate::planner::Step {
+            title: "Task".into(),
+            acceptance: criteria.iter().map(|c| c.to_string()).collect(),
+            model: "fixture".into(),
+            dependencies: vec![],
+            policy: WorkPolicy {
+                files: vec!["a.rs".into()],
+                check: vec!["true".into()],
+            },
+        };
+        crate::tasks::Snapshot {
+            schema_version: crate::tasks::SCHEMA_VERSION,
+            workspace: std::path::PathBuf::from("."),
+            mission: "mission".into(),
+            revision: 1,
+            tasks: vec![crate::tasks::Task {
+                id: 1,
+                title: "Task".into(),
+                model: "fixture".into(),
+                dependencies: vec![],
+                status: crate::tasks::TaskStatus::ReviewReady,
+                policy: None,
+                repair_of: None,
+                run: None,
+            }],
+            receipts: vec![Receipt {
+                task: 1,
+                revision: 1,
+                request: Request {
+                    correlation: "plan".into(),
+                    expected_revision: 0,
+                    action: Action::Plan {
+                        plan: crate::planner::Plan {
+                            prompt: "p".into(),
+                            planner: "fixture".into(),
+                            context: None,
+                            scope: None,
+                            architecture: None,
+                            tasks: vec![step],
+                        },
+                    },
+                },
+            }],
+        }
+    }
+
+    #[test]
+    fn fit_words_keeps_the_start_of_a_long_unbroken_token() {
+        let cut = fit_words(r#"Use /review 4 {"outcome":"approved","reason":"…"}"#, 40);
+        assert!(
+            cut.starts_with(r#"Use /review 4 {"outcome":"appr"#),
+            "{cut}"
+        );
+    }
+
+    #[test]
+    fn review_ready_hint_matches_what_accept_allows() {
+        let with = review_snapshot(&["Returns 42"]);
+        let hint = next_action(&with, &with.tasks[0]).unwrap();
+        assert!(
+            hint.contains("/review 1 JSON") && hint.contains("/reject 1"),
+            "{hint}"
+        );
+        assert!(!hint.contains("/accept"), "{hint}");
+        let without = review_snapshot(&[]);
+        let hint = next_action(&without, &without.tasks[0]).unwrap();
+        assert!(
+            hint.contains("/accept 1") && hint.contains("/reject 1"),
+            "{hint}"
+        );
     }
 }

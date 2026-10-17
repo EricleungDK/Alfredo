@@ -29,6 +29,7 @@ class AutopilotServer:
         self.requests = []
         self.errors = []
         self.release_app = threading.Event()
+        self.prose_worker = False
         fixture = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -65,6 +66,9 @@ class AutopilotServer:
                              'model': request['model'], 'dependencies': [1],
                              'policy': {'files': ['app.py'], 'check': CHECK_APP}},
                         ]})
+                    elif fixture.prose_worker:
+                        marker = 'PROSE'
+                        content = 'I would rather talk about it than write any code.'
                     elif prompt.startswith('Implement this task: Repair #1:'):
                         marker = 'REPAIR'
                         content = json.dumps({'files': [{'path': 'calc.py', 'content': 'def answer():\n    return 42\n'}]})
@@ -223,6 +227,69 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertEqual(self.git('symbolic-ref', 'HEAD'), 'refs/heads/main')
         self.assertEqual(self.git('status', '--porcelain'), '')
         self.assertEqual((self.workspace / 'calc.py').read_text(), 'def answer():\n    return 0\n')
+        self.quit(terminal)
+
+    def test_rejected_commands_explain_themselves_and_never_concatenate_with_the_next_command(self):
+        terminal = self.terminal(resume=False)
+        terminal.send('/foo\r')
+        self.screen_has(terminal, 'Unknown command /foo')
+        screen = terminal.screen()
+        self.assertIn('F1 lists commands', screen)
+        self.assertIn('/go GOAL starts autopilot', screen)
+        terminal.send('/model\r')
+        self.screen_has(terminal, 'Usage: /model NAME (or /models)')
+        terminal.send('/help\r')
+        self.screen_has(terminal, 'Esc close')  # the F1 command picker opened
+        self.assertNotIn('Unknown command /help', terminal.screen())
+        terminal.send(b'\x1b')  # close the picker
+        self.wait_until('picker closed', lambda: 'Esc close' not in terminal.screen())
+        terminal.send('/go\r')
+        self.screen_has(terminal, 'Usage: /go GOAL')
+        # The next keystroke replaces the rejected text instead of appending to it.
+        terminal.send('/go Make answer return 42 and add app\r')
+        self.wait_until('autopilot planned', lambda: 'PLAN' in self.fixture.markers(), 60)
+        screen = terminal.screen()
+        self.assertNotIn('/go/go', screen)
+        self.assertNotIn('Unknown command', screen)
+        self.assertNotIn('Usage', screen)
+        self.screen_has(terminal, 'Autopilot')
+        self.quit(terminal)
+
+    def test_stop_then_resume_runs_the_cancelled_task_again_without_a_repair(self):
+        terminal = self.terminal(resume=False)
+        terminal.send('/go Make answer return 42 and add app\r')
+        self.wait_until('dependent worker running after the real repair',
+                        lambda: self.fixture.markers().count('APP') == 1
+                        and (2, 'running', None) in self.statuses(), 60)
+        terminal.send('/stop\r')
+        self.wait_until('stopped worker cancelled', lambda: (2, 'cancelled', None) in self.statuses())
+        self.screen_has(terminal, 'Autopilot ‖ paused')
+        screen = terminal.screen()
+        # The one failure is the real check failure repaired as #3; the cancel adds none.
+        self.assertIn('1 repair', screen)
+        self.assertNotIn('2 failed', screen)
+        self.fixture.release_app.set()
+
+        terminal.send('/resume\r')
+        self.screen_has(terminal, 'git switch alfredo/go-', 60)
+        self.assertEqual(self.statuses(), [(1, 'failed', None), (2, 'accepted', None), (3, 'accepted', 1)])
+        self.assertEqual(self.fixture.markers(), ['PLAN', 'CALC', 'REPAIR', 'APP', 'APP'])
+        screen = terminal.screen()
+        self.assertNotIn('Repair #2', screen)
+        self.assertNotIn('Repair #4', screen)
+        self.assertIn('Autopilot ✓ done   2/2   1 repair', screen)
+        self.quit(terminal)
+
+    def test_failed_summary_shows_the_cause_and_a_next_step_when_the_model_writes_prose(self):
+        self.fixture.prose_worker = True
+        terminal = self.terminal(resume=False)
+        terminal.send('/go Make answer return 42 and add app\r')
+        self.screen_has(terminal, 'Autopilot ✗ failed', 90)
+        self.screen_has(terminal, 'Model returned no FILE blocks')
+        screen = terminal.screen()
+        self.assertIn('repair budget exhausted (3/3)', screen)
+        self.assertIn('raise --max-repairs', screen)
+        self.assertNotIn('Invalid plan JSON', screen)
         self.quit(terminal)
 
     def test_go_in_repository_without_commits_fails_once_with_the_fix(self):

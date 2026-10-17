@@ -1745,7 +1745,7 @@ async fn planned_worker_receives_the_saved_scope_brief_with_its_existing_policy(
             }
         })
         .unwrap_err()
-        .contains("acceptance criteria"));
+        .contains("Use /review 2 {"));
     let mut missing = request.clone();
     missing.correlation = "missing".into();
     if let Action::Assess { assessment, .. } = &mut missing.action {
@@ -6672,4 +6672,54 @@ async fn repair_after_a_steer_starts_fresh_and_never_replays_or_parses_the_parti
         assert!(!prompt.contains("PREVIOUS ATTEMPT FILES"), "{prompt}");
         assert!(!prompt.contains("    return 42"), "{prompt}");
     }
+}
+
+#[test]
+fn accept_refusal_leads_with_the_review_template_for_the_tasks_real_criteria() {
+    use alfredo_tui::planner::{Plan, Step};
+    let fixture = Fixture::new();
+    fixture.permit();
+    let policy = fixture.store.snapshot().unwrap().tasks[0]
+        .policy
+        .clone()
+        .unwrap();
+    fixture.action(Action::Cancel { task: 1 });
+    fixture.action(Action::Plan {
+        plan: Plan {
+            architecture: None,
+            prompt: "Implement answer".into(),
+            planner: "fixture".into(),
+            context: None,
+            scope: None,
+            tasks: vec![Step {
+                title: "Make answer return 42".into(),
+                acceptance: vec!["Answer is 42".into(), "Notes exist".into()],
+                model: "fixture".into(),
+                dependencies: vec![],
+                policy,
+            }],
+        },
+    });
+    // The criteria guard runs before status checks, so no run is needed.
+    let revision = fixture.store.snapshot().unwrap().revision;
+    let message = fixture
+        .store
+        .transact(Request {
+            correlation: "accept-with-criteria".into(),
+            expected_revision: revision,
+            action: Action::Review {
+                task: 2,
+                accept: true,
+            },
+        })
+        .unwrap_err()
+        .to_string();
+    assert!(message.starts_with("Use /review 2 {"), "{message}");
+    assert!(message.contains(r#""criterion":2"#), "{message}");
+    assert!(!message.contains("/accept"), "{message}");
+    assert!(message
+        .chars()
+        .take(80)
+        .collect::<String>()
+        .contains("/review 2"));
 }

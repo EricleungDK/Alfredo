@@ -117,6 +117,7 @@ pub struct TaskControl {
     provider: Option<Ollama>,
     pub evidence: Option<crate::review::View>,
     pub activity: Option<String>,
+    activity_view: std::cell::RefCell<crate::activity::View>,
     pub run_observations: BTreeMap<u64, String>,
     /// Read-only autopilot projection for rendering; the controller owns decisions.
     pub autopilot: Option<crate::autopilot::Status>,
@@ -217,6 +218,7 @@ impl TaskControl {
             provider: None,
             evidence: None,
             activity: None,
+            activity_view: Default::default(),
             run_observations: BTreeMap::new(),
             autopilot: None,
             autopilot_report: None,
@@ -319,9 +321,9 @@ impl TaskControl {
             match task.status {
                 TaskStatus::Proposed if task.repair_of.is_some() => status.repair += 1,
                 TaskStatus::ReviewReady => status.review += 1,
-                TaskStatus::Failed | TaskStatus::Rejected | TaskStatus::Cancelled
-                    if task.run.is_some() =>
-                {
+                // A run cancelled by the user is requeued, not repaired.
+                TaskStatus::Cancelled if task.run.is_some() => status.cancelled += 1,
+                TaskStatus::Failed | TaskStatus::Rejected if task.run.is_some() => {
                     status.repair += 1
                 }
                 TaskStatus::Accepted if task.repair_of.is_some() => status.resolve += 1,
@@ -356,6 +358,31 @@ impl TaskControl {
             })?;
         }
         Ok(())
+    }
+
+    /// Everything a background refresh can change that the screen shows.
+    /// Any new field a background refresh updates and the UI displays MUST be
+    /// added here, or `poll` will not report it and the screen will go stale.
+    fn refresh_fingerprint(&self) -> impl PartialEq {
+        (
+            self.snapshot.as_ref().map(|snapshot| {
+                (
+                    snapshot.revision,
+                    snapshot.receipts.len(),
+                    snapshot
+                        .receipts
+                        .last()
+                        .map(|receipt| receipt.request.correlation.clone()),
+                )
+            }),
+            self.run_observations.clone(),
+            self.notice.clone(),
+            self.dispatch.enabled,
+            self.scope_status.revision,
+            self.scope_status.blocked,
+            self.scope_status.label.clone(),
+            self.canonical_scope.as_ref().map(|scope| scope.revision),
+        )
     }
 
     pub fn poll(&mut self) -> bool {
@@ -416,7 +443,9 @@ impl TaskControl {
         }
         if let Ok(result) = self.background_receiver.try_recv() {
             self.refreshing = false;
-            changed = true;
+            // An unchanged re-read (same revision, observations, gate and notice)
+            // must not force a redraw; anything visible that moved still does.
+            let before = self.refresh_fingerprint();
             match result {
                 Ok(mut projection) => {
                     projection.notice = self.notice.clone();
@@ -427,6 +456,7 @@ impl TaskControl {
                     self.notice = format!("Task refresh failed; dispatch off: {error}");
                 }
             }
+            changed |= before != self.refresh_fingerprint();
         }
         while let Ok((task, result)) = self.worker_receiver.try_recv() {
             let intent = self.prepared_workers.remove(&task);
@@ -1032,8 +1062,38 @@ impl TaskControl {
         changed
     }
 
+    /// Visible slice of the cached F4 activity projection.
+    pub fn activity_window(
+        &self,
+        snapshot: &crate::tasks::Snapshot,
+        query: &str,
+        width: u16,
+        height: u16,
+    ) -> crate::activity::Window {
+        self.activity_view
+            .borrow_mut()
+            .window(snapshot, query, width, height, self.scroll)
+    }
+
+    /// Times the activity entry list was projected from a snapshot (cache misses).
+    pub fn activity_builds(&self) -> usize {
+        self.activity_view.borrow().builds()
+    }
+
     pub fn has_live_workers(&self) -> bool {
         !self.progress.is_empty()
+    }
+
+    /// Whether the 250 ms timing redraw is needed for task clocks. Independent of
+    /// pane visibility: the side pane and dashboard show elapsed times for live
+    /// workers (including queued ones) and the Architect row shows planning time.
+    pub fn timing_redraw_due(&self) -> bool {
+        self.has_live_workers() || self.planner.active()
+    }
+
+    /// A background read has been requested and not yet consumed by `poll`.
+    pub fn refresh_in_flight(&self) -> bool {
+        self.refreshing
     }
 
     /// Current live worker view for a task, if a local worker is observed.
@@ -1597,10 +1657,10 @@ impl TaskControl {
         };
         // Wait for an acknowledged claim before choosing another global revision.
         if self.workers.keys().any(|id| {
-            snapshot
-                .tasks
-                .iter()
-                .any(|task| task.id == *id && task.run.is_none())
+            snapshot.tasks.iter().any(|task| {
+                task.id == *id
+                    && (task.run.is_none() || task.status == crate::tasks::TaskStatus::Approved)
+            })
         }) {
             return Ok(None);
         }
@@ -1948,7 +2008,19 @@ impl TaskControl {
                     request: Request {
                         correlation,
                         expected_revision: snapshot.revision,
-                        action: parse(&text, model)?,
+                        action: parse(&text, model).map_err(|error| {
+                            match error.strip_prefix("Usage: /review ") {
+                                Some(_) => {
+                                    let task = text
+                                        .strip_prefix("/review ")
+                                        .and_then(|rest| rest.split(' ').next())
+                                        .and_then(|id| id.parse().ok())
+                                        .unwrap_or_default();
+                                    review_usage(task, snapshot.acceptance_for_task(task).len())
+                                }
+                                None => error,
+                            }
+                        })?,
                     },
                 }
             }
@@ -2554,6 +2626,11 @@ impl TaskControl {
     }
 }
 
+/// `/review` usage with a copy-pasteable template for the task's criteria.
+fn review_usage(task: u64, criteria: usize) -> String {
+    format!("Usage: {}", crate::tasks::review_template(task, criteria))
+}
+
 pub fn parse(text: &str, model: &str) -> Result<Action, String> {
     if let Some(arguments) = text.trim().strip_prefix("/assign ") {
         let (id, model) = arguments.split_once(' ').ok_or("Usage: /assign ID MODEL")?;
@@ -2572,6 +2649,11 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
     if let Some(id) = text.strip_prefix("/resolve-repair ") {
         return Ok(Action::ResolveRepair {
             task: id.trim().parse().map_err(|_| "Usage: /resolve-repair ID")?,
+        });
+    }
+    if let Some(id) = text.strip_prefix("/requeue ") {
+        return Ok(Action::Requeue {
+            task: id.trim().parse().map_err(|_| "Usage: /requeue ID")?,
         });
     }
     if let Some(arguments) = text.strip_prefix("/repair ") {
@@ -2594,15 +2676,29 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
         return Ok(Action::Permit { task, policy });
     }
     if let Some(arguments) = text.strip_prefix("/review ") {
-        let (id, json) = arguments.split_once(' ').ok_or(
-            "Usage: /review ID JSON (outcome, reason, criteria; limitations for limited approval)",
-        )?;
-        let task = id.parse().map_err(|_| "Invalid task id")?;
+        let task = arguments
+            .split(' ')
+            .next()
+            .and_then(|id| id.parse::<u64>().ok())
+            .ok_or("Invalid task id")?;
+        let json = arguments
+            .split_once(' ')
+            .map_or("", |(_, json)| json.trim());
+        if json.is_empty() {
+            return Err(review_usage(task, 1));
+        }
         #[derive(serde::Deserialize)]
         #[serde(untagged)]
         enum ReviewInput {
             Decision(crate::assessment::Decision),
             Assessment(crate::assessment::Assessment),
+        }
+        if let Err(error) = serde_json::from_str::<serde_json::Value>(json) {
+            return Err(format!(
+                "Review JSON is not valid JSON (line {} column {})",
+                error.line(),
+                error.column()
+            ));
         }
         match serde_json::from_str::<ReviewInput>(json).map_err(|_| "Review JSON needs outcome (or legacy accept), reason, criteria; limited approval also needs limitations")? {
             ReviewInput::Decision(decision) => {
@@ -2660,7 +2756,18 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
             });
         }
     }
-    Err("Commands: /task description · /permit ID JSON · /approve ID · /run ID · /cancel-task ID · /evidence ID · /recover ID · /accept ID · /reject ID · /tasks · /activity [query] · /chat · /refresh · /retry-task".into())
+    Err(unknown_command(text))
+}
+
+/// Short feedback for a command nobody handles; it names the command, points to
+/// F1 and shows the autopilot entry point, and stays within 80 columns.
+fn unknown_command(text: &str) -> String {
+    let verb = text.split_whitespace().next().unwrap_or(text);
+    let mut name: String = verb.chars().take(14).collect();
+    if verb.chars().count() > 14 {
+        name.push('…');
+    }
+    format!("Unknown command {name} · F1 lists commands · /go GOAL starts autopilot")
 }
 
 #[cfg(test)]
@@ -2824,5 +2931,58 @@ mod evidence_refresh_tests {
             fs::read(store.conversation_directory().unwrap().join("tasks.json")).unwrap(),
             canonical
         );
+    }
+}
+
+#[cfg(test)]
+mod unknown_command_tests {
+    use super::*;
+
+    #[test]
+    fn unknown_command_names_it_and_points_to_f1_and_go() {
+        for command in ["/help", "/quit", "/exit", "/clear", "/new"] {
+            let message = parse(command, "model").unwrap_err();
+            assert!(message.contains(command), "{message}");
+            assert!(message.contains("F1"), "{message}");
+            assert!(message.contains("/go GOAL"), "{message}");
+            assert!(message.chars().count() <= 80, "{message}");
+        }
+    }
+
+    #[test]
+    fn a_very_long_unknown_command_name_stays_short() {
+        let message = parse(&format!("/{} arg", "x".repeat(500)), "model").unwrap_err();
+        assert!(
+            message.contains("F1") && message.contains("/go GOAL"),
+            "{message}"
+        );
+        assert!(message.chars().count() <= 80, "{message}");
+    }
+
+    #[test]
+    fn review_usage_shows_a_template_with_the_real_criterion_numbers() {
+        let message = parse("/review 3", "model").unwrap_err();
+        assert!(message.starts_with("Usage: /review 3 {"), "{message}");
+        assert_eq!(parse("/review 3 ", "model").unwrap_err(), message);
+        assert!(
+            !review_usage(3, 0).contains("criterion"),
+            "no fake criterion"
+        );
+        let message = review_usage(3, 2);
+        assert!(
+            message.contains(
+                r#"/review 3 {"outcome":"approved","reason":"…","criteria":[{"criterion":1,"met":true,"note":"…"},{"criterion":2,"met":true,"note":"…"}]}"#
+            ),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn review_json_syntax_errors_report_position_apart_from_missing_fields() {
+        let syntax = parse("/review 1 {oops", "model").unwrap_err();
+        assert_eq!(syntax, "Review JSON is not valid JSON (line 1 column 2)");
+        let fields = parse(r#"/review 1 {"accept":true}"#, "model").unwrap_err();
+        assert!(fields.starts_with("Review JSON needs outcome"), "{fields}");
+        assert!(!fields.contains("not valid JSON"), "{fields}");
     }
 }

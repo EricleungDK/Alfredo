@@ -66,6 +66,10 @@ pub fn iter_entries<'a>(snapshot: &'a Snapshot, query: &str) -> impl Iterator<It
                     "Task cancelled".into(),
                     "Unstarted task cancellation acknowledged".into(),
                 ),
+                Action::Requeue { .. } => (
+                    "Task requeued".into(),
+                    "Cancelled run returns to approved; a new run starts when dispatched".into(),
+                ),
                 Action::Start {
                     baseline, inputs, ..
                 } => (
@@ -126,4 +130,154 @@ pub fn iter_entries<'a>(snapshot: &'a Snapshot, query: &str) -> impl Iterator<It
                 detail,
             })
         })
+}
+
+/// Cached F4 projection. Entries are rebuilt only when the snapshot revision,
+/// receipt tail or query changes; wrapped row geometry only when the width
+/// changes; and each frame turns only the visible window into styled lines.
+#[derive(Default)]
+pub struct View {
+    key: Option<(String, std::path::PathBuf, u64, usize, String, String)>,
+    entries: Vec<Entry>,
+    width: u16,
+    // One starting row per entry, followed by the total row count.
+    starts: Vec<usize>,
+    builds: usize,
+}
+
+/// Owned visible slice with the wrapped-row offset into it and the scroll maximum.
+pub struct Window {
+    pub lines: Vec<ratatui::text::Line<'static>>,
+    pub row: u16,
+    pub maximum: usize,
+}
+
+fn entry_lines(entry: &Entry) -> Vec<ratatui::text::Line<'static>> {
+    use crate::dashboard::safe;
+    use ratatui::{
+        style::{Color, Style},
+        text::Line,
+    };
+    let mut lines = vec![Line::styled(
+        format!(
+            "r{} · task #{} · {}",
+            entry.revision,
+            entry.task,
+            safe(&entry.summary)
+        ),
+        Style::default().fg(Color::Cyan),
+    )];
+    lines.extend(
+        safe(&entry.detail)
+            .lines()
+            .map(|line| Line::from(line.to_owned())),
+    );
+    lines.push(Line::from(format!("Receipt: {}", safe(&entry.correlation))));
+    lines.push(Line::default());
+    lines
+}
+
+fn empty_lines() -> Vec<ratatui::text::Line<'static>> {
+    vec![ratatui::text::Line::from(
+        "No saved task activity matches this query",
+    )]
+}
+
+fn rows(line: &ratatui::text::Line<'static>, width: u16) -> usize {
+    use ratatui::widgets::{Paragraph, Wrap};
+    if line.width() <= usize::from(width) {
+        1
+    } else {
+        Paragraph::new(line.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(width)
+            .max(1)
+    }
+}
+
+impl View {
+    /// How many times the entry list was projected from the snapshot.
+    pub fn builds(&self) -> usize {
+        self.builds
+    }
+
+    /// Visible window for a viewport; `offset` is clamped like the other
+    /// scrolling panels.
+    pub fn window(
+        &mut self,
+        snapshot: &Snapshot,
+        query: &str,
+        width: u16,
+        height: u16,
+        offset: usize,
+    ) -> Window {
+        if width == 0 || height == 0 {
+            return Window {
+                lines: Vec::new(),
+                row: 0,
+                maximum: 0,
+            };
+        }
+        let key = (
+            snapshot.mission.clone(),
+            snapshot.workspace.clone(),
+            snapshot.revision,
+            snapshot.receipts.len(),
+            snapshot
+                .receipts
+                .last()
+                .map(|receipt| receipt.request.correlation.clone())
+                .unwrap_or_default(),
+            query.to_owned(),
+        );
+        if self.key.as_ref() != Some(&key) {
+            self.entries = entries(snapshot, query);
+            self.builds += 1;
+            self.key = Some(key);
+            self.width = 0;
+        }
+        if self.width != width {
+            self.starts.clear();
+            self.starts.push(0);
+            if self.entries.is_empty() {
+                self.starts.push(1);
+            }
+            for entry in &self.entries {
+                let height = entry_lines(entry)
+                    .iter()
+                    .map(|line| rows(line, width))
+                    .sum::<usize>();
+                self.starts
+                    .push(self.starts.last().copied().unwrap_or(0) + height);
+            }
+            self.width = width;
+        }
+        let total = self.starts.last().copied().unwrap_or(0);
+        let maximum = total.saturating_sub(usize::from(height));
+        let top = offset.min(maximum);
+        if self.entries.is_empty() {
+            return Window {
+                lines: empty_lines(),
+                row: top.min(u16::MAX as usize) as u16,
+                maximum,
+            };
+        }
+        let first = self
+            .starts
+            .partition_point(|start| *start <= top)
+            .saturating_sub(1)
+            .min(self.entries.len() - 1);
+        let last = self
+            .starts
+            .partition_point(|start| *start < top.saturating_add(usize::from(height)))
+            .min(self.entries.len());
+        Window {
+            lines: self.entries[first..last.max(first + 1)]
+                .iter()
+                .flat_map(entry_lines)
+                .collect(),
+            row: (top - self.starts[first]).min(u16::MAX as usize) as u16,
+            maximum,
+        }
+    }
 }

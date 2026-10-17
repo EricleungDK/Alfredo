@@ -537,6 +537,7 @@ fn autopilot_follows_the_running_task_unless_the_user_recently_moved() {
         total: 6,
         failed: 1,
         repairs: 0,
+        max_repairs: 3,
         elapsed: Duration::from_secs(3),
         branch: None,
     });
@@ -567,6 +568,7 @@ fn autopilot_status(state: RunState, branch: Option<&str>) -> AutopilotStatus {
         total: 3,
         failed: 1,
         repairs: 0,
+        max_repairs: 3,
         elapsed: Duration::from_secs(83),
         branch: branch.map(Into::into),
     }

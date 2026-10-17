@@ -209,3 +209,38 @@ fn sandbox_preflight_names_bubblewrap_and_the_fix_only_when_it_is_unusable() {
     assert!(alfredo_tui::doctor::worker_tool_ready("/bin/sh"));
     assert!(!alfredo_tui::doctor::worker_tool_ready("/etc"));
 }
+
+fn plain_folder_report() -> (String, std::path::PathBuf) {
+    let fixture = Fixture::new();
+    let plain = fixture.root.join("plain");
+    fs::create_dir_all(&plain).unwrap();
+    // The state dir lives inside the non-repo working directory, as with the default under $HOME.
+    let state = plain.join(".local/state/alfredo");
+    let (endpoint, server) = catalog("initial-model");
+    let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .args(["--doctor", "--model", "initial-model", "--endpoint"])
+        .arg(&endpoint)
+        .arg("--state-dir")
+        .arg(&state)
+        .current_dir(&plain)
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    let text = String::from_utf8(output.stdout).unwrap();
+    (text, plain.canonicalize().unwrap())
+}
+
+#[test]
+fn doctor_in_a_non_repository_names_the_next_step_and_skips_the_storage_check() {
+    let (text, plain) = plain_folder_report();
+    assert!(
+        text.contains(&format!("{} is not a Git repository", plain.display())),
+        "{text}"
+    );
+    assert!(text.contains("git init"), "{text}");
+    assert!(!text.contains("fatal"), "{text}");
+    assert!(!text.contains("conversation-only"), "{text}");
+    assert!(!text.contains("FAIL storage"), "{text}");
+    assert!(!text.contains("outside the coding workspace"), "{text}");
+}
