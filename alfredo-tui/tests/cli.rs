@@ -144,3 +144,27 @@ fn startup_errors_print_as_plain_text_without_debug_quotes() {
     assert!(stderr.starts_with("Error: --model"), "{stderr}");
     assert!(!stderr.contains('"'), "{stderr}");
 }
+
+#[test]
+fn mission_flags_outside_a_repository_name_workspace_instead_of_being_ignored() {
+    let dir = std::env::temp_dir().join(format!("alfredo-cli-norepo-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for flag in ["--mission", "--new-mission"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+            .args([flag, "alpha", "--state-dir"])
+            .arg(dir.join("state"))
+            .current_dir(&dir)
+            .env("GIT_CEILING_DIRECTORIES", &dir)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let error = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            error.contains(flag) && error.contains("--workspace DIR"),
+            "{error}"
+        );
+        assert!(!error.contains("Interactive terminal"), "{error}");
+    }
+    std::fs::remove_dir_all(&dir).unwrap();
+}
