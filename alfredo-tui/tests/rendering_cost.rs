@@ -1,4 +1,4 @@
-//! Opt-in real rendering cohorts; no model, network, subprocess or duration threshold.
+//! Opt-in real rendering cohorts; no model, network or subprocess. Only the ignored measurement asserts a duration (activity warm p50 under 1 ms).
 use alfredo_tui::{
     commands::Completion,
     conversations::TaskView,
@@ -203,6 +203,15 @@ fn measure_mission_work_redraws() {
                 ));
             }
             assert!(screen_hashes.iter().all(|value| value == &screen_hashes[0]));
+            if panel == "activity" {
+                // Issue #111: cached, windowed activity redraws. Only this explicit
+                // release measurement asserts time, so default CI cannot flake.
+                assert!(
+                    percentile(&warm, 50) < 1_000_000,
+                    "activity warm p50 {} ns at {width}x{height}",
+                    percentile(&warm, 50)
+                );
+            }
             cohorts.push(serde_json::json!({
                 "panel": panel, "viewport": [width,height], "cold_samples_ns": cold,
                 "cold_p50_ns": percentile(&cold,50), "cold_p95_ns": percentile(&cold,95),
@@ -351,4 +360,58 @@ fn measure_dashboard_streaming_redraws() {
         serde_json::json!({"fixture": "200 tasks, 4 streaming workers, 140x40", "average_ms": average})
     );
     assert!(average < 16.0, "average redraw {average:.2} ms ≥ 16 ms");
+}
+
+/// Chat redraw while a reply streams into a long conversation (issue #122).
+#[test]
+#[ignore = "explicit release-mode chat transcript redraw measurement"]
+fn measure_chat_transcript_redraws() {
+    let mut app = App::new("fixture".into());
+    for index in 0..400 {
+        // About 4 KB per message: 25 lines of about 160 bytes, so each wraps at 140 columns.
+        let content = (0..25)
+            .map(|line| {
+                format!(
+                    "message {index} line {line:02} {}",
+                    "lorem ipsum ".repeat(12)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        app.sessions[0].messages.push(alfredo_tui::model::Message {
+            role: if index % 2 == 0 { "user" } else { "assistant" }.into(),
+            content,
+        });
+    }
+    let bytes: usize = app.sessions[0]
+        .messages
+        .iter()
+        .map(|m| m.content.len())
+        .sum();
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+    let mut frame = |app: &App| {
+        let start = Instant::now();
+        terminal.draw(|f| ui::draw(f, black_box(app))).unwrap();
+        black_box(terminal.backend().buffer());
+        start.elapsed().as_nanos()
+    };
+    let _cold = frame(&app);
+    let mut warm = vec![];
+    for token in 0..100 {
+        // A streaming token lands on the last message before each redraw.
+        app.sessions[0]
+            .messages
+            .last_mut()
+            .unwrap()
+            .content
+            .push_str(&format!(" token{token}"));
+        warm.push(frame(&app));
+    }
+    let (p50, p95) = (percentile(&warm, 50), percentile(&warm, 95));
+    println!(
+        "{}",
+        serde_json::json!({"fixture": "400 messages x 4 KB, 140x40, streaming last message", "transcript_bytes": bytes, "warm_p50_ms": p50 as f64 / 1e6, "warm_p95_ms": p95 as f64 / 1e6})
+    );
+    assert!(p50 < 5_000_000, "p50 {} ms >= 5 ms", p50 as f64 / 1e6);
+    assert!(p95 < 16_000_000, "p95 {} ms >= 16 ms", p95 as f64 / 1e6);
 }

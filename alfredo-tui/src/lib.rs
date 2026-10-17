@@ -7,6 +7,7 @@ pub mod tasks;
 // Shared production host-effect implementation; no Python or desktop runtime dependency.
 pub mod dashboard;
 pub mod execution;
+pub mod transcript_cache;
 pub mod ui;
 pub mod worker;
 

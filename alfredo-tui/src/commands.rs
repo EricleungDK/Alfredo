@@ -50,6 +50,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "ID reason — propose a linked repair with inherited policy",
     ),
     (
+        "/requeue",
+        "ID — run a task cancelled by /stop again, no repair",
+    ),
+    (
         "/branch",
         "[ID] — create local review branch for accepted result",
     ),
@@ -140,6 +144,7 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
             "/accept",
             "/reject",
             "/repair",
+            "/requeue",
             "/resolve-repair",
             "/review",
             "/branch",

@@ -6,6 +6,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A failed `/go` summary now says why: a task whose repair budget is spent shows its
+  last failure line and a next step (`Try a larger model, /repair ID <hint>, or raise
+  --max-repairs`). A planner reply that is not JSON reads `The model did not return a
+  valid plan (expected JSON)…` instead of the raw parser text, repeated identical
+  `plan failed` chat lines collapse to one line with `×N`, and the agent view title for
+  a repair reads `Agent · repair 2/3 of #1 · failed` instead of showing a task id as a
+  count. `/autopilot` after a planning failure shows the summary rather than the stale
+  plan draft panel.
+
 ### Fixed
 
 - The default model is now `qwen2.5-coder:14b`, the model the README and `INSTALL.md`
@@ -14,15 +25,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of showing a plain green check. A 404 for a missing model names the model,
   keeps Ollama's own text and suggests `/models` / `ollama pull`; `/go` no longer
   retries it three times.
+- The task panel's `Next` hint for a review-ready task with acceptance criteria now
+  says `/review N JSON` and `/reject N` instead of `/accept N`, which Alfredo refuses
+  for such tasks. The `/accept` refusal and the `/review N` usage message lead with the
+  command and show a one-line JSON template prefilled with the task's criterion
+  numbers. Malformed `/review` JSON reports `Review JSON is not valid JSON (line L
+  column C)`, separate from the missing-fields message.
+- A clean cancel (or timeout) is no longer sometimes recorded as `outcome-unknown` /
+  `cleanup-uncertain`. Process-group cleanup on Linux now ignores zombie members that
+  are only waiting to be reaped, instead of waiting out the deadline and failing to
+  prove quiescence. The publication-crash test fixture also reports the child's exit
+  status and stderr when it fails to start.
+- Outside a Git repository the selector, `--workspace` and `--doctor` say
+  `<path> is not a Git repository` and name the next step (`cd` into a repository, or
+  `git init` and make a first commit) instead of raw `fatal:` text. Startup errors
+  print as plain `Error: <message>`. `--doctor` no longer claims conversation-only use
+  and skips the storage check (no bogus `FAIL storage` from `$HOME`) until the
+  workspace is a Git root.
+- `/stop` then `/resume` no longer turns the cancelled task into a failure and an
+  automatic Repair. The cancelled task runs again as a new run of itself; it no
+  longer counts as `failed` and spends no `--max-repairs` budget. New `/requeue ID`
+  command and task `Requeue` action; the task state schema is now v17 (older builds
+  cannot open v17 state; v16 state upgrades in place with a backup).
 - In a repository with no commits, `/go` now stops at once (no planning retries) and
   says to make an initial commit; the launch footer and `--doctor` give the same fix.
   Git error text no longer glues lines together (`tree.Use`).
+- Rejected slash commands no longer leave you stuck: unknown commands name themselves and
+  point to F1 and `/go GOAL` instead of a truncated manual-task list, `/help` opens the F1
+  picker, `/model` alone prints its usage, and the rejected text is replaced by the next
+  typed character (Up still recalls it) so `/go` then `/go GOAL` no longer becomes `/go/go GOAL`.
+  Footer notices are cut at a word boundary.
 
 ### Changed
 
+- F4 activity redraws with a 4096-receipt history take under 1 ms (was 9 ms wide, 37 ms
+  narrow): entries are cached per snapshot revision and query, row wrapping per width,
+  and only the visible window is rendered. An idle task refresh tick whose snapshot,
+  run observations and scope gate are unchanged no longer redraws the screen.
 - Side pane: other missions show `done/total` and their state (`4/7   running`).
 - `execution.rs` moved into `alfredo-tui/src`; the crate builds without the rest of
   the repository.
+- Chat redraw no longer re-wraps the whole conversation each frame: message bodies and
+  wrapped heights are cached per session and only the visible rows are rendered (400
+  messages x 4 KB: about 88 ms to 1 ms per frame, #122).
 
 ### Removed
 

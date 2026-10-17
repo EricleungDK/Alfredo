@@ -999,3 +999,15 @@ impl Planner {
         format!("{}{timing}\n\nFrontier Architect draft · Local Agent worker assignments\nNot saved or approved · committed context only; working edits excluded\n{}{warnings}\n\n{}", self.notice, context, self.draft.as_ref().and_then(|p| serde_json::to_string_pretty(p).ok()).unwrap_or_else(|| self.partial.clone()))
     }
 }
+
+/// User-facing wording for a planner failure. A reply that is not the plan
+/// JSON is a model-capability problem, not a parser detail; the serde text
+/// stays in the planner notice, the command outcome (F4/receipts) and the retry
+/// feedback; only autopilot's report and the chat line use this wording.
+pub fn plain_error(error: &str) -> String {
+    if error.starts_with("Invalid plan JSON") {
+        "The model did not return a valid plan (expected JSON). Try a larger model or /plan to inspect its answer".into()
+    } else {
+        error.to_string()
+    }
+}

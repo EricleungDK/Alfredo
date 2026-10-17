@@ -217,6 +217,8 @@ pub struct Status {
     pub total: usize,
     pub failed: usize,
     pub repairs: u32,
+    /// Repair budget per task (`--max-repairs`).
+    pub max_repairs: u32,
     pub elapsed: Duration,
     pub branch: Option<String>,
 }
@@ -268,6 +270,8 @@ enum Settled {
     Active,
     Success(u64),
     Stuck(String),
+    /// Cancelled by /stop or quit before /resume; neither a failure nor a repair.
+    Cancelled,
 }
 
 struct Family {
@@ -694,6 +698,7 @@ impl Autopilot {
                     }
                 };
                 tasks.set_visible(true);
+                tasks.planner.visible = false;
                 tasks.autopilot_report = Some(report);
                 Ok("Autopilot status · /tasks returns to task details".into())
             }
@@ -795,7 +800,7 @@ impl Autopilot {
                 match family.settled {
                     Settled::Success(_) => done += 1,
                     Settled::Stuck(_) => failed += 1,
-                    Settled::Active => {}
+                    Settled::Active | Settled::Cancelled => {}
                 }
             }
         }
@@ -810,6 +815,7 @@ impl Autopilot {
             total,
             failed,
             repairs,
+            max_repairs: saved.max_repairs,
             elapsed: Duration::from_secs(self.elapsed()),
             branch: saved.branch.clone(),
         })
@@ -960,6 +966,9 @@ impl Autopilot {
         }
         self.finished_notice = Some(clean(&format!("Autopilot failed{GAP}{notice}"), 1024));
         self.set_notice(tasks, notice);
+        // A planning failure leaves the unsaved draft panel open; the summary
+        // must be what the user sees, as after a task failure.
+        tasks.planner.visible = false;
         tasks.autopilot_report = self.report().map(str::to_owned);
         self.persist();
     }
@@ -1071,9 +1080,13 @@ impl Autopilot {
                 // Deterministic: retrying cannot help.
                 self.fail(tasks, error);
             } else if saved.plan_attempts >= PLAN_ATTEMPTS {
+                // `error` stays raw for retry feedback; only the report is plain.
                 self.fail(
                     tasks,
-                    format!("Planning failed {PLAN_ATTEMPTS} times; autopilot stopped: {error}"),
+                    format!(
+                        "Planning failed {PLAN_ATTEMPTS} times; autopilot stopped: {}",
+                        crate::planner::plain_error(&error)
+                    ),
                 );
             } else {
                 saved.plan_errors.push(error);
@@ -1198,7 +1211,13 @@ impl Autopilot {
                     format!("resolve-{}", head.id),
                     format!("/resolve-repair {}", head.id),
                 )),
-                TaskStatus::Failed | TaskStatus::Cancelled => {
+                // A run cancelled by the user is dispatched again as the same
+                // task: no repair, no failure and no repair budget spent.
+                TaskStatus::Cancelled => Some((
+                    format!("requeue-{}", head.id),
+                    format!("/requeue {}", head.id),
+                )),
+                TaskStatus::Failed => {
                     let reason =
                         clean(&format!("autopilot: {}", failure_detail(tasks, head)), 1800);
                     Some((
@@ -1217,7 +1236,6 @@ impl Autopilot {
                 family.settled == Settled::Active
                     && find(family.head).is_some_and(|task| {
                         task.status == TaskStatus::Approved
-                            && task.run.is_none()
                             && !tasks.workers.contains_key(&task.id)
                             && task
                                 .dependencies
@@ -1406,10 +1424,24 @@ impl Autopilot {
                     ("✗", Some(reason.clone()))
                 }
                 Settled::Active => ("◌", Some("unfinished".into())),
+                Settled::Cancelled => ("–", Some("cancelled; /resume runs it again".into())),
             };
             lines.push(format!("{glyph} #{}  {title}", family.root));
             if let Some(detail) = detail {
+                let exhausted = detail.contains(BUDGET_EXHAUSTED);
                 lines.push(format!("      {detail}"));
+                if exhausted {
+                    if let Some(head) = snapshot.tasks.iter().find(|t| t.id == family.head) {
+                        lines.push(format!(
+                            "      Last failure: {}",
+                            last_failure_line(&failure_detail(tasks, head))
+                        ));
+                    }
+                    lines.push(format!(
+                        "      Next: Try a larger model, /repair {} <hint>, or raise --max-repairs",
+                        family.head
+                    ));
+                }
             }
         }
         if let Some(name) = &branch {
@@ -1448,8 +1480,28 @@ impl Autopilot {
         }
         self.set_notice(tasks, notice);
         tasks.set_visible(true);
+        tasks.planner.visible = false;
         tasks.autopilot_report = Some(report);
         self.persist();
+    }
+}
+
+const BUDGET_EXHAUSTED: &str = "repair budget exhausted";
+
+/// One line of a recorded failure for the summary: its first non-empty line,
+/// shortened on a character boundary.
+fn last_failure_line(detail: &str) -> String {
+    let line = detail
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("no detail recorded");
+    let line = clean(line, 400);
+    if line.chars().count() > 160 {
+        let cut: String = line.chars().take(159).collect();
+        format!("{cut}…")
+    } else {
+        line
     }
 }
 
@@ -1574,14 +1626,14 @@ fn families(snapshot: &Snapshot, saved: &Saved, tasks: &TaskControl) -> Vec<Fami
                 TaskStatus::NeedsHumanReview => Settled::Stuck("held for human review".into()),
                 TaskStatus::Rejected => Settled::Stuck("rejected by review".into()),
                 TaskStatus::Failed if repairs >= saved.max_repairs => Settled::Stuck(format!(
-                    "failed; repair budget exhausted ({repairs}/{})",
+                    "failed; {BUDGET_EXHAUSTED} ({repairs}/{})",
                     saved.max_repairs
                 )),
                 TaskStatus::Cancelled if head_task.run.is_none() => {
                     Settled::Stuck("cancelled before start".into())
                 }
                 TaskStatus::Cancelled if !saved.retry_cancelled.contains(&head) => {
-                    Settled::Stuck("cancelled; /resume retries it".into())
+                    Settled::Cancelled
                 }
                 TaskStatus::Running if !tasks.workers.contains_key(&head) => {
                     Settled::Stuck(format!("run interrupted; inspect with /recover {head}"))
@@ -1589,7 +1641,6 @@ fn families(snapshot: &Snapshot, saved: &Saved, tasks: &TaskControl) -> Vec<Fami
                 TaskStatus::Proposed | TaskStatus::Approved => match blocked() {
                     Some(reason) => Settled::Stuck(reason),
                     None if head_task.status == TaskStatus::Approved
-                        && head_task.run.is_none()
                         && !tasks.workers.contains_key(&head)
                         && crate::dispatch::approval(snapshot, head).is_some_and(|approval| {
                             tasks.dispatch.attempts.get(&head) == Some(&approval)

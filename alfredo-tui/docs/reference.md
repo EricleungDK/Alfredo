@@ -38,8 +38,23 @@ status. The header's second row shows the run: state, `done/total`, failures and
 repairs when present, elapsed time and branch; the goal is the work group title.
 State lives in a small
 `autopilot-<conversation-sha256>.json` beside the task store; after restart the loop
-is restored **paused** and nothing is replayed until you resume (runs cancelled by
-quit or `/stop` are repaired after resume).
+is restored **paused** and nothing is replayed until you resume. Runs cancelled by
+quit or `/stop` are not failures: `/resume` requeues the same task (`/requeue ID`,
+which returns a cancelled run to approved and starts a fresh run on dispatch), creates
+no Repair task, and spends none of the `--max-repairs` budget. Only a failed check or
+worker is repaired. A stopped task shows as `cancelled` in the work status and resumes with
+`/resume` (autopilot) or `/requeue ID`.
+
+A failed autopilot summary says why. For a task whose repair budget is spent, the
+summary adds `Last failure:` (one line of the last attempt's recorded cause, such as
+`Model returned no FILE blocks`) and `Next:` (`Try a larger model, /repair ID <hint>,
+or raise --max-repairs`). A planner reply that is not the plan JSON is reported as
+`The model did not return a valid plan (expected JSON). Try a larger model or /plan
+to inspect its answer`; the parser detail stays in the plan panel, the saved planner outcome and the
+retry feedback sent to the model.
+Identical consecutive `plan failed` lines in the chat collapse to one line with a
+count (`×3`), and `/autopilot` after a planning failure shows the summary instead of
+the stale plan draft panel.
 
 When every planned task is accepted, held or failed, autopilot composes the accepted
 candidates on the plan's recorded baseline with the dependency merge-tree composition
@@ -247,6 +262,11 @@ fail before diagnostics. Results distinguish storage, model server/catalog and
 worker prerequisites with corrective flags or actions. A repository with no commits
 fails the worker check with `git commit --allow-empty -m init`; the same notice shows
 in the footer at launch, and `/go` there fails once without planning retries.
+Outside a Git repository the worker check reports `<path> is not a Git repository`
+with the next step (`cd` into a repository, or `git init` and make a first commit),
+and the storage check is skipped until the workspace is a validated Git root
+(this includes a repository subdirectory, which is not the root). The same text is
+shown above the selector when automatic open finds no repository.
 
 Diagnostics can initialize private state directories and lock files, but do not
 save conversations, mutate task receipts, send inference, or run coding checks.
@@ -254,6 +274,18 @@ Model catalog membership does not prove model readiness or GPU capacity, and too
 presence does not prove sandbox permission. Actual worker execution remains subject
 to the normal permission and sandbox checks. An occupied named conversation is
 reported as a storage issue; choose another `--conversation` when appropriate.
+
+A rejected slash command (unknown command, `Usage: …`, `Select a task first`, task not
+found) keeps its text in the prompt so it can be corrected, but the text is marked
+"replace on next keystroke": it is drawn reversed and the next typed character or paste
+replaces it, so retyping the full command never concatenates (`/go/go …`). Left, Right,
+Home, End, Backspace, Delete, Ctrl+W or the first Up drop the mark and keep the text for
+editing; the next Up continues into older prompts. Ctrl+U clears it, and Up then recalls it
+from prompt history. An unknown command such as `/help`,
+`/quit` or `/clear` answers `Unknown command /NAME · F1 lists commands · /go GOAL starts
+autopilot`; `/help` itself opens the F1 command picker and `/model` without a name
+answers `Usage: /model NAME (or /models)`. Footer notices wider than the terminal are
+cut at a word boundary with `…`.
 
 Use `/models` to load installed models from the configured server, then Up/Down and
 Enter (or `/model NAME`) to select one for the current conversation. `▸` marks the
@@ -276,7 +308,9 @@ corrupt), the selector appears with the reason shown above its input.
 
 Outside a repository, or with `--select`, launch starts with **Workspace selection
 required**. The current directory is only a placeholder Starting Location; typing
-replaces it. Enter validates an existing repository's exact root;
+replaces it. Enter validates an existing repository's exact root; a folder that is
+not a repository is refused with `<path> is not a Git repository` and the next step
+(`cd` into a repository, or `git init` and make a first commit);
 F2 selects new-repository creation at an unused path. The picker collects the
 repository and mission choice without creating either. Existing files/directories
 and nested repositories are never overwritten. After final mission confirmation
@@ -340,6 +374,15 @@ entry from the existing durable receipt ledger, including restored history and
 idempotent retries. Entries show revision order rather than invented wall-clock
 times or actor identities. It is not yet the full attributed Activity Journal.
 
+The activity view caches its projected entries per mission, workspace, snapshot
+revision, receipt count, newest receipt and query, caches wrapped row offsets per
+width, and builds only the visible window each frame, so a warm redraw stays
+under 1 ms even with thousands of receipts. A background task refresh that
+changes nothing visible does not trigger a redraw. The ignored
+`tests/rendering_cost.rs` measurement (`cargo test --release -- --ignored`)
+asserts the warm p50 below 1 ms; it is timing-dependent and not part of the
+default test run.
+
 The side pane's **work** section groups tasks under their recorded Plan (titled by
 the user's goal; planner retry and revision text is cut off, also for older saved
 plans) or **Manual tasks**, with repair descendants (`⑂`) nested beneath their
@@ -391,8 +434,9 @@ from model admission; `— steered · output cut` when unknown). The exchange is
 retained marked `cut`; nothing is retained when nothing streamed. A repair after a
 cut starts a fresh Local Agent and is never given the partial answer.
 The title names the latest attempt (`Agent · worker #2 · running`,
-`Agent · repair #3 of #2 · failed`, `Agent · architect · draft`). It follows the
-tail while live; PageUp/PageDown keep the reading position like the chat.
+`Agent · repair 2/3 of #1 · failed`, `Agent · architect · draft`). A repair counts the
+repairs of the original task (`2/3` inside an autopilot run with its budget, `2` outside).
+It follows the tail while live; PageUp/PageDown keep the reading position like the chat.
 
 While it is shown, the prompt title is `To worker #N · Enter send · Esc back` and
 Enter records an owner instruction for the family's latest attempt. `/tell
@@ -588,9 +632,10 @@ The crate is self-contained: the execution provider lives in `src/execution.rs`.
 | Key | Action |
 | --- | --- |
 | Enter | Send current prompt (or fill draft when command picker is open) |
-| F1 | Open command picker when draft is empty |
+| F1 | Open command picker when draft is empty (`/help` opens it too) |
 | Tab after `/prefix` | Open matching slash commands |
 | Up / Down in conversation | Browse prompt history and restore unsent draft |
+| First printable key or paste after a rejected command | Replaces the rejected text (shown reversed); Left, Right, Home, End, Backspace, Delete, Ctrl+W and the first Up keep it for editing; Up again, or Up from an emptied prompt, browses history where it is the newest entry |
 | Up / Down in task detail | Select a visible task or group |
 | Alt+Left / Alt+Right | Collapse / expand a branch, or move to parent / child |
 | F6 | Focus the side pane (overlay below 88 columns); F6 or Escape returns to the prompt |
@@ -904,6 +949,12 @@ cleanup still requires a reaped leader and quiescent group before success. Failu
 prove cleanup remains outcome-unknown. This may use the full configured grace interval;
 no timeout bounds or execution permissions are expanded.
 
+On Linux, group liveness ignores zombie members (state `Z` in `/proc/<pid>/stat`): a
+killed descendant that its parent has not yet reaped cannot run, so it does not keep
+cleanup waiting or turn a clean cancel into `outcome-unknown` / `cleanup-uncertain`.
+Without a readable `/proc`, any group member counts as live, as before. Once only
+zombies remain, the leader is reaped and cleanup succeeds.
+
 ## Thinking-stream progress
 
 Ollama's [thinking protocol](https://docs.ollama.com/capabilities/thinking) can emit
@@ -1215,7 +1266,11 @@ of at most 2048 UTF-8 bytes; each note is a nonempty single line of at most 1024
 bytes, with at most 16 ordered criteria. Unknown fields and mismatched coverage
 refuse. Legacy/manual tasks without recorded criteria use an empty criteria list.
 
-New `/accept` calls for tasks with criteria refuse and direct the user to `/review`.
+New `/accept` calls for tasks with criteria refuse and direct the user to `/review`;
+the refusal and the `/review ID` usage message show a one-line template prefilled
+with the task's criterion numbers, and the task panel's `Next` hint for such a task
+is `/review ID JSON` and `/reject ID` (`/accept ID` only when no criteria are
+recorded). Invalid JSON reports `Review JSON is not valid JSON (line L column C)`.
 `/accept` for tasks without criteria and `/reject` remain available. Historical
 boolean review receipts remain readable and exactly replayable without invented
 reasons or criterion assessments. Both review paths retain the existing successful

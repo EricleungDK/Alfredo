@@ -1,5 +1,5 @@
 //! Rust task authority. All callers use the same locked revision/receipt transaction.
-pub const SCHEMA_VERSION: u32 = 16;
+pub const SCHEMA_VERSION: u32 = 17;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -215,6 +215,11 @@ pub enum Action {
     Cancel {
         task: u64,
     },
+    /// Return a run cancelled by the user to Approved so it dispatches again
+    /// as a new run of the same task; no repair is created.
+    Requeue {
+        task: u64,
+    },
     Permit {
         task: u64,
         policy: WorkPolicy,
@@ -275,6 +280,15 @@ pub struct Snapshot {
     pub revision: u64,
     pub tasks: Vec<Task>,
     pub receipts: Vec<Receipt>,
+}
+
+/// One-line `/review` template prefilled with the task's real criterion numbers.
+pub fn review_template(task: u64, criteria: usize) -> String {
+    let items = (1..=criteria)
+        .map(|n| format!(r#"{{"criterion":{n},"met":true,"note":"…"}}"#))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(r#"/review {task} {{"outcome":"approved","reason":"…","criteria":[{items}]}}"#)
 }
 
 impl Snapshot {
@@ -790,6 +804,11 @@ impl TaskStore {
             {
                 return Err("Architecture failure requires its governed review route".into());
             }
+            if snapshot.schema_version < 17
+                && matches!(receipt.request.action, Action::Requeue { .. })
+            {
+                return Err("Requeue requires task schema v17".into());
+            }
             if snapshot.schema_version < 16
                 && (matches!(receipt.request.action, Action::ReviewArchitecture { .. })
                     || matches!(&receipt.request.action, Action::Decide { decision, .. } | Action::ReviewAndRepair { decision, .. } if decision.failure.is_some())
@@ -1106,7 +1125,8 @@ impl TaskStore {
         }
         if let Action::Review { task, accept: true } = &request.action {
             if !snapshot.acceptance_for_task(*task).is_empty() {
-                return Err("This task has acceptance criteria; use /review ID JSON to record a reason and evidence notes for every criterion".into());
+                let count = snapshot.acceptance_for_task(*task).len();
+                return Err(format!("Use {}", review_template(*task, count)).into());
             }
         }
         if snapshot.receipts.len() == MAX_RECEIPTS {
@@ -1685,6 +1705,21 @@ impl TaskStore {
                     }
                     _ => return Err("Task transition is not allowed from its current state".into()),
                 }
+                Ok(*task)
+            }
+            Action::Requeue { task } => {
+                let item = snapshot
+                    .tasks
+                    .iter_mut()
+                    .find(|t| t.id == *task)
+                    .ok_or("Unknown task")?;
+                if item.status != TaskStatus::Cancelled
+                    || item.run.is_none()
+                    || item.policy.is_none()
+                {
+                    return Err("Requeue requires a task cancelled during a run".into());
+                }
+                item.status = TaskStatus::Approved;
                 Ok(*task)
             }
             Action::Permit { task, policy } => {
