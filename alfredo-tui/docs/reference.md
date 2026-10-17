@@ -313,9 +313,11 @@ and `›` the conversation's model. PageUp/PageDown scroll the catalog;
 Escape closes it. Discovery runs asynchronously with a ten-second total deadline,
 a 1 MiB response bound and at most 256 entries. Errors retain the previous catalog
 and can be retried with `/models`. Listing a model does not prove it is loaded or
-has sufficient memory to run. Active or interrupted turns retain their model;
-finish/retry them or open another conversation to switch. Existing task assignments
-remain fixed, while newly proposed tasks use the conversation's selected model.
+has sufficient memory to run. An active turn retains its model: cancel it (Esc) or wait. A cancelled or failed
+turn does not block a switch; the next turn uses the new model, and Ctrl+R before
+any new prompt retries the interrupted turn on the new model. Existing task
+assignments remain fixed, while newly proposed tasks use the conversation's
+selected model.
 See [Ollama model listing](https://docs.ollama.com/api/tags) for the provider protocol.
 
 Launched inside a Git repository (from any subdirectory) with no workspace or
@@ -371,6 +373,16 @@ gets an independent `rust-tasks-v1/<sha256>/tasks.json`.
 owns a set at a time; use another name for a concurrent terminal sharing the task
 queue. `--model` supplies the initial model for a new set; restored conversations
 keep their saved models, which you can change using `/model` when eligible.
+
+A cancelled or failed chat turn does not lock the conversation. Typing a new prompt
+and pressing Enter starts a new turn in the same chat, and `/model NAME` switches the
+model for it. The interrupted turn (its prompt and any partial reply or failure) stays
+in the transcript, headed `· interrupted, not sent as context`, but it is dropped
+from the messages sent to the model: the new request carries only the earlier
+completed turns, never the orphaned prompt or the partial reply. Once the new turn
+starts, the interrupted turn is no longer retryable with Ctrl+R; Ctrl+R before
+sending anything new still retries it exactly as before. Which turns were moved past
+is saved with the conversation, so a restart does not send them to the model either.
 
 Snapshots save outside the workspace in `conversations-<name-sha256>.json`, beside
 the task store. Changed snapshots are saved asynchronously about once a second,
@@ -682,8 +694,8 @@ The crate is self-contained: the execution provider lives in `src/execution.rs`.
 | F2 | Switch the right pane between task detail and conversation |
 | F3 | Open evidence for the selected task; groups require a task selection |
 | Tab / Shift+Tab | Select next / previous conversation |
-| Escape | Abort the selected client request and retain partial output |
-| Ctrl+R | Explicitly retry a failed/cancelled turn, replacing its partial reply |
+| Escape | Abort the selected client request and retain partial output; a new prompt or `/model NAME` is then accepted |
+| Ctrl+R | Explicitly retry a failed/cancelled turn, replacing its partial reply; only until a new prompt starts a turn |
 | PageUp / PageDown | Scroll transcript, task/group details or open evidence |
 | Ctrl+Q / Ctrl+C | Quit and restore the terminal |
 
@@ -1032,7 +1044,8 @@ never selects a model, records assignment or grants approval on its own.
 
 Use `/models` to refresh an empty or outdated catalog. Completion performs no network
 request. Existing model-selection and assignment checks still apply at submission,
-including restrictions on active/interrupted work and fresh approval after assignment.
+including the refusal to switch while a turn is active and fresh approval after
+assignment.
 Move the cursor to the end before completion; arbitrary command arguments keep
 normal conversation switching. Installed names do not establish model qualification.
 

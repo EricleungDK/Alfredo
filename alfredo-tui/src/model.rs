@@ -149,6 +149,10 @@ pub struct Session {
     commands: Vec<crate::console_command::ConsoleCommand>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     sources: std::collections::BTreeMap<usize, ResponseSource>,
+    /// User-message indices of cancelled or failed turns the user moved past with
+    /// a new prompt. They stay in the transcript but are not sent to the model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    interrupted: Vec<usize>,
     pub status: Status,
     pub attempt: u64,
     pub scroll: std::cell::Cell<u16>,
@@ -200,6 +204,7 @@ impl Session {
             task_receipts: Vec::new(),
             commands: Vec::new(),
             sources: Default::default(),
+            interrupted: Vec::new(),
             status: Status::Ready,
             attempt: 0,
             scroll: std::cell::Cell::new(0),
@@ -579,9 +584,6 @@ impl Session {
         if self.status.active() {
             return Err("Cancel or wait for the current reply");
         }
-        if matches!(self.status, Status::Failed(_) | Status::Cancelled) {
-            return Err("Retry the interrupted turn or start a new session");
-        }
         let prompt = self.draft.trim().to_string();
         if prompt.is_empty() {
             return Err("Enter a prompt");
@@ -591,12 +593,46 @@ impl Session {
             return Err("Conversation limit reached; start a new session");
         }
         self.remember_submission();
+        if matches!(self.status, Status::Failed(_) | Status::Cancelled) {
+            // Moving on abandons the interrupted turn: it stays visible but is
+            // no longer retryable and is not part of the next request.
+            self.interrupted.push(self.messages.len() - 2);
+        }
         self.messages.push(Message {
             role: "user".into(),
             content: prompt,
         });
         self.clear_draft();
         Ok(self.start())
+    }
+
+    /// Whether the user message at `user_index` opened a turn that was cancelled
+    /// or failed and then abandoned for a new prompt.
+    pub fn interrupted_turn(&self, user_index: usize) -> bool {
+        user_index.is_multiple_of(2) && self.interrupted.contains(&user_index)
+    }
+
+    /// Model context ending at the user message `user_index`: earlier interrupted
+    /// turns are omitted; `user_index` itself is kept even if it was interrupted.
+    pub fn request_through(&self, user_index: usize) -> Vec<Message> {
+        let end = (user_index + 1).min(self.messages.len());
+        self.messages[..end]
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| {
+                let user = index - index % 2;
+                user == user_index || !self.interrupted_turn(user)
+            })
+            .map(|(_, message)| message.clone())
+            .collect()
+    }
+
+    pub(crate) fn valid_interrupted(&self) -> bool {
+        self.interrupted.windows(2).all(|pair| pair[0] < pair[1])
+            && self
+                .interrupted
+                .iter()
+                .all(|index| index.is_multiple_of(2) && index + 2 < self.messages.len())
     }
 
     pub fn retry(&mut self) -> Result<Vec<Message>, &'static str> {
@@ -610,7 +646,7 @@ impl Session {
     }
 
     fn start(&mut self) -> Vec<Message> {
-        let request = self.messages.clone();
+        let request = self.request_through(self.messages.len() - 1);
         self.messages.push(Message {
             role: "assistant".into(),
             content: String::new(),
@@ -1481,10 +1517,8 @@ impl App {
         let Some(session) = self.sessions.get_mut(index) else {
             return Err("The conversation is gone");
         };
-        if session.status.active()
-            || matches!(session.status, Status::Failed(_) | Status::Cancelled)
-        {
-            return Err("Active or interrupted turns retain their model; finish/retry or open a new conversation");
+        if session.status.active() {
+            return Err("An active turn retains its model; cancel or wait for it first");
         }
         session.model = name.into();
         self.health.preload(name);

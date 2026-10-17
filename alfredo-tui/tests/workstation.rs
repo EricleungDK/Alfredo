@@ -271,6 +271,7 @@ fn cancelled_conversation_does_not_abandon_a_pending_scope_receipt() {
                 session: 0,
                 attempt: 1,
                 model: "fixture".into(),
+                user_message: 0,
                 messages,
             },
             Some(0),
