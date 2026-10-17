@@ -591,10 +591,27 @@ impl Session {
         user_index.is_multiple_of(2) && self.interrupted.contains(&user_index)
     }
 
-    pub(crate) fn valid_interrupted(&self) -> bool {
-        self.interrupted
+    /// Model context ending at the user message `user_index`: earlier interrupted
+    /// turns are omitted; `user_index` itself is kept even if it was interrupted.
+    pub fn request_through(&self, user_index: usize) -> Vec<Message> {
+        let end = (user_index + 1).min(self.messages.len());
+        self.messages[..end]
             .iter()
-            .all(|index| index.is_multiple_of(2) && index + 2 < self.messages.len())
+            .enumerate()
+            .filter(|(index, _)| {
+                let user = index - index % 2;
+                user == user_index || !self.interrupted_turn(user)
+            })
+            .map(|(_, message)| message.clone())
+            .collect()
+    }
+
+    pub(crate) fn valid_interrupted(&self) -> bool {
+        self.interrupted.windows(2).all(|pair| pair[0] < pair[1])
+            && self
+                .interrupted
+                .iter()
+                .all(|index| index.is_multiple_of(2) && index + 2 < self.messages.len())
     }
 
     pub fn retry(&mut self) -> Result<Vec<Message>, &'static str> {
@@ -608,15 +625,7 @@ impl Session {
     }
 
     fn start(&mut self) -> Vec<Message> {
-        let request = self
-            .messages
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| {
-                !self.interrupted_turn(*index) && !self.interrupted_turn(index.saturating_sub(1))
-            })
-            .map(|(_, message)| message.clone())
-            .collect();
+        let request = self.request_through(self.messages.len() - 1);
         self.messages.push(Message {
             role: "assistant".into(),
             content: String::new(),

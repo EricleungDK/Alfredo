@@ -485,7 +485,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 if let Some(request) = request {
                     let intent = alfredo_tui::command_intent::Intent::Wayfinder {
                         request,
-                        user_message: turn.messages.len().saturating_sub(1),
+                        user_message: turn.user_message,
                     };
                     let id = alfredo_tui::console_command::ConsoleCommand::identity(&intent);
                     let state = match &result {
@@ -1408,8 +1408,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                     session: origin,
                                                     attempt: 0,
                                                     model: session.model.clone(),
-                                                    messages: session.messages[..=user_message]
-                                                        .to_vec(),
+                                                    user_message,
+                                                    messages: session.request_through(user_message),
                                                 };
                                                 if let Err(error) =
                                                     work.wayfinder.resume(turn, request)
@@ -1542,7 +1542,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         let model = work.app.sessions[index].model.clone();
                         let attempt = work.app.sessions[index].attempt;
-                        let user_message = messages.len().saturating_sub(1);
+                        // `messages` is the filtered model context; the transcript index is the
+                        // user message just before the empty assistant reply.
+                        let user_message =
+                            work.app.sessions[index].messages.len().saturating_sub(2);
                         let existing =
                             work.app.sessions[index]
                                 .commands()
@@ -1558,6 +1561,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             session: index,
                             attempt,
                             model,
+                            user_message,
                             messages,
                         };
                         let routed = match existing {
@@ -2066,6 +2070,7 @@ mod tests {
                         session,
                         attempt: work.app.sessions[session].attempt,
                         model: "fixture".into(),
+                        user_message: work.app.sessions[session].messages.len() - 2,
                         messages,
                     },
                     Some(0),

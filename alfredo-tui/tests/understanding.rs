@@ -606,6 +606,7 @@ fn router_preparation_and_resume_are_inert_and_exact_withdrawal_prevents_dispatc
         session: 1,
         attempt: 3,
         model: "fixture".into(),
+        user_message: 0,
         messages: vec![Message {
             role: "user".into(),
             content: "Build a new project".into(),

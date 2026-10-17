@@ -287,10 +287,11 @@ cursor and `›` the conversation's model. PageUp/PageDown scroll the catalog;
 Escape closes it. Discovery runs asynchronously with a ten-second total deadline,
 a 1 MiB response bound and at most 256 entries. Errors retain the previous catalog
 and can be retried with `/models`. Listing a model does not prove it is loaded or
-has sufficient memory to run. An active turn retains its model: cancel it (Esc) or
-wait. A cancelled or failed turn does not block a switch; the next turn uses the new
-model (Ctrl+R before any new prompt retries the interrupted turn on the new model). Existing task assignments
-remain fixed, while newly proposed tasks use the conversation's selected model.
+has sufficient memory to run. An active turn retains its model: cancel it (Esc) or wait. A cancelled or failed
+turn does not block a switch; the next turn uses the new model, and Ctrl+R before
+any new prompt retries the interrupted turn on the new model. Existing task
+assignments remain fixed, while newly proposed tasks use the conversation's
+selected model.
 See [Ollama model listing](https://docs.ollama.com/api/tags) for the provider protocol.
 
 Launched inside a Git repository (from any subdirectory) with no workspace or
@@ -1004,7 +1005,8 @@ never selects a model, records assignment or grants approval on its own.
 
 Use `/models` to refresh an empty or outdated catalog. Completion performs no network
 request. Existing model-selection and assignment checks still apply at submission,
-including restrictions on active/interrupted work and fresh approval after assignment.
+including the refusal to switch while a turn is active and fresh approval after
+assignment.
 Move the cursor to the end before completion; arbitrary command arguments keep
 normal conversation switching. Installed names do not establish model qualification.
 

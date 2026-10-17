@@ -1,6 +1,7 @@
 //! #148: a cancelled or failed chat turn must not trap the conversation.
-use alfredo_tui::conversations::Snapshot;
+use alfredo_tui::conversations::{ConversationStore, Snapshot};
 use alfredo_tui::model::{App, Session, Status, Update};
+use alfredo_tui::tasks::TaskStore;
 
 fn roles(request: &[alfredo_tui::model::Message]) -> Vec<(&str, &str)> {
     request
@@ -118,4 +119,88 @@ fn model_switch_is_still_refused_while_a_turn_is_active() {
     app.sessions[0].insert("q");
     app.sessions[0].begin().unwrap();
     assert!(app.select_model("other").is_err());
+}
+
+#[test]
+fn request_through_omits_earlier_interrupted_turns_but_keeps_its_own_target() {
+    let mut session = interrupted("cancel");
+    session.insert("right");
+    let request = session.begin().unwrap();
+    assert_eq!(session.request_through(2), request);
+    assert_eq!(
+        roles(&session.request_through(0)),
+        [("user", "wrong question")]
+    );
+}
+
+#[test]
+fn cancel_then_model_switch_then_retry_uses_the_new_model() {
+    let mut app = App::new("original".into());
+    app.receive_models(Ok(vec!["other".into()]));
+    app.sessions[0] = interrupted("cancel");
+    app.sessions[0].model = "original".into();
+    app.select_model("other").unwrap();
+    let request = app.sessions[0].retry().unwrap();
+    assert_eq!(roles(&request), [("user", "wrong question")]);
+    assert_eq!(app.sessions[0].model, "other");
+}
+
+fn store() -> (std::path::PathBuf, ConversationStore) {
+    static ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "alfredo-interrupted-{}-{}",
+        std::process::id(),
+        ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(root.join("workspace")).unwrap();
+    let tasks = TaskStore::new(&root.join("state"), &root.join("workspace"), "mission").unwrap();
+    let store = ConversationStore::open(&tasks, "default").unwrap();
+    (root, store)
+}
+
+fn snapshot_json() -> serde_json::Value {
+    let mut app = App::new("m".into());
+    app.sessions[0] = interrupted("fail");
+    app.sessions[0].insert("next");
+    app.sessions[0].begin().unwrap();
+    app.sessions[0].apply(2, Update::Done);
+    serde_json::to_value(Snapshot::capture(&app, "default")).unwrap()
+}
+
+#[test]
+fn snapshot_without_the_interrupted_field_still_loads() {
+    let mut json = snapshot_json();
+    let session = &mut json["sessions"][0];
+    assert!(session
+        .as_object_mut()
+        .unwrap()
+        .remove("interrupted")
+        .is_some());
+    let snapshot: Snapshot = serde_json::from_value(json).unwrap();
+    let (root, store) = store();
+    store.save(&snapshot).unwrap();
+    let mut restored = store.load().unwrap().unwrap().restore();
+    restored.sessions[0].insert("third");
+    // Without the record, an old snapshot sends the whole history, as before.
+    assert_eq!(restored.sessions[0].begin().unwrap().len(), 5);
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn snapshot_validation_rejects_invalid_interrupted_indices() {
+    let (root, store) = store();
+    for bad in [
+        serde_json::json!([1]),
+        serde_json::json!([2]),
+        serde_json::json!([40]),
+        serde_json::json!([0, 0]),
+    ] {
+        let mut json = snapshot_json();
+        json["sessions"][0]["interrupted"] = bad.clone();
+        let snapshot: Snapshot = serde_json::from_value(json).unwrap();
+        assert!(store.save(&snapshot).is_err(), "accepted {bad}");
+    }
+    let snapshot: Snapshot = serde_json::from_value(snapshot_json()).unwrap();
+    store.save(&snapshot).unwrap();
+    let _ = std::fs::remove_dir_all(root);
 }
