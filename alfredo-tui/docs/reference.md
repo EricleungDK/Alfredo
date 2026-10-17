@@ -282,7 +282,9 @@ answers `Usage: /model NAME (or /models)`. Footer notices wider than the termina
 cut at a word boundary with `…`.
 
 Use `/models` to load installed models from the configured server, then Up/Down and
-Enter (or `/model NAME`) to select one for the current conversation. `▸` marks the
+Enter to select one for the current conversation. `/model NAME` works without opening
+`/models`: the first use checks installed models, then applies the selection or lists
+what is installed. `▸` marks the
 cursor and `›` the conversation's model. PageUp/PageDown scroll the catalog;
 Escape closes it. Discovery runs asynchronously with a ten-second total deadline,
 a 1 MiB response bound and at most 256 entries. Errors retain the previous catalog

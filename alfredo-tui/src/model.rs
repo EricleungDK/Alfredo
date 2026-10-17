@@ -1305,6 +1305,10 @@ pub struct App {
     pub models: Vec<String>,
     pub models_visible: bool,
     pub models_pending: bool,
+    /// True once discovery has succeeded at least once, so `models` is trustworthy.
+    pub models_loaded: bool,
+    /// `/model NAME` typed before the catalog was loaded; resolved when discovery returns.
+    pub pending_model: Option<String>,
     pub models_notice: String,
     pub models_scroll: u16,
     /// Catalog row the model list's arrow keys point at.
@@ -1325,6 +1329,8 @@ impl App {
             models: Vec::new(),
             models_visible: false,
             models_pending: false,
+            models_loaded: false,
+            pending_model: None,
             models_notice: String::new(),
             models_scroll: 0,
             models_cursor: 0,
@@ -1336,8 +1342,10 @@ impl App {
 
     pub fn receive_models(&mut self, result: Result<Vec<String>, String>) {
         self.models_pending = false;
+        let queued = self.pending_model.take();
         match result {
             Ok(models) => {
+                self.models_loaded = true;
                 self.models = models;
                 let current = &self.sessions[self.selected].model;
                 self.models_cursor = self
@@ -1350,10 +1358,45 @@ impl App {
                 } else {
                     "Installed models · ↑↓ Enter or /model NAME selects for this chat".into()
                 };
+                if let Some(name) = queued {
+                    self.resolve_queued_model(&name);
+                }
             }
             Err(error) => {
-                self.models_notice = format!("{error}; previous catalog retained · /models retries")
+                self.models_notice =
+                    format!("{error}; previous catalog retained · /models retries");
+                if let Some(name) = queued {
+                    self.notice = format!(
+                        "Cannot check installed models for {name}: {error}; /model NAME retries"
+                    );
+                }
             }
+        }
+    }
+
+    /// Whether `/model NAME` must wait for the first discovery. When it must,
+    /// the name is held and the caller starts discovery if none is running.
+    pub fn queue_model(&mut self, name: &str) -> bool {
+        if self.models_loaded {
+            return false;
+        }
+        self.pending_model = Some(name.into());
+        self.notice = "Checking installed models…".into();
+        true
+    }
+
+    fn resolve_queued_model(&mut self, name: &str) {
+        if !self.models.iter().any(|model| model == name) {
+            self.notice = if self.models.is_empty() {
+                format!("Model {name} is not installed; no installed models reported")
+            } else {
+                format!(
+                    "Model {name} is not installed; installed: {}",
+                    self.models.join(", ")
+                )
+            };
+        } else if let Err(error) = self.select_model(name) {
+            self.notice = error.into();
         }
     }
 
