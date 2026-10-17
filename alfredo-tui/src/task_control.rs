@@ -2430,9 +2430,24 @@ impl TaskControl {
             return Ok(());
         }
         if text.trim() == "/plan-cancel" {
+            let nothing = !self.planner.active()
+                && self.planner.draft.is_none()
+                && self.planner.partial.is_empty()
+                && self.planner.notice.is_empty();
+            if nothing {
+                return Err("No plan draft to cancel".into());
+            }
+            let discarded_only = !self.planner.active() && self.planner.draft.is_none();
             self.planner.cancel();
             self.planner.draft = None;
-            self.planner.notice = "Plan cancelled · no action taken".into();
+            self.planner.partial.clear();
+            if discarded_only {
+                // An invalid or failed draft: close its pane and confirm.
+                self.planner.visible = false;
+                self.planner.notice = "Plan draft discarded".into();
+            } else {
+                self.planner.notice = "Plan cancelled · no action taken".into();
+            }
             return Ok(());
         }
         if text.trim() == "/plan" {

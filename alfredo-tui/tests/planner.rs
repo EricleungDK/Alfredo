@@ -1321,3 +1321,64 @@ fn manual_plan_shows_validation_warnings_without_blocking_save() {
     wait(&mut control, |c| !c.pending);
     assert_eq!(fixture.store.snapshot().unwrap().tasks.len(), 2);
 }
+
+/// Mirrors the console route for `/plan-cancel`: a durable planner command when
+/// there is something to bind, otherwise the plain controller command.
+fn console_plan_cancel(
+    control: &mut TaskControl,
+    runtime: &tokio::runtime::Runtime,
+) -> Result<(), String> {
+    match control.prepare_command("/plan-cancel", "fixture")? {
+        None => control.command(runtime, "/plan-cancel", "fixture"),
+        Some(_) => Err("durable planner command".into()),
+    }
+}
+
+#[test]
+fn plan_cancel_discards_an_invalid_draft_with_a_friendly_confirmation() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let fixture = Fixture::new();
+    let (provider, server) = server("I completed everything".into(), true, Duration::ZERO);
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.set_provider(provider);
+    control.refresh(&runtime);
+    wait(&mut control, |c| !c.pending);
+    control
+        .command(&runtime, "/plan Implement calculation", "fixture")
+        .unwrap();
+    wait(&mut control, |c| {
+        c.planner.notice.contains("Invalid plan JSON")
+    });
+    server.join().unwrap();
+    assert!(control.planner.visible);
+    console_plan_cancel(&mut control, &runtime).unwrap();
+    assert!(!control.planner.visible);
+    assert!(control.planner.draft.is_none());
+    assert!(control.planner.partial.is_empty());
+    assert_eq!(control.planner.notice, "Plan draft discarded");
+    assert!(!control.planner.active());
+}
+
+#[test]
+fn plan_cancel_without_a_draft_is_a_friendly_noop() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let fixture = Fixture::new();
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.refresh(&runtime);
+    wait(&mut control, |c| !c.pending);
+    let error = console_plan_cancel(&mut control, &runtime).unwrap_err();
+    assert_eq!(error, "No plan draft to cancel");
+    assert!(!error.contains("bounds or source binding"));
+}
+
+#[test]
+fn plan_cancel_of_a_valid_draft_keeps_the_durable_planner_command() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let fixture = Fixture::new();
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.refresh(&runtime);
+    wait(&mut control, |c| !c.pending);
+    control.planner.draft = Some(plan());
+    let prepared = control.prepare_command("/plan-cancel", "fixture").unwrap();
+    assert!(prepared.is_some());
+}
