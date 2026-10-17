@@ -73,3 +73,19 @@ fn cursor_stays_visible_in_a_long_catalog() {
     }
     assert!(screen(&app).contains("▸   m59"));
 }
+
+#[test]
+fn bare_name_matches_the_latest_catalog_entry() {
+    let mut app = App::new("qwen2.5-coder".into());
+    app.receive_models(Ok(vec![
+        "llama3:8b".into(),
+        "qwen2.5-coder:14b".into(),
+        "qwen2.5-coder:latest".into(),
+    ]));
+    assert_eq!(app.models_cursor, 2, "picker highlights the :latest row");
+    app.select_model("qwen2.5-coder").unwrap();
+    assert_eq!(app.sessions[0].model, "qwen2.5-coder", "typed name is kept");
+    let mut other = App::new("x".into());
+    other.receive_models(Ok(vec!["qwen2.5-coder:14b".into()]));
+    assert!(other.select_model("qwen2.5-coder").is_err());
+}

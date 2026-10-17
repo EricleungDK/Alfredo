@@ -139,12 +139,26 @@ impl HealthView {
         match state.reachable {
             None => Health::Unknown,
             Some(Err(since)) => Health::Down { since },
-            Some(Ok(())) if state.running.iter().any(|name| name == model) => Health::Ready {
-                model: model.into(),
-            },
-            Some(Ok(())) if state.preloading.as_deref() == Some(model) => Health::Loading {
-                model: model.into(),
-            },
+            Some(Ok(()))
+                if state
+                    .running
+                    .iter()
+                    .any(|name| crate::models::same_model(name, model)) =>
+            {
+                Health::Ready {
+                    model: model.into(),
+                }
+            }
+            Some(Ok(()))
+                if state
+                    .preloading
+                    .as_deref()
+                    .is_some_and(|loading| crate::models::same_model(loading, model)) =>
+            {
+                Health::Loading {
+                    model: model.into(),
+                }
+            }
             Some(Ok(()))
                 if state.installed.as_ref().is_some_and(|installed| {
                     !crate::provider::model_installed(installed, model)
@@ -215,7 +229,7 @@ impl HealthView {
                         state.reachable = Some(Ok(()));
                         if let Some(running) = running {
                             state.running = running;
-                        } else if !state.running.contains(&model) {
+                        } else if !crate::models::contains_model(&state.running, &model) {
                             state.running.push(model);
                         }
                     }
