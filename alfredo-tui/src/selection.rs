@@ -209,14 +209,22 @@ pub const DEFAULT_MISSION: &str = "default";
 /// mission `default` resumed or created. `Ok(None)` means not inside a repository.
 /// Nothing is created here; the launcher admits the choice like a selector choice.
 pub async fn automatic(starting: &Path, state: &Path) -> Result<Option<Choice>> {
+    let Some(root) = repository_root(starting).await? else {
+        return Ok(None);
+    };
+    let workspace = prepare_workspace(&root, state, false).await?;
+    open_or_create(state, workspace, DEFAULT_MISSION).map(Some)
+}
+
+/// Canonical root of the repository containing `starting`; `Ok(None)` outside a repository.
+pub async fn repository_root(starting: &Path) -> Result<Option<PathBuf>> {
     let Ok(root) = git(starting, &["rev-parse", "--show-toplevel"]).await else {
         return Ok(None);
     };
-    let root = Path::new(root.trim())
+    Path::new(root.trim())
         .canonicalize()
-        .map_err(|e| format!("Repository unavailable: {e}"))?;
-    let workspace = prepare_workspace(&root, state, false).await?;
-    open_or_create(state, workspace, DEFAULT_MISSION).map(Some)
+        .map(Some)
+        .map_err(|e| format!("Repository unavailable: {e}"))
 }
 
 /// Notice shown above the selector when the automatic open found no repository at `start`.
@@ -280,7 +288,9 @@ pub fn render_selector(frame: &mut Frame, view: &SelectorView) {
     let notice_height = if view.notice.is_empty() {
         0
     } else {
-        notice.line_count(area.width).clamp(1, 4) as u16
+        notice
+            .line_count(area.width)
+            .clamp(1, usize::from(area.height.saturating_sub(8)).max(1)) as u16
     };
     let rows = Layout::vertical([
         Constraint::Length(2),
@@ -619,11 +629,16 @@ pub fn choose_in_terminal(
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
-                    input.insert(&c.to_string())
+                    input.insert(&c.to_string());
                 }
                 _ => {}
             },
-            Event::Paste(text) => input.insert(&text),
+            Event::Paste(text) => {
+                let inserted = input.insert(&text);
+                if inserted.truncated {
+                    notice = crate::model::PASTE_TRUNCATED_NOTICE.into();
+                }
+            }
             _ => {}
         }
     }

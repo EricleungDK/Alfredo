@@ -1463,6 +1463,7 @@ impl TaskControl {
                         Action::ResolveRepair { task } => format!("Repair #{task} selected for original dependencies · revision {}", receipt.revision),
                         Action::Plan { plan } => format!("Plan saved · {} proposed tasks starting at #{} · revision {} · approve each policy before /run", plan.tasks.len(), receipt.task, receipt.revision),
                         Action::ReviewAndRepair { task, .. } => format!("Review #{task} saved · repair #{} proposed · /approve {} before running · revision {}", receipt.task, receipt.task, receipt.revision),
+                        Action::Propose { .. } => format!("Task #{} saved · next /permit {} {{\"files\":[…],\"check\":[…]}}, then /approve {} · revision {}", receipt.task, receipt.task, receipt.task, receipt.revision),
                         _ => format!("Task #{} saved · revision {}", receipt.task, receipt.revision),
                     };
                     (snapshot, notice).into()
@@ -1972,7 +1973,7 @@ impl TaskControl {
                         .strip_prefix("/scope-confirm ")
                         .unwrap()
                         .parse()
-                        .map_err(|_| "Usage: /scope-confirm DRAFT_REVISION")?,
+                        .map_err(|_| USAGE_SCOPE_CONFIRM)?,
                 }
             };
             Intent::Scope {
@@ -2056,13 +2057,15 @@ impl TaskControl {
                         correlation,
                         expected_revision: snapshot.revision,
                         action: parse(&text, model).map_err(|error| {
-                            match error.strip_prefix("Usage: /review ") {
-                                Some(_) => {
-                                    let task = text
-                                        .strip_prefix("/review ")
-                                        .and_then(|rest| rest.split(' ').next())
-                                        .and_then(|id| id.parse().ok())
-                                        .unwrap_or_default();
+                            // Only rewrite into a template when the user named a task;
+                            // bare `/review` keeps its plain usage line.
+                            let task = error
+                                .strip_prefix("Usage: /review ")
+                                .and_then(|_| text.trim().strip_prefix("/review "))
+                                .and_then(|rest| rest.split(' ').next())
+                                .and_then(|id| id.parse().ok());
+                            match task {
+                                Some(task) => {
                                     review_usage(task, snapshot.acceptance_for_task(task).len())
                                 }
                                 None => error,
@@ -2362,7 +2365,7 @@ impl TaskControl {
                             .strip_prefix("/scope-confirm ")
                             .unwrap()
                             .parse()
-                            .map_err(|_| "Usage: /scope-confirm DRAFT_REVISION")?,
+                            .map_err(|_| USAGE_SCOPE_CONFIRM)?,
                     }
                 };
                 self.sequence += 1;
@@ -2489,7 +2492,7 @@ impl TaskControl {
             return Err("Wait for the pending task receipt".into());
         }
         if let Some(id) = text.trim().strip_prefix("/architect-revise ") {
-            let task = id.parse().map_err(|_| "Usage: /architect-revise ID")?;
+            let task = id.parse().map_err(|_| USAGE_ARCHITECT_REVISE)?;
             let provider = self
                 .provider
                 .clone()
@@ -2704,7 +2707,7 @@ fn review_usage(task: u64, criteria: usize) -> String {
 
 pub fn parse(text: &str, model: &str) -> Result<Action, String> {
     if let Some(arguments) = text.trim().strip_prefix("/assign ") {
-        let (id, model) = arguments.split_once(' ').ok_or("Usage: /assign ID MODEL")?;
+        let (id, model) = arguments.split_once(' ').ok_or(USAGE_ASSIGN)?;
         let task = id.parse().map_err(|_| "Use a numeric task id")?;
         let model = model.trim();
         if model.is_empty() || model.len() > 200 || model.chars().any(char::is_control) {
@@ -2719,30 +2722,26 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
     let text = text.trim();
     if let Some(id) = text.strip_prefix("/resolve-repair ") {
         return Ok(Action::ResolveRepair {
-            task: id.trim().parse().map_err(|_| "Usage: /resolve-repair ID")?,
+            task: id.trim().parse().map_err(|_| USAGE_RESOLVE_REPAIR)?,
         });
     }
     if let Some(id) = text.strip_prefix("/requeue ") {
         return Ok(Action::Requeue {
-            task: id.trim().parse().map_err(|_| "Usage: /requeue ID")?,
+            task: id.trim().parse().map_err(|_| USAGE_REQUEUE)?,
         });
     }
     if let Some(arguments) = text.strip_prefix("/repair ") {
-        let (id, reason) = arguments
-            .split_once(' ')
-            .ok_or("Usage: /repair ID reason")?;
+        let (id, reason) = arguments.split_once(' ').ok_or(USAGE_REPAIR)?;
         return Ok(Action::Repair {
             task: id.parse().map_err(|_| "Invalid task id")?,
             reason: reason.trim().into(),
         });
     }
     if let Some(arguments) = text.strip_prefix("/permit ") {
-        let (id, json) = arguments
-            .split_once(' ')
-            .ok_or("Usage: /permit ID {\"files\":[\"path\"],\"check\":[\"program\",\"arg\"]}")?;
+        let (id, json) = arguments.split_once(' ').ok_or(USAGE_PERMIT)?;
         let task = id.parse().map_err(|_| "Invalid task id")?;
         let policy: crate::tasks::WorkPolicy = serde_json::from_str(json)
-            .map_err(|_| "Policy must be JSON with exact files and check argv")?;
+            .map_err(|_| "Policy must be JSON with exact files and check argv, e.g. {\"files\":[\"calc.py\"],\"check\":[\"python3\",\"-m\",\"unittest\"]}")?;
         policy.validate()?;
         return Ok(Action::Permit { task, policy });
     }
@@ -2787,20 +2786,23 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
             });
         }
     }
-    if let Some(title) = text.strip_prefix("/task ") {
-        if title.trim().is_empty() {
-            return Err("Usage: /task description".into());
+    if let Some(title) = word_arguments(text, "/task") {
+        if title.is_empty() {
+            return Err(bare_usage("/task").into());
         }
         return Ok(Action::Propose {
-            title: title.trim().into(),
+            title: title.into(),
             model: model.into(),
             dependencies: vec![],
         });
     }
-    if let Some(arguments) = text.strip_prefix("/after ") {
+    if let Some(arguments) = word_arguments(text, "/after") {
         let (ids, title) = arguments
-            .split_once(' ')
-            .ok_or("Usage: /after 1,2 description")?;
+            .split_once(char::is_whitespace)
+            .map_or((arguments, ""), |(ids, title)| (ids, title.trim()));
+        if ids.is_empty() || title.is_empty() {
+            return Err(bare_usage("/after").into());
+        }
         let dependencies = ids
             .split(',')
             .map(|id| {
@@ -2808,11 +2810,8 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
                     .map_err(|_| "Invalid dependency id".to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        if title.trim().is_empty() {
-            return Err("Task description is required".into());
-        }
         return Ok(Action::Propose {
-            title: title.trim().into(),
+            title: title.into(),
             model: model.into(),
             dependencies,
         });
@@ -2827,7 +2826,50 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
             });
         }
     }
+    if BARE_USAGE.iter().any(|(verb, _)| *verb == text) {
+        return Err(bare_usage(text).into());
+    }
     Err(unknown_command(text))
+}
+
+const USAGE_ASSIGN: &str = "Usage: /assign ID MODEL";
+const USAGE_PERMIT: &str =
+    "Usage: /permit ID {\"files\":[\"path\"],\"check\":[\"program\",\"arg\"]}";
+const USAGE_REPAIR: &str = "Usage: /repair ID reason";
+const USAGE_REQUEUE: &str = "Usage: /requeue ID";
+const USAGE_RESOLVE_REPAIR: &str = "Usage: /resolve-repair ID";
+const USAGE_SCOPE_CONFIRM: &str = "Usage: /scope-confirm DRAFT_REVISION";
+const USAGE_ARCHITECT_REVISE: &str = "Usage: /architect-revise ID";
+
+/// Usage for commands that need arguments, shown when typed bare. Each matches
+/// `VERB ` with a trailing space above, so the bare word would otherwise reach
+/// `unknown_command`.
+const BARE_USAGE: &[(&str, &str)] = &[
+    ("/task", "Usage: /task DESCRIPTION"),
+    ("/after", "Usage: /after IDS DESCRIPTION"),
+    ("/assign", USAGE_ASSIGN),
+    ("/permit", USAGE_PERMIT),
+    ("/repair", USAGE_REPAIR),
+    ("/requeue", USAGE_REQUEUE),
+    ("/resolve-repair", USAGE_RESOLVE_REPAIR),
+    ("/review", "Usage: /review ID JSON"),
+    ("/scope-confirm", USAGE_SCOPE_CONFIRM),
+    ("/architect-revise", USAGE_ARCHITECT_REVISE),
+    ("/retry-command", "Usage: /retry-command SESSION:COMMAND"),
+];
+
+fn bare_usage(verb: &str) -> &'static str {
+    BARE_USAGE
+        .iter()
+        .find(|(known, _)| *known == verb)
+        .map_or("", |(_, usage)| usage)
+}
+
+/// Arguments after `word` in trimmed `text`: empty for the bare word, `None`
+/// when `text` is another command that merely starts with the same letters.
+fn word_arguments<'a>(text: &'a str, word: &str) -> Option<&'a str> {
+    let rest = text.strip_prefix(word)?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
 }
 
 /// Short feedback for a command nobody handles; it names the command, points to
@@ -3018,6 +3060,35 @@ mod unknown_command_tests {
             assert!(message.contains("/go GOAL"), "{message}");
             assert!(message.chars().count() <= 80, "{message}");
         }
+    }
+
+    #[test]
+    fn task_and_after_keep_parsing_valid_input_and_name_missing_arguments() {
+        let propose = |title: &str, dependencies: Vec<u64>| Action::Propose {
+            title: title.into(),
+            model: "model".into(),
+            dependencies,
+        };
+        assert_eq!(
+            parse("/task  fix it ", "model"),
+            Ok(propose("fix it", vec![]))
+        );
+        assert_eq!(
+            parse("/after 1,2 add tests", "model"),
+            Ok(propose("add tests", vec![1, 2]))
+        );
+        assert_eq!(
+            parse("/after x add tests", "model").unwrap_err(),
+            "Invalid dependency id"
+        );
+        assert_eq!(
+            parse("/tasks", "model").unwrap_err(),
+            unknown_command("/tasks")
+        );
+        assert_eq!(
+            parse("/after 1", "model").unwrap_err(),
+            bare_usage("/after")
+        );
     }
 
     #[test]

@@ -67,6 +67,18 @@ class FlagTests(unittest.TestCase):
         missing = sorted(f for f in flags if f'`{f}' not in readme)
         self.assertEqual([], missing)
 
+    def test_readme_default_model_matches_the_code_and_setup_docs(self):
+        source = (ROOT / 'alfredo-tui/src/main.rs').read_text(encoding='utf-8')
+        code = re.search(r'"ALFREDO_MODEL"\)\.unwrap_or_else\(\|_\| "([^"]+)"\.into\(\)\)', source)
+        self.assertIsNotNone(code)
+        readme = (ROOT / 'README.md').read_text(encoding='utf-8')
+        row = re.search(r'^\| `--model NAME` \| `([^`]+)`', readme, re.M)
+        self.assertIsNotNone(row)
+        self.assertEqual(code.group(1), row.group(1))
+        for name in ('README.md', 'alfredo-tui/INSTALL.md'):
+            text = (ROOT / name).read_text(encoding='utf-8')
+            self.assertIn(f'ollama pull {code.group(1)}', text, name)
+
     def test_readme_names_the_current_version_and_toolchain(self):
         cargo = (ROOT / 'alfredo-tui/Cargo.toml').read_text(encoding='utf-8')
         version = re.search(r'^version = "([^"]+)"', cargo, re.M).group(1)

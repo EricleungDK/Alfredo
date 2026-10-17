@@ -65,6 +65,20 @@ fn prepared_task_captures_selection_and_never_mutates_before_dispatch() {
     let fixture = Fixture::new();
     fixture.propose("First");
     fixture.propose("Second");
+    fixture
+        .store
+        .transact(Request {
+            correlation: "permit".into(),
+            expected_revision: 2,
+            action: Action::Permit {
+                task: 1,
+                policy: alfredo_tui::tasks::WorkPolicy {
+                    files: vec!["calc.py".into()],
+                    check: vec!["/bin/true".into()],
+                },
+            },
+        })
+        .unwrap();
     let mut control = fixture.control();
     let path = fixture
         .store

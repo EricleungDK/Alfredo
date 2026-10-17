@@ -1,4 +1,5 @@
 //! Autopilot drives the existing governed transactions; real HTTP fixtures and workers.
+mod ollama_fixture;
 use alfredo_tui::{
     assessment::{Criterion, Decision, Outcome, ReviewRisk},
     autopilot::{self, Autopilot, RunState},
@@ -930,6 +931,162 @@ fn stop_cancels_running_workers_through_the_cancel_path() {
         TaskStatus::Cancelled
     );
     assert_eq!(autopilot.status(&control).unwrap().state, RunState::Paused);
+}
+
+/// A planner reply held until released; later requests answer immediately.
+fn slow_planning(release: std::sync::mpsc::Receiver<()>) -> Server {
+    let gate = Mutex::new(release);
+    Server::new(move |request, _| {
+        if planner(request) {
+            let _ = gate.lock().unwrap().recv_timeout(Duration::from_secs(10));
+            return one_task_plan();
+        }
+        good_calc()
+    })
+}
+
+fn planning_in_flight(control: &TaskControl, server: &Server) -> bool {
+    server.count() == 1 && control.planner.active()
+}
+
+#[test]
+fn stop_while_planning_cancels_the_planner_and_leaves_no_late_draft_so_go_starts() {
+    let fixture = Fixture::new();
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let server = slow_planning(gate);
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start("First", "fixture", 2, &control).unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "planning",
+        |_, c| planning_in_flight(c, &server),
+    );
+    let notice = autopilot.stop(&runtime, &mut control);
+    assert!(notice.contains("planning cancelled"), "{notice}");
+    assert!(!control.planner.active());
+    let _ = release.send(());
+    // The late reply must not surface as a draft.
+    for _ in 0..100 {
+        control.poll();
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert!(control.planner.checkpoint().is_none());
+    assert!(control.planner.draft.is_none());
+    autopilot
+        .start("Second goal", "fixture", 2, &control)
+        .expect("/go after a stopped planning phase starts");
+}
+
+#[test]
+fn stop_while_planning_then_resume_plans_again_and_finishes() {
+    let fixture = Fixture::new();
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let server = slow_planning(gate);
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start("First", "fixture", 2, &control).unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "planning",
+        |_, c| planning_in_flight(c, &server),
+    );
+    autopilot.stop(&runtime, &mut control);
+    assert!(autopilot.resume(&control).unwrap().contains("resumed"));
+    drop(release);
+    drive(&mut autopilot, &mut control, &runtime, "done", finished);
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Done);
+}
+
+#[test]
+fn go_after_stop_with_the_autopilots_finished_draft_open_names_resume_and_plan_cancel() {
+    let fixture = Fixture::new();
+    let server = Server::new(move |request, _| {
+        if planner(request) {
+            return one_task_plan();
+        }
+        good_calc()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.start("First", "fixture", 2, &control).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(submission) = autopilot.tick(&runtime, &mut control) {
+            let _ = control.dispatch_prepared(&runtime, &submission.intent);
+        }
+        control.poll();
+        if control.planner.checkpoint().is_some() {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{}", control.planner.notice);
+        thread::sleep(Duration::from_millis(3));
+    }
+    autopilot.stop(&runtime, &mut control);
+    let error = autopilot
+        .start("Second", "fixture", 2, &control)
+        .unwrap_err();
+    assert!(
+        error.contains("stopped autopilot's plan draft") && error.contains("/resume"),
+        "{error}"
+    );
+}
+
+#[test]
+fn stop_leaves_a_users_own_plan_generation_running() {
+    let fixture = Fixture::new();
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let server = slow_planning(gate);
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    control
+        .command(&runtime, "/plan Make answer return 42", "fixture")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !(server.count() == 1 && control.planner.active()) {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.planner.notice);
+        thread::sleep(Duration::from_millis(3));
+    }
+    autopilot.stop(&runtime, &mut control);
+    assert!(control.planner.active());
+    let _ = release.send(());
+    while control.planner.checkpoint().is_none() {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.planner.notice);
+        thread::sleep(Duration::from_millis(3));
+    }
+}
+
+#[test]
+fn go_never_discards_a_users_own_plan_draft() {
+    let fixture = Fixture::new();
+    let server = Server::new(move |_, _| one_task_plan());
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    control
+        .command(&runtime, "/plan Make answer return 42", "fixture")
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while control.planner.checkpoint().is_none() {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.planner.notice);
+        thread::sleep(Duration::from_millis(5));
+    }
+    let error = autopilot
+        .start("Other", "fixture", 2, &control)
+        .unwrap_err();
+    assert!(error.contains("/plan-cancel"), "{error}");
+    assert!(control.planner.checkpoint().is_some());
 }
 
 /// /stop cancels the running worker; /resume must run the same task again, not
@@ -2230,6 +2387,44 @@ fn saved_state_carries_done_and_total_for_read_only_peeks_of_other_missions() {
     assert_eq!(seen.last(), Some(&Some((2, 2))), "{seen:?}");
 }
 
+#[test]
+fn missing_model_404_stops_planning_after_one_request_and_names_the_model() {
+    let fixture = Fixture::new();
+    let server = ollama_fixture::serve(ollama_fixture::reserve(), |request, _| {
+        match request.path.as_str() {
+            "GET /api/tags" => ollama_fixture::running(&["qwen2.5-coder:14b"]),
+            _ => ollama_fixture::Reply::Json(
+                404,
+                json!({"error": "model 'qwen3:14b' not found"}).to_string(),
+            ),
+        }
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.set_provider(
+        Ollama::new(&server.endpoint, Duration::from_secs(5))
+            .unwrap()
+            .with_retry_backoff(Duration::from_millis(5)),
+    );
+    control.refresh(&runtime);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while control.pending || control.scope_status.revision.is_none() {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.notice);
+        thread::sleep(Duration::from_millis(2));
+    }
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Improve calc", "qwen3:14b", 2, &control)
+        .unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "failure", finished);
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+    assert_eq!(server.count("POST /api/chat"), 1, "{:?}", server.paths());
+    let notice = autopilot.notice();
+    assert!(!notice.contains("Planning failed 3 times"), "{notice}");
+    assert!(notice.contains("ollama pull qwen3:14b"), "{notice}");
+}
+
 fn one_task_plan() -> String {
     json!({"tasks": [
         {"title": "Make answer return 42", "acceptance": ["answer() returns 42"], "model": "fixture",
@@ -2410,4 +2605,137 @@ fn manual_repeated_plan_failures_are_not_collapsed() {
     let chat = render_rows(&app, &control, 160, 40).join("\n");
     assert!(!chat.contains("×2"), "{chat}");
     assert_eq!(chat.matches("/plan Improve calc").count(), 2, "{chat}");
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum Loop {
+    None,
+    Running,
+    Paused,
+    Finished,
+    Failed,
+}
+
+/// /stop, /pause and /resume must tell one story in every autopilot state:
+/// "/resume continues" only where /resume really continues the loop.
+#[test]
+fn stop_pause_and_resume_agree_across_autopilot_states() {
+    for state in [
+        Loop::None,
+        Loop::Running,
+        Loop::Paused,
+        Loop::Finished,
+        Loop::Failed,
+    ] {
+        let fixture = Fixture::new();
+        let server = match state {
+            Loop::Failed => Server::new(|_, _| {
+                json!({"tasks": [{"title": "Bad", "acceptance": ["x"], "model": "fixture", "dependencies": [2],
+                    "policy": {"files": ["calc.py"], "check": ["true"]}}]})
+                .to_string()
+            }),
+            _ => one_good_task(),
+        };
+        let runtime = Runtime::new().unwrap();
+        let mut control = control(&fixture, &server, &runtime);
+        let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+        if state != Loop::None {
+            autopilot.start("Answer", "fixture", 2, &control).unwrap();
+        }
+        if matches!(state, Loop::Finished | Loop::Failed) {
+            drive(&mut autopilot, &mut control, &runtime, "end", finished);
+        }
+        if state == Loop::Failed {
+            assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+        }
+        if state == Loop::Finished {
+            assert_eq!(autopilot.status(&control).unwrap().state, RunState::Done);
+        }
+        let say = |autopilot: &mut Autopilot, control: &mut TaskControl, text: &str| {
+            autopilot
+                .command(&runtime, control, text, "fixture", 2)
+                .unwrap_or_else(|error| error)
+        };
+        if state == Loop::Paused {
+            say(&mut autopilot, &mut control, "/pause");
+        }
+        let pause = say(&mut autopilot, &mut control, "/pause");
+        if state == Loop::Running {
+            say(&mut autopilot, &mut control, "/resume");
+        }
+        let stop = say(&mut autopilot, &mut control, "/stop");
+        let resume = say(&mut autopilot, &mut control, "/resume");
+        let active = matches!(state, Loop::Running | Loop::Paused);
+        if active {
+            assert!(pause.starts_with("Autopilot paused"), "{pause}");
+            assert_eq!(
+                stop,
+                "Autopilot stopped · cancellation requested for 0 worker(s) · /resume continues"
+            );
+            assert_eq!(resume, "Autopilot resumed");
+        } else {
+            assert_eq!(pause, "No active autopilot");
+            assert_eq!(stop, "No active autopilot");
+            assert_eq!(
+                resume,
+                if state == Loop::None {
+                    "No autopilot goal; use /go GOAL"
+                } else {
+                    "Autopilot already finished; /go GOAL starts a new loop"
+                }
+            );
+        }
+    }
+}
+
+/// Without an active autopilot, /stop still cancels running workers (here a
+/// worker started by an autopilot that this instance knows nothing about, so it
+/// is indistinguishable from a manual one) and must not claim autopilot stopped.
+#[test]
+fn stop_without_autopilot_still_cancels_running_workers() {
+    let fixture = Fixture::new();
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let gate = Mutex::new(gate);
+    let server = Server::new(move |request, _| {
+        if planner(request) {
+            return json!({"tasks": [
+                {"title": "Make answer return 42", "acceptance": ["answer() returns 42"], "model": "fixture",
+                 "dependencies": [], "policy": {"files": ["calc.py"], "check": check("from calc import answer; assert answer() == 42")}},
+            ]})
+            .to_string();
+        }
+        let _ = gate.lock().unwrap().recv_timeout(Duration::from_secs(10));
+        good_calc()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut starter = Autopilot::open(&fixture.directory(), "default").unwrap();
+    starter.start("Answer", "fixture", 2, &control).unwrap();
+    drive(
+        &mut starter,
+        &mut control,
+        &runtime,
+        "worker request",
+        |_, _| server.count() == 2,
+    );
+    let other = Fixture::new();
+    let mut idle = Autopilot::open(&other.directory(), "default").unwrap();
+    assert!(!control.workers.is_empty());
+    let notice = idle.stop(&runtime, &mut control);
+    assert_eq!(
+        notice,
+        "No active autopilot · cancellation requested for 1 worker(s)"
+    );
+    assert!(control
+        .workers
+        .values()
+        .all(|flag| flag.load(Ordering::SeqCst)));
+    drop(release);
+    drive(&mut starter, &mut control, &runtime, "cancelled", |_, c| {
+        c.workers.is_empty()
+    });
+    assert_eq!(
+        fixture.store.snapshot().unwrap().tasks[0].status,
+        TaskStatus::Cancelled
+    );
 }

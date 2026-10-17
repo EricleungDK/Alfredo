@@ -503,6 +503,16 @@ impl Autopilot {
             return Err(blocker);
         }
         if tasks.planner.active() || tasks.planner.checkpoint().is_some() {
+            if let Some(saved) = self
+                .saved
+                .as_ref()
+                .filter(|saved| saved.active() && saved.paused)
+            {
+                if matches!(&saved.plan_request, Some(request) if tasks.planner.active() || draft_matches(tasks, request))
+                {
+                    return Err("The stopped autopilot's plan draft is open; /resume to continue it or /plan-cancel to discard".into());
+                }
+            }
             return Err("A plan draft is open; /plan-save or /plan-cancel it before /go".into());
         }
         if let Some(scope) = &tasks.canonical_scope {
@@ -631,7 +641,9 @@ impl Autopilot {
             .as_ref()
             .map(|saved| saved.model.clone())
             .unwrap_or_else(|| "pending".into());
+        let was_active = self.saved.as_ref().is_some_and(|saved| saved.active());
         self.pause(tasks);
+        let planning_cancelled = self.cancel_planning(tasks);
         let workers: Vec<u64> = tasks.workers.keys().copied().collect();
         let mut errors = Vec::new();
         for task in &workers {
@@ -639,18 +651,53 @@ impl Autopilot {
                 errors.push(format!("#{task}: {error}"));
             }
         }
-        self.notice = if errors.is_empty() {
+        // Only a live loop can be "stopped" or "continued" by /resume.
+        let head = if was_active {
+            "Autopilot stopped"
+        } else {
+            "No active autopilot"
+        };
+        self.notice = if errors.is_empty() && !was_active && workers.is_empty() {
+            head.into()
+        } else if errors.is_empty() {
+            let tail = if was_active {
+                " · /resume continues"
+            } else {
+                ""
+            };
             format!(
-                "Autopilot stopped · cancellation requested for {} worker(s) · /resume continues",
+                "{head} · cancellation requested for {} worker(s){tail}",
                 workers.len()
             )
         } else {
-            format!(
-                "Autopilot stopped · cancellation issues: {}",
-                errors.join("; ")
-            )
+            format!("{head} · cancellation issues: {}", errors.join("; "))
         };
+        if planning_cancelled {
+            self.notice
+                .push_str(" · planning cancelled, no draft will appear");
+        }
         self.notice.clone()
+    }
+
+    /// Abort the planner generation autopilot itself requested, so a late
+    /// reply cannot surface as a draft. `/resume` plans again.
+    fn cancel_planning(&mut self, tasks: &mut TaskControl) -> bool {
+        let Some(saved) = self.saved.as_mut() else {
+            return false;
+        };
+        // A landed draft means any generation now running is the user's revision.
+        if saved.phase != Phase::Planning
+            || saved.plan_request.is_none()
+            || !tasks.planner.active()
+            || tasks.planner.checkpoint().is_some()
+        {
+            return false;
+        }
+        tasks.planner.cancel();
+        tasks.planner.visible = false;
+        saved.plan_request = None;
+        self.persist();
+        true
     }
 
     /// Terminal command entry for `/go`, `/pause`, `/resume`, `/stop`, `/autopilot`.
@@ -1077,7 +1124,9 @@ impl Autopilot {
             let saved = self.saved.as_mut().unwrap();
             saved.plan_attempts += 1;
             saved.plan_request = None;
-            if error.contains(crate::worker::NO_COMMITS) {
+            if error.contains(crate::worker::NO_COMMITS)
+                || error.contains(crate::provider::MISSING_MODEL_MARKER)
+            {
                 // Deterministic: retrying cannot help.
                 self.fail(tasks, error);
             } else if saved.plan_attempts >= PLAN_ATTEMPTS {
