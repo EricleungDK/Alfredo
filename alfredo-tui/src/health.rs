@@ -8,6 +8,9 @@ use std::{
 };
 use tokio::{runtime::Handle, task::JoinHandle};
 
+/// Keeps a hanging `/api/tags` from delaying up/down transitions.
+const CATALOG_DEADLINE: Duration = Duration::from_secs(2);
+
 pub const POLL_INTERVAL: Duration = Duration::from_secs(5);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,6 +26,10 @@ pub enum Health {
         model: String,
     },
     Ready {
+        model: String,
+    },
+    /// Server reachable and its catalog does not list the selected model.
+    Missing {
         model: String,
     },
 }
@@ -48,10 +55,21 @@ impl Health {
             Self::Down { .. } => Some("ollama ✗ retrying".into()),
             Self::Loading { .. } => Some(named("loading")),
             Self::Ready { .. } => Some(named("warm")),
+            Self::Missing { model } if with_model => {
+                let model: String = model.chars().filter(|c| !c.is_control()).collect();
+                Some(format!(
+                    "model {model} not installed · /models or ollama pull {model}"
+                ))
+            }
+            Self::Missing { .. } => Some("model not installed · /models".into()),
         }
     }
     pub fn healthy(&self) -> bool {
         !matches!(self, Self::Down { .. })
+    }
+    /// The server answers but the selected model cannot be used yet.
+    pub fn needs_attention(&self) -> bool {
+        matches!(self, Self::Missing { .. })
     }
 }
 
@@ -60,6 +78,8 @@ struct State {
     /// None until the first poll completes.
     reachable: Option<Result<(), Instant>>,
     running: Vec<String>,
+    /// Last `/api/tags` listing; None until fetched or when it fails.
+    installed: Option<Vec<String>>,
     preloading: Option<String>,
     preload_error: Option<String>,
     revision: u64,
@@ -125,6 +145,15 @@ impl HealthView {
             Some(Ok(())) if state.preloading.as_deref() == Some(model) => Health::Loading {
                 model: model.into(),
             },
+            Some(Ok(()))
+                if state.installed.as_ref().is_some_and(|installed| {
+                    !crate::provider::model_installed(installed, model)
+                }) =>
+            {
+                Health::Missing {
+                    model: model.into(),
+                }
+            }
             Some(Ok(())) => Health::Up,
         }
     }
@@ -216,10 +245,22 @@ impl Monitor {
         let task = handle.spawn(async move {
             loop {
                 let observed = provider.running_models().await;
+                // A failed catalog fetch keeps the last listing; absence never flags.
+                let catalog = if observed.is_ok() {
+                    tokio::time::timeout(CATALOG_DEADLINE, provider.models())
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                } else {
+                    None
+                };
                 poller.update(|state| match observed {
                     Ok(running) => {
                         state.reachable = Some(Ok(()));
                         state.running = running;
+                        if catalog.is_some() {
+                            state.installed = catalog;
+                        }
                     }
                     Err(_) => {
                         if !matches!(state.reachable, Some(Err(_))) {

@@ -199,13 +199,20 @@ fn shown_path(path: &str) -> String {
         .collect()
 }
 
-/// Block content: one markdown fence layer stripped, one trailing newline.
+/// Block content: one wrapping markdown fence layer stripped (only when no other
+/// fence line lies inside), one trailing newline.
 fn block_content(lines: &[&str]) -> String {
     let mut body = lines;
     let filled = |line: &&str| !line.trim().is_empty();
     if let (Some(first), Some(last)) = (body.iter().position(filled), body.iter().rposition(filled))
     {
-        if first < last && body[first].trim_start().starts_with("```") && body[last].trim() == "```"
+        let interior_fence = body[first + 1..last.max(first + 1)]
+            .iter()
+            .any(|line| line.trim_start().starts_with("```"));
+        if first < last
+            && !interior_fence
+            && body[first].trim_start().starts_with("```")
+            && body[last].trim() == "```"
         {
             body = &body[first + 1..last];
         }
@@ -1958,5 +1965,31 @@ mod sanitize_output_tests {
         let out = sanitize_output("\x1b]8;;file:///x\x07/tmp/run/worktree/src/a.rs\x1b]8;;\x07");
         assert!(!out.contains("8;;") && !out.contains("/tmp/run"), "{out}");
         assert!(out.contains("src/a.rs"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod fence_strip_tests {
+    use super::parse_answer;
+
+    fn content_of(body: &str) -> String {
+        let answer = format!("=== FILE: README.md ===\n{body}=== END FILE ===\n");
+        let plan = parse_answer(&answer).unwrap();
+        assert_eq!(plan.files.len(), 1);
+        plan.files[0].content.clone()
+    }
+
+    #[test]
+    fn markdown_file_with_several_fence_pairs_is_kept_verbatim() {
+        let body = "```sh\ncargo build\n```\n\nThen run it:\n\n```sh\ncargo run\n```\n";
+        assert_eq!(content_of(body), body);
+    }
+
+    #[test]
+    fn single_wrapping_fence_is_still_stripped() {
+        assert_eq!(
+            content_of("```python\nprint(1)\n```\n"),
+            "print(1)\n".to_string()
+        );
     }
 }
