@@ -193,7 +193,7 @@ class MissionFlagsInsideRepository(unittest.TestCase):
                     terminal.close()
 
             # An unknown mission is refused exactly as with --workspace; nothing is created.
-            refused(['--mission', 'alpha'], 'Mission does not exist; choose Start New Mission')
+            refused(['--mission', 'alpha'], "Mission 'alpha' does not exist; use --new-mission alpha to create it")
             self.assertEqual(missions(), [])
             # --new-mission creates it in the repository root, even from a subdirectory.
             for name in ('alpha', 'bad name/x'):
@@ -207,7 +207,7 @@ class MissionFlagsInsideRepository(unittest.TestCase):
                     terminal.close()
             self.assertEqual(missions(), ['alpha', 'bad name/x'])
             # A second --new-mission with the same name is refused; --mission resumes.
-            refused(['--new-mission', 'alpha'], 'Mission already exists')
+            refused(['--new-mission', 'alpha'], "Mission 'alpha' already exists; use --mission alpha to resume it")
             terminal = Pty(self, base + ['--mission', 'alpha'], nested, env)
             try:
                 terminal.wait_for('ALFREDO  alpha · ')
@@ -216,6 +216,39 @@ class MissionFlagsInsideRepository(unittest.TestCase):
             finally:
                 terminal.close()
             self.assertEqual(missions(), ['alpha', 'bad name/x'])
+
+
+class MissionFlagErrors(unittest.TestCase):
+    def test_flag_errors_name_the_flag_and_exit_nonzero(self):
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        with tempfile.TemporaryDirectory(prefix='alfredo-flag-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-flag-repo-') as repo:
+            root = os.path.realpath(repo)
+            subprocess.run(['git', '-C', root, 'init', '-q', '--template='], check=True)
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            base = [str(binary), '--workspace', root, '--model', 'fixture', '--endpoint', 'http://127.0.0.1:9']
+            created = Pty(self, base + ['--new-mission', 'm1'], root, env)
+            try:
+                created.wait_for('ALFREDO  m1 · ')
+                created.write(b'\x11')
+                self.assertEqual(created.process.wait(timeout=5), 0)
+            finally:
+                created.close()
+
+            def refused(flag, name):
+                master, slave = pty.openpty()
+                try:
+                    process = subprocess.run(base + [flag, name], stdin=slave, stdout=slave,
+                        stderr=subprocess.PIPE, env=env, cwd=root, timeout=30)
+                finally:
+                    os.close(master)
+                    os.close(slave)
+                return process.returncode, process.stderr.decode()
+
+            self.assertEqual(refused('--mission', 'nope'), (1,
+                "Error: Mission 'nope' does not exist; use --new-mission nope to create it (existing: m1)\n"))
+            self.assertEqual(refused('--new-mission', 'm1'), (1,
+                "Error: Mission 'm1' already exists; use --mission m1 to resume it\n"))
 
 
 class ScreenReconstruction(unittest.TestCase):
