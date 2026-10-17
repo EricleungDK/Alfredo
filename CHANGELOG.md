@@ -19,10 +19,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `--doctor` run from a repository subdirectory, or with `--workspace` pointing at one,
-  now checks the repository root like the TUI does instead of failing with `Choose the
-  repository root with --workspace`. The storage check runs against that root and
-  `PASS worker workspace:` names it.
 - The task panel's `Next` hint for a review-ready task with acceptance criteria now
   says `/review N JSON` and `/reject N` instead of `/accept N`, which Alfredo refuses
   for such tasks. The `/accept` refusal and the `/review N` usage message lead with the
