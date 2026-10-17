@@ -249,8 +249,9 @@ No latency improvement or complete model/profile qualification is claimed.
 
 Run `alfredo-tui --doctor` without a TTY to check startup prerequisites. It opens
 and validates the selected workspace/mission/conversation storage, checks the
-restored selected model against the bounded Ollama catalog, validates the Git root
-and committed baseline, and checks installed worker executables. Exit 0 means these
+restored selected model against the bounded Ollama catalog, resolves and validates the Git root
+(a subdirectory or `--workspace DIR` inside a repository checks its root, which the
+worker line names) and committed baseline, and checks installed worker executables. Exit 0 means these
 checks passed; exit 2 means one or more checks failed. Invalid CLI arguments still
 fail before diagnostics. Results distinguish storage, model server/catalog and
 worker prerequisites with corrective flags or actions. A repository with no commits
