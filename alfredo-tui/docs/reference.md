@@ -40,6 +40,15 @@ setup refusal as the first line of stderr (never `execvp` or bind-mount errors);
 class is the typed `failure_code` in the run's evidence. `ALFREDO_TEST_BWRAP_PATH` is a
 test-only seam that redirects only the preflight probe, never the executable a run uses.
 
+Workers see only the committed `HEAD`. When `/go` starts with tracked modifications
+or untracked, non-ignored files, the start notice and the run's summary carry a
+warning line such as `3 uncommitted changes are not visible to workers (based on HEAD
+abc1234)` (`Warning` row in the summary and in `/autopilot`). The check is a
+read-only `git status --porcelain` that never changes your branch, index or files; it
+is informational and does not block `/go`. A clean tree gets the notice unchanged. The
+count and short SHA are saved in the autopilot state file (optional `dirty` field,
+absent for clean trees and in older files).
+
 Each choice is an ordinary console command saved and dispatched through the same
 intent path as typed input; policy, evidence, locks and receipts stay authoritative.
 Risk-classified or human-hold reviews always wait for you, and manual commands keep

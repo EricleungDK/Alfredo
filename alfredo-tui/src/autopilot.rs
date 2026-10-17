@@ -101,11 +101,27 @@ struct Saved {
     done: u32,
     #[serde(default, skip_serializing_if = "is_zero")]
     total: u32,
+    /// Uncommitted changes in the workspace when the run started, and the short
+    /// HEAD workers were based on. Absent for clean trees and in older state files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dirty: Option<(u32, String)>,
 }
 fn is_zero(value: &u32) -> bool {
     *value == 0
 }
 impl Saved {
+    /// The start warning, also carried by the summary of the run.
+    fn dirty_warning(&self) -> Option<String> {
+        let (count, head) = self.dirty.as_ref().filter(|(count, _)| *count > 0)?;
+        let (noun, verb) = if *count == 1 {
+            ("change", "is")
+        } else {
+            ("changes", "are")
+        };
+        Some(format!(
+            "{count} uncommitted {noun} {verb} not visible to workers (based on HEAD {head})"
+        ))
+    }
     fn roots(&self) -> Vec<u64> {
         let first = self.first.unwrap_or(0);
         let mut roots: Vec<u64> = (first..first + self.count).collect();
@@ -555,6 +571,7 @@ impl Autopilot {
             stale: false,
             done: 0,
             total: 0,
+            dirty: crate::worker::uncommitted_changes(tasks.workspace()),
         });
         self.last = None;
         self.last_key = None;
@@ -566,6 +583,9 @@ impl Autopilot {
         self.notice = format!(
             "Autopilot started · plan → approve → dispatch → review/repair (max {max_repairs} repairs per task) · F5 pauses"
         );
+        if let Some(warning) = self.saved.as_ref().and_then(Saved::dirty_warning) {
+            self.notice.push_str(&format!(" · {warning}"));
+        }
         self.persist();
         Ok(self.notice.clone())
     }
@@ -740,6 +760,9 @@ impl Autopilot {
                                 crate::dashboard::clock(status.elapsed)
                             ),
                         ];
+                        if let Some(warning) = self.saved.as_ref().and_then(Saved::dirty_warning) {
+                            lines.push(format!("{:<LABEL$}{warning}", "Warning"));
+                        }
                         if !self.notice.is_empty() {
                             lines.push(String::new());
                             lines.push(format!("{:<LABEL$}{}", "Note", clean(&self.notice, 400)));
@@ -1007,12 +1030,16 @@ impl Autopilot {
         if let Some(saved) = self.saved.as_mut() {
             saved.phase = Phase::Failed;
             saved.finished = Some(saved.started + elapsed);
-            saved.report = Some(format!(
+            let mut report = format!(
                 "✗ Autopilot failed\n{}\n\n{:<LABEL$}{}",
                 clean(&saved.goal, 400),
                 "Reason",
                 clean(&notice, 1024)
-            ));
+            );
+            if let Some(warning) = saved.dirty_warning() {
+                report.push_str(&format!("\n{:<LABEL$}{warning}", "Warning"));
+            }
+            saved.report = Some(report);
         }
         self.finished_notice = Some(clean(&format!("Autopilot failed{GAP}{notice}"), 1024));
         self.set_notice(tasks, notice);
@@ -1445,6 +1472,9 @@ impl Autopilot {
             format!("{:<LABEL$}{accepted}/{} accepted", "Tasks", families.len()),
             format!("{:<LABEL$}{repairs}", "Repairs"),
         ];
+        if let Some(warning) = saved.dirty_warning() {
+            lines.push(format!("{:<LABEL$}{warning}", "Warning"));
+        }
         let branch = match &result {
             Ok(value) => {
                 let (name, _) = value.split_once('\0').unwrap_or((value, ""));

@@ -2607,6 +2607,78 @@ fn manual_repeated_plan_failures_are_not_collapsed() {
     assert_eq!(chat.matches("/plan Improve calc").count(), 2, "{chat}");
 }
 
+const START_NOTICE: &str = "Autopilot started · plan → approve → dispatch → review/repair (max 1 repairs per task) · F5 pauses";
+
+#[test]
+fn clean_working_tree_gets_the_unchanged_start_notice_and_no_warning() {
+    let fixture = Fixture::new();
+    // An ignored file is not an uncommitted change.
+    fs::write(fixture.workspace.join(".gitignore"), "*.log\n").unwrap();
+    git(&fixture.workspace, &["add", ".gitignore"]);
+    git(
+        &fixture.workspace,
+        &["-c", "core.hooksPath=/dev/null", "commit", "-qm", "ignore"],
+    );
+    fs::write(fixture.workspace.join("debug.log"), "noise\n").unwrap();
+    let server = one_good_task();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    let notice = autopilot.start("Answer", "fixture", 1, &control).unwrap();
+    assert_eq!(notice, START_NOTICE);
+    drive(&mut autopilot, &mut control, &runtime, "done", finished);
+    assert!(
+        !autopilot.report().unwrap().contains("uncommitted"),
+        "{}",
+        autopilot.report().unwrap()
+    );
+}
+
+#[test]
+fn dirty_working_tree_warns_at_start_and_in_the_summary_without_touching_it() {
+    let fixture = Fixture::new();
+    fs::write(fixture.workspace.join(".gitignore"), "*.log\n").unwrap();
+    git(&fixture.workspace, &["add", ".gitignore"]);
+    git(
+        &fixture.workspace,
+        &["-c", "core.hooksPath=/dev/null", "commit", "-qm", "ignore"],
+    );
+    let head = fixture.head();
+    fs::write(
+        fixture.workspace.join("calc.py"),
+        "def answer():\n    return 1\n",
+    )
+    .unwrap();
+    fs::write(fixture.workspace.join("new.txt"), "mine\n").unwrap();
+    fs::write(fixture.workspace.join("debug.log"), "ignored\n").unwrap();
+    let before = fixture.status();
+    let server = one_good_task();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    let warning = format!(
+        "2 uncommitted changes are not visible to workers (based on HEAD {})",
+        &head[..7]
+    );
+    // Informational only: /go still starts.
+    let notice = autopilot.start("Answer", "fixture", 1, &control).unwrap();
+    assert_eq!(notice, format!("{START_NOTICE} · {warning}"));
+    drive(&mut autopilot, &mut control, &runtime, "done", finished);
+    let report = autopilot.report().unwrap();
+    assert!(
+        report
+            .lines()
+            .any(|line| line == format!("Warning   {warning}")),
+        "{report}"
+    );
+    // Read-only: the user's tree and index are exactly as they were.
+    assert_eq!(fixture.status(), before);
+    assert_eq!(fixture.head(), head);
+    // The warning survives a restart (persisted state).
+    let reopened = Autopilot::open(&fixture.directory(), "default").unwrap();
+    assert!(reopened.report().unwrap().contains(&warning));
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum Loop {
     None,
