@@ -159,7 +159,7 @@ fn unavailable_target_and_failed_final_save_keep_current_work_and_release_target
     assert!(work
         .switch_to(&runtime, &f.root.join("b"), "beta")
         .unwrap_err()
-        .contains("in use"));
+        .contains("already owns that mission's conversation"));
     drop(target_owner);
     assert_eq!(work.mission(), "alpha");
     assert!(ConversationStore::open(&f.a, "default").is_err());
@@ -394,4 +394,48 @@ fn restart_restores_reviewable_plan_without_inference_and_retains_stale_save_gua
         .unwrap();
     drop(work);
     assert!(fixture.open().tasks.planner.draft.is_none());
+}
+
+#[test]
+fn startup_launch_on_a_busy_conversation_reports_a_short_actionable_error() {
+    use alfredo_tui::selection_command::{Choice, MissionChoice, Origin, Request, WorkspaceChoice};
+    let f = Fixture::new();
+    let runtime = Runtime::new().unwrap();
+    let _owner = ConversationStore::open(&f.a, "default").unwrap();
+    let request = Request::new(
+        Origin::Startup,
+        Choice {
+            workspace: WorkspaceChoice::Existing {
+                path: f.root.join("a"),
+            },
+            mission: MissionChoice::Resume {
+                name: "alpha".into(),
+            },
+        },
+        "default".into(),
+    )
+    .unwrap();
+    let error = Workstation::launch(
+        &runtime,
+        &f.root.join("state"),
+        request,
+        "fixture",
+        Ollama::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap(),
+    )
+    .err()
+    .expect("busy conversation must refuse launch");
+    assert!(
+        error.contains("Another alfredo-tui already owns conversation 'default'"),
+        "{error}"
+    );
+    assert!(error.contains("alfredo-tui --conversation NAME"), "{error}");
+    assert!(error.lines().count() == 1, "{error}");
+    for forbidden in [
+        "inspect partial target artifacts",
+        "Selection stopped after",
+        "selections.json",
+    ] {
+        assert!(!error.contains(forbidden), "{error}");
+    }
+    assert!(alfredo_tui::conversations::is_namespace_in_use(&error));
 }

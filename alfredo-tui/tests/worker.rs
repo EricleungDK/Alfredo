@@ -1,3 +1,4 @@
+mod common;
 use alfredo_tui::{
     provider::Ollama,
     tasks::{Action, Request, TaskStatus, TaskStore, WorkPolicy},
@@ -579,7 +580,8 @@ async fn cancellation_during_inference_produces_terminal_receipt_without_edits()
 #[tokio::test]
 async fn bare_legacy_approval_cannot_start_a_worker() {
     let fixture = Fixture::new();
-    fixture.action(Action::Approve { task: 1 });
+    fixture.permit();
+    common::forge_legacy_approval(&fixture.store);
     let provider = Ollama::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap();
     assert!(worker::start(
         fixture.store.clone(),
