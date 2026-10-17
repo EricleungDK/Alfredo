@@ -1484,7 +1484,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     Ok(()) => {
                                         work.app.sessions[index].remember_submission();
                                         work.app.sessions[index].clear_draft();
-                                        work.app.notice.clear();
+                                        work.app.notice = if text == "/plan-cancel" {
+                                            work.tasks.planner.notice.clone()
+                                        } else {
+                                            String::new()
+                                        };
                                     }
                                     Err(error) => {
                                         work.app.notice = error;
