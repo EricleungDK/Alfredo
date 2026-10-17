@@ -108,6 +108,7 @@ impl Fixture {
             patch: String::new(),
             candidate_commit: None,
             model_metrics: None,
+            failure_code: None,
             generation: None,
             check: None,
         })

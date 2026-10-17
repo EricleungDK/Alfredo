@@ -499,6 +499,9 @@ impl Autopilot {
                 ));
             }
         }
+        if let Some(blocker) = crate::doctor::sandbox_blocker() {
+            return Err(blocker);
+        }
         if tasks.planner.active() || tasks.planner.checkpoint().is_some() {
             return Err("A plan draft is open; /plan-save or /plan-cancel it before /go".into());
         }
@@ -1185,6 +1188,14 @@ impl Autopilot {
         let saved = self.saved.as_ref().unwrap().clone();
         let families = families(&snapshot, &saved, tasks);
         let find = |id: u64| snapshot.tasks.iter().find(|task| task.id == id);
+        // An environment failure cannot be repaired, and says so even when the
+        // repair budget is zero or spent: stop with the root cause quoted.
+        for family in families.iter().filter(|f| !held_or_done(f, tasks)) {
+            if let Some(cause) = find(family.head).and_then(|head| sandbox_failure(tasks, head)) {
+                self.fail(tasks, format!("{cause}. {}", crate::doctor::BWRAP_FIX));
+                return Ok(None);
+            }
+        }
         let mut command = None;
         // Families the owner is instructing are theirs until the instructed run starts.
         let held = tasks.owner.held();
@@ -1493,6 +1504,22 @@ impl Autopilot {
         tasks.autopilot_report = Some(report);
         self.persist();
     }
+}
+
+/// Root cause when the head failed because the sandbox could not start. The
+/// run's evidence carries the typed `failure_code`; repairing cannot fix it.
+fn sandbox_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
+    if head.status != TaskStatus::Failed {
+        return None;
+    }
+    let evidence = tasks.store().evidence(head.id).ok()?;
+    let evidence = serde_json::from_str::<crate::worker::Evidence>(&evidence).ok()?;
+    (evidence.failure_code.as_deref() == Some(crate::execution::SANDBOX_UNAVAILABLE))
+        .then(|| clean(&evidence.detail, 300))
+}
+
+fn held_or_done(family: &Family, tasks: &TaskControl) -> bool {
+    matches!(family.settled, Settled::Success(_)) || tasks.owner.held().contains(&family.root)
 }
 
 const BUDGET_EXHAUSTED: &str = "repair budget exhausted";
