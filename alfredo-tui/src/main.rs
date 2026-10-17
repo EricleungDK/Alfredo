@@ -1065,7 +1065,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Char('w') if ctrl => work.app.sessions[index].delete_word(),
                         KeyCode::Char('u') if ctrl => work.app.sessions[index].clear_draft(),
                         KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
-                            work.app.sessions[index].insert("\n")
+                            work.app.sessions[index].insert("\n");
                         }
                         KeyCode::Enter
                             if alfredo_tui::autopilot::is_command(
@@ -1529,7 +1529,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     if session.replace_pending() {
                         session.clear_draft();
                     }
-                    session.insert(&text);
+                    if session.insert(&text).truncated {
+                        work.app.notice = alfredo_tui::model::PASTE_TRUNCATED_NOTICE.into();
+                    }
                 }
                 _ => {}
             }
