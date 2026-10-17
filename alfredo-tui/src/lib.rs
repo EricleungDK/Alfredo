@@ -1,6 +1,7 @@
 pub mod autopilot;
 pub mod health;
 pub mod model;
+pub mod models;
 pub mod provider;
 pub mod task_control;
 pub mod tasks;

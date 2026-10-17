@@ -1343,7 +1343,7 @@ impl App {
                 self.models_cursor = self
                     .models
                     .iter()
-                    .position(|model| model == current)
+                    .position(|model| crate::models::same_model(model, current))
                     .unwrap_or(0);
                 self.models_notice = if self.models.is_empty() {
                     "No installed models reported".into()
@@ -1378,7 +1378,11 @@ impl App {
         if self.models_pending {
             return Err("Wait for model discovery to finish");
         }
-        if !self.models.iter().any(|model| model == name) {
+        if !self
+            .models
+            .iter()
+            .any(|model| crate::models::same_model(model, name))
+        {
             return Err("Model not in the catalog; /models refreshes installed models");
         }
         let session = &mut self.sessions[self.selected];

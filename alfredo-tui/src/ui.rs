@@ -818,7 +818,11 @@ fn draw_right(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: R
             let text = format!(
                 "{} {} {}",
                 if row == app.models_cursor { "▸" } else { " " },
-                if *name == session.model { "›" } else { " " },
+                if crate::models::same_model(name, &session.model) {
+                    "›"
+                } else {
+                    " "
+                },
                 safe(name)
             );
             if row == app.models_cursor {

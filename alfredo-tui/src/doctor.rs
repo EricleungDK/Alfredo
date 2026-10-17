@@ -61,7 +61,7 @@ pub async fn inspect(
         }
     }
     match provider.models().await {
-        Ok(models) if models.contains(&model) => lines.push(format!(
+        Ok(models) if crate::models::contains_model(&models, &model) => lines.push(format!(
             "PASS model catalog: {} is installed",
             clean(&model)
         )),
