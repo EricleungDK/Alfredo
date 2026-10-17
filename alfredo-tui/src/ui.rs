@@ -303,10 +303,12 @@ fn health_span(app: &App, width: u16) -> Span<'static> {
     health
         .label(side_pane::short_model(&session.model), width >= 100)
         .map(|label| {
-            let tone = if health.healthy() {
-                Tone::Green
-            } else {
+            let tone = if !health.healthy() {
                 Tone::Red
+            } else if health.needs_attention() {
+                Tone::Amber
+            } else {
+                Tone::Green
             };
             Span::styled(format!(" {label} "), Style::default().fg(theme.color(tone)))
         })
@@ -1222,6 +1224,11 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
                 wayfinder_requests.get(&index.saturating_sub(1)).copied(),
             )
         };
+        let heading = if session.interrupted_turn(index - index % 2) {
+            format!("{heading} · interrupted, not sent as context")
+        } else {
+            heading
+        };
         // Speaker labels are quiet; only an unverified claim keeps its warning colour.
         let color = if color == Color::Green {
             Color::DarkGray
@@ -1540,6 +1547,8 @@ fn status_word(snapshot: &crate::tasks::Snapshot, task: &crate::tasks::Task) -> 
     };
     match task.status {
         TaskStatus::Proposed => "Needs approval",
+        // A pre-policy save can hold an approval with no policy; never call it approved.
+        TaskStatus::Approved if task.policy.is_none() => "Needs files/check policy",
         TaskStatus::Approved => "Approved",
         TaskStatus::Cancelled => "Cancelled",
         TaskStatus::Running => "Running",

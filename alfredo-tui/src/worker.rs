@@ -199,13 +199,20 @@ fn shown_path(path: &str) -> String {
         .collect()
 }
 
-/// Block content: one markdown fence layer stripped, one trailing newline.
+/// Block content: one wrapping markdown fence layer stripped (only when no other
+/// fence line lies inside), one trailing newline.
 fn block_content(lines: &[&str]) -> String {
     let mut body = lines;
     let filled = |line: &&str| !line.trim().is_empty();
     if let (Some(first), Some(last)) = (body.iter().position(filled), body.iter().rposition(filled))
     {
-        if first < last && body[first].trim_start().starts_with("```") && body[last].trim() == "```"
+        let interior_fence = body[first + 1..last.max(first + 1)]
+            .iter()
+            .any(|line| line.trim_start().starts_with("```"));
+        if first < last
+            && !interior_fence
+            && body[first].trim_start().starts_with("```")
+            && body[last].trim() == "```"
         {
             body = &body[first + 1..last];
         }
@@ -681,15 +688,32 @@ fn sanitize_output(text: &str) -> String {
     while let Some(c) = chars.next() {
         match c {
             '\u{1b}' => {
-                if chars.peek() == Some(&'[') {
-                    chars.next();
-                    for next in chars.by_ref() {
-                        if ('@'..='~').contains(&next) {
-                            break;
+                match chars.next() {
+                    // CSI: parameters, then a final byte in `@`..=`~`.
+                    Some('[') => {
+                        for next in chars.by_ref() {
+                            if ('@'..='~').contains(&next) {
+                                break;
+                            }
                         }
                     }
-                } else {
-                    chars.next();
+                    // OSC, DCS, APC, PM: a string ended by BEL or ST (`ESC \`).
+                    // An unterminated string drops the rest of the input.
+                    Some(']' | 'P' | '_' | '^') => {
+                        while let Some(next) = chars.next() {
+                            if next == '\u{7}'
+                                || (next == '\u{1b}' && chars.next_if_eq(&'\\').is_some())
+                            {
+                                break;
+                            }
+                        }
+                    }
+                    // Charset designation takes one more character.
+                    Some('(' | ')' | '*' | '+') => {
+                        chars.next();
+                    }
+                    // Any other two-byte escape: the final byte is already consumed.
+                    _ => {}
                 }
             }
             '\r' if chars.peek() == Some(&'\n') => {}
@@ -1269,14 +1293,18 @@ pub async fn start_checked(
         .unwrap()
         .clone();
     let run = task.run.as_ref().unwrap().clone();
-    let directory = store.run_directory(&run.id)?;
-    fs::create_dir_all(directory.parent().unwrap()).map_err(|e| e.to_string())?;
+    let directory = store.run_directory(&run.id).map_err(Refusal::Uncertain)?;
+    fs::create_dir_all(directory.parent().unwrap())
+        .map_err(|e| Refusal::Uncertain(e.to_string()))?;
     // Exclusive directory creation is an effect claim. Existing runs are retained,
     // never deleted or re-executed even when the prior outcome is uncertain.
     fs::create_dir(&directory).map_err(|_| {
-        "Run effect directory already exists or cannot be created; outcome requires inspection"
+        Refusal::Uncertain(
+            "Run effect directory already exists or cannot be created; outcome requires inspection"
+                .into(),
+        )
     })?;
-    crate::run_boundary::record_start(&directory, &task)?;
+    crate::run_boundary::record_start(&directory, &task).map_err(Refusal::Uncertain)?;
     let worktree = directory.join("worktree");
     let mut evidence = Evidence {
         agent: None,
@@ -1405,20 +1433,21 @@ pub async fn start_checked(
         }
         observer.stage("Saving evidence and receipt");
     }
-    let bytes = serde_json::to_vec_pretty(&evidence).map_err(|e| e.to_string())?;
+    let bytes =
+        serde_json::to_vec_pretty(&evidence).map_err(|e| Refusal::Uncertain(e.to_string()))?;
     let digest = format!("{:x}", Sha256::digest(&bytes));
     let mut file = OpenOptions::new()
         .create_new(true)
         .write(true)
         .open(directory.join("evidence.json"))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Refusal::Uncertain(e.to_string()))?;
     file.write_all(&bytes)
         .and_then(|_| file.sync_all())
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Refusal::Uncertain(e.to_string()))?;
     #[cfg(unix)]
     fs::File::open(&directory)
         .and_then(|f| f.sync_all())
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| Refusal::Uncertain(e.to_string()))?;
     // Independent workers may finish together. Retry only the receipt transaction,
     // never inference, file writes or the approved command.
     for _ in 0..32 {
@@ -1446,7 +1475,9 @@ pub async fn start_checked(
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    Err("Evidence saved, but task result receipt is not confirmed; do not rerun effects".into())
+    Err(Refusal::Uncertain(
+        "Evidence saved, but task result receipt is not confirmed; do not rerun effects".into(),
+    ))
 }
 
 // Admission does not approve work. It revalidates the already claimed exact
@@ -1916,5 +1947,85 @@ mod git_error_tests {
         assert!(text.contains("working tree. Use '--'"), "{text}");
         assert!(text.contains("revisions like this:"), "{text}");
         assert!(!text.contains("tree.Use") && !text.contains("  "), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod sanitize_output_tests {
+    use super::sanitize_output;
+
+    #[test]
+    fn strips_escape_sequences_table() {
+        let cases: &[(&str, &str, &str)] = &[
+            (
+                "osc hyperlink bel",
+                "\x1b]8;;http://x\x07link\x1b]8;;\x07 end",
+                "link end",
+            ),
+            ("osc title bel", "\x1b]0;title\x07ok", "ok"),
+            (
+                "osc st terminator",
+                "\x1b]8;;http://x\x1b\\link\x1b]8;;\x1b\\ end",
+                "link end",
+            ),
+            ("dcs st", "a\x1bPq;payload\x1b\\b", "ab"),
+            ("apc st", "a\x1b_payload\x1b\\b", "ab"),
+            ("pm st", "a\x1b^payload\x1b\\b", "ab"),
+            (
+                "osc unterminated drops rest",
+                "keep\x1b]0;title and more",
+                "keep",
+            ),
+            ("osc lone trailing esc", "keep\x1b]0;title\x1b", "keep"),
+            ("charset b", "\x1b(B done", " done"),
+            ("charset paren", "a\x1b)0b", "ab"),
+            ("charset star", "a\x1b*Ab", "ab"),
+            ("charset plus", "a\x1b+Bb", "ab"),
+            ("charset at end", "a\x1b(", "a"),
+            ("keypad mode", "a\x1b=b\x1b>c", "abc"),
+            ("save cursor", "a\x1b7b\x1b8c", "abc"),
+            ("trailing esc", "a\x1b", "a"),
+            ("csi color", "\x1b[31mred\x1b[0m", "red"),
+            ("csi with params", "\x1b[1;32mgreen\x1b[K!", "green!"),
+            ("csi then osc", "\x1b[1m\x1b]0;t\x07x", "x"),
+            ("plain unchanged", "plain text", "plain text"),
+            ("line endings", "a\r\nb\rc\td", "a\nb\nc d"),
+        ];
+        for (name, input, want) in cases {
+            assert_eq!(sanitize_output(input), *want, "{name}");
+        }
+    }
+
+    #[test]
+    fn still_shortens_worktree_paths() {
+        let out = sanitize_output("\x1b]8;;file:///x\x07/tmp/run/worktree/src/a.rs\x1b]8;;\x07");
+        assert!(!out.contains("8;;") && !out.contains("/tmp/run"), "{out}");
+        assert!(out.contains("src/a.rs"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod fence_strip_tests {
+    use super::parse_answer;
+
+    fn content_of(body: &str) -> String {
+        let answer = format!("=== FILE: README.md ===\n{body}=== END FILE ===\n");
+        let plan = parse_answer(&answer).unwrap();
+        assert_eq!(plan.files.len(), 1);
+        plan.files[0].content.clone()
+    }
+
+    #[test]
+    fn markdown_file_with_several_fence_pairs_is_kept_verbatim() {
+        let body = "```sh\ncargo build\n```\n\nThen run it:\n\n```sh\ncargo run\n```\n";
+        assert_eq!(content_of(body), body);
+    }
+
+    #[test]
+    fn single_wrapping_fence_is_still_stripped() {
+        assert_eq!(
+            content_of("```python\nprint(1)\n```\n"),
+            "print(1)\n".to_string()
+        );
     }
 }

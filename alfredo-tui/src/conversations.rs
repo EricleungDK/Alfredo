@@ -223,6 +223,9 @@ impl Snapshot {
             {
                 return Err("Conversation role order is invalid".into());
             }
+            if !session.valid_interrupted() {
+                return Err("Conversation interrupted turns are invalid".into());
+            }
             if (session.messages.is_empty() && session.status != Status::Ready)
                 || (!session.messages.is_empty()
                     && (session.status == Status::Ready || session.attempt == 0))
@@ -280,6 +283,21 @@ impl Snapshot {
     }
 }
 
+const NAMESPACE_IN_USE_MARKER: &str = "already owns conversation";
+/// Startup refusal when another process holds the conversation namespace.
+pub fn namespace_in_use(namespace: &str) -> String {
+    format!("Another alfredo-tui {NAMESPACE_IN_USE_MARKER} '{namespace}' for this repo. Close it, or start this one with: alfredo-tui --conversation NAME")
+}
+/// Same refusal while switching missions inside a running session.
+pub fn namespace_in_use_in_session() -> String {
+    "Another alfredo-tui already owns that mission's conversation; close it or pick another mission"
+        .into()
+}
+/// True when `error` is the refusal produced by [`namespace_in_use`].
+pub fn is_namespace_in_use(error: &str) -> bool {
+    error.starts_with("Another alfredo-tui ") && error.contains(NAMESPACE_IN_USE_MARKER)
+        || error == namespace_in_use_in_session()
+}
 pub struct ConversationStore {
     root: PathBuf,
     path: PathBuf,
@@ -303,9 +321,7 @@ impl ConversationStore {
             true,
             true,
         )?;
-        owner
-            .try_lock()
-            .map_err(|_| "Conversation namespace is in use; choose another --conversation NAME")?;
+        owner.try_lock().map_err(|_| namespace_in_use(namespace))?;
         Ok(Self {
             path: root.join(format!("conversations-{digest}.json")),
             root,
@@ -519,5 +535,16 @@ impl Autosave {
         self.store.save(&snapshot)?;
         self.saved = Some(snapshot);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod namespace_in_use_tests {
+    use super::*;
+    #[test]
+    fn only_the_bare_refusal_is_classified() {
+        assert!(is_namespace_in_use(&namespace_in_use("x")));
+        assert!(is_namespace_in_use(&namespace_in_use_in_session()));
+        assert!(!is_namespace_in_use("Selection stopped after mission ready at /p: Another alfredo-tui already owns conversation 'x' for this repo. Close it"));
     }
 }

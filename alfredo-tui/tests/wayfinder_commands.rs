@@ -64,6 +64,7 @@ fn turn(app: &mut App, session: usize, prompt: &str) -> (usize, Turn) {
             session,
             attempt: app.sessions[session].attempt,
             model: app.sessions[session].model.clone(),
+            user_message,
             messages,
         },
     )
@@ -197,7 +198,8 @@ fn wayfinder_entry_draft_and_confirmation_wait_for_saved_origin_and_replay_exact
         session: 0,
         attempt: restored.sessions[0].attempt,
         model: restored.sessions[0].model.clone(),
-        messages: restored.sessions[0].messages[..*user_message + 1].to_vec(),
+        user_message: *user_message,
+        messages: restored.sessions[0].request_through(*user_message),
     };
     restarted.resume(replay_turn, request.clone()).unwrap();
     assert_eq!(scope.snapshot().unwrap(), final_scope);
@@ -337,4 +339,50 @@ fn cancellation_after_wayfinder_write_preserves_canonical_receipt_without_revivi
         .is_some());
     assert_eq!(scope.snapshot().unwrap().revision, 1);
     assert!(fixture.tasks.snapshot().unwrap().tasks.is_empty());
+}
+
+#[test]
+fn wayfinder_command_after_an_interrupted_turn_binds_the_transcript_index_not_the_context_length() {
+    let fixture = Fixture::new();
+    let scope = fixture.tasks.understanding();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let mut router = Router::new(scope.clone());
+    let mut app = App::new("fixture".into());
+    app.sessions[0].insert("wrong question");
+    app.sessions[0].begin().unwrap();
+    app.sessions[0].cancel();
+    let (user_message, submitted) = turn(&mut app, 0, "Build a new project for local calculations");
+    assert_eq!(user_message, 2);
+    assert_eq!(
+        submitted.messages.len(),
+        1,
+        "interrupted turn is not context"
+    );
+    assert_eq!(submitted.user_message, 2);
+    router
+        .start(
+            &runtime,
+            submitted,
+            Some(scope.snapshot().unwrap().revision),
+        )
+        .unwrap();
+    let (prepared_turn, request) = prepared(&mut router, &runtime);
+    assert_eq!(prepared_turn.user_message, 2);
+    let origins = router.prepared_origins();
+    assert_eq!(origins.len(), 1);
+    assert_eq!(origins[0].2, 2, "not the filtered context length minus one");
+    app.sessions[0]
+        .submit_wayfinder_command(origins[0].2, request.clone())
+        .unwrap();
+    let entry = app.sessions[0].commands().last().unwrap();
+    let Intent::Wayfinder { user_message, .. } = &entry.intent else {
+        panic!("Expected a Wayfinder intent");
+    };
+    // A retry rebuilds the same context without resending the interrupted turn.
+    let replay = app.sessions[0].request_through(*user_message);
+    assert_eq!(replay.len(), 1);
+    assert_eq!(
+        replay[0].content,
+        "Build a new project for local calculations"
+    );
 }

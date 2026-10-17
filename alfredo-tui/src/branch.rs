@@ -1,6 +1,6 @@
 //! Local branch handoff. Git's exact ref is observable if the task receipt is interrupted.
 use crate::{
-    tasks::{Action, Request, Snapshot, TaskStatus, TaskStore},
+    tasks::{Action, Refusal, Request, Snapshot, TaskStatus, TaskStore},
     worker::{git, verify_candidate, Evidence},
 };
 use std::time::Duration;
@@ -18,14 +18,29 @@ pub async fn publish(
     expected_revision: u64,
     correlation: String,
 ) -> Result<(Snapshot, String), String> {
+    publish_checked(store, task, expected_revision, correlation)
+        .await
+        .map_err(String::from)
+}
+
+/// `publish` with a typed refusal. Everything before the git ref is created is a
+/// final refusal; failures once the ref may exist leave the outcome uncertain.
+pub async fn publish_checked(
+    store: TaskStore,
+    task: u64,
+    expected_revision: u64,
+    correlation: String,
+) -> Result<(Snapshot, String), Refusal> {
     let snapshot = store.snapshot()?;
     let item = snapshot
         .tasks
         .iter()
         .find(|item| item.id == task)
-        .ok_or("Unknown task")?;
+        .ok_or_else(|| crate::tasks::unknown_task(task))?;
     if item.status != TaskStatus::Accepted {
-        return Err("Review and accept this task before /branch".into());
+        return Err(
+            format!("Task #{task} is not accepted; /accept {task} before /branch {task}").into(),
+        );
     }
     let evidence: Evidence =
         serde_json::from_str(&store.evidence(task)?).map_err(|_| "Malformed branch evidence")?;
@@ -87,11 +102,12 @@ pub async fn publish(
                     &snapshot.workspace,
                     &["show-ref", "--verify", "--hash", &reference],
                 )
-                .await?;
+                .await
+                .map_err(Refusal::Uncertain)?;
                 if current.trim() != commit {
-                    return Err(format!(
+                    return Err(Refusal::Uncertain(format!(
                         "Branch creation not confirmed; /branch {task} can recheck: {error}"
-                    ));
+                    )));
                 }
             }
         }
@@ -100,9 +116,12 @@ pub async fn publish(
         &snapshot.workspace,
         &["show-ref", "--verify", "--hash", &reference],
     )
-    .await?;
+    .await
+    .map_err(Refusal::Uncertain)?;
     if actual.trim() != commit {
-        return Err("Review branch changed before confirmation".into());
+        return Err(Refusal::Uncertain(
+            "Review branch changed before confirmation".into(),
+        ));
     }
     // Only receipt storage is retried. Git ref creation is not repeated in this loop.
     for _ in 0..32 {
@@ -123,7 +142,9 @@ pub async fn publish(
                 .find(|receipt| receipt.request.correlation == correlation)
             {
                 if receipt.request.action != action {
-                    return Err("Branch exists, but receipt correlation conflicts".into());
+                    return Err(Refusal::Uncertain(
+                        "Branch exists, but receipt correlation conflicts".into(),
+                    ));
                 }
             }
             let request = Request {
@@ -140,7 +161,7 @@ pub async fn publish(
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    Err(format!(
+    Err(Refusal::Uncertain(format!(
         "Branch {name} exists; receipt not confirmed. Repeat /branch {task} to reconcile."
-    ))
+    )))
 }

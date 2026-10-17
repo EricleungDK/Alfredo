@@ -209,14 +209,22 @@ pub const DEFAULT_MISSION: &str = "default";
 /// mission `default` resumed or created. `Ok(None)` means not inside a repository.
 /// Nothing is created here; the launcher admits the choice like a selector choice.
 pub async fn automatic(starting: &Path, state: &Path) -> Result<Option<Choice>> {
+    let Some(root) = repository_root(starting).await? else {
+        return Ok(None);
+    };
+    let workspace = prepare_workspace(&root, state, false).await?;
+    open_or_create(state, workspace, DEFAULT_MISSION).map(Some)
+}
+
+/// Canonical root of the repository containing `starting`; `Ok(None)` outside a repository.
+pub async fn repository_root(starting: &Path) -> Result<Option<PathBuf>> {
     let Ok(root) = git(starting, &["rev-parse", "--show-toplevel"]).await else {
         return Ok(None);
     };
-    let root = Path::new(root.trim())
+    Path::new(root.trim())
         .canonicalize()
-        .map_err(|e| format!("Repository unavailable: {e}"))?;
-    let workspace = prepare_workspace(&root, state, false).await?;
-    open_or_create(state, workspace, DEFAULT_MISSION).map(Some)
+        .map(Some)
+        .map_err(|e| format!("Repository unavailable: {e}"))
 }
 
 /// Notice shown above the selector when the automatic open found no repository at `start`.
@@ -280,7 +288,9 @@ pub fn render_selector(frame: &mut Frame, view: &SelectorView) {
     let notice_height = if view.notice.is_empty() {
         0
     } else {
-        notice.line_count(area.width).clamp(1, 4) as u16
+        notice
+            .line_count(area.width)
+            .clamp(1, usize::from(area.height.saturating_sub(8)).max(1)) as u16
     };
     let rows = Layout::vertical([
         Constraint::Length(2),
@@ -429,7 +439,9 @@ pub fn choose(
 ) -> Result<Option<Choice>> {
     if let (Some(path), Some(name)) = (&explicit, &mission) {
         let workspace = runtime.block_on(prepare_workspace(path, state, false))?;
-        return Ok(Some(mission_choice(state, workspace, name, start_new)?));
+        return Ok(Some(flag_mission_choice(
+            state, workspace, name, start_new,
+        )?));
     }
     let mut terminal = ratatui::init();
     let _guard = Guard;
@@ -462,7 +474,12 @@ pub fn choose_in_terminal(
         None => None,
     };
     if let (Some(path), Some(name)) = (&accepted, &mission) {
-        return Ok(Some(mission_choice(state, path.clone(), name, start_new)?));
+        return Ok(Some(flag_mission_choice(
+            state,
+            path.clone(),
+            name,
+            start_new,
+        )?));
     }
     // Suggestions are placeholders, so typing never appends to them.
     let mission_placeholder = mission.as_deref().unwrap_or(DEFAULT_MISSION).to_owned();
@@ -619,14 +636,58 @@ pub fn choose_in_terminal(
                         .modifiers
                         .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
-                    input.insert(&c.to_string())
+                    input.insert(&c.to_string());
                 }
                 _ => {}
             },
-            Event::Paste(text) => input.insert(&text),
+            Event::Paste(text) => {
+                let inserted = input.insert(&text);
+                if inserted.truncated {
+                    notice = crate::model::PASTE_TRUNCATED_NOTICE.into();
+                }
+            }
             _ => {}
         }
     }
+}
+
+/// Mission resolution for `--mission` / `--new-mission`: same checks as the selector,
+/// but errors name the flag to use instead of a selector choice.
+fn flag_mission_choice(
+    state: &Path,
+    workspace: WorkspaceChoice,
+    name: &str,
+    start_new: bool,
+) -> Result<Choice> {
+    let path = match &workspace {
+        WorkspaceChoice::Existing { path } => Some(path.clone()),
+        _ => None,
+    };
+    mission_choice(state, workspace, name, start_new).map_err(|error| {
+        let existing = path
+            .and_then(|path| crate::missions::discover(state, &path).ok())
+            .map(|found| found.names)
+            .unwrap_or_default();
+        flag_mission_error(error, name, &existing)
+    })
+}
+
+/// Rewrite the two selector-wording mission errors for the command line.
+pub fn flag_mission_error(error: String, name: &str, existing: &[String]) -> String {
+    if error == crate::tasks::MISSION_EXISTS {
+        return format!("Mission '{name}' already exists; use --mission {name} to resume it");
+    }
+    if error == crate::tasks::MISSION_MISSING {
+        let mut message =
+            format!("Mission '{name}' does not exist; use --new-mission {name} to create it");
+        if !existing.is_empty() {
+            let shown: Vec<&str> = existing.iter().take(5).map(String::as_str).collect();
+            let more = if existing.len() > 5 { ", …" } else { "" };
+            message.push_str(&format!(" (existing: {}{more})", shown.join(", ")));
+        }
+        return message;
+    }
+    error
 }
 
 fn mission_choice(

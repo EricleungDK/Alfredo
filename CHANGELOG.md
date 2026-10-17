@@ -6,13 +6,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- `/go` on a working tree with uncommitted changes or untracked files now says so: the
-  start notice and the run summary warn `N uncommitted changes are not visible to
-  workers (based on HEAD abc1234)`. Informational only; a clean tree is unchanged and
-  nothing in your repository is modified.
-
 ### Changed
 
 - A failed `/go` summary now says why: a task whose repair budget is spent shows its
