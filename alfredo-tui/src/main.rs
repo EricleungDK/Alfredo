@@ -27,6 +27,18 @@ fn main() {
     }
 }
 
+/// Selection-stage failures point at the selection history; a busy conversation is reported plainly.
+fn launch_error_message(error: String, journal: &std::path::Path) -> String {
+    if alfredo_tui::conversations::is_namespace_in_use(&error) {
+        error
+    } else {
+        format!(
+            "{error}. Inspect selection history at {}",
+            journal.display()
+        )
+    }
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let starting = std::env::current_dir()?;
     let mut workspace = None;
@@ -249,12 +261,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         Workstation::launch(&runtime, &state_dir, request, &model, provider.clone()).map_err(
             |error| {
-                format!(
-                    "{error}. Inspect selection history at {}",
-                    state_dir
-                        .join("rust-selection-v1/selections.json")
-                        .display()
-                )
+                launch_error_message(error, &state_dir.join("rust-selection-v1/selections.json"))
             },
         )
     };
@@ -266,6 +273,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         match runtime.block_on(alfredo_tui::selection::automatic(&start, &state_dir)) {
             Ok(Some(choice)) => match launch(choice) {
                 Ok(work) => launched = Some(work),
+                Err(error) if alfredo_tui::conversations::is_namespace_in_use(&error) => {
+                    return Err(error.into())
+                }
                 Err(error) => notice = format!("Automatic open failed: {error}"),
             },
             Ok(None) => notice = alfredo_tui::selection::not_a_repository_notice(&start),
@@ -1859,6 +1869,18 @@ fn withdraw_pending_architect(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn launch_errors_keep_the_selection_history_pointer_except_a_busy_conversation() {
+        let journal = std::path::Path::new("/s/selections.json");
+        let genuine =
+            super::launch_error_message("Selection stopped after mission ready".into(), journal);
+        assert!(
+            genuine.ends_with("Inspect selection history at /s/selections.json"),
+            "{genuine}"
+        );
+        let busy = alfredo_tui::conversations::namespace_in_use("default");
+        assert_eq!(super::launch_error_message(busy.clone(), journal), busy);
+    }
     use super::{
         saved_pending_command, stage_ready_wayfinder, withdraw_pending_architect,
         withdraw_wayfinder,

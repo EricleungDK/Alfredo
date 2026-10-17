@@ -280,7 +280,9 @@ pub fn render_selector(frame: &mut Frame, view: &SelectorView) {
     let notice_height = if view.notice.is_empty() {
         0
     } else {
-        notice.line_count(area.width).clamp(1, 4) as u16
+        notice
+            .line_count(area.width)
+            .clamp(1, usize::from(area.height.saturating_sub(8)).max(1)) as u16
     };
     let rows = Layout::vertical([
         Constraint::Length(2),

@@ -127,11 +127,22 @@ class ZeroCeremonyStart(unittest.TestCase):
                 first.wait_for(root)  # arrival line names the repository root
                 manifests = [json.loads(path.read_text()) for path in Path(state).rglob('mission.json')]
                 self.assertEqual([manifest['mission'] for manifest in manifests], ['default'])
-                # The conversation is owned by the first terminal: fall back with the reason shown.
-                second = Pty(self, args, nested, env)
+                # The conversation is owned by the first terminal: no selector, a short message, non-zero exit.
+                busy = Pty(self, args, nested, env)
+                try:
+                    self.assertEqual(busy.process.wait(timeout=30), 1)
+                    while select.select([busy.master], [], [], 0.2)[0]:
+                        busy.output.extend(os.read(busy.master, 65536))
+                    raw = busy.output.decode(errors='replace')  # the reconstructed screen clips wrapped lines
+                    self.assertIn('already owns conversation', raw)
+                    self.assertIn('alfredo-tui --conversation NAME', raw)
+                    for text in ('Open your work', 'Selection stopped', 'selections.json', 'partial target artifacts'):
+                        self.assertNotIn(text, raw)
+                finally:
+                    busy.close()
+                # --select still reaches the selector, where another mission can be chosen.
+                second = Pty(self, args + ['--select'], nested, env)
                 second.wait_for('Workspace selection required')
-                second.wait_for('Automatic open failed')
-                second.wait_for('in use')
                 # Enter validates the placeholder (the subdirectory); the refusal sits on the line above the input.
                 second.write(b'\r')
                 second.wait_for('exact repository root')

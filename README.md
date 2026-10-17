@@ -210,8 +210,9 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
   with `bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net true` and allow
   bwrap per your distro's policy.
 - **"Interactive terminal required"**: run in a real terminal, not piped.
-- **"Conversation namespace is in use"**: another terminal owns that conversation
-  set; use `--conversation other` (both terminals share the task queue).
+- **"Another alfredo-tui already owns conversation 'default' for this repo"**: another
+  terminal owns that conversation set; close it or relaunch with
+  `alfredo-tui --conversation other` (both terminals share the task queue).
 
 ### WSL notes
 
