@@ -351,3 +351,28 @@ async fn failing_catalog_read_never_flags_the_model_as_missing() {
     }
     assert_eq!(view.state("qwen3:14b"), Health::Up);
 }
+
+#[tokio::test]
+async fn bare_model_name_goes_warm_when_ollama_reports_it_as_latest() {
+    let fixture = serve(reserve(), |request, _| match request.path.as_str() {
+        "GET /api/ps" => running(&["qwen2.5-coder:latest"]),
+        "POST /api/generate" => Reply::Json(200, "{\"done\":true,\"done_reason\":\"load\"}".into()),
+        _ => Reply::Json(404, "{}".into()),
+    });
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(3)).unwrap();
+    let monitor = Monitor::start(
+        &tokio::runtime::Handle::current(),
+        provider,
+        Duration::from_millis(40),
+    );
+    let view = monitor.view();
+    wait_for(&view, "qwen2.5-coder", |state| {
+        matches!(state, Health::Ready { .. })
+    })
+    .await;
+    assert_eq!(
+        view.state("qwen2.5-coder:14b"),
+        Health::Up,
+        "another tag is not warm"
+    );
+}

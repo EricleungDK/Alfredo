@@ -1430,7 +1430,7 @@ impl App {
                 self.models_cursor = self
                     .models
                     .iter()
-                    .position(|model| model == current)
+                    .position(|model| crate::models::same_model(model, current))
                     .unwrap_or(0);
                 self.models_notice = if self.models.is_empty() {
                     "No installed models reported".into()
@@ -1465,7 +1465,7 @@ impl App {
     }
 
     fn resolve_queued_model(&mut self, index: usize, name: &str) {
-        if !self.models.iter().any(|model| model == name) {
+        if !crate::models::contains_model(&self.models, name) {
             let shown: Vec<&str> = self.models.iter().take(4).map(String::as_str).collect();
             self.notice = if shown.is_empty() {
                 format!("Model {name} is not installed; no installed models reported · /models")
@@ -1511,7 +1511,11 @@ impl App {
         if self.models_pending {
             return Err("Wait for model discovery to finish");
         }
-        if !self.models.iter().any(|model| model == name) {
+        if !self
+            .models
+            .iter()
+            .any(|model| crate::models::same_model(model, name))
+        {
             return Err("Model not in the catalog; /models refreshes installed models");
         }
         let Some(session) = self.sessions.get_mut(index) else {

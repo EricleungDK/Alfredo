@@ -43,7 +43,7 @@ pub async fn assign_checked(
             .ok_or("Unknown task")?
             .validate_assignment(&model)?;
         let models = provider.models().await?;
-        if !models.contains(&model) {
+        if !crate::models::contains_model(&models, &model) {
             return Err(format!(
                 "Worker model {model} is not installed; /models lists available choices"
             )

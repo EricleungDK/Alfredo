@@ -1030,11 +1030,9 @@ impl Ollama {
 pub const MISSING_MODEL_MARKER: &str = " is not installed (Ollama: ";
 
 /// True when `installed` (an `/api/tags` listing) provides `model`. A name
-/// without a tag means `:latest`, as in Ollama.
+/// without a tag means `:latest`, as in Ollama (see [`crate::models::same_model`]).
 pub fn model_installed(installed: &[String], model: &str) -> bool {
-    installed.iter().any(|name| {
-        name == model || (!model.contains(':') && name.strip_suffix(":latest") == Some(model))
-    })
+    crate::models::contains_model(installed, model)
 }
 
 /// A 404 whose JSON body says the model was not found, mapped to an error that

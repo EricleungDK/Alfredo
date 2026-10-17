@@ -283,6 +283,8 @@ shown above the selector when automatic open finds no repository.
 
 Diagnostics can initialize private state directories and lock files, but do not
 save conversations, mutate task receipts, send inference, or run coding checks.
+Model names are compared the way Ollama resolves them: `name` equals `name:latest` (only the last `/` segment
+carries a tag) and no other tag.
 Model catalog membership does not prove model readiness or GPU capacity, and tool
 presence does not prove sandbox permission. Actual worker execution remains subject
 to the normal permission and sandbox checks. An occupied named conversation is

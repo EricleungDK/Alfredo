@@ -245,6 +245,32 @@ fn doctor_in_a_non_repository_names_the_next_step_and_skips_the_storage_check() 
     assert!(!text.contains("outside the coding workspace"), "{text}");
 }
 
+#[test]
+fn doctor_accepts_a_bare_model_name_installed_as_latest_but_not_another_tag() {
+    for (model, tag, passes) in [
+        ("qwen2.5-coder", "qwen2.5-coder:latest", true),
+        ("qwen2.5-coder", "qwen2.5-coder:14b", false),
+    ] {
+        let fixture = Fixture::new();
+        let (endpoint, job) = catalog(tag);
+        let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+            .args(["--doctor", "--model", model, "--endpoint", &endpoint])
+            .arg("--workspace")
+            .arg(&fixture.workspace)
+            .arg("--state-dir")
+            .arg(&fixture.state)
+            .output()
+            .unwrap();
+        job.join().unwrap();
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert_eq!(
+            text.contains("PASS model catalog"),
+            passes,
+            "{model} vs {tag}: {text}"
+        );
+    }
+}
+
 fn doctor_text(mut command: Command, server: thread::JoinHandle<()>) -> (Option<i32>, String) {
     let output = command.output().unwrap();
     server.join().unwrap();

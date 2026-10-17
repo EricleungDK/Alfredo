@@ -111,6 +111,20 @@ fn model_name_before_first_discovery_waits_then_selects_an_installed_model() {
 }
 
 #[test]
+fn bare_model_name_before_first_discovery_selects_the_latest_tag_only() {
+    let mut app = App::new("original".into());
+    assert!(app.queue_model("qwen2.5-coder"));
+    app.receive_models(Ok(vec!["qwen2.5-coder:latest".into()]));
+    assert_eq!(app.sessions[0].model, "qwen2.5-coder", "typed name is kept");
+
+    let mut app = App::new("original".into());
+    assert!(app.queue_model("qwen2.5-coder"));
+    app.receive_models(Ok(vec!["qwen2.5-coder:14b".into()]));
+    assert_eq!(app.sessions[0].model, "original");
+    assert!(app.notice.contains("is not installed"), "{}", app.notice);
+}
+
+#[test]
 fn model_name_before_first_discovery_reports_not_installed_with_the_catalog() {
     let mut app = App::new("original".into());
     assert!(app.queue_model("missing"));
