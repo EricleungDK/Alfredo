@@ -65,6 +65,20 @@ fn prepared_task_captures_selection_and_never_mutates_before_dispatch() {
     let fixture = Fixture::new();
     fixture.propose("First");
     fixture.propose("Second");
+    fixture
+        .store
+        .transact(Request {
+            correlation: "permit".into(),
+            expected_revision: 2,
+            action: Action::Permit {
+                task: 1,
+                policy: alfredo_tui::tasks::WorkPolicy {
+                    files: vec!["calc.py".into()],
+                    check: vec!["/bin/true".into()],
+                },
+            },
+        })
+        .unwrap();
     let mut control = fixture.control();
     let path = fixture
         .store
@@ -442,4 +456,87 @@ fn planner_preparation_is_inert_and_never_a_task_receipt() {
         outcome: Outcome::Stopped,
     };
     assert!(!forged.valid(0));
+}
+
+fn settle(control: &mut TaskControl) {
+    wait(control);
+}
+
+fn refused_without_retry_hint(command: &str, expected: &str) {
+    let fixture = Fixture::new();
+    fixture.propose("First");
+    let mut control = fixture.control();
+    let intent = control
+        .prepare_command(command, "fixture")
+        .unwrap()
+        .unwrap();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    control.dispatch_prepared(&runtime, &intent).unwrap();
+    settle(&mut control);
+    assert!(
+        control.intent_refused(&intent),
+        "{command}: {:?}",
+        control.intent_error(&intent)
+    );
+    assert!(!control.intent_transient(&intent));
+    let error = control.intent_error(&intent).unwrap();
+    assert!(error.contains(expected), "{command}: {error}");
+    assert!(
+        !control.notice.contains("/retry-task"),
+        "{}",
+        control.notice
+    );
+    assert!(control.notice.contains(expected), "{}", control.notice);
+    assert!(control.notice.chars().count() <= 80, "{}", control.notice);
+}
+
+#[test]
+fn unknown_task_is_refused_with_next_step_and_no_retry_hint() {
+    refused_without_retry_hint("/approve 9", "Unknown task 9; the task panel lists ids");
+}
+
+#[test]
+fn accept_without_run_evidence_is_refused_with_next_step() {
+    refused_without_retry_hint("/accept 1", "Task #1 has not run; /run 1 first");
+}
+
+#[test]
+fn evidence_on_a_task_that_never_ran_names_the_next_step_without_retry_hint() {
+    let fixture = Fixture::new();
+    fixture.propose("First");
+    let mut control = fixture.control();
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    // An earlier failed request leaves a retryable request behind.
+    control.command(&runtime, "/accept 1", "fixture").unwrap();
+    settle(&mut control);
+    control.command(&runtime, "/evidence 1", "fixture").unwrap();
+    settle(&mut control);
+    assert!(
+        control.notice.contains("Task #1 has not run; /run 1 first"),
+        "{}",
+        control.notice
+    );
+    assert!(
+        !control.notice.contains("/retry-task"),
+        "{}",
+        control.notice
+    );
+    assert!(control.notice.chars().count() <= 80, "{}", control.notice);
+}
+
+#[test]
+fn undecided_command_stays_unconfirmed() {
+    let fixture = Fixture::new();
+    fixture.propose("First");
+    let control = fixture.control();
+    let mut control = control;
+    let intent = control
+        .prepare_command("/approve 1", "fixture")
+        .unwrap()
+        .unwrap();
+    assert!(!control.intent_refused(&intent));
+    assert!(matches!(
+        control.unmatched_state(&intent),
+        alfredo_tui::console_command::CommandState::Unknown { .. }
+    ));
 }

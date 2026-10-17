@@ -81,6 +81,7 @@ pub struct TaskControl {
     prepared_errors: BTreeMap<String, String>,
     /// Correlations whose refusal was transient: nothing was written.
     prepared_transient: BTreeSet<String>,
+    prepared_refused: BTreeSet<String>,
     controller_epoch: u64,
     dispatch_origin: Option<crate::control_command::Request>,
     control_sender: mpsc::UnboundedSender<ControlResult>,
@@ -176,6 +177,7 @@ impl TaskControl {
             prepared_workers: BTreeMap::new(),
             prepared_errors: BTreeMap::new(),
             prepared_transient: BTreeSet::new(),
+            prepared_refused: BTreeSet::new(),
             controller_epoch: 0,
             dispatch_origin: None,
             control_sender,
@@ -536,15 +538,24 @@ impl TaskControl {
                 );
                 self.apply_outcome(Ok((*current, notice).into()));
             }
+            Err(refusal) if refusal.final_refusal() => {
+                // Decided before any write: retrying or refreshing cannot change it.
+                self.retry = None;
+                self.notice = refusal.to_string();
+            }
             Err(refusal) => self.apply_outcome(Err(refusal.into())),
         }
     }
 
     fn record_refusal(&mut self, correlation: &str, result: &Checked) {
         self.prepared_transient.remove(correlation);
+        self.prepared_refused.remove(correlation);
         if let Err(refusal) = result {
             self.prepared_errors
                 .insert(correlation.into(), refusal.to_string());
+            if refusal.final_refusal() {
+                self.prepared_refused.insert(correlation.into());
+            }
             if refusal.transient() {
                 self.prepared_transient.insert(correlation.into());
             }
@@ -569,6 +580,28 @@ impl TaskControl {
         } else {
             self.notice =
                 format!("Automatic launch #{task} deferred: {reason}; retrying on current state");
+        }
+    }
+
+    /// The intent was refused before any write, so it can only be refused again.
+    pub fn intent_refused(&self, intent: &crate::command_intent::Intent) -> bool {
+        self.prepared_refused.contains(intent.correlation())
+    }
+
+    /// State for a submitted command whose operation ended without a matching
+    /// receipt: refused when decided before any write, otherwise unconfirmed.
+    pub fn unmatched_state(
+        &self,
+        intent: &crate::command_intent::Intent,
+    ) -> crate::console_command::CommandState {
+        use crate::console_command::{bounded_reason, CommandState};
+        let reason = bounded_reason(&self.intent_error(intent).unwrap_or_else(|| {
+            "Operation ended without a matching receipt; inspect Activity before retry".into()
+        }));
+        if self.intent_refused(intent) {
+            CommandState::Refused { reason }
+        } else {
+            CommandState::Unknown { reason }
         }
     }
 
@@ -1412,12 +1445,12 @@ impl TaskControl {
             self.notice = "Checking installed worker model; awaiting assignment receipt".into();
             runtime.spawn(async move {
                 let result = match provider {
-                    Some(provider) => crate::assignment::assign(store, request, provider)
+                    Some(provider) => crate::assignment::assign_checked(store, request, provider)
                         .await
                         .map(Projection::from),
-                    None => Err("Worker provider unavailable".into()),
+                    None => Err(Refusal::from("Worker provider unavailable")),
                 };
-                let _ = sender.send(result.map_err(Refusal::from)).await;
+                let _ = sender.send(result).await;
             });
             return;
         }
@@ -1430,6 +1463,7 @@ impl TaskControl {
                         Action::ResolveRepair { task } => format!("Repair #{task} selected for original dependencies · revision {}", receipt.revision),
                         Action::Plan { plan } => format!("Plan saved · {} proposed tasks starting at #{} · revision {} · approve each policy before /run", plan.tasks.len(), receipt.task, receipt.revision),
                         Action::ReviewAndRepair { task, .. } => format!("Review #{task} saved · repair #{} proposed · /approve {} before running · revision {}", receipt.task, receipt.task, receipt.revision),
+                        Action::Propose { .. } => format!("Task #{} saved · next /permit {} {{\"files\":[…],\"check\":[…]}}, then /approve {} · revision {}", receipt.task, receipt.task, receipt.task, receipt.revision),
                         _ => format!("Task #{} saved · revision {}", receipt.task, receipt.revision),
                     };
                     (snapshot, notice).into()
@@ -1449,7 +1483,11 @@ impl TaskControl {
                 }).map_err(Refusal::from),
             })
             .await
-            .unwrap_or_else(|_| Err("Task storage worker stopped; outcome unknown".into()));
+            .unwrap_or_else(|_| {
+                Err(Refusal::Uncertain(
+                    "Task storage worker stopped; outcome unknown".into(),
+                ))
+            });
             let _ = sender.send(result).await;
         });
     }
@@ -1536,10 +1574,10 @@ impl TaskControl {
             ))
             .await
             .unwrap_or_else(|_| {
-                Err(
+                Err(Refusal::Uncertain(
                     "Worker stopped unexpectedly; inspect retained run, do not replay effects"
                         .into(),
-                )
+                ))
             });
             let _ = sender.send((task, result.map(Projection::from))).await;
         });
@@ -1935,7 +1973,7 @@ impl TaskControl {
                         .strip_prefix("/scope-confirm ")
                         .unwrap()
                         .parse()
-                        .map_err(|_| "Usage: /scope-confirm DRAFT_REVISION")?,
+                        .map_err(|_| USAGE_SCOPE_CONFIRM)?,
                 }
             };
             Intent::Scope {
@@ -1961,7 +1999,7 @@ impl TaskControl {
                     .tasks
                     .iter()
                     .find(|t| t.id == task)
-                    .ok_or("Unknown task")?;
+                    .ok_or_else(|| crate::tasks::unknown_task(task))?;
                 match verb {
                     "/run" => Intent::Run {
                         correlation,
@@ -1977,13 +2015,23 @@ impl TaskControl {
                                 receipt.request.expected_revision
                             }),
                             task,
-                            run: item.run.as_ref().ok_or("Task has not run")?.id.clone(),
+                            run: item
+                                .run
+                                .as_ref()
+                                .ok_or_else(|| crate::tasks::not_run(task))?
+                                .id
+                                .clone(),
                         }
                     }
                     _ => Intent::Recover {
                         correlation,
                         task,
-                        run: item.run.as_ref().ok_or("Task has not run")?.id.clone(),
+                        run: item
+                            .run
+                            .as_ref()
+                            .ok_or_else(|| crate::tasks::not_run(task))?
+                            .id
+                            .clone(),
                     },
                 }
             } else if text == "/plan-save" {
@@ -2009,13 +2057,15 @@ impl TaskControl {
                         correlation,
                         expected_revision: snapshot.revision,
                         action: parse(&text, model).map_err(|error| {
-                            match error.strip_prefix("Usage: /review ") {
-                                Some(_) => {
-                                    let task = text
-                                        .strip_prefix("/review ")
-                                        .and_then(|rest| rest.split(' ').next())
-                                        .and_then(|id| id.parse().ok())
-                                        .unwrap_or_default();
+                            // Only rewrite into a template when the user named a task;
+                            // bare `/review` keeps its plain usage line.
+                            let task = error
+                                .strip_prefix("Usage: /review ")
+                                .and_then(|_| text.trim().strip_prefix("/review "))
+                                .and_then(|rest| rest.split(' ').next())
+                                .and_then(|id| id.parse().ok());
+                            match task {
+                                Some(task) => {
                                     review_usage(task, snapshot.acceptance_for_task(task).len())
                                 }
                                 None => error,
@@ -2057,6 +2107,7 @@ impl TaskControl {
         }
         self.prepared_errors.remove(intent.correlation());
         self.prepared_transient.remove(intent.correlation());
+        self.prepared_refused.remove(intent.correlation());
         self.prepared_retry = Some(intent.clone());
         self.visible = true;
         let target = match intent {
@@ -2132,9 +2183,14 @@ impl TaskControl {
                 self.prepared_active = Some(intent.clone());
                 runtime.spawn(async move {
                     let result = tokio::task::spawn_blocking(move || {
-                        let state = store.understanding().transact(request)?;
+                        // The scope store mixes validation and write failures, so a
+                        // failure here is reported as uncertain rather than as refused.
+                        let state = store
+                            .understanding()
+                            .transact(request)
+                            .map_err(Refusal::Uncertain)?;
                         Ok(Projection {
-                            snapshot: store.snapshot()?,
+                            snapshot: store.snapshot().map_err(Refusal::Uncertain)?,
                             notice: format!("Scope receipt saved · revision {}", state.revision),
                             evidence: None,
                             run_observations: None,
@@ -2144,7 +2200,11 @@ impl TaskControl {
                         })
                     })
                     .await
-                    .unwrap_or_else(|_| Err("Scope worker stopped; outcome unknown".into()));
+                    .unwrap_or_else(|_| {
+                        Err(Refusal::Uncertain(
+                            "Scope worker stopped; outcome unknown".into(),
+                        ))
+                    });
                     let _ = sender.send(result).await;
                 });
             }
@@ -2173,17 +2233,22 @@ impl TaskControl {
                             }
                             Ok(())
                         })
-                        .await
-                        .unwrap_or_else(|_| Err("Branch verifier stopped; outcome unknown".into()));
+                        .await;
                     let result = match checked {
-                        Ok(()) => {
-                            crate::branch::publish(store, task, expected_revision, correlation)
-                                .await
-                                .map(Projection::from)
-                        }
-                        Err(error) => Err(error),
+                        Ok(Ok(())) => crate::branch::publish_checked(
+                            store,
+                            task,
+                            expected_revision,
+                            correlation,
+                        )
+                        .await
+                        .map(Projection::from),
+                        Ok(Err(error)) => Err(Refusal::from(error)),
+                        Err(_) => Err(Refusal::Uncertain(
+                            "Branch verifier stopped; outcome unknown".into(),
+                        )),
                     };
-                    let _ = sender.send(result.map_err(Refusal::from)).await;
+                    let _ = sender.send(result).await;
                 });
             }
             Intent::Recover { task, run, .. } => {
@@ -2195,18 +2260,23 @@ impl TaskControl {
                 self.prepared_active = Some(intent.clone());
                 runtime.spawn(async move {
                     let result =
-                        tokio::task::spawn_blocking(move || {
+                        match tokio::task::spawn_blocking(move || {
                             let snapshot = store.snapshot()?;
                             if !snapshot.tasks.iter().any(|t| {
                                 t.id == task && t.run.as_ref().is_some_and(|r| r.id == run)
                             }) {
                                 return Err("Recovery source run changed".into());
                             }
-                            store.recover(task).map(Projection::from)
+                            store.recover_checked(task).map(Projection::from)
                         })
                         .await
-                        .unwrap_or_else(|_| Err("Recovery worker stopped; outcome unknown".into()));
-                    let _ = sender.send(result.map_err(Refusal::from)).await;
+                        {
+                            Ok(result) => result,
+                            Err(_) => Err(Refusal::Uncertain(
+                                "Recovery worker stopped; outcome unknown".into(),
+                            )),
+                        };
+                    let _ = sender.send(result).await;
                 });
             }
         }
@@ -2295,7 +2365,7 @@ impl TaskControl {
                             .strip_prefix("/scope-confirm ")
                             .unwrap()
                             .parse()
-                            .map_err(|_| "Usage: /scope-confirm DRAFT_REVISION")?,
+                            .map_err(|_| USAGE_SCOPE_CONFIRM)?,
                     }
                 };
                 self.sequence += 1;
@@ -2422,7 +2492,7 @@ impl TaskControl {
             return Err("Wait for the pending task receipt".into());
         }
         if let Some(id) = text.trim().strip_prefix("/architect-revise ") {
-            let task = id.parse().map_err(|_| "Usage: /architect-revise ID")?;
+            let task = id.parse().map_err(|_| USAGE_ARCHITECT_REVISE)?;
             let provider = self
                 .provider
                 .clone()
@@ -2433,9 +2503,22 @@ impl TaskControl {
             return Ok(());
         }
         if text.trim() == "/plan-cancel" {
+            let nothing =
+                !self.planner.active() && self.planner.draft.is_none() && !self.planner.visible;
+            if nothing {
+                return Err("No plan draft to cancel".into());
+            }
+            let discarded_only = !self.planner.active() && self.planner.draft.is_none();
             self.planner.cancel();
             self.planner.draft = None;
-            self.planner.notice = "Plan cancelled · no action taken".into();
+            self.planner.visible = false;
+            if discarded_only {
+                // An invalid or failed draft: close its pane and confirm.
+                self.planner.partial.clear();
+                self.planner.notice = "Plan draft discarded".into();
+            } else {
+                self.planner.notice = "Plan cancelled · no action taken".into();
+            }
             return Ok(());
         }
         if text.trim() == "/plan" {
@@ -2523,10 +2606,10 @@ impl TaskControl {
             let store = self.store.clone();
             let sender = self.sender.clone();
             runtime.spawn(async move {
-                let result = crate::branch::publish(store, task, revision, correlation)
+                let result = crate::branch::publish_checked(store, task, revision, correlation)
                     .await
                     .map(Projection::from);
-                let _ = sender.send(result.map_err(Refusal::from)).await;
+                let _ = sender.send(result).await;
             });
             return Ok(());
         }
@@ -2537,13 +2620,17 @@ impl TaskControl {
             let store = self.store.clone();
             let sender = self.sender.clone();
             runtime.spawn(async move {
-                let result =
-                    tokio::task::spawn_blocking(move || store.recover(task).map(Projection::from))
-                        .await
-                        .unwrap_or_else(|_| {
-                            Err("Recovery stopped; refresh before retrying /recover".into())
-                        });
-                let _ = sender.send(result.map_err(Refusal::from)).await;
+                let result = match tokio::task::spawn_blocking(move || {
+                    store.recover_checked(task).map(Projection::from)
+                })
+                .await
+                {
+                    Ok(result) => result,
+                    Err(_) => Err(Refusal::Uncertain(
+                        "Recovery stopped; refresh before retrying /recover".into(),
+                    )),
+                };
+                let _ = sender.send(result).await;
             });
             return Ok(());
         }
@@ -2633,7 +2720,7 @@ fn review_usage(task: u64, criteria: usize) -> String {
 
 pub fn parse(text: &str, model: &str) -> Result<Action, String> {
     if let Some(arguments) = text.trim().strip_prefix("/assign ") {
-        let (id, model) = arguments.split_once(' ').ok_or("Usage: /assign ID MODEL")?;
+        let (id, model) = arguments.split_once(' ').ok_or(USAGE_ASSIGN)?;
         let task = id.parse().map_err(|_| "Use a numeric task id")?;
         let model = model.trim();
         if model.is_empty() || model.len() > 200 || model.chars().any(char::is_control) {
@@ -2648,30 +2735,26 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
     let text = text.trim();
     if let Some(id) = text.strip_prefix("/resolve-repair ") {
         return Ok(Action::ResolveRepair {
-            task: id.trim().parse().map_err(|_| "Usage: /resolve-repair ID")?,
+            task: id.trim().parse().map_err(|_| USAGE_RESOLVE_REPAIR)?,
         });
     }
     if let Some(id) = text.strip_prefix("/requeue ") {
         return Ok(Action::Requeue {
-            task: id.trim().parse().map_err(|_| "Usage: /requeue ID")?,
+            task: id.trim().parse().map_err(|_| USAGE_REQUEUE)?,
         });
     }
     if let Some(arguments) = text.strip_prefix("/repair ") {
-        let (id, reason) = arguments
-            .split_once(' ')
-            .ok_or("Usage: /repair ID reason")?;
+        let (id, reason) = arguments.split_once(' ').ok_or(USAGE_REPAIR)?;
         return Ok(Action::Repair {
             task: id.parse().map_err(|_| "Invalid task id")?,
             reason: reason.trim().into(),
         });
     }
     if let Some(arguments) = text.strip_prefix("/permit ") {
-        let (id, json) = arguments
-            .split_once(' ')
-            .ok_or("Usage: /permit ID {\"files\":[\"path\"],\"check\":[\"program\",\"arg\"]}")?;
+        let (id, json) = arguments.split_once(' ').ok_or(USAGE_PERMIT)?;
         let task = id.parse().map_err(|_| "Invalid task id")?;
         let policy: crate::tasks::WorkPolicy = serde_json::from_str(json)
-            .map_err(|_| "Policy must be JSON with exact files and check argv")?;
+            .map_err(|_| "Policy must be JSON with exact files and check argv, e.g. {\"files\":[\"calc.py\"],\"check\":[\"python3\",\"-m\",\"unittest\"]}")?;
         policy.validate()?;
         return Ok(Action::Permit { task, policy });
     }
@@ -2716,20 +2799,23 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
             });
         }
     }
-    if let Some(title) = text.strip_prefix("/task ") {
-        if title.trim().is_empty() {
-            return Err("Usage: /task description".into());
+    if let Some(title) = word_arguments(text, "/task") {
+        if title.is_empty() {
+            return Err(bare_usage("/task").into());
         }
         return Ok(Action::Propose {
-            title: title.trim().into(),
+            title: title.into(),
             model: model.into(),
             dependencies: vec![],
         });
     }
-    if let Some(arguments) = text.strip_prefix("/after ") {
+    if let Some(arguments) = word_arguments(text, "/after") {
         let (ids, title) = arguments
-            .split_once(' ')
-            .ok_or("Usage: /after 1,2 description")?;
+            .split_once(char::is_whitespace)
+            .map_or((arguments, ""), |(ids, title)| (ids, title.trim()));
+        if ids.is_empty() || title.is_empty() {
+            return Err(bare_usage("/after").into());
+        }
         let dependencies = ids
             .split(',')
             .map(|id| {
@@ -2737,11 +2823,8 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
                     .map_err(|_| "Invalid dependency id".to_string())
             })
             .collect::<Result<Vec<_>, _>>()?;
-        if title.trim().is_empty() {
-            return Err("Task description is required".into());
-        }
         return Ok(Action::Propose {
-            title: title.trim().into(),
+            title: title.into(),
             model: model.into(),
             dependencies,
         });
@@ -2756,7 +2839,50 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
             });
         }
     }
+    if BARE_USAGE.iter().any(|(verb, _)| *verb == text) {
+        return Err(bare_usage(text).into());
+    }
     Err(unknown_command(text))
+}
+
+const USAGE_ASSIGN: &str = "Usage: /assign ID MODEL";
+const USAGE_PERMIT: &str =
+    "Usage: /permit ID {\"files\":[\"path\"],\"check\":[\"program\",\"arg\"]}";
+const USAGE_REPAIR: &str = "Usage: /repair ID reason";
+const USAGE_REQUEUE: &str = "Usage: /requeue ID";
+const USAGE_RESOLVE_REPAIR: &str = "Usage: /resolve-repair ID";
+const USAGE_SCOPE_CONFIRM: &str = "Usage: /scope-confirm DRAFT_REVISION";
+const USAGE_ARCHITECT_REVISE: &str = "Usage: /architect-revise ID";
+
+/// Usage for commands that need arguments, shown when typed bare. Each matches
+/// `VERB ` with a trailing space above, so the bare word would otherwise reach
+/// `unknown_command`.
+const BARE_USAGE: &[(&str, &str)] = &[
+    ("/task", "Usage: /task DESCRIPTION"),
+    ("/after", "Usage: /after IDS DESCRIPTION"),
+    ("/assign", USAGE_ASSIGN),
+    ("/permit", USAGE_PERMIT),
+    ("/repair", USAGE_REPAIR),
+    ("/requeue", USAGE_REQUEUE),
+    ("/resolve-repair", USAGE_RESOLVE_REPAIR),
+    ("/review", "Usage: /review ID JSON"),
+    ("/scope-confirm", USAGE_SCOPE_CONFIRM),
+    ("/architect-revise", USAGE_ARCHITECT_REVISE),
+    ("/retry-command", "Usage: /retry-command SESSION:COMMAND"),
+];
+
+fn bare_usage(verb: &str) -> &'static str {
+    BARE_USAGE
+        .iter()
+        .find(|(known, _)| *known == verb)
+        .map_or("", |(_, usage)| usage)
+}
+
+/// Arguments after `word` in trimmed `text`: empty for the bare word, `None`
+/// when `text` is another command that merely starts with the same letters.
+fn word_arguments<'a>(text: &'a str, word: &str) -> Option<&'a str> {
+    let rest = text.strip_prefix(word)?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then(|| rest.trim())
 }
 
 /// Short feedback for a command nobody handles; it names the command, points to
@@ -2950,6 +3076,35 @@ mod unknown_command_tests {
     }
 
     #[test]
+    fn task_and_after_keep_parsing_valid_input_and_name_missing_arguments() {
+        let propose = |title: &str, dependencies: Vec<u64>| Action::Propose {
+            title: title.into(),
+            model: "model".into(),
+            dependencies,
+        };
+        assert_eq!(
+            parse("/task  fix it ", "model"),
+            Ok(propose("fix it", vec![]))
+        );
+        assert_eq!(
+            parse("/after 1,2 add tests", "model"),
+            Ok(propose("add tests", vec![1, 2]))
+        );
+        assert_eq!(
+            parse("/after x add tests", "model").unwrap_err(),
+            "Invalid dependency id"
+        );
+        assert_eq!(
+            parse("/tasks", "model").unwrap_err(),
+            unknown_command("/tasks")
+        );
+        assert_eq!(
+            parse("/after 1", "model").unwrap_err(),
+            bare_usage("/after")
+        );
+    }
+
+    #[test]
     fn a_very_long_unknown_command_name_stays_short() {
         let message = parse(&format!("/{} arg", "x".repeat(500)), "model").unwrap_err();
         assert!(
@@ -2984,5 +3139,82 @@ mod unknown_command_tests {
         let fields = parse(r#"/review 1 {"accept":true}"#, "model").unwrap_err();
         assert!(fields.starts_with("Review JSON needs outcome"), "{fields}");
         assert!(!fields.contains("not valid JSON"), "{fields}");
+    }
+}
+
+#[cfg(test)]
+mod refusal_notice_tests {
+    use super::*;
+
+    fn control() -> (TaskControl, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!(
+            "alfredo-refusal-notice-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("workspace")).unwrap();
+        let store =
+            crate::tasks::TaskStore::new(&root.join("state"), &root.join("workspace"), "mission")
+                .unwrap();
+        let mut control = TaskControl::new(store);
+        control.retry = Some(Request {
+            correlation: "retry".into(),
+            expected_revision: 0,
+            action: Action::Approve { task: 1 },
+        });
+        (control, root)
+    }
+
+    #[test]
+    fn uncertain_failure_keeps_the_retry_hint_and_the_pending_retry() {
+        let (mut control, root) = control();
+        control.apply_checked(Err(Refusal::Uncertain(
+            "Task save outcome uncertain".into(),
+        )));
+        assert!(control.notice.contains("/retry-task"), "{}", control.notice);
+        assert!(control.retry.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn unmatched_state_is_refused_only_for_a_final_refusal() {
+        use crate::console_command::CommandState;
+        let (mut control, root) = control();
+        let intent = crate::command_intent::Intent::Task {
+            request: control.retry.clone().unwrap(),
+        };
+        control.record_refusal(
+            intent.correlation(),
+            &Err(Refusal::Denied(
+                "Unknown task 9; the task panel lists ids".into(),
+            )),
+        );
+        assert!(matches!(
+            control.unmatched_state(&intent),
+            CommandState::Refused { .. }
+        ));
+        control.record_refusal(
+            intent.correlation(),
+            &Err(Refusal::Uncertain("save outcome uncertain".into())),
+        );
+        assert!(matches!(
+            control.unmatched_state(&intent),
+            CommandState::Unknown { .. }
+        ));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn final_refusal_drops_the_retry_hint_and_the_pending_retry() {
+        let (mut control, root) = control();
+        control.apply_checked(Err(Refusal::Denied(
+            "Unknown task 9; the task panel lists ids".into(),
+        )));
+        assert_eq!(control.notice, "Unknown task 9; the task panel lists ids");
+        assert!(control.retry.is_none());
+        let _ = std::fs::remove_dir_all(root);
     }
 }

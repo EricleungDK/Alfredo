@@ -37,7 +37,7 @@ python3 alfredo-tui/tests/terminal_smoke.py    # plus the other *_smoke.py; see 
 | Change | Update |
 | --- | --- |
 | Flag, key or slash command | `README.md` tables, `alfredo-tui/README.md`, `--help` text in `src/main.rs` |
-| User-visible behavior | `CHANGELOG.md` under `[Unreleased]`, `alfredo-tui/docs/reference.md` |
+| User-visible behavior | a fragment in `changelog.d/` (see `changelog.d/README.md`; don't edit `CHANGELOG.md` directly), `alfredo-tui/docs/reference.md` |
 | Project state, release readiness | `.agent/Tasks/STATUS.md` |
 | Domain vocabulary | `CONTEXT.md` |
 

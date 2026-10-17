@@ -1321,3 +1321,140 @@ fn manual_plan_shows_validation_warnings_without_blocking_save() {
     wait(&mut control, |c| !c.pending);
     assert_eq!(fixture.store.snapshot().unwrap().tasks.len(), 2);
 }
+
+/// Mirrors the console route for `/plan-cancel`: a durable planner command when
+/// there is something to bind, otherwise the plain controller command.
+fn console_plan_cancel(
+    control: &mut TaskControl,
+    runtime: &tokio::runtime::Runtime,
+) -> Result<(), String> {
+    match control.prepare_command("/plan-cancel", "fixture")? {
+        None => control.command(runtime, "/plan-cancel", "fixture"),
+        Some(_) => Err("durable planner command".into()),
+    }
+}
+
+#[test]
+fn plan_cancel_discards_an_invalid_draft_with_a_friendly_confirmation() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let fixture = Fixture::new();
+    let (provider, server) = server("I completed everything".into(), true, Duration::ZERO);
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.set_provider(provider);
+    control.refresh(&runtime);
+    wait(&mut control, |c| !c.pending);
+    control
+        .command(&runtime, "/plan Implement calculation", "fixture")
+        .unwrap();
+    wait(&mut control, |c| {
+        c.planner.notice.contains("Invalid plan JSON")
+    });
+    server.join().unwrap();
+    assert!(control.planner.visible);
+    console_plan_cancel(&mut control, &runtime).unwrap();
+    assert!(!control.planner.visible);
+    assert!(control.planner.draft.is_none());
+    assert!(control.planner.partial.is_empty());
+    assert_eq!(control.planner.notice, "Plan draft discarded");
+    assert!(!control.planner.active());
+    // The leftover notice is not state: a second cancel has nothing to do.
+    assert_eq!(
+        console_plan_cancel(&mut control, &runtime).unwrap_err(),
+        "No plan draft to cancel"
+    );
+}
+
+#[test]
+fn plan_cancel_without_a_draft_is_a_friendly_noop() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let fixture = Fixture::new();
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.refresh(&runtime);
+    wait(&mut control, |c| !c.pending);
+    let error = console_plan_cancel(&mut control, &runtime).unwrap_err();
+    assert_eq!(error, "No plan draft to cancel");
+    assert!(!error.contains("bounds or source binding"));
+}
+
+#[test]
+fn plan_cancel_of_a_valid_draft_applies_the_durable_cancel_and_drops_it() {
+    use alfredo_tui::planner_command::Outcome;
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let fixture = Fixture::new();
+    let (provider, _server) = server(String::new(), true, Duration::ZERO);
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.refresh(&runtime);
+    wait(&mut control, |c| !c.pending);
+    control.planner.draft = Some(plan());
+    let request = control
+        .prepare_command("/plan-cancel", "fixture")
+        .unwrap()
+        .expect("a valid draft keeps the durable planner command");
+    let alfredo_tui::command_intent::Intent::Planner { request } = request else {
+        panic!("expected a planner intent");
+    };
+    control
+        .planner
+        .dispatch_command(&runtime, provider, &request, fixture.store.clone())
+        .unwrap();
+    assert!(control.planner.draft.is_none());
+    assert!(!control.planner.visible);
+    let events = control.planner.take_command_events();
+    assert!(events
+        .iter()
+        .any(|e| e.request == request && e.outcome == Outcome::Stopped));
+    assert_eq!(
+        console_plan_cancel(&mut control, &runtime).unwrap_err(),
+        "No plan draft to cancel"
+    );
+}
+
+#[test]
+fn plan_cancel_of_an_inflight_generation_stops_it_and_clears_the_binding() {
+    use alfredo_tui::planner_command::Outcome;
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let fixture = Fixture::new();
+    let (provider, server, received) = server_capture(
+        serde_json::json!({"tasks": plan().tasks}).to_string(),
+        true,
+        Duration::from_millis(200),
+    );
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.set_provider(provider.clone());
+    control.refresh(&runtime);
+    wait(&mut control, |c| !c.pending);
+    let snapshot = fixture.store.snapshot().unwrap();
+    let generate = control
+        .planner
+        .prepare_command("gen-1", "/plan Implement calculation", "fixture", &snapshot)
+        .unwrap()
+        .unwrap();
+    control
+        .planner
+        .dispatch_command(&runtime, provider.clone(), &generate, fixture.store.clone())
+        .unwrap();
+    received.recv_timeout(Duration::from_secs(4)).unwrap();
+    assert!(control.planner.active());
+    let cancel = control
+        .planner
+        .prepare_command("cancel-1", "/plan-cancel", "fixture", &snapshot)
+        .unwrap()
+        .expect("an in-flight generation keeps the durable planner command");
+    control
+        .planner
+        .dispatch_command(&runtime, provider, &cancel, fixture.store.clone())
+        .unwrap();
+    assert!(!control.planner.active());
+    assert!(control.planner.draft.is_none());
+    let events = control.planner.take_command_events();
+    assert!(events
+        .iter()
+        .any(|e| e.request == cancel && e.outcome == Outcome::Stopped));
+    // The generation binding is gone: nothing is left to cancel.
+    assert!(control
+        .planner
+        .prepare_command("cancel-2", "/plan-cancel", "fixture", &snapshot)
+        .unwrap()
+        .is_none());
+    let _ = server.join();
+}

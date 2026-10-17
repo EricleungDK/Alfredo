@@ -263,6 +263,13 @@ impl Planner {
         let draft = self.checkpoint();
         let base = draft.as_ref().map(SavedDraft::digest).transpose()?;
         let operation = if text == "/plan-cancel" {
+            // Nothing in flight and no complete draft: there is no durable
+            // target to bind, so the controller discards any invalid draft or
+            // reports a no-op instead of building a request the validator
+            // must (and does) reject.
+            if !self.active() && self.generation.is_none() && base.is_none() {
+                return Ok(None);
+            }
             Operation::Cancel {
                 generation: self.generation.clone(),
                 draft_sha256: base,
@@ -353,6 +360,7 @@ impl Planner {
             if !was_active {
                 self.draft = None;
                 self.draft_origin = None;
+                self.visible = false;
             }
             self.notice = "Planning stopped · inspect retained draft before continuing".into();
             self.command_events.push(Event {

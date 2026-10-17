@@ -44,7 +44,8 @@ Each choice is an ordinary console command saved and dispatched through the same
 intent path as typed input; policy, evidence, locks and receipts stay authoritative.
 Risk-classified or human-hold reviews always wait for you, and manual commands keep
 working. `/pause` or F5 stops new starts and decisions (running workers finish);
-`/resume` or F5 continues; `/stop` also cancels running workers; `/autopilot` shows
+`/resume` or F5 continues; `/stop` also cancels running workers and an in-flight planning request (no
+draft appears later; `/resume` plans again); `/autopilot` shows
 status. The header's second row shows the run: state, `done/total`, failures and
 repairs when present, elapsed time and branch; the goal is the work group title.
 State lives in a small
@@ -249,7 +250,13 @@ is loading or busy. Model discovery bypasses this queue.
 - The header polls `GET /api/ps` every 5 s (2 s timeout, outside the queue):
   `ollama ✓ MODEL warm`, `ollama ✓ MODEL loading`, `ollama ✓ MODEL` (server up,
   model not loaded) or `ollama ✗ retrying`. Narrow terminals omit the model name.
-  A restarted server is picked up without restarting Alfredo.
+  A restarted server is picked up without restarting Alfredo. Each poll also reads
+  `GET /api/tags`; when the selected model is not listed (a name without a tag means
+  `:latest`) the header turns amber: `model X not installed · /models or ollama pull X`
+  (narrow: `model not installed · /models`). A failed catalog read never flags a model.
+- An HTTP 404 whose JSON body says the model was `not found` fails once with
+  `Model X is not installed (Ollama: …); /models … or ollama pull X`. Autopilot treats
+  it as deterministic and stops planning after that single request.
 
 Queued cancellation removes eligibility before HTTP dispatch; process exit releases
 its client slots. Saved queue records never replay inference. The ten-minute total
@@ -260,10 +267,11 @@ No latency improvement or complete model/profile qualification is claimed.
 
 Run `alfredo-tui --doctor` without a TTY to check startup prerequisites. It opens
 and validates the selected workspace/mission/conversation storage, checks the
-restored selected model against the bounded Ollama catalog, validates the Git root
-and committed baseline, and checks installed worker executables. Exit 0 means these
-checks passed; exit 2 means one or more checks failed. Invalid CLI arguments still
-fail before diagnostics. Results distinguish storage, model server/catalog and
+restored selected model against the bounded Ollama catalog, resolves and validates
+the Git root (a subdirectory or `--workspace DIR` inside a repository checks its
+root, which the worker line names) and committed baseline, and checks installed
+worker executables. Exit 0 means these checks passed; exit 2 means one or more
+checks failed. Invalid CLI arguments still fail before diagnostics. Results distinguish storage, model server/catalog and
 worker prerequisites with corrective flags or actions. A repository with no commits
 fails the worker check with `git commit --allow-empty -m init`; the same notice shows
 in the footer at launch, and `/go` there fails once without planning retries.
@@ -281,6 +289,9 @@ Model catalog membership does not prove model readiness or GPU capacity, and too
 presence does not prove sandbox permission. Actual worker execution remains subject
 to the normal permission and sandbox checks. An occupied named conversation is
 reported as a storage issue; choose another `--conversation` when appropriate.
+Outside diagnostics, a start whose conversation another `alfredo-tui` already owns
+exits with code 1 and a one-line message (close the other one, or relaunch with
+`--conversation NAME`) instead of opening the workspace selector.
 
 A rejected slash command (unknown command, `Usage: …`, `Select a task first`, task not
 found) keeps its text in the prompt so it can be corrected, but the text is marked
@@ -295,14 +306,20 @@ answers `Usage: /model NAME (or /models)`. Footer notices wider than the termina
 cut at a word boundary with `…`.
 
 Use `/models` to load installed models from the configured server, then Up/Down and
-Enter (or `/model NAME`) to select one for the current conversation. `▸` marks the
-cursor and `›` the conversation's model. PageUp/PageDown scroll the catalog;
+Enter to select one for the current conversation. `/model NAME` works without opening
+`/models`: the first use checks installed models, then applies the selection to the
+conversation that asked, even if you switch chats meanwhile. A missing name answers
+`Model NAME is not installed; installed: … · /models`, and an unreachable server answers
+`Cannot check installed models for NAME: …; /model NAME retries`. `▸` marks the cursor
+and `›` the conversation's model. PageUp/PageDown scroll the catalog;
 Escape closes it. Discovery runs asynchronously with a ten-second total deadline,
 a 1 MiB response bound and at most 256 entries. Errors retain the previous catalog
 and can be retried with `/models`. Listing a model does not prove it is loaded or
-has sufficient memory to run. Active or interrupted turns retain their model;
-finish/retry them or open another conversation to switch. Existing task assignments
-remain fixed, while newly proposed tasks use the conversation's selected model.
+has sufficient memory to run. An active turn retains its model: cancel it (Esc) or wait. A cancelled or failed
+turn does not block a switch; the next turn uses the new model, and Ctrl+R before
+any new prompt retries the interrupted turn on the new model. Existing task
+assignments remain fixed, while newly proposed tasks use the conversation's
+selected model.
 See [Ollama model listing](https://docs.ollama.com/api/tags) for the provider protocol.
 
 Launched inside a Git repository (from any subdirectory) with no workspace or
@@ -338,11 +355,19 @@ See [selection recovery](#selection-history-and-recovery) for the independent st
 
 `--workspace DIR --mission NAME` resumes an existing mission directly. Use
 `--workspace DIR --new-mission NAME` to create a distinct mission name. These flags
-are mutually exclusive, and the repository is still validated. A mission flag without
-`--workspace` opens the repository step of the selector. `--doctor`
+are mutually exclusive, and the repository is still validated. A missing `--mission`
+name is refused with `Mission 'NAME' does not exist; use --new-mission NAME to create it
+(existing: default, m1)` (up to 5 names, then `, …`), and an existing `--new-mission`
+name with `Mission 'NAME' already exists; use --mission NAME to resume it`. A mission
+flag without `--workspace` inside a Git repository (any subdirectory) uses that
+repository root, as if it were passed as `--workspace`, with the same checks. Outside a
+repository it exits naming `--workspace DIR`; with `--select` the flag only prefills the
+selector. Mission names are validated identically on every path (1–120 bytes, no
+control characters; `/` and spaces are allowed). `--doctor`
 remains noninteractive and uses current directory / `default` when flags are absent. `--state-dir DIR`
 or `ALFREDO_STATE_DIR` selects task storage, defaulting to `$HOME/.local/state/alfredo`.
-State must be outside the coding workspace. Each canonical workspace/mission pair
+State must be outside the coding workspace, judged on the resolved path (`..` and
+symlinks followed; `../state` from inside the repo is fine, `sub/../state` is not). Each canonical workspace/mission pair
 gets an independent `rust-tasks-v1/<sha256>/tasks.json`.
 
 `--conversation NAME` selects a named conversation set within that workspace/mission
@@ -350,6 +375,16 @@ gets an independent `rust-tasks-v1/<sha256>/tasks.json`.
 owns a set at a time; use another name for a concurrent terminal sharing the task
 queue. `--model` supplies the initial model for a new set; restored conversations
 keep their saved models, which you can change using `/model` when eligible.
+
+A cancelled or failed chat turn does not lock the conversation. Typing a new prompt
+and pressing Enter starts a new turn in the same chat, and `/model NAME` switches the
+model for it. The interrupted turn (its prompt and any partial reply or failure) stays
+in the transcript, headed `· interrupted, not sent as context`, but it is dropped
+from the messages sent to the model: the new request carries only the earlier
+completed turns, never the orphaned prompt or the partial reply. Once the new turn
+starts, the interrupted turn is no longer retryable with Ctrl+R; Ctrl+R before
+sending anything new still retries it exactly as before. Which turns were moved past
+is saved with the conversation, so a restart does not send them to the model either.
 
 Snapshots save outside the workspace in `conversations-<name-sha256>.json`, beside
 the task store. Changed snapshots are saved asynchronously about once a second,
@@ -367,9 +402,11 @@ persisted. Version 1 snapshots migrate on save with an exact-byte `.v1-backup`
 sibling; invalid state or conflicting backups stop the save.
 
 Type `/task description` to propose a task, `/after 1,2 description` to propose
-a task depending on existing earlier tasks, `/approve ID` to approve it, or
+a task depending on existing earlier tasks, `/permit ID JSON` to set its exact
+files and check, `/approve ID` to approve it (refused until a policy exists), or
 `/cancel-task ID` to cancel it. `/tasks` and F2 show the queue; `/chat` or F2 returns
-to the conversation. `/refresh` reads the latest committed state. Errors preserve
+to the conversation. A command typed without its arguments prints its `Usage:` line and
+changes nothing. `/refresh` reads the latest committed state. Errors preserve
 the last acknowledged queue; `/retry-task` repeats the exact failed request.
 Commands entered here are handled by Rust directly and never sent to a model.
 
@@ -659,8 +696,8 @@ The crate is self-contained: the execution provider lives in `src/execution.rs`.
 | F2 | Switch the right pane between task detail and conversation |
 | F3 | Open evidence for the selected task; groups require a task selection |
 | Tab / Shift+Tab | Select next / previous conversation |
-| Escape | Abort the selected client request and retain partial output |
-| Ctrl+R | Explicitly retry a failed/cancelled turn, replacing its partial reply |
+| Escape | Abort the selected client request and retain partial output; a new prompt or `/model NAME` is then accepted |
+| Ctrl+R | Explicitly retry a failed/cancelled turn, replacing its partial reply; only until a new prompt starts a turn |
 | PageUp / PageDown | Scroll transcript, task/group details or open evidence |
 | Ctrl+Q / Ctrl+C | Quit and restore the terminal |
 
@@ -677,8 +714,11 @@ input and rendering remain separate from inference. Completion requires Ollama's
 `done` marker; EOF alone is a failure. There is no automatic replay. Drafts are
 limited to 16 KiB, conversations to 128 KiB, frames to 64 KiB, and the event channel
 to 128 entries. New sessions currently inherit the initial model. Draft editing preserves independent
-cursor positions across sessions. Paste inserts at the cursor, strips terminal
-control characters and respects the 16 KiB limit without cutting a grapheme cluster.
+cursor positions across sessions. Paste inserts at the cursor, expands each tab to four spaces
+(so indentation survives and no tab reaches the draft), normalizes `\r\n` to `\n`, strips
+other terminal control characters and respects the 16 KiB limit without cutting a grapheme
+cluster. Expanded spaces count against the limit. When a paste is cut by the limit the
+notice `Paste truncated to 16 KiB` is shown; nothing is shown when nothing was cut.
 History is bounded to 100 entries and 128 KiB per session. Submission adds a history
 entry without granting new authority; recalled commands require explicit submission.
 Up/Down in task detail selects tree rows; Alt+Left/Right controls branch disclosure.
@@ -1006,7 +1046,8 @@ never selects a model, records assignment or grants approval on its own.
 
 Use `/models` to refresh an empty or outdated catalog. Completion performs no network
 request. Existing model-selection and assignment checks still apply at submission,
-including restrictions on active/interrupted work and fresh approval after assignment.
+including the refusal to switch while a turn is active and fresh approval after
+assignment.
 Move the cursor to the end before completion; arbitrary command arguments keep
 normal conversation switching. Installed names do not establish model qualification.
 
@@ -1077,7 +1118,8 @@ in the saved `model-response.txt`. Rules:
   the 32-file / 128 KiB bounds are refused as before.
 - Content is taken verbatim; CRLF becomes LF and trailing newlines collapse to one.
   One markdown fence layer inside a block (first line starting with ```` ``` ````,
-  last line ```` ``` ````) is stripped.
+  last line ```` ``` ````) is stripped, unless a fence line also appears
+  between them (a Markdown file with its own code blocks is kept verbatim).
 - Output ending inside a block fails with `Model output ended inside FILE block for
   PATH (truncated)`; no blocks fails with `Model returned no FILE blocks`. The next
   repair states that the previous response was truncated.
@@ -1122,7 +1164,9 @@ if the conversation model has changed. Review the complete replacement before
 A failed or malformed revision restores the previous complete draft with its
 original task revision, so a failed refinement cannot refresh a stale save. Saving
 and another revision are blocked while inference is active. `/plan-cancel` discards
-the current draft and pending revision; late responses cannot restore them. Revision
+the current draft (including an invalid one, closing its pane with `Plan draft
+discarded`) and pending revision, and closes the draft pane; with nothing to cancel
+it answers `No plan draft to cancel`; late responses cannot restore them. Revision
 requests share the 8 KiB prompt limit, and previous task reference data is bounded
 to 64 KiB. Complete drafts now survive restart as described below; full Mission
 Draft/Issue Graph formation remains unfinished.
@@ -1492,6 +1536,8 @@ The chat console now shows **Observed task receipt** entries for newly observed 
 
 Task mutations, scope changes, explicit worker starts, branch creation and recovery now save their immutable command intent before dispatch. The console keeps the command and matching receipt in its originating session. Interrupted commands restore as unconfirmed without automatic replay. `/retry-command SESSION:COMMAND` explicitly retries a saved command number, including from another session; the exact intent and origin remain unchanged. `/retry-task` can use the selected session's latest unresolved saved command after restart. Planner generation and worker controls also use saved intent, with their separate outcomes described below.
 
+A command refused before any write (unknown task id, a task that has not run, `/branch` before `/accept`) is recorded as `✗ Not dispatched` with the reason and next step, and the status line does not suggest `/retry-task`: repeating it can only be refused again. Only a failed save or a stopped storage worker leaves the outcome unknown and suggests `/retry-task`.
+
 ### Saved planner commands
 
 `/plan REQUEST`, `/plan-revise REQUEST`, `/architect-revise ID`, and `/plan-cancel`
@@ -1575,7 +1621,9 @@ Full mission formation and production launch acceptance remain unfinished.
 Workspace and mission choices save before creation or handoff. An in-process
 **You · selection #N** entry stays in its originating conversation; a matching
 **Workspace · arrival #N** entry preserves the destination's existing messages,
-draft and reading position. These observations do not approve tasks. **Handoff
+draft and reading position. A destination keeps one arrival per workspace and
+mission: re-arriving at the same target replaces the earlier entry instead of adding
+another, while a different mission or workspace is recorded separately. These observations do not approve tasks. **Handoff
 prepared** means the destination history was saved, while **workspace selected**
 records the later switch. Historical selection does not change the current header.
 

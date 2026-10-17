@@ -308,6 +308,9 @@ pub struct Turn {
     pub session: usize,
     pub attempt: u64,
     pub model: String,
+    /// Index of this turn's user message in the session transcript. `messages`
+    /// is the model context and can omit interrupted turns, so its length is not it.
+    pub user_message: usize,
     pub messages: Vec<Message>,
 }
 pub struct Completion {
@@ -420,7 +423,7 @@ impl Router {
                 Stage::Ready(request) => Some((
                     pending.turn.session,
                     pending.turn.attempt,
-                    pending.turn.messages.len() - 1,
+                    pending.turn.user_message,
                     request.clone(),
                 )),
                 _ => None,
