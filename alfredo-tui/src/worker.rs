@@ -476,7 +476,7 @@ pub fn not_a_repository(path: &Path) -> String {
 /// The phrase every not-a-repository message carries (used to recognise it).
 pub(crate) const NOT_A_REPOSITORY: &str = "is not a Git repository";
 
-fn git_succeeds(workspace: &Path, args: &[&str]) -> bool {
+fn git_blocking(workspace: &Path, args: &[&str], stdout: Stdio) -> Option<std::process::Output> {
     std::process::Command::new("/usr/bin/git")
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -488,10 +488,39 @@ fn git_succeeds(workspace: &Path, args: &[&str]) -> bool {
         .arg(workspace)
         .args(args)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
+        .stdout(stdout)
         .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+        .output()
+        .ok()
+}
+
+fn git_succeeds(workspace: &Path, args: &[&str]) -> bool {
+    git_blocking(workspace, args, Stdio::null()).is_some_and(|output| output.status.success())
+}
+
+/// Number of uncommitted changes (tracked modifications and untracked,
+/// non-ignored files) and the short HEAD they are not based on. Read-only
+/// (`GIT_OPTIONAL_LOCKS=0`; no index refresh is written). `None` when the
+/// workspace is not a readable repository with a commit.
+pub fn uncommitted_changes(workspace: &Path) -> Option<(u32, String)> {
+    let status = git_blocking(
+        workspace,
+        &["status", "--porcelain", "--untracked-files=all"],
+        Stdio::piped(),
+    )
+    .filter(|output| output.status.success())?;
+    let count = String::from_utf8_lossy(&status.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .count();
+    let head = git_blocking(
+        workspace,
+        &["rev-parse", "--short=7", "HEAD"],
+        Stdio::piped(),
+    )
+    .filter(|output| output.status.success())?;
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    Some((u32::try_from(count).unwrap_or(u32::MAX), head))
 }
 
 /// Whether `workspace` has a commit at HEAD (blocking; one quick local git call).

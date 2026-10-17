@@ -29,6 +29,15 @@ requests 8192. Evidence records the requested temperature and limit. An exhauste
 dependents stay blocked, and independent work continues. Invalid plans are retried
 once with the validation error appended, then autopilot stops.
 
+Workers see only the committed `HEAD`. When `/go` starts with tracked modifications
+or untracked, non-ignored files, the start notice and the run's summary carry a
+warning line such as `3 uncommitted changes are not visible to workers (based on HEAD
+abc1234)` (`Warning` row in the summary and in `/autopilot`). The check is a
+read-only `git status --porcelain` that never changes your branch, index or files; it
+is informational and does not block `/go`. A clean tree gets the notice unchanged. The
+count and short SHA are saved in the autopilot state file (optional `dirty` field,
+absent for clean trees and in older files).
+
 Each choice is an ordinary console command saved and dispatched through the same
 intent path as typed input; policy, evidence, locks and receipts stay authoritative.
 Risk-classified or human-hold reviews always wait for you, and manual commands keep
