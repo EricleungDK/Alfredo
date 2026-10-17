@@ -1109,7 +1109,9 @@ if the conversation model has changed. Review the complete replacement before
 A failed or malformed revision restores the previous complete draft with its
 original task revision, so a failed refinement cannot refresh a stale save. Saving
 and another revision are blocked while inference is active. `/plan-cancel` discards
-the current draft and pending revision; late responses cannot restore them. Revision
+the current draft (including an invalid one, closing its pane with `Plan draft
+discarded`) and pending revision; with nothing to cancel it answers `No plan draft to
+cancel`; late responses cannot restore them. Revision
 requests share the 8 KiB prompt limit, and previous task reference data is bounded
 to 64 KiB. Complete drafts now survive restart as described below; full Mission
 Draft/Issue Graph formation remains unfinished.
