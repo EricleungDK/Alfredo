@@ -251,6 +251,16 @@ fn flag_mission_errors_name_the_flag_and_cap_the_list() {
         flag_mission_error(MISSION_MISSING.into(), "x", &many),
         "Mission 'x' does not exist; use --new-mission x to create it (existing: m1, m2, m3, m4, m5, …)"
     );
+    let five: Vec<String> = (1..=5).map(|n| format!("m{n}")).collect();
+    assert_eq!(
+        flag_mission_error(MISSION_MISSING.into(), "x", &five),
+        "Mission 'x' does not exist; use --new-mission x to create it (existing: m1, m2, m3, m4, m5)"
+    );
+    let six: Vec<String> = (1..=6).map(|n| format!("m{n}")).collect();
+    assert_eq!(
+        flag_mission_error(MISSION_MISSING.into(), "x", &six),
+        "Mission 'x' does not exist; use --new-mission x to create it (existing: m1, m2, m3, m4, m5, …)"
+    );
     assert_eq!(
         flag_mission_error(MISSION_EXISTS.into(), "m1", &few),
         "Mission 'm1' already exists; use --mission m1 to resume it"

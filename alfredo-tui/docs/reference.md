@@ -327,7 +327,7 @@ See [selection recovery](#selection-history-and-recovery) for the independent st
 `--workspace DIR --new-mission NAME` to create a distinct mission name. These flags
 are mutually exclusive, and the repository is still validated. A missing `--mission`
 name is refused with `Mission 'NAME' does not exist; use --new-mission NAME to create it
-(existing: …)` (first 5 names), and an existing `--new-mission` name with `Mission 'NAME'
+(existing: default, m1)` (up to 5 names, then `, …`), and an existing `--new-mission` name with `Mission 'NAME'
 already exists; use --mission NAME to resume it`. A mission flag without
 `--workspace` opens the repository step of the selector. `--doctor`
 remains noninteractive and uses current directory / `default` when flags are absent. `--state-dir DIR`
