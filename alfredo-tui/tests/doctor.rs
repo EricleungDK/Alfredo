@@ -232,3 +232,57 @@ fn doctor_in_a_non_repository_names_the_next_step_and_skips_the_storage_check() 
     assert!(!text.contains("FAIL storage"), "{text}");
     assert!(!text.contains("outside the coding workspace"), "{text}");
 }
+
+fn doctor_text(mut command: Command, server: thread::JoinHandle<()>) -> (Option<i32>, String) {
+    let output = command.output().unwrap();
+    server.join().unwrap();
+    (
+        output.status.code(),
+        String::from_utf8(output.stdout).unwrap(),
+    )
+}
+
+#[test]
+fn doctor_from_a_repository_subdirectory_checks_the_resolved_root() {
+    let fixture = Fixture::new();
+    let sub = fixture.workspace.join("sub/deep");
+    fs::create_dir_all(&sub).unwrap();
+    let root = fixture.workspace.canonicalize().unwrap();
+    let (endpoint, server) = catalog("initial-model");
+    let (expected_code, expected) = doctor_text(fixture.command(&endpoint), server);
+    // Exit code also reflects host tools (e.g. bwrap), so compare against the root run.
+    assert!(expected.contains("PASS storage"), "{expected}");
+    assert!(
+        expected.contains(&format!("PASS worker workspace: {}", root.display())),
+        "{expected}"
+    );
+
+    // cwd is a subdirectory and no --workspace is given.
+    let (endpoint, server) = catalog("initial-model");
+    let mut cwd = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"));
+    cwd.args(["--doctor", "--model", "initial-model", "--endpoint"])
+        .arg(&endpoint)
+        .arg("--state-dir")
+        .arg(&fixture.state)
+        .current_dir(&sub);
+    let (code, text) = doctor_text(cwd, server);
+    assert_eq!(code, expected_code, "{text}");
+    assert_eq!(text, expected);
+    assert!(!text.contains("SKIP storage"), "{text}");
+}
+
+#[test]
+fn doctor_with_workspace_set_to_a_subdirectory_behaves_like_the_root() {
+    let fixture = Fixture::new();
+    let sub = fixture.workspace.join("sub/deep");
+    fs::create_dir_all(&sub).unwrap();
+    let (endpoint, server) = catalog("initial-model");
+    let (expected_code, expected) = doctor_text(fixture.command(&endpoint), server);
+    let (endpoint, server) = catalog("initial-model");
+    let mut command = fixture.command(&endpoint);
+    command.arg("--workspace").arg(&sub);
+    let (code, text) = doctor_text(command, server);
+    assert_eq!(code, expected_code, "{text}");
+    assert_eq!(text, expected);
+    assert!(text.contains("PASS storage"), "{text}");
+}
