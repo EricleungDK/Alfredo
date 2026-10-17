@@ -19,11 +19,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- `/model NAME` now works on a fresh launch without opening `/models` first: it shows
-  `Checking installed models…`, then selects the model once discovery finishes. A name
-  that is not installed reports `Model NAME is not installed; installed: …`, and a
-  failed discovery says it could not check installed models instead of `Model not in
-  the catalog`.
 - The task panel's `Next` hint for a review-ready task with acceptance criteria now
   says `/review N JSON` and `/reject N` instead of `/accept N`, which Alfredo refuses
   for such tasks. The `/accept` refusal and the `/review N` usage message lead with the
