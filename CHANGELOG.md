@@ -19,6 +19,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Without a usable `/usr/bin/bwrap`, `/go`, `--go` and `/run` now refuse at once with
+  `Coding workers need bubblewrap: sudo apt install bubblewrap` (no planning or repair
+  model calls). A sandbox start failure mid-run is classified as an environment
+  failure (typed `failure_code` in the run evidence; covers a refused or unspawnable
+  bwrap and a namespace/uid-map setup refusal): autopilot stops without spending
+  `--max-repairs`, even at 0, and the summary Reason
+  quotes the cause. `--doctor` and the preflight share one executable probe.
 - The task panel's `Next` hint for a review-ready task with acceptance criteria now
   says `/review N JSON` and `/reject N` instead of `/accept N`, which Alfredo refuses
   for such tasks. The `/accept` refusal and the `/review N` usage message lead with the
