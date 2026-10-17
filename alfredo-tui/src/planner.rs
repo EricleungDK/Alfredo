@@ -360,6 +360,7 @@ impl Planner {
             if !was_active {
                 self.draft = None;
                 self.draft_origin = None;
+                self.visible = false;
             }
             self.notice = "Planning stopped · inspect retained draft before continuing".into();
             self.command_events.push(Event {

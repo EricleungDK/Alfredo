@@ -24,7 +24,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   invalid draft is discarded, its pane closes and the status line reads `Plan draft
   discarded`; with nothing to cancel it reads `No plan draft to cancel`. Cancelling an
   in-flight generation or a valid draft is unchanged.
-
 - The task panel's `Next` hint for a review-ready task with acceptance criteria now
   says `/review N JSON` and `/reject N` instead of `/accept N`, which Alfredo refuses
   for such tasks. The `/accept` refusal and the `/review N` usage message lead with the
