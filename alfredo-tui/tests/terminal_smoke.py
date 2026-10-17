@@ -127,11 +127,22 @@ class ZeroCeremonyStart(unittest.TestCase):
                 first.wait_for(root)  # arrival line names the repository root
                 manifests = [json.loads(path.read_text()) for path in Path(state).rglob('mission.json')]
                 self.assertEqual([manifest['mission'] for manifest in manifests], ['default'])
-                # The conversation is owned by the first terminal: fall back with the reason shown.
-                second = Pty(self, args, nested, env)
+                # The conversation is owned by the first terminal: no selector, a short message, non-zero exit.
+                busy = Pty(self, args, nested, env)
+                try:
+                    self.assertEqual(busy.process.wait(timeout=30), 1)
+                    while select.select([busy.master], [], [], 0.2)[0]:
+                        busy.output.extend(os.read(busy.master, 65536))
+                    raw = busy.output.decode(errors='replace')  # the reconstructed screen clips wrapped lines
+                    self.assertIn('already owns conversation', raw)
+                    self.assertIn('alfredo-tui --conversation NAME', raw)
+                    for text in ('Open your work', 'Selection stopped', 'selections.json', 'partial target artifacts'):
+                        self.assertNotIn(text, raw)
+                finally:
+                    busy.close()
+                # --select still reaches the selector, where another mission can be chosen.
+                second = Pty(self, args + ['--select'], nested, env)
                 second.wait_for('Workspace selection required')
-                second.wait_for('Automatic open failed')
-                second.wait_for('in use')
                 # Enter validates the placeholder (the subdirectory); the refusal sits on the line above the input.
                 second.write(b'\r')
                 second.wait_for('exact repository root')
@@ -154,6 +165,57 @@ class ZeroCeremonyStart(unittest.TestCase):
                 first.close()
                 if second is not None:
                     second.close()
+
+
+class MissionFlagsInsideRepository(unittest.TestCase):
+    def test_mission_flags_without_workspace_use_the_repository_of_the_current_directory(self):
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        with tempfile.TemporaryDirectory(prefix='alfredo-flag-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-flag-repo-') as repo:
+            root = os.path.realpath(repo)
+            subprocess.run(['git', '-C', root, 'init', '-q', '--template='], check=True)
+            nested = Path(root, 'src')
+            nested.mkdir()
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            base = [str(binary), '--model', 'fixture', '--endpoint', 'http://127.0.0.1:9']
+
+            def missions():
+                return sorted(json.loads(path.read_text())['mission'] for path in Path(state).rglob('mission.json'))
+
+            def refused(extra, message):
+                terminal = Pty(self, base + extra, nested, env)
+                try:
+                    self.assertNotEqual(terminal.process.wait(timeout=10), 0)
+                    while select.select([terminal.master], [], [], 0.2)[0]:
+                        terminal.output.extend(os.read(terminal.master, 65536))
+                    self.assertIn(message, terminal.output.decode(errors='replace'))
+                finally:
+                    terminal.close()
+
+            # An unknown mission is refused exactly as with --workspace; nothing is created.
+            refused(['--mission', 'alpha'], "Mission 'alpha' does not exist; use --new-mission alpha to create it")
+            self.assertEqual(missions(), [])
+            # --new-mission creates it in the repository root, even from a subdirectory.
+            for name in ('alpha', 'bad name/x'):
+                terminal = Pty(self, base + ['--new-mission', name], nested, env)
+                try:
+                    terminal.wait_for(f'ALFREDO  {name} · ')
+                    self.assertNotIn('Workspace selection required', terminal.screen())
+                    terminal.write(b'\x11')
+                    self.assertEqual(terminal.process.wait(timeout=5), 0)
+                finally:
+                    terminal.close()
+            self.assertEqual(missions(), ['alpha', 'bad name/x'])
+            # A second --new-mission with the same name is refused; --mission resumes.
+            refused(['--new-mission', 'alpha'], "Mission 'alpha' already exists; use --mission alpha to resume it")
+            terminal = Pty(self, base + ['--mission', 'alpha'], nested, env)
+            try:
+                terminal.wait_for('ALFREDO  alpha · ')
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                terminal.close()
+            self.assertEqual(missions(), ['alpha', 'bad name/x'])
 
 
 class MissionFlagErrors(unittest.TestCase):
@@ -595,12 +657,17 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/task Persisted_fix\r')
             wait_for(b'Persisted_fix')
             wait_for(b'Task #1 saved')
+            os.write(master, b'/approve 1\r')  # No policy yet: refused, nothing is saved.
+            wait_for(b'Task #1 has no files/check yet')
+            first_policy = json.dumps({'files': ['answer.py'], 'check': ['/usr/bin/python3', '-B', '-c', 'from answer import VALUE; assert VALUE == 42']})
+            os.write(master, ('/permit 1 ' + first_policy + '\r').encode())
+            wait_for(b'revision 2')
             os.write(master, b'/approve 1\r')
             wait_for('Approved · fixture'.encode())  # detail status line
             saved = next(Path(state.name).glob('rust-tasks-v1/*/tasks.json'))
             record = json.loads(saved.read_text())
             self.assertEqual(record['tasks'][0]['status'], 'approved')
-            self.assertEqual(record['revision'], 2)
+            self.assertEqual(record['revision'], 3)
             os.write(master, b'/chat\r')
             wait_for(b'Task #1 approved')
             os.write(master, b'/tasks\r')
@@ -635,14 +702,14 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'ALFREDO')
             wait_for(b'Workspace selection required')
             wait_for(b'Tab fills a saved path')
-            self.assertEqual(json.loads(saved.read_text())['revision'], 2)
+            self.assertEqual(json.loads(saved.read_text())['revision'], 3)
             os.write(master, b'\t\r')
             wait_for(b'Mission selection required')
             wait_for(b'Tab fills a saved name')
-            self.assertEqual(json.loads(saved.read_text())['revision'], 2)
+            self.assertEqual(json.loads(saved.read_text())['revision'], 3)
             os.write(master, b'\x1bOQ\r')  # Start New cannot replace the existing default mission.
             wait_for(b'Mission already exists')
-            self.assertEqual(json.loads(saved.read_text())['revision'], 2)
+            self.assertEqual(json.loads(saved.read_text())['revision'], 3)
             os.write(master, b'\x1bOQ\t\r')  # Return to Resume, fill the saved name, then open it.
             wait_for(b'Conversations restored')
             wait_for(b'Persisted_fix')
@@ -666,17 +733,17 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'\t/tasks\r')
             wait_for(b'Persisted_fix')
             wait_for('Approved · fixture'.encode())  # detail status line
-            self.assertEqual(json.loads(saved.read_text())['revision'], 2)
+            self.assertEqual(json.loads(saved.read_text())['revision'], 3)
             os.write(master, b'/activity #1\r')
             wait_for(b'Saved task activity')
             wait_for(b'Task approved')
-            self.assertEqual(json.loads(saved.read_text())['revision'], 2)
+            self.assertEqual(json.loads(saved.read_text())['revision'], 3)
             policy = json.dumps({'files': ['answer.py'], 'check': ['/usr/bin/python3', '-B', '-c', 'from answer import VALUE; assert VALUE == 42']})
             os.write(master, ('/permit 1 ' + policy + '\r').encode())
             wait_for(b'Task #1 saved')
-            wait_for(b'revision 3')
-            os.write(master, b'/approve 1\r')
             wait_for(b'revision 4')
+            os.write(master, b'/approve 1\r')
+            wait_for(b'revision 5')
             os.write(master, b'/run 1\r')
             wait_for(b'needs review', timeout=15)
             os.write(master, b'/chat\r')
@@ -700,7 +767,7 @@ class TerminalSmoke(unittest.TestCase):
             self.assertEqual(repair['repair_of'], 1)
             self.assertEqual(repair['status'], 'proposed')
             os.write(master, b'/approve 2\r')
-            wait_for(b'revision 8')
+            wait_for(b'revision 9')
             os.write(master, b'/run 2\r')
             wait_for('◐ #2'.encode(), timeout=15)
             repair_requests = [r for r in model_requests if r['messages'][-1]['content'].startswith('Implement this task: Repair #1:')]
@@ -719,7 +786,7 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'/evidence 2\r')
             wait_for(b'Verified evidence for task #2')
             os.write(master, b'/accept\r')  # Must target the evidence being inspected.
-            wait_for(b'revision 11')  # Wait for the review receipt, not evidence explanatory text.
+            wait_for(b'revision 12')  # Wait for the review receipt, not evidence explanatory text.
             self.assertEqual(json.loads(saved.read_text())['tasks'][1]['status'], 'accepted')
             self.assertEqual(json.loads(saved.read_text())['tasks'][0]['status'], 'rejected')
             os.write(master, b'/activity #2\r')
@@ -728,11 +795,11 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'Task #3 saved')
             policy = json.dumps({'files': ['child.txt'], 'check': ['/usr/bin/python3', '-B', '-c', "from answer import VALUE; from pathlib import Path; assert VALUE == 42; assert Path('child.txt').read_text() == 'ready'"]})
             os.write(master, ('/permit 3 ' + policy + '\r').encode())
-            wait_for(b'revision 13')
-            os.write(master, b'/approve 3\r')
             wait_for(b'revision 14')
-            os.write(master, b'/resolve-repair 2\r')
+            os.write(master, b'/approve 3\r')
             wait_for(b'revision 15')
+            os.write(master, b'/resolve-repair 2\r')
+            wait_for(b'revision 16')
             os.write(master, b'/run 3\r')
             wait_for('◐ #3'.encode(), timeout=15)
             os.write(master, b'/evidence 3\r')
@@ -744,7 +811,7 @@ class TerminalSmoke(unittest.TestCase):
             self.assertFalse(Path(workspace.name, 'child.txt').exists())
             os.write(master, b'/accept\r')
             wait_for(b'Task #3 saved')
-            wait_for(b'revision 18')
+            wait_for(b'revision 19')
             os.write(master, b'/branch\r')
             wait_for(b'Review branch ready:')
             result = json.loads(saved.read_text())
@@ -802,10 +869,10 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'Installed models')
             wait_for(b'second-model')
             os.write(master, b'/approve 4\r')
-            wait_for(b'revision 21')
+            wait_for(b'revision 22')
             os.write(master, ('/assign 4 ' + replacement[:2] + '\t\r').encode())
             wait_for(('/assign 4 ' + replacement).encode())
-            self.assertEqual(json.loads(saved.read_text())['revision'], 21)
+            self.assertEqual(json.loads(saved.read_text())['revision'], 22)
             os.write(master, b'\r')
             wait_for(b'Assignment recorded: task #4')
             reassigned = json.loads(saved.read_text())
@@ -814,9 +881,9 @@ class TerminalSmoke(unittest.TestCase):
             self.assertEqual(reassigned['receipts'][-1]['request']['action']['kind'], 'assign')
             policy = json.dumps({'files': ['answer.py'], 'check': ['/usr/bin/python3', '-B', '-c', 'from answer import VALUE; assert VALUE == 42']})
             os.write(master, ('/permit 4 ' + policy + '\r').encode())
-            wait_for(b'revision 23')
-            os.write(master, b'/approve 4\r')
             wait_for(b'revision 24')
+            os.write(master, b'/approve 4\r')
+            wait_for(b'revision 25')
             os.write(master, b'/run 4\r')
             wait_for('◐ #4'.encode(), timeout=15)
             self.assertEqual(worker_models[-1], replacement)
@@ -1125,7 +1192,7 @@ class TerminalSmoke(unittest.TestCase):
                 output.clear()
                 new_env = dict(env, ALFREDO_STATE_DIR=new_state)
                 process = subprocess.Popen(
-                    [str(binary), '--new-mission', 'fresh', '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}'],
+                    [str(binary), '--select', '--new-mission', 'fresh', '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}'],
                     stdin=slave, stdout=slave, stderr=slave, env=new_env, cwd=workspace.name,
                 )
                 wait_for(b'Workspace selection required')
@@ -1146,7 +1213,7 @@ class TerminalSmoke(unittest.TestCase):
                 self.assertEqual(list(Path(new_state).iterdir()), [])
                 output.clear()
                 process = subprocess.Popen(
-                    [str(binary), '--new-mission', 'fresh', '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}'],
+                    [str(binary), '--select', '--new-mission', 'fresh', '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}'],
                     stdin=slave, stdout=slave, stderr=slave, env=new_env, cwd=workspace.name,
                 )
                 wait_for(b'Workspace selection required')

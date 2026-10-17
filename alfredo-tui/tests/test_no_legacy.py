@@ -5,7 +5,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 LEGACY = ('mission-control', 'albert_mvp')
-EXEMPT_PREFIXES = ('.agent/',)
+EXEMPT_PREFIXES = ('.agent/', 'changelog.d/')
 EXEMPT_FILES = {'CHANGELOG.md', 'alfredo-tui/tests/test_no_legacy.py'}
 
 

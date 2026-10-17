@@ -171,12 +171,12 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--model NAME` | `qwen3:14b` (env `ALFREDO_MODEL`) | Model for new conversations |
+| `--model NAME` | `qwen2.5-coder:14b` (env `ALFREDO_MODEL`) | Model for new conversations |
 | `--endpoint URL` | `http://127.0.0.1:11434` (env `OLLAMA_HOST`) | Ollama HTTP origin |
 | `--go GOAL` | off | Start autopilot on launch |
 | `--max-repairs N` | 3 | Auto-repairs per task, 0–16 (0 disables) |
 | `--workspace DIR` | current repo | Open the repository containing `DIR` |
-| `--mission NAME` / `--new-mission NAME` | `default` | Resume / create a named mission (with `--workspace`) |
+| `--mission NAME` / `--new-mission NAME` | `default` | Resume / create a named mission in the repository of the current directory or of `--workspace`; outside a repository `--workspace DIR` is required |
 | `--select` | off | Always show the repository/mission selector |
 | `--conversation NAME` | `default` | Named conversation set (one terminal owns a set) |
 | `--state-dir DIR` | `~/.local/state/alfredo` (env `ALFREDO_STATE_DIR`) | State location; must be outside the repo |
@@ -210,8 +210,9 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
   with `bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net true` and allow
   bwrap per your distro's policy.
 - **"Interactive terminal required"**: run in a real terminal, not piped.
-- **"Conversation namespace is in use"**: another terminal owns that conversation
-  set; use `--conversation other` (both terminals share the task queue).
+- **"Another alfredo-tui already owns conversation 'default' for this repo"**: another
+  terminal owns that conversation set; close it or relaunch with
+  `alfredo-tui --conversation other` (both terminals share the task queue).
 
 ### WSL notes
 
