@@ -1430,6 +1430,7 @@ impl TaskControl {
                         Action::ResolveRepair { task } => format!("Repair #{task} selected for original dependencies · revision {}", receipt.revision),
                         Action::Plan { plan } => format!("Plan saved · {} proposed tasks starting at #{} · revision {} · approve each policy before /run", plan.tasks.len(), receipt.task, receipt.revision),
                         Action::ReviewAndRepair { task, .. } => format!("Review #{task} saved · repair #{} proposed · /approve {} before running · revision {}", receipt.task, receipt.task, receipt.revision),
+                        Action::Propose { .. } => format!("Task #{} saved · next /permit {} {{\"files\":[…],\"check\":[…]}}, then /approve {} · revision {}", receipt.task, receipt.task, receipt.task, receipt.revision),
                         _ => format!("Task #{} saved · revision {}", receipt.task, receipt.revision),
                     };
                     (snapshot, notice).into()
@@ -2669,7 +2670,7 @@ pub fn parse(text: &str, model: &str) -> Result<Action, String> {
         let (id, json) = arguments.split_once(' ').ok_or(USAGE_PERMIT)?;
         let task = id.parse().map_err(|_| "Invalid task id")?;
         let policy: crate::tasks::WorkPolicy = serde_json::from_str(json)
-            .map_err(|_| "Policy must be JSON with exact files and check argv")?;
+            .map_err(|_| "Policy must be JSON with exact files and check argv, e.g. {\"files\":[\"calc.py\"],\"check\":[\"python3\",\"-m\",\"unittest\"]}")?;
         policy.validate()?;
         return Ok(Action::Permit { task, policy });
     }

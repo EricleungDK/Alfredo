@@ -1279,6 +1279,20 @@ impl TaskStore {
             }
             _ => {}
         }
+        // Only new approvals need a policy. Saves from before this rule may hold an
+        // approval without one, and replaying their receipts must keep working.
+        if let Action::Approve { task } = &request.action {
+            if snapshot
+                .tasks
+                .iter()
+                .any(|t| t.id == *task && t.status == TaskStatus::Proposed && t.policy.is_none())
+            {
+                return Err(format!(
+                    "Task #{task} has no files/check yet; set them with /permit {task} {{\"files\":[\"path\"],\"check\":[\"program\",\"arg\"]}}"
+                )
+                .into());
+            }
+        }
         let task = Self::apply(&mut snapshot, &request.action)?;
         snapshot.revision += 1;
         let receipt = Receipt {
