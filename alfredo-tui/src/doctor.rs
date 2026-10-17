@@ -111,7 +111,10 @@ pub async fn inspect(
             {
                 lines.push(format!("FAIL worker workspace: {error}"));
             } else {
-                lines.push(format!("FAIL worker workspace: {}. Coding needs --workspace at a Git root with a commit.", clean(&error)));
+                lines.push(format!(
+                    "FAIL worker workspace: {}. Coding needs a Git repository with a commit.",
+                    clean(&error)
+                ));
             }
         }
     }
