@@ -624,6 +624,36 @@ pub struct WorkerOwner {
     _lock: StoreLock,
 }
 
+/// Resolve `path` as the OS would, even when its tail does not exist yet: canonicalize the
+/// longest existing prefix (so `..` and symlinks follow the filesystem), then append the
+/// remaining components lexically. Missing components cannot be symlinks, so `.`/`..`
+/// there are safe to resolve textually.
+fn resolve_for_containment(path: &Path) -> Result<PathBuf> {
+    use std::path::Component;
+    let mut resolved = PathBuf::new();
+    let mut missing = false;
+    for component in path.components() {
+        if !missing {
+            match resolved.join(component.as_os_str()).canonicalize() {
+                Ok(real) => {
+                    resolved = real;
+                    continue;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => missing = true,
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                resolved.pop();
+            }
+            other => resolved.push(other.as_os_str()),
+        }
+    }
+    Ok(resolved)
+}
+
 impl TaskStore {
     pub fn new(root: &Path, workspace: &Path, mission: &str) -> Result<Self> {
         let workspace = workspace
@@ -643,15 +673,13 @@ impl TaskStore {
                 .join(root)
         };
         // State is separate from the coding workspace and all legacy mission files.
-        for ancestor in root.ancestors() {
-            if ancestor.exists()
-                && ancestor
-                    .canonicalize()
-                    .map_err(|e| e.to_string())?
-                    .starts_with(&workspace)
-            {
-                return Err("Task state must live outside the coding workspace".into());
-            }
+        let resolved = resolve_for_containment(&root)?;
+        if resolved.starts_with(&workspace) {
+            return Err(format!(
+                "Task state must live outside the coding workspace: state {} is inside workspace {}",
+                resolved.display(),
+                workspace.display()
+            ));
         }
         let identity = serde_json::to_vec(&(&workspace, mission)).map_err(|e| e.to_string())?;
         let namespace = format!("{:x}", Sha256::digest(identity));

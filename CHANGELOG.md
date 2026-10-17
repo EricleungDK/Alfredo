@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `--state-dir` paths that contain `..` (for example `../state` from inside the repo) are
+  no longer rejected as inside the coding workspace when they resolve outside it. The
+  check now resolves the path as the filesystem would, and the rejection names both the
+  resolved state path and the workspace path.
 - The task panel's `Next` hint for a review-ready task with acceptance criteria now
   says `/review N JSON` and `/reject N` instead of `/accept N`, which Alfredo refuses
   for such tasks. The `/accept` refusal and the `/review N` usage message lead with the
