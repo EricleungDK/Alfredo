@@ -226,3 +226,81 @@ fn failed_startup_reports_created_artifact_without_claiming_a_retained_workstati
     assert!(error.contains(target.to_str().unwrap()), "{error}");
     assert!(target.join(".git").is_dir());
 }
+
+fn arrival_count(work: &Workstation) -> usize {
+    work.app
+        .sessions
+        .iter()
+        .flat_map(|session| session.commands())
+        .filter(|command| {
+            matches!(
+                command.intent,
+                alfredo_tui::command_intent::Intent::SelectionArrival { .. }
+            )
+        })
+        .count()
+}
+
+fn screen(work: &Workstation) -> String {
+    use ratatui::{backend::TestBackend, Terminal};
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal
+        .draw(|frame| alfredo_tui::ui::draw(frame, &work.app))
+        .unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn relaunching_into_the_same_target_keeps_one_arrival_and_the_welcome_hint() {
+    let fixture = Fixture::new();
+    let runtime = Runtime::new().unwrap();
+    let launch = || {
+        let request =
+            Request::new(Origin::Startup, fixture.create_choice(), "default".into()).unwrap();
+        let mut choice = fixture.create_choice();
+        // Only the first launch creates; later launches resume the same mission.
+        choice.workspace = WorkspaceChoice::Existing {
+            path: fixture.create_choice().target(),
+        };
+        choice.mission = MissionChoice::Resume {
+            name: "mission".into(),
+        };
+        (request, choice)
+    };
+    let (first, choice) = launch();
+    let mut work = Workstation::launch(
+        &runtime,
+        &fixture.state,
+        first,
+        "fixture",
+        fixture.provider(),
+    )
+    .unwrap();
+    assert_eq!(arrival_count(&work), 1);
+    for _ in 0..3 {
+        drop(work);
+        let request = Request::new(Origin::Startup, choice.clone(), "default".into()).unwrap();
+        work = Workstation::launch(
+            &runtime,
+            &fixture.state,
+            request,
+            "fixture",
+            fixture.provider(),
+        )
+        .unwrap();
+        assert_eq!(arrival_count(&work), 1, "arrivals must not accumulate");
+        let screen = screen(&work);
+        assert_eq!(screen.matches("· Workspace").count(), 1, "{screen}");
+        assert!(screen.contains("/go GOAL"), "{screen}");
+    }
+    // Arrival records are display-only: never part of the model conversation.
+    assert!(work.app.sessions[0].messages.is_empty());
+}

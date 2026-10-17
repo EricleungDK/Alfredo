@@ -785,6 +785,28 @@ impl Session {
         request: crate::selection_command::Request,
         outcome: crate::selection_command::Outcome,
     ) -> Result<String, String> {
+        // One arrival per workspace and mission: a relaunch supersedes the earlier
+        // banner instead of piling up. The superseded entry is display-only history
+        // and the new record carries the live journal correlation. Restored on
+        // failure so a refused admission changes nothing.
+        let target = request.choice.target();
+        let mission = request.choice.mission.name().to_owned();
+        let before = self.commands.clone();
+        self.commands.retain(|command| {
+            !matches!(&command.intent, crate::command_intent::Intent::SelectionArrival { request }
+                if request.choice.target() == target && request.choice.mission.name() == mission)
+        });
+        let admitted = self.admit_arrival(request, outcome);
+        if admitted.is_err() {
+            self.commands = before;
+        }
+        admitted
+    }
+    fn admit_arrival(
+        &mut self,
+        request: crate::selection_command::Request,
+        outcome: crate::selection_command::Outcome,
+    ) -> Result<String, String> {
         self.admit_command(
             format!(
                 "Workspace {} · mission {}",
