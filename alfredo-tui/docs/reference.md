@@ -44,7 +44,8 @@ Each choice is an ordinary console command saved and dispatched through the same
 intent path as typed input; policy, evidence, locks and receipts stay authoritative.
 Risk-classified or human-hold reviews always wait for you, and manual commands keep
 working. `/pause` or F5 stops new starts and decisions (running workers finish);
-`/resume` or F5 continues; `/stop` also cancels running workers; `/autopilot` shows
+`/resume` or F5 continues; `/stop` also cancels running workers and an in-flight planning request (no
+draft appears later; `/resume` plans again); `/autopilot` shows
 status. The header's second row shows the run: state, `done/total`, failures and
 repairs when present, elapsed time and branch; the goal is the work group title.
 State lives in a small
