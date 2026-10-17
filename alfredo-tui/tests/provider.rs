@@ -927,3 +927,20 @@ fn ollama_host_forms_normalize_to_an_http_origin() {
         assert!(Ollama::new(&normalize_endpoint(input), Duration::from_secs(1)).is_ok());
     }
 }
+
+#[tokio::test]
+async fn missing_model_404_names_the_model_with_ollamas_text_and_is_not_retried() {
+    let missing = serve(reserve(), |_, _| {
+        Reply::Json(404, "{\"error\":\"model 'fixture' not found\"}".into())
+    });
+    let events = run(&retrying(&missing.endpoint, 3, Duration::from_millis(5))).await;
+    assert!(retries(&events).is_empty());
+    assert_eq!(missing.count("POST /api/chat"), 1);
+    let Update::Failed(error) = &events.last().unwrap().update else {
+        panic!("{events:?}");
+    };
+    assert!(error.contains("fixture"), "{error}");
+    assert!(error.contains("/models"), "{error}");
+    assert!(error.contains("ollama pull fixture"), "{error}");
+    assert!(error.contains("model 'fixture' not found"), "{error}");
+}

@@ -238,3 +238,28 @@ fn empty_selector_input_shows_a_placeholder_that_typing_replaces() {
         "default"
     );
 }
+
+#[test]
+fn long_selector_notice_wraps_in_full_at_100_columns() {
+    let saved = Discovery::default();
+    let input = Session::new("selection".into());
+    let words: Vec<String> = (0..60).map(|n| format!("word{n:02}")).collect();
+    let notice = words.join(" ");
+    let view = SelectorView {
+        starting: Path::new("/tmp/start"),
+        accepted: None,
+        create: false,
+        start_new: false,
+        notice: &notice,
+        input: &input,
+        placeholder: "default",
+        saved: &saved,
+        saved_index: 0,
+        loading: false,
+        pending: false,
+    };
+    let screen = rows(&render(100, 45, &view)).join("\n");
+    for word in &words {
+        assert!(screen.contains(word.as_str()), "{word} cut off:\n{screen}");
+    }
+}

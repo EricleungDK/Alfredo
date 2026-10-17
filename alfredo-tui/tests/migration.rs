@@ -1,3 +1,4 @@
+mod common;
 use alfredo_tui::tasks::{Action, Request, TaskStore, WorkPolicy};
 use std::fs;
 
@@ -21,13 +22,27 @@ fn legacy_upgrade_retains_exact_bytes_and_does_not_infer_execution_permission() 
                 },
             })
             .unwrap();
-        store
-            .transact(Request {
-                correlation: "approve".into(),
+        for request in [
+            Request {
+                correlation: "permit".into(),
                 expected_revision: 1,
+                action: Action::Permit {
+                    task: 1,
+                    policy: WorkPolicy {
+                        files: vec!["src/main.rs".into()],
+                        check: vec!["/bin/true".into()],
+                    },
+                },
+            },
+            Request {
+                correlation: "approve".into(),
+                expected_revision: 2,
                 action: Action::Approve { task: 1 },
-            })
-            .unwrap();
+            },
+        ] {
+            store.transact(request).unwrap();
+        }
+        common::forge_legacy_approval(&store);
         let namespace = fs::read_dir(root.join("state/rust-tasks-v1"))
             .unwrap()
             .next()

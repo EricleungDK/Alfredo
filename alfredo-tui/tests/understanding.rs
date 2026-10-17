@@ -138,8 +138,20 @@ fn pending_scope_prevents_owner_claim_but_allows_cancellation() {
     let f = Fixture::new();
     f.a.transact(proposal("task", 0)).unwrap();
     f.a.transact(TaskRequest {
-        correlation: "approve".into(),
+        correlation: "permit".into(),
         expected_revision: 1,
+        action: TaskAction::Permit {
+            task: 1,
+            policy: alfredo_tui::tasks::WorkPolicy {
+                files: vec!["calc.py".into()],
+                check: vec!["/bin/true".into()],
+            },
+        },
+    })
+    .unwrap();
+    f.a.transact(TaskRequest {
+        correlation: "approve".into(),
+        expected_revision: 2,
         action: TaskAction::Approve { task: 1 },
     })
     .unwrap();
@@ -153,7 +165,7 @@ fn pending_scope_prevents_owner_claim_but_allows_cancellation() {
         .contains("Understanding pending"));
     f.a.transact(TaskRequest {
         correlation: "cancel".into(),
-        expected_revision: 2,
+        expected_revision: 3,
         action: TaskAction::Cancel { task: 1 },
     })
     .unwrap();
