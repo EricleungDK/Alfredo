@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `--mission NAME` for a missing mission now says `Mission 'NAME' does not exist; use
+  --new-mission NAME to create it (existing: default, m1)` (first 5 names, then `…`), and
+  `--new-mission NAME` for an existing one says `Mission 'NAME' already exists; use
+  --mission NAME to resume it`, instead of the selector's "choose Start New Mission" /
+  "choose Resume" wording. The in-TUI selector wording is unchanged.
 - The task panel's `Next` hint for a review-ready task with acceptance criteria now
   says `/review N JSON` and `/reject N` instead of `/accept N`, which Alfredo refuses
   for such tasks. The `/accept` refusal and the `/review N` usage message lead with the

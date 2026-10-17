@@ -232,3 +232,41 @@ async fn automatic_open_of_a_plain_folder_yields_the_not_a_repository_notice() {
     );
     assert!(notice.contains("git init") && !notice.contains("fatal"));
 }
+
+#[test]
+fn flag_mission_errors_name_the_flag_and_cap_the_list() {
+    use alfredo_tui::selection::flag_mission_error;
+    use alfredo_tui::tasks::{MISSION_EXISTS, MISSION_MISSING};
+    let few = vec!["default".to_string(), "m1".to_string()];
+    assert_eq!(
+        flag_mission_error(MISSION_MISSING.into(), "nope", &few),
+        "Mission 'nope' does not exist; use --new-mission nope to create it (existing: default, m1)"
+    );
+    assert_eq!(
+        flag_mission_error(MISSION_MISSING.into(), "nope", &[]),
+        "Mission 'nope' does not exist; use --new-mission nope to create it"
+    );
+    let many: Vec<String> = (1..=7).map(|n| format!("m{n}")).collect();
+    assert_eq!(
+        flag_mission_error(MISSION_MISSING.into(), "x", &many),
+        "Mission 'x' does not exist; use --new-mission x to create it (existing: m1, m2, m3, m4, m5, …)"
+    );
+    assert_eq!(
+        flag_mission_error(MISSION_EXISTS.into(), "m1", &few),
+        "Mission 'm1' already exists; use --mission m1 to resume it"
+    );
+    // Unrelated errors pass through untouched.
+    assert_eq!(flag_mission_error("Boom".into(), "m1", &few), "Boom");
+}
+
+#[test]
+fn selector_wording_is_unchanged() {
+    assert_eq!(
+        alfredo_tui::tasks::MISSION_MISSING,
+        "Mission does not exist; choose Start New Mission"
+    );
+    assert_eq!(
+        alfredo_tui::tasks::MISSION_EXISTS,
+        "Mission already exists; choose Resume or another name"
+    );
+}

@@ -573,6 +573,10 @@ impl Snapshot {
     }
 }
 
+/// Selector wording; the command-line flag path rewrites these (see `selection::flag_mission_error`).
+pub const MISSION_EXISTS: &str = "Mission already exists; choose Resume or another name";
+pub const MISSION_MISSING: &str = "Mission does not exist; choose Start New Mission";
+
 #[derive(Clone)]
 pub struct TaskStore {
     root: PathBuf,
@@ -903,8 +907,8 @@ impl TaskStore {
             }
         }
         match (start_new, exists) {
-            (true, true) => Err("Mission already exists; choose Resume or another name".into()),
-            (false, false) => Err("Mission does not exist; choose Start New Mission".into()),
+            (true, true) => Err(MISSION_EXISTS.into()),
+            (false, false) => Err(MISSION_MISSING.into()),
             (false, true) if fs::symlink_metadata(&manifest).is_ok() => {
                 crate::missions::validate_manifest(&manifest, &self.workspace, &self.mission)
             }
@@ -915,13 +919,13 @@ impl TaskStore {
     /// Select identity under the namespace lock; this grants no task approval.
     pub fn select_mission(&self, start_new: bool) -> Result<()> {
         if !start_new && !self.root.exists() {
-            return Err("Mission does not exist; choose Start New Mission".into());
+            return Err(MISSION_MISSING.into());
         }
         let _lock = self.lock()?;
         let manifest = self.root.join("mission.json");
         if std::fs::symlink_metadata(&manifest).is_ok() {
             if start_new {
-                return Err("Mission already exists; choose Resume or another name".into());
+                return Err(MISSION_EXISTS.into());
             }
             return crate::missions::validate_manifest(&manifest, &self.workspace, &self.mission);
         }
@@ -945,7 +949,7 @@ impl TaskStore {
         }
         if has_tasks || !conversations.is_empty() {
             if start_new {
-                return Err("Mission already exists; choose Resume or another name".into());
+                return Err(MISSION_EXISTS.into());
             }
             if has_tasks {
                 self.read_locked()?;
@@ -978,7 +982,7 @@ impl TaskStore {
             return Ok(());
         }
         if !start_new {
-            return Err("Mission does not exist; choose Start New Mission".into());
+            return Err(MISSION_MISSING.into());
         }
         crate::missions::create_manifest(&manifest, &self.workspace, &self.mission)
     }
