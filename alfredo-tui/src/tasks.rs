@@ -2263,6 +2263,23 @@ impl TaskStore {
     /// `recover` with a typed refusal: failures before any recovery write are
     /// final; once a boundary record or receipt may have been written they are uncertain.
     pub fn recover_checked(&self, task: u64) -> std::result::Result<(Snapshot, String), Refusal> {
+        self.recover_with(task, false)
+    }
+
+    /// `/recover ID requeue`, used by `/resume`: the same proofs, but an interruption
+    /// is recorded as a cancelled run so `/requeue` applies and no repair is spent.
+    pub fn recover_requeue_checked(
+        &self,
+        task: u64,
+    ) -> std::result::Result<(Snapshot, String), Refusal> {
+        self.recover_with(task, true)
+    }
+
+    fn recover_with(
+        &self,
+        task: u64,
+        requeue: bool,
+    ) -> std::result::Result<(Snapshot, String), Refusal> {
         let _owner = self
             .recovery_owner(task)?
             .ok_or("Worker is still active; recovery refused")?;
@@ -2285,7 +2302,7 @@ impl TaskStore {
         let (request, detail) = match self.recovery_request(task, &snapshot) {
             Ok(request) => (
                 request,
-                "Saved worker result recovered; no effects replayed",
+                "Saved worker result recovered; no effects replayed".to_string(),
             ),
             Err(error) => {
                 // Both interruption proofs require absent final evidence. An existing
@@ -2293,10 +2310,14 @@ impl TaskStore {
                 let detail = if crate::run_boundary::interrupted_before_check(&run_directory, item)
                     .is_ok()
                 {
-                    crate::run_boundary::record_interrupted(&run_directory, item)
+                    crate::run_boundary::record_interrupted(&run_directory, item, requeue)
                         .map_err(Refusal::Uncertain)?;
                     wrote = true;
-                    "Interrupted worker recorded as failed before check launch; no effects replayed"
+                    if requeue {
+                        "Interrupted worker recorded as cancelled before check launch; no effects replayed".to_string()
+                    } else {
+                        "Interrupted worker recorded as failed before check launch; no effects replayed".to_string()
+                    }
                 } else if crate::run_boundary::interrupted_after_check(
                     &run_directory,
                     item,
@@ -2308,10 +2329,15 @@ impl TaskStore {
                         &run_directory,
                         item,
                         &snapshot.mission,
+                        requeue,
                     )
                     .map_err(Refusal::Uncertain)?;
                     wrote = true;
-                    "Interrupted worker recorded as failed after check; candidate not finalized; no effects replayed"
+                    if requeue {
+                        "Interrupted worker recorded as cancelled after check; candidate not finalized; no effects replayed".to_string()
+                    } else {
+                        "Interrupted worker recorded as failed after check; candidate not finalized; no effects replayed".to_string()
+                    }
                 } else {
                     return Err(Refusal::Uncertain(format!(
                         "Outcome unknown; retained evidence cannot be recovered: {error}. No effects replayed"
@@ -2342,7 +2368,7 @@ impl TaskStore {
                 Refusal::Denied(reason) if wrote => Refusal::Uncertain(reason),
                 other => other,
             })?;
-        Ok((snapshot, detail.into()))
+        Ok((snapshot, detail))
     }
 
     fn read_evidence(

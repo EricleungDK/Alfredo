@@ -369,8 +369,10 @@ pub struct Autopilot {
     /// Monotonic process clock plus seconds already elapsed when it was taken.
     clock: (std::time::Instant, u64),
     notice: String,
-    /// One-line result, handed once to the terminal footer when the loop finishes.
+    /// One-line result (or the restore notice), handed once to the terminal footer.
     finished_notice: Option<String>,
+    /// The restore notice naming runs that Alfredo's exit interrupted was shown.
+    announced_interrupted: bool,
 }
 
 impl Autopilot {
@@ -418,6 +420,7 @@ impl Autopilot {
             clock: (std::time::Instant::now(), saved_elapsed.unwrap_or_default()),
             notice,
             finished_notice: None,
+            announced_interrupted: false,
         })
     }
 
@@ -919,6 +922,7 @@ impl Autopilot {
     pub fn tick(&mut self, runtime: &Runtime, tasks: &mut TaskControl) -> Option<Submission> {
         self.poll_integration(tasks);
         self.record_progress(tasks);
+        self.announce_interrupted(tasks);
         if let Some(reason) = tasks.dispatch.contended.take() {
             if self.running() {
                 self.halt(
@@ -1014,6 +1018,42 @@ impl Autopilot {
                 None
             }
         }
+    }
+
+    /// After a restore, say which recorded-running tasks lost their worker and what
+    /// `/resume` does about it. Shown once; nothing is recovered until `/resume`.
+    fn announce_interrupted(&mut self, tasks: &mut TaskControl) {
+        if self.announced_interrupted
+            || !self.saved.as_ref().is_some_and(|s| s.active() && s.paused)
+        {
+            return;
+        }
+        let Some(snapshot) = &tasks.snapshot else {
+            return;
+        };
+        let ids: Vec<String> = snapshot
+            .tasks
+            .iter()
+            .filter(|task| tasks.interrupted(task.id))
+            .map(|task| format!("#{}", task.id))
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        self.announced_interrupted = true;
+        let notice = if ids.len() == 1 {
+            format!(
+                "Task {} was running when Alfredo exited; /resume re-runs it",
+                ids[0]
+            )
+        } else {
+            format!(
+                "Tasks {} were running when Alfredo exited; /resume re-runs them",
+                ids.join(", ")
+            )
+        };
+        self.finished_notice = Some(notice.clone());
+        self.set_notice(tasks, notice);
     }
 
     fn halt(&mut self, tasks: &mut TaskControl, notice: String) {
@@ -1262,6 +1302,7 @@ impl Autopilot {
             }
         }
         let mut command = None;
+        let mut retry_recovered: Vec<u64> = Vec::new();
         // Families the owner is instructing are theirs until the instructed run starts.
         let held = tasks.owner.held();
         for family in families
@@ -1296,6 +1337,16 @@ impl Autopilot {
                     format!("resolve-{}", head.id),
                     format!("/resolve-repair {}", head.id),
                 )),
+                // Alfredo exited mid-run: record the interruption with `/recover`'s proof
+                // as a cancelled run (never a failure), then `/requeue` below. Nothing
+                // is replayed and no repair is spent.
+                TaskStatus::Running if tasks.recoverable(head.id) => {
+                    retry_recovered.push(head.id);
+                    Some((
+                        format!("recover-{}", head.id),
+                        format!("/recover {} requeue", head.id),
+                    ))
+                }
                 // A run cancelled by the user is dispatched again as the same
                 // task: no repair, no failure and no repair budget spent.
                 TaskStatus::Cancelled => Some((
@@ -1339,6 +1390,13 @@ impl Autopilot {
             let intent = tasks
                 .prepare_command(&text, &saved.model)?
                 .ok_or("Command unavailable")?;
+            if !retry_recovered.is_empty() {
+                // The recovered run is cancelled; this resume re-runs it, like a /stop cancel.
+                if let Some(saved) = self.saved.as_mut() {
+                    saved.retry_cancelled.extend(retry_recovered);
+                }
+                self.persist();
+            }
             let display = if text.starts_with("/review ") {
                 format!(
                     "{} (approved: check passed)",
@@ -1517,7 +1575,14 @@ impl Autopilot {
             lines.push(format!("{glyph} #{}  {title}", family.root));
             if let Some(detail) = detail {
                 let exhausted = detail.contains(BUDGET_EXHAUSTED);
+                let interrupted = detail.starts_with(INTERRUPTED);
                 lines.push(format!("      {detail}"));
+                if interrupted {
+                    lines.push(format!(
+                        "      Next: /tasks #{0} for the retained run (do not rerun effects); /recover {0} says what it can prove, or start the work again with /go",
+                        family.head
+                    ));
+                }
                 if exhausted {
                     if let Some(head) = snapshot.tasks.iter().find(|t| t.id == family.head) {
                         lines.push(format!(
@@ -1584,6 +1649,22 @@ fn sandbox_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
     let evidence = serde_json::from_str::<crate::worker::Evidence>(&evidence).ok()?;
     (evidence.failure_code.as_deref() == Some(crate::execution::SANDBOX_UNAVAILABLE))
         .then(|| clean(&evidence.detail, 300))
+}
+
+const INTERRUPTED: &str = "run interrupted";
+
+/// Why an interrupted run cannot be recovered automatically.
+fn interrupted_reason(tasks: &TaskControl, head: u64) -> String {
+    match tasks.run_observations.get(&head) {
+        Some(text) if text.contains("another process") => {
+            format!("{INTERRUPTED}: its worker is still active in another Alfredo process")
+        }
+        Some(text) => format!(
+            "{INTERRUPTED}: it cannot be recovered safely ({})",
+            clean(text, 200)
+        ),
+        None => format!("{INTERRUPTED}: its worker state is unknown"),
+    }
 }
 
 fn held_or_done(family: &Family, tasks: &TaskControl) -> bool {
@@ -1739,8 +1820,11 @@ fn families(snapshot: &Snapshot, saved: &Saved, tasks: &TaskControl) -> Vec<Fami
                 TaskStatus::Cancelled if !saved.retry_cancelled.contains(&head) => {
                     Settled::Cancelled
                 }
+                // Alfredo exited mid-run: `/resume` recovers it with the `/recover` proof
+                // and runs it again, so it is neither failed nor stuck while provable.
+                TaskStatus::Running if tasks.recoverable(head) => Settled::Active,
                 TaskStatus::Running if !tasks.workers.contains_key(&head) => {
-                    Settled::Stuck(format!("run interrupted; inspect with /recover {head}"))
+                    Settled::Stuck(interrupted_reason(tasks, head))
                 }
                 TaskStatus::Proposed | TaskStatus::Approved => match blocked() {
                     Some(reason) => Settled::Stuck(reason),

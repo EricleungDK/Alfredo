@@ -43,7 +43,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ("/run", "[ID] — start approved worker"),
     ("/cancel-task", "[ID] — cancel selected task"),
     ("/evidence", "[ID] — inspect verified evidence"),
-    ("/recover", "[ID] — recover a stopped run without replay"),
+    (
+        "/recover",
+        "[ID] [requeue] — recover a stopped run without replay",
+    ),
     ("/accept", "[ID] — accept reviewed evidence"),
     (
         "/repair",

@@ -47,6 +47,9 @@ pub enum Intent {
         correlation: String,
         task: u64,
         run: String,
+        /// `/resume`: record an interruption as a cancelled run, so it requeues.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        requeue: bool,
     },
 }
 #[derive(Clone, Debug, PartialEq, Eq)]

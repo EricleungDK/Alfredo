@@ -1968,14 +1968,14 @@ fn work_detail(
         }
         return (
             lines,
-            format!(" Task #{} · {} ", task.id, dashboard::state_word(task)),
+            format!(" Task #{} · {} ", task.id, task_state_word(tasks, task)),
             true,
             pinned,
         );
     }
     (
         lines,
-        format!(" Task #{} · {} ", task.id, dashboard::state_word(task)),
+        format!(" Task #{} · {} ", task.id, task_state_word(tasks, task)),
         false,
         0,
     )
@@ -2947,5 +2947,15 @@ mod fit_words_tests {
             hint.contains("/accept 1") && hint.contains("/reject 1"),
             "{hint}"
         );
+    }
+}
+
+/// `running` only while a worker or owner lock can still be live; a run whose
+/// process is gone reads `interrupted`.
+fn task_state_word(tasks: &TaskControl, task: &crate::tasks::Task) -> &'static str {
+    if tasks.interrupted(task.id) {
+        "interrupted"
+    } else {
+        dashboard::state_word(task)
     }
 }

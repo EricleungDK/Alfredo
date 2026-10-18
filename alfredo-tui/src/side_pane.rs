@@ -341,6 +341,7 @@ pub fn task_status(
                 RowStatus::Queued
             }
             Some(_) => RowStatus::Working,
+            None if tasks.interrupted(task.id) => RowStatus::Interrupted,
             None => RowStatus::Unverified,
         },
         TaskStatus::Accepted => RowStatus::Complete,

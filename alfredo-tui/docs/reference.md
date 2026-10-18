@@ -66,6 +66,20 @@ no Repair task, and spends none of the `--max-repairs` budget. Only a failed che
 worker is repaired. A stopped task shows as `cancelled` in the work status and resumes with
 `/resume` (autopilot) or `/requeue ID`.
 
+After a hard crash (kill -9, out-of-memory, power loss) a task can still be recorded
+`running` although its worker and owner lock are gone. On restore the pane shows it
+as `interrupted` (not `running ▶`), the footer says `Task #1 was running when Alfredo
+exited; /resume re-runs it`, and the header does not count it as failed. Nothing is
+replayed until you resume. `/resume` then applies the same proof as `/recover ID`
+(`/recover ID requeue` is the explicit form), records the interruption as a **cancelled**
+run, requeues the task like a `/stop` cancel (no Repair task, none of the
+`--max-repairs` budget spent) and continues the loop to the integration branch. When
+the proof does not hold (damaged boundary artifacts, a worker still alive in another
+Alfredo process) `/resume` ends the run naming the reason (`run interrupted: it cannot
+be recovered safely (…)`) with a `Next:` line, instead of a bare failure. A run whose
+worker had already saved a result keeps that result and goes through review or repair
+as usual. Interrupted repair runs are not covered yet.
+
 A failed autopilot summary says why. For a task whose repair budget is spent, the
 summary adds `Last failure:` (one line of the last attempt's recorded cause, such as
 `Model returned no FILE blocks`) and `Next:` (`Try a larger model, /repair ID <hint>,
@@ -1244,7 +1258,9 @@ not authenticate private state against a same-user actor replacing all records.
 After-check recovery retains the original check receipt and output and reports
 **interrupted after check; candidate not finalized**. Even a zero-exit check yields
 a Failed task: recovery reconstructs neither patch nor candidate. Original partial
-work and artifacts remain intact. Repeating recovery returns the same Finish
+work and artifacts remain intact. `/recover ID requeue`, which autopilot `/resume`
+runs for an interrupted generation, uses the same two proofs but records the run as
+**Cancelled** so `/requeue ID` runs the task again without a repair. Repeating recovery returns the same Finish
 acknowledgment without repeating an effect. `/repair` proposes separate work that
 requires fresh approval; dependencies remain blocked on the failed original.
 

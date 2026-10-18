@@ -76,6 +76,8 @@ pub enum RowStatus {
     Cancelled,
     /// Recorded as running without an observed local worker.
     Unverified,
+    /// Recorded as running, but its worker process and owner lock are gone.
+    Interrupted,
 }
 
 impl IconSet {
@@ -135,6 +137,7 @@ impl IconSet {
             RowStatus::Complete => pick(ascii, "+", "✓"),
             RowStatus::Idle | RowStatus::Pending => pick(ascii, "o", "○"),
             RowStatus::Cancelled => pick(ascii, "-", "–"),
+            RowStatus::Interrupted => pick(ascii, "!", "↻"),
         }
     }
 }
@@ -260,7 +263,7 @@ impl Theme {
                 Tone::Dim
             }
             RowStatus::Review => Tone::Cyan,
-            RowStatus::Decision | RowStatus::Unverified => Tone::Amber,
+            RowStatus::Decision | RowStatus::Unverified | RowStatus::Interrupted => Tone::Amber,
             RowStatus::Failed => Tone::Red,
             RowStatus::Blocked => Tone::Magenta,
             RowStatus::Complete => Tone::Green,

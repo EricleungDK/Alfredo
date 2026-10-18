@@ -18,6 +18,7 @@ const STATUSES: [RowStatus; 11] = [
     RowStatus::Pending,
     RowStatus::Cancelled,
     RowStatus::Unverified,
+    RowStatus::Interrupted,
 ];
 
 #[test]

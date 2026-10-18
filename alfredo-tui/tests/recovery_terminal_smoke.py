@@ -240,6 +240,30 @@ class ResumeAfterCrashSmoke(autopilot_terminal_smoke.AutopilotTerminalSmoke):
         self.assertEqual(self.git('status', '--porcelain'), '')
         self.quit(terminal)
 
+    def test_unrecoverable_interruption_names_reason_and_next_step(self):
+        self.fixture.single_task = True
+        self.fixture.hold_calc = threading.Event()
+        terminal = self.terminal(resume=False)
+        terminal.send('/go Make answer return 42\r')
+        self.wait_until('worker generating', lambda: self.fixture.markers().count('CALC') == 1, 60)
+        terminal.kill()
+        terminal.close()
+        self.fixture.hold_calc.set()
+        # Damage the run boundary: the /recover proof can no longer hold.
+        boundary = next(self.state.glob('rust-tasks-v1/*/runs/*/execution-boundary.json'))
+        boundary.write_text('{')
+
+        terminal = self.terminal(resume=True)
+        self.screen_has(terminal, 'Autopilot ‖ paused')
+        terminal.send('/resume\r')
+        self.screen_has(terminal, 'Autopilot failed', 30)
+        self.screen_has(terminal, 'run interrupted: it cannot be recovered safely')
+        self.screen_has(terminal, 'Next: /tasks #1')
+        self.assertIn('/recover 1', terminal.screen())
+        self.assertEqual(self.fixture.markers(), ['PLAN', 'CALC'], 'nothing is replayed')
+        self.assertEqual(self.statuses(), [(1, 'running', None)])
+        self.quit(terminal)
+
 
 if __name__ == '__main__':
     unittest.main()
