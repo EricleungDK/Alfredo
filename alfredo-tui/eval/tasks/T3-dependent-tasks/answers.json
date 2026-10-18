@@ -1,0 +1,24 @@
+{
+  "plan": {"tasks": [
+    {"title": "Add pricing.with_tax",
+     "acceptance": ["with_tax(price) adds config.RATE tax, rounded to 2 decimals"],
+     "dependencies": [],
+     "policy": {"files": ["pricing.py"], "check": ["/usr/bin/python3", "-B", "-c",
+       "from pricing import with_tax; assert with_tax(100) == 125.0"]}},
+    {"title": "Add invoice.total",
+     "acceptance": ["total(prices) sums with_tax over prices, rounded to 2 decimals"],
+     "dependencies": [1],
+     "policy": {"files": ["invoice.py"], "check": ["/usr/bin/python3", "-B", "-c",
+       "from invoice import total; assert total([100, 20]) == 150.0"]}}
+  ]},
+  "workers": [
+    {"prefix": "Implement this task: Add pricing", "replies": [{"files": [{
+      "path": "pricing.py",
+      "content": "from config import RATE\n\n\ndef with_tax(price):\n    return round(price * (1 + RATE), 2)\n"
+    }]}]},
+    {"prefix": "Implement this task: Add invoice", "replies": [{"files": [{
+      "path": "invoice.py",
+      "content": "from pricing import with_tax\n\n\ndef total(prices):\n    return round(sum(with_tax(price) for price in prices), 2)\n"
+    }]}]}
+  ]
+}

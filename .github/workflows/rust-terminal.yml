@@ -73,6 +73,9 @@ jobs:
       - name: PTY smoke - agent view
         timeout-minutes: 10
         run: python3 alfredo-tui/tests/agent_terminal_smoke.py
+      - name: Eval smoke - fixture harness metrics
+        timeout-minutes: 10
+        run: python3 alfredo-tui/tests/eval_smoke.py
       - name: Install dependency auditor
         run: |
           cargo audit --version 2>/dev/null | grep -q ' 0\.22\.2$' \

@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Alfredo harness eval result",
+  "type": "object",
+  "required": ["schema_version", "agent", "backend", "model", "config", "trials", "tasks", "metrics", "warnings", "likely_broken"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "agent": {"enum": ["alfredo", "claude-code"]},
+    "backend": {"enum": ["fixture", "ollama", "claude-api"]},
+    "model": {"type": "string", "minLength": 1},
+    "config": {
+      "type": "object",
+      "required": ["trials", "tasks", "started_at", "cpus", "agent_version"],
+      "properties": {
+        "trials": {"type": "integer", "minimum": 1},
+        "tasks": {"type": "array", "items": {"type": "string"}},
+        "skipped_tasks": {"type": "object", "additionalProperties": {"type": "string"}},
+        "started_at": {"type": "string"},
+        "cpus": {"type": "integer", "minimum": 1},
+        "agent_version": {"type": ["string", "null"]},
+        "command": {"type": ["array", "null"], "items": {"type": "string"}}
+      }
+    },
+    "trials": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["task", "kind", "trial", "pass", "outcome", "turns", "tool_calls", "tokens", "errors", "repairs",
+                     "wall_s", "ttft_ms", "rss_kb", "exit_code", "panic", "unavailable"],
+        "properties": {
+          "task": {"type": "string"},
+          "kind": {"enum": ["positive", "negative_control"]},
+          "trial": {"type": "integer", "minimum": 1},
+          "pass": {"type": "boolean"},
+          "outcome": {"enum": ["done", "failed", "timeout", "crashed", "harness_error"]},
+          "graded_ref": {"type": ["string", "null"]},
+          "grade_output": {"type": "string"},
+          "turns": {"type": ["integer", "null"], "minimum": 0},
+          "tool_calls": {"type": ["integer", "null"], "minimum": 0},
+          "tokens": {
+            "type": "object",
+            "required": ["prompt", "eval", "planner", "peak_ctx"],
+            "additionalProperties": false,
+            "properties": {
+              "prompt": {"type": ["integer", "null"], "minimum": 0},
+              "eval": {"type": ["integer", "null"], "minimum": 0},
+              "planner": {"type": ["integer", "null"], "minimum": 0},
+              "peak_ctx": {"type": ["integer", "null"], "minimum": 0}
+            }
+          },
+          "errors": {
+            "type": "object",
+            "required": ["malformed", "refused", "sandbox"],
+            "additionalProperties": false,
+            "properties": {
+              "malformed": {"type": ["integer", "null"], "minimum": 0},
+              "refused": {"type": ["integer", "null"], "minimum": 0},
+              "sandbox": {"type": ["integer", "null"], "minimum": 0}
+            }
+          },
+          "repairs": {"type": ["integer", "null"], "minimum": 0},
+          "repairs_accepted": {"type": ["integer", "null"], "minimum": 0},
+          "tasks_accepted": {"type": ["integer", "null"], "minimum": 0},
+          "enter_to_request_ms": {"type": ["number", "null"], "minimum": 0},
+          "wall_s": {"type": "number", "minimum": 0},
+          "cold_start_ms": {"type": ["number", "null"], "minimum": 0},
+          "overhead_s": {"type": ["number", "null"], "minimum": 0},
+          "ttft_ms": {"type": ["number", "null"], "minimum": 0},
+          "rss_kb": {"type": ["integer", "null"], "minimum": 0},
+          "exit_code": {"type": ["integer", "null"]},
+          "panic": {"type": "boolean"},
+          "unavailable": {"type": "object", "additionalProperties": {"type": "string"}},
+          "notes": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "tasks": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["kind", "trials", "passes", "pass_rate", "expected"],
+        "properties": {
+          "kind": {"enum": ["positive", "negative_control"]},
+          "trials": {"type": "integer", "minimum": 0},
+          "passes": {"type": "integer", "minimum": 0},
+          "pass_rate": {"type": ["number", "null"], "minimum": 0, "maximum": 1},
+          "expected": {"enum": ["pass", "fail", "none"]},
+          "as_expected": {"type": ["boolean", "null"]}
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "required": ["M1", "M2", "M3", "M4", "M5", "M6", "M7", "M8", "M9", "M10", "M11", "M12", "M13", "M14", "M15", "M16"],
+      "additionalProperties": {"$ref": "#/$defs/metric"}
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["code", "message"],
+        "properties": {"code": {"type": "string"}, "message": {"type": "string"}, "task": {"type": "string"}}
+      }
+    },
+    "likely_broken": {"type": "boolean"}
+  },
+  "$defs": {
+    "metric": {
+      "type": "object",
+      "required": ["name", "value", "unit", "reason"],
+      "properties": {
+        "name": {"type": "string"},
+        "value": {"type": ["number", "null"]},
+        "unit": {"type": "string"},
+        "reason": {"type": ["string", "null"]},
+        "note": {"type": "string"},
+        "secondary": {"type": "object", "additionalProperties": {"type": ["number", "null"]}}
+      }
+    }
+  }
+}

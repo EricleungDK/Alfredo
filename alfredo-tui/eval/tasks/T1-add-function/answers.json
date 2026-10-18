@@ -1,0 +1,13 @@
+{
+  "plan": {"tasks": [{
+    "title": "Add clamp to mathx.py",
+    "acceptance": ["clamp(value, low, high) limits value to low..high", "double() is unchanged"],
+    "dependencies": [],
+    "policy": {"files": ["mathx.py"], "check": ["/usr/bin/python3", "-B", "-c",
+      "from mathx import clamp, double; assert clamp(5, 0, 3) == 3 and clamp(-1, 0, 3) == 0 and double(4) == 8"]}
+  }]},
+  "workers": [{"prefix": "Implement this task: Add clamp", "replies": [{"files": [{
+    "path": "mathx.py",
+    "content": "\"\"\"Small numeric helpers.\"\"\"\n\n\ndef double(x):\n    return x * 2\n\n\ndef clamp(value, low, high):\n    return max(low, min(value, high))\n"
+  }]}]}]
+}

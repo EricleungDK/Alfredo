@@ -1,0 +1,1 @@
+Add pricing.py with with_tax(price) that returns the price plus config.RATE tax rounded to two decimals, and then invoice.py with total(prices) that sums with_tax over a list of prices, rounded to two decimals. invoice.py must use pricing.with_tax.

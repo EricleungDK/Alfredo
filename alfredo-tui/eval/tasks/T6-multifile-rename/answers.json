@@ -1,0 +1,15 @@
+{
+  "plan": {"tasks": [{
+    "title": "Rename fetch_data to load_records",
+    "acceptance": ["no fetch_data remains in util.py, a.py, b.py, main.py", "main.report() is unchanged"],
+    "dependencies": [],
+    "policy": {"files": ["util.py", "a.py", "b.py", "main.py"], "check": ["/usr/bin/python3", "-B", "-c",
+      "import util; from main import report; assert util.load_records() == [1, 2, 3] and report() == '3 items, total 6'"]}
+  }]},
+  "workers": [{"prefix": "Implement this task: Rename", "replies": [{"files": [
+    {"path": "util.py", "content": "\"\"\"Data access.\"\"\"\n\n\ndef load_records():\n    return [1, 2, 3]\n"},
+    {"path": "a.py", "content": "from util import load_records\n\n\ndef total():\n    return sum(load_records())\n"},
+    {"path": "b.py", "content": "import util\n\n\ndef count():\n    return len(util.load_records())\n"},
+    {"path": "main.py", "content": "# The numbers come from util.load_records().\nfrom a import total\nfrom b import count\n\n\ndef report():\n    return f\"{count()} items, total {total()}\"\n"}
+  ]}]}]
+}

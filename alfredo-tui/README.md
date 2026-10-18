@@ -190,6 +190,7 @@ python3 alfredo-tui/tests/agent_terminal_smoke.py
 python3 alfredo-tui/tests/inference_terminal_smoke.py
 python3 alfredo-tui/tests/recovery_terminal_smoke.py
 python3 alfredo-tui/tests/qualification_cli_smoke.py
+python3 alfredo-tui/tests/eval_smoke.py                # harness eval, fixture mode
 python3 -m unittest discover -s alfredo-tui/tests -p 'test_*.py'
 cargo audit --file alfredo-tui/Cargo.lock --deny warnings
 ```
@@ -203,6 +204,10 @@ dependency.
 preflight probe (`--doctor`, `/go`, `--go`, `/run`) so a smoke can simulate a missing
 bwrap. It never changes the executable workers run, so it cannot weaken the sandbox.
 Do not set it outside tests.
+
+The harness eval (`eval/`) measures pass rate, repairs, turns, tokens, overhead, cold start
+and memory on a fixed task set, for Alfredo or Claude Code; see
+[eval/README.md](eval/README.md).
 
 Optional live checks against a real local model (`ALFREDO_SMOKE_MODEL`, default
 `qwen2.5-coder:14b`):
@@ -247,6 +252,7 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | `src/commands.rs` | Command catalog (F1 picker) |
 | `tests/*.rs`, `tests/*_smoke.py` | Integration tests and PTY smokes |
 | `scripts/` | Packaging and third-party notice generation |
+| `eval/` | Reproducible harness eval and metrics ([eval/README.md](eval/README.md)) |
 
 ## Reference
 

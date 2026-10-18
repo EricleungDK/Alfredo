@@ -1,0 +1,1 @@
+slugify() in slug.py leaves a leading or trailing hyphen, for example slugify("Hello, World!") returns "hello-world-". Fix that bug and add test_slug.py, a unittest module with at least two tests that cover it.
