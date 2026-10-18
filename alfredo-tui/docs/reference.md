@@ -1258,11 +1258,13 @@ not authenticate private state against a same-user actor replacing all records.
 After-check recovery retains the original check receipt and output and reports
 **interrupted after check; candidate not finalized**. Even a zero-exit check yields
 a Failed task: recovery reconstructs neither patch nor candidate. Original partial
-work and artifacts remain intact. `/recover ID requeue`, which autopilot `/resume`
-runs for an interrupted generation, uses the same two proofs but records the run as
-**Cancelled** so `/requeue ID` runs the task again without a repair. Repeating recovery returns the same Finish
+work and artifacts remain intact. Repeating recovery returns the same Finish
 acknowledgment without repeating an effect. `/repair` proposes separate work that
 requires fresh approval; dependencies remain blocked on the failed original.
+
+`/recover ID requeue`, which autopilot `/resume` runs for an interrupted run, uses the
+same two proofs but records the run as **Cancelled** instead of Failed, so `/requeue ID`
+runs the task again without a repair.
 
 An old unbound check intent, missing or partial result after launch, unsupported or
 corrupt artifacts, mismatched identities, and uncertain or reconciliation-required

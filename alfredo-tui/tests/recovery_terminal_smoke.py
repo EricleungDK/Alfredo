@@ -196,6 +196,7 @@ class RecoveryTerminalSmoke(unittest.TestCase):
 
 class ResumeAfterCrashSmoke(autopilot_terminal_smoke.AutopilotTerminalSmoke):
     """kill -9 while the worker generates, restart, /resume: the task reruns and is accepted."""
+    # The parent class still runs this test; the override only stops it running twice here.
     test_go_repairs_pauses_restarts_paused_and_resumes_to_one_integration_branch = None
 
     def settle(self, terminal, seconds):
@@ -223,6 +224,9 @@ class ResumeAfterCrashSmoke(autopilot_terminal_smoke.AutopilotTerminalSmoke):
         self.assertEqual(self.fixture.markers(), ['PLAN', 'CALC'], 'restart never replays inference')
         self.assertEqual(self.git('rev-parse', 'HEAD'), head)
         self.assertNotIn('▶', screen, 'a dead worker is not shown as running')
+        header = screen.splitlines()[1]
+        self.assertIn('paused', header)
+        self.assertNotIn('failed', header, 'an interrupted run is not a failure')
         self.assertIn('interrupted', screen)
         self.assertIn('Task #1 was running when Alfredo exited; /resume re-runs it', screen)
 
@@ -255,8 +259,11 @@ class ResumeAfterCrashSmoke(autopilot_terminal_smoke.AutopilotTerminalSmoke):
 
         terminal = self.terminal(resume=True)
         self.screen_has(terminal, 'Autopilot ‖ paused')
+        self.screen_has(terminal, 'cannot be recovered safely')
+        self.assertNotIn('/resume re-runs it', terminal.screen())
         terminal.send('/resume\r')
         self.screen_has(terminal, 'Autopilot failed', 30)
+        self.assertNotIn('▶', terminal.screen(), 'an unrecoverable dead worker is not running')
         self.screen_has(terminal, 'run interrupted: it cannot be recovered safely')
         self.screen_has(terminal, 'Next: /tasks #1')
         self.assertIn('/recover 1', terminal.screen())

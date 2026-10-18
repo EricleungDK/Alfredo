@@ -370,6 +370,32 @@ fn assert_refused_unchanged(fixture: &Fixture, directory: &Path) {
 }
 
 #[test]
+fn killed_after_durable_check_recovers_as_cancelled_for_resume_and_requeues() {
+    let fixture = Fixture::new();
+    let mut child = CrashedChild::spawn(&fixture, "after-check");
+    let running = fixture.store.snapshot().unwrap();
+    let directory = fixture
+        .store
+        .run_directory(&running.tasks[0].run.as_ref().unwrap().id)
+        .unwrap();
+    child.kill();
+    let reopened = open_store(&fixture.root);
+    let (recovered, message) = reopened.recover_requeue_checked(1).unwrap();
+    assert!(message.contains("cancelled after check"), "{message}");
+    assert_eq!(recovered.tasks[0].status, TaskStatus::Cancelled);
+    let evidence: Evidence = serde_json::from_str(&reopened.evidence(1).unwrap()).unwrap();
+    assert_eq!(evidence.status, TaskStatus::Cancelled);
+    assert!(evidence.check.is_some() && evidence.candidate_commit.is_none());
+    assert_eq!(
+        fs::read_to_string(directory.join("worktree/count")).unwrap(),
+        "1"
+    );
+    let requeued = transact(&reopened, Action::Requeue { task: 1 });
+    assert_eq!(requeued.tasks[0].status, TaskStatus::Approved);
+    assert_eq!(requeued.tasks.len(), 1);
+}
+
+#[test]
 fn death_before_launch_is_recoverable_but_an_in_flight_check_remains_unknown() {
     for cut in ["before-launch", "in-flight"] {
         let fixture = Fixture::with_waiting_check(cut == "in-flight");

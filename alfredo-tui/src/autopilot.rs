@@ -373,6 +373,8 @@ pub struct Autopilot {
     finished_notice: Option<String>,
     /// The restore notice naming runs that Alfredo's exit interrupted was shown.
     announced_interrupted: bool,
+    /// Heads sent to `/recover N requeue` whose outcome is not yet known (not persisted).
+    recovering: BTreeSet<u64>,
 }
 
 impl Autopilot {
@@ -421,6 +423,7 @@ impl Autopilot {
             notice,
             finished_notice: None,
             announced_interrupted: false,
+            recovering: BTreeSet::new(),
         })
     }
 
@@ -640,6 +643,7 @@ impl Autopilot {
             // Interrupted generation restarts once explicitly resumed.
             saved.plan_request = None;
         }
+        self.recovering.clear();
         self.attempts.clear();
         self.last = None;
         self.last_key = None;
@@ -1034,14 +1038,26 @@ impl Autopilot {
         let ids: Vec<String> = snapshot
             .tasks
             .iter()
-            .filter(|task| tasks.interrupted(task.id))
+            .filter(|task| tasks.recoverable(task.id))
             .map(|task| format!("#{}", task.id))
             .collect();
-        if ids.is_empty() {
+        let unproven: Vec<String> = snapshot
+            .tasks
+            .iter()
+            .filter(|task| tasks.interrupted(task.id) && !tasks.recoverable(task.id))
+            .map(|task| format!("#{}", task.id))
+            .collect();
+        if ids.is_empty() && unproven.is_empty() {
             return;
         }
         self.announced_interrupted = true;
-        let notice = if ids.len() == 1 {
+        let notice = if ids.is_empty() {
+            format!(
+                "Task {} was running when Alfredo exited and cannot be recovered safely; /tasks {0} or /recover {1} says why",
+                unproven[0],
+                unproven[0].trim_start_matches('#')
+            )
+        } else if ids.len() == 1 {
             format!(
                 "Task {} was running when Alfredo exited; /resume re-runs it",
                 ids[0]
@@ -1054,6 +1070,37 @@ impl Autopilot {
         };
         self.finished_notice = Some(notice.clone());
         self.set_notice(tasks, notice);
+    }
+
+    /// A head sent to `/recover N requeue` is re-run by this resume only once recovery
+    /// recorded it cancelled. A saved result or a refusal leaves `retry_cancelled`
+    /// alone, so a later `/stop` of that task is not retried automatically.
+    fn settle_recovered(&mut self, snapshot: &Snapshot) {
+        if self.recovering.is_empty() {
+            return;
+        }
+        let mut retry = Vec::new();
+        self.recovering.retain(|id| {
+            match snapshot
+                .tasks
+                .iter()
+                .find(|t| t.id == *id)
+                .map(|t| &t.status)
+            {
+                Some(TaskStatus::Running) => true,
+                Some(TaskStatus::Cancelled) => {
+                    retry.push(*id);
+                    false
+                }
+                _ => false,
+            }
+        });
+        if !retry.is_empty() {
+            if let Some(saved) = self.saved.as_mut() {
+                saved.retry_cancelled.extend(retry);
+            }
+            self.persist();
+        }
     }
 
     fn halt(&mut self, tasks: &mut TaskControl, notice: String) {
@@ -1290,6 +1337,7 @@ impl Autopilot {
         tasks: &mut TaskControl,
     ) -> Result<Option<(String, String, Intent)>, String> {
         let snapshot = tasks.snapshot.clone().unwrap();
+        self.settle_recovered(&snapshot);
         let saved = self.saved.as_ref().unwrap().clone();
         let families = families(&snapshot, &saved, tasks);
         let find = |id: u64| snapshot.tasks.iter().find(|task| task.id == id);
@@ -1390,13 +1438,7 @@ impl Autopilot {
             let intent = tasks
                 .prepare_command(&text, &saved.model)?
                 .ok_or("Command unavailable")?;
-            if !retry_recovered.is_empty() {
-                // The recovered run is cancelled; this resume re-runs it, like a /stop cancel.
-                if let Some(saved) = self.saved.as_mut() {
-                    saved.retry_cancelled.extend(retry_recovered);
-                }
-                self.persist();
-            }
+            self.recovering.extend(retry_recovered);
             let display = if text.starts_with("/review ") {
                 format!(
                     "{} (approved: check passed)",
