@@ -42,6 +42,8 @@ class EvalSmoke(unittest.TestCase):
             for trial in document['trials']:
                 self.assertEqual(0, trial['exit_code'], trial['task'])
                 self.assertFalse(trial['panic'], trial['task'])
+            self.assertIsNotNone(document['metrics']['M6']['value'], 'fixture token counts are synthetic but present')
+            self.assertEqual(0, document['metrics']['M12']['value'])
             repaired = next(t for t in document['trials'] if t['task'].startswith('T2-'))
             self.assertEqual(1, repaired['repairs'])
             control = next(t for t in document['trials'] if t['kind'] == 'negative_control')

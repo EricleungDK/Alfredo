@@ -34,7 +34,13 @@ sys.path.insert(0, str(TUI / 'tests'))
 import schema_check  # noqa: E402
 
 SCHEMA_VERSION = 1
-CLAUDE_TOOLS = 'Read,Edit,Write,Glob,Grep,Bash(python3:*),Bash(ls:*),Bash(cat:*),Bash(git diff:*),Bash(git status:*)'
+# No Bash: python3 can write anywhere the user can, so shell access would defeat "edits only in the
+# temp repo". Read/Glob/Grep are read-only; Edit/Write are confined to the cwd by acceptEdits.
+CLAUDE_TOOLS = 'Read,Edit,Write,Glob,Grep'
+CLAUDE_ENV_KEYS = ('PATH', 'HOME', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'USER', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME',
+                   'XDG_CACHE_HOME', 'CLAUDE_CONFIG_DIR', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN',
+                   'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_OAUTH_TOKEN', 'HTTPS_PROXY', 'HTTP_PROXY', 'NO_PROXY',
+                   'https_proxy', 'http_proxy', 'no_proxy', 'SSL_CERT_FILE', 'NODE_EXTRA_CA_CERTS')
 GIT_ENV = dict(os.environ, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null')
 MALFORMED = re.compile(r'no FILE blocks|valid file plan|FILE marker|ended inside FILE block|more than once')
 REFUSED = re.compile(r'unapproved file|outside approved paths')
@@ -42,17 +48,22 @@ SANDBOX_CODE = 'sandbox-unavailable'
 LOOPBACK = {'127.0.0.1', 'localhost', '::1'}
 
 METRIC_NAMES = {
-    'M1': ('pass@1', 'fraction'), 'M2': ('pass^3', 'fraction'), 'M3': ('repairs', 'per trial'),
-    'M4': ('turns', 'per trial'), 'M5': ('tool calls', 'per trial'), 'M6': ('tokens', 'per trial'),
-    'M7': ('tool errors', 'per trial'), 'M8': ('harness overhead', 's per trial (median)'),
-    'M9': ('frame cost', 'ms'), 'M10': ('input latency', 'ms'), 'M11': ('cold start', 'ms (median)'),
-    'M12': ('wall time', 's per trial (median)'), 'M13': ('flakiness', 'fraction'),
-    'M14': ('kill recovery', 'fraction'), 'M15': ('code health', 'score'),
-    'M16': ('peak RSS', 'kB (median)'),
+    'M1': ('pass@1', 'fraction'), 'M2': ('pass^3', 'fraction'),
+    'M3': ('repair recovery rate', 'fraction of repairs accepted'),
+    'M4': ('turns per task', 'model requests per trial (median)'),
+    'M5': ('tool/command calls per task', 'worker runs + check runs per trial (median)'),
+    'M6': ('tokens per task', 'prompt+completion tokens per trial (median)'),
+    'M7': ('tool-call error rate', 'errors per 100 calls'),
+    'M8': ('harness overhead per turn', 'ms p50'),
+    'M9': ('keystroke echo', 'ms p50/p95'), 'M10': ('frame render cost', 'ms p50/p95'),
+    'M11': ('cold start to first frame', 'ms (median)'),
+    'M12': ('panics/crashes', 'count'), 'M13': ('flaky tests', 'count'),
+    'M14': ('crash recovery', 'fraction'), 'M15': ('code health', 'score'),
+    'M16': ('peak RSS during /go', 'kB, main process, median'),
 }
 FIXED_NULL = {
-    'M9': 'frame-cost benches (tests/rendering_cost.rs) are not wrapped by the eval yet (follow-up to #176)',
-    'M10': 'input-latency benches (tests/rendering_cost.rs) are not wrapped by the eval yet (follow-up to #176)',
+    'M9': 'keystroke-echo benches (tests/rendering_cost.rs) are not wrapped by the eval yet (follow-up to #176)',
+    'M10': 'frame-render-cost benches (tests/rendering_cost.rs) are not wrapped by the eval yet (follow-up to #176)',
     'M13': 'flakiness needs repeated identical runs of one build; --trials only samples task outcomes (see M2)',
     'M14': 'kill/restart recovery needs a dedicated kill probe, which eval trials do not run',
     'M15': 'code health is a static analysis of the source tree, not of an agent run',
@@ -241,7 +252,12 @@ class ModelServer:
                 handler.send_response(200)
                 handler.send_header('Content-Type', 'application/x-ndjson')
                 handler.end_headers()
-                handler.wfile.write((json.dumps({'message': {'content': content}, 'done': True}) + '\n').encode())
+                # Deterministic synthetic counts (ceil(chars / 4)); a real server reports its own.
+                chars = sum(len(m.get('content') or '') for m in request['messages'])
+                done = {'message': {'content': content}, 'done': True,
+                        'prompt_eval_count': -(-chars // 4), 'eval_count': -(-len(content) // 4)}
+                record['prompt'], record['eval'] = done['prompt_eval_count'], done['eval_count']
+                handler.wfile.write((json.dumps(done) + '\n').encode())
                 handler.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):
             pass
@@ -301,8 +317,7 @@ def model_stats(records, backend):
             'peak_ctx': max(r['prompt'] + r['eval'] for r in records),
         }
     else:
-        unavailable['tokens'] = ('the fixture backend sends no token counts' if backend == 'fixture' else
-                                 f'the model server reported token counts for {len(counted)} of {len(records)} requests')
+        unavailable['tokens'] = f'the model server reported token counts for {len(counted)} of {len(records)} requests'
     ttfts = [r['ttft'] * 1000 for r in records if r['ttft'] is not None]
     ttft = round(statistics.median(ttfts), 1) if ttfts else None
     if ttft is None:
@@ -316,10 +331,16 @@ def model_stats(records, backend):
 
 def read_state(state):
     """Repairs, check executions and error classes from the on-disk Alfredo state."""
-    repairs = 0
+    repairs = repairs_accepted = tasks_accepted = 0
     for path in state.glob('rust-tasks-v1/*/tasks.json'):
-        data = json.loads(path.read_text(encoding='utf-8'))
-        repairs += sum(1 for task in data.get('tasks', []) if task.get('repair_of') is not None)
+        tasks = json.loads(path.read_text(encoding='utf-8')).get('tasks', [])
+        fixes = [t for t in tasks if t.get('repair_of') is not None]
+        recovered = {t['repair_of'] for t in fixes if t.get('status') == 'accepted'}
+        repairs += len(fixes)
+        repairs_accepted += sum(1 for t in fixes if t.get('status') == 'accepted')
+        tasks_accepted += sum(1 for t in tasks if t.get('repair_of') is None
+                              and (t.get('status') == 'accepted' or t['id'] in recovered))
+    runs = len([p for p in state.glob('rust-tasks-v1/*/runs/*') if p.is_dir()])
     checks = len(list(state.glob('rust-tasks-v1/*/runs/*/check-result.json')))
     errors = {'malformed': 0, 'refused': 0, 'sandbox': 0}
     for path in state.glob('rust-tasks-v1/*/runs/*/evidence.json'):
@@ -331,7 +352,8 @@ def read_state(state):
             errors['malformed'] += 1
         if REFUSED.search(detail):
             errors['refused'] += 1
-    return {'repairs': repairs, 'tool_calls': checks, 'errors': errors}
+    return {'repairs': repairs, 'repairs_accepted': repairs_accepted, 'tasks_accepted': tasks_accepted,
+            'tool_calls': runs + checks, 'errors': errors}
 
 
 def peak_rss_kb(pid):
@@ -352,7 +374,8 @@ def blank_trial(task, index):
         'task': task['id'], 'kind': task['kind'], 'trial': index, 'pass': False, 'outcome': 'harness_error',
         'graded_ref': None, 'grade_output': '', 'turns': None, 'tool_calls': None,
         'tokens': {'prompt': None, 'eval': None, 'planner': None, 'peak_ctx': None},
-        'errors': {'malformed': None, 'refused': None, 'sandbox': None}, 'repairs': None, 'wall_s': 0.0,
+        'errors': {'malformed': None, 'refused': None, 'sandbox': None}, 'repairs': None, 'repairs_accepted': None,
+        'tasks_accepted': None, 'enter_to_request_ms': None, 'wall_s': 0.0,
         'cold_start_ms': None, 'overhead_s': None, 'ttft_ms': None, 'rss_kb': None, 'exit_code': None,
         'panic': False, 'unavailable': {}, 'notes': [],
     }
@@ -391,7 +414,7 @@ def alfredo_trial(task, index, options):
 
         goal = ' '.join(task['goal'].split())
         started = time.monotonic()
-        terminal.send(f'/go {goal}\r')
+        terminal.send(f'/go {goal}\r')  # Enter is the last byte sent
         deadline = started + options.timeout
         rss = None
         while True:
@@ -436,13 +459,22 @@ def alfredo_trial(task, index, options):
         model, unavailable = model_stats(server.snapshot(), options.backend)
         trial.update(turns=model['turns'], tokens=model['tokens'], ttft_ms=model['ttft_ms'],
                      tool_calls=stats['tool_calls'], errors=stats['errors'], repairs=stats['repairs'],
+                     repairs_accepted=stats['repairs_accepted'], tasks_accepted=stats['tasks_accepted'],
                      overhead_s=round(max(0.0, trial['wall_s'] - model['model_s']), 3))
         trial['unavailable'].update(unavailable)
+        firsts = [r['start'] for r in server.snapshot()]
+        if firsts:
+            trial['enter_to_request_ms'] = round((min(firsts) - started) * 1000, 1)
+        else:
+            trial['unavailable']['enter_to_request_ms'] = 'no model request reached the server'
     except AssertionError as error:  # Terminal.pump: the TUI exited by itself
         trial['outcome'] = 'crashed'
         trial['notes'].append(str(error)[:400])
         trial['exit_code'] = terminal.process.poll() if terminal else None
         trial['panic'] = bool(terminal and 'panicked at' in terminal.output.decode(errors='replace'))
+    except Exception as error:  # one broken trial must not abort the whole eval
+        trial['outcome'] = 'harness_error'
+        trial['notes'].append(f'{type(error).__name__}: {error}'[:400])
     finally:
         if terminal:
             terminal.close()
@@ -494,15 +526,18 @@ def parse_claude_stream(lines):
 def claude_trial(task, index, options):
     trial = blank_trial(task, index)
     root = Path(tempfile.mkdtemp(prefix='alfredo-eval-', dir=options.tmp_root))
+    process = None
     try:
         workspace = root / 'workspace'
         make_repo(task, workspace)
         command = ['claude', '-p', '--model', options.model, '--output-format', 'stream-json', '--verbose',
                    '--max-turns', '30', '--permission-mode', 'acceptEdits', '--allowedTools', CLAUDE_TOOLS,
-                   '--disallowedTools', 'WebFetch,WebSearch', '--no-session-persistence']
+                   '--disallowedTools', 'WebFetch,WebSearch', '--no-session-persistence',
+                   '--setting-sources', 'project', '--strict-mcp-config']
+        env = {key: os.environ[key] for key in CLAUDE_ENV_KEYS if key in os.environ}
         spawned = time.monotonic()
         process = subprocess.Popen(command, cwd=workspace, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                   stderr=subprocess.PIPE, text=True)
+                                   stderr=subprocess.PIPE, text=True, env=env)
         out, err, first = [], [], []
 
         def drain(stream, sink, stamp):
@@ -554,7 +589,13 @@ def claude_trial(task, index, options):
             'claude-code result', '--allow-empty')
         trial['graded_ref'] = 'HEAD'
         trial['pass'], trial['grade_output'] = grade(task, workspace, 'HEAD')
+    except Exception as error:  # one broken trial must not abort the whole eval
+        trial['outcome'] = 'harness_error'
+        trial['notes'].append(f'{type(error).__name__}: {error}'[:400])
     finally:
+        if process is not None and process.poll() is None:  # also on KeyboardInterrupt
+            process.kill()
+            process.wait()
         if options.keep:
             print(f'kept {root}', file=sys.stderr)
         else:
@@ -610,11 +651,16 @@ def aggregate(trials, tasks, config):
             warnings.append({'code': 'harness_error', 'task': t['task'],
                              'message': f'{t["task"]} trial {t["trial"]}: ' + '; '.join(t['notes'])})
 
-    def metric(key, value, reason=None, digits=3):
+    def metric(key, value, reason=None, digits=3, note=None, secondary=None):
         name, unit = METRIC_NAMES[key]
         if isinstance(value, float):
             value = round(value, digits)
-        return {'name': name, 'value': value, 'unit': unit, 'reason': None if value is not None else reason}
+        result = {'name': name, 'value': value, 'unit': unit, 'reason': None if value is not None else reason}
+        if note:
+            result['note'] = note
+        if secondary:
+            result['secondary'] = {k: round(v, digits) if isinstance(v, float) else v for k, v in secondary.items()}
+        return result
 
     def over(field, reducer, getter=None):
         get = getter or (lambda t: t[field])
@@ -637,26 +683,49 @@ def aggregate(trials, tasks, config):
     else:
         metrics['M1'] = metric('M1', None, 'no positive task was run')
         metrics['M2'] = metric('M2', None, 'no positive task was run')
+    known = [t for t in positives if t['repairs'] is not None]
+    attempted = sum(t['repairs'] for t in known)
+    accepted_tasks = sum(t['tasks_accepted'] or 0 for t in known)
     value, reason = over('repairs', mean)
-    metrics['M3'] = metric('M3', value, reason)
-    value, reason = over('turns', mean)
+    if value is not None:
+        value = sum(t['repairs_accepted'] or 0 for t in known) / attempted if attempted else None
+        reason = 'no repair attempted'
+    metrics['M3'] = metric('M3', value, reason, secondary={
+        'repairs_per_accepted_task': attempted / accepted_tasks if accepted_tasks else None,
+        'repairs_attempted': attempted if known else None})
+    value, reason = over('turns', statistics.median)
     metrics['M4'] = metric('M4', value, reason)
-    value, reason = over('tool_calls', mean)
+    value, reason = over('tool_calls', statistics.median)
     metrics['M5'] = metric('M5', value, reason)
-    value, reason = over('tokens', mean, lambda t: None if t['tokens']['prompt'] is None
+    value, reason = over('tokens', statistics.median, lambda t: None if t['tokens']['prompt'] is None
                          else t['tokens']['prompt'] + t['tokens']['eval'])
-    metrics['M6'] = metric('M6', value, reason)
-    value, reason = over('errors', mean, lambda t: None if t['errors']['malformed'] is None
-                         else sum(t['errors'].values()))
-    metrics['M7'] = metric('M7', value, reason)
-    value, reason = over('overhead_s', statistics.median)
-    metrics['M8'] = metric('M8', value, reason)
+    peaks = [t['tokens']['peak_ctx'] for t in positives if t['tokens']['peak_ctx'] is not None]
+    metrics['M6'] = metric('M6', value, reason, secondary={'peak_ctx_max': max(peaks) if peaks else None},
+                           note='fixture token counts are synthetic (ceil(chars / 4)), deterministic, not model counts'
+                           if config['backend'] == 'fixture' else None)
+    scored = [t for t in positives if t['errors']['malformed'] is not None and t['tool_calls'] is not None]
+    calls = sum(t['tool_calls'] for t in scored)
+    errors = sum(sum(t['errors'].values()) for t in scored)
+    metrics['M7'] = metric('M7', 100 * errors / calls if calls else None, 'no tool calls were made')
+    enter = [t['enter_to_request_ms'] for t in positives if t['enter_to_request_ms'] is not None]
+    metrics['M8'] = metric(
+        'M8', None, 'needs Enter/render timestamps: reply-to-screen time is not measured because spinner redraws '
+        'make byte-level screen-change detection unreliable at the 30 ms poll; only Enter-to-request is measured '
+        '(secondary, exact: both stamps are taken in this process); trial.overhead_s is the whole non-model time',
+        secondary={'enter_to_request_p50_ms': statistics.median(enter) if enter else None})
     value, reason = over('cold_start_ms', statistics.median)
     metrics['M11'] = metric('M11', value, reason, digits=1)
-    value, reason = over('wall_s', statistics.median)
-    metrics['M12'] = metric('M12', value, reason)
+    abnormal = sum(1 for t in trials if t['panic'] or t['outcome'] == 'crashed'
+                   or t['exit_code'] not in (0, None))
+    metrics['M12'] = metric('M12', abnormal, note='counts eval trials only (panic, crash or abnormal exit); '
+                            'the smoke suites are not included')
     value, reason = over('rss_kb', statistics.median)
-    metrics['M16'] = metric('M16', value, reason, digits=0)
+    release = TUI / 'target/release/alfredo-tui'
+    metrics['M16'] = metric(
+        'M16', value, reason, digits=0,
+        secondary={'release_binary_kb': release.stat().st_size // 1024 if release.is_file() else None},
+        note='main process VmHWM only (process-tree peak is not sampled); release_binary_kb is null unless '
+             'target/release/alfredo-tui exists')
     for key, why in FIXED_NULL.items():
         metrics[key] = metric(key, None, why)
     return summary, {key: metrics[key] for key in sorted(metrics, key=lambda k: int(k[1:]))}, warnings, likely_broken

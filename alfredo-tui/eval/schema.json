@@ -59,6 +59,9 @@
             }
           },
           "repairs": {"type": ["integer", "null"], "minimum": 0},
+          "repairs_accepted": {"type": ["integer", "null"], "minimum": 0},
+          "tasks_accepted": {"type": ["integer", "null"], "minimum": 0},
+          "enter_to_request_ms": {"type": ["number", "null"], "minimum": 0},
           "wall_s": {"type": "number", "minimum": 0},
           "cold_start_ms": {"type": ["number", "null"], "minimum": 0},
           "overhead_s": {"type": ["number", "null"], "minimum": 0},
@@ -109,7 +112,9 @@
         "name": {"type": "string"},
         "value": {"type": ["number", "null"]},
         "unit": {"type": "string"},
-        "reason": {"type": ["string", "null"]}
+        "reason": {"type": ["string", "null"]},
+        "note": {"type": "string"},
+        "secondary": {"type": "object", "additionalProperties": {"type": ["number", "null"]}}
       }
     }
   }

@@ -92,13 +92,17 @@ Per trial this runs, in the temp repo (outside this checkout), with `goal.md` on
 
 ```bash
 claude -p --model haiku --output-format stream-json --verbose --max-turns 30 \
-  --permission-mode acceptEdits \
-  --allowedTools 'Read,Edit,Write,Glob,Grep,Bash(python3:*),Bash(ls:*),Bash(cat:*),Bash(git diff:*),Bash(git status:*)' \
-  --disallowedTools 'WebFetch,WebSearch' --no-session-persistence
+  --permission-mode acceptEdits --allowedTools 'Read,Edit,Write,Glob,Grep' \
+  --disallowedTools 'WebFetch,WebSearch' --no-session-persistence \
+  --setting-sources project --strict-mcp-config
 ```
 
-Edits are accepted only inside the working directory. It uses your logged-in Claude Code and
-costs real tokens, so start with `--tasks T1 --trials 1`.
+`acceptEdits` confines Edit and Write to the working directory. There is no Bash tool, because
+a shell (even `python3`) could write anywhere you can. The process gets a minimal environment
+(`PATH`, `HOME`, locale, proxy/CA and Anthropic auth variables only), and only project
+settings load, so your user hooks, memory and MCP servers are not used. Residual risk: Read,
+Glob and Grep are not path-restricted, so the model can read files outside the temp repo.
+It uses your logged-in Claude Code and costs real tokens, so start with `--tasks T1 --trials 1`.
 
 ## Output
 
@@ -112,30 +116,29 @@ costs real tokens, so start with `--tasks T1 --trials 1`.
   where `value` is `null` with a `reason` when it cannot be produced; `warnings`;
   `likely_broken`.
 
-| Metric | Definition (over positive tasks) |
+| Metric | Definition (positive tasks unless noted; names follow scoreboard #159) |
 | --- | --- |
 | M1 | pass@1: share of trials that pass |
 | M2 | pass^3: mean over tasks of P(3 distinct trials all pass); needs >= 3 trials |
-| M3 | automatic repairs per trial (Alfredo) |
-| M4 | model turns per trial: Alfredo planner + worker + repair requests; Claude Code `num_turns` |
-| M5 | tool calls per trial: Alfredo's sandboxed check runs; Claude Code `tool_use` blocks |
-| M6 | prompt + eval tokens per trial (needs a server that reports counts) |
-| M7 | tool errors per trial: malformed + refused + sandbox |
-| M8 | harness overhead, median: trial wall time minus time inside model requests (Alfredo) |
-| M11 | cold start, median ms from spawn to the first Alfredo screen (Claude Code: first event) |
-| M12 | wall time, median seconds per trial |
-| M16 | peak RSS, median `VmHWM` of the agent process in kB (children excluded) |
-| M9, M10 | `null`: the `rendering_cost.rs` bench wrapper is a follow-up |
+| M3 | repair recovery rate: repairs that ended accepted / repairs attempted (`null`, "no repair attempted", if none). `secondary.repairs_per_accepted_task` = repairs / accepted tasks (Alfredo only) |
+| M4 | turns per task: model requests per trial, median (Alfredo planner + worker + repair requests; Claude Code `num_turns`) |
+| M5 | tool/command calls per task, median: Alfredo worker runs + check runs; Claude Code `tool_use` blocks |
+| M6 | tokens per task: prompt + completion tokens per trial, median; `secondary.peak_ctx_max` is the largest prompt + completion of one request. Fixture counts are synthetic (`ceil(chars / 4)`, deterministic), not model counts |
+| M7 | tool-call error rate: 100 x (malformed + refused + sandbox errors) / M5 calls; `null` if there were no calls |
+| M8 | harness overhead per turn (Enter to request at server, reply to screen, p50 ms): `null`. Reply-to-screen is not measured because spinner redraws make byte-level change detection unreliable at the 30 ms poll. `secondary.enter_to_request_p50_ms` is measured exactly; `trial.overhead_s` is the whole non-model time |
+| M9 | keystroke echo p50/p95: `null`, the `rendering_cost.rs` bench wrapper is a follow-up |
+| M10 | frame render cost p50/p95: `null`, same follow-up |
+| M11 | cold start to first frame, median ms from spawn until the header is drawn in the pty (Claude Code: first stream event) |
+| M12 | panics/crashes: count of eval trials (all kinds) with a panic, a crash or a non-zero exit; target 0. The smoke suites are not included |
 | M13, M14, M15 | `null`: need repeated builds, a kill probe or static analysis |
+| M16 | peak RSS during `/go`: median `VmHWM` of the main `alfredo-tui` process in kB (children and process tree not sampled); `secondary.release_binary_kb` is the size of `target/release/alfredo-tui` when it exists, else `null` |
 
-The metric numbers follow issue #176; M12 is this runner's choice (median wall time) where
-that issue names no metric, so check it against #159.
+Metrics may also carry a `note` (always-true caveats) and `secondary` values.
 
 Error classes: `malformed` is a worker answer Alfredo could not parse (no FILE blocks, bad
 JSON, truncated block); `refused` a file outside the task's allowed paths (Claude Code: a
 denied permission); `sandbox` an unavailable sandbox. Claude Code reports `malformed` for
-rejected edits and `sandbox` as 0. Fixture runs send no token counts and replies are
-instant, so tokens and `ttft_ms` are `null` there.
+rejected edits and `sandbox` as 0. Fixture replies are instant, so `ttft_ms` is `null` there.
 
 ### Broken-task guard
 

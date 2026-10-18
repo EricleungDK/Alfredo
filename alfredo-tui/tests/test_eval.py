@@ -32,11 +32,12 @@ schema_check = load('schema_check')
 
 def good_trial(task='T1-add-function', kind='positive', passed=True):
     trial = run_eval.blank_trial({'id': task, 'kind': kind}, 1)
-    trial.update({'pass': passed, 'outcome': 'done', 'turns': 2, 'tool_calls': 1, 'repairs': 0, 'wall_s': 1.5,
+    trial.update({'pass': passed, 'outcome': 'done', 'turns': 2, 'tool_calls': 2, 'repairs': 0, 'wall_s': 1.5,
+                  'repairs_accepted': 0, 'tasks_accepted': 1, 'enter_to_request_ms': 5.0,
+                  'tokens': {'prompt': 100, 'eval': 20, 'planner': 50, 'peak_ctx': 120},
                   'errors': {'malformed': 0, 'refused': 0, 'sandbox': 0}, 'rss_kb': 24000, 'exit_code': 0,
                   'cold_start_ms': 40.0, 'overhead_s': 1.4,
-                  'unavailable': {'tokens': 'the fixture backend sends no token counts',
-                                  'ttft_ms': 'fixture'}})
+                  'unavailable': {'ttft_ms': 'fixture'}})
     return trial
 
 
@@ -172,14 +173,35 @@ class AggregateTests(unittest.TestCase):
         _s, metrics, _w, _b = self.run_aggregate([good_trial('A')], tasks, count=1)
         self.assertIsNone(metrics['M2']['value'])
         self.assertIn('3 trials', metrics['M2']['reason'])
-        self.assertIsNone(metrics['M6']['value'])
-        self.assertIn('token counts', metrics['M6']['reason'])
-        for key in ('M9', 'M10', 'M13', 'M14', 'M15'):
+        self.assertEqual(120, metrics['M6']['value'])
+        self.assertEqual(120, metrics['M6']['secondary']['peak_ctx_max'])
+        self.assertIsNone(metrics['M3']['value'])
+        self.assertEqual('no repair attempted', metrics['M3']['reason'])
+        self.assertIn('Enter/render timestamps', metrics['M8']['reason'])
+        self.assertEqual(5.0, metrics['M8']['secondary']['enter_to_request_p50_ms'])
+        self.assertEqual('keystroke echo', metrics['M9']['name'])
+        self.assertEqual('frame render cost', metrics['M10']['name'])
+        for key in ('M8', 'M9', 'M10', 'M13', 'M14', 'M15'):
             self.assertIsNone(metrics[key]['value'])
             self.assertTrue(metrics[key]['reason'])
-        for key in ('M1', 'M3', 'M4', 'M5', 'M7', 'M8', 'M11', 'M12', 'M16'):
+        for key in ('M1', 'M4', 'M5', 'M6', 'M7', 'M11', 'M12', 'M16'):
             self.assertIsNotNone(metrics[key]['value'], key)
             self.assertIsNone(metrics[key]['reason'])
+
+    def test_m3_m7_and_m12_follow_the_scoreboard_definitions(self):
+        tasks = [{'id': 'A', 'kind': 'positive'}]
+        fixed, unfixed, crashed = good_trial('A'), good_trial('A'), good_trial('A')
+        fixed.update(repairs=2, repairs_accepted=1, tasks_accepted=1, tool_calls=6,
+                     errors={'malformed': 1, 'refused': 0, 'sandbox': 0})
+        unfixed.update(repairs=2, repairs_accepted=1, tasks_accepted=1, tool_calls=4,
+                       errors={'malformed': 1, 'refused': 1, 'sandbox': 0})
+        crashed.update(repairs=0, panic=True, exit_code=101)
+        _s, metrics, _w, _b = self.run_aggregate([fixed, unfixed, crashed], tasks)
+        self.assertEqual(0.5, metrics['M3']['value'])  # 2 of 4 repairs accepted
+        self.assertAlmostEqual(4 / 3, metrics['M3']['secondary']['repairs_per_accepted_task'], places=3)
+        self.assertAlmostEqual(100 * 3 / 12, metrics['M7']['value'], places=3)
+        self.assertEqual(('count', 1), (metrics['M12']['unit'], metrics['M12']['value']))
+        self.assertIn('eval trials only', metrics['M12']['note'])
 
     def test_fixture_expectations_flag_a_mismatch(self):
         tasks = [{'id': 'A', 'kind': 'positive'}, {'id': 'C', 'kind': 'negative_control'}]
