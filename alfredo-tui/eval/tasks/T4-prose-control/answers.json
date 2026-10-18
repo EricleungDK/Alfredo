@@ -1,0 +1,12 @@
+{
+  "plan": {"tasks": [{
+    "title": "Add is_even to parity.py",
+    "acceptance": ["is_even(n) is True for even integers"],
+    "dependencies": [],
+    "policy": {"files": ["parity.py"], "check": ["/usr/bin/python3", "-B", "-c",
+      "from parity import is_even; assert is_even(4) is True"]}
+  }]},
+  "workers": [{"prefix": "Implement this task:", "replies": [
+    {"prose": "I would rather talk about it than write any code."}
+  ]}]
+}

@@ -1,0 +1,1 @@
+Rename the function fetch_data to load_records everywhere in util.py, a.py, b.py and main.py (definition, imports, calls and comments) without changing behaviour, so main.report() still returns "3 items, total 6".

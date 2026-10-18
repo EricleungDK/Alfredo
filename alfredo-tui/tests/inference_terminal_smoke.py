@@ -99,7 +99,7 @@ class FixtureServer:
 
 class Terminal:
     def __init__(self, binary, endpoint, workspace, state, mission, resume=False,
-                 conversation='default', height=36, width=140, parallel=1, env=None):
+                 conversation='default', height=36, width=140, parallel=1, env=None, model='fixture'):
         self.master, self.slave = pty.openpty()
         self.original = termios.tcgetattr(self.slave)
         self.height, self.width = height, width
@@ -109,7 +109,7 @@ class Terminal:
         self.expected_exit = False
         self.closed = False
         self.process = subprocess.Popen([
-            str(binary), '--model', 'fixture', '--endpoint', endpoint,
+            str(binary), '--model', model, '--endpoint', endpoint,
             '--parallel-models', str(parallel), '--workspace', str(workspace),
             '--state-dir', str(state), '--mission' if resume else '--new-mission', mission,
             '--conversation', conversation,

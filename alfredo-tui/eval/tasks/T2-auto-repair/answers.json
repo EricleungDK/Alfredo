@@ -1,0 +1,19 @@
+{
+  "plan": {"tasks": [{
+    "title": "Add initials to names.py",
+    "acceptance": ["initials(name) returns the uppercase initials", "greeting() is unchanged"],
+    "dependencies": [],
+    "policy": {"files": ["names.py"], "check": ["/usr/bin/python3", "-B", "-c",
+      "from names import initials; assert initials('ada lovelace') == 'AL'"]}
+  }]},
+  "workers": [
+    {"prefix": "Implement this task: Repair #", "replies": [{"files": [{
+      "path": "names.py",
+      "content": "\"\"\"Name helpers.\"\"\"\n\n\ndef greeting(name):\n    return f\"Hello, {name}!\"\n\n\ndef initials(name):\n    return \"\".join(word[0].upper() for word in name.split())\n"
+    }]}]},
+    {"prefix": "Implement this task: Add initials", "replies": [{"files": [{
+      "path": "names.py",
+      "content": "\"\"\"Name helpers.\"\"\"\n\n\ndef greeting(name):\n    return f\"Hello, {name}!\"\n\n\ndef initials(name):\n    return \"\".join(word[0] for word in name.split())\n"
+    }]}]}
+  ]
+}

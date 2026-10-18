@@ -1,0 +1,14 @@
+{
+  "plan": {"tasks": [{
+    "title": "Fix slugify and add test_slug.py",
+    "acceptance": ["slugify never returns a leading or trailing hyphen", "test_slug.py has at least two passing tests"],
+    "dependencies": [],
+    "policy": {"files": ["slug.py", "test_slug.py"], "check": ["/usr/bin/python3", "-B", "-m", "unittest", "test_slug"]}
+  }]},
+  "workers": [{"prefix": "Implement this task: Fix slugify", "replies": [{"files": [
+    {"path": "slug.py",
+     "content": "\"\"\"URL slugs.\"\"\"\nimport re\n\n\ndef slugify(text):\n    \"\"\"Lowercase words joined by single hyphens, with no leading or trailing hyphen.\"\"\"\n    return re.sub(r\"[^a-z0-9]+\", \"-\", text.lower()).strip(\"-\")\n"},
+    {"path": "test_slug.py",
+     "content": "import unittest\n\nfrom slug import slugify\n\n\nclass SlugifyTests(unittest.TestCase):\n    def test_no_trailing_hyphen(self):\n        self.assertEqual(slugify(\"Hello, World!\"), \"hello-world\")\n\n    def test_no_leading_hyphen(self):\n        self.assertEqual(slugify(\"  Already  spaced  \"), \"already-spaced\")\n\n    def test_repeated_separators_collapse(self):\n        self.assertEqual(slugify(\"a--b\"), \"a-b\")\n\n\nif __name__ == \"__main__\":\n    unittest.main()\n"}
+  ]}]}]
+}
