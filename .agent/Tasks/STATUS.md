@@ -11,6 +11,9 @@
 - **Test**: see `alfredo-tui/README.md#test` (fmt, clippy, `cargo test --locked`, 6 PTY
   smokes, Python unittests incl. `test_docs.py` doc-drift guards, `cargo audit`). CI:
   `.github/workflows/rust-terminal.yml`; tag `v*` -> `release.yml` draft release.
+- **Eval**: `alfredo-tui/eval/` (issue #176) runs 6 fixed tasks through Alfredo (fixture or
+  local Ollama) or Claude Code and emits schema-valid metrics JSON (M1-M16); fixture mode
+  is smoked in CI by `tests/eval_smoke.py`. See `alfredo-tui/eval/README.md`.
 - **Package**: `python3 alfredo-tui/scripts/package_release.py --output NEWDIR` then
   `python3 alfredo-tui/tests/release_smoke.py NEWDIR/*.tar.gz`.
 - **Docs map**: [root README](../../README.md) (users) ·

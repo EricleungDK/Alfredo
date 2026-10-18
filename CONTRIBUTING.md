@@ -28,6 +28,7 @@ cargo test --locked --manifest-path alfredo-tui/Cargo.toml
 cargo build --locked --manifest-path alfredo-tui/Cargo.toml
 python3 -m unittest discover -s alfredo-tui/tests -p 'test_*.py'
 python3 alfredo-tui/tests/terminal_smoke.py    # plus the other *_smoke.py; see alfredo-tui/README.md#test
+python3 alfredo-tui/tests/eval_smoke.py        # harness eval; see alfredo-tui/eval/README.md
 ```
 
 4. Update the docs in the same change (below), then open a pull request against `main`.
