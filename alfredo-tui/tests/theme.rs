@@ -6,7 +6,7 @@ use ratatui::style::Color;
 use std::time::{Duration, Instant};
 use unicode_width::UnicodeWidthStr;
 
-const STATUSES: [RowStatus; 11] = [
+const STATUSES: [RowStatus; 12] = [
     RowStatus::Working,
     RowStatus::Queued,
     RowStatus::Review,

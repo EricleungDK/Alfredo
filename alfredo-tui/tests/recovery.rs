@@ -383,7 +383,7 @@ fn interrupted_before_check_recovers_once_and_repair_still_requires_approval() {
 #[test]
 fn resume_recovery_records_a_cancelled_run_that_requeues_without_a_repair() {
     let fixture = Fixture::new();
-    let (directory, owner) = boundary_run(&fixture);
+    let (_directory, owner) = boundary_run(&fixture);
     assert!(fixture
         .store
         .recover_requeue_checked(1)
