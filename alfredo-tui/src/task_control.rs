@@ -988,6 +988,31 @@ impl TaskControl {
         self.focus_work_node(node);
     }
 
+    /// Recorded `running`, no worker in this process, and the owner lock is free:
+    /// the process that ran it is gone (crash, kill, power loss).
+    pub fn interrupted(&self, task: u64) -> bool {
+        !self.workers.contains_key(&task)
+            && self.snapshot.as_ref().is_some_and(|s| {
+                s.tasks
+                    .iter()
+                    .any(|t| t.id == task && t.status == crate::tasks::TaskStatus::Running)
+            })
+            && self
+                .run_observations
+                .get(&task)
+                .is_some_and(|text| text.starts_with("Worker stopped"))
+    }
+
+    /// An interrupted run whose boundary artifacts let `/recover` prove no effect
+    /// is half-applied (result saved, or stopped before/after the check).
+    pub fn recoverable(&self, task: u64) -> bool {
+        self.interrupted(task)
+            && self
+                .run_observations
+                .get(&task)
+                .is_some_and(|text| !text.contains("outcome unknown"))
+    }
+
     /// Live worker stage and elapsed time without copying streamed output.
     /// The flag is true while the worker waits for shared model capacity.
     pub fn worker_stage(&self, task: u64) -> Option<(&'static str, std::time::Duration, bool)> {
@@ -1993,12 +2018,12 @@ impl TaskControl {
                 .as_ref()
                 .ok_or("Task queue unavailable; /refresh first")?;
             if matches!(verb, "/run" | "/branch" | "/recover") {
-                let task: u64 = text
-                    .split_once(' ')
-                    .ok_or("Command needs a task ID")?
-                    .1
-                    .parse()
-                    .map_err(|_| "Invalid task ID")?;
+                let argument = text.split_once(' ').ok_or("Command needs a task ID")?.1;
+                let (argument, requeue) = match argument.strip_suffix(" requeue") {
+                    Some(id) if verb == "/recover" => (id, true),
+                    _ => (argument, false),
+                };
+                let task: u64 = argument.parse().map_err(|_| "Invalid task ID")?;
                 let item = snapshot
                     .tasks
                     .iter()
@@ -2036,6 +2061,7 @@ impl TaskControl {
                             .ok_or_else(|| crate::tasks::not_run(task))?
                             .id
                             .clone(),
+                        requeue,
                     },
                 }
             } else if text == "/plan-save" {
@@ -2255,8 +2281,10 @@ impl TaskControl {
                     let _ = sender.send(result).await;
                 });
             }
-            Intent::Recover { task, run, .. } => {
-                let (task, run) = (*task, run.clone());
+            Intent::Recover {
+                task, run, requeue, ..
+            } => {
+                let (task, run, requeue) = (*task, run.clone(), *requeue);
                 let store = self.store.clone();
                 let sender = self.sender.clone();
                 self.pending = true;
@@ -2271,7 +2299,12 @@ impl TaskControl {
                             }) {
                                 return Err("Recovery source run changed".into());
                             }
-                            store.recover_checked(task).map(Projection::from)
+                            if requeue {
+                                store.recover_requeue_checked(task)
+                            } else {
+                                store.recover_checked(task)
+                            }
+                            .map(Projection::from)
                         })
                         .await
                         {

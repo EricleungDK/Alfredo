@@ -128,9 +128,21 @@ pub(crate) fn interrupted_before_check(path: &Path, task: &Task) -> Result<Evide
         patch: String::new(), candidate_commit: None, model_metrics: None, failure_code: None, generation: None, check: None,
     })
 }
+/// An interruption `/resume` recovers is the same fact as a `/stop` cancel: the run is
+/// recorded as cancelled, so `/requeue` runs the task again and no repair is spent.
+fn requeueable(mut evidence: Evidence, requeue: bool) -> Evidence {
+    if requeue {
+        evidence.status = TaskStatus::Cancelled;
+        evidence.detail = evidence.detail.replace(
+            "Propose a repair and approve it separately",
+            "Alfredo exited during the run; the task runs again from its baseline",
+        );
+    }
+    evidence
+}
 /// Called only under the stopped-owner guard by explicit recovery. Never overwrites evidence.
-pub(crate) fn record_interrupted(path: &Path, task: &Task) -> Result<()> {
-    let evidence = interrupted_before_check(path, task)?;
+pub(crate) fn record_interrupted(path: &Path, task: &Task, requeue: bool) -> Result<()> {
+    let evidence = requeueable(interrupted_before_check(path, task)?, requeue);
     write_once(&path.join("evidence.json"), &evidence)
 }
 
@@ -639,8 +651,9 @@ pub(crate) fn record_interrupted_after_check(
     path: &Path,
     task: &Task,
     mission: &str,
+    requeue: bool,
 ) -> Result<()> {
-    let evidence = interrupted_after_check(path, task, mission)?;
+    let evidence = requeueable(interrupted_after_check(path, task, mission)?, requeue);
     write_bounded(&path.join("evidence.json"), &evidence, MAX_RESULT + 4096).map(|_| ())
 }
 
@@ -847,10 +860,11 @@ mod tests {
             assert!(evidence.patch.is_empty());
             assert!(evidence.candidate_commit.is_none());
             assert_eq!(evidence.check, Some(check));
-            record_interrupted_after_check(&fixture.path, &fixture.task, "mission").unwrap();
+            record_interrupted_after_check(&fixture.path, &fixture.task, "mission", false).unwrap();
             let saved = fs::read(fixture.path.join("evidence.json")).unwrap();
             assert!(
-                record_interrupted_after_check(&fixture.path, &fixture.task, "mission").is_err()
+                record_interrupted_after_check(&fixture.path, &fixture.task, "mission", false)
+                    .is_err()
             );
             assert_eq!(fs::read(fixture.path.join("evidence.json")).unwrap(), saved);
         }
@@ -868,7 +882,9 @@ mod tests {
                 .unwrap_err()
                 .contains("uncertain")
         );
-        assert!(record_interrupted_after_check(&fixture.path, &fixture.task, "mission").is_err());
+        assert!(
+            record_interrupted_after_check(&fixture.path, &fixture.task, "mission", false).is_err()
+        );
         assert_eq!(
             fs::read(fixture.path.join("check-result.json")).unwrap(),
             saved

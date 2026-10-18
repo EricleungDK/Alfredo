@@ -381,6 +381,65 @@ fn interrupted_before_check_recovers_once_and_repair_still_requires_approval() {
 }
 
 #[test]
+fn resume_recovery_records_a_cancelled_run_that_requeues_without_a_repair() {
+    let fixture = Fixture::new();
+    let (_directory, owner) = boundary_run(&fixture);
+    assert!(fixture
+        .store
+        .recover_requeue_checked(1)
+        .unwrap_err()
+        .to_string()
+        .contains("still active"));
+    drop(owner);
+    let before = fixture.store.snapshot().unwrap();
+    let (recovered, detail) = fixture.store.recover_requeue_checked(1).unwrap();
+    assert!(detail.contains("cancelled before check launch"), "{detail}");
+    assert_eq!(recovered.tasks[0].status, TaskStatus::Cancelled);
+    assert_eq!(recovered.revision, before.revision + 1);
+    let evidence: Evidence = serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    assert_eq!(evidence.status, TaskStatus::Cancelled);
+    assert!(evidence.check.is_none() && evidence.candidate_commit.is_none());
+    assert!(evidence.patch.is_empty());
+    assert!(
+        !evidence.detail.contains("Propose a repair"),
+        "{}",
+        evidence.detail
+    );
+    // Idempotent, and the cancelled run requeues as the same task: no repair task.
+    let (again, _) = fixture.store.recover_requeue_checked(1).unwrap();
+    assert_eq!(again.revision, recovered.revision);
+    let (requeued, _) = fixture
+        .store
+        .transact(Request {
+            correlation: "requeue-after-crash".into(),
+            expected_revision: recovered.revision,
+            action: Action::Requeue { task: 1 },
+        })
+        .unwrap();
+    assert_eq!(requeued.tasks.len(), 1);
+    assert_eq!(requeued.tasks[0].status, TaskStatus::Approved);
+}
+
+#[test]
+fn resume_recovery_refuses_what_recover_refuses() {
+    let fixture = Fixture::new();
+    let (directory, owner) = boundary_run(&fixture);
+    fs::write(directory.join("execution-boundary.json"), b"{").unwrap();
+    drop(owner);
+    let before = fixture.store.snapshot().unwrap();
+    let error = fixture
+        .store
+        .recover_requeue_checked(1)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("Outcome unknown"), "{error}");
+    assert_eq!(
+        serde_json::to_vec(&fixture.store.snapshot().unwrap()).unwrap(),
+        serde_json::to_vec(&before).unwrap()
+    );
+}
+
+#[test]
 fn possible_launch_bad_boundary_and_bad_evidence_never_authorize_reconstruction() {
     for case in [
         "intent",
