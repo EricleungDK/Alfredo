@@ -2272,6 +2272,11 @@ fn capacity_wait_app(icons: alfredo_tui::theme::IconSet, motion: bool) -> App {
     };
     app.sessions[0].insert("Discuss this change");
     app.sessions[0].begin().unwrap();
+    // Pin the elapsed label: a start in the future saturates to "0.0s" on every draw,
+    // so rendering never depends on the wall clock.
+    app.sessions[0].timing = Some(alfredo_tui::client_timing::Timing::new(
+        std::time::Instant::now() + std::time::Duration::from_secs(3600),
+    ));
     app.sessions[0].apply(1, Update::CapacityWait { live: 1 });
     app
 }
@@ -2306,7 +2311,9 @@ fn capacity_wait_shows_a_static_cat_with_its_text_on_one_line_when_there_is_room
     assert!(rows.iter().any(|row| row.contains("Chat 1 · queued")));
     // The ordinary queue wording is not claimed while only the conflict is known.
     assert!(rows.iter().all(|row| !row.contains("queued 1/")));
-    // Static without motion: the same frame on every draw.
+    // Static without motion: the same frame on every draw, even when the wall clock
+    // crosses a 100 ms boundary between the draws.
+    std::thread::sleep(std::time::Duration::from_millis(250));
     assert_eq!(rows, screen_rows(&app, 160, 30));
 }
 
