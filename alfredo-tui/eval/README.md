@@ -102,7 +102,10 @@ a shell (even `python3`) could write anywhere you can. The process gets a minima
 (`PATH`, `HOME`, locale, proxy/CA and Anthropic auth variables only), and only project
 settings load, so your user hooks, memory and MCP servers are not used. Residual risk: Read,
 Glob and Grep are not path-restricted, so the model can read files outside the temp repo.
-It uses your logged-in Claude Code and costs real tokens, so start with `--tasks T1 --trials 1`.
+Without Bash, Claude Code cannot run tests itself, so it may score lower than Alfredo (which
+runs the approved check) on tasks like T5. Only Anthropic API-key, OAuth or subscription
+login is supported; Bedrock, Vertex, `apiKeyHelper` and custom-header setups are not passed
+through. It uses your logged-in Claude Code and costs real tokens, so start with `--tasks T1 --trials 1`.
 
 ## Output
 
@@ -125,7 +128,7 @@ It uses your logged-in Claude Code and costs real tokens, so start with `--tasks
 | M5 | tool/command calls per task, median: Alfredo worker runs + check runs; Claude Code `tool_use` blocks |
 | M6 | tokens per task: prompt + completion tokens per trial, median; `secondary.peak_ctx_max` is the largest prompt + completion of one request. Fixture counts are synthetic (`ceil(chars / 4)`, deterministic), not model counts |
 | M7 | tool-call error rate: 100 x (malformed + refused + sandbox errors) / M5 calls; `null` if there were no calls |
-| M8 | harness overhead per turn (Enter to request at server, reply to screen, p50 ms): `null`. Reply-to-screen is not measured because spinner redraws make byte-level change detection unreliable at the 30 ms poll. `secondary.enter_to_request_p50_ms` is measured exactly; `trial.overhead_s` is the whole non-model time |
+| M8 | harness overhead per turn (Enter to request at server, reply to screen, p50 ms): `null`. Reply-to-screen is not measured because spinner redraws make byte-level change detection unreliable at the 30 ms poll. `secondary.enter_to_request_p50_ms` is measured exactly, but for `/go` it includes preflight, git and planning preparation (about 1 s), so do not score it against the ~50 ms chat baseline; `trial.overhead_s` is the whole non-model time |
 | M9 | keystroke echo p50/p95: `null`, the `rendering_cost.rs` bench wrapper is a follow-up |
 | M10 | frame render cost p50/p95: `null`, same follow-up |
 | M11 | cold start to first frame, median ms from spawn until the header is drawn in the pty (Claude Code: first stream event) |
