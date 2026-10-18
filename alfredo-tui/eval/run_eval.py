@@ -383,7 +383,10 @@ def blank_trial(task, index):
 
 def remove_tree(path):
     def writable(function, target, _info):
-        os.chmod(target, 0o700)
+        # Unlinking an entry needs a writable parent; listing a directory needs it readable.
+        os.chmod(os.path.dirname(target), 0o700)
+        if os.path.isdir(target) and not os.path.islink(target):
+            os.chmod(target, 0o700)
         function(target)
     shutil.rmtree(path, onerror=writable)
 
