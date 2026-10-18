@@ -30,6 +30,9 @@ class AutopilotServer:
         self.errors = []
         self.release_app = threading.Event()
         self.prose_worker = False
+        # Recovery smoke options: one passing task whose first worker request can be held.
+        self.single_task = False
+        self.hold_calc = None
         fixture = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -58,14 +61,15 @@ class AutopilotServer:
                     prompt = request['messages'][-1]['content']
                     if request['messages'][0]['content'].startswith('Act as Frontier Architect'):
                         marker = 'PLAN'
-                        content = json.dumps({'tasks': [
+                        tasks = [
                             {'title': 'Make answer return 42', 'acceptance': ['answer() returns 42'],
                              'model': request['model'], 'dependencies': [],
                              'policy': {'files': ['calc.py'], 'check': CHECK_CALC}},
                             {'title': 'Add app reporting the answer', 'acceptance': ['main() reports answer=42'],
                              'model': request['model'], 'dependencies': [1],
                              'policy': {'files': ['app.py'], 'check': CHECK_APP}},
-                        ]})
+                        ]
+                        content = json.dumps({'tasks': tasks[:1] if fixture.single_task else tasks})
                     elif fixture.prose_worker:
                         marker = 'PROSE'
                         content = 'I would rather talk about it than write any code.'
@@ -74,7 +78,7 @@ class AutopilotServer:
                         content = json.dumps({'files': [{'path': 'calc.py', 'content': 'def answer():\n    return 42\n'}]})
                     elif prompt.startswith('Implement this task: Make answer'):
                         marker = 'CALC'
-                        content = json.dumps({'files': [{'path': 'calc.py', 'content': 'def answer():\n    return 41\n'}]})
+                        content = json.dumps({'files': [{'path': 'calc.py', 'content': 'def answer():\n    return %d\n' % (42 if fixture.single_task else 41)}]})
                     elif prompt.startswith('Implement this task: Add app'):
                         marker = 'APP'
                         content = json.dumps({'files': [{'path': 'app.py', 'content':
@@ -83,6 +87,8 @@ class AutopilotServer:
                         raise AssertionError(f'Unexpected request: {prompt[:120]!r}')
                     with fixture.lock:
                         fixture.requests.append(marker)
+                    if marker == 'CALC' and fixture.hold_calc is not None and not fixture.hold_calc.wait(60):
+                        raise AssertionError('Calc worker was never released')
                     if marker == 'APP' and not fixture.release_app.wait(60):
                         raise AssertionError('App worker was never released')
                     self.send_response(200)

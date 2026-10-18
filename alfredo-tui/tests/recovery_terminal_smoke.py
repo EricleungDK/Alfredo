@@ -15,6 +15,7 @@ import threading
 import time
 import unittest
 
+import autopilot_terminal_smoke
 from inference_terminal_smoke import FixtureServer, Terminal
 
 
@@ -191,6 +192,53 @@ class RecoveryTerminalSmoke(unittest.TestCase):
         self.assertEqual(self.fixture.count(), 1)
         self.assertEqual(counter.read_text(), '1')
         self.stop(terminal)
+
+
+class ResumeAfterCrashSmoke(autopilot_terminal_smoke.AutopilotTerminalSmoke):
+    """kill -9 while the worker generates, restart, /resume: the task reruns and is accepted."""
+    test_go_repairs_pauses_restarts_paused_and_resumes_to_one_integration_branch = None
+
+    def settle(self, terminal, seconds):
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            terminal.pump()
+            time.sleep(0.05)
+
+    def test_kill_during_generation_then_resume_reruns_and_accepts(self):
+        self.fixture.single_task = True
+        self.fixture.hold_calc = threading.Event()
+        head = self.git('rev-parse', 'HEAD')
+        terminal = self.terminal(resume=False)
+        terminal.send('/go Make answer return 42\r')
+        self.wait_until('worker generating', lambda: self.fixture.markers().count('CALC') == 1, 60)
+        self.assertEqual(self.statuses(), [(1, 'running', None)])
+        terminal.kill()  # kill -9: no cleanup, no evidence, owner lock released by the OS
+        terminal.close()
+        self.fixture.hold_calc.set()
+
+        terminal = self.terminal(resume=True)
+        self.screen_has(terminal, 'Autopilot ‖ paused')
+        self.settle(terminal, 1.5)
+        screen = terminal.screen()
+        self.assertEqual(self.fixture.markers(), ['PLAN', 'CALC'], 'restart never replays inference')
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        self.assertNotIn('▶', screen, 'a dead worker is not shown as running')
+        self.assertIn('interrupted', screen)
+        self.assertIn('Task #1 was running when Alfredo exited; /resume re-runs it', screen)
+
+        terminal.send('/resume\r')
+        self.screen_has(terminal, 'git switch alfredo/go-', 60)
+        self.assertEqual(self.fixture.markers(), ['PLAN', 'CALC', 'CALC'])
+        self.assertEqual(self.statuses(), [(1, 'accepted', None)])
+        screen = terminal.screen()
+        self.assertNotIn('Autopilot failed', screen)
+        branches = self.git('for-each-ref', '--format=%(refname:short)', 'refs/heads/alfredo/').split()
+        self.assertEqual(len(branches), 1, branches)
+        self.assertTrue(branches[0].startswith('alfredo/go-'), branches)
+        self.assertEqual(self.git('show', f'{branches[0]}:calc.py'), 'def answer():\n    return 42')
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        self.assertEqual(self.git('status', '--porcelain'), '')
+        self.quit(terminal)
 
 
 if __name__ == '__main__':
