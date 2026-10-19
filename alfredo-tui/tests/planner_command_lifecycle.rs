@@ -74,6 +74,7 @@ fn plan() -> Plan {
         architecture: None,
         prompt: "Implement the requested calculation and integration".into(),
         planner: "fixture".into(),
+        usage: None,
         context: None,
         scope: None,
         tasks: vec![

@@ -395,7 +395,9 @@ impl Router {
             IDS.fetch_add(1, Ordering::Relaxed)
         );
         let store = self.store.clone();
-        let job = runtime.spawn_blocking(move || prepare(&store, &prompt, &correlation, revision));
+        let job = crate::wake::spawn_blocking(runtime, move || {
+            prepare(&store, &prompt, &correlation, revision)
+        });
         self.pending.insert(
             turn.session,
             Pending {
@@ -466,7 +468,7 @@ impl Router {
         }
         let store = self.store.clone();
         let exact = request.clone();
-        let job = runtime.spawn_blocking(move || dispatch(&store, &exact));
+        let job = crate::wake::spawn_blocking(runtime, move || dispatch(&store, &exact));
         pending.stage = Stage::Writing {
             request: request.clone(),
             job,

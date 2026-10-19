@@ -96,6 +96,13 @@ candidates on the plan's recorded baseline with the dependency merge-tree compos
 and creates one local branch `alfredo/go-<id>`. HEAD, the index and working files are
 untouched; nothing is pushed. The summary lists each task's outcome and the `git switch`
 / `git merge` commands, and says when the branch holds only an accepted subset.
+The finish notice and summary add one totals line, `tokens 12.3k in / 1.1k out · model 38 s`,
+summed over the planner, the workers and the repairs of this run's own tasks (counts
+and total model time as the server reported them; no cost estimate). The line is
+omitted when the server reported no token counts. The planner's counts are saved in the
+plan receipt (`usage`: prompt and completion tokens, model time) when `/plan-save`
+stores the plan; a plan from an older build has none, and a revised draft keeps only its
+last generation's counts. Workers' counts come from their run evidence.
 
 Scope: a confirmed scope, or no scope with an ordinary goal, is used as is. A new-project
 goal (the case that would otherwise enter Wayfinder) records and confirms a minimal
@@ -1235,7 +1242,9 @@ Type `@wayfinder REQUEST` to address the native scope adapter. Tab completes the
 name; arrows select, Enter fills the composer, and Escape dismisses completion.
 Completion never submits a turn. F1 lists this capability alongside commands.
 Unknown leading `@` names and an empty Wayfinder request produce an error and retain
-the draft without model dispatch. Mentions inside ordinary prose are not commands.
+the draft without model dispatch. Mentions inside ordinary prose are not commands, and
+a leading `@` token containing `/` or `.` (for example `@calc.py explain`) is a file
+mention, not a capability name.
 
 An explicit discussion request without a saved scope enters Chart (or Work-through
 for an existing Wayfinder map/ticket). Ordinary read-only prompts outside the capability keep their existing
@@ -1244,6 +1253,29 @@ also accept the prefix; their outcomes retain the same scope receipts and grant 
 task approval or execution. Subsequent discussion reuses the existing flow.
 Other native roles remain accessible through their documented commands; this is
 not a general skill/plugin executor or complete capability-routing implementation.
+
+## Chat file mentions (`@path`)
+
+A token `@relative/path` in a chat prompt, starting at a word boundary (so `a@b.com` and
+`@wayfinder` are not mentions), appends that file's committed HEAD content to the message
+the model receives, as a `FILE path` block under an "Attached files" heading. The
+transcript still shows only what you typed. The block stays part of that turn in the
+request history, so follow-ups still see the file; it counts toward the conversation
+size limit, and it is kept in memory only (not restored after a restart).
+
+- Content comes from Git objects at `HEAD` (never the working tree, so uncommitted edits
+  are not seen), through the same reader family and exclusion rules as planner references:
+  secrets (`.env*`, `*.pem`, `*.key`…), `.git`, `node_modules`, `target`, `dist`, `vendor`
+  are refused. Paths are relative to the repository root; absolute, `..`, empty-segment
+  and symlink or submodule paths are refused, as are directories, binary and non-UTF-8
+  files and files over 256 KiB.
+- Bounds per prompt: at most 8 distinct mentions and 32 KiB of file text; a longer file
+  is cut with `[truncated: N of M bytes]`, and mentions past the budget are not attached.
+- Anything that looks like a path (contains `/` or `.`) but cannot be attached shows a
+  notice naming it and the reason, for example `@calc.py: not attached (not committed at
+  HEAD)`. A bare `@word` that is not a committed file is left alone silently.
+- Not included: directory mentions, Tab completion of paths, mentions in `/go` goals or
+  commands, a chat tool loop. `@wayfinder REQUEST` is unchanged.
 
 ## Recovery at recorded check boundaries
 

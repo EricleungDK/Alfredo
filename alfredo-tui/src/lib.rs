@@ -41,6 +41,8 @@ pub mod metrics;
 
 pub mod selection;
 
+pub mod wake;
+
 pub mod missions;
 
 pub mod understanding;
@@ -97,3 +99,4 @@ pub mod agent_drafts;
 pub mod instruct;
 
 pub mod chat_context;
+pub mod chat_mentions;
