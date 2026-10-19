@@ -154,7 +154,7 @@ pub type OutcomeLines = Arc<Result<Vec<ratatui::text::Line<'static>>, String>>;
 const MANUAL_SELECTION_HOLD: std::time::Duration = std::time::Duration::from_secs(10);
 
 impl TaskControl {
-    pub(crate) fn workspace(&self) -> &std::path::Path {
+    pub fn workspace(&self) -> &std::path::Path {
         self.store.identity().0
     }
 
