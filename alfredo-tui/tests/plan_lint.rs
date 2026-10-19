@@ -22,6 +22,7 @@ fn plan(tasks: Vec<Step>) -> Plan {
     Plan {
         prompt: "goal".into(),
         planner: "fixture".into(),
+        usage: None,
         tasks,
         context: None,
         scope: None,

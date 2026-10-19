@@ -1769,6 +1769,7 @@ async fn planned_worker_receives_the_saved_scope_brief_with_its_existing_policy(
             architecture: None,
             prompt: "Implement calculation".into(),
             planner: "fixture".into(),
+            usage: None,
             context: None,
             scope: Some(Box::new(binding.clone())),
             tasks: vec![Step {
@@ -2262,6 +2263,7 @@ async fn review_outcomes_hold_resolve_and_preserve_exact_v11_history() {
                 architecture: None,
                 prompt: "Implement answer".into(),
                 planner: "fixture".into(),
+                usage: None,
                 context: None,
                 scope: None,
                 tasks: vec![Step {
@@ -3208,6 +3210,7 @@ async fn review_and_repair_is_atomic_replayable_and_requires_fresh_approval() {
                 architecture: None,
                 prompt: "Implement answer".into(),
                 planner: "fixture".into(),
+                usage: None,
                 context: None,
                 scope: None,
                 tasks: vec![Step {
@@ -4046,6 +4049,7 @@ async fn contracted_repair_resolution_requires_recorded_criterion_review_even_fo
             architecture: None,
             prompt: "Implement answer".into(),
             planner: "fixture".into(),
+            usage: None,
             context: None,
             scope: None,
             tasks: vec![Step {
@@ -4357,6 +4361,7 @@ async fn repeated_architecture_failure_requires_bound_revision_and_fresh_executi
     let plan = Plan {
         prompt: context.prompt.clone(),
         planner: "fixture-architect".into(),
+        usage: None,
         context: None,
         scope: None,
         architecture: Some(context.origin.clone()),
@@ -4613,6 +4618,7 @@ async fn architect_adoption_inherits_declared_dependencies_and_frozen_execution_
     let context = fixture.store.architecture_context(3).unwrap();
     let plan = Plan {
         prompt: context.prompt, planner: "fixture-architect".into(), context: None, scope: None, architecture: Some(context.origin),
+        usage: None,
         tasks: vec![Step { title: "Revise consumer architecture".into(), model: "fixture".into(), dependencies: vec![], acceptance: vec!["Consumer preserves its accepted calculation dependency".into()], policy: WorkPolicy {
             files: vec!["calc.py".into(), "result.txt".into()],
             check: vec!["/usr/bin/python3".into(), "-B".into(), "-c".into(), "from calc import answer; from pathlib import Path; assert answer()==42; assert Path('result.txt').read_text()=='REVISED'".into()],
@@ -4882,6 +4888,7 @@ async fn adopted_architecture_blocks_old_repairs_and_cancelled_draft_can_be_repl
         architecture: Some(context.origin.clone()),
         prompt: context.prompt.clone(),
         planner: context.model.clone(),
+        usage: None,
         context: None,
         scope: None,
         tasks: vec![Step {
@@ -5697,6 +5704,7 @@ fn plan_task(fixture: &Fixture, prompt: &str, title: &str, policy: WorkPolicy) -
             architecture: None,
             prompt: prompt.into(),
             planner: "fixture".into(),
+            usage: None,
             context: None,
             scope: None,
             tasks: vec![Step {
@@ -6796,6 +6804,7 @@ fn accept_refusal_leads_with_the_review_template_for_the_tasks_real_criteria() {
             architecture: None,
             prompt: "Implement answer".into(),
             planner: "fixture".into(),
+            usage: None,
             context: None,
             scope: None,
             tasks: vec![Step {
