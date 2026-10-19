@@ -44,6 +44,9 @@ file, or Alfredo exits with a usage error before starting.
   `ALFREDO_GOAL`, `ALFREDO_ACCEPTED`, `ALFREDO_TOTAL` (planned tasks) and
   `ALFREDO_REPAIRS`. Treat `ALFREDO_GOAL` as untrusted text.
 - Runs on its own thread so the UI never waits; after 10 s it is killed and reaped.
+  Only the program itself is killed: a script should `exec` its last command, or its
+  own children may outlive the limit. Quitting right after a run finishes can skip the
+  hook, and a failure notice is dropped if you switch missions before the hook ends.
   A spawn failure, non-zero exit or timeout shows a footer notice
   (`--on-finish hook failed (exit status: 3)`) and never changes autopilot state.
 - Fires when the run first reaches the finished state, including planning failures and
