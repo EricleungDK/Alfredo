@@ -98,7 +98,9 @@ must be available at http://127.0.0.1:11434 to send prompts; use --endpoint for
 another origin and /models to discover installed models. A check you approve may
 need its own interpreter. Coding workers require Git, /usr/bin/bwrap and
 /usr/bin/prlimit on Linux and a repository with a commit. No packages are installed
-automatically. Worker commands run in isolated worktrees with network disabled.
+automatically. Worker commands run in isolated worktrees with network disabled and private IPC
+(SysV shared memory, semaphores and queues) and UTS namespaces, and a cgroup
+namespace where the kernel allows it.
 
 Terminals owned by the same user share model-request capacity for the same normalized
 endpoint origin, independently of `--state-dir`. The default is two; configure 1–8
