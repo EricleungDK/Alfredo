@@ -406,6 +406,16 @@ fn go_plans_approves_dispatches_repairs_and_integrates_on_one_local_branch() {
         &["merge-base", "--is-ancestor", &head, &branch]
     )
     .is_empty());
+    // The tip's subject names the goal; the candidate commits below read as task titles.
+    assert_eq!(
+        git(&fixture.workspace, &["log", "-1", "--format=%s", &branch]),
+        "Make answer return 42 and add app"
+    );
+    let subjects = git(
+        &fixture.workspace,
+        &["log", "--format=%s", &format!("{head}..{branch}")],
+    );
+    assert!(!subjects.contains("Alfredo candidate"), "{subjects}");
     let report = autopilot.report().unwrap();
     for text in [
         "#1",

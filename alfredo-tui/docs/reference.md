@@ -150,7 +150,8 @@ When every planned task is accepted, held or failed, autopilot composes the acce
 candidates on the plan's recorded baseline with the dependency merge-tree composition
 and creates one local branch `alfredo/go-<id>`. HEAD, the index and working files are
 untouched; nothing is pushed. The summary lists each task's outcome and the `git switch`
-/ `git merge` commands, and says when the branch holds only an accepted subset.
+/ `git merge` commands, and says when the branch holds only an accepted subset. The branch tip is an extra commit
+on the composed tree whose subject is the goal (first 72 characters).
 The finish notice and summary add one totals line, `tokens 12.3k in / 1.1k out · model 38 s`,
 summed over the planner, the workers and the repairs of this run's own tasks (counts
 and total model time as the server reported them; no cost estimate). The line is
@@ -713,7 +714,9 @@ workers and waits for their results. Up to four workers may run per terminal.
 Successful worker results now retain a Git candidate commit for the exact reviewed
 diff, parented by the recorded baseline. A `refs/alfredo/candidates/<commit>` ref
 keeps the object reachable; the workspace branch, HEAD and working files stay
-unchanged. Untracked check/build output is excluded. Evidence stores the optional
+unchanged. Untracked check/build output is excluded. The commit subject is the task title (72 characters at most, control characters
+stripped) and the body reads `Alfredo task #N · run ID · files · check`, plus
+`Repair of #M` for repairs. Evidence stores the optional
 commit ID under its existing digest. Verification checks its sole parent and exact
 binary diff against that evidence, without relying on mutable retained worktree
 files. Older evidence remains readable with no inferred candidate. Snapshot
