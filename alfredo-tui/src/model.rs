@@ -1397,6 +1397,8 @@ pub struct App {
     pub health: crate::health::HealthView,
     /// Side pane focus, cursor, presentation settings and mission list (view state only).
     pub pane: crate::side_pane::PaneUi,
+    /// Configured `--num-ctx`, for the context-fill indicator; None shows `default`.
+    pub num_ctx: Option<u32>,
 }
 
 impl App {
@@ -1416,6 +1418,7 @@ impl App {
             completion: None,
             health: Default::default(),
             pane: Default::default(),
+            num_ctx: None,
         }
     }
 
