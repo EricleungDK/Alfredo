@@ -1960,10 +1960,15 @@ async fn integration_branch(
     let reference = format!("refs/heads/{name}");
     match crate::worker::git(&workspace, &["show-ref", "--verify", "--hash", &reference]).await {
         Ok(current) if current.trim() == commit => {}
-        // A retry after a restart rebuilds the tip with a new timestamp; the same
-        // composition under the same goal is already there.
+        // A retry after a restart rebuilds the tip with a new timestamp. Accept a ref
+        // sitting on the same composed tip (goal commit on top) or at it (a branch
+        // made before the goal commit existed).
         Ok(current)
-            if crate::worker::git(&workspace, &["rev-parse", &format!("{}^", current.trim())])
+            if current.trim() == composed
+                || crate::worker::git(
+                    &workspace,
+                    &["rev-parse", &format!("{}^", current.trim())],
+                )
                 .await
                 .is_ok_and(|parent| parent.trim() == composed) =>
         {
