@@ -42,6 +42,7 @@ impl Fixture {
                 architecture: None,
                 prompt: "Implement a dependency diamond".into(),
                 planner: "fixture".into(),
+                usage: None,
                 context: None,
                 scope: None,
                 tasks: [

@@ -96,6 +96,13 @@ candidates on the plan's recorded baseline with the dependency merge-tree compos
 and creates one local branch `alfredo/go-<id>`. HEAD, the index and working files are
 untouched; nothing is pushed. The summary lists each task's outcome and the `git switch`
 / `git merge` commands, and says when the branch holds only an accepted subset.
+The finish notice and summary add one totals line, `tokens 12.3k in / 1.1k out · model 38 s`,
+summed over the planner, the workers and the repairs of this run's own tasks (counts
+and total model time as the server reported them; no cost estimate). The line is
+omitted when the server reported no token counts. The planner's counts are saved in the
+plan receipt (`usage`: prompt and completion tokens, model time) when `/plan-save`
+stores the plan; a plan from an older build has none, and a revised draft keeps only its
+last generation's counts. Workers' counts come from their run evidence.
 
 Scope: a confirmed scope, or no scope with an ordinary goal, is used as is. A new-project
 goal (the case that would otherwise enter Wayfinder) records and confirms a minimal

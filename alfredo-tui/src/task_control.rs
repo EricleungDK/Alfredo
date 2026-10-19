@@ -2075,8 +2075,7 @@ impl TaskControl {
                         action: Action::Plan {
                             plan: self
                                 .planner
-                                .draft
-                                .clone()
+                                .draft_for_save()
                                 .ok_or("No complete validated plan to save")?,
                         },
                     },
@@ -2613,8 +2612,7 @@ impl TaskControl {
             }
             let plan = self
                 .planner
-                .draft
-                .clone()
+                .draft_for_save()
                 .ok_or("No complete validated plan to save")?;
             self.sequence += 1;
             let request = Request {
