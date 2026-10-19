@@ -42,6 +42,10 @@ fn invalid_arguments_fail_before_entering_terminal_mode() {
         vec!["--endpoint", "file:///tmp"],
         vec!["--keep-alive"],
         vec!["--keep-alive", "bogus"],
+        vec!["--num-ctx"],
+        vec!["--num-ctx", "2047"],
+        vec!["--num-ctx", "262145"],
+        vec!["--num-ctx", "big"],
         vec!["--connect-retries"],
         vec!["--connect-retries", "-1"],
         vec!["--connect-retries", "11"],
@@ -63,7 +67,13 @@ fn connection_flags_are_documented_and_invalid_environment_fails_early() {
         .output()
         .unwrap();
     let help = String::from_utf8_lossy(&output.stdout);
-    for text in ["--keep-alive", "--connect-retries", "ALFREDO_KEEP_ALIVE"] {
+    for text in [
+        "--keep-alive",
+        "--connect-retries",
+        "ALFREDO_KEEP_ALIVE",
+        "--num-ctx",
+        "ALFREDO_NUM_CTX",
+    ] {
         assert!(help.contains(text), "{text}");
     }
     let output = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
