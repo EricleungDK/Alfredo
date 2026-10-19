@@ -598,6 +598,20 @@ impl Autopilot {
             return Err("Usage: /go GOAL, or /go to run the open plan; there is no open plan draft or saved proposed task to run".into());
         };
         ids.sort_unstable();
+        for id in &ids {
+            let Some(task) = snapshot.tasks.iter().find(|task| task.id == *id) else {
+                continue;
+            };
+            if let Some(dep) = task
+                .dependencies
+                .iter()
+                .find(|dep| !ids.contains(dep) && snapshot.dependency_source(**dep).is_err())
+            {
+                return Err(format!(
+                    "Task #{id} depends on #{dep}, which is not accepted and not part of this run; nothing changed. Finish or accept #{dep} first, or /cancel-task #{id}"
+                ));
+            }
+        }
         self.begin(&goal, model, max_repairs, tasks, Phase::Running, Some(ids))
     }
 

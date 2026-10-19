@@ -3007,3 +3007,68 @@ fn bare_go_refuses_a_plan_that_fails_unattended_lint_and_leaves_it_untouched() {
         .all(|task| task.status == TaskStatus::Proposed));
     assert!(autopilot.status(&control).is_none());
 }
+
+#[test]
+fn go_goal_with_an_open_draft_names_bare_go_as_the_way_to_run_it() {
+    let fixture = Fixture::new();
+    let server = plan_server();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    open_draft(&mut control, &runtime);
+    let error = autopilot
+        .start("Another goal", "fixture", 2, &control)
+        .unwrap_err();
+    assert!(
+        error.contains("/go with no goal runs it") && error.contains("/plan-cancel"),
+        "{error}"
+    );
+    assert!(control.planner.checkpoint().is_some());
+    assert!(autopilot.status(&control).is_none());
+}
+
+#[test]
+fn bare_go_refuses_saved_tasks_that_depend_on_unaccepted_work_outside_the_run() {
+    let fixture = Fixture::new();
+    let server = plan_server();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    open_draft(&mut control, &runtime);
+    control.command(&runtime, "/plan-save", "fixture").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while control.snapshot.as_ref().is_none_or(|s| s.tasks.len() < 2) {
+        control.poll();
+        control.refresh(&runtime);
+        assert!(Instant::now() < deadline, "{}", control.notice);
+        thread::sleep(Duration::from_millis(5));
+    }
+    while control
+        .command(&runtime, "/cancel-task 1", "fixture")
+        .is_err()
+    {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.notice);
+        thread::sleep(Duration::from_millis(5));
+    }
+    while control.snapshot.as_ref().is_none_or(|s| {
+        s.tasks
+            .iter()
+            .any(|task| task.id == 1 && task.status != TaskStatus::Cancelled)
+    }) {
+        control.poll();
+        control.refresh(&runtime);
+        assert!(Instant::now() < deadline, "{}", control.notice);
+        thread::sleep(Duration::from_millis(5));
+    }
+    let error = autopilot
+        .command(&runtime, &mut control, "/go", "fixture", 2)
+        .unwrap_err();
+    assert!(
+        error.contains("#2 depends on #1") && error.contains("nothing changed"),
+        "{error}"
+    );
+    assert!(autopilot.status(&control).is_none());
+    let snapshot = fixture.store.snapshot().unwrap();
+    assert_eq!(snapshot.tasks[1].status, TaskStatus::Proposed);
+}
