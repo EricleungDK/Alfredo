@@ -63,6 +63,7 @@ fn plan(prompt: &str, count: usize) -> Plan {
     Plan {
         prompt: prompt.into(),
         planner: "qwen2.5-coder:14b".into(),
+        usage: None,
         tasks: (0..count)
             .map(|index| Step {
                 title: format!("Step {index}"),

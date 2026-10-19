@@ -260,6 +260,22 @@ class RecorderTests(unittest.TestCase):
         self.assertIsNone(stats['tokens']['prompt'])
         self.assertIn('tokens', unavailable)
 
+    def test_planner_tokens_are_read_from_saved_plan_receipts_and_cross_checked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            folder = state / 'rust-tasks-v1' / 'abc'
+            folder.mkdir(parents=True)
+            self.assertIsNone(run_eval.planner_tokens(state))
+            receipts = [{'request': {'action': {'kind': 'plan', 'plan': {'usage': {'prompt_tokens': 700, 'completion_tokens': 9}}}}},
+                        {'request': {'action': {'kind': 'plan', 'plan': {}}}},
+                        {'request': {'action': {'kind': 'approve', 'task': 1}}}]
+            (folder / 'tasks.json').write_text(json.dumps({'tasks': [], 'receipts': receipts}))
+            self.assertEqual(709, run_eval.planner_tokens(state))
+        self.assertIsNone(run_eval.planner_token_mismatch(709, 709))
+        self.assertIsNone(run_eval.planner_token_mismatch(None, None))
+        self.assertIn('counted 709, Alfredo saved 700', run_eval.planner_token_mismatch(709, 700))
+        self.assertIn('saved none', run_eval.planner_token_mismatch(709, None))
+
 
 class ClaudeStreamTests(unittest.TestCase):
     def test_counts_tool_calls_errors_turns_and_tokens(self):

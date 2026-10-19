@@ -1563,6 +1563,7 @@ impl Autopilot {
             .count();
         let repairs: u32 = families.iter().map(|family| family.repairs).sum();
         let state = outcome(accepted, families.len());
+        let totals = run_usage(tasks, &snapshot, &saved).line();
         // Labeled sections in the side pane language: dim labels, one blank
         // row between sections, one line per task.
         let mut lines = vec![
@@ -1572,6 +1573,9 @@ impl Autopilot {
             format!("{:<LABEL$}{accepted}/{} accepted", "Tasks", families.len()),
             format!("{:<LABEL$}{repairs}", "Repairs"),
         ];
+        if let Some(totals) = &totals {
+            lines.push(format!("{:<LABEL$}{totals}", "Model"));
+        }
         if let Some(warning) = saved.dirty_warning() {
             lines.push(format!("{:<LABEL$}{warning}", "Warning"));
         }
@@ -1659,6 +1663,9 @@ impl Autopilot {
         if repairs > 0 {
             notice.push_str(&format!("{GAP}{}", plural(repairs, "repair")));
         }
+        if let Some(totals) = &totals {
+            notice.push_str(&format!("{GAP}{totals}"));
+        }
         notice.push_str(&match &branch {
             Some(name) => format!("{GAP}git switch {name}"),
             None => format!("{GAP}no integration branch"),
@@ -1679,6 +1686,47 @@ impl Autopilot {
         tasks.autopilot_report = Some(report);
         self.persist();
     }
+}
+
+/// Planner, worker and repair usage of this run's own tasks: the saved plan's
+/// receipt plus the model metrics in each task run's evidence. Anything the
+/// server did not report adds nothing.
+fn run_usage(tasks: &TaskControl, snapshot: &Snapshot, saved: &Saved) -> crate::metrics::Usage {
+    let mut total = crate::metrics::Usage::default();
+    let plan = saved.save_request.as_ref().and_then(|request| {
+        snapshot
+            .receipts
+            .iter()
+            .find(|receipt| &receipt.request.correlation == request)
+    });
+    if let Some(crate::tasks::Action::Plan { plan }) = plan.map(|receipt| &receipt.request.action) {
+        if let Some(usage) = &plan.usage {
+            total.add(usage);
+        }
+    }
+    let Some(first) = saved.first else {
+        return total;
+    };
+    let roots = saved.roots();
+    for task in snapshot.tasks.iter().filter(|task| task.id >= first) {
+        let in_run = snapshot
+            .repair_root(task.id)
+            .is_some_and(|root| roots.contains(&root));
+        if !in_run || task.run.is_none() {
+            continue;
+        }
+        let usage = tasks
+            .store()
+            .evidence(task.id)
+            .ok()
+            .and_then(|text| serde_json::from_str::<crate::worker::Evidence>(&text).ok())
+            .and_then(|evidence| evidence.model_metrics)
+            .and_then(|metrics| crate::metrics::Usage::from_metrics(&metrics));
+        if let Some(usage) = usage {
+            total.add(&usage);
+        }
+    }
+    total
 }
 
 /// Root cause when the head failed because the sandbox could not start. The
