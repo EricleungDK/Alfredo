@@ -826,18 +826,48 @@ fn exhausted_repairs_hold_the_task_block_dependents_and_integrate_independent_wo
 /// check's own process prints Bubblewrap's setup error as its first stderr line),
 /// driven through the real worker finalize, evidence and settle path.
 fn sandbox_refused(max_repairs: u32) {
+    sandbox_refused_with(max_repairs, |_| None);
+}
+
+#[test]
+fn failed_run_shows_the_token_totals_line_when_the_server_reported_counts() {
+    let (report, notice) = sandbox_refused_with(0, |request| {
+        let (prompt, eval) = if planner(request) {
+            (1000, 100)
+        } else {
+            (200, 50)
+        };
+        Some(json!({"prompt_eval_count": prompt, "eval_count": eval}))
+    });
+    assert!(report.contains("tokens 1.2k in / 150 out"), "{report}");
+    assert!(notice.starts_with("Autopilot failed"), "{notice}");
+    assert!(notice.contains("tokens 1.2k in / 150 out"), "{notice}");
+    let (report, notice) = sandbox_refused_with(0, |_| None);
+    assert!(
+        !report.contains("tokens") && !notice.contains("tokens"),
+        "{report}{notice}"
+    );
+}
+
+fn sandbox_refused_with(
+    max_repairs: u32,
+    usage: impl Fn(&Value) -> Option<Value> + Send + Sync + 'static,
+) -> (String, String) {
     let fixture = Fixture::new();
-    let server = Server::new(|request, _| {
-        if planner(request) {
-            return json!({"tasks": [
+    let server = Server::with_usage(
+        |request, _| {
+            if planner(request) {
+                return json!({"tasks": [
                 {"title": "Make answer return 42", "acceptance": ["answer() returns 42"], "model": "fixture",
                  "dependencies": [], "policy": {"files": ["calc.py"], "check": check(
                     "import sys; sys.stderr.write('bwrap: No permissions to create new namespace\\n'); sys.exit(1)")}},
             ]})
             .to_string();
-        }
-        good_calc()
-    });
+            }
+            good_calc()
+        },
+        usage,
+    );
     let runtime = Runtime::new().unwrap();
     let mut control = control(&fixture, &server, &runtime);
     let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
@@ -857,7 +887,7 @@ fn sandbox_refused(max_repairs: u32) {
         evidence.failure_code.as_deref(),
         Some(alfredo_tui::execution::SANDBOX_UNAVAILABLE)
     );
-    let report = autopilot.report().unwrap();
+    let report = autopilot.report().unwrap().to_string();
     assert!(
         report.contains("bwrap: No permissions to create new namespace"),
         "{report}"
@@ -872,6 +902,8 @@ fn sandbox_refused(max_repairs: u32) {
         "{:?}",
         server.prompts()
     );
+    let notice = autopilot.take_finished_notice().unwrap();
+    (report, notice)
 }
 
 #[test]

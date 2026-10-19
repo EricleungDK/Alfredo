@@ -84,7 +84,15 @@ impl Usage {
             completion_tokens: metrics.eval_count,
             model_ns: metrics.total_duration,
         };
-        (usage != Self::default()).then_some(usage)
+        (usage != Self::default() && usage.in_bounds()).then_some(usage)
+    }
+    /// Generous sanity limits (a billion tokens, 24 h); beyond them the numbers are dropped, not trusted.
+    pub fn in_bounds(&self) -> bool {
+        [self.prompt_tokens, self.completion_tokens]
+            .into_iter()
+            .flatten()
+            .all(|tokens| tokens <= 1_000_000_000)
+            && self.model_ns.is_none_or(|ns| ns <= 86_400_000_000_000)
     }
     /// Sum another phase in; a count the server never reported stays absent.
     pub fn add(&mut self, other: &Self) {

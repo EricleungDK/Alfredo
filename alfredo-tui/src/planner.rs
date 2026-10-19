@@ -36,13 +36,7 @@ pub struct Plan {
 }
 impl Plan {
     pub fn validate(&self) -> Result<(), String> {
-        if self.usage.is_some_and(|usage| {
-            [usage.prompt_tokens, usage.completion_tokens]
-                .into_iter()
-                .flatten()
-                .any(|tokens| tokens > 1_000_000)
-                || usage.model_ns.is_some_and(|ns| ns > 600_000_000_000)
-        }) {
+        if self.usage.is_some_and(|usage| !usage.in_bounds()) {
             return Err("Plan usage exceeds supported bounds".into());
         }
         if let Some(scope) = &self.scope {

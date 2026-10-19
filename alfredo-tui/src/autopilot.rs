@@ -1114,6 +1114,11 @@ impl Autopilot {
 
     fn fail(&mut self, tasks: &mut TaskControl, notice: String) {
         let elapsed = self.elapsed();
+        let totals = tasks
+            .snapshot
+            .as_ref()
+            .zip(self.saved.as_ref())
+            .and_then(|(snapshot, saved)| run_usage(tasks, snapshot, saved).line());
         if let Some(saved) = self.saved.as_mut() {
             saved.phase = Phase::Failed;
             saved.finished = Some(saved.started + elapsed);
@@ -1126,9 +1131,18 @@ impl Autopilot {
             if let Some(warning) = saved.dirty_warning() {
                 report.push_str(&format!("\n{:<LABEL$}{warning}", "Warning"));
             }
+            if let Some(totals) = &totals {
+                report.push_str(&format!("\n{:<LABEL$}{totals}", "Model"));
+            }
             saved.report = Some(report);
         }
-        self.finished_notice = Some(clean(&format!("Autopilot failed{GAP}{notice}"), 1024));
+        let totals = totals
+            .map(|line| format!("{GAP}{line}"))
+            .unwrap_or_default();
+        self.finished_notice = Some(clean(
+            &format!("Autopilot failed{GAP}{notice}{totals}"),
+            1024,
+        ));
         self.set_notice(tasks, notice);
         // A planning failure leaves the unsaved draft panel open; the summary
         // must be what the user sees, as after a task failure.

@@ -61,3 +61,41 @@ fn totals_line_is_bounded_and_omitted_without_token_counts() {
     timed.add(&Usage::from_metrics(&metrics(None, None, Some(5_000_000_000))).unwrap());
     assert_eq!(timed.line(), None);
 }
+
+#[test]
+fn oversized_usage_is_dropped_so_the_plan_still_saves() {
+    use alfredo_tui::planner::{Plan, Planner, Step};
+    use alfredo_tui::tasks::WorkPolicy;
+    let plan = Plan {
+        prompt: "goal".into(),
+        planner: "fixture".into(),
+        tasks: vec![Step {
+            title: "t".into(),
+            acceptance: vec!["a".into()],
+            model: "fixture".into(),
+            dependencies: vec![],
+            policy: WorkPolicy {
+                files: vec!["a.py".into()],
+                check: vec!["true".into()],
+            },
+        }],
+        context: None,
+        scope: None,
+        architecture: None,
+        usage: None,
+    };
+    let mut planner = Planner::default();
+    planner.draft = Some(plan);
+    planner.metrics = Some(metrics(
+        Some(5_000_000_000),
+        Some(1),
+        Some(2_000_000_000_000_000),
+    ));
+    let saved = planner.draft_for_save().unwrap();
+    assert_eq!(saved.usage, None);
+    saved.validate().unwrap();
+    planner.metrics = Some(metrics(Some(10), Some(1), Some(700_000_000_000)));
+    let saved = planner.draft_for_save().unwrap();
+    assert_eq!(saved.usage.unwrap().model_ns, Some(700_000_000_000));
+    saved.validate().unwrap();
+}
