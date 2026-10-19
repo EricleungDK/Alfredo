@@ -79,3 +79,68 @@ impl Metrics {
         format!("Server timing · {}", parts.join(" · "))
     }
 }
+
+/// Counts and model time worth keeping in a receipt: no per-phase timings, so a
+/// plan receipt grows by well under a hundred bytes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Usage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_ns: Option<u64>,
+}
+impl Usage {
+    pub fn from_metrics(metrics: &Metrics) -> Option<Self> {
+        let usage = Self {
+            prompt_tokens: metrics.prompt_eval_count,
+            completion_tokens: metrics.eval_count,
+            model_ns: metrics.total_duration,
+        };
+        (usage != Self::default() && usage.in_bounds()).then_some(usage)
+    }
+    /// Generous sanity limits (a billion tokens, 24 h); beyond them the numbers are dropped, not trusted.
+    pub fn in_bounds(&self) -> bool {
+        [self.prompt_tokens, self.completion_tokens]
+            .into_iter()
+            .flatten()
+            .all(|tokens| tokens <= 1_000_000_000)
+            && self.model_ns.is_none_or(|ns| ns <= 86_400_000_000_000)
+    }
+    /// Sum another phase in; a count the server never reported stays absent.
+    pub fn add(&mut self, other: &Self) {
+        let sum = |a: Option<u64>, b: Option<u64>| match (a, b) {
+            (None, None) => None,
+            (a, b) => Some(a.unwrap_or(0).saturating_add(b.unwrap_or(0))),
+        };
+        self.prompt_tokens = sum(self.prompt_tokens, other.prompt_tokens);
+        self.completion_tokens = sum(self.completion_tokens, other.completion_tokens);
+        self.model_ns = sum(self.model_ns, other.model_ns);
+    }
+    /// `tokens 12.3k in / 1.1k out · model 38 s`; absent when the server gave no token counts.
+    pub fn line(&self) -> Option<String> {
+        if self.prompt_tokens.is_none() && self.completion_tokens.is_none() {
+            return None;
+        }
+        let count = |n: u64| match n {
+            0..=999 => n.to_string(),
+            _ => format!("{:.1}k", n as f64 / 1000.0),
+        };
+        let mut line = format!(
+            "tokens {} in / {} out",
+            count(self.prompt_tokens.unwrap_or(0)),
+            count(self.completion_tokens.unwrap_or(0))
+        );
+        if let Some(ns) = self.model_ns {
+            let seconds = ns as f64 / 1e9;
+            if seconds < 1.0 {
+                line.push_str(" · model <1 s");
+            } else {
+                line.push_str(&format!(" · model {seconds:.0} s"));
+            }
+        }
+        Some(line)
+    }
+}

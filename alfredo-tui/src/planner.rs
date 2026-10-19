@@ -29,9 +29,16 @@ pub struct Plan {
     pub scope: Option<Box<crate::understanding::Binding>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub architecture: Option<crate::architecture::Origin>,
+    /// The planner's own token counts and model time, stamped when the plan is
+    /// saved and only if the server reported them. Not part of a draft.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::metrics::Usage>,
 }
 impl Plan {
     pub fn validate(&self) -> Result<(), String> {
+        if self.usage.is_some_and(|usage| !usage.in_bounds()) {
+            return Err("Plan usage exceeds supported bounds".into());
+        }
         if let Some(scope) = &self.scope {
             scope.validate()?;
         }
@@ -251,6 +258,15 @@ impl Drop for Planner {
     }
 }
 impl Planner {
+    /// The finished draft stamped with the planner's reported usage, for saving.
+    pub fn draft_for_save(&self) -> Option<Plan> {
+        let mut plan = self.draft.clone()?;
+        plan.usage = self
+            .metrics
+            .as_ref()
+            .and_then(crate::metrics::Usage::from_metrics);
+        Some(plan)
+    }
     pub fn prepare_command(
         &self,
         correlation: &str,
@@ -624,6 +640,7 @@ impl Planner {
             context: None,
             scope: None,
             architecture: request.architecture.clone(),
+            usage: None,
             tasks: vec![Step {
                 title: "validation".into(),
                 acceptance: if request.architecture.is_some() {
@@ -714,7 +731,7 @@ impl Planner {
             }
             let envelope = Plan {
                 prompt: prompt.clone(), planner: model.clone(), context: None, scope: None,
-                architecture: architecture.clone(),
+                architecture: architecture.clone(), usage: None,
                 tasks: vec![Step { title: "Validation".into(), acceptance: vec!["Validation".into()], model: model.clone(),
                     dependencies: vec![], policy: WorkPolicy { files: vec!["file".into()], check: vec!["true".into()] } }],
             };
@@ -924,6 +941,7 @@ impl Planner {
                                 context: self.context.clone(),
                                 scope: self.scope.clone().map(Box::new),
                                 architecture: self.architecture.clone(),
+                                usage: None,
                             };
                             plan.validate()?;
                             if plan.tasks.iter().any(|task| task.acceptance.is_empty()) {
