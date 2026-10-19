@@ -18,7 +18,9 @@
         "started_at": {"type": "string"},
         "cpus": {"type": "integer", "minimum": 1},
         "agent_version": {"type": ["string", "null"]},
-        "command": {"type": ["array", "null"], "items": {"type": "string"}}
+        "command": {"type": ["array", "null"], "items": {"type": "string"}},
+        "binary": {"type": ["string", "null"]},
+        "profile": {"enum": ["debug", "release", "unknown", null]}
       }
     },
     "trials": {
@@ -105,6 +107,10 @@
     "likely_broken": {"type": "boolean"}
   },
   "$defs": {
+    "secondary_value": {
+      "type": ["number", "null", "object"],
+      "additionalProperties": {"type": ["number", "null"]}
+    },
     "metric": {
       "type": "object",
       "required": ["name", "value", "unit", "reason"],
@@ -114,7 +120,7 @@
         "unit": {"type": "string"},
         "reason": {"type": ["string", "null"]},
         "note": {"type": "string"},
-        "secondary": {"type": "object", "additionalProperties": {"type": ["number", "null"]}}
+        "secondary": {"type": "object", "additionalProperties": {"$ref": "#/$defs/secondary_value"}}
       }
     }
   }
