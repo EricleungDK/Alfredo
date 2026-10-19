@@ -268,6 +268,19 @@ impl Status {
     }
 }
 
+/// One planned task's outcome: `None` while still open (or cancelled by /stop).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TaskOutcome {
+    pub id: u64,
+    pub title: String,
+    /// Latest task of the family: the original or its newest repair.
+    pub head: u64,
+    /// Status of the original planned task.
+    pub status: TaskStatus,
+    pub repairs: u32,
+    pub result: Option<Result<(), String>>,
+}
+
 /// One command chosen by autopilot. The caller admits it exactly like typed input.
 #[derive(Clone, Debug)]
 pub struct Submission {
@@ -899,6 +912,31 @@ impl Autopilot {
             elapsed: Duration::from_secs(self.elapsed()),
             branch: saved.branch.clone(),
         })
+    }
+
+    /// Settled outcome of each planned task, for scripted (headless) reporting.
+    pub fn outcomes(&self, tasks: &TaskControl) -> Vec<TaskOutcome> {
+        let (Some(saved), Some(snapshot)) = (self.saved.as_ref(), tasks.snapshot.as_ref()) else {
+            return vec![];
+        };
+        families(snapshot, saved, tasks)
+            .into_iter()
+            .map(|family| {
+                let root = snapshot.tasks.iter().find(|task| task.id == family.root);
+                TaskOutcome {
+                    id: family.root,
+                    title: root.map(|task| task.title.clone()).unwrap_or_default(),
+                    status: root.map_or(TaskStatus::Proposed, |task| task.status.clone()),
+                    head: family.head,
+                    repairs: family.repairs,
+                    result: match family.settled {
+                        Settled::Success(_) => Some(Ok(())),
+                        Settled::Stuck(reason) => Some(Err(reason)),
+                        Settled::Active | Settled::Cancelled => None,
+                    },
+                }
+            })
+            .collect()
     }
 
     /// Keep the saved counts current so other missions can show them without

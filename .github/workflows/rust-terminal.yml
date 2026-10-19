@@ -61,6 +61,9 @@ jobs:
       - name: PTY smoke - autopilot
         timeout-minutes: 10
         run: python3 alfredo-tui/tests/autopilot_terminal_smoke.py
+      - name: Headless smoke - go without a TTY
+        timeout-minutes: 10
+        run: python3 alfredo-tui/tests/headless_smoke.py
       - name: PTY smoke - inference
         timeout-minutes: 10
         run: python3 alfredo-tui/tests/inference_terminal_smoke.py
