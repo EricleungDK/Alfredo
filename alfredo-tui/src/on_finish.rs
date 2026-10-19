@@ -45,16 +45,33 @@ pub fn validate(value: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Linux refuses to exec a file that some process still holds open for writing
+/// (`ETXTBSY`). A process forked elsewhere at the moment the hook was written can
+/// hold that handle for a few milliseconds, so a short bounded retry starts it.
+fn start(program: &Path, env: &[(&str, String)]) -> std::io::Result<std::process::Child> {
+    const TEXT_FILE_BUSY: i32 = 26;
+    let mut attempts = 0;
+    loop {
+        let result = Command::new(program)
+            .envs(env.iter().map(|(key, value)| (*key, value.as_str())))
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        match result {
+            Err(error) if error.raw_os_error() == Some(TEXT_FILE_BUSY) && attempts < 10 => {
+                attempts += 1;
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Run `program` with `env` added to the inherited environment; blocks up to
 /// `timeout`, then kills and reaps the child. Output is discarded.
 pub fn run(program: &Path, env: &[(&str, String)], timeout: Duration) -> Result<(), String> {
-    let mut child = Command::new(program)
-        .envs(env.iter().map(|(key, value)| (*key, value.as_str())))
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|error| format!("cannot start: {error}"))?;
+    let mut child = start(program, env).map_err(|error| format!("cannot start: {error}"))?;
     let deadline = Instant::now() + timeout;
     loop {
         match child.try_wait() {
