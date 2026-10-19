@@ -564,6 +564,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
                             let mut messages = turn.messages;
+                            // `@path` mentions: committed HEAD contents join this user turn's
+                            // model-visible message (kept for follow-ups); the transcript is unchanged.
+                            let session = &mut work.app.sessions[turn.session];
+                            if !session.has_attachment(turn.user_message) {
+                                let prompt = session
+                                    .messages
+                                    .get(turn.user_message)
+                                    .map(|message| message.content.clone())
+                                    .unwrap_or_default();
+                                let attachment =
+                                    runtime.block_on(alfredo_tui::chat_mentions::attach(
+                                        work.tasks.workspace(),
+                                        &prompt,
+                                    ));
+                                if !attachment.notices.is_empty() {
+                                    work.app.notice = attachment.notices.join(" · ");
+                                }
+                                if !attachment.block.is_empty() {
+                                    let session = &mut work.app.sessions[turn.session];
+                                    session.attach(turn.user_message, attachment.block);
+                                    messages = session.request_through(turn.user_message);
+                                }
+                            }
                             if revision == 0 {
                                 messages.insert(0, work.tasks.chat_context());
                             } else {

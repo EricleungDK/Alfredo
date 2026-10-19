@@ -96,3 +96,4 @@ pub mod agent_drafts;
 pub mod instruct;
 
 pub mod chat_context;
+pub mod chat_mentions;

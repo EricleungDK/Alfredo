@@ -155,6 +155,10 @@ pub struct Session {
     interrupted: Vec<usize>,
     pub status: Status,
     pub attempt: u64,
+    /// `@path` file contents (committed HEAD) appended to a user turn's model-visible
+    /// message, keyed by user-message index. Not shown, not saved.
+    #[serde(skip)]
+    attachments: std::collections::BTreeMap<usize, String>,
     pub scroll: std::cell::Cell<u16>,
     #[serde(
         default,
@@ -207,6 +211,7 @@ impl Session {
             interrupted: Vec::new(),
             status: Status::Ready,
             attempt: 0,
+            attachments: Default::default(),
             scroll: std::cell::Cell::new(0),
             reading: Default::default(),
             transcript_cache: Default::default(),
@@ -588,7 +593,8 @@ impl Session {
         if prompt.is_empty() {
             return Err("Enter a prompt");
         }
-        let bytes: usize = self.messages.iter().map(|m| m.content.len()).sum();
+        let bytes: usize = self.messages.iter().map(|m| m.content.len()).sum::<usize>()
+            + self.attachments.values().map(String::len).sum::<usize>();
         if bytes + prompt.len() > MAX_TEXT || self.messages.len() + 2 > MAX_MESSAGES {
             return Err("Conversation limit reached; start a new session");
         }
@@ -623,8 +629,32 @@ impl Session {
                 let user = index - index % 2;
                 user == user_index || !self.interrupted_turn(user)
             })
-            .map(|(_, message)| message.clone())
+            .map(|(index, message)| {
+                let mut message = message.clone();
+                if let Some(block) = self.attachments.get(&index) {
+                    message.content.push_str(block);
+                }
+                message
+            })
             .collect()
+    }
+
+    /// Attach file context to the user message at `user_index` for this and later
+    /// requests; the transcript text is unchanged.
+    pub fn attach(&mut self, user_index: usize, block: String) {
+        if !block.is_empty()
+            && self
+                .messages
+                .get(user_index)
+                .is_some_and(|m| m.role == "user")
+        {
+            self.attachments.insert(user_index, block);
+        }
+    }
+
+    /// Whether the user message at `user_index` already carries attached files.
+    pub fn has_attachment(&self, user_index: usize) -> bool {
+        self.attachments.contains_key(&user_index)
     }
 
     pub(crate) fn valid_interrupted(&self) -> bool {

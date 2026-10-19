@@ -100,6 +100,10 @@ pub fn capability_prompt(text: &str) -> Result<Option<&str>, String> {
         return Ok(None);
     }
     let (name, prompt) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+    // `@src/main.rs explain` is a file mention in ordinary prose, not a capability name.
+    if name.contains(['/', '.']) {
+        return Ok(None);
+    }
     if name != "@wayfinder" {
         return Err("Unknown capability; use @wayfinder or F1 for available commands".into());
     }
