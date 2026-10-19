@@ -102,6 +102,8 @@ fn absent(path: &Path) -> Result<()> {
         }
     }
 }
+/// Recovered evidence carries no diff; `/clean` keys on this phrase to keep such worktrees.
+pub(crate) const PATCH_NOT_RECONSTRUCTED: &str = "patch not reconstructed";
 /// Persist before any worker preparation. A partial marker is not recoverable proof.
 pub fn record_start(path: &Path, task: &Task) -> Result<()> {
     write_once(&path.join("execution-boundary.json"), &expected(task)?)
@@ -124,7 +126,7 @@ pub(crate) fn interrupted_before_check(path: &Path, task: &Task) -> Result<Evide
     Ok(Evidence {
         agent: None,
         run: run.id.clone(), baseline: run.baseline.clone(), status: TaskStatus::Failed,
-        detail: "Worker interrupted before check launch; partial work retained, patch not reconstructed. Propose a repair and approve it separately; no effects replayed".into(),
+        detail: format!("Worker interrupted before check launch; partial work retained, {PATCH_NOT_RECONSTRUCTED}. Propose a repair and approve it separately; no effects replayed"),
         patch: String::new(), candidate_commit: None, model_metrics: None, failure_code: None, generation: None, check: None,
     })
 }
@@ -640,7 +642,7 @@ pub(crate) fn interrupted_after_check(path: &Path, task: &Task, mission: &str) -
     }
     Ok(Evidence {
         agent: None, run: intent.run, baseline: intent.baseline, status: TaskStatus::Failed,
-        detail: "Worker interrupted after check; candidate not finalized. Check result retained; patch not reconstructed. Propose a repair and approve it separately; no effects replayed".into(),
+        detail: format!("Worker interrupted after check; candidate not finalized. Check result retained; {PATCH_NOT_RECONSTRUCTED}. Propose a repair and approve it separately; no effects replayed"),
         patch: String::new(), candidate_commit: None, model_metrics: None, failure_code: None, generation: None,
         check: Some(result.receipt),
     })
@@ -859,6 +861,7 @@ mod tests {
             assert_eq!(evidence.status, TaskStatus::Failed);
             assert!(evidence.patch.is_empty());
             assert!(evidence.candidate_commit.is_none());
+            assert!(crate::clean::unsaved_work(&evidence));
             assert_eq!(evidence.check, Some(check));
             record_interrupted_after_check(&fixture.path, &fixture.task, "mission", false).unwrap();
             let saved = fs::read(fixture.path.join("evidence.json")).unwrap();
@@ -1022,6 +1025,19 @@ mod tests {
         let oversized_path = fixture.path.join("oversized.json");
         assert!(write_bounded(&oversized_path, &"x".repeat(100), 10).is_err());
         assert!(!oversized_path.exists());
+    }
+
+    #[test]
+    fn recovery_before_check_is_marked_as_having_no_saved_diff() {
+        for requeue in [false, true] {
+            let fixture = Fixture::new();
+            let evidence = requeueable(
+                interrupted_before_check(&fixture.path, &fixture.task).unwrap(),
+                requeue,
+            );
+            assert!(evidence.patch.is_empty() && evidence.candidate_commit.is_none());
+            assert!(crate::clean::unsaved_work(&evidence), "{}", evidence.detail);
+        }
     }
 
     #[test]
