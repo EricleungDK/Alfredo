@@ -40,6 +40,8 @@ pub mod metrics;
 
 pub mod selection;
 
+pub mod wake;
+
 pub mod missions;
 
 pub mod understanding;

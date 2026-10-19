@@ -1,8 +1,7 @@
 use alfredo_tui::{model::MAX_SESSIONS, provider::Ollama, ui, workstation::Workstation};
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
-        KeyModifiers,
+        DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
     },
     execute,
 };
@@ -254,7 +253,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         return Ok(());
     }
-    let runtime = Runtime::new()?;
+    let mut input = alfredo_tui::wake::Input::new();
+    let runtime = input.runtime()?;
     // A mission flag names a mission of one repository: without --workspace, that is the
     // repository containing the current directory, never a silently dropped flag.
     if let (Some(name), None, false) = (&mission, &workspace, select) {
@@ -346,6 +346,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = ratatui::init();
     let _guard = TerminalGuard;
     execute!(io::stdout(), EnableBracketedPaste)?;
+    // From here the reader thread owns terminal reads; prompts use `input`.
+    input.spawn_reader()?;
     let result = (|| -> io::Result<()> {
         let mut dirty = true;
         let mut quit_pending = false;
@@ -369,7 +371,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let state = state_dir.clone();
                 let conversation = conversation.clone();
                 let sender = missions_sender.clone();
-                runtime.spawn_blocking(move || {
+                alfredo_tui::wake::spawn_blocking(&runtime, move || {
                     let entries = alfredo_tui::side_pane::load_missions(
                         &state,
                         &key.0,
@@ -801,12 +803,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 terminal.draw(|frame| ui::draw_with_tasks(frame, &work.app, &work.tasks))?;
                 dirty = false;
             }
-            if !event::poll(Duration::from_millis(33))? {
-                continue;
-            }
+            // Blocks until a key, a runtime worker going idle (a model, planner,
+            // worker or task result may be waiting) or the timer fallback.
+            // Wakes beyond a short burst are paced to one pass per 20 ms; keys are immediate.
+            let event = match input.wait_paced(Duration::from_millis(33))? {
+                alfredo_tui::wake::Next::Event(event) => event,
+                alfredo_tui::wake::Next::Woken | alfredo_tui::wake::Next::Timeout => continue,
+            };
             let mut request = None;
             dirty = true;
-            match event::read()? {
+            match event {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                     let index = work.app.selected;
@@ -1135,7 +1141,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             match work.can_switch() {
                                 Err(error) => work.app.notice = error,
                                 Ok(()) => {
-                                    let selected = alfredo_tui::selection::choose_in_terminal(
+                                    let selected = alfredo_tui::selection::choose_in_terminal_with(
                                         &runtime,
                                         work.workspace(),
                                         None,
@@ -1144,6 +1150,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         &state_dir,
                                         "",
                                         &mut terminal,
+                                        &mut input,
                                     );
                                     match selected {
                                         Ok(Some(choice)) => {
