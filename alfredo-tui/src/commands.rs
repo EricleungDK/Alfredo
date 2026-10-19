@@ -70,6 +70,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     ("/reject", "[ID] — reject reviewed evidence"),
     ("/refresh", "reload acknowledged task state"),
+    (
+        "/clean",
+        "[yes] — list, or with yes remove, finished runs' worktrees",
+    ),
     ("/retry-task", "repeat exact failed storage request"),
     (
         "/retry-command",
@@ -166,7 +170,10 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
             "/scope-retry",
         ],
     ),
-    ("Navigation", &["/workspace", "/activity", "/refresh"]),
+    (
+        "Navigation",
+        &["/workspace", "/activity", "/refresh", "/clean"],
+    ),
     (
         "Advanced",
         &[
