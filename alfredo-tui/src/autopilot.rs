@@ -1513,10 +1513,12 @@ impl Autopilot {
         let (sender, receiver) = oneshot::channel();
         let store = tasks.store().clone();
         let workspace = snapshot.workspace.clone();
+        let goal = saved.goal.clone();
         runtime.spawn(async move {
-            let result = integration_branch(store, workspace, baseline, sources, name.clone())
-                .await
-                .map(|commit| format!("{name}\0{commit}"));
+            let result =
+                integration_branch(store, workspace, baseline, sources, name.clone(), goal)
+                    .await
+                    .map(|commit| format!("{name}\0{commit}"));
             let _ = sender.send(result);
         });
         self.job = Some(receiver);
@@ -1907,6 +1909,7 @@ async fn integration_branch(
     baseline: String,
     sources: Vec<u64>,
     name: String,
+    goal: String,
 ) -> Result<String, String> {
     let mut candidates = Vec::new();
     for source in sources {
@@ -1921,10 +1924,51 @@ async fn integration_branch(
             crate::worker::verify_candidate(&workspace, &evidence).await?,
         ));
     }
-    let commit = crate::dependencies::compose(&workspace, baseline, &candidates).await?;
+    let composed = crate::dependencies::compose(&workspace, baseline, &candidates).await?;
+    // The tip names the goal; its tree is the composed tree, so the content is unchanged.
+    let subject = crate::worker::commit_line(&goal, 72);
+    let subject = if subject.is_empty() {
+        "Alfredo autopilot".to_string()
+    } else {
+        subject
+    };
+    let message = format!(
+        "{subject}\n\nAlfredo autopilot integration of {} accepted task{}",
+        candidates.len(),
+        if candidates.len() == 1 { "" } else { "s" }
+    );
+    let commit = crate::worker::git(
+        &workspace,
+        &[
+            "-c",
+            "user.name=Alfredo",
+            "-c",
+            "user.email=alfredo@localhost",
+            "-c",
+            "commit.gpgSign=false",
+            "commit-tree",
+            &format!("{composed}^{{tree}}"),
+            "-p",
+            &composed,
+            "-m",
+            &message,
+        ],
+    )
+    .await?
+    .trim()
+    .to_string();
     let reference = format!("refs/heads/{name}");
     match crate::worker::git(&workspace, &["show-ref", "--verify", "--hash", &reference]).await {
         Ok(current) if current.trim() == commit => {}
+        // A retry after a restart rebuilds the tip with a new timestamp; the same
+        // composition under the same goal is already there.
+        Ok(current)
+            if crate::worker::git(&workspace, &["rev-parse", &format!("{}^", current.trim())])
+                .await
+                .is_ok_and(|parent| parent.trim() == composed) =>
+        {
+            return Ok(current.trim().to_string());
+        }
         Ok(_) => {
             return Err(format!(
                 "{name} already exists and points elsewhere; it was not changed"

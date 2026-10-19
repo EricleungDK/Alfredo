@@ -1421,7 +1421,7 @@ pub async fn start_checked(
     }
     if evidence.status == TaskStatus::ReviewReady {
         observer.stage("Saving candidate snapshot");
-        match save_candidate(&worktree, &evidence).await {
+        match save_candidate(&worktree, &evidence, &task).await {
             Ok(candidate) => evidence.candidate_commit = Some(candidate),
             Err(error) => {
                 evidence.status = TaskStatus::Failed;
@@ -1882,12 +1882,51 @@ pub async fn verify_candidate(workspace: &Path, evidence: &Evidence) -> Result<S
     Ok(candidate.to_owned())
 }
 
-async fn save_candidate(worktree: &Path, evidence: &Evidence) -> Result<String> {
+/// One line of at most `limit` characters: control characters (newlines, ESC) become
+/// spaces, runs of whitespace collapse, and the cut falls on a character boundary.
+pub(crate) fn commit_line(text: &str, limit: usize) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let joined = flat.split_whitespace().collect::<Vec<_>>().join(" ");
+    joined
+        .chars()
+        .take(limit)
+        .collect::<String>()
+        .trim_end()
+        .to_string()
+}
+
+/// Candidate commit message: the task title as subject, provenance in the body.
+/// Only the tree and parent are verified later, never the message.
+fn candidate_message(task: &Task, run: &str) -> String {
+    let subject = commit_line(&task.title, 72);
+    let subject = if subject.is_empty() {
+        format!("Alfredo task #{}", task.id)
+    } else {
+        subject
+    };
+    let mut body = format!("Alfredo task #{} · run {}", task.id, commit_line(run, 200));
+    if let Some(policy) = &task.policy {
+        body.push_str(&format!(
+            " · files: {} · check: {}",
+            commit_line(&policy.files.join(", "), 400),
+            commit_line(&policy.check.join(" "), 400)
+        ));
+    }
+    if let Some(parent) = task.repair_of {
+        body.push_str(&format!("\n\nRepair of #{parent}"));
+    }
+    format!("{subject}\n\n{body}")
+}
+
+async fn save_candidate(worktree: &Path, evidence: &Evidence, task: &Task) -> Result<String> {
     // The worker's private index already tracks new model files with intent-to-add.
     // Untracked check/build output is deliberately excluded from the reviewed snapshot.
     git(worktree, &["add", "--update", "--", "."]).await?;
     let tree = git(worktree, &["write-tree"]).await?;
-    let message = format!("Alfredo candidate {}", evidence.run);
+    let message = candidate_message(task, &evidence.run);
     let candidate = git(
         worktree,
         &[
@@ -1947,6 +1986,61 @@ mod git_error_tests {
         assert!(text.contains("working tree. Use '--'"), "{text}");
         assert!(text.contains("revisions like this:"), "{text}");
         assert!(!text.contains("tree.Use") && !text.contains("  "), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod commit_message_tests {
+    use super::{candidate_message, commit_line};
+    use crate::tasks::{Task, TaskStatus, WorkPolicy};
+
+    fn task(title: &str, repair_of: Option<u64>) -> Task {
+        Task {
+            id: 3,
+            title: title.into(),
+            model: "m".into(),
+            dependencies: vec![],
+            status: TaskStatus::Approved,
+            policy: Some(WorkPolicy {
+                files: vec!["a.py".into(), "b.py".into()],
+                check: vec!["python3".into(), "-m".into(), "unittest".into()],
+            }),
+            run: None,
+            repair_of,
+        }
+    }
+
+    #[test]
+    fn subject_is_title_and_body_has_provenance() {
+        let message = candidate_message(&task("Add verbose flag", None), "task-3-run-8");
+        let (subject, body) = message.split_once("\n\n").unwrap();
+        assert_eq!(subject, "Add verbose flag");
+        assert_eq!(
+            body,
+            "Alfredo task #3 · run task-3-run-8 · files: a.py, b.py · check: python3 -m unittest"
+        );
+        let repair = candidate_message(&task("Fix it", Some(2)), "task-4-run-1");
+        assert!(repair.ends_with("\n\nRepair of #2"), "{repair}");
+    }
+
+    #[test]
+    fn titles_are_flattened_bounded_and_char_safe() {
+        assert_eq!(commit_line("a\nb\x1b[31mc\td", 72), "a b [31mc d");
+        let long = "é".repeat(100);
+        let line = commit_line(&long, 72);
+        assert_eq!(line.chars().count(), 72);
+        let mixed = commit_line(&format!("{}日本語", "x".repeat(70)), 72);
+        assert_eq!(mixed.chars().count(), 72);
+        assert!(mixed.ends_with("日本"));
+        let message = candidate_message(&task("Line one\nLine two\x1b]0;x\x07", None), "r");
+        assert_eq!(message.lines().next().unwrap(), "Line one Line two ]0;x");
+        assert_eq!(
+            candidate_message(&task("\n\x1b ", None), "r")
+                .lines()
+                .next()
+                .unwrap(),
+            "Alfredo task #3"
+        );
     }
 }
 
