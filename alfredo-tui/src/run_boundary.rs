@@ -267,6 +267,9 @@ fn contract_request(
         "--unshare-user",
         "--unshare-pid",
         "--unshare-net",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--unshare-cgroup-try",
         "--tmpfs",
         "/",
         "--dev",
@@ -952,6 +955,47 @@ mod tests {
                 r.status = status.into();
                 reidentify(r);
             });
+        }
+    }
+
+    #[test]
+    fn both_prepared_argv_builders_unshare_network_ipc_uts_and_cgroup_once() {
+        let fixture = Fixture::new();
+        let worktree = fixture.path.join("worktree");
+        fs::write(worktree.join(".git"), "fixture git metadata\n").unwrap();
+        let worktree_root = worktree
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+        let system_roots: Vec<String> = SYSTEM_ROOTS
+            .iter()
+            .filter(|root| Path::new(root).exists())
+            .map(|root| (*root).to_owned())
+            .collect();
+        let check =
+            crate::worker::check_request(&worktree, &fixture.task, "builder-isolation").unwrap();
+        let run = contract_request(
+            worktree_root,
+            &fixture.task,
+            "builder-isolation",
+            &system_roots,
+        )
+        .unwrap();
+        for (builder, request) in [("check", check), ("run", run)] {
+            let prefix_end = request.argv.iter().position(|a| a == "--").unwrap();
+            for flag in [
+                "--unshare-net",
+                "--unshare-ipc",
+                "--unshare-uts",
+                "--unshare-cgroup-try",
+            ] {
+                let count = request.argv[..prefix_end]
+                    .iter()
+                    .filter(|a| a.as_str() == flag)
+                    .count();
+                assert_eq!(count, 1, "{builder} argv must contain {flag} exactly once");
+            }
         }
     }
 

@@ -1901,8 +1901,14 @@ fn validate_prepared_argv(request: &ExecutionRequest) -> Result<(), StructuredFa
     while index < prefix.len() {
         let argument = prefix[index].as_str();
         match argument {
-            "--die-with-parent" | "--new-session" | "--unshare-user" | "--unshare-pid"
-            | "--unshare-net" => {
+            "--die-with-parent"
+            | "--new-session"
+            | "--unshare-user"
+            | "--unshare-pid"
+            | "--unshare-net"
+            | "--unshare-ipc"
+            | "--unshare-uts"
+            | "--unshare-cgroup-try" => {
                 *flags.entry(argument).or_default() += 1;
                 index += 1;
             }
@@ -2011,6 +2017,8 @@ fn validate_prepared_argv(request: &ExecutionRequest) -> Result<(), StructuredFa
         "--new-session",
         "--unshare-user",
         "--unshare-pid",
+        "--unshare-net",
+        "--unshare-ipc",
     ] {
         if flags.get(flag).copied() != Some(1) {
             return Err(StructuredFailure::new(
@@ -2257,7 +2265,7 @@ mod tests {
         let request = test_request("shadow-rust-digest");
         assert_eq!(
             request.request_digest().unwrap(),
-            "f0ff5caad0df80a6ef5165fd51c14a09e8cf5e67f53f41a3e341738507bc9a12"
+            "97ccfdc93c126e6a7f7af0ab75b6976f48791b19ec38f69dbb7a4ac993531e7d"
         );
         let receipt = RustExecutionProvider::with_test_outcome(ProcessOutcome {
             status: ProcessOutcomeStatus::Completed,
@@ -2374,6 +2382,39 @@ mod tests {
             "echo unsafe".to_owned(),
         ];
         assert!(RustExecutionProvider::validate_request(&request).is_err());
+    }
+
+    #[test]
+    fn validation_refuses_prepared_argv_without_network_or_ipc_isolation() {
+        // Attack argv: the prepared Bubblewrap prefix with the network or the
+        // SysV IPC namespace unshare flag removed.
+        let mut without_net = test_request("shadow-rust-no-net");
+        without_net
+            .argv
+            .retain(|argument| argument != "--unshare-net");
+        let failure = RustExecutionProvider::validate_request(&without_net)
+            .expect_err("a prepared argv without --unshare-net must be refused");
+        assert_eq!(failure.code, "contract-failure");
+
+        let mut without_ipc = test_request("shadow-rust-no-ipc");
+        without_ipc
+            .argv
+            .retain(|argument| argument != "--unshare-ipc");
+        let failure = RustExecutionProvider::validate_request(&without_ipc)
+            .expect_err("a prepared argv without --unshare-ipc must be refused");
+        assert_eq!(failure.code, "contract-failure");
+
+        let mut duplicated_ipc = test_request("shadow-rust-dup-ipc");
+        let pid = duplicated_ipc
+            .argv
+            .iter()
+            .position(|argument| argument == "--unshare-pid")
+            .expect("test request should unshare the pid namespace");
+        duplicated_ipc.argv.insert(pid, "--unshare-ipc".to_owned());
+        duplicated_ipc.argv.insert(pid, "--unshare-ipc".to_owned());
+        let failure = RustExecutionProvider::validate_request(&duplicated_ipc)
+            .expect_err("a duplicated --unshare-ipc must be refused");
+        assert_eq!(failure.code, "contract-failure");
     }
 
     #[test]
@@ -2695,6 +2736,58 @@ mod tests {
         fs::remove_dir_all(root).expect("test fixture should be removable");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn system_launcher_hides_host_sysv_ipc_segments_from_the_sandbox() {
+        if trusted_bwrap_path().is_none()
+            || !Path::new("/usr/bin/ipcs").is_file()
+            || !Path::new("/usr/bin/ipcmk").is_file()
+            || !Path::new("/usr/bin/ipcrm").is_file()
+        {
+            return;
+        }
+        let created = Command::new("/usr/bin/ipcmk")
+            .args(["-M", "4096"])
+            .output()
+            .expect("host ipcmk should run");
+        assert!(created.status.success(), "{created:?}");
+        let host_id = String::from_utf8_lossy(&created.stdout)
+            .split_whitespace()
+            .last()
+            .and_then(|id| id.parse::<u64>().ok())
+            .expect("ipcmk should print the created segment id");
+        let (request, root) = system_test_request(
+            "shadow-rust-system-ipc",
+            vec!["/usr/bin/ipcs".to_owned(), "-m".to_owned()],
+            ExecutionLimits {
+                timeout_seconds: 2.0,
+                output_limit_bytes: 4096,
+                address_space_bytes: 8 * 1024 * 1024 * 1024,
+                file_size_bytes: 2 * 1024 * 1024 * 1024,
+                open_file_limit: 1024,
+                process_count_limit: 256,
+                descendant_grace_seconds: 0.1,
+            },
+        );
+        let result = RustExecutionProvider::new().execute(&request);
+        let _ = Command::new("/usr/bin/ipcrm")
+            .args(["-m", &host_id.to_string()])
+            .status();
+        let receipt = result.expect("system provider should return a receipt");
+        assert_eq!(receipt.status, "completed", "{receipt:?}");
+        let host_id = host_id.to_string();
+        let listed = receipt
+            .stdout
+            .lines()
+            .any(|line| line.split_whitespace().nth(1) == Some(host_id.as_str()));
+        assert!(
+            !listed,
+            "sandbox ipcs listed host SysV segment {host_id}:\n{}",
+            receipt.stdout
+        );
+        fs::remove_dir_all(root).expect("ipc fixture should be removable");
+    }
+
     #[cfg(unix)]
     #[test]
     fn system_launcher_enforces_timeout_and_output_limits() {
@@ -2949,6 +3042,10 @@ mod tests {
             "--new-session".to_owned(),
             "--unshare-user".to_owned(),
             "--unshare-pid".to_owned(),
+            "--unshare-net".to_owned(),
+            "--unshare-ipc".to_owned(),
+            "--unshare-uts".to_owned(),
+            "--unshare-cgroup-try".to_owned(),
             "--tmpfs".to_owned(),
             "/".to_owned(),
             "--dev".to_owned(),
@@ -3033,6 +3130,10 @@ mod tests {
                 "--new-session".to_owned(),
                 "--unshare-user".to_owned(),
                 "--unshare-pid".to_owned(),
+                "--unshare-net".to_owned(),
+                "--unshare-ipc".to_owned(),
+                "--unshare-uts".to_owned(),
+                "--unshare-cgroup-try".to_owned(),
                 "--tmpfs".to_owned(),
                 "/".to_owned(),
                 "--dev".to_owned(),
