@@ -387,6 +387,28 @@ fn canonical_wayfinder_routes_first_contact_and_reuses_flow_across_missions() {
 }
 
 #[test]
+fn held_scope_lock_waits_for_release_but_stays_busy_past_the_bound() {
+    let fixture = Fixture::new();
+    let scope = fixture.a.understanding();
+    let waiter = fixture.b.understanding();
+    std::thread::scope(|threads| {
+        let held = scope.lock().unwrap();
+        threads.spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            drop(held);
+        });
+        // Longer than the old 250 ms deadline, shorter than the bound: must wait, not fail.
+        waiter.transact(draft("waited", 0)).unwrap();
+    });
+    let held = scope.lock().unwrap();
+    let started = std::time::Instant::now();
+    let error = fixture.b.understanding().lock().err().unwrap();
+    assert!(matches!(error, alfredo_tui::understanding::LockError::Busy));
+    assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    drop(held);
+}
+
+#[test]
 fn concurrent_entry_creates_one_flow_and_work_through_survives_reload() {
     use alfredo_tui::{
         understanding::{Flow, Mode},

@@ -11,6 +11,11 @@ use std::{
 };
 type Result<T> = std::result::Result<T, String>;
 
+/// Hard upper bound on waiting for the scope lock. Holders only keep it for one
+/// fsynced commit, so a queue of concurrent writers on a slow disk drains well
+/// inside this; a genuinely stuck holder still yields `Busy` after it.
+const LOCK_DEADLINE: Duration = Duration::from_secs(3);
+
 /// Why the scope lock was not taken. `Busy` is transient (nothing was read or
 /// written; the same request may be retried); `Failed` is final.
 #[derive(Debug)]
@@ -301,7 +306,8 @@ impl Store {
         }
         fs::create_dir_all(&self.root).map_err(|e| e.to_string())?;
         let file = regular_file(&self.root.join("scope.lock"), true, true)?;
-        let deadline = Instant::now() + Duration::from_millis(250);
+        let deadline = Instant::now() + LOCK_DEADLINE;
+        let mut backoff = Duration::from_millis(2);
         loop {
             match file.try_lock() {
                 Ok(()) => {
@@ -311,7 +317,8 @@ impl Store {
                     })
                 }
                 Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(2))
+                    std::thread::sleep(backoff);
+                    backoff = (backoff * 2).min(Duration::from_millis(25));
                 }
                 Err(std::fs::TryLockError::WouldBlock) => return Err(LockError::Busy),
                 Err(error) => return Err(error.to_string().into()),
