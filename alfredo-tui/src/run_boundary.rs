@@ -260,28 +260,13 @@ fn contract_request(
         process_count_limit: 128,
         descendant_grace_seconds: 1.0,
     };
-    let mut argv: Vec<String> = [
-        "/usr/bin/bwrap",
-        "--die-with-parent",
-        "--new-session",
-        "--unshare-user",
-        "--unshare-pid",
-        "--unshare-net",
-        "--unshare-ipc",
-        "--unshare-uts",
-        "--unshare-cgroup-try",
-        "--tmpfs",
-        "/",
-        "--dev",
-        "/dev",
-        "--proc",
-        "/proc",
-        "--tmpfs",
-        "/tmp",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect();
+    let mut argv: Vec<String> = std::iter::once("/usr/bin/bwrap")
+        .chain(crate::execution::SANDBOX_ISOLATION_FLAGS)
+        .chain([
+            "--tmpfs", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+        ])
+        .map(str::to_owned)
+        .collect();
     for system in system_roots {
         argv.extend(["--ro-bind".into(), system.clone(), system.clone()]);
     }

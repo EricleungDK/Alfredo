@@ -522,11 +522,46 @@ fn git_succeeds(workspace: &Path, args: &[&str]) -> bool {
     git_blocking(workspace, args, Stdio::null()).is_some_and(|output| output.status.success())
 }
 
+/// Whether a repository's local config (`git config --local --list` output)
+/// holds filter drivers or includes. Git can run repository-chosen commands
+/// for them while it inspects or checks out files, so every gate that reads
+/// the config refuses them until they are qualified.
+pub(crate) fn local_config_needs_qualification(config: &str) -> bool {
+    config.lines().any(|line| {
+        line.starts_with("filter.")
+            || line.starts_with("include.")
+            || line.starts_with("includeif.")
+    })
+}
+
+/// The `dirty` count recorded when uncommitted changes could not be checked
+/// (refused repository config). It is a marker, not a real count.
+pub(crate) const UNCHECKED_CHANGES: u32 = u32::MAX;
+
 /// Number of uncommitted changes (tracked modifications and untracked,
 /// non-ignored files) and the short HEAD they are not based on. Read-only
 /// (`GIT_OPTIONAL_LOCKS=0`; no index refresh is written). `None` when the
-/// workspace is not a readable repository with a commit.
+/// workspace is not a readable repository with a commit. When the repository
+/// config needs qualification, `git status` is not run at all (it would run
+/// the repository's clean filters); the count is `UNCHECKED_CHANGES`.
 pub fn uncommitted_changes(workspace: &Path) -> Option<(u32, String)> {
+    let head = git_blocking(
+        workspace,
+        &["rev-parse", "--short=7", "HEAD"],
+        Stdio::piped(),
+    )
+    .filter(|output| output.status.success())?;
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    // Listing the config executes nothing. An unreadable listing is treated
+    // as unqualified: the status call below would not be trustworthy either.
+    let qualified = git_blocking(workspace, &["config", "--local", "--list"], Stdio::piped())
+        .filter(|output| output.status.success())
+        .is_some_and(|config| {
+            !local_config_needs_qualification(&String::from_utf8_lossy(&config.stdout))
+        });
+    if !qualified {
+        return Some((UNCHECKED_CHANGES, head));
+    }
     let status = git_blocking(
         workspace,
         &["status", "--porcelain", "--untracked-files=all"],
@@ -537,14 +572,7 @@ pub fn uncommitted_changes(workspace: &Path) -> Option<(u32, String)> {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .count();
-    let head = git_blocking(
-        workspace,
-        &["rev-parse", "--short=7", "HEAD"],
-        Stdio::piped(),
-    )
-    .filter(|output| output.status.success())?;
-    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
-    Some((u32::try_from(count).unwrap_or(u32::MAX), head))
+    Some((u32::try_from(count).unwrap_or(UNCHECKED_CHANGES - 1), head))
 }
 
 /// Whether `workspace` has a commit at HEAD (blocking; one quick local git call).
@@ -1068,28 +1096,13 @@ pub fn check_request(worktree: &Path, task: &Task, mission: &str) -> Result<Exec
         process_count_limit: 128,
         descendant_grace_seconds: 1.0,
     };
-    let mut argv: Vec<String> = [
-        "/usr/bin/bwrap",
-        "--die-with-parent",
-        "--new-session",
-        "--unshare-user",
-        "--unshare-pid",
-        "--unshare-net",
-        "--unshare-ipc",
-        "--unshare-uts",
-        "--unshare-cgroup-try",
-        "--tmpfs",
-        "/",
-        "--dev",
-        "/dev",
-        "--proc",
-        "/proc",
-        "--tmpfs",
-        "/tmp",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect();
+    let mut argv: Vec<String> = std::iter::once("/usr/bin/bwrap")
+        .chain(crate::execution::SANDBOX_ISOLATION_FLAGS)
+        .chain([
+            "--tmpfs", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+        ])
+        .map(str::to_string)
+        .collect();
     for system in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"] {
         if Path::new(system).exists() {
             argv.extend(["--ro-bind".into(), system.into(), system.into()]);
@@ -1226,11 +1239,7 @@ pub async fn start_checked(
         return Err("Execution workspace must be the Git repository root".into());
     }
     let config = git(&before.workspace, &["config", "--local", "--list"]).await?;
-    if config.lines().any(|line| {
-        line.starts_with("filter.")
-            || line.starts_with("include.")
-            || line.starts_with("includeif.")
-    }) {
+    if local_config_needs_qualification(&config) {
         return Err(
             "Repository checkout filters/includes need qualification before worker execution"
                 .into(),
@@ -2189,6 +2198,70 @@ mod host_git_tests {
         assert_eq!(changes.map(|(count, _)| count), Some(1));
         assert!(head);
         assert!(!lacks);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A repository whose `.gitattributes` routes its files through a clean
+    /// filter defined in its own config (touching a marker). `git status` runs
+    /// clean filters for modified files, so host-side status must never do so.
+    #[test]
+    fn host_side_status_never_runs_repo_local_filter_driver() {
+        let root = std::env::temp_dir().join(format!(
+            "alfredo-host-git-filter-{}-{}",
+            std::process::id(),
+            ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let marker: PathBuf = root.join("filter-ran");
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&root)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success(),
+                "git {args:?} failed"
+            );
+        };
+        git(&["init", "-q", "--template="]);
+        fs::write(root.join("tracked.txt"), "original\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@localhost",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ]);
+        // Attributes and the filter come only after the baseline commit, so the
+        // fixture itself never runs the filter.
+        fs::write(root.join(".gitattributes"), "* filter=evil\n").unwrap();
+        git(&[
+            "config",
+            "filter.evil.clean",
+            &format!("touch '{}'; cat", marker.display()),
+        ]);
+        // Same byte length as the baseline: git skips the content check (and so
+        // the filter) when the size differs, so only a same-size edit reaches it.
+        fs::write(root.join("tracked.txt"), "ABCDEFGH\n").unwrap();
+
+        let changes = uncommitted_changes(&root);
+
+        assert!(
+            !marker.exists(),
+            "host-side git ran the repository's filter driver"
+        );
+        assert_eq!(
+            changes.map(|(count, _)| count),
+            Some(super::UNCHECKED_CHANGES),
+            "refused repository config must report unchecked changes"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 }

@@ -30,6 +30,19 @@ const MAX_PROCESS_COUNT_LIMIT: u64 = 4_096;
 const OUTPUT_MESSAGE_RESERVE: usize = 256;
 pub const MAX_PROTOCOL_LINE_BYTES: usize = 16 * 1024 * 1024;
 const TRUSTED_EXECUTABLE_ROOTS: [&str; 4] = ["/usr/bin", "/usr/sbin", "/bin", "/sbin"];
+/// Bubblewrap namespace and session isolation shared by every prepared argv
+/// (worker check/run requests and the run boundary). Order is part of the
+/// prepared argv shape.
+pub(crate) const SANDBOX_ISOLATION_FLAGS: [&str; 8] = [
+    "--die-with-parent",
+    "--new-session",
+    "--unshare-user",
+    "--unshare-pid",
+    "--unshare-net",
+    "--unshare-ipc",
+    "--unshare-uts",
+    "--unshare-cgroup-try",
+];
 const IMPLICIT_READONLY_ROOTS: [&str; 6] = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"];
 const PROTECTED_READONLY_ROOTS: [&str; 7] =
     ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/dev"];
@@ -1901,14 +1914,7 @@ fn validate_prepared_argv(request: &ExecutionRequest) -> Result<(), StructuredFa
     while index < prefix.len() {
         let argument = prefix[index].as_str();
         match argument {
-            "--die-with-parent"
-            | "--new-session"
-            | "--unshare-user"
-            | "--unshare-pid"
-            | "--unshare-net"
-            | "--unshare-ipc"
-            | "--unshare-uts"
-            | "--unshare-cgroup-try" => {
+            _ if SANDBOX_ISOLATION_FLAGS.contains(&argument) => {
                 *flags.entry(argument).or_default() += 1;
                 index += 1;
             }
