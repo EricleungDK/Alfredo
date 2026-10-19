@@ -282,7 +282,9 @@ pub struct Submission {
 pub fn is_command(text: &str) -> bool {
     let text = text.trim();
     let verb = text.split_whitespace().next().unwrap_or("");
-    verb == "/go" || matches!(text, "/pause" | "/resume" | "/stop" | "/autopilot")
+    verb == "/go"
+        || verb == "/clean"
+        || matches!(text, "/pause" | "/resume" | "/stop" | "/autopilot")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -785,7 +787,8 @@ impl Autopilot {
         true
     }
 
-    /// Terminal command entry for `/go`, `/pause`, `/resume`, `/stop`, `/autopilot`.
+    /// Terminal command entry for `/go`, `/pause`, `/resume`, `/stop`, `/autopilot`, and the
+    /// autopilot-gated `/clean`.
     pub fn command(
         &mut self,
         runtime: &Runtime,
@@ -840,6 +843,12 @@ impl Autopilot {
                 tasks.autopilot_report = Some(report);
                 Ok("Autopilot status · /tasks returns to task details".into())
             }
+            _ if text.split_whitespace().next() == Some("/clean") => crate::clean::command(
+                runtime,
+                tasks,
+                self.running(),
+                text.strip_prefix("/clean").unwrap_or(""),
+            ),
             _ => match text.strip_prefix("/go") {
                 Some(goal) if goal.starts_with(char::is_whitespace) && !goal.trim().is_empty() => {
                     self.start(goal, model, max_repairs, tasks)

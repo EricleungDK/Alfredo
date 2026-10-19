@@ -697,6 +697,8 @@ binary diff against that evidence, without relying on mutable retained worktree
 files. Older evidence remains readable with no inferred candidate. Snapshot
 failure prevents a new result from becoming review-ready. Candidate refs are
 retained; retirement and storage budgeting for them are not implemented yet.
+Worktrees can be removed with `/clean` (see
+[Clean finished-run worktrees](#clean-finished-run-worktrees)).
 
 For `/after 1,2 description`, each parent must be Accepted and retain a candidate
 commit that verifies against its saved evidence. Before dispatch, the worker
@@ -1551,6 +1553,52 @@ shows conversation unrecorded. Task schema v13, conversation-set schema v6 and
 scope v2 remain unchanged; the separately retained agent transcript has schema v1.
 Review-triggered automatic repair proposal/launch, Architect revision routing,
 qualified model selection and retention/storage lifecycle remain unfinished.
+
+## Clean finished-run worktrees
+
+Every worker run executes `git worktree add --detach` into
+`<state>/rust-tasks-v1/<id>/runs/<run>/worktree`. That is a full checkout, so disk use
+grows by one per run, and Git registers each one in the repository's own
+`.git/worktrees/`, so they appear in the user's `git worktree list`. Beside the
+worktree, the run directory holds `evidence.json` (diff, check receipt, candidate ID)
+and the boundary records; these are outside the worktree and are never removed. Two
+more kinds of Git state outlive runs: `refs/alfredo/candidates/<sha>` (one per
+review-ready result) and `refs/alfredo/bases/<sha>` (composed dependency baselines),
+both hidden from `git branch`, plus the `alfredo/go-*` branches autopilot creates.
+
+`/clean` lists, and `/clean yes` removes, worktrees under this mission's own state
+directory; nothing else is ever deleted, and `/clean` never touches the repository's
+branches, refs, index or working files. A run's worktree is removable only when all hold:
+
+- the run has a finish receipt and its task is Accepted, Rejected, Failed or Cancelled
+  (a superseded run, such as one cancelled and requeued, counts when its own finish was
+  Failed or Cancelled). Running, interrupted (no finish receipt), review-ready and
+  held-for-review runs are kept;
+- `evidence.json` is a regular file whose SHA-256 equals the finish receipt's digest, so
+  F3 evidence is intact;
+- when the evidence records a candidate commit, `refs/alfredo/candidates/<commit>` still
+  resolves to exactly that commit, so `/branch` and dependent tasks still work. A
+  finished review-ready or accepted run with no recorded candidate is kept;
+- the path is a real directory (not a symlink) whose canonical path is the run's
+  `worktree` directory and which `git worktree list` registers.
+
+Failed and cancelled runs never save a candidate commit. When the worker finished
+normally, the diff is in the evidence and the worktree is scratch, so they are
+removable without one; untracked check output inside it is discarded with it. Runs
+whose evidence has no captured diff are kept, with the reason "partial work was not
+captured": those recovered after an interrupt (`/recover`, evidence says "patch not
+reconstructed") and those whose diff failed ("Diff unavailable"). There the worktree is
+the only copy of the partial work. Each removal is
+`git worktree remove --force <path>`, which deregisters it. Only when something was
+removed, and only if no stale (`prunable`) worktree entry outside this mission's runs
+exists, does it then run `git worktree prune`; otherwise the prune is skipped and the
+report says so, because a prune would also forget the user's own missing worktrees.
+The run directory must itself be a real directory, not a symlink. `/clean` with no argument
+only lists, with sizes and the reason for each kept run; any other argument is a usage
+error. Both forms are refused while autopilot is running, any coding worker is active
+or `/dispatch` is on. Removal runs on the UI thread, so a very large cleanup pauses
+input until it finishes. Automatic or time-based cleanup, branch deletion and
+`/discard` are not provided.
 
 ## Atomic review-to-repair proposals (task schema v14)
 

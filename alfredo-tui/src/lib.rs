@@ -13,6 +13,7 @@ pub mod ui;
 pub mod worker;
 
 pub mod activity;
+pub mod clean;
 pub mod commands;
 pub mod conversations;
 
