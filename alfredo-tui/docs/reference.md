@@ -1502,11 +1502,18 @@ branches, refs, index or working files. A run's worktree is removable only when 
 - the path is a real directory (not a symlink) whose canonical path is the run's
   `worktree` directory and which `git worktree list` registers.
 
-Failed and cancelled runs never save a candidate commit; their worktree is scratch
-whose diff was already captured in the evidence, so they are removable without one.
-Untracked check output inside it is discarded with it. Each removal is
-`git worktree remove --force <path>`; then one `git worktree prune`, which also drops
-stale registrations of worktrees that are already gone. `/clean` with no argument
+Failed and cancelled runs never save a candidate commit. When the worker finished
+normally, the diff is in the evidence and the worktree is scratch, so they are
+removable without one; untracked check output inside it is discarded with it. Runs
+whose evidence has no captured diff are kept, with the reason "partial work was not
+captured": those recovered after an interrupt (`/recover`, evidence says "patch not
+reconstructed") and those whose diff failed ("Diff unavailable"). There the worktree is
+the only copy of the partial work. Each removal is
+`git worktree remove --force <path>`, which deregisters it. Only when something was
+removed, and only if no stale (`prunable`) worktree entry outside this mission's runs
+exists, does it then run `git worktree prune`; otherwise the prune is skipped and the
+report says so, because a prune would also forget the user's own missing worktrees.
+The run directory must itself be a real directory, not a symlink. `/clean` with no argument
 only lists, with sizes and the reason for each kept run; any other argument is a usage
 error. Both forms are refused while autopilot is running, any coding worker is active
 or `/dispatch` is on. Removal runs on the UI thread, so a very large cleanup pauses

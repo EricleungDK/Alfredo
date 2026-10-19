@@ -458,3 +458,75 @@ fn command_refuses_while_autopilot_or_a_worker_is_active_and_needs_the_confirm_w
         .unwrap()
         .contains("Nothing to clean"));
 }
+
+#[tokio::test]
+async fn users_own_worktrees_survive_and_a_foreign_stale_entry_blocks_the_global_prune() {
+    let fixture = Fixture::new();
+    let task = fixture.task("c.txt");
+    assert_eq!(
+        fixture.run(task, "c.txt", "OK\n").await,
+        TaskStatus::ReviewReady
+    );
+    fixture.action(Action::Review { task, accept: true });
+    let live = fixture.root.join("user-live");
+    let gone = fixture.root.join("user-gone");
+    for path in [&live, &gone] {
+        fixture.git(&["worktree", "add", "-q", "--detach", path.to_str().unwrap()]);
+    }
+    fs::write(live.join("scratch.txt"), "mine").unwrap();
+    // The user's other worktree vanished (say, an unmounted drive): a prune would forget it.
+    fs::remove_dir_all(&gone).unwrap();
+
+    let outcome = clean::clean(&fixture.store).await.unwrap();
+    assert_eq!(outcome.removed.len(), 1);
+    assert!(!outcome.pruned);
+    assert!(outcome.prune_note.as_deref().unwrap().contains("skipped"));
+    assert_eq!(
+        fs::read_to_string(live.join("scratch.txt")).unwrap(),
+        "mine"
+    );
+    let listed = fixture.worktrees();
+    assert!(
+        listed.iter().any(|w| w.ends_with("user-live")),
+        "{listed:?}"
+    );
+    assert!(
+        listed.iter().any(|w| w.ends_with("user-gone")),
+        "{listed:?}"
+    );
+    assert!(!listed.iter().any(|w| w.contains("/runs/")), "{listed:?}");
+}
+
+#[tokio::test]
+async fn nothing_removed_means_no_prune_and_the_kept_list_comes_from_the_executed_plan() {
+    let fixture = Fixture::new();
+    let task = fixture.task("d.txt");
+    assert_eq!(
+        fixture.run(task, "d.txt", "OK\n").await,
+        TaskStatus::ReviewReady
+    );
+    let outcome = clean::clean(&fixture.store).await.unwrap();
+    assert!(outcome.removed.is_empty() && !outcome.pruned);
+    assert!(outcome
+        .keep
+        .iter()
+        .any(|k| k.task == task && k.reason.contains("awaiting")));
+}
+
+#[tokio::test]
+async fn symlinked_run_directory_is_ignored() {
+    let fixture = Fixture::new();
+    let task = fixture.task("e.txt");
+    assert_eq!(
+        fixture.run(task, "e.txt", "OK\n").await,
+        TaskStatus::ReviewReady
+    );
+    fixture.action(Action::Review { task, accept: true });
+    let directory = fixture.run_dir(task);
+    let moved = fixture.root.join("moved-run");
+    fs::rename(&directory, &moved).unwrap();
+    std::os::unix::fs::symlink(&moved, &directory).unwrap();
+    let plan = clean::plan(&fixture.store).await.unwrap();
+    assert!(plan.remove.is_empty());
+    assert!(moved.join("worktree").exists());
+}

@@ -184,8 +184,10 @@ Everything is under the state directory except a few Git entries in your reposit
 
 Cleanup is manual and explicit. `/clean` lists the worktrees it would remove with their
 total size; `/clean yes` removes those of finished runs (accepted, rejected, failed or
-cancelled) and runs `git worktree prune`. It keeps runs that are active, interrupted or
-awaiting review, and any run whose saved evidence or candidate ref is missing. The
+cancelled) and runs `git worktree prune` (skipped if you have stale worktree entries of
+your own). It keeps runs that are active, interrupted or
+awaiting review, any run whose saved evidence or candidate ref is missing, and runs whose partial work
+was not captured in the evidence (interrupted and recovered). The
 evidence (F3), candidate refs, `/branch` and your `alfredo/go-*` branches are untouched,
 and it is refused while autopilot or a worker is active. Failed runs have no candidate
 to save; their diff is kept in the run's evidence. See

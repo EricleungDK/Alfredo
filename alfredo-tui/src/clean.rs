@@ -7,7 +7,8 @@
 //! A worktree is therefore removable once its run has a finish receipt, its evidence still
 //! matches that receipt, and, when the run saved a candidate, the candidate ref still
 //! resolves. A failed or cancelled run has no candidate by design; its worktree is scratch
-//! and its diff is in the evidence. Everything else is kept, and the reason is shown.
+//! and its diff is in the evidence, unless that capture failed or the run was recovered
+//! after an interrupt (see `unsaved_work`), in which case it is kept. Everything else is kept, and the reason is shown.
 use crate::tasks::{Action, Snapshot, TaskStatus, TaskStore};
 use crate::worker::{git, Evidence};
 use sha2::{Digest, Sha256};
@@ -46,6 +47,12 @@ impl Plan {
 pub struct Outcome {
     pub removed: Vec<Entry>,
     pub failed: Vec<(String, String)>,
+    /// Runs kept by the plan this clean actually executed.
+    pub keep: Vec<Kept>,
+    /// `git worktree prune` ran.
+    pub pruned: bool,
+    /// Why the prune was skipped, when it was.
+    pub prune_note: Option<String>,
 }
 impl Outcome {
     pub fn bytes(&self) -> u64 {
@@ -156,6 +163,15 @@ fn outcome_label(status: &TaskStatus) -> &'static str {
     }
 }
 
+/// A failed or cancelled run recovered after an interrupt, or whose diff could not be taken,
+/// has no candidate and no diff in its evidence: the worktree is the only copy of its work.
+pub fn unsaved_work(evidence: &Evidence) -> bool {
+    evidence
+        .detail
+        .contains(crate::run_boundary::PATCH_NOT_RECONSTRUCTED)
+        || evidence.patch.starts_with("Diff unavailable")
+}
+
 /// Decide, per run that still has a worktree directory, whether it may be removed.
 pub async fn plan(store: &TaskStore) -> Result<Plan, String> {
     let snapshot = store.snapshot()?;
@@ -179,6 +195,9 @@ pub async fn plan(store: &TaskStore) -> Result<Plan, String> {
         let Ok(directory) = store.run_directory(&run) else {
             continue;
         };
+        if !fs::symlink_metadata(&directory).is_ok_and(|meta| meta.is_dir()) {
+            continue;
+        }
         let worktree = directory.join("worktree");
         let Ok(meta) = fs::symlink_metadata(&worktree) else {
             continue;
@@ -256,7 +275,12 @@ pub async fn plan(store: &TaskStore) -> Result<Plan, String> {
                 }
             }
             None => {
-                // Failed and cancelled runs save no candidate; their diff is in the evidence.
+                // Failed and cancelled runs save no candidate; their diff is in the evidence,
+                // unless it could not be captured.
+                if unsaved_work(&evidence) {
+                    keep("partial work was not captured in the evidence");
+                    continue;
+                }
                 if matches!(
                     evidence.status,
                     TaskStatus::ReviewReady | TaskStatus::Accepted
@@ -298,7 +322,34 @@ pub async fn clean(store: &TaskStore) -> Result<Outcome, String> {
             Err(error) => outcome.failed.push((entry.run, error)),
         }
     }
-    git(&workspace, &["worktree", "prune"]).await?;
+    outcome.keep = plan.keep;
+    if outcome.removed.is_empty() {
+        return Ok(outcome);
+    }
+    // `worktree remove` already deregistered ours. Prune is repository-wide, so it runs only
+    // when it cannot drop a stale entry that belongs to the user.
+    let runs = store
+        .run_directory("task-0-run-0")?
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let runs = fs::canonicalize(&runs).unwrap_or(runs);
+    let listing = git(&workspace, &["worktree", "list", "--porcelain"]).await?;
+    let foreign = listing
+        .split("\n\n")
+        .filter(|block| block.lines().any(|line| line.starts_with("prunable")))
+        .filter_map(|block| block.lines().find_map(|l| l.strip_prefix("worktree ")))
+        .filter(|path| !Path::new(path).starts_with(&runs))
+        .count();
+    if foreign > 0 {
+        outcome.prune_note = Some(format!(
+            "git worktree prune skipped: {foreign} stale worktree entr{} of yours; run it yourself",
+            if foreign == 1 { "y" } else { "ies" }
+        ));
+    } else {
+        git(&workspace, &["worktree", "prune"]).await?;
+        outcome.pruned = true;
+    }
     Ok(outcome)
 }
 
@@ -332,6 +383,9 @@ fn report(plan: &Plan, done: Option<&Outcome>) -> String {
             for (run, error) in &done.failed {
                 lines.push(format!("  kept {run}: {error}"));
             }
+            if let Some(note) = &done.prune_note {
+                lines.push(note.clone());
+            }
         }
         None => {
             lines.push(format!(
@@ -351,10 +405,11 @@ fn report(plan: &Plan, done: Option<&Outcome>) -> String {
             }
         }
     }
-    if !plan.keep.is_empty() {
+    let keep = done.map_or(&plan.keep, |done| &done.keep);
+    if !keep.is_empty() {
         lines.push(String::new());
-        lines.push(format!("Kept {}", plan.keep.len()));
-        for kept in &plan.keep {
+        lines.push(format!("Kept {}", keep.len()));
+        for kept in keep {
             lines.push(format!("  #{} {} · {}", kept.task, kept.run, kept.reason));
         }
     }
@@ -397,7 +452,7 @@ pub fn command(
     let (text, notice) = if confirm {
         let done = runtime.block_on(clean(&store))?;
         let notice = format!(
-            "Removed {} worktree{} · freed {}{}",
+            "Removed {} worktree{} · freed {}{}{}",
             done.removed.len(),
             plural(done.removed.len()),
             size_label(done.bytes()),
@@ -405,6 +460,11 @@ pub fn command(
                 String::new()
             } else {
                 format!(" · {} kept after an error", done.failed.len())
+            },
+            if done.prune_note.is_some() {
+                " · prune skipped"
+            } else {
+                ""
             }
         );
         (report(&plan, Some(&done)), notice)
@@ -423,4 +483,34 @@ pub fn command(
     tasks.planner.visible = false;
     tasks.autopilot_report = Some(text);
     Ok(notice)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn evidence(detail: &str, patch: &str) -> Evidence {
+        serde_json::from_value(serde_json::json!({
+            "run": "task-1-run-1", "baseline": "a".repeat(40), "status": "failed",
+            "detail": detail, "patch": patch, "check": null
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn work_without_a_captured_diff_is_flagged() {
+        assert!(unsaved_work(&evidence("x", "Diff unavailable: git failed")));
+        assert!(unsaved_work(&evidence(
+            &format!(
+                "interrupted; {}",
+                crate::run_boundary::PATCH_NOT_RECONSTRUCTED
+            ),
+            ""
+        )));
+        assert!(!unsaved_work(&evidence(
+            "Check failed",
+            "diff --git a/x b/x"
+        )));
+        assert!(!unsaved_work(&evidence("Model answered badly", "")));
+    }
 }
