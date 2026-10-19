@@ -119,8 +119,8 @@ pub async fn inspect(
             if !crate::worker::has_head_commit(workspace) {
                 return Err(crate::worker::NO_COMMITS.to_string());
             }
-            let config = crate::worker::git(workspace, &["config", "--local", "--list"]).await?;
-            if crate::worker::local_config_needs_qualification(&config) {
+            let config = crate::worker::git(workspace, &crate::worker::REPOSITORY_CONFIG_ARGS).await?;
+            if crate::worker::config_needs_qualification(&config) {
                 return Err(
                     "Repository checkout filters/includes need qualification before worker execution"
                         .into(),

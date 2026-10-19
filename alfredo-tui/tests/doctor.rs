@@ -199,6 +199,33 @@ fn doctor_names_the_fix_for_a_repository_without_commits() {
 }
 
 #[test]
+fn doctor_refuses_worktree_scoped_filter_config_before_worker_execution() {
+    let fixture = Fixture::new();
+    for args in [
+        vec!["config", "extensions.worktreeConfig", "true"],
+        vec!["config", "--worktree", "filter.evil.clean", "cat"],
+    ] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&fixture.workspace)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    let (endpoint, server) = catalog("initial-model");
+    let output = fixture.command(&endpoint).output().unwrap();
+    server.join().unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        text.contains(
+            "FAIL worker workspace: Repository checkout filters/includes need qualification"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
 fn sandbox_preflight_names_bubblewrap_and_the_fix_only_when_it_is_unusable() {
     assert_eq!(
         alfredo_tui::doctor::sandbox_blocker_at("/nonexistent/alfredo-test/bwrap").as_deref(),

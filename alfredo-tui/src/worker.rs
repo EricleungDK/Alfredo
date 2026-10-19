@@ -522,11 +522,18 @@ fn git_succeeds(workspace: &Path, args: &[&str]) -> bool {
     git_blocking(workspace, args, Stdio::null()).is_some_and(|output| output.status.success())
 }
 
-/// Whether a repository's local config (`git config --local --list` output)
-/// holds filter drivers or includes. Git can run repository-chosen commands
-/// for them while it inspects or checks out files, so every gate that reads
-/// the config refuses them until they are qualified.
-pub(crate) fn local_config_needs_qualification(config: &str) -> bool {
+/// The config listing every repository-config gate reads. Plain `--list` spans
+/// every repository scope, including `.git/config.worktree`, which `--local`
+/// omits. System and global scope are already disabled by each caller's
+/// environment, and the command-line overrides in `HARDENED_GIT_ARGS` cannot
+/// match the prefixes checked by `config_needs_qualification`.
+pub(crate) const REPOSITORY_CONFIG_ARGS: [&str; 2] = ["config", "--list"];
+
+/// Whether a repository's config (`REPOSITORY_CONFIG_ARGS` output) holds filter
+/// drivers or includes. Git can run repository-chosen commands for them while
+/// it inspects or checks out files, so every gate that reads the config refuses
+/// them until they are qualified.
+pub(crate) fn config_needs_qualification(config: &str) -> bool {
     config.lines().any(|line| {
         line.starts_with("filter.")
             || line.starts_with("include.")
@@ -554,10 +561,10 @@ pub fn uncommitted_changes(workspace: &Path) -> Option<(u32, String)> {
     let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
     // Listing the config executes nothing. An unreadable listing is treated
     // as unqualified: the status call below would not be trustworthy either.
-    let qualified = git_blocking(workspace, &["config", "--local", "--list"], Stdio::piped())
+    let qualified = git_blocking(workspace, &REPOSITORY_CONFIG_ARGS, Stdio::piped())
         .filter(|output| output.status.success())
         .is_some_and(|config| {
-            !local_config_needs_qualification(&String::from_utf8_lossy(&config.stdout))
+            !config_needs_qualification(&String::from_utf8_lossy(&config.stdout))
         });
     if !qualified {
         return Some((UNCHECKED_CHANGES, head));
@@ -1238,8 +1245,8 @@ pub async fn start_checked(
     {
         return Err("Execution workspace must be the Git repository root".into());
     }
-    let config = git(&before.workspace, &["config", "--local", "--list"]).await?;
-    if local_config_needs_qualification(&config) {
+    let config = git(&before.workspace, &REPOSITORY_CONFIG_ARGS).await?;
+    if config_needs_qualification(&config) {
         return Err(
             "Repository checkout filters/includes need qualification before worker execution"
                 .into(),
@@ -2261,6 +2268,71 @@ mod host_git_tests {
             changes.map(|(count, _)| count),
             Some(super::UNCHECKED_CHANGES),
             "refused repository config must report unchecked changes"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The same filter fixture, but the driver lives in the worktree scope
+    /// (`.git/config.worktree`, enabled by `extensions.worktreeConfig`).
+    /// `git config --local --list` does not show that scope, so the gate must
+    /// still refuse and host-side status must never run the filter.
+    #[test]
+    fn host_side_status_never_runs_worktree_scoped_filter_driver() {
+        let root = std::env::temp_dir().join(format!(
+            "alfredo-host-git-worktree-filter-{}-{}",
+            std::process::id(),
+            ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let marker: PathBuf = root.join("worktree-filter-ran");
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&root)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success(),
+                "git {args:?} failed"
+            );
+        };
+        git(&["init", "-q", "--template="]);
+        git(&["config", "extensions.worktreeConfig", "true"]);
+        fs::write(root.join("tracked.txt"), "original\n").unwrap();
+        fs::write(root.join(".gitattributes"), "* filter=evil\n").unwrap();
+        git(&["add", "tracked.txt", ".gitattributes"]);
+        git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@localhost",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ]);
+        // The driver is defined only after the baseline commit, in the worktree scope.
+        git(&[
+            "config",
+            "--worktree",
+            "filter.evil.clean",
+            &format!("touch '{}'; cat", marker.display()),
+        ]);
+        // Same byte length as the baseline, so git must compare content (and run the filter).
+        fs::write(root.join("tracked.txt"), "ABCDEFGH\n").unwrap();
+
+        let changes = uncommitted_changes(&root);
+
+        assert!(
+            !marker.exists(),
+            "host-side git ran a worktree-scoped filter driver"
+        );
+        assert_eq!(
+            changes.map(|(count, _)| count),
+            Some(super::UNCHECKED_CHANGES),
+            "worktree-scoped filter config must report unchecked changes"
         );
         let _ = fs::remove_dir_all(&root);
     }

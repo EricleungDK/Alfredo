@@ -110,7 +110,7 @@ pub async fn compose(
     mut baseline: String,
     candidates: &[(u64, String)],
 ) -> Result<String, String> {
-    let config = git(workspace, &["config", "--local", "--list"]).await?;
+    let config = git(workspace, &crate::worker::REPOSITORY_CONFIG_ARGS).await?;
     if config.lines().any(|line| line.starts_with("merge.")) {
         return Err(
             "Custom merge configuration needs qualification before dependency composition".into(),
