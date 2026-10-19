@@ -12,15 +12,17 @@ import argparse
 import datetime
 import http.client
 import http.server
+import io
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import platform
 import re
 import shutil
 import statistics
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -45,6 +47,13 @@ GIT_ENV = dict(os.environ, GIT_CONFIG_NOSYSTEM='1', GIT_CONFIG_GLOBAL='/dev/null
 MALFORMED = re.compile(r'no FILE blocks|valid file plan|FILE marker|ended inside FILE block|more than once')
 REFUSED = re.compile(r'unapproved file|outside approved paths')
 SANDBOX_CODE = 'sandbox-unavailable'
+# check.sh imports model-written code, so grading runs it under the same bwrap profile the worker uses
+# (alfredo-tui/src/worker.rs check_request). The check script is bound read-only at GUEST_CHECK.
+GUEST_CHECK = '/grader/check.sh'
+GRADE_LIMITS = {'as': 8 * 1024 * 1024 * 1024, 'fsize': 32 * 1024 * 1024, 'nofile': 1024, 'nproc': 128}
+SANDBOX_MISSING = ('grading sandbox unavailable: grading runs model-written code and needs bubblewrap and '
+                   'util-linux (sudo apt install bubblewrap util-linux); refusing to run it unsandboxed. '
+                   'Pass --unsafe-unsandboxed-grading only on a disposable machine.')
 LOOPBACK = {'127.0.0.1', 'localhost', '::1'}
 
 METRIC_NAMES = {
@@ -116,19 +125,99 @@ def make_repo(task, destination):
         git(destination, *args)
 
 
-def grade(task, repo, ref):
-    """Run the task's check.sh on `git archive ref`; never looks at a screen or a log."""
+def sandbox_tools():
+    """(bwrap, prlimit) when grading can run sandboxed, else None."""
+    bwrap = '/usr/bin/bwrap' if Path('/usr/bin/bwrap').is_file() else shutil.which('bwrap')
+    prlimit = '/usr/bin/prlimit' if Path('/usr/bin/prlimit').is_file() else shutil.which('prlimit')
+    return (bwrap, prlimit) if bwrap and prlimit else None
+
+
+def sandbox_argv(export, check, bwrap, prlimit):
+    """The bwrap argv that runs one check.sh: only `export` is writable, the host home and network are gone."""
+    export = str(export)
+    argv = [bwrap, '--die-with-parent', '--new-session', '--unshare-all', '--unshare-net',
+            '--tmpfs', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp']
+    for system in ('/usr', '/bin', '/sbin', '/lib', '/lib64', '/etc'):
+        if Path(system).exists():
+            argv += ['--ro-bind', system, system]
+    argv += ['--bind', export, export, '--chdir', export, '--ro-bind', str(check), GUEST_CHECK, '--',
+             prlimit, f'--as={GRADE_LIMITS["as"]}', f'--fsize={GRADE_LIMITS["fsize"]}',
+             f'--nofile={GRADE_LIMITS["nofile"]}', f'--nproc={GRADE_LIMITS["nproc"]}', '--', 'sh', GUEST_CHECK]
+    return argv
+
+
+def _relative_inside(path):
+    """True for a relative path that stays inside its root after lexical normalisation."""
+    if path.startswith('/'):
+        return False
+    normal = os.path.normpath(path)
+    return normal != '..' and not normal.startswith('../')
+
+
+def check_archive(data):
+    """Refuse archive members that could name, link or write outside the export (#207).
+
+    Raises ValueError for absolute or `..` member names, symlinks whose target leaves the export,
+    hardlinks to anything outside the archive, and device or fifo members. Only files, directories,
+    symlinks and hardlinks are allowed.
+    """
+    with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+        for member in archive.getmembers():
+            name = member.name
+            if name.startswith('/') or '..' in PurePosixPath(name).parts:
+                raise ValueError(f'member {name!r} is not a relative path inside the export')
+            if member.issym():
+                if not _relative_inside(os.path.join(os.path.dirname(name), member.linkname)):
+                    raise ValueError(f'symlink {name!r} points outside the export: {member.linkname!r}')
+            elif member.islnk():
+                if member.linkname.startswith('/') or '..' in PurePosixPath(member.linkname).parts:
+                    raise ValueError(f'hardlink {name!r} points outside the export: {member.linkname!r}')
+            elif not (member.isfile() or member.isdir()):
+                raise ValueError(f'member {name!r} is a device or fifo, not allowed in an export')
+
+
+def _links_escaping(export):
+    """Symlinks in the extracted export whose real target lies outside it (checks chained links)."""
+    base = os.path.realpath(export)
+    for dirpath, dirnames, filenames in os.walk(export):
+        for name in dirnames + filenames:
+            path = os.path.join(dirpath, name)
+            if os.path.islink(path):
+                real = os.path.realpath(path)
+                if real != base and not real.startswith(base + os.sep):
+                    yield path
+
+
+def grade(task, repo, ref, *, unsafe_unsandboxed=False):
+    """Run the task's check.sh on `git archive ref` under the grading sandbox; never looks at a screen or a log.
+
+    The candidate is model-written code, so check.sh runs under bwrap with only the export writable.
+    Without bwrap grading refuses, unless `unsafe_unsandboxed` (--unsafe-unsandboxed-grading) is set.
+    """
     if ref is None:
         return False, 'no candidate to grade'
+    tools = sandbox_tools()
+    if tools is None and not unsafe_unsandboxed:
+        return False, SANDBOX_MISSING
     export = Path(tempfile.mkdtemp(prefix='alfredo-eval-grade-', dir=repo.parent))
     try:
         archive = subprocess.run(['git', '-C', str(repo), 'archive', '--format=tar', ref], env=GIT_ENV,
                                  check=True, timeout=30, capture_output=True).stdout
+        try:
+            check_archive(archive)
+        except (ValueError, tarfile.TarError) as error:
+            return False, f'refused: {error}'
         subprocess.run(['tar', '-x', '-C', str(export)], input=archive, check=True, timeout=30)
+        escaping = next(_links_escaping(export), None)
+        if escaping:
+            return False, f'refused: symlink {escaping} resolves outside the export'
         env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': str(export), 'LC_ALL': 'C.UTF-8',
                'PYTHONDONTWRITEBYTECODE': '1'}
-        run = subprocess.run(['sh', str(task['check'])], cwd=export, env=env, timeout=60,
-                             capture_output=True, text=True)
+        if tools:
+            argv = sandbox_argv(export, task['check'], *tools)
+        else:
+            argv = ['sh', str(task['check'])]
+        run = subprocess.run(argv, cwd=export, env=env, timeout=60, capture_output=True, text=True)
         tail = (run.stdout + run.stderr).strip().splitlines()[-6:]
         return run.returncode == 0, '\n'.join(tail)[:800]
     except subprocess.TimeoutExpired:
@@ -139,15 +228,17 @@ def grade(task, repo, ref):
         shutil.rmtree(export, ignore_errors=True)
 
 
-def validate_tasks(tasks):
+def validate_tasks(tasks, *, unsafe_unsandboxed=False):
     """Every check.sh must fail on the untouched repo, or the grader would pass an empty answer."""
+    if sandbox_tools() is None and not unsafe_unsandboxed:
+        return [SANDBOX_MISSING]
     problems = []
     for task in tasks:
         root = Path(tempfile.mkdtemp(prefix='alfredo-eval-validate-'))
         try:
             repo = root / 'repo'
             make_repo(task, repo)
-            ok, output = grade(task, repo, 'HEAD')
+            ok, output = grade(task, repo, 'HEAD', unsafe_unsandboxed=unsafe_unsandboxed)
             if ok:
                 problems.append(f'{task["id"]}: check.sh passes on the untouched repo')
         finally:
@@ -446,7 +537,8 @@ def alfredo_trial(task, index, options):
         branches = git(workspace, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/alfredo/').split()
         ref = branches[0] if trial['outcome'] == 'done' and branches else None
         trial['graded_ref'] = ref
-        trial['pass'], trial['grade_output'] = grade(task, workspace, ref)
+        trial['pass'], trial['grade_output'] = grade(task, workspace, ref,
+                                                     unsafe_unsandboxed=options.unsafe_unsandboxed_grading)
 
         terminal.expected_exit = True
         terminal.send(b'\x11')
@@ -591,7 +683,8 @@ def claude_trial(task, index, options):
         git(workspace, '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false', 'commit', '-qm',
             'claude-code result', '--allow-empty')
         trial['graded_ref'] = 'HEAD'
-        trial['pass'], trial['grade_output'] = grade(task, workspace, 'HEAD')
+        trial['pass'], trial['grade_output'] = grade(task, workspace, 'HEAD',
+                                                     unsafe_unsandboxed=options.unsafe_unsandboxed_grading)
     except Exception as error:  # one broken trial must not abort the whole eval
         trial['outcome'] = 'harness_error'
         trial['notes'].append(f'{type(error).__name__}: {error}'[:400])
@@ -769,6 +862,9 @@ def parse_args(argv):
     parser.add_argument('--keep', action='store_true', help='keep temp repos for debugging')
     parser.add_argument('--validate-tasks', action='store_true',
                         help='only check that every check.sh fails on its untouched repo, then exit')
+    parser.add_argument('--unsafe-unsandboxed-grading', action='store_true',
+                        help='grade model-written code on the host when bubblewrap is missing (never needed when '
+                             'bwrap is installed; the flag does not disable the sandbox when it is present)')
     options = parser.parse_args(argv)
     if options.trials < 1:
         parser.error('--trials must be at least 1')
@@ -800,8 +896,14 @@ def main(argv=None):
     options = parse_args(argv if argv is not None else sys.argv[1:])
     try:
         tasks = load_tasks(HERE, options.tasks.split(',') if options.tasks else None)
+        unsafe = options.unsafe_unsandboxed_grading
+        if sandbox_tools() is None:
+            if not unsafe:
+                raise EvalError(SANDBOX_MISSING)
+            print('warning: grading model-written code WITHOUT a sandbox (--unsafe-unsandboxed-grading)',
+                  file=sys.stderr)
         if options.validate_tasks:
-            problems = validate_tasks(tasks)
+            problems = validate_tasks(tasks, unsafe_unsandboxed=unsafe)
             print('\n'.join(problems) or f'{len(tasks)} tasks: every check.sh fails on its untouched repo')
             return 1 if problems else 0
         skipped = {}

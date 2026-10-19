@@ -28,6 +28,9 @@ def load(name):
 
 run_eval = load('run_eval')
 schema_check = load('schema_check')
+# These tests grade author-written scripted answers, never model output, so without bwrap they may grade
+# unsandboxed. The sandboxed path is covered by test_eval_grader.py, whose live tests CI runs with bwrap.
+TRUSTED_UNSAFE = run_eval.sandbox_tools() is None
 
 
 def good_trial(task='T1-add-function', kind='positive', passed=True):
@@ -63,7 +66,7 @@ class TaskSetTests(unittest.TestCase):
             self.assertIn('workers', task['answers'])
 
     def test_every_check_fails_on_the_untouched_repo(self):
-        self.assertEqual([], run_eval.validate_tasks(self.tasks))
+        self.assertEqual([], run_eval.validate_tasks(self.tasks, unsafe_unsandboxed=TRUSTED_UNSAFE))
 
     def test_scripted_answers_pass_every_positive_check_and_never_the_control(self):
         for task in self.tasks:
@@ -78,7 +81,7 @@ class TaskSetTests(unittest.TestCase):
                         wrote = True
                 run_eval.git(repo, 'add', '-A')
                 run_eval.git(repo, '-c', 'commit.gpgSign=false', 'commit', '-qm', 'answer', '--allow-empty')
-                ok, output = run_eval.grade(task, repo, 'HEAD')
+                ok, output = run_eval.grade(task, repo, 'HEAD', unsafe_unsandboxed=TRUSTED_UNSAFE)
                 if task['kind'] == 'positive':
                     self.assertTrue(ok, output)
                 else:
@@ -94,7 +97,7 @@ class TaskSetTests(unittest.TestCase):
                 (repo / file['path']).write_text(file['content'])
             run_eval.git(repo, 'add', '-A')
             run_eval.git(repo, '-c', 'commit.gpgSign=false', 'commit', '-qm', 'first')
-            self.assertFalse(run_eval.grade(task, repo, 'HEAD')[0])
+            self.assertFalse(run_eval.grade(task, repo, 'HEAD', unsafe_unsandboxed=TRUSTED_UNSAFE)[0])
 
     def test_selector_accepts_prefixes_and_rejects_unknown_ids(self):
         self.assertEqual(['T1-add-function'], [t['id'] for t in run_eval.load_tasks(EVAL, ['T1'])])
