@@ -133,6 +133,9 @@ class HeadlessSmoke(unittest.TestCase):
         result = self.result(out)
         self.assertEqual((result['state'], result['accepted']), ('paused', 0))
         self.assertIn('interrupted', err)
+        tasks = [json.loads(path.read_text()) for path in self.state.glob('rust-tasks-v1/*/tasks.json')]
+        statuses = {task['id']: task['status'] for file in tasks for task in file['tasks']}
+        self.assertEqual(statuses.get(1), 'cancelled', statuses)
         saved = list(self.state.glob('**/autopilot*'))
         self.assertTrue(saved, 'autopilot state is kept for /resume')
 

@@ -114,7 +114,9 @@ line on stderr (`plan drafted`, `#1 approved`, `#1 check failed → repair #3`,
 accepted; 1 partial, failed or interrupted; 2 setup or usage error (`--headless`
 without `--go`, with `--select`, `--mission` or `--new-mission`, no repository, no
 sandbox). SIGINT and SIGTERM stop the run as `/stop` does: workers are cancelled,
-the state is kept paused and `/resume` in the TUI continues it. Not covered yet: a
+the state is kept paused and `/resume` in the TUI continues it. A second signal during the drain reports at once; a runtime error after launch
+stops the run and reports state `failed` (exit 1). Wayfinder-style goals are
+refused (exit 2) because headless has no scope flow. Not covered yet: a
 goal from stdin, streaming output and a headless resume.
 
 ## Build and install a development archive

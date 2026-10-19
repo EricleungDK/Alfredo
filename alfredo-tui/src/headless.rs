@@ -13,16 +13,22 @@ use alfredo_tui::{
 };
 use std::{
     collections::BTreeSet,
+    io::Write,
     path::PathBuf,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicU32, Ordering},
     time::{Duration, Instant},
 };
 use tokio::runtime::Runtime;
 
-static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+static INTERRUPTED: AtomicU32 = AtomicU32::new(0);
 
 extern "C" fn on_signal(_: libc::c_int) {
-    INTERRUPTED.store(true, Ordering::SeqCst);
+    INTERRUPTED.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Progress line on stderr; a closed pipe must not abort the run.
+fn say(line: impl std::fmt::Display) {
+    let _ = writeln!(std::io::stderr(), "{line}");
 }
 
 /// SIGINT and SIGTERM request the same cancellation as `/stop`.
@@ -105,8 +111,28 @@ impl Progress {
     }
 }
 
+/// Status for a run whose saved state is unreadable.
+fn stopped_status(goal: &str) -> Status {
+    Status {
+        state: RunState::Failed,
+        goal: goal.to_owned(),
+        done: 0,
+        total: 0,
+        failed: 0,
+        repairs: 0,
+        max_repairs: 0,
+        elapsed: Duration::ZERO,
+        branch: None,
+    }
+}
+
 /// The one JSON result object.
-fn result_json(status: &Status, outcomes: &[TaskOutcome], reason: &str) -> serde_json::Value {
+fn result_json(
+    status: &Status,
+    outcomes: &[TaskOutcome],
+    reason: &str,
+    run_error: bool,
+) -> serde_json::Value {
     let mut failed: Vec<_> = outcomes
         .iter()
         .filter_map(|outcome| match &outcome.result {
@@ -116,7 +142,7 @@ fn result_json(status: &Status, outcomes: &[TaskOutcome], reason: &str) -> serde
             _ => None,
         })
         .collect();
-    if status.state == RunState::Failed && failed.is_empty() {
+    if status.state == RunState::Failed && (failed.is_empty() || run_error) {
         failed.push(serde_json::json!({
             "id": null, "title": "autopilot", "reason": reason
         }));
@@ -169,37 +195,53 @@ pub fn run(options: Options) -> Result<i32, String> {
     let (mut last_refresh, mut last_save) = (Instant::now(), Instant::now());
     let mut stopping: Option<Instant> = None;
     let mut reason = String::new();
+    // A runtime failure after launch still ends with the JSON result.
+    let mut fatal: Option<String> = None;
     loop {
-        if stopping.is_none() && INTERRUPTED.load(Ordering::SeqCst) {
-            eprintln!("interrupted: stopping workers; /resume continues this run");
+        if stopping.is_none() && INTERRUPTED.load(Ordering::SeqCst) > 0 {
+            say("interrupted: stopping workers; /resume continues this run");
             work.autopilot.stop(runtime, &mut work.tasks);
             stopping = Some(Instant::now());
         }
-        step(
+        if let Err(error) = step(
             runtime,
             &mut work,
             &mut pending,
-            stopping.is_some(),
+            stopping.is_some() || fatal.is_some(),
             &mut last_refresh,
             &mut last_save,
-        )?;
-        let status = work.autopilot.status(&work.tasks);
+        ) {
+            say(format!("Error: {error}"));
+            work.autopilot.stop(runtime, &mut work.tasks);
+            fatal = Some(error);
+            stopping.get_or_insert_with(Instant::now);
+        }
+        let mut status = work.autopilot.status(&work.tasks).unwrap_or_else(|| {
+            fatal.get_or_insert_with(|| "Autopilot state vanished".into());
+            stopped_status(&goal)
+        });
         let outcomes = work.autopilot.outcomes(&work.tasks);
-        let Some(status) = status else {
-            return Err("Autopilot state vanished".into());
-        };
         for line in progress.lines(&status, &outcomes) {
-            eprintln!("{line}");
+            say(&line);
         }
         let drained = work.tasks.workers.is_empty() && !work.tasks.writing;
         let end = if let Some(since) = stopping {
-            drained || since.elapsed() > Duration::from_secs(30)
+            let timed_out = !drained && since.elapsed() > Duration::from_secs(30);
+            let again = INTERRUPTED.load(Ordering::SeqCst) > 1;
+            if !drained && (timed_out || again) {
+                say(if again {
+                    "second signal: not waiting for workers to finish"
+                } else {
+                    "workers did not finish within 30 s; reporting anyway"
+                });
+            }
+            drained || timed_out || again
         } else if status.state.finished() {
             drained
         } else if status.state == RunState::Paused {
             // Autopilot halted itself (a refusal, contention): the notice says why.
             reason = work.autopilot.notice().to_owned();
-            eprintln!("{reason}");
+            say(&reason);
             work.autopilot.stop(runtime, &mut work.tasks);
             stopping = Some(Instant::now());
             false
@@ -207,7 +249,10 @@ pub fn run(options: Options) -> Result<i32, String> {
             false
         };
         if end {
-            if status.state.finished() && status.state == RunState::Failed {
+            if let Some(error) = &fatal {
+                status.state = RunState::Failed;
+                reason = error.clone();
+            } else if status.state.finished() && status.state == RunState::Failed {
                 // The report's "Reason" row names why the whole run failed.
                 reason = work
                     .autopilot
@@ -215,7 +260,11 @@ pub fn run(options: Options) -> Result<i32, String> {
                     .and_then(|report| report.lines().find_map(|line| line.strip_prefix("Reason")))
                     .map_or(reason, |text| text.trim().to_owned());
             }
-            println!("{}", result_json(&status, &outcomes, &reason));
+            let _ = writeln!(
+                std::io::stdout(),
+                "{}",
+                result_json(&status, &outcomes, &reason, fatal.is_some())
+            );
             return Ok(i32::from(status.state != RunState::Done));
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -354,13 +403,13 @@ fn stage_dispatch(work: &mut Workstation, pending: &mut Option<(usize, String)>)
         Ok(Some(request)) => {
             match crate::stage_automatic_command(work, Intent::ArchitectDraft { request }) {
                 Ok(staged) => *pending = Some(staged),
-                Err(error) => eprintln!("Automatic Architect not started: {error}"),
+                Err(error) => say(format!("Automatic Architect not started: {error}")),
             }
             return;
         }
         Ok(None) => {}
         Err(error) => {
-            eprintln!("Automatic Architect not started: {error}");
+            say(format!("Automatic Architect not started: {error}"));
             return;
         }
     }
@@ -451,10 +500,14 @@ mod tests {
             0,
             Some(Err("rejected by review".into())),
         )];
-        let value = result_json(&status(RunState::Partial, 1), &outcomes, "");
+        let value = result_json(&status(RunState::Partial, 1), &outcomes, "", false);
         assert_eq!(value["failed"][0]["reason"], "rejected by review");
         assert_eq!(value["state"], "partial");
-        let value = result_json(&status(RunState::Failed, 0), &[], "planner gave up");
+        let value = result_json(&status(RunState::Failed, 0), &[], "planner gave up", false);
         assert_eq!(value["failed"][0]["reason"], "planner gave up");
+        // A runtime error is listed even beside failed tasks.
+        let value = result_json(&status(RunState::Failed, 0), &outcomes, "save failed", true);
+        assert_eq!(value["failed"][1]["reason"], "save failed");
+        assert_eq!(value["failed"][1]["id"], serde_json::Value::Null);
     }
 }
