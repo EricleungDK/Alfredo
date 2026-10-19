@@ -1116,7 +1116,12 @@ impl Autopilot {
         self.fail_with_next(tasks, notice, None);
     }
 
-    fn fail_with_next(&mut self, tasks: &mut TaskControl, notice: String, next: Option<String>) {
+    fn fail_with_next(
+        &mut self,
+        tasks: &mut TaskControl,
+        notice: String,
+        next: Option<(String, u32)>,
+    ) {
         let elapsed = self.elapsed();
         if let Some(saved) = self.saved.as_mut() {
             saved.phase = Phase::Failed;
@@ -1127,18 +1132,26 @@ impl Autopilot {
                 "Reason",
                 clean(&notice, 1024)
             );
-            if let Some(next) = next.as_deref().filter(|next| !next.is_empty()) {
-                report.push_str(&format!("\n{:<LABEL$}{}", "Next", clean(next, 300)));
+            if let Some((next, repairs)) = &next {
+                report.push_str(&format!("\n{:<LABEL$}{repairs}", "Repairs"));
+                if !next.is_empty() {
+                    report.push_str(&format!("\n{:<LABEL$}{}", "Next", clean(next, 300)));
+                }
             }
             if let Some(warning) = saved.dirty_warning() {
                 report.push_str(&format!("\n{:<LABEL$}{warning}", "Warning"));
             }
             saved.report = Some(report);
         }
-        let notice = match next.as_deref().filter(|next| !next.is_empty()) {
-            Some(next) => format!("{notice} {next}"),
-            None => notice,
+        let notice = match next.as_ref() {
+            Some((next, _)) if !next.is_empty() => format!("{notice} {next}"),
+            _ => notice,
         };
+        let repairs = next
+            .as_ref()
+            .map(|(_, repairs)| format!("{GAP}{}", plural(*repairs, "repair")))
+            .unwrap_or_default();
+        let notice = format!("{notice}{repairs}");
         self.finished_notice = Some(clean(&format!("Autopilot failed{GAP}{notice}"), 1024));
         self.set_notice(tasks, notice);
         // A planning failure leaves the unsaved draft panel open; the summary
@@ -1362,7 +1375,12 @@ impl Autopilot {
             if let Some(cause) = find(family.head).and_then(|head| too_large_failure(tasks, head)) {
                 // The last sentence of the shared message is the way forward.
                 let (reason, next) = cause.rsplit_once(". ").unwrap_or((&cause, ""));
-                self.fail_with_next(tasks, format!("{reason}."), Some(next.to_string()));
+                let repairs: u32 = families.iter().map(|family| family.repairs).sum();
+                self.fail_with_next(
+                    tasks,
+                    format!("{reason}."),
+                    Some((next.to_string(), repairs)),
+                );
                 return Ok(None);
             }
         }

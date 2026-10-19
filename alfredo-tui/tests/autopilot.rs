@@ -838,7 +838,7 @@ fn plan_approving_a_file_over_the_bound_is_rejected_at_lint_with_no_repairs() {
     assert_eq!(status.repairs, 0);
     let report = autopilot.report().unwrap();
     assert!(
-        report.contains("calc.py is 153 KiB; workers can edit files up to 64 KiB. Split the file, or edit it by hand."),
+        report.contains("calc.py is 154 KiB; workers can edit files up to 64 KiB. Split the file, or edit it by hand."),
         "{report}"
     );
     assert!(!report.contains("larger model"), "{report}");
@@ -846,8 +846,7 @@ fn plan_approving_a_file_over_the_bound_is_rejected_at_lint_with_no_repairs() {
     assert_eq!(fixture.store.snapshot().unwrap().tasks.len(), 0);
 }
 
-#[test]
-fn oversized_approved_set_stops_autopilot_without_repairs_or_model_advice() {
+fn oversized_approved_set(max_repairs: u32) {
     let fixture = Fixture::new();
     // Each file fits the per-file bound; together they pass the 96 KiB context bound,
     // which the planning lint does not see.
@@ -862,7 +861,7 @@ fn oversized_approved_set_stops_autopilot_without_repairs_or_model_advice() {
     let mut control = control(&fixture, &server, &runtime);
     let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
     autopilot
-        .start("Make the answer 42", "fixture", 3, &control)
+        .start("Make the answer 42", "fixture", max_repairs, &control)
         .unwrap();
     drive(
         &mut autopilot,
@@ -884,7 +883,16 @@ fn oversized_approved_set_stops_autopilot_without_repairs_or_model_advice() {
     );
     let report = autopilot.report().unwrap();
     assert!(report.contains("Approved files total"), "{report}");
-    assert!(report.contains("Next"), "{report}");
+    assert!(report.contains("Repairs   0"), "{report}");
+    assert!(
+        report.contains("Next      Approve fewer or smaller files, or edit them by hand."),
+        "{report}"
+    );
+    assert!(
+        autopilot.notice().contains("0 repairs"),
+        "{}",
+        autopilot.notice()
+    );
     assert!(!report.contains("larger model"), "{report}");
     assert!(!report.contains("repair budget exhausted"), "{report}");
     assert!(
@@ -892,6 +900,16 @@ fn oversized_approved_set_stops_autopilot_without_repairs_or_model_advice() {
         "{:?}",
         server.prompts()
     );
+}
+
+#[test]
+fn oversized_approved_set_stops_autopilot_without_repairs_or_model_advice() {
+    oversized_approved_set(3);
+}
+
+#[test]
+fn oversized_approved_set_stops_cleanly_with_no_repair_budget() {
+    oversized_approved_set(0);
 }
 
 #[test]

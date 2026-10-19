@@ -576,7 +576,7 @@ async fn approved_file_over_the_bound_fails_with_a_typed_code_and_no_model_call(
     .await
     .unwrap();
     assert_eq!(snapshot.tasks[0].status, TaskStatus::Failed);
-    let kib = (big.len() + 512) / 1024;
+    let kib = big.len().div_ceil(1024);
     let expected = format!(
         "calc.py is {kib} KiB; workers can edit files up to 64 KiB. Split the file, or edit it by hand."
     );
@@ -588,6 +588,61 @@ async fn approved_file_over_the_bound_fails_with_a_typed_code_and_no_model_call(
         Some(worker::FILE_TOO_LARGE)
     );
     assert_eq!(evidence.detail, expected);
+}
+
+async fn run_with_calc_of(bytes: usize) -> (worker::Evidence, String) {
+    let fixture = Fixture::new();
+    let mut text = "x = 1\n".repeat(bytes / 6);
+    text.push_str(&"#".repeat(bytes - text.len()));
+    assert_eq!(text.len(), bytes);
+    fs::write(fixture.workspace.join("calc.py"), &text).unwrap();
+    for args in [
+        vec!["add", "."],
+        vec!["-c", "core.hooksPath=/dev/null", "commit", "-qm", "edge"],
+    ] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&fixture.workspace)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    fixture.permit();
+    let provider = Ollama::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap();
+    let (snapshot, _) = worker::start(
+        fixture.store.clone(),
+        1,
+        "edge".into(),
+        3,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    let evidence: worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    (
+        evidence,
+        snapshot.tasks[0].run.as_ref().unwrap().detail.clone(),
+    )
+}
+
+#[tokio::test]
+async fn file_of_exactly_64_kib_is_read_and_one_byte_more_is_refused() {
+    // Exactly at the bound the worker proceeds to the model (which here refuses).
+    let (evidence, detail) = run_with_calc_of(64 * 1024).await;
+    assert_eq!(evidence.failure_code, None, "{detail}");
+    assert!(!detail.contains("workers can edit"), "{detail}");
+    let (evidence, detail) = run_with_calc_of(64 * 1024 + 1).await;
+    assert_eq!(
+        evidence.failure_code.as_deref(),
+        Some(worker::FILE_TOO_LARGE)
+    );
+    assert_eq!(
+        detail,
+        "calc.py is 65 KiB; workers can edit files up to 64 KiB. Split the file, or edit it by hand."
+    );
 }
 
 #[tokio::test]

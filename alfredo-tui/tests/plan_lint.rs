@@ -276,11 +276,29 @@ fn committed_file_over_the_worker_bound_is_rejected_with_the_worker_message() {
     let all = |_: &str| true;
     assert_eq!(
         plan_lint::lint(&large, &all, &all, &size),
-        vec!["big.py is 153 KiB; workers can edit files up to 64 KiB. Split the file, or edit it by hand.".to_string()]
+        vec!["big.py is 154 KiB; workers can edit files up to 64 KiB. Split the file, or edit it by hand.".to_string()]
     );
     let small = step(&["calc.py"], &["python3", "-c", "print(1)"], &[]);
     assert_eq!(
         plan_lint::lint(&plan(vec![small]), &all, &all, &size),
         Vec::<String>::new()
+    );
+}
+
+#[test]
+fn file_the_plan_creates_is_not_sized_and_is_not_flagged() {
+    // `size` answers only for committed blobs; a new file has none at the baseline.
+    let new_file = plan(vec![step(
+        &["fresh.py"],
+        &["python3", "-c", "print(1)"],
+        &[],
+    )]);
+    assert_eq!(lint(&new_file), Vec::<String>::new());
+    let exact = |_: &str| Some(64 * 1024);
+    let all = |_: &str| true;
+    assert_eq!(
+        plan_lint::lint(&new_file, &all, &all, &exact),
+        Vec::<String>::new(),
+        "exactly 64 KiB is within the bound"
     );
 }

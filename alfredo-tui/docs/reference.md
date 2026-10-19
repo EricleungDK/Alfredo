@@ -42,7 +42,7 @@ test-only seam that redirects only the preflight probe, never the executable a r
 
 A worker reads and rewrites each approved file whole, so an approved file over 64 KiB (or
 approved files totalling over 96 KiB) fails the run before any model call with a typed
-`file-too-large` `failure_code`: `calc.py is 153 KiB; workers can edit files up to 64 KiB.
+`file-too-large` `failure_code`: `calc.py is 154 KiB; workers can edit files up to 64 KiB.
 Split the file, or edit it by hand.` The same text shows after a manual `/run`. Autopilot
 does not repair it (no repair spent, no larger-model or `--max-repairs` advice) and the
 summary adds a `Next` row. The planning lint rejects a draft that approves a committed file

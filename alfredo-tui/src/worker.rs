@@ -685,7 +685,7 @@ pub const MAX_APPROVED_FILE: u64 = 64 * 1024;
 pub const FILE_TOO_LARGE: &str = "file-too-large";
 
 fn kib(bytes: u64) -> u64 {
-    (bytes + 512) / 1024
+    bytes.div_ceil(1024)
 }
 
 /// The one message a worker run, a manual `/run` and the planning lint share.
@@ -695,6 +695,16 @@ pub fn file_too_large(path: &str, bytes: u64) -> String {
         kib(bytes),
         MAX_APPROVED_FILE / 1024
     )
+}
+
+/// Splits a shared too-large message into its reason and the way forward (the
+/// last sentence); `None` for any other failure text.
+pub fn too_large_advice(detail: &str) -> Option<(&str, &str)> {
+    if !(detail.contains(" KiB; workers can ") && detail.ends_with('.')) {
+        return None;
+    }
+    let (reason, next) = detail.rsplit_once(". ")?;
+    Some((reason, next))
 }
 
 fn context_too_large(bytes: usize) -> String {
