@@ -175,6 +175,7 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 | `--endpoint URL` | `http://127.0.0.1:11434` (env `OLLAMA_HOST`) | Ollama HTTP origin |
 | `--go GOAL` | off | Start autopilot on launch |
 | `--max-repairs N` | 3 | Auto-repairs per task, 0–16 (0 disables) |
+| `--on-finish PROGRAM` | off (env `ALFREDO_ON_FINISH`) | Absolute path to your own executable, run when an autopilot run ends `done`, `partial` or `failed` (see [reference](alfredo-tui/docs/reference.md#completion-hook)) |
 | `--workspace DIR` | current repo | Open the repository containing `DIR` |
 | `--mission NAME` / `--new-mission NAME` | `default` | Resume / create a named mission in the repository of the current directory or of `--workspace`; outside a repository `--workspace DIR` is required |
 | `--select` | off | Always show the repository/mission selector |
