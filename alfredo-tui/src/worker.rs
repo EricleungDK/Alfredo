@@ -487,6 +487,18 @@ pub fn not_a_repository(path: &Path) -> String {
 /// The phrase every not-a-repository message carries (used to recognise it).
 pub(crate) const NOT_A_REPOSITORY: &str = "is not a Git repository";
 
+/// Command-line `-c` overrides that every host-side Git call passes. They
+/// outrank repository-local and global config, so a repository cannot make
+/// Alfredo run its own fsmonitor command or hooks while inspecting it.
+pub(crate) const HARDENED_GIT_ARGS: [&str; 6] = [
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.quotePath=false",
+];
+
 fn git_blocking(workspace: &Path, args: &[&str], stdout: Stdio) -> Option<std::process::Output> {
     std::process::Command::new("/usr/bin/git")
         .env_clear()
@@ -495,6 +507,7 @@ fn git_blocking(workspace: &Path, args: &[&str], stdout: Stdio) -> Option<std::p
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(HARDENED_GIT_ARGS)
         .arg("-C")
         .arg(workspace)
         .args(args)
@@ -560,14 +573,7 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
-        .args([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.quotePath=false",
-        ])
+        .args(HARDENED_GIT_ARGS)
         .arg("-C")
         .arg(root)
         .args(args)
@@ -2027,5 +2033,74 @@ mod fence_strip_tests {
             content_of("```python\nprint(1)\n```\n"),
             "print(1)\n".to_string()
         );
+    }
+}
+
+#[cfg(test)]
+mod host_git_tests {
+    use super::{has_head_commit, lacks_commits, uncommitted_changes};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    static ID: AtomicU64 = AtomicU64::new(0);
+
+    /// A repository whose own config asks git to run a shell command (touching a
+    /// marker) as its fsmonitor hook. Alfredo's host-side git must never run it.
+    #[test]
+    fn host_side_git_never_runs_repo_local_fsmonitor() {
+        let root = std::env::temp_dir().join(format!(
+            "alfredo-host-git-fsmonitor-{}-{}",
+            std::process::id(),
+            ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let marker: PathBuf = root.join("fsmonitor-ran");
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&root)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success(),
+                "git {args:?} failed"
+            );
+        };
+        git(&["init", "-q", "--template="]);
+        git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@localhost",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]);
+        git(&[
+            "config",
+            "core.fsmonitor",
+            &format!("touch '{}'; true #", marker.display()),
+        ]);
+        fs::write(root.join("untracked.txt"), "pending\n").unwrap();
+
+        let changes = uncommitted_changes(&root);
+        let head = has_head_commit(&root);
+        let lacks = lacks_commits(&root);
+
+        assert!(
+            !marker.exists(),
+            "host-side git ran the repository's core.fsmonitor hook"
+        );
+        assert_eq!(changes.map(|(count, _)| count), Some(1));
+        assert!(head);
+        assert!(!lacks);
+        let _ = fs::remove_dir_all(&root);
     }
 }
