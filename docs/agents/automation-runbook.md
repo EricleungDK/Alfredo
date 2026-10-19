@@ -78,7 +78,7 @@ The build's daily "keep open PRs mergeable" step resolves the rest.
 
 | Test | Cause | Status |
 |---|---|---|
-| `tests/understanding.rs::concurrent_entry_creates_one_flow_and_work_through_survives_reload` | 8 writers vs a 250 ms lock deadline on slow runners (`LockError::Busy`) | fixed (issue #210) |
+| `tests/understanding.rs::concurrent_entry_creates_one_flow_and_work_through_survives_reload` | 8 writers vs a 250 ms lock deadline on slow runners (`LockError::Busy`); the deadline is now 3 s with backoff | fixed (issue #210) |
 | `agent_terminal_smoke.py` F2 press swallowed by a dashboard redraw | timing race | fixed by #200 |
 | `layout::capacity_wait_shows_a_static_cat…` | wall-clock label | fixed by #177 |
 
