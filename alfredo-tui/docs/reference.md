@@ -165,6 +165,23 @@ goal (the case that would otherwise enter Wayfinder) records and confirms a mini
 goal-derived scope through the normal scope transactions. A pending scope draft you
 wrote is never confirmed for you: `/go` asks you to review it first.
 
+## Headless
+
+`alfredo-tui --go GOAL --headless` runs the same autopilot without a terminal (stdin
+and stdout may be pipes), for CI, cron or another tool. It opens the repository's
+default mission like the automatic TUI start. Each autopilot state change prints one
+line on stderr (`plan drafted`, `#1 approved`, `#1 check failed → repair #3`,
+`done 2/2 alfredo/go-ab12`). On exit stdout carries exactly one JSON object:
+`{state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]}` with
+`state` one of `done`, `partial`, `failed` or `paused`. Exit codes: 0 every task
+accepted; 1 partial, failed or interrupted; 2 setup or usage error (`--headless`
+without `--go`, with `--select`, `--mission` or `--new-mission`, no repository, no
+sandbox). SIGINT and SIGTERM stop the run as `/stop` does: workers are cancelled,
+the state is kept paused and `/resume` in the TUI continues it. A second signal during the drain reports at once; a runtime error after launch
+stops the run and reports state `failed` (exit 1). Wayfinder-style goals are
+refused (exit 2) because headless has no scope flow. Not covered yet: a
+goal from stdin, streaming output and a headless resume.
+
 ## Build and install a development archive
 
 On Linux x86-64 with Rust 1.96.0 and Python 3.11+, build a native locked candidate:
