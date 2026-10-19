@@ -52,6 +52,7 @@ F1 on an empty prompt lists every command. Most used:
 | `/repair ID REASON`, `/requeue ID`, `/resolve-repair ID`, `/recover [ID] [requeue]` | Repair, rerun a cancelled task, recovery |
 | `/branch [ID]` | Local review branch for an accepted task |
 | `/tasks [QUERY\|#ID]`, `/activity [QUERY\|#ID]`, `/chat`, `/refresh` | Views |
+| `/clean`, `/clean yes` | List, then remove, the worktrees of finished runs (see below) |
 | `/models`, `/model NAME`, `/workspace` | Model and workspace switching |
 | `/scope [JSON]`, `/scope-confirm REV`, `@wayfinder REQUEST` | Project scope agreement |
 
@@ -62,6 +63,13 @@ files, 32 KiB) is sent with that message; see `docs/reference.md#chat-file-menti
 `~/.local/state/alfredo` (or `--state-dir`), never inside your repository. Workers
 edit detached worktrees from committed HEAD; your branch, index and working files
 are never modified.
+
+Each run keeps a full checkout under the state directory and a `git worktree list`
+entry in your repository; reviewed results are held by `refs/alfredo/candidates/*`.
+`/clean` shows which finished runs' worktrees can go and how much disk that frees;
+`/clean yes` removes them and prunes. Evidence, candidate refs, `/branch` and
+`alfredo/go-*` branches stay. See the
+[reference](docs/reference.md#clean-finished-run-worktrees).
 
 ## Screen
 
