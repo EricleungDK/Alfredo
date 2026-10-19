@@ -1118,7 +1118,7 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         })
     {
         lines.push(Line::from(
-            "Type /go GOAL and autopilot plans, runs and reviews it.",
+            "Type /go GOAL and autopilot plans, runs and reviews it (or /plan GOAL, review, /go).",
         ));
         lines.push(Line::from("Or chat with your local model."));
         lines.push(Line::default());
@@ -1583,6 +1583,18 @@ fn next_action(snapshot: &crate::tasks::Snapshot, task: &crate::tasks::Task) -> 
         }
         TaskStatus::ReviewReady => Some(format!("/review {id} JSON{GAP}/reject {id}")),
         TaskStatus::NeedsHumanReview => Some(format!("/review {id} JSON")),
+        TaskStatus::Failed
+            if task
+                .run
+                .as_ref()
+                .is_some_and(|run| crate::worker::too_large_advice(&run.detail).is_some()) =>
+        {
+            // A repair cannot shrink the file; say what can, as autopilot's summary does.
+            task.run
+                .as_ref()
+                .and_then(|run| crate::worker::too_large_advice(&run.detail))
+                .map(|(_, next)| next.to_string())
+        }
         TaskStatus::Rejected | TaskStatus::Failed if snapshot.architecture_required(id) => {
             Some(format!("/architect-revise {id}"))
         }

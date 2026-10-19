@@ -34,7 +34,14 @@ class EvalSmoke(unittest.TestCase):
             self.assertEqual([], schema_check.validate(document))
             self.assertEqual(1, document['schema_version'])
             self.assertFalse(document['likely_broken'])
-            self.assertEqual([], document['warnings'])
+            self.assertEqual(str(binary.resolve()), document['config']['binary'])
+            profile = document['config']['profile']
+            self.assertIn(profile, ('debug', 'release', 'unknown'))
+            self.assertEqual(['debug_profile'] if profile == 'debug' else [], [w['code'] for w in document['warnings']])
+            self.assertEqual(sorted(t for t, v in document['tasks'].items() if v['kind'] == 'positive'),
+                             sorted(document['metrics']['M4']['secondary']['per_task']))
+            self.assertEqual(1.0, document['metrics']['M3']['secondary']['per_task'][
+                next(t for t in document['tasks'] if t.startswith('T2-'))])
             for name, task in document['tasks'].items():
                 self.assertTrue(task['as_expected'], name)
                 self.assertEqual(0 if task['kind'] == 'negative_control' else 1, task['passes'], name)

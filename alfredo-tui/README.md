@@ -22,6 +22,11 @@ Opens straight into the repository root, mission `default`. Then either:
   composes accepted work onto `alfredo/go-<id>`. F5 or `/pause` / `/resume`;
   `/stop` also cancels running workers; `/autopilot` shows status. After a restart
   the loop comes back paused and never replays work.
+- **Plan first**: `/plan GOAL`, read the draft (`/plan-revise` to change it), then
+  bare `/go` runs exactly that plan under autopilot, with no second planner call.
+  Bare `/go` also runs tasks saved with `/plan-save` and not yet started. Your review
+  stands in for autopilot's own approval of each task's files and check; a plan with
+  an unrunnable check or unordered writers is still refused and left untouched.
 - **Manual**: drive each step yourself.
 
 ```text
@@ -38,7 +43,7 @@ F1 on an empty prompt lists every command. Most used:
 
 | Command | Purpose |
 | --- | --- |
-| `/go GOAL`, `/pause`, `/resume`, `/stop`, `/autopilot` | Autopilot loop |
+| `/go GOAL`, `/go` (run the open `/plan` draft or saved tasks), `/pause`, `/resume`, `/stop`, `/autopilot` | Autopilot loop |
 | `/plan REQUEST`, `/plan-revise REQUEST`, `/plan-save`, `/plan-cancel` | Generate and save a task plan |
 | `/task TEXT`, `/after 1,2 TEXT` | Propose a task (with dependencies) |
 | `/permit ID JSON`, `/approve [ID]`, `/assign ID MODEL` | Policy, approval, worker model |

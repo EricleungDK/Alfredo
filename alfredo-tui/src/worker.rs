@@ -428,7 +428,7 @@ pub struct Evidence {
     pub status: TaskStatus,
     pub detail: String,
     /// Typed failure class when the run failed for an environment reason
-    /// (`execution::SANDBOX_UNAVAILABLE`); repairing the code cannot fix it.
+    /// (`execution::SANDBOX_UNAVAILABLE`, `FILE_TOO_LARGE`); repairing the code cannot fix it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_code: Option<String>,
     pub patch: String,
@@ -487,6 +487,18 @@ pub fn not_a_repository(path: &Path) -> String {
 /// The phrase every not-a-repository message carries (used to recognise it).
 pub(crate) const NOT_A_REPOSITORY: &str = "is not a Git repository";
 
+/// Command-line `-c` overrides that every host-side Git call passes. They
+/// outrank repository-local and global config, so a repository cannot make
+/// Alfredo run its own fsmonitor command or hooks while inspecting it.
+pub(crate) const HARDENED_GIT_ARGS: [&str; 6] = [
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.quotePath=false",
+];
+
 fn git_blocking(workspace: &Path, args: &[&str], stdout: Stdio) -> Option<std::process::Output> {
     std::process::Command::new("/usr/bin/git")
         .env_clear()
@@ -495,6 +507,7 @@ fn git_blocking(workspace: &Path, args: &[&str], stdout: Stdio) -> Option<std::p
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_OPTIONAL_LOCKS", "0")
+        .args(HARDENED_GIT_ARGS)
         .arg("-C")
         .arg(workspace)
         .args(args)
@@ -509,11 +522,53 @@ fn git_succeeds(workspace: &Path, args: &[&str]) -> bool {
     git_blocking(workspace, args, Stdio::null()).is_some_and(|output| output.status.success())
 }
 
+/// The config listing every repository-config gate reads. Plain `--list` spans
+/// every repository scope, including `.git/config.worktree`, which `--local`
+/// omits. System and global scope are already disabled by each caller's
+/// environment, and the command-line overrides in `HARDENED_GIT_ARGS` cannot
+/// match the prefixes checked by `config_needs_qualification`.
+pub(crate) const REPOSITORY_CONFIG_ARGS: [&str; 2] = ["config", "--list"];
+
+/// Whether a repository's config (`REPOSITORY_CONFIG_ARGS` output) holds filter
+/// drivers or includes. Git can run repository-chosen commands for them while
+/// it inspects or checks out files, so every gate that reads the config refuses
+/// them until they are qualified.
+pub(crate) fn config_needs_qualification(config: &str) -> bool {
+    config.lines().any(|line| {
+        line.starts_with("filter.")
+            || line.starts_with("include.")
+            || line.starts_with("includeif.")
+    })
+}
+
+/// The `dirty` count recorded when uncommitted changes could not be checked
+/// (refused repository config). It is a marker, not a real count.
+pub(crate) const UNCHECKED_CHANGES: u32 = u32::MAX;
+
 /// Number of uncommitted changes (tracked modifications and untracked,
 /// non-ignored files) and the short HEAD they are not based on. Read-only
 /// (`GIT_OPTIONAL_LOCKS=0`; no index refresh is written). `None` when the
-/// workspace is not a readable repository with a commit.
+/// workspace is not a readable repository with a commit. When the repository
+/// config needs qualification, `git status` is not run at all (it would run
+/// the repository's clean filters); the count is `UNCHECKED_CHANGES`.
 pub fn uncommitted_changes(workspace: &Path) -> Option<(u32, String)> {
+    let head = git_blocking(
+        workspace,
+        &["rev-parse", "--short=7", "HEAD"],
+        Stdio::piped(),
+    )
+    .filter(|output| output.status.success())?;
+    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
+    // Listing the config executes nothing. An unreadable listing is treated
+    // as unqualified: the status call below would not be trustworthy either.
+    let qualified = git_blocking(workspace, &REPOSITORY_CONFIG_ARGS, Stdio::piped())
+        .filter(|output| output.status.success())
+        .is_some_and(|config| {
+            !config_needs_qualification(&String::from_utf8_lossy(&config.stdout))
+        });
+    if !qualified {
+        return Some((UNCHECKED_CHANGES, head));
+    }
     let status = git_blocking(
         workspace,
         &["status", "--porcelain", "--untracked-files=all"],
@@ -524,14 +579,7 @@ pub fn uncommitted_changes(workspace: &Path) -> Option<(u32, String)> {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .count();
-    let head = git_blocking(
-        workspace,
-        &["rev-parse", "--short=7", "HEAD"],
-        Stdio::piped(),
-    )
-    .filter(|output| output.status.success())?;
-    let head = String::from_utf8_lossy(&head.stdout).trim().to_string();
-    Some((u32::try_from(count).unwrap_or(u32::MAX), head))
+    Some((u32::try_from(count).unwrap_or(UNCHECKED_CHANGES - 1), head))
 }
 
 /// Whether `workspace` has a commit at HEAD (blocking; one quick local git call).
@@ -560,14 +608,7 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_OPTIONAL_LOCKS", "0")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
-        .args([
-            "-c",
-            "core.hooksPath=/dev/null",
-            "-c",
-            "core.fsmonitor=false",
-            "-c",
-            "core.quotePath=false",
-        ])
+        .args(HARDENED_GIT_ARGS)
         .arg("-C")
         .arg(root)
         .args(args)
@@ -677,6 +718,43 @@ pub fn validate_plan(plan: &FilePlan, policy: &WorkPolicy) -> Result<()> {
 
 /// Approved plus read-only reference source text in one worker request.
 const SOURCE_CONTEXT: usize = 96 * 1024;
+/// Largest approved source file a worker reads and rewrites.
+pub const MAX_APPROVED_FILE: u64 = 64 * 1024;
+
+/// Evidence `failure_code` for an approved file or file set beyond the worker's
+/// context bounds. Deterministic: neither a repair nor a larger model changes it.
+pub const FILE_TOO_LARGE: &str = "file-too-large";
+
+fn kib(bytes: u64) -> u64 {
+    bytes.div_ceil(1024)
+}
+
+/// The one message a worker run, a manual `/run` and the planning lint share.
+pub fn file_too_large(path: &str, bytes: u64) -> String {
+    format!(
+        "{path} is {} KiB; workers can edit files up to {} KiB. Split the file, or edit it by hand.",
+        kib(bytes),
+        MAX_APPROVED_FILE / 1024
+    )
+}
+
+/// Splits a shared too-large message into its reason and the way forward (the
+/// last sentence); `None` for any other failure text.
+pub fn too_large_advice(detail: &str) -> Option<(&str, &str)> {
+    if !(detail.contains(" KiB; workers can ") && detail.ends_with('.')) {
+        return None;
+    }
+    let (reason, next) = detail.rsplit_once(". ")?;
+    Some((reason, next))
+}
+
+fn context_too_large(bytes: usize) -> String {
+    format!(
+        "Approved files total {} KiB; workers can read up to {} KiB of approved files. Approve fewer or smaller files, or edit them by hand.",
+        kib(bytes as u64),
+        SOURCE_CONTEXT / 1024
+    )
+}
 const TAIL_LINES: usize = 40;
 const TAIL_BYTES: usize = 4096;
 
@@ -728,11 +806,14 @@ fn sanitize_output(text: &str) -> String {
     let mut rest = plain.as_str();
     while let Some(index) = rest.find(MARK) {
         let before = &rest[..index];
+        // Advance by the delimiter's own UTF-8 width: whitespace such as NBSP,
+        // U+2003 or U+3000 spans several bytes, and slicing inside one panics.
         let start = before
-            .rfind(|c: char| {
+            .char_indices()
+            .rfind(|&(_, c)| {
                 c.is_whitespace() || matches!(c, '"' | '\'' | '(' | '[' | '<' | '=' | ',' | '`')
             })
-            .map_or(0, |i| i + 1);
+            .map_or(0, |(i, c)| i + c.len_utf8());
         out.push_str(&before[..start]);
         if !before[start..].starts_with('/') {
             out.push_str(&before[start..]);
@@ -1059,25 +1140,13 @@ pub fn check_request(worktree: &Path, task: &Task, mission: &str) -> Result<Exec
         process_count_limit: 128,
         descendant_grace_seconds: 1.0,
     };
-    let mut argv: Vec<String> = [
-        "/usr/bin/bwrap",
-        "--die-with-parent",
-        "--new-session",
-        "--unshare-user",
-        "--unshare-pid",
-        "--unshare-net",
-        "--tmpfs",
-        "/",
-        "--dev",
-        "/dev",
-        "--proc",
-        "/proc",
-        "--tmpfs",
-        "/tmp",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect();
+    let mut argv: Vec<String> = std::iter::once("/usr/bin/bwrap")
+        .chain(crate::execution::SANDBOX_ISOLATION_FLAGS)
+        .chain([
+            "--tmpfs", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+        ])
+        .map(str::to_string)
+        .collect();
     for system in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"] {
         if Path::new(system).exists() {
             argv.extend(["--ro-bind".into(), system.into(), system.into()]);
@@ -1213,12 +1282,8 @@ pub async fn start_checked(
     {
         return Err("Execution workspace must be the Git repository root".into());
     }
-    let config = git(&before.workspace, &["config", "--local", "--list"]).await?;
-    if config.lines().any(|line| {
-        line.starts_with("filter.")
-            || line.starts_with("include.")
-            || line.starts_with("includeif.")
-    }) {
+    let config = git(&before.workspace, &REPOSITORY_CONFIG_ARGS).await?;
+    if config_needs_qualification(&config) {
         return Err(
             "Repository checkout filters/includes need qualification before worker execution"
                 .into(),
@@ -1552,17 +1617,23 @@ async fn perform(
     for path in &policy.files {
         let file = safe_file(worktree, path)?;
         let content = if file.exists() {
+            let size = fs::metadata(&file).map_err(|e| e.to_string())?.len();
+            if size > MAX_APPROVED_FILE {
+                evidence.failure_code = Some(FILE_TOO_LARGE.into());
+                return Err(file_too_large(path, size));
+            }
             let mut bytes = Vec::new();
             std::io::Read::read_to_end(
                 &mut std::io::Read::take(
                     fs::File::open(&file).map_err(|e| e.to_string())?,
-                    64 * 1024 + 1,
+                    MAX_APPROVED_FILE + 1,
                 ),
                 &mut bytes,
             )
             .map_err(|e| e.to_string())?;
-            if bytes.len() > 64 * 1024 {
-                return Err("Approved source file exceeds 64 KiB context limit".into());
+            if bytes.len() as u64 > MAX_APPROVED_FILE {
+                evidence.failure_code = Some(FILE_TOO_LARGE.into());
+                return Err(file_too_large(path, bytes.len() as u64));
             }
             String::from_utf8(bytes).map_err(|_| "Approved source file is not UTF-8")?
         } else {
@@ -1570,7 +1641,8 @@ async fn perform(
         };
         context.push_str(&format!("\nFILE {path}\n{content}\n"));
         if context.len() > SOURCE_CONTEXT {
-            return Err("Approved source context exceeds 96 KiB".into());
+            evidence.failure_code = Some(FILE_TOO_LARGE.into());
+            return Err(context_too_large(context.len()));
         }
     }
     // Committed files the check runs or the goal/task names: reference only, never
@@ -2002,6 +2074,88 @@ mod sanitize_output_tests {
         assert!(!out.contains("8;;") && !out.contains("/tmp/run"), "{out}");
         assert!(out.contains("src/a.rs"), "{out}");
     }
+
+    /// Whitespace delimiters whose UTF-8 width is not one byte.
+    const MULTIBYTE_SPACES: [(&str, char); 3] = [
+        ("no-break space", '\u{a0}'),
+        ("em space", '\u{2003}'),
+        ("ideographic space", '\u{3000}'),
+    ];
+
+    fn receipt_with(stdout: &str, stderr: &str) -> crate::execution::ExecutionReceipt {
+        crate::execution::ExecutionReceipt {
+            schema_version: 1,
+            request_id: String::new(),
+            request_digest: String::new(),
+            effect: String::new(),
+            status: "failed".into(),
+            started_at: String::new(),
+            ended_at: String::new(),
+            exit_code: Some(1),
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            stdout_bytes: stdout.len(),
+            stderr_bytes: stderr.len(),
+            stdout_sha256: String::new(),
+            stderr_sha256: String::new(),
+            effect_started: true,
+            reconciliation_required: false,
+            error_code: String::new(),
+            error_message: String::new(),
+            receipt_id: String::new(),
+            owner_pid: None,
+            owner_identity: String::new(),
+            process_pid: None,
+            process_identity: String::new(),
+            provider: String::new(),
+        }
+    }
+
+    #[test]
+    fn multibyte_whitespace_before_bare_worktree_marker_does_not_panic() {
+        // Attack from the ticket: `error:<ws>/worktree/x` used to panic on the
+        // byte slice one past a multi-byte delimiter.
+        for (name, ws) in MULTIBYTE_SPACES {
+            let input = format!("error:{ws}/worktree/x");
+            assert_eq!(sanitize_output(&input), input, "{name}");
+        }
+    }
+
+    #[test]
+    fn multibyte_whitespace_before_absolute_worktree_path_is_shortened() {
+        for (name, ws) in MULTIBYTE_SPACES
+            .iter()
+            .copied()
+            .chain([("ascii space", ' ')])
+        {
+            let input = format!("error:{ws}/tmp/run/worktree/src/a.rs");
+            assert_eq!(
+                sanitize_output(&input),
+                format!("error:{ws}src/a.rs"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn multibyte_whitespace_worktree_paths_reach_stdout_and_stderr_tails() {
+        use super::output_tail;
+        for (name, ws) in MULTIBYTE_SPACES {
+            let input = format!("error:{ws}/worktree/x");
+            let stderr_tail = output_tail(&receipt_with("", &input));
+            assert_eq!(
+                stderr_tail,
+                Some(("stderr", input.clone())),
+                "stderr {name}"
+            );
+            let stdout_tail = output_tail(&receipt_with(&input, ""));
+            assert_eq!(
+                stdout_tail,
+                Some(("stdout", input.clone())),
+                "stdout {name}"
+            );
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2027,5 +2181,203 @@ mod fence_strip_tests {
             content_of("```python\nprint(1)\n```\n"),
             "print(1)\n".to_string()
         );
+    }
+}
+
+#[cfg(test)]
+mod host_git_tests {
+    use super::{has_head_commit, lacks_commits, uncommitted_changes};
+    use std::{
+        fs,
+        path::PathBuf,
+        sync::atomic::{AtomicU64, Ordering},
+    };
+
+    static ID: AtomicU64 = AtomicU64::new(0);
+
+    /// A repository whose own config asks git to run a shell command (touching a
+    /// marker) as its fsmonitor hook. Alfredo's host-side git must never run it.
+    #[test]
+    fn host_side_git_never_runs_repo_local_fsmonitor() {
+        let root = std::env::temp_dir().join(format!(
+            "alfredo-host-git-fsmonitor-{}-{}",
+            std::process::id(),
+            ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let marker: PathBuf = root.join("fsmonitor-ran");
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&root)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success(),
+                "git {args:?} failed"
+            );
+        };
+        git(&["init", "-q", "--template="]);
+        git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@localhost",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "init",
+        ]);
+        git(&[
+            "config",
+            "core.fsmonitor",
+            &format!("touch '{}'; true #", marker.display()),
+        ]);
+        fs::write(root.join("untracked.txt"), "pending\n").unwrap();
+
+        let changes = uncommitted_changes(&root);
+        let head = has_head_commit(&root);
+        let lacks = lacks_commits(&root);
+
+        assert!(
+            !marker.exists(),
+            "host-side git ran the repository's core.fsmonitor hook"
+        );
+        assert_eq!(changes.map(|(count, _)| count), Some(1));
+        assert!(head);
+        assert!(!lacks);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// A repository whose `.gitattributes` routes its files through a clean
+    /// filter defined in its own config (touching a marker). `git status` runs
+    /// clean filters for modified files, so host-side status must never do so.
+    #[test]
+    fn host_side_status_never_runs_repo_local_filter_driver() {
+        let root = std::env::temp_dir().join(format!(
+            "alfredo-host-git-filter-{}-{}",
+            std::process::id(),
+            ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let marker: PathBuf = root.join("filter-ran");
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&root)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success(),
+                "git {args:?} failed"
+            );
+        };
+        git(&["init", "-q", "--template="]);
+        fs::write(root.join("tracked.txt"), "original\n").unwrap();
+        git(&["add", "tracked.txt"]);
+        git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@localhost",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ]);
+        // Attributes and the filter come only after the baseline commit, so the
+        // fixture itself never runs the filter.
+        fs::write(root.join(".gitattributes"), "* filter=evil\n").unwrap();
+        git(&[
+            "config",
+            "filter.evil.clean",
+            &format!("touch '{}'; cat", marker.display()),
+        ]);
+        // Same byte length as the baseline: git skips the content check (and so
+        // the filter) when the size differs, so only a same-size edit reaches it.
+        fs::write(root.join("tracked.txt"), "ABCDEFGH\n").unwrap();
+
+        let changes = uncommitted_changes(&root);
+
+        assert!(
+            !marker.exists(),
+            "host-side git ran the repository's filter driver"
+        );
+        assert_eq!(
+            changes.map(|(count, _)| count),
+            Some(super::UNCHECKED_CHANGES),
+            "refused repository config must report unchecked changes"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// The same filter fixture, but the driver lives in the worktree scope
+    /// (`.git/config.worktree`, enabled by `extensions.worktreeConfig`).
+    /// `git config --local --list` does not show that scope, so the gate must
+    /// still refuse and host-side status must never run the filter.
+    #[test]
+    fn host_side_status_never_runs_worktree_scoped_filter_driver() {
+        let root = std::env::temp_dir().join(format!(
+            "alfredo-host-git-worktree-filter-{}-{}",
+            std::process::id(),
+            ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let marker: PathBuf = root.join("worktree-filter-ran");
+        let git = |args: &[&str]| {
+            assert!(
+                std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&root)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success(),
+                "git {args:?} failed"
+            );
+        };
+        git(&["init", "-q", "--template="]);
+        git(&["config", "extensions.worktreeConfig", "true"]);
+        fs::write(root.join("tracked.txt"), "original\n").unwrap();
+        fs::write(root.join(".gitattributes"), "* filter=evil\n").unwrap();
+        git(&["add", "tracked.txt", ".gitattributes"]);
+        git(&[
+            "-c",
+            "user.name=Fixture",
+            "-c",
+            "user.email=fixture@localhost",
+            "commit",
+            "-q",
+            "-m",
+            "init",
+        ]);
+        // The driver is defined only after the baseline commit, in the worktree scope.
+        git(&[
+            "config",
+            "--worktree",
+            "filter.evil.clean",
+            &format!("touch '{}'; cat", marker.display()),
+        ]);
+        // Same byte length as the baseline, so git must compare content (and run the filter).
+        fs::write(root.join("tracked.txt"), "ABCDEFGH\n").unwrap();
+
+        let changes = uncommitted_changes(&root);
+
+        assert!(
+            !marker.exists(),
+            "host-side git ran a worktree-scoped filter driver"
+        );
+        assert_eq!(
+            changes.map(|(count, _)| count),
+            Some(super::UNCHECKED_CHANGES),
+            "worktree-scoped filter config must report unchecked changes"
+        );
+        let _ = fs::remove_dir_all(&root);
     }
 }

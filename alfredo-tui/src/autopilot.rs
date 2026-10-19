@@ -8,7 +8,7 @@ use crate::{
     command_intent::Intent,
     dispatch::TRANSIENT_LIMIT,
     task_control::TaskControl,
-    tasks::{Snapshot, Task, TaskStatus, TaskStore},
+    tasks::{Action, Snapshot, Task, TaskStatus, TaskStore},
     understanding,
 };
 use serde::{Deserialize, Serialize};
@@ -113,6 +113,11 @@ impl Saved {
     /// The start warning, also carried by the summary of the run.
     fn dirty_warning(&self) -> Option<String> {
         let (count, head) = self.dirty.as_ref().filter(|(count, _)| *count > 0)?;
+        if *count == crate::worker::UNCHECKED_CHANGES {
+            return Some(format!(
+                "uncommitted changes not checked (repository filters or includes need qualification) · workers see HEAD {head}"
+            ));
+        }
         let (noun, verb) = if *count == 1 {
             ("change", "is")
         } else {
@@ -520,8 +525,118 @@ impl Autopilot {
     ) -> Result<String, String> {
         let goal = goal.trim();
         if !text(goal, 4096) {
-            return Err("Usage: /go GOAL (1–4096 bytes without control characters)".into());
+            return Err("Usage: /go GOAL, or /go to run the open plan (GOAL is 1–4096 bytes without control characters)".into());
         }
+        self.admit(model, max_repairs, tasks)?;
+        if tasks.planner.active() || tasks.planner.checkpoint().is_some() {
+            if self.stopped_draft(tasks) {
+                return Err("The stopped autopilot's plan draft is open; /resume to continue it or /plan-cancel to discard".into());
+            }
+            return Err("A plan draft is open; /go with no goal runs it, or /plan-save or /plan-cancel it before /go GOAL".into());
+        }
+        if let Some(scope) = &tasks.canonical_scope {
+            scope_blocker(scope, goal)?;
+        }
+        self.begin(goal, model, max_repairs, tasks, Phase::Scoping, None)
+    }
+
+    /// Bare `/go`: run a plan the user already reviewed instead of planning.
+    /// An open draft is saved unchanged; otherwise the mission's saved, still
+    /// proposed tasks run. Either way no planner request is made, and nothing
+    /// changes when the plan is refused.
+    pub fn start_plan(
+        &mut self,
+        model: &str,
+        max_repairs: u32,
+        tasks: &TaskControl,
+    ) -> Result<String, String> {
+        self.admit(model, max_repairs, tasks)?;
+        if self.stopped_draft(tasks) {
+            return Err("The stopped autopilot's plan draft is open; /resume to continue it or /plan-cancel to discard".into());
+        }
+        if tasks.planner.active() {
+            return Err("A plan is still being generated; wait for the draft, then /go".into());
+        }
+        if let Some(draft) = tasks.planner.checkpoint() {
+            if draft.plan.architecture.is_some() {
+                return Err(
+                    "The open draft is an Architect repair revision; /plan-save it instead of /go"
+                        .into(),
+                );
+            }
+            draft
+                .validate()
+                .map_err(|error| format!("The open plan draft is not valid: {error}"))?;
+            lint_refusal(&draft.plan)?;
+            let goal = plan_goal(&draft.plan)?;
+            return self.begin(
+                &goal,
+                model,
+                max_repairs,
+                tasks,
+                Phase::Saving,
+                Some(vec![]),
+            );
+        }
+        let snapshot = tasks
+            .snapshot
+            .as_ref()
+            .ok_or("Tasks are not loaded yet; try /go again")?;
+        let claimed: BTreeSet<u64> = self
+            .saved
+            .as_ref()
+            .map(|saved| saved.roots().into_iter().collect())
+            .unwrap_or_default();
+        let mut ids: Vec<u64> = Vec::new();
+        let mut goal = None;
+        for receipt in &snapshot.receipts {
+            let Action::Plan { plan } = &receipt.request.action else {
+                continue;
+            };
+            if plan.architecture.is_some() {
+                continue;
+            }
+            let proposed: Vec<u64> = (receipt.task..receipt.task + plan.tasks.len() as u64)
+                .filter(|id| !claimed.contains(id) && !ids.contains(id))
+                .filter(|id| {
+                    snapshot.tasks.iter().any(|task| {
+                        task.id == *id
+                            && task.status == TaskStatus::Proposed
+                            && task.policy.is_some()
+                            && task.repair_of.is_none()
+                    })
+                })
+                .collect();
+            if proposed.is_empty() {
+                continue;
+            }
+            lint_refusal(plan)?;
+            goal = Some(plan_goal(plan)?);
+            ids.extend(proposed);
+        }
+        let Some(goal) = goal else {
+            return Err("Usage: /go GOAL, or /go to run the open plan; there is no open plan draft or saved proposed task to run".into());
+        };
+        ids.sort_unstable();
+        for id in &ids {
+            let Some(task) = snapshot.tasks.iter().find(|task| task.id == *id) else {
+                continue;
+            };
+            if let Some(dep) = task
+                .dependencies
+                .iter()
+                .find(|dep| !ids.contains(dep) && snapshot.dependency_source(**dep).is_err())
+            {
+                return Err(format!(
+                    "Task #{id} depends on #{dep}, which is not accepted and not part of this run; nothing changed. Finish or accept #{dep} first, or /cancel-task #{id}"
+                ));
+            }
+        }
+        self.begin(&goal, model, max_repairs, tasks, Phase::Running, Some(ids))
+    }
+
+    /// Checks shared by every way of starting a run.
+    fn admit(&self, model: &str, max_repairs: u32, tasks: &TaskControl) -> Result<(), String> {
         if !text(model, 200) {
             return Err("Autopilot needs a selected model".into());
         }
@@ -539,22 +654,30 @@ impl Autopilot {
         if let Some(blocker) = crate::doctor::sandbox_blocker() {
             return Err(blocker);
         }
-        if tasks.planner.active() || tasks.planner.checkpoint().is_some() {
-            if let Some(saved) = self
-                .saved
-                .as_ref()
-                .filter(|saved| saved.active() && saved.paused)
-            {
-                if matches!(&saved.plan_request, Some(request) if tasks.planner.active() || draft_matches(tasks, request))
-                {
-                    return Err("The stopped autopilot's plan draft is open; /resume to continue it or /plan-cancel to discard".into());
-                }
-            }
-            return Err("A plan draft is open; /plan-save or /plan-cancel it before /go".into());
-        }
-        if let Some(scope) = &tasks.canonical_scope {
-            scope_blocker(scope, goal)?;
-        }
+        Ok(())
+    }
+
+    /// The open draft belongs to a stopped autopilot run.
+    fn stopped_draft(&self, tasks: &TaskControl) -> bool {
+        self.saved
+            .as_ref()
+            .filter(|saved| saved.active() && saved.paused)
+            .is_some_and(|saved| {
+                matches!(&saved.plan_request, Some(request) if tasks.planner.active() || draft_matches(tasks, request))
+            })
+    }
+
+    /// Record a new run. `plan` is `None` for a goal still to be planned,
+    /// `Some(empty)` for an open draft to save, and the saved task ids to run.
+    fn begin(
+        &mut self,
+        goal: &str,
+        model: &str,
+        max_repairs: u32,
+        tasks: &TaskControl,
+        phase: Phase,
+        plan: Option<Vec<u64>>,
+    ) -> Result<String, String> {
         let id = format!(
             "{:x}",
             Sha256::digest(format!(
@@ -566,13 +689,14 @@ impl Autopilot {
             ))
         )[..16]
             .to_string();
+        let ids = plan.clone().unwrap_or_default();
         self.saved = Some(Saved {
             version: VERSION,
             id,
             goal: goal.into(),
             model: model.into(),
             max_repairs,
-            phase: Phase::Scoping,
+            phase,
             paused: false,
             started: now(),
             finished: None,
@@ -581,13 +705,13 @@ impl Autopilot {
             plan_errors: vec![],
             plan_request: None,
             save_request: None,
-            first: None,
+            first: ids.first().copied(),
             count: 0,
             retry_cancelled: BTreeSet::new(),
             notice: String::new(),
             report: None,
             branch: None,
-            adopted: BTreeSet::new(),
+            adopted: ids.iter().copied().collect(),
             round: 0,
             stale: false,
             done: 0,
@@ -601,8 +725,12 @@ impl Autopilot {
         self.job = None;
         self.finished_notice = None;
         self.clock = (std::time::Instant::now(), 0);
+        let stages = match &plan {
+            None => "plan → approve → dispatch → review/repair",
+            Some(_) => "reviewed plan → approve → dispatch → review/repair",
+        };
         self.notice = format!(
-            "Autopilot started · plan → approve → dispatch → review/repair (max {max_repairs} repairs per task) · F5 pauses"
+            "Autopilot started · {stages} (max {max_repairs} repairs per task) · F5 pauses"
         );
         if let Some(warning) = self.saved.as_ref().and_then(Saved::dirty_warning) {
             self.notice.push_str(&format!(" · {warning}"));
@@ -808,7 +936,8 @@ impl Autopilot {
                 Some(goal) if goal.starts_with(char::is_whitespace) && !goal.trim().is_empty() => {
                     self.start(goal, model, max_repairs, tasks)
                 }
-                _ => Err("Usage: /go GOAL".into()),
+                Some("") => self.start_plan(model, max_repairs, tasks),
+                _ => Err("Usage: /go GOAL, or /go to run the open plan".into()),
             },
         }
     }
@@ -1160,6 +1289,15 @@ impl Autopilot {
     }
 
     fn fail(&mut self, tasks: &mut TaskControl, notice: String) {
+        self.fail_with_next(tasks, notice, None);
+    }
+
+    fn fail_with_next(
+        &mut self,
+        tasks: &mut TaskControl,
+        notice: String,
+        next: Option<(String, u32)>,
+    ) {
         let elapsed = self.elapsed();
         let totals = tasks
             .snapshot
@@ -1175,6 +1313,12 @@ impl Autopilot {
                 "Reason",
                 clean(&notice, 1024)
             );
+            if let Some((next, repairs)) = &next {
+                report.push_str(&format!("\n{:<LABEL$}{repairs}", "Repairs"));
+                if !next.is_empty() {
+                    report.push_str(&format!("\n{:<LABEL$}{}", "Next", clean(next, 300)));
+                }
+            }
             if let Some(warning) = saved.dirty_warning() {
                 report.push_str(&format!("\n{:<LABEL$}{warning}", "Warning"));
             }
@@ -1183,6 +1327,15 @@ impl Autopilot {
             }
             saved.report = Some(report);
         }
+        let notice = match next.as_ref() {
+            Some((next, _)) if !next.is_empty() => format!("{notice} {next}"),
+            _ => notice,
+        };
+        let repairs = next
+            .as_ref()
+            .map(|(_, repairs)| format!("{GAP}{}", plural(*repairs, "repair")))
+            .unwrap_or_default();
+        let notice = format!("{notice}{repairs}");
         let totals = totals
             .map(|line| format!("{GAP}{line}"))
             .unwrap_or_default();
@@ -1407,6 +1560,17 @@ impl Autopilot {
         for family in families.iter().filter(|f| !held_or_done(f, tasks)) {
             if let Some(cause) = find(family.head).and_then(|head| sandbox_failure(tasks, head)) {
                 self.fail(tasks, format!("{cause}. {}", crate::doctor::BWRAP_FIX));
+                return Ok(None);
+            }
+            if let Some(cause) = find(family.head).and_then(|head| too_large_failure(tasks, head)) {
+                // The last sentence of the shared message is the way forward.
+                let (reason, next) = cause.rsplit_once(". ").unwrap_or((&cause, ""));
+                let repairs: u32 = families.iter().map(|family| family.repairs).sum();
+                self.fail_with_next(
+                    tasks,
+                    format!("{reason}."),
+                    Some((next.to_string(), repairs)),
+                );
                 return Ok(None);
             }
         }
@@ -1802,6 +1966,18 @@ fn sandbox_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
         .then(|| clean(&evidence.detail, 300))
 }
 
+/// Failure text when the head's approved files exceed the worker's bounds. The
+/// run's evidence carries the typed `failure_code`; repairing cannot fix it.
+fn too_large_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
+    if head.status != TaskStatus::Failed {
+        return None;
+    }
+    let evidence = tasks.store().evidence(head.id).ok()?;
+    let evidence = serde_json::from_str::<crate::worker::Evidence>(&evidence).ok()?;
+    (evidence.failure_code.as_deref() == Some(crate::worker::FILE_TOO_LARGE))
+        .then(|| clean(&evidence.detail, 300))
+}
+
 const INTERRUPTED: &str = "run interrupted";
 
 /// Why an interrupted run cannot be recovered automatically.
@@ -1868,6 +2044,27 @@ fn unattended_lint(plan: &crate::planner::Plan) -> Result<(), String> {
         Ok(())
     } else {
         Err(findings.join("; "))
+    }
+}
+
+/// Reviewing a plan is the approval of its files and checks, but autopilot
+/// still refuses what it would refuse from the planner.
+fn lint_refusal(plan: &crate::planner::Plan) -> Result<(), String> {
+    unattended_lint(plan).map_err(|error| {
+        format!(
+            "The plan cannot run unattended and nothing changed: {}. Fix it with /plan-revise (draft) or run it by hand with /approve",
+            clean(&error, 600)
+        )
+    })
+}
+
+/// The goal autopilot shows for a plan it adopts: the `/plan` prompt.
+fn plan_goal(plan: &crate::planner::Plan) -> Result<String, String> {
+    let goal = clean(plan.prompt.trim(), 4096);
+    if text(&goal, 4096) {
+        Ok(goal)
+    } else {
+        Err("The plan has no usable prompt to show as the goal".into())
     }
 }
 

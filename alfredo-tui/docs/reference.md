@@ -29,6 +29,18 @@ requests 8192. Evidence records the requested temperature and limit. An exhauste
 dependents stay blocked, and independent work continues. Invalid plans are retried
 once with the validation error appended, then autopilot stops.
 
+Plan first: bare `/go` (no goal) runs a plan you already reviewed instead of planning.
+With a `/plan` draft open it saves the draft unchanged (`/plan-save`) and runs those
+tasks; with no draft it runs the mission's saved `/plan-save` tasks that are still
+`proposed` (and not already part of a finished run). No planner request is made. The
+goal shown is the plan's `/plan` prompt. Your review stands in for autopilot's own
+approval of the files and check, but the same unattended lint applies; a plan that
+fails it (or a draft that is still generating, a repair revision, or a draft of a
+stopped autopilot) is refused with the reason, and the draft and tasks are untouched.
+`/go GOAL` with a draft open still refuses and names bare `/go`. With neither a draft
+nor saved proposed tasks, bare `/go` answers `Usage: /go GOAL, or /go to run the open
+plan`.
+
 Without a usable `/usr/bin/bwrap`, `/go`, `--go` and `/run` refuse before any model
 call with `Coding workers need bubblewrap: sudo apt install bubblewrap` (the same
 executable check as `--doctor`). If the sandbox still fails to start during a run, that
@@ -39,6 +51,14 @@ and the fix. Classified as a sandbox failure: the provider refusing an untrusted
 setup refusal as the first line of stderr (never `execvp` or bind-mount errors); ordinary failing checks stay repairable. The
 class is the typed `failure_code` in the run's evidence. `ALFREDO_TEST_BWRAP_PATH` is a
 test-only seam that redirects only the preflight probe, never the executable a run uses.
+
+A worker reads and rewrites each approved file whole, so an approved file over 64 KiB (or
+approved files totalling over 96 KiB) fails the run before any model call with a typed
+`file-too-large` `failure_code`: `calc.py is 154 KiB; workers can edit files up to 64 KiB.
+Split the file, or edit it by hand.` The same text shows after a manual `/run`. Autopilot
+does not repair it (no repair spent, no larger-model or `--max-repairs` advice) and the
+summary adds a `Next` row. The planning lint rejects a draft that approves a committed file
+over 64 KiB with the same message, so the failure comes at plan time.
 
 Workers see only the committed `HEAD`. When `/go` starts with tracked modifications
 or untracked, non-ignored files, the start notice and the run's summary carry a
@@ -654,7 +674,9 @@ approval. `/run` claims a durable run and creates a detached worktree from commi
 HEAD. Dirty working files are not copied. The model returns complete files as
 FILE blocks (see "Worker answer format"), and Rust rejects unapproved paths before
 writing. The approved check
-runs in Bubblewrap with private network/process namespaces, system tools mounted
+runs in Bubblewrap with private network, process, IPC (SysV shared memory, semaphores
+and queues) and UTS namespaces, plus a cgroup namespace where the kernel allows it;
+the network namespace is always required. System tools mounted
 read-only, and only the isolated worktree writable. Host home directories and
 external toolchains are unavailable. Git filters/includes are rejected at preflight.
 

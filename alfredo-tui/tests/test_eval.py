@@ -6,12 +6,14 @@ import http.server
 import io
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 EVAL = ROOT / 'alfredo-tui/eval'
@@ -28,6 +30,9 @@ def load(name):
 
 run_eval = load('run_eval')
 schema_check = load('schema_check')
+# These tests grade author-written scripted answers, never model output, so without bwrap they may grade
+# unsandboxed. The sandboxed path is covered by test_eval_grader.py, whose live tests CI runs with bwrap.
+NO_SANDBOX_AVAILABLE = run_eval.sandbox_tools() is None
 
 
 def good_trial(task='T1-add-function', kind='positive', passed=True):
@@ -63,7 +68,7 @@ class TaskSetTests(unittest.TestCase):
             self.assertIn('workers', task['answers'])
 
     def test_every_check_fails_on_the_untouched_repo(self):
-        self.assertEqual([], run_eval.validate_tasks(self.tasks))
+        self.assertEqual([], run_eval.validate_tasks(self.tasks, unsafe_unsandboxed=NO_SANDBOX_AVAILABLE))
 
     def test_scripted_answers_pass_every_positive_check_and_never_the_control(self):
         for task in self.tasks:
@@ -78,7 +83,7 @@ class TaskSetTests(unittest.TestCase):
                         wrote = True
                 run_eval.git(repo, 'add', '-A')
                 run_eval.git(repo, '-c', 'commit.gpgSign=false', 'commit', '-qm', 'answer', '--allow-empty')
-                ok, output = run_eval.grade(task, repo, 'HEAD')
+                ok, output = run_eval.grade(task, repo, 'HEAD', unsafe_unsandboxed=NO_SANDBOX_AVAILABLE)
                 if task['kind'] == 'positive':
                     self.assertTrue(ok, output)
                 else:
@@ -94,7 +99,7 @@ class TaskSetTests(unittest.TestCase):
                 (repo / file['path']).write_text(file['content'])
             run_eval.git(repo, 'add', '-A')
             run_eval.git(repo, '-c', 'commit.gpgSign=false', 'commit', '-qm', 'first')
-            self.assertFalse(run_eval.grade(task, repo, 'HEAD')[0])
+            self.assertFalse(run_eval.grade(task, repo, 'HEAD', unsafe_unsandboxed=NO_SANDBOX_AVAILABLE)[0])
 
     def test_selector_accepts_prefixes_and_rejects_unknown_ids(self):
         self.assertEqual(['T1-add-function'], [t['id'] for t in run_eval.load_tasks(EVAL, ['T1'])])
@@ -103,6 +108,25 @@ class TaskSetTests(unittest.TestCase):
 
     def test_grading_without_a_candidate_fails(self):
         self.assertFalse(run_eval.grade(self.tasks[0], Path('/nonexistent'), None)[0])
+
+
+class SandboxToolTests(unittest.TestCase):
+    def test_accepts_only_the_trusted_absolute_installs(self):
+        with mock.patch.object(run_eval.Path, 'is_file', return_value=True), \
+                mock.patch('shutil.which', side_effect=AssertionError('PATH must not be consulted')):
+            self.assertEqual(('/usr/bin/bwrap', '/usr/bin/prlimit'), run_eval.sandbox_tools())
+
+    def test_path_lookup_never_supplies_the_tools(self):
+        with mock.patch.object(run_eval.Path, 'is_file', return_value=False), \
+                mock.patch('shutil.which', side_effect=AssertionError('PATH must not be consulted')):
+            self.assertIsNone(run_eval.sandbox_tools())
+
+    def test_one_helper_decides_the_grading_refusal(self):
+        with mock.patch.object(run_eval, 'sandbox_tools', return_value=None):
+            self.assertEqual(run_eval.SANDBOX_MISSING, run_eval.grading_refusal())
+            self.assertIsNone(run_eval.grading_refusal(unsafe_unsandboxed=True))
+        with mock.patch.object(run_eval, 'sandbox_tools', return_value=('/usr/bin/bwrap', '/usr/bin/prlimit')):
+            self.assertIsNone(run_eval.grading_refusal())
 
 
 class SchemaTests(unittest.TestCase):
@@ -115,7 +139,9 @@ class SchemaTests(unittest.TestCase):
         summary, metrics, warnings, broken = run_eval.aggregate(trials, tasks, config)
         return {'schema_version': 1, 'agent': 'alfredo', 'backend': 'fixture', 'model': 'fixture',
                 'config': {'trials': 3, 'tasks': ['T1-add-function'], 'started_at': 'now', 'cpus': 2,
-                           'agent_version': None}, 'trials': trials, 'tasks': summary, 'metrics': metrics,
+                           'agent_version': None, 'binary': '/x/target/release/alfredo-tui',
+                           'profile': 'release'},
+                'trials': trials, 'tasks': summary, 'metrics': metrics,
                 'warnings': warnings, 'likely_broken': broken}
 
     def test_valid_document_passes(self):
@@ -130,6 +156,8 @@ class SchemaTests(unittest.TestCase):
             (lambda d: d['metrics'].pop('M16'), "missing required 'M16'"),
             (lambda d: d['trials'][0].update(wall_s=-1), 'minimum'),
             (lambda d: d.update(backend='cloud'), 'not in'),
+            (lambda d: d['config'].update(profile='fast'), 'not in'),
+            (lambda d: d['metrics']['M4']['secondary'].update(per_task='x'), 'expected number|null|object'),
         ]:
             document = copy.deepcopy(self.document())
             mutate(document)
@@ -140,8 +168,8 @@ class SchemaTests(unittest.TestCase):
 
 
 class AggregateTests(unittest.TestCase):
-    def run_aggregate(self, trials, tasks, backend='fixture', count=3):
-        return run_eval.aggregate(trials, tasks, {'trials': count, 'backend': backend})
+    def run_aggregate(self, trials, tasks, backend='fixture', count=3, **config):
+        return run_eval.aggregate(trials, tasks, {'trials': count, 'backend': backend, **config})
 
     def test_zero_pass_rate_on_positive_tasks_flags_a_broken_grader(self):
         tasks = [{'id': 'A', 'kind': 'positive'}]
@@ -211,6 +239,80 @@ class AggregateTests(unittest.TestCase):
         self.assertFalse(summary['A']['as_expected'])
         self.assertTrue(summary['C']['as_expected'])
         self.assertIn('fixture_mismatch', [w['code'] for w in warnings])
+
+
+    def test_per_task_medians_expose_a_regression_the_global_median_hides(self):
+        tasks = [{'id': 'A', 'kind': 'positive'}, {'id': 'B', 'kind': 'positive'}, {'id': 'C', 'kind': 'positive'}]
+        trials = []
+        for task, turns, calls in [('A', 2, 2), ('B', 2, 2), ('C', 3, 4)]:
+            for _ in range(3):
+                trial = good_trial(task)
+                trial.update(turns=turns, tool_calls=calls)
+                trials.append(trial)
+        _s, metrics, _w, _b = self.run_aggregate(trials, tasks)
+        self.assertEqual(2, metrics['M4']['value'])  # the global median is blind to C
+        self.assertEqual({'A': 2, 'B': 2, 'C': 3}, metrics['M4']['secondary']['per_task'])
+        self.assertEqual({'A': 2, 'B': 2, 'C': 4}, metrics['M5']['secondary']['per_task'])
+        self.assertEqual({'A': 120, 'B': 120, 'C': 120}, metrics['M6']['secondary']['per_task'])
+        self.assertEqual(120, metrics['M6']['secondary']['peak_ctx_max'])
+
+    def test_m3_reports_repairs_per_accepted_task_for_each_task(self):
+        tasks = [{'id': 'A', 'kind': 'positive'}, {'id': 'B', 'kind': 'positive'}]
+        trials = [good_trial('A') for _ in range(3)] + [good_trial('B') for _ in range(3)]
+        for trial in trials[3:]:
+            trial.update(repairs=1, repairs_accepted=1, tasks_accepted=1)
+        _s, metrics, _w, _b = self.run_aggregate(trials, tasks)
+        secondary = metrics['M3']['secondary']
+        self.assertAlmostEqual(3 / 6, secondary['repairs_per_accepted_task'], places=3)  # the global figure
+        self.assertEqual({'A': 0.0, 'B': 1.0}, secondary['per_task'])
+
+    def test_per_task_is_null_when_a_task_produced_no_value(self):
+        tasks = [{'id': 'A', 'kind': 'positive'}, {'id': 'B', 'kind': 'positive'}]
+        trials = [good_trial('A'), good_trial('B')]
+        trials[1].update(turns=None, unavailable={'turns': 'not counted'})
+        _s, metrics, _w, _b = self.run_aggregate(trials, tasks, count=1)
+        self.assertEqual({'A': 2, 'B': None}, metrics['M4']['secondary']['per_task'])
+
+    def test_profile_is_derived_from_the_binary_path(self):
+        for path, profile in [('/x/target/debug/alfredo-tui', 'debug'), ('/x/target/release/alfredo-tui', 'release'),
+                              ('/opt/bin/alfredo-tui', 'unknown'),
+                              ('/work/release/proj/target/debug/alfredo-tui', 'debug'),
+                              ('/opt/debug/bin/alfredo-tui', 'unknown'),
+                              ('/tmp/tgt/release/alfredo-tui', 'release')]:
+            self.assertEqual(profile, run_eval.binary_profile(Path(path)), path)
+
+    def test_debug_profile_warns_on_m11_and_m16_and_release_does_not(self):
+        tasks = [{'id': 'A', 'kind': 'positive'}]
+        trials = [good_trial('A')]
+        _s, metrics, warnings, broken = self.run_aggregate(
+            trials, tasks, count=1, binary='/x/target/debug/alfredo-tui', profile='debug')
+        self.assertFalse(broken)
+        warning = next(w for w in warnings if w['code'] == 'debug_profile')
+        self.assertIn('M11', warning['message'])
+        self.assertIn('M16', warning['message'])
+        for key in ('M11', 'M16'):
+            self.assertIn('debug', metrics[key]['note'])
+        for profile in ('release', None):
+            _s, metrics, warnings, _b = self.run_aggregate(
+                trials, tasks, count=1, binary='/x/target/release/alfredo-tui', profile=profile)
+            self.assertNotIn('debug_profile', [w['code'] for w in warnings])
+            self.assertNotIn('debug', metrics['M11'].get('note', ''))
+
+    def test_m16_reports_the_size_of_the_binary_under_test(self):
+        tasks = [{'id': 'A', 'kind': 'positive'}]
+        with tempfile.TemporaryDirectory() as directory:
+            binary = Path(directory) / 'alfredo-tui'
+            binary.write_bytes(b'x' * 4096)
+            for profile, release_kb in (('release', 4), ('debug', None)):
+                _s, metrics, _w, _b = self.run_aggregate(
+                    [good_trial('A')], tasks, count=1, binary=str(binary), profile=profile)
+                self.assertEqual(4, metrics['M16']['secondary']['binary_kb'])
+                self.assertEqual(release_kb, metrics['M16']['secondary']['release_binary_kb'])
+
+    def test_missing_binary_gives_null_sizes(self):
+        _s, metrics, _w, _b = self.run_aggregate([good_trial('A')], [{'id': 'A', 'kind': 'positive'}], count=1)
+        self.assertIsNone(metrics['M16']['secondary']['binary_kb'])
+        self.assertIsNone(metrics['M16']['secondary']['release_binary_kb'])
 
 
 class RecorderTests(unittest.TestCase):
