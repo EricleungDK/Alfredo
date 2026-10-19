@@ -64,6 +64,18 @@ alfredo-tui --go "add calc.py with tests" \
 #   notify-send "Alfredo $ALFREDO_STATE" "$ALFREDO_ACCEPTED/$ALFREDO_TOTAL accepted $ALFREDO_BRANCH"
 ```
 
+Plan first: bare `/go` (no goal) runs a plan you already reviewed instead of planning.
+With a `/plan` draft open it saves the draft unchanged (`/plan-save`) and runs those
+tasks; with no draft it runs the mission's saved `/plan-save` tasks that are still
+`proposed` (and not already part of a finished run). No planner request is made. The
+goal shown is the plan's `/plan` prompt. Your review stands in for autopilot's own
+approval of the files and check, but the same unattended lint applies; a plan that
+fails it (or a draft that is still generating, a repair revision, or a draft of a
+stopped autopilot) is refused with the reason, and the draft and tasks are untouched.
+`/go GOAL` with a draft open still refuses and names bare `/go`. With neither a draft
+nor saved proposed tasks, bare `/go` answers `Usage: /go GOAL, or /go to run the open
+plan`.
+
 Without a usable `/usr/bin/bwrap`, `/go`, `--go` and `/run` refuse before any model
 call with `Coding workers need bubblewrap: sudo apt install bubblewrap` (the same
 executable check as `--doctor`). If the sandbox still fails to start during a run, that
@@ -680,7 +692,9 @@ approval. `/run` claims a durable run and creates a detached worktree from commi
 HEAD. Dirty working files are not copied. The model returns complete files as
 FILE blocks (see "Worker answer format"), and Rust rejects unapproved paths before
 writing. The approved check
-runs in Bubblewrap with private network/process namespaces, system tools mounted
+runs in Bubblewrap with private network, process, IPC (SysV shared memory, semaphores
+and queues) and UTS namespaces, plus a cgroup namespace where the kernel allows it;
+the network namespace is always required. System tools mounted
 read-only, and only the isolated worktree writable. Host home directories and
 external toolchains are unavailable. Git filters/includes are rejected at preflight.
 

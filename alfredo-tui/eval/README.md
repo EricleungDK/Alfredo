@@ -21,12 +21,44 @@ trials). CI runs a one-trial pass of it (`tests/eval_smoke.py`).
    - **Claude Code**: run it with the goal on stdin in the temp repo (see below).
 3. Grade the candidate without reading any screen or log: `git archive` the `alfredo/go-*`
    branch (Claude Code: a commit of the final working tree), extract it, and run the task's
-   `check.sh` there. Exit 0 is a pass. No branch means fail.
+   `check.sh` in the grading sandbox (below). Exit 0 is a pass. No branch means fail.
 4. Delete the temp directory (use `--keep` to inspect it).
 
 `check.sh` lives outside the repo the agent sees, so an agent cannot read or edit its grader.
 `python3 alfredo-tui/eval/run_eval.py --agent alfredo --validate-tasks` checks that every
 `check.sh` fails on its untouched repo.
+
+### Grading sandbox
+
+The candidate is model-written code, and `check.sh` imports it (`from mathx import ...`), so
+grading runs it under bubblewrap with the same profile the worker uses
+(`alfredo-tui/src/worker.rs`, `check_request`):
+
+- `bwrap --unshare-all --unshare-net --die-with-parent --new-session` with a tmpfs `/` and a fresh
+  `/dev`, `/proc` and `/tmp`. The host home directory, your files and the network are not visible.
+- System directories (`/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/etc`) are read-only.
+- Only the extracted export is bound read-write, and `HOME` points at it. `check.sh` is bound
+  read-only at `/grader/check.sh`.
+- The check runs under `prlimit` with the worker's limits: address space 8 GiB, file size 32 MiB,
+  1024 open files, 128 processes. The timeout is 60 s.
+
+Archive members are checked before extraction. An absolute or `..` path, a symlink whose target
+leaves the export, a hardlink outside the archive, or a device or fifo makes the grade fail with
+`refused: ...` and nothing is extracted. After extraction, any symlink that still resolves outside
+the export also fails the grade.
+
+Requirements: `/usr/bin/bwrap` (package `bubblewrap`) and `/usr/bin/prlimit` (`util-linux`). CI
+installs both. Without them grading refuses to run and reports
+`grading sandbox unavailable`, so Alfredo and Claude Code runs stop before the first trial.
+`--unsafe-unsandboxed-grading` is the only way to grade on the host without the sandbox. It
+runs the candidate as you, with your files and network, so use it only on a disposable machine.
+When the sandbox is present the flag changes nothing. `tests/eval_smoke.py` passes no such flag:
+it needs bwrap, and in CI it grades inside the sandbox. `tests/test_eval_grader.py` runs the
+#207 attack (a candidate that writes a marker outside the export) and its live bwrap tests are
+skipped without `/usr/bin/bwrap`.
+
+The sandbox covers the grader only. It does not sandbox the agent run itself (for Claude Code
+see the residual risk below).
 
 ## Tasks
 
@@ -62,9 +94,10 @@ consumed in order and the last repeats; a reply is `{"files": [...]}` or `{"pros
 | `--tasks IDS` | comma-separated ids or prefixes |
 | `--out FILE` | write JSON there (default stdout); progress goes to stderr |
 | `--timeout S` | per trial: fixture 120, ollama 900, claude-code 600 |
-| `--binary PATH` | `alfredo-tui` binary (default `$ALFREDO_TUI_BINARY`, else `target/debug`) |
+| `--binary PATH` | `alfredo-tui` binary (default `$ALFREDO_TUI_BINARY`, else `target/debug`). Use `target/release/alfredo-tui` for M11/M16 that compare with the scoreboard baselines: a debug build adds a `debug_profile` warning and a note on both metrics |
 | `--ollama-endpoint URL` | default `http://127.0.0.1:11434`; must be a loopback address |
 | `--tmp-root DIR`, `--keep` | where temp repos go; keep them |
+| `--unsafe-unsandboxed-grading` | grade on the host when bubblewrap is missing (see Grading sandbox) |
 
 Exit code: 0 ok, 1 if the run is flagged (below) or a fixture task did not grade as scripted,
 2 for usage or environment errors (missing binary, Ollama unreachable, `claude` not found).
@@ -106,6 +139,7 @@ Without Bash, Claude Code cannot run tests itself, so it may score lower than Al
 runs the approved check) on tasks like T5. Only Anthropic API-key, OAuth or subscription
 login is supported; Bedrock, Vertex, `apiKeyHelper` and custom-header setups are not passed
 through. It uses your logged-in Claude Code and costs real tokens, so start with `--tasks T1 --trials 1`.
+The grade of its result runs in the grading sandbox, but the Claude Code process itself is not sandboxed.
 
 ## Output
 
@@ -115,6 +149,7 @@ through. It uses your logged-in Claude Code and costs real tokens, so start with
   planner, peak_ctx}, errors{malformed, refused, sandbox}, repairs, wall_s, ttft_ms, rss_kb,
   exit_code, panic`, plus `cold_start_ms`, `overhead_s`, `graded_ref`, `grade_output`, `notes`.
   A value the mode cannot produce is `null`, with the reason in that trial's `unavailable`.
+- `config.binary` is the resolved binary path and `config.profile` its cargo profile (`debug`, `release`, or `unknown` when the binary's parent directory is neither, e.g. a copied or renamed binary, which gets no warning and no note; both `null` for Claude Code).
 - `tasks`: pass counts per task; `metrics`: `M1`..`M16`, each `{name, value, unit, reason}`
   where `value` is `null` with a `reason` when it cannot be produced; `warnings`;
   `likely_broken`.
@@ -123,18 +158,18 @@ through. It uses your logged-in Claude Code and costs real tokens, so start with
 | --- | --- |
 | M1 | pass@1: share of trials that pass |
 | M2 | pass^3: mean over tasks of P(3 distinct trials all pass); needs >= 3 trials |
-| M3 | repair recovery rate: repairs that ended accepted / repairs attempted (`null`, "no repair attempted", if none). `secondary.repairs_per_accepted_task` = repairs / accepted tasks (Alfredo only) |
-| M4 | turns per task: model requests per trial, median (Alfredo planner + worker + repair requests; Claude Code `num_turns`) |
-| M5 | tool/command calls per task, median: Alfredo worker runs + check runs; Claude Code `tool_use` blocks |
-| M6 | tokens per task: prompt + completion tokens per trial, median; `secondary.peak_ctx_max` is the largest prompt + completion of one request. Fixture counts are synthetic (`ceil(chars / 4)`, deterministic), not model counts. Alfredo trials also cross-check the server's planner count against the `usage` saved in the plan receipt and raise a `planner_token_mismatch` warning if they differ |
+| M3 | repair recovery rate: repairs that ended accepted / repairs attempted (`null`, "no repair attempted", if none). `secondary.repairs_per_accepted_task` = repairs / accepted tasks over all tasks (Alfredo only); `secondary.per_task` = the same ratio for each task (`null` if it accepted none), the figure to compare with the per-task baseline (T2 1.0) |
+| M4 | turns per task: model requests per trial, median (Alfredo planner + worker + repair requests; Claude Code `num_turns`); `secondary.per_task` = each task's own median, because the global median hides one task regressing |
+| M5 | tool/command calls per task, median: Alfredo worker runs + check runs; Claude Code `tool_use` blocks; `secondary.per_task` as for M4 |
+| M6 | tokens per task: prompt + completion tokens per trial, median; `secondary.peak_ctx_max` is the largest prompt + completion of one request. `secondary.per_task` as for M4. Fixture counts are synthetic (`ceil(chars / 4)`, deterministic), not model counts. Alfredo trials also cross-check the server's planner count against the `usage` saved in the plan receipt and raise a `planner_token_mismatch` warning if they differ |
 | M7 | tool-call error rate: 100 x (malformed + refused + sandbox errors) / M5 calls; `null` if there were no calls |
 | M8 | harness overhead per turn (Enter to request at server, reply to screen, p50 ms): `null`. Reply-to-screen is not measured because spinner redraws make byte-level change detection unreliable at the 30 ms poll. `secondary.enter_to_request_p50_ms` is measured exactly, but for `/go` it includes preflight, git and planning preparation (about 1 s), so do not score it against the ~50 ms chat baseline; `trial.overhead_s` is the whole non-model time |
 | M9 | keystroke echo p50/p95: `null`, the `rendering_cost.rs` bench wrapper is a follow-up |
 | M10 | frame render cost p50/p95: `null`, same follow-up |
-| M11 | cold start to first frame, median ms from spawn until the header is drawn in the pty (Claude Code: first stream event) |
+| M11 | cold start to first frame, median ms from spawn until the header is drawn in the pty (Claude Code: first stream event). Debug builds are slower: see `config.profile` and the `debug_profile` warning |
 | M12 | panics/crashes: count of eval trials (all kinds) with a panic, a crash or a non-zero exit; target 0. The smoke suites are not included |
 | M13, M14, M15 | `null`: need repeated builds, a kill probe or static analysis |
-| M16 | peak RSS during `/go`: median `VmHWM` of the main `alfredo-tui` process in kB (children and process tree not sampled); `secondary.release_binary_kb` is the size of `target/release/alfredo-tui` when it exists, else `null` |
+| M16 | peak RSS during `/go`: median `VmHWM` of the main `alfredo-tui` process in kB (children and process tree not sampled); `secondary.binary_kb` is the size of the binary under test (`config.binary`); `secondary.release_binary_kb` is the same value for a release build, else `null`. A debug build carries the `debug_profile` warning |
 
 Metrics may also carry a `note` (always-true caveats) and `secondary` values.
 

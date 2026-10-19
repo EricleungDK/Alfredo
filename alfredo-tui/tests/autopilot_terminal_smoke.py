@@ -286,6 +286,25 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertIn('Autopilot ✓ done   2/2   1 repair', screen)
         self.quit(terminal)
 
+    def test_plan_first_bare_go_runs_the_open_draft_without_a_second_planner_request(self):
+        self.fixture.release_app.set()
+        terminal = self.terminal(resume=False)
+        terminal.send('/plan Make answer return 42 and add app\r')
+        self.wait_until('planner asked once', lambda: self.fixture.markers() == ['PLAN'], 60)
+        self.screen_has(terminal, 'Not saved or approved', 60)
+        # A goal with the draft open is refused and points at bare /go.
+        terminal.send('/go Something else\r')
+        self.screen_has(terminal, '/go with no goal')
+        self.assertEqual(self.statuses(), [])
+        terminal.send('/go\r')
+        self.screen_has(terminal, 'git switch alfredo/go-', 90)
+        self.assertEqual(self.statuses(), [(1, 'failed', None), (2, 'accepted', None), (3, 'accepted', 1)])
+        self.assertEqual(self.fixture.markers(), ['PLAN', 'CALC', 'REPAIR', 'APP'])
+        branches = self.git('for-each-ref', '--format=%(refname:short)', 'refs/heads/alfredo/').split()
+        self.assertEqual(len(branches), 1, branches)
+        self.assertEqual(self.git('show', f'{branches[0]}:calc.py'), 'def answer():\n    return 42')
+        self.quit(terminal)
+
     def test_failed_summary_shows_the_cause_and_a_next_step_when_the_model_writes_prose(self):
         self.fixture.prose_worker = True
         terminal = self.terminal(resume=False)

@@ -6,7 +6,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     (
         "/go",
-        "GOAL — autopilot: plan, approve, run, review/repair, integrate",
+        "[GOAL] — autopilot: plan, approve, run, review/repair, integrate; without GOAL runs the open /plan",
     ),
     ("/pause", "pause autopilot; running workers finish (F5)"),
     ("/resume", "resume a paused or restored autopilot (F5)"),

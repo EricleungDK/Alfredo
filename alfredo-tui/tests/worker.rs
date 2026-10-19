@@ -1337,6 +1337,36 @@ async fn unaccepted_conflicting_and_tampered_dependencies_never_start_the_child(
         .status()
         .unwrap()
         .success());
+    // The same refusal must hold when the merge driver lives in the worktree scope.
+    for args in [
+        vec!["config", "extensions.worktreeConfig", "true"],
+        vec![
+            "config",
+            "--worktree",
+            "merge.evil.driver",
+            "touch SHOULD_NOT_RUN",
+        ],
+    ] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&fixture.workspace)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    assert!(attempt(before.revision)
+        .await
+        .unwrap_err()
+        .contains("Custom merge configuration"));
+    assert!(!fixture.workspace.join("SHOULD_NOT_RUN").exists());
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&fixture.workspace)
+        .args(["config", "--worktree", "--remove-section", "merge.evil"])
+        .status()
+        .unwrap()
+        .success());
     let error = attempt(before.revision).await.unwrap_err();
     assert!(
         error.contains("compose cleanly") && error.contains("calc.py"),

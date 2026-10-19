@@ -3192,6 +3192,87 @@ fn on_finish_hook_is_not_run_by_stop() {
     });
     autopilot.stop(&runtime, &mut control);
     drop(release);
+
+fn plan_server() -> Server {
+    Server::new(|request, _| {
+        if planner(request) {
+            return two_task_plan();
+        }
+        let prompt = worker_prompt(request);
+        if prompt.starts_with("Implement this task: Make answer") {
+            good_calc()
+        } else if prompt.starts_with("Implement this task: Add app") {
+            app()
+        } else {
+            panic!("Unexpected prompt {prompt}")
+        }
+    })
+}
+
+fn planner_requests(server: &Server) -> usize {
+    server
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| planner(request))
+        .count()
+}
+
+fn open_draft(control: &mut TaskControl, runtime: &Runtime) {
+    control
+        .command(
+            runtime,
+            "/plan Make answer return 42 and add app",
+            "fixture",
+        )
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while control.planner.checkpoint().is_none() {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.planner.notice);
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn assert_ran_and_integrated(autopilot: &Autopilot, control: &TaskControl, fixture: &Fixture) {
+    let status = autopilot.status(control).unwrap();
+    assert_eq!(status.state, RunState::Done, "{status:?}");
+    assert_eq!((status.done, status.total, status.failed), (2, 2, 0));
+    assert!(status.branch.as_deref().unwrap().starts_with("alfredo/go-"));
+    let snapshot = fixture.store.snapshot().unwrap();
+    assert_eq!(snapshot.tasks.len(), 2, "no duplicate tasks");
+    assert!(snapshot
+        .tasks
+        .iter()
+        .all(|task| task.status == TaskStatus::Accepted));
+}
+
+#[test]
+fn bare_go_saves_the_open_draft_unchanged_and_runs_it_without_a_planner_request() {
+    let fixture = Fixture::new();
+    let server = plan_server();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    open_draft(&mut control, &runtime);
+    assert_eq!(planner_requests(&server), 1);
+
+    let error = autopilot
+        .command(&runtime, &mut control, "/go Other goal", "fixture", 2)
+        .unwrap_err();
+    assert!(error.contains("/go with no goal"), "{error}");
+    assert!(control.planner.checkpoint().is_some());
+    assert!(autopilot.status(&control).is_none());
+
+    let notice = autopilot
+        .command(&runtime, &mut control, "/go", "fixture", 2)
+        .unwrap();
+    assert!(notice.contains("reviewed plan"), "{notice}");
+    assert_eq!(
+        autopilot.status(&control).unwrap().goal,
+        "Make answer return 42 and add app"
+    );
     drive(
         &mut autopilot,
         &mut control,
@@ -3201,4 +3282,180 @@ fn on_finish_hook_is_not_run_by_stop() {
     );
     thread::sleep(Duration::from_millis(300));
     assert!(!out.exists());
+
+        "draft run",
+        finished,
+    );
+    assert_ran_and_integrated(&autopilot, &control, &fixture);
+    assert_eq!(planner_requests(&server), 1, "no second planner request");
+}
+
+#[test]
+fn bare_go_runs_saved_proposed_tasks_without_replanning_or_orphaning_them() {
+    let fixture = Fixture::new();
+    let server = plan_server();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    open_draft(&mut control, &runtime);
+    control.command(&runtime, "/plan-save", "fixture").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while control.planner.checkpoint().is_some()
+        || control.snapshot.as_ref().is_none_or(|s| s.tasks.len() < 2)
+    {
+        control.poll();
+        control.refresh(&runtime);
+        assert!(Instant::now() < deadline, "{}", control.notice);
+        thread::sleep(Duration::from_millis(5));
+    }
+
+    autopilot
+        .command(&runtime, &mut control, "/go", "fixture", 2)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "saved run",
+        finished,
+    );
+    assert_ran_and_integrated(&autopilot, &control, &fixture);
+    assert_eq!(planner_requests(&server), 1);
+    // Nothing is left to adopt once the saved tasks have run.
+    let error = autopilot
+        .command(&runtime, &mut control, "/go", "fixture", 2)
+        .unwrap_err();
+    assert!(
+        error.starts_with("Usage: /go GOAL, or /go to run the open plan"),
+        "{error}"
+    );
+}
+
+#[test]
+fn bare_go_with_nothing_to_run_says_usage() {
+    let fixture = Fixture::new();
+    let server = plan_server();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    let error = autopilot
+        .command(&runtime, &mut control, "/go", "fixture", 2)
+        .unwrap_err();
+    assert!(
+        error.starts_with("Usage: /go GOAL, or /go to run the open plan"),
+        "{error}"
+    );
+    assert!(autopilot.status(&control).is_none());
+}
+
+#[test]
+fn bare_go_refuses_a_plan_that_fails_unattended_lint_and_leaves_it_untouched() {
+    let fixture = Fixture::new();
+    let server = Server::new(|_, _| {
+        // Both tasks write calc.py with no dependency between them.
+        json!({"tasks": [
+            {"title": "One", "acceptance": ["a"], "model": "fixture", "dependencies": [],
+             "policy": {"files": ["calc.py"], "check": check("import calc")}},
+            {"title": "Two", "acceptance": ["b"], "model": "fixture", "dependencies": [],
+             "policy": {"files": ["calc.py"], "check": check("import calc")}},
+        ]})
+        .to_string()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    open_draft(&mut control, &runtime);
+    let before = control.planner.checkpoint().unwrap();
+    let error = autopilot
+        .command(&runtime, &mut control, "/go", "fixture", 2)
+        .unwrap_err();
+    assert!(error.contains("both write calc.py"), "{error}");
+    assert!(error.contains("nothing changed"), "{error}");
+    assert_eq!(control.planner.checkpoint().unwrap().plan, before.plan);
+    assert!(autopilot.status(&control).is_none());
+
+    // The same plan saved by hand is refused the same way and stays proposed.
+    control.command(&runtime, "/plan-save", "fixture").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while control.snapshot.as_ref().is_none_or(|s| s.tasks.len() < 2) {
+        control.poll();
+        control.refresh(&runtime);
+        assert!(Instant::now() < deadline, "{}", control.notice);
+        thread::sleep(Duration::from_millis(5));
+    }
+    let error = autopilot
+        .command(&runtime, &mut control, "/go", "fixture", 2)
+        .unwrap_err();
+    assert!(error.contains("both write calc.py"), "{error}");
+    let snapshot = fixture.store.snapshot().unwrap();
+    assert!(snapshot
+        .tasks
+        .iter()
+        .all(|task| task.status == TaskStatus::Proposed));
+    assert!(autopilot.status(&control).is_none());
+}
+
+#[test]
+fn go_goal_with_an_open_draft_names_bare_go_as_the_way_to_run_it() {
+    let fixture = Fixture::new();
+    let server = plan_server();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    open_draft(&mut control, &runtime);
+    let error = autopilot
+        .start("Another goal", "fixture", 2, &control)
+        .unwrap_err();
+    assert!(
+        error.contains("/go with no goal runs it") && error.contains("/plan-cancel"),
+        "{error}"
+    );
+    assert!(control.planner.checkpoint().is_some());
+    assert!(autopilot.status(&control).is_none());
+}
+
+#[test]
+fn bare_go_refuses_saved_tasks_that_depend_on_unaccepted_work_outside_the_run() {
+    let fixture = Fixture::new();
+    let server = plan_server();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    open_draft(&mut control, &runtime);
+    control.command(&runtime, "/plan-save", "fixture").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while control.snapshot.as_ref().is_none_or(|s| s.tasks.len() < 2) {
+        control.poll();
+        control.refresh(&runtime);
+        assert!(Instant::now() < deadline, "{}", control.notice);
+        thread::sleep(Duration::from_millis(5));
+    }
+    while control
+        .command(&runtime, "/cancel-task 1", "fixture")
+        .is_err()
+    {
+        control.poll();
+        assert!(Instant::now() < deadline, "{}", control.notice);
+        thread::sleep(Duration::from_millis(5));
+    }
+    while control.snapshot.as_ref().is_none_or(|s| {
+        s.tasks
+            .iter()
+            .any(|task| task.id == 1 && task.status != TaskStatus::Cancelled)
+    }) {
+        control.poll();
+        control.refresh(&runtime);
+        assert!(Instant::now() < deadline, "{}", control.notice);
+        thread::sleep(Duration::from_millis(5));
+    }
+    let error = autopilot
+        .command(&runtime, &mut control, "/go", "fixture", 2)
+        .unwrap_err();
+    assert!(
+        error.contains("#2 depends on #1") && error.contains("nothing changed"),
+        "{error}"
+    );
+    assert!(autopilot.status(&control).is_none());
+    let snapshot = fixture.store.snapshot().unwrap();
+    assert_eq!(snapshot.tasks[1].status, TaskStatus::Proposed);
 }

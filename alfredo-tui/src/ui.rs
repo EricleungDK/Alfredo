@@ -1118,7 +1118,7 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         })
     {
         lines.push(Line::from(
-            "Type /go GOAL and autopilot plans, runs and reviews it.",
+            "Type /go GOAL and autopilot plans, runs and reviews it (or /plan GOAL, review, /go).",
         ));
         lines.push(Line::from("Or chat with your local model."));
         lines.push(Line::default());
