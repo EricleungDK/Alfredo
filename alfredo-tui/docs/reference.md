@@ -295,6 +295,19 @@ is loading or busy. Model discovery bypasses this queue.
   `keep_alive` on chat, planner and worker requests. Accepts Go durations (`30m`,
   `1h30m`), integer seconds (`300`; `-1` keeps the model loaded), or `default` to
   omit the field and use the server setting.
+- `--num-ctx N` (env `ALFREDO_NUM_CTX`, 2048–262144 tokens, default unset) sets
+  Ollama `options.num_ctx` on every chat, planner, worker and repair request and on
+  the preload (so the model is not reloaded to resize its window). Unset, the option
+  is omitted and the server's window applies (4096 tokens on many installs unless
+  `OLLAMA_CONTEXT_LENGTH` is set); Alfredo's worker and repair prompts can be far
+  larger, so Ollama may then truncate them silently. With the flag set, a request
+  whose estimated prompt (bytes/3 plus the 4096-token reply budget) exceeds the
+  window is refused before sending with `prompt ≈N tokens > --num-ctx M; shorten
+  the request`. The reply budget counts, so any window of 4096 or less refuses every
+  request; use 8192 or more. After each reply that reports `prompt_eval_count` the chat shows
+  `ctx used/N` (`ctx used/default` when unset), plus "context may be truncated" from
+  95% of a set window. `--doctor` prints a `NOTE context:` line. A larger window
+  uses more VRAM (KV cache), so it is your setting; there is no default.
 - At startup, on workspace switch and on `/model NAME`, Alfredo preloads the model
   in the background (`POST /api/generate` with an empty prompt). Preload bypasses
   the inference queue; failure is only a status.
