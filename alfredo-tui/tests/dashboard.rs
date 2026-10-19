@@ -462,6 +462,25 @@ fn failed_task_pane_shows_the_check_output_tail_under_the_outcome_before_the_dif
 }
 
 #[test]
+fn too_large_failure_shows_reason_and_next_step_in_the_task_pane() {
+    let fixture = finished_fixture_with(
+        "calc.py is 154 KiB; workers can edit files up to 64 KiB. Split the file, or edit it by hand.",
+        None,
+    );
+    let screen = text(&fixture.render(140, 40));
+    assert!(
+        screen.contains("calc.py is 154 KiB; workers can edit files up to 64 KiB."),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("Next     Split the file, or edit it by hand."),
+        "{screen}"
+    );
+    assert!(!screen.contains("larger model"), "{screen}");
+    assert!(!screen.contains("/repair 1 REASON"), "{screen}");
+}
+
+#[test]
 fn successful_outcome_reads_as_passed_not_as_a_pending_review_request() {
     let evidence = serde_json::to_string(&Evidence {
         agent: None,

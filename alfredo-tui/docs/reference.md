@@ -75,6 +75,14 @@ setup refusal as the first line of stderr (never `execvp` or bind-mount errors);
 class is the typed `failure_code` in the run's evidence. `ALFREDO_TEST_BWRAP_PATH` is a
 test-only seam that redirects only the preflight probe, never the executable a run uses.
 
+A worker reads and rewrites each approved file whole, so an approved file over 64 KiB (or
+approved files totalling over 96 KiB) fails the run before any model call with a typed
+`file-too-large` `failure_code`: `calc.py is 154 KiB; workers can edit files up to 64 KiB.
+Split the file, or edit it by hand.` The same text shows after a manual `/run`. Autopilot
+does not repair it (no repair spent, no larger-model or `--max-repairs` advice) and the
+summary adds a `Next` row. The planning lint rejects a draft that approves a committed file
+over 64 KiB with the same message, so the failure comes at plan time.
+
 Workers see only the committed `HEAD`. When `/go` starts with tracked modifications
 or untracked, non-ignored files, the start notice and the run's summary carry a
 warning line such as `3 uncommitted changes are not visible to workers (based on HEAD
