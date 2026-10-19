@@ -206,7 +206,7 @@ none touch your Ollama:
   `tests/recovery_terminal_smoke.py`).
 
 A probe that fails leaves only its own rows `null`, with the error as the `reason`. Probes are
-timing-sensitive: run them first, on an otherwise idle machine. `tests/eval_smoke.py` runs them
+timing-sensitive: they run after the trials, so use an otherwise idle machine and no parallel builds. `tests/eval_smoke.py` runs them
 with tiny counts and no render probe (about 10 s).
 
 ## Limits

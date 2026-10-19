@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -353,7 +354,7 @@ class ProbeTests(unittest.TestCase):
     def test_rendering_cost_output_without_json_is_an_error_not_a_crash(self):
         self.assertIn('no JSON', probes.parse_rendering_cost('running 0 tests\n')['error'])
 
-    def test_percentiles_use_nearest_rank_and_handle_no_samples(self):
+    def test_percentiles_use_the_rounded_index_and_handle_no_samples(self):
         values = list(range(1, 101))
         self.assertEqual({'p50': 51, 'p95': 95, 'n': 100}, probes.stats(values))
         self.assertEqual({'p50': None, 'p95': None, 'n': 0}, probes.stats([]))
@@ -420,6 +421,31 @@ class ProbeTests(unittest.TestCase):
         options = run_eval.parse_args(['--agent', 'alfredo', '--probes'])
         self.assertEqual((20, 100, 3, True), (options.probe_chats, options.probe_keys,
                                               options.probe_recovery_trials, options.render_probe))
+
+    def test_a_raising_probe_nulls_only_its_own_rows_and_the_eval_still_emits_json(self):
+        options = run_eval.parse_args(['--agent', 'alfredo', '--probes', '--probe-recovery-trials', '1'])
+        options.binary = Path('/x/target/release/alfredo-tui')
+        tasks = [{'id': 'A', 'kind': 'positive'}]
+        with mock.patch.object(run_eval.probes, 'run_chat', side_effect=OSError('pty gone')), \
+                mock.patch.object(run_eval.probes, 'run_echo', return_value={'echo_ms': [1.0]}), \
+                mock.patch.object(run_eval, 'recovery_trial', side_effect=subprocess.TimeoutExpired('git', 1)), \
+                mock.patch.object(run_eval.probes, 'run_render', side_effect=RuntimeError('cargo')):
+            results = run_eval.run_probes(options, tasks)
+        _s, metrics, _w, _b = self.aggregate(results)
+        self.assertIn('pty gone', metrics['M8']['reason'])
+        self.assertIn('TimeoutExpired', metrics['M14']['reason'])
+        self.assertIn('cargo', metrics['M10']['reason'])
+        self.assertEqual(1.0, metrics['M9']['value'])
+
+    def test_debug_warning_names_the_probe_rows_only_when_probes_ran(self):
+        tasks = [{'id': 'A', 'kind': 'positive'}]
+        config = dict(binary='/x/target/debug/alfredo-tui', profile='debug')
+        _s, _m, warnings, _b = self.aggregate(probe_results(), probes={'chats': 3}, **config)
+        text = next(w for w in warnings if w['code'] == 'debug_profile')['message']
+        for key in ('M8', 'M9', 'M14'):
+            self.assertIn(key, text)
+        _s, _m, warnings, _b = self.aggregate(None, **config)
+        self.assertNotIn('M8', next(w for w in warnings if w['code'] == 'debug_profile')['message'])
 
     def test_marker_server_replies_with_the_prompt_keyed_marker_and_stamps_it(self):
         server = probes.MarkerServer()

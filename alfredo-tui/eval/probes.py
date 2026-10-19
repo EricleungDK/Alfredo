@@ -23,7 +23,7 @@ RENDER_COMMAND = ['cargo', 'test', '--release', '--locked', '--manifest-path', N
 
 
 def percentile(values, p):
-    """Nearest-rank percentile over a sorted copy; None for no samples."""
+    """Percentile by rounded index into a sorted copy (index round(p/100*(n-1))); None for no samples."""
     if not values:
         return None
     ordered = sorted(values)
@@ -197,10 +197,14 @@ def run_chat(binary, chats=DEFAULT_CHATS, model='fixture', tmp_root=None):
     except AssertionError as error:  # Terminal.pump: the TUI exited by itself
         return {'error': f'Alfredo exited during the chat probe: {str(error)[:200]}'}
     finally:
-        if terminal:
-            terminal.close()
-        server.close()
-        shutil.rmtree(root, ignore_errors=True)
+        try:
+            if terminal:
+                terminal.close()
+        finally:
+            try:
+                server.close()
+            finally:
+                shutil.rmtree(root, ignore_errors=True)
 
 
 def run_echo(binary, keys=DEFAULT_KEYS, model='fixture', tmp_root=None):
@@ -221,7 +225,11 @@ def run_echo(binary, keys=DEFAULT_KEYS, model='fixture', tmp_root=None):
     except AssertionError as error:
         return {'error': f'Alfredo exited during the echo probe: {str(error)[:200]}'}
     finally:
-        if terminal:
-            terminal.close()
-        server.close()
-        shutil.rmtree(root, ignore_errors=True)
+        try:
+            if terminal:
+                terminal.close()
+        finally:
+            try:
+                server.close()
+            finally:
+                shutil.rmtree(root, ignore_errors=True)

@@ -678,20 +678,27 @@ def recovery_trial(task, options):
 def run_probes(options, tasks):
     """All `--probes` measurements; each key is a result dict or {'error': reason}."""
     binary, results = options.binary, {}
-    print('probe: chat latency', file=sys.stderr)
-    results['chat'] = probes.run_chat(binary, options.probe_chats, options.model, options.tmp_root)
-    print('probe: keystroke echo', file=sys.stderr)
-    results['echo'] = probes.run_echo(binary, options.probe_keys, options.model, options.tmp_root)
-    print('probe: crash recovery', file=sys.stderr)
     task = next((t for t in tasks if t['kind'] == 'positive'), None)
-    if task is None:
-        results['recovery'] = {'error': 'no positive task selected for the recovery probe'}
-    else:
-        results['recovery'] = {'recovered': [recovery_trial(task, options)
-                                              for _ in range(options.probe_recovery_trials)]}
+
+    def recovery():
+        if task is None:
+            return {'error': 'no positive task selected for the recovery probe'}
+        return {'recovered': [recovery_trial(task, options) for _ in range(options.probe_recovery_trials)]}
+
+    steps = [('chat', 'chat latency', lambda: probes.run_chat(binary, options.probe_chats, options.model,
+                                                              options.tmp_root)),
+             ('echo', 'keystroke echo', lambda: probes.run_echo(binary, options.probe_keys, options.model,
+                                                                options.tmp_root)),
+             ('recovery', 'crash recovery', recovery)]
     if options.render_probe:
-        print('probe: render cost (release cargo test; slow on a cold build)', file=sys.stderr)
-        results['render'] = probes.run_render(TUI)
+        steps.append(('render', 'render cost (release cargo test; slow on a cold build)',
+                      lambda: probes.run_render(TUI)))
+    for key, label, run in steps:
+        print(f'probe: {label}', file=sys.stderr)
+        try:
+            results[key] = run()
+        except Exception as error:  # one broken probe must not lose the whole eval
+            results[key] = {'error': repr(error)[:200]}
     return results
 
 
@@ -958,8 +965,9 @@ def aggregate(trials, tasks, config, probes_result=None):
         debug_note = ('measured on a debug build: not comparable with the release baselines; '
                       'rerun with --binary target/release/alfredo-tui')
         warnings.append({'code': 'debug_profile',
-                         'message': 'binary is a debug build: M11 cold start and M16 peak RSS are not comparable '
-                                    'with the release baselines (scoreboard #159); pass --binary '
+                         'message': 'binary is a debug build: M11 cold start and M16 peak RSS'
+                                    + (', and the probe rows M8, M9 and M14,' if config.get('probes') else '')
+                                    + ' are not comparable with the release baselines (scoreboard #159); pass --binary '
                                     'target/release/alfredo-tui'})
 
     mean = statistics.fmean
