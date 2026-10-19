@@ -37,6 +37,21 @@ impl RawMetrics {
     }
 }
 impl Metrics {
+    /// `ctx used/window` once the server reported the prompt size; a warning
+    /// from 95% of a configured window, where Ollama may drop the oldest text.
+    pub fn context_fill(&self, window: Option<u32>) -> Option<String> {
+        let used = self.prompt_eval_count?;
+        let Some(window) = window else {
+            return Some(format!("ctx {used}/default"));
+        };
+        let warning = if used * 100 >= u64::from(window) * 95 {
+            " · context may be truncated"
+        } else {
+            ""
+        };
+        Some(format!("ctx {used}/{window}{warning}"))
+    }
+
     pub fn summary(&self) -> String {
         let mut parts = Vec::new();
         for (label, value) in [
