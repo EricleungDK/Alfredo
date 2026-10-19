@@ -798,7 +798,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             // Blocks until a key, a runtime worker going idle (a model, planner,
             // worker or task result may be waiting) or the timer fallback.
-            let event = match input.wait(Duration::from_millis(33))? {
+            // Wakes beyond a short burst are paced to one pass per 20 ms; keys are immediate.
+            let event = match input.wait_paced(Duration::from_millis(33))? {
                 alfredo_tui::wake::Next::Event(event) => event,
                 alfredo_tui::wake::Next::Woken | alfredo_tui::wake::Next::Timeout => continue,
             };

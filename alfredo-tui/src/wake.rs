@@ -19,6 +19,7 @@
 //! without input; an idle terminal does no more work than before.
 use crossterm::event::{self, Event};
 use std::{
+    cell::Cell,
     io,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -32,6 +33,10 @@ use tokio::{runtime::Runtime, task::JoinHandle};
 
 /// How long the reader thread blocks in `poll` before it re-checks its stop flag.
 const READER_SLICE: Duration = Duration::from_millis(250);
+
+/// Wake passes allowed back to back, then the sustained spacing between them.
+const PACE_BURST: f64 = 8.0;
+const PACE_INTERVAL: Duration = Duration::from_millis(20);
 
 enum Signal {
     Input(Event),
@@ -81,12 +86,14 @@ impl Shared {
 pub struct Input {
     receiver: Receiver<Signal>,
     shared: Arc<Shared>,
+    pace: Cell<(f64, Instant)>,
 }
 impl Input {
     pub fn new() -> Self {
         let (sender, receiver) = mpsc::channel();
         Self {
             receiver,
+            pace: Cell::new((PACE_BURST, Instant::now())),
             shared: Arc::new(Shared {
                 sender,
                 wake_queued: AtomicBool::new(false),
@@ -145,6 +152,40 @@ impl Input {
                 Err(io::Error::other("terminal input thread stopped"))
             }
         }
+    }
+
+    /// Like [`Input::wait`], but wakes are paced by a token bucket: a burst of
+    /// `PACE_BURST` passes is immediate (first-chunk and reply latency), then
+    /// one pass per `PACE_INTERVAL`, so a fast stream costs about the CPU of the
+    /// old 33 ms poll. Keys are never delayed and a held wake is never lost.
+    pub fn wait_paced(&self, timeout: Duration) -> io::Result<Next> {
+        match self.wait(timeout)? {
+            Next::Woken => {}
+            other => return Ok(other),
+        }
+        let (mut tokens, at) = self.pace.get();
+        let now = Instant::now();
+        tokens = (tokens + now.duration_since(at).as_secs_f64() / PACE_INTERVAL.as_secs_f64())
+            .min(PACE_BURST);
+        if tokens < 1.0 {
+            let deadline = now + PACE_INTERVAL.mul_f64(1.0 - tokens);
+            loop {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    break;
+                }
+                match self.wait(left)? {
+                    Next::Event(event) => {
+                        self.pace.set((tokens, now));
+                        return Ok(Next::Event(event));
+                    }
+                    Next::Woken | Next::Timeout => {}
+                }
+            }
+            tokens = 1.0;
+        }
+        self.pace.set((tokens - 1.0, Instant::now()));
+        Ok(Next::Woken)
     }
 
     fn settle(&self, signal: Signal) -> io::Result<Next> {

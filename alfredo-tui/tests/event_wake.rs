@@ -82,3 +82,25 @@ fn quiet_runtime_times_out_and_explicit_wake_is_coalesced() {
     waker.wake();
     assert!(woken(&input));
 }
+
+#[test]
+fn paced_wait_allows_a_burst_then_spaces_wakes_without_losing_one() {
+    use std::time::Instant;
+    let input = Input::new();
+    let waker = input.waker();
+    let started = Instant::now();
+    // The burst is delivered at once: each wake is a pass, none is dropped.
+    for _ in 0..8 {
+        waker.wake();
+        assert!(matches!(input.wait_paced(LONG).unwrap(), Next::Woken));
+    }
+    // Past the burst a wake is held for the spacing, then still delivered.
+    waker.wake();
+    assert!(matches!(input.wait_paced(LONG).unwrap(), Next::Woken));
+    assert!(started.elapsed() < Duration::from_secs(10));
+    // Nothing pending: times out.
+    assert!(matches!(
+        input.wait_paced(Duration::from_millis(60)).unwrap(),
+        Next::Timeout
+    ));
+}
