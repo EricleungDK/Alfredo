@@ -510,7 +510,7 @@ impl Autosave {
             snapshot.plan_draft = plan;
             if self.saved.as_ref() != Some(&snapshot) {
                 let store = self.store.clone();
-                self.pending = Some(runtime.spawn_blocking(move || {
+                self.pending = Some(crate::wake::spawn_blocking(runtime, move || {
                     store.save(&snapshot)?;
                     Ok(snapshot)
                 }));

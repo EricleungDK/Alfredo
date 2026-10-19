@@ -120,6 +120,7 @@ fn fixture(tasks: Vec<Task>) -> Fixture {
                     plan: Plan {
                         prompt: format!("{GOAL} | The previous plan was rejected by validation: Task 1 check must be an argv array. Return a corrected complete plan."),
                         planner: "qwen2.5-coder:14b".into(),
+                        usage: None,
                         tasks: steps,
                         context: None,
                         scope: None,
