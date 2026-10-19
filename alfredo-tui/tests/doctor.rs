@@ -324,3 +324,25 @@ fn doctor_with_workspace_set_to_a_subdirectory_behaves_like_the_root() {
     assert_eq!(text, expected);
     assert!(text.contains("PASS storage"), "{text}");
 }
+
+#[test]
+fn doctor_notes_the_context_window_setting() {
+    let fixture = Fixture::new();
+    for (extra, expected) in [
+        (
+            None,
+            "NOTE context: not set: Ollama default applies; set --num-ctx for prompts above ~4k tokens",
+        ),
+        (Some("16384"), "NOTE context: --num-ctx 16384 tokens"),
+    ] {
+        let (endpoint, server) = catalog("initial-model");
+        let mut command = fixture.command(&endpoint);
+        if let Some(value) = extra {
+            command.args(["--num-ctx", value]);
+        }
+        let output = command.output().unwrap();
+        server.join().unwrap();
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(text.contains(expected), "{text}");
+    }
+}

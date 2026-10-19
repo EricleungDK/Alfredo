@@ -18,6 +18,30 @@ const MAX_CONNECT_RETRIES: u32 = 10;
 const PRELOAD_DEADLINE: Duration = Duration::from_secs(300);
 const HEALTH_DEADLINE: Duration = Duration::from_secs(2);
 
+/// Smallest and largest accepted `--num-ctx` window, in tokens.
+pub const NUM_CTX_RANGE: std::ops::RangeInclusive<u32> = 2048..=262_144;
+
+/// Validate `--num-ctx`. Empty or `default` leaves the option out so the server's
+/// own window applies.
+pub fn parse_num_ctx(value: &str) -> Result<Option<u32>, String> {
+    let value = value.trim();
+    if value.is_empty() || value == "default" {
+        return Ok(None);
+    }
+    value
+        .parse::<u32>()
+        .ok()
+        .filter(|number| NUM_CTX_RANGE.contains(number))
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "Invalid num-ctx {value:?}; use a token count from {} to {}",
+                NUM_CTX_RANGE.start(),
+                NUM_CTX_RANGE.end()
+            )
+        })
+}
+
 /// Validate an Ollama `keep_alive` value. `default` omits the field so the
 /// server default applies; integers are seconds (negative keeps loaded);
 /// otherwise a Go duration such as `30m` or `1h30m`.
@@ -143,6 +167,8 @@ pub struct Ollama {
     context_profile: ContextProfile,
     recorder: Option<RequestRecorder>,
     keep_alive: Option<String>,
+    /// User-chosen input window (`--num-ctx`); None omits the option.
+    num_ctx_override: Option<u32>,
     connect_retries: u32,
     retry_backoff: Duration,
     /// Schema-constrained temperature; token limit applies to every request.
@@ -263,6 +289,7 @@ impl Ollama {
             context_profile: ContextProfile::Baseline,
             recorder: None,
             keep_alive: None,
+            num_ctx_override: None,
             connect_retries: 0,
             retry_backoff: Duration::from_secs(1),
             temperature: 0.0,
@@ -274,6 +301,16 @@ impl Ollama {
     pub fn with_keep_alive(mut self, keep_alive: Option<String>) -> Self {
         self.keep_alive = keep_alive;
         self
+    }
+
+    /// None omits `num_ctx` (server window). Use `parse_num_ctx` first.
+    pub fn with_num_ctx(mut self, num_ctx: Option<u32>) -> Self {
+        self.num_ctx_override = num_ctx;
+        self
+    }
+
+    pub fn num_ctx(&self) -> Option<u32> {
+        self.num_ctx_override
     }
 
     /// Automatic retries before any response content; 0 disables.
@@ -307,6 +344,10 @@ impl Ollama {
         let mut endpoint = self.endpoint.clone();
         endpoint.set_path("/api/generate");
         let mut body = serde_json::json!({"model": model, "prompt": "", "stream": false});
+        // Same window as requests, or Ollama reloads the model to resize it.
+        if let Some(num_ctx) = self.num_ctx_override {
+            body["options"] = serde_json::json!({ "num_ctx": num_ctx });
+        }
         if let Some(keep_alive) = &self.keep_alive {
             body["keep_alive"] = keep_alive_json(keep_alive);
         }
@@ -765,6 +806,21 @@ impl Ollama {
         }
         if let Some(context) = self.context_profile.context(self.priority) {
             body["options"]["num_ctx"] = context.into();
+        } else if let Some(window) = self.num_ctx_override {
+            // A qualification context candidate keeps its recorded window; the user's
+            // --num-ctx applies to baseline (production) requests only.
+            // Estimate like the rest of Alfredo: bytes/3 plus the reply budget.
+            let bytes: usize = messages
+                .iter()
+                .map(|message| message.role.len() + message.content.len())
+                .sum();
+            let estimate = bytes / 3 + self.num_predict as usize;
+            if estimate > window as usize {
+                return Err(Failure::Final(format!(
+                    "prompt ≈{estimate} tokens > --num-ctx {window}; shorten the request"
+                )));
+            }
+            body["options"]["num_ctx"] = window.into();
         }
         if let Some(keep_alive) = &self.keep_alive {
             body["keep_alive"] = keep_alive_json(keep_alive);

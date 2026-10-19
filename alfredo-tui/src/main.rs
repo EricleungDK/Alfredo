@@ -1,8 +1,7 @@
 use alfredo_tui::{model::MAX_SESSIONS, provider::Ollama, ui, workstation::Workstation};
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
-        KeyModifiers,
+        DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
     },
     execute,
 };
@@ -57,6 +56,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut structured_thinking = Some(false);
     let mut worker_format = alfredo_tui::worker::WorkerFormat::default();
     let mut keep_alive = std::env::var("ALFREDO_KEEP_ALIVE").unwrap_or_else(|_| "30m".into());
+    let mut num_ctx = std::env::var("ALFREDO_NUM_CTX").unwrap_or_default();
     let mut connect_retries = 3;
     let mut doctor = false;
     let mut qualification_output = None;
@@ -148,6 +148,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .next()
                     .ok_or("--keep-alive needs a duration, seconds or default")?
             }
+            "--num-ctx" => {
+                num_ctx = args
+                    .next()
+                    .ok_or("--num-ctx needs a token count from 2048 to 262144")?
+            }
             "--connect-retries" => {
                 connect_retries = args
                     .next()
@@ -164,7 +169,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "--model" => model = args.next().ok_or("--model needs a model name")?,
             "--endpoint" => endpoint = args.next().ok_or("--endpoint needs an HTTP(S) origin")?,
             "--help" | "-h" => {
-                println!("Quickstart: cd YOUR-GIT-REPO && alfredo-tui    opens the repository, nothing to type\n            /go add calc.py with tests        autopilot: plan, run, review, branch\n            F2 tasks/chat · F6 side pane · F5 pause · F1 help · Ctrl+Q quit\n\nAlfredo — local multi-agent coding terminal for Ollama\n\nUsage: alfredo-tui [--model NAME] [--endpoint URL]\n  [--select] [--workspace DIR] [--mission NAME | --new-mission NAME] [--state-dir DIR] [--conversation NAME] [--parallel-models 1..8] [--structured-thinking auto|on|off] [--worker-format blocks|json] [--keep-alive DURATION|default] [--connect-retries 0..10] [--doctor]\n  [--go GOAL] [--max-repairs 0..16] [--icons nerd|unicode|ascii] [--no-motion]\n\nSide pane: missions of this repository and the work tree (plan groups, tasks, repairs, architect and chats). F6 focuses it (an overlay below 88 columns): Up/Down move, Tab switches missions/work, Enter opens, Alt+Left/Right fold, Esc returns to the prompt. Enter on another mission switches to it under the /workspace rules.\nAgents: Enter on a task or the architect opens its agent view: the instruction, read-only references, the answer as code per file, the check and outcome, then each repair. The prompt then talks to that agent: while it generates a note steers it (cancel, rerun with the note; not a repair), during its check it is queued for a failure, a failed, rejected or review-ready result is repaired with it, accepted work gets a follow-up task, and the architect revises its draft. Same files and check only; held reviews refuse. Esc back · Ctrl+O expand instructions · /watch ID · /tell ID TEXT.\n--icons nerd|unicode|ascii picks record icons (default unicode; env ALFREDO_ICONS). --no-motion (or ALFREDO_NO_MOTION=1) shows a static ▶ instead of the spinner. Colours: truecolor when COLORTERM is truecolor or 24bit, otherwise 16 colours; NO_COLOR disables colour.\n\nInside a Git repository (or with --workspace DIR alone), opens the repository root with mission default, resumed or created; no typed input. Otherwise, or with --select, a selector chooses the repository and mission; Enter opens or creates the named mission. If the automatic open fails, the selector shows why. --mission resumes and --new-mission creates a distinct name, in the repository containing the current directory or the one given by --workspace; outside a repository they need --workspace DIR (with --select they only prefill the selector).\nDirect Ollama conversations and isolated Rust coding workers.\nTerminals using the same endpoint share --parallel-models capacity; a terminal with a different capacity waits for the others to drain.\nForeground conversations get bounded priority over queued workers.\n--worker-format blocks|json: coding workers answer with plain-text FILE blocks (default, no schema) or the legacy schema-constrained JSON file plan. Either answer is accepted; qualification always requests json.\n--keep-alive keeps the model loaded between requests (default 30m; seconds, -1 forever, default = server setting); the model is preloaded at start and on /model.\n--connect-retries retries model requests that fail before any reply text, including Ollama error frames (default 3, backoff 1s/2s/4s…; 0 disables). The header shows server health.\nExplicit file/check permission and approval required. Conversation history and drafts restore without replaying interrupted requests.\n--go GOAL starts autopilot after launch: plan, save, approve, dispatch, auto-review passing checks, bounded auto-repair (--max-repairs, default 3), one local alfredo/go-ID integration branch. Never pushes or moves your branch.\n/go GOAL · /pause · /resume · /stop · /autopilot · F5 pause/resume autopilot (restored paused after restart)\n/task description · /after 1,2 description · /approve ID · /cancel-task ID\n/permit ID JSON · /run ID · /evidence ID · /recover ID [requeue] · /review ID JSON · /accept ID · /reject ID · /repair ID reason · /requeue ID · /resolve-repair ID · /branch ID\n@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry\n/plan REQUEST · /plan-revise REQUEST · /architect-revise ID · /plan-save · /plan-cancel · /assign ID MODEL · /dispatch on|off\n/watch ID|architect · /tell ID|architect TEXT\n/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME\nEnter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry\nF2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit\n\n--doctor checks startup prerequisites without entering terminal mode or running inference.\n--qualify-inference REPORT [--qualification-repetitions 1..3] runs isolated diagnostic fixtures with baseline/candidate context profiles and one shared client slot. Default: three repetitions; artifacts are retained beside the new report.\n--inspect-qualification REPORT validates and summarizes a saved report without replay. No production profile changes or promotion.\nEnvironment: ALFREDO_MODEL, OLLAMA_HOST, ALFREDO_STATE_DIR, ALFREDO_KEEP_ALIVE, ALFREDO_ICONS, ALFREDO_NO_MOTION, COLORTERM, NO_COLOR");
+                println!("Quickstart: cd YOUR-GIT-REPO && alfredo-tui    opens the repository, nothing to type\n            /go add calc.py with tests        autopilot: plan, run, review, branch\n            F2 tasks/chat · F6 side pane · F5 pause · F1 help · Ctrl+Q quit\n\nAlfredo — local multi-agent coding terminal for Ollama\n\nUsage: alfredo-tui [--model NAME] [--endpoint URL]\n  [--select] [--workspace DIR] [--mission NAME | --new-mission NAME] [--state-dir DIR] [--conversation NAME] [--parallel-models 1..8] [--structured-thinking auto|on|off] [--worker-format blocks|json] [--keep-alive DURATION|default] [--num-ctx 2048..262144] [--connect-retries 0..10] [--doctor]\n  [--go GOAL] [--max-repairs 0..16] [--icons nerd|unicode|ascii] [--no-motion]\n\nSide pane: missions of this repository and the work tree (plan groups, tasks, repairs, architect and chats). F6 focuses it (an overlay below 88 columns): Up/Down move, Tab switches missions/work, Enter opens, Alt+Left/Right fold, Esc returns to the prompt. Enter on another mission switches to it under the /workspace rules.\nAgents: Enter on a task or the architect opens its agent view: the instruction, read-only references, the answer as code per file, the check and outcome, then each repair. The prompt then talks to that agent: while it generates a note steers it (cancel, rerun with the note; not a repair), during its check it is queued for a failure, a failed, rejected or review-ready result is repaired with it, accepted work gets a follow-up task, and the architect revises its draft. Same files and check only; held reviews refuse. Esc back · Ctrl+O expand instructions · /watch ID · /tell ID TEXT.\n--icons nerd|unicode|ascii picks record icons (default unicode; env ALFREDO_ICONS). --no-motion (or ALFREDO_NO_MOTION=1) shows a static ▶ instead of the spinner. Colours: truecolor when COLORTERM is truecolor or 24bit, otherwise 16 colours; NO_COLOR disables colour.\n\nInside a Git repository (or with --workspace DIR alone), opens the repository root with mission default, resumed or created; no typed input. Otherwise, or with --select, a selector chooses the repository and mission; Enter opens or creates the named mission. If the automatic open fails, the selector shows why. --mission resumes and --new-mission creates a distinct name, in the repository containing the current directory or the one given by --workspace; outside a repository they need --workspace DIR (with --select they only prefill the selector).\nDirect Ollama conversations and isolated Rust coding workers.\nTerminals using the same endpoint share --parallel-models capacity; a terminal with a different capacity waits for the others to drain.\nForeground conversations get bounded priority over queued workers.\n--worker-format blocks|json: coding workers answer with plain-text FILE blocks (default, no schema) or the legacy schema-constrained JSON file plan. Either answer is accepted; qualification always requests json.\n--keep-alive keeps the model loaded between requests (default 30m; seconds, -1 forever, default = server setting); the model is preloaded at start and on /model.\n--num-ctx N sets Ollama's input window (num_ctx, tokens, 2048..262144; env ALFREDO_NUM_CTX) on every chat, planner, worker and repair request and the preload, and refuses a request whose estimated prompt (bytes/3 plus reply budget) exceeds it instead of letting Ollama truncate silently. Unset: the server's window applies and requests are unchanged. The chat shows ctx used/N after each reply.\n--connect-retries retries model requests that fail before any reply text, including Ollama error frames (default 3, backoff 1s/2s/4s…; 0 disables). The header shows server health.\nExplicit file/check permission and approval required. Conversation history and drafts restore without replaying interrupted requests.\n--go GOAL starts autopilot after launch: plan, save, approve, dispatch, auto-review passing checks, bounded auto-repair (--max-repairs, default 3), one local alfredo/go-ID integration branch. Never pushes or moves your branch.\n/go GOAL · /pause · /resume · /stop · /autopilot · F5 pause/resume autopilot (restored paused after restart)\n/task description · /after 1,2 description · /approve ID · /cancel-task ID\n/permit ID JSON · /run ID · /evidence ID · /recover ID [requeue] · /review ID JSON · /accept ID · /reject ID · /repair ID reason · /requeue ID · /resolve-repair ID · /branch ID\n@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry\n/plan REQUEST · /plan-revise REQUEST · /architect-revise ID · /plan-save · /plan-cancel · /assign ID MODEL · /dispatch on|off\n/watch ID|architect · /tell ID|architect TEXT\n/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME\nEnter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry\nF2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit\n\n--doctor checks startup prerequisites without entering terminal mode or running inference.\n--qualify-inference REPORT [--qualification-repetitions 1..3] runs isolated diagnostic fixtures with baseline/candidate context profiles and one shared client slot. Default: three repetitions; artifacts are retained beside the new report.\n--inspect-qualification REPORT validates and summarizes a saved report without replay. No production profile changes or promotion.\nEnvironment: ALFREDO_MODEL, OLLAMA_HOST, ALFREDO_STATE_DIR, ALFREDO_KEEP_ALIVE, ALFREDO_NUM_CTX, ALFREDO_ICONS, ALFREDO_NO_MOTION, COLORTERM, NO_COLOR");
                 return Ok(());
             }
             "--version" | "-V" => {
@@ -229,6 +234,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_structured_thinking(structured_thinking)
         .with_worker_format(worker_format)
         .with_keep_alive(alfredo_tui::provider::parse_keep_alive(&keep_alive)?)
+        .with_num_ctx(alfredo_tui::provider::parse_num_ctx(&num_ctx)?)
         .with_connect_retries(connect_retries)?;
     if doctor {
         let runtime = Runtime::new()?;
@@ -247,7 +253,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         return Ok(());
     }
-    let runtime = Runtime::new()?;
+    let mut input = alfredo_tui::wake::Input::new();
+    let runtime = input.runtime()?;
     // A mission flag names a mission of one repository: without --workspace, that is the
     // repository containing the current directory, never a silently dropped flag.
     if let (Some(name), None, false) = (&mission, &workspace, select) {
@@ -339,6 +346,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = ratatui::init();
     let _guard = TerminalGuard;
     execute!(io::stdout(), EnableBracketedPaste)?;
+    // From here the reader thread owns terminal reads; prompts use `input`.
+    input.spawn_reader()?;
     let result = (|| -> io::Result<()> {
         let mut dirty = true;
         let mut quit_pending = false;
@@ -362,7 +371,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let state = state_dir.clone();
                 let conversation = conversation.clone();
                 let sender = missions_sender.clone();
-                runtime.spawn_blocking(move || {
+                alfredo_tui::wake::spawn_blocking(&runtime, move || {
                     let entries = alfredo_tui::side_pane::load_missions(
                         &state,
                         &key.0,
@@ -564,6 +573,29 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
                             let mut messages = turn.messages;
+                            // `@path` mentions: committed HEAD contents join this user turn's
+                            // model-visible message (kept for follow-ups); the transcript is unchanged.
+                            let session = &mut work.app.sessions[turn.session];
+                            if !session.has_attachment(turn.user_message) {
+                                let prompt = session
+                                    .messages
+                                    .get(turn.user_message)
+                                    .map(|message| message.content.clone())
+                                    .unwrap_or_default();
+                                let attachment =
+                                    runtime.block_on(alfredo_tui::chat_mentions::attach(
+                                        work.tasks.workspace(),
+                                        &prompt,
+                                    ));
+                                if !attachment.notices.is_empty() {
+                                    work.app.notice = attachment.notices.join(" · ");
+                                }
+                                if !attachment.block.is_empty() {
+                                    let session = &mut work.app.sessions[turn.session];
+                                    session.attach(turn.user_message, attachment.block);
+                                    messages = session.request_through(turn.user_message);
+                                }
+                            }
                             if revision == 0 {
                                 messages.insert(0, work.tasks.chat_context());
                             } else {
@@ -794,12 +826,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 terminal.draw(|frame| ui::draw_with_tasks(frame, &work.app, &work.tasks))?;
                 dirty = false;
             }
-            if !event::poll(Duration::from_millis(33))? {
-                continue;
-            }
+            // Blocks until a key, a runtime worker going idle (a model, planner,
+            // worker or task result may be waiting) or the timer fallback.
+            // Wakes beyond a short burst are paced to one pass per 20 ms; keys are immediate.
+            let event = match input.wait_paced(Duration::from_millis(33))? {
+                alfredo_tui::wake::Next::Event(event) => event,
+                alfredo_tui::wake::Next::Woken | alfredo_tui::wake::Next::Timeout => continue,
+            };
             let mut request = None;
             dirty = true;
-            match event::read()? {
+            match event {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                     let index = work.app.selected;
@@ -1128,7 +1164,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             match work.can_switch() {
                                 Err(error) => work.app.notice = error,
                                 Ok(()) => {
-                                    let selected = alfredo_tui::selection::choose_in_terminal(
+                                    let selected = alfredo_tui::selection::choose_in_terminal_with(
                                         &runtime,
                                         work.workspace(),
                                         None,
@@ -1137,6 +1173,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         &state_dir,
                                         "",
                                         &mut terminal,
+                                        &mut input,
                                     );
                                     match selected {
                                         Ok(Some(choice)) => {

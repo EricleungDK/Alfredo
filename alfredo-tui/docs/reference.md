@@ -96,6 +96,13 @@ candidates on the plan's recorded baseline with the dependency merge-tree compos
 and creates one local branch `alfredo/go-<id>`. HEAD, the index and working files are
 untouched; nothing is pushed. The summary lists each task's outcome and the `git switch`
 / `git merge` commands, and says when the branch holds only an accepted subset.
+The finish notice and summary add one totals line, `tokens 12.3k in / 1.1k out · model 38 s`,
+summed over the planner, the workers and the repairs of this run's own tasks (counts
+and total model time as the server reported them; no cost estimate). The line is
+omitted when the server reported no token counts. The planner's counts are saved in the
+plan receipt (`usage`: prompt and completion tokens, model time) when `/plan-save`
+stores the plan; a plan from an older build has none, and a revised draft keeps only its
+last generation's counts. Workers' counts come from their run evidence.
 
 Scope: a confirmed scope, or no scope with an ordinary goal, is used as is. A new-project
 goal (the case that would otherwise enter Wayfinder) records and confirms a minimal
@@ -260,6 +267,19 @@ is loading or busy. Model discovery bypasses this queue.
   `keep_alive` on chat, planner and worker requests. Accepts Go durations (`30m`,
   `1h30m`), integer seconds (`300`; `-1` keeps the model loaded), or `default` to
   omit the field and use the server setting.
+- `--num-ctx N` (env `ALFREDO_NUM_CTX`, 2048–262144 tokens, default unset) sets
+  Ollama `options.num_ctx` on every chat, planner, worker and repair request and on
+  the preload (so the model is not reloaded to resize its window). Unset, the option
+  is omitted and the server's window applies (4096 tokens on many installs unless
+  `OLLAMA_CONTEXT_LENGTH` is set); Alfredo's worker and repair prompts can be far
+  larger, so Ollama may then truncate them silently. With the flag set, a request
+  whose estimated prompt (bytes/3 plus the 4096-token reply budget) exceeds the
+  window is refused before sending with `prompt ≈N tokens > --num-ctx M; shorten
+  the request`. The reply budget counts, so any window of 4096 or less refuses every
+  request; use 8192 or more. After each reply that reports `prompt_eval_count` the chat shows
+  `ctx used/N` (`ctx used/default` when unset), plus "context may be truncated" from
+  95% of a set window. `--doctor` prints a `NOTE context:` line. A larger window
+  uses more VRAM (KV cache), so it is your setting; there is no default.
 - At startup, on workspace switch and on `/model NAME`, Alfredo preloads the model
   in the background (`POST /api/generate` with an empty prompt). Preload bypasses
   the inference queue; failure is only a status.
@@ -1220,7 +1240,9 @@ Type `@wayfinder REQUEST` to address the native scope adapter. Tab completes the
 name; arrows select, Enter fills the composer, and Escape dismisses completion.
 Completion never submits a turn. F1 lists this capability alongside commands.
 Unknown leading `@` names and an empty Wayfinder request produce an error and retain
-the draft without model dispatch. Mentions inside ordinary prose are not commands.
+the draft without model dispatch. Mentions inside ordinary prose are not commands, and
+a leading `@` token containing `/` or `.` (for example `@calc.py explain`) is a file
+mention, not a capability name.
 
 An explicit discussion request without a saved scope enters Chart (or Work-through
 for an existing Wayfinder map/ticket). Ordinary read-only prompts outside the capability keep their existing
@@ -1229,6 +1251,29 @@ also accept the prefix; their outcomes retain the same scope receipts and grant 
 task approval or execution. Subsequent discussion reuses the existing flow.
 Other native roles remain accessible through their documented commands; this is
 not a general skill/plugin executor or complete capability-routing implementation.
+
+## Chat file mentions (`@path`)
+
+A token `@relative/path` in a chat prompt, starting at a word boundary (so `a@b.com` and
+`@wayfinder` are not mentions), appends that file's committed HEAD content to the message
+the model receives, as a `FILE path` block under an "Attached files" heading. The
+transcript still shows only what you typed. The block stays part of that turn in the
+request history, so follow-ups still see the file; it counts toward the conversation
+size limit, and it is kept in memory only (not restored after a restart).
+
+- Content comes from Git objects at `HEAD` (never the working tree, so uncommitted edits
+  are not seen), through the same reader family and exclusion rules as planner references:
+  secrets (`.env*`, `*.pem`, `*.key`…), `.git`, `node_modules`, `target`, `dist`, `vendor`
+  are refused. Paths are relative to the repository root; absolute, `..`, empty-segment
+  and symlink or submodule paths are refused, as are directories, binary and non-UTF-8
+  files and files over 256 KiB.
+- Bounds per prompt: at most 8 distinct mentions and 32 KiB of file text; a longer file
+  is cut with `[truncated: N of M bytes]`, and mentions past the budget are not attached.
+- Anything that looks like a path (contains `/` or `.`) but cannot be attached shows a
+  notice naming it and the reason, for example `@calc.py: not attached (not committed at
+  HEAD)`. A bare `@word` that is not a committed file is left alone silently.
+- Not included: directory mentions, Tab completion of paths, mentions in `/go` goals or
+  commands, a chat tool loop. `@wayfinder REQUEST` is unchanged.
 
 ## Recovery at recorded check boundaries
 

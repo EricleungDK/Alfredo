@@ -50,6 +50,9 @@ F1 on an empty prompt lists every command. Most used:
 | `/models`, `/model NAME`, `/workspace` | Model and workspace switching |
 | `/scope [JSON]`, `/scope-confirm REV`, `@wayfinder REQUEST` | Project scope agreement |
 
+Chat prompts accept `@path/to/file` mentions: the file's committed HEAD content (at most 8
+files, 32 KiB) is sent with that message; see `docs/reference.md#chat-file-mentions-path`.
+
 `[ID]` defaults to the task selected in the task detail (F2). Everything is stored under
 `~/.local/state/alfredo` (or `--state-dir`), never inside your repository. Workers
 edit detached worktrees from committed HEAD; your branch, index and working files
@@ -188,6 +191,7 @@ python3 alfredo-tui/tests/terminal_smoke.py            # PTY journeys against a 
 python3 alfredo-tui/tests/autopilot_terminal_smoke.py
 python3 alfredo-tui/tests/agent_terminal_smoke.py
 python3 alfredo-tui/tests/inference_terminal_smoke.py
+python3 alfredo-tui/tests/num_ctx_terminal_smoke.py
 python3 alfredo-tui/tests/recovery_terminal_smoke.py
 python3 alfredo-tui/tests/qualification_cli_smoke.py
 python3 alfredo-tui/tests/eval_smoke.py                # harness eval, fixture mode

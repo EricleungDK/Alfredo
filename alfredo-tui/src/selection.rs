@@ -7,8 +7,7 @@ use crate::{
 };
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind,
-        KeyModifiers,
+        DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
     },
     execute,
 };
@@ -446,7 +445,7 @@ pub fn choose(
     let mut terminal = ratatui::init();
     let _guard = Guard;
     execute!(io::stdout(), EnableBracketedPaste).map_err(|e| e.to_string())?;
-    choose_in_terminal(
+    choose_in_terminal_with(
         runtime,
         starting,
         explicit,
@@ -455,11 +454,14 @@ pub fn choose(
         state,
         notice,
         &mut terminal,
+        &mut crate::wake::Direct,
     )
 }
 
+/// Selector inside a running run loop: events come from the loop's single
+/// reader (`input`), never a second `event::read` that would steal keys.
 #[allow(clippy::too_many_arguments)]
-pub fn choose_in_terminal(
+pub fn choose_in_terminal_with(
     runtime: &Runtime,
     starting: &Path,
     explicit: Option<PathBuf>,
@@ -468,6 +470,7 @@ pub fn choose_in_terminal(
     state: &Path,
     initial_notice: &str,
     terminal: &mut ratatui::DefaultTerminal,
+    events: &mut dyn crate::wake::InputSource,
 ) -> Result<Option<Choice>> {
     let mut accepted = match explicit {
         Some(path) => Some(runtime.block_on(prepare_workspace(&path, state, false))?),
@@ -556,10 +559,12 @@ pub fn choose_in_terminal(
                 )
             })
             .map_err(|e| e.to_string())?;
-        if !event::poll(Duration::from_millis(40)).map_err(|e| e.to_string())? {
+        let Some(event) = events
+            .next_event(Duration::from_millis(40))
+            .map_err(|e| e.to_string())?
+        else {
             continue;
-        }
-        let event = event::read().map_err(|e| e.to_string())?;
+        };
         if matches!(&event, Event::Key(key) if key.kind != KeyEventKind::Release && (key.code == KeyCode::Esc || (key.code == KeyCode::Char('q') && key.modifiers.contains(KeyModifiers::CONTROL))))
         {
             if let Some(job) = pending.take() {

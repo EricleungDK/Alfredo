@@ -16,6 +16,7 @@ fn snapshot() -> Snapshot {
     let plan = Plan {
         prompt: "check the repo if there is any dead code, remove them".into(),
         planner: "qwen2.5-coder:14b".into(),
+        usage: None,
         tasks: vec![Step {
             title: "Remove Dead Code".into(),
             acceptance: vec![],

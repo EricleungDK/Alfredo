@@ -70,6 +70,7 @@ fn plan(snapshot: &mut Snapshot, revision: u64, first: u64, count: usize, prompt
             plan: Plan {
                 prompt: prompt.into(),
                 planner: "fixture-planner".into(),
+                usage: None,
                 tasks,
                 context: None,
                 scope: None,
