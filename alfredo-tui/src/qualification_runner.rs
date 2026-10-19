@@ -606,11 +606,10 @@ fn execute(
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .env("GIT_AUTHOR_DATE", "2000-01-01T00:00:00Z")
                 .env("GIT_COMMITTER_DATE", "2000-01-01T00:00:00Z")
+                .args(crate::worker::HARDENED_GIT_ARGS)
                 .args([
                     "-C",
                     workspace.to_str().ok_or("Invalid fixture path")?,
-                    "-c",
-                    "core.hooksPath=/dev/null",
                     "-c",
                     "commit.gpgSign=false",
                     "commit",

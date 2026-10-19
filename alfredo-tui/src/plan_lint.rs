@@ -295,6 +295,7 @@ fn committed(plan: &Plan) -> impl Fn(&str) -> bool + '_ {
             return true;
         };
         std::process::Command::new("/usr/bin/git")
+            .args(crate::worker::HARDENED_GIT_ARGS)
             .arg("-C")
             .arg(&scope.workspace)
             .args(["--literal-pathspecs", "ls-tree", "--name-only", "-z"])
