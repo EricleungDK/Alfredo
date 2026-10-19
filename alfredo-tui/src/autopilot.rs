@@ -1113,6 +1113,10 @@ impl Autopilot {
     }
 
     fn fail(&mut self, tasks: &mut TaskControl, notice: String) {
+        self.fail_with_next(tasks, notice, None);
+    }
+
+    fn fail_with_next(&mut self, tasks: &mut TaskControl, notice: String, next: Option<String>) {
         let elapsed = self.elapsed();
         if let Some(saved) = self.saved.as_mut() {
             saved.phase = Phase::Failed;
@@ -1123,11 +1127,18 @@ impl Autopilot {
                 "Reason",
                 clean(&notice, 1024)
             );
+            if let Some(next) = next.as_deref().filter(|next| !next.is_empty()) {
+                report.push_str(&format!("\n{:<LABEL$}{}", "Next", clean(next, 300)));
+            }
             if let Some(warning) = saved.dirty_warning() {
                 report.push_str(&format!("\n{:<LABEL$}{warning}", "Warning"));
             }
             saved.report = Some(report);
         }
+        let notice = match next.as_deref().filter(|next| !next.is_empty()) {
+            Some(next) => format!("{notice} {next}"),
+            None => notice,
+        };
         self.finished_notice = Some(clean(&format!("Autopilot failed{GAP}{notice}"), 1024));
         self.set_notice(tasks, notice);
         // A planning failure leaves the unsaved draft panel open; the summary
@@ -1346,6 +1357,12 @@ impl Autopilot {
         for family in families.iter().filter(|f| !held_or_done(f, tasks)) {
             if let Some(cause) = find(family.head).and_then(|head| sandbox_failure(tasks, head)) {
                 self.fail(tasks, format!("{cause}. {}", crate::doctor::BWRAP_FIX));
+                return Ok(None);
+            }
+            if let Some(cause) = find(family.head).and_then(|head| too_large_failure(tasks, head)) {
+                // The last sentence of the shared message is the way forward.
+                let (reason, next) = cause.rsplit_once(". ").unwrap_or((&cause, ""));
+                self.fail_with_next(tasks, format!("{reason}."), Some(next.to_string()));
                 return Ok(None);
             }
         }
@@ -1690,6 +1707,18 @@ fn sandbox_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
     let evidence = tasks.store().evidence(head.id).ok()?;
     let evidence = serde_json::from_str::<crate::worker::Evidence>(&evidence).ok()?;
     (evidence.failure_code.as_deref() == Some(crate::execution::SANDBOX_UNAVAILABLE))
+        .then(|| clean(&evidence.detail, 300))
+}
+
+/// Failure text when the head's approved files exceed the worker's bounds. The
+/// run's evidence carries the typed `failure_code`; repairing cannot fix it.
+fn too_large_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
+    if head.status != TaskStatus::Failed {
+        return None;
+    }
+    let evidence = tasks.store().evidence(head.id).ok()?;
+    let evidence = serde_json::from_str::<crate::worker::Evidence>(&evidence).ok()?;
+    (evidence.failure_code.as_deref() == Some(crate::worker::FILE_TOO_LARGE))
         .then(|| clean(&evidence.detail, 300))
 }
 

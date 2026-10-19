@@ -428,7 +428,7 @@ pub struct Evidence {
     pub status: TaskStatus,
     pub detail: String,
     /// Typed failure class when the run failed for an environment reason
-    /// (`execution::SANDBOX_UNAVAILABLE`); repairing the code cannot fix it.
+    /// (`execution::SANDBOX_UNAVAILABLE`, `FILE_TOO_LARGE`); repairing the code cannot fix it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_code: Option<String>,
     pub patch: String,
@@ -677,6 +677,33 @@ pub fn validate_plan(plan: &FilePlan, policy: &WorkPolicy) -> Result<()> {
 
 /// Approved plus read-only reference source text in one worker request.
 const SOURCE_CONTEXT: usize = 96 * 1024;
+/// Largest approved source file a worker reads and rewrites.
+pub const MAX_APPROVED_FILE: u64 = 64 * 1024;
+
+/// Evidence `failure_code` for an approved file or file set beyond the worker's
+/// context bounds. Deterministic: neither a repair nor a larger model changes it.
+pub const FILE_TOO_LARGE: &str = "file-too-large";
+
+fn kib(bytes: u64) -> u64 {
+    (bytes + 512) / 1024
+}
+
+/// The one message a worker run, a manual `/run` and the planning lint share.
+pub fn file_too_large(path: &str, bytes: u64) -> String {
+    format!(
+        "{path} is {} KiB; workers can edit files up to {} KiB. Split the file, or edit it by hand.",
+        kib(bytes),
+        MAX_APPROVED_FILE / 1024
+    )
+}
+
+fn context_too_large(bytes: usize) -> String {
+    format!(
+        "Approved files total {} KiB; workers can read up to {} KiB of approved files. Approve fewer or smaller files, or edit them by hand.",
+        kib(bytes as u64),
+        SOURCE_CONTEXT / 1024
+    )
+}
 const TAIL_LINES: usize = 40;
 const TAIL_BYTES: usize = 4096;
 
@@ -1552,17 +1579,23 @@ async fn perform(
     for path in &policy.files {
         let file = safe_file(worktree, path)?;
         let content = if file.exists() {
+            let size = fs::metadata(&file).map_err(|e| e.to_string())?.len();
+            if size > MAX_APPROVED_FILE {
+                evidence.failure_code = Some(FILE_TOO_LARGE.into());
+                return Err(file_too_large(path, size));
+            }
             let mut bytes = Vec::new();
             std::io::Read::read_to_end(
                 &mut std::io::Read::take(
                     fs::File::open(&file).map_err(|e| e.to_string())?,
-                    64 * 1024 + 1,
+                    MAX_APPROVED_FILE + 1,
                 ),
                 &mut bytes,
             )
             .map_err(|e| e.to_string())?;
-            if bytes.len() > 64 * 1024 {
-                return Err("Approved source file exceeds 64 KiB context limit".into());
+            if bytes.len() as u64 > MAX_APPROVED_FILE {
+                evidence.failure_code = Some(FILE_TOO_LARGE.into());
+                return Err(file_too_large(path, bytes.len() as u64));
             }
             String::from_utf8(bytes).map_err(|_| "Approved source file is not UTF-8")?
         } else {
@@ -1570,7 +1603,8 @@ async fn perform(
         };
         context.push_str(&format!("\nFILE {path}\n{content}\n"));
         if context.len() > SOURCE_CONTEXT {
-            return Err("Approved source context exceeds 96 KiB".into());
+            evidence.failure_code = Some(FILE_TOO_LARGE.into());
+            return Err(context_too_large(context.len()));
         }
     }
     // Committed files the check runs or the goal/task names: reference only, never

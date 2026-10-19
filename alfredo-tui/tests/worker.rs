@@ -544,6 +544,53 @@ async fn unapproved_model_path_is_rejected_before_any_file_changes() {
 }
 
 #[tokio::test]
+async fn approved_file_over_the_bound_fails_with_a_typed_code_and_no_model_call() {
+    let fixture = Fixture::new();
+    let big: String = (0..2500)
+        .map(|i| format!("def helper_{i}():\n    return {i}\n\n"))
+        .collect();
+    fs::write(fixture.workspace.join("calc.py"), &big).unwrap();
+    for args in [
+        vec!["add", "."],
+        vec!["-c", "core.hooksPath=/dev/null", "commit", "-qm", "big"],
+    ] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&fixture.workspace)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    fixture.permit();
+    // Port 1 refuses connections: the failure must come before any model request.
+    let provider = Ollama::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap();
+    let (snapshot, _) = worker::start(
+        fixture.store.clone(),
+        1,
+        "too-large".into(),
+        3,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(snapshot.tasks[0].status, TaskStatus::Failed);
+    let kib = (big.len() + 512) / 1024;
+    let expected = format!(
+        "calc.py is {kib} KiB; workers can edit files up to 64 KiB. Split the file, or edit it by hand."
+    );
+    assert_eq!(snapshot.tasks[0].run.as_ref().unwrap().detail, expected);
+    let evidence: worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    assert_eq!(
+        evidence.failure_code.as_deref(),
+        Some(worker::FILE_TOO_LARGE)
+    );
+    assert_eq!(evidence.detail, expected);
+}
+
+#[tokio::test]
 async fn cancellation_during_inference_produces_terminal_receipt_without_edits() {
     let fixture = Fixture::new();
     fixture.permit();

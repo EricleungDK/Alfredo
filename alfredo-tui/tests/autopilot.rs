@@ -791,6 +791,109 @@ fn sandbox_refusal_is_quoted_even_with_no_repair_budget() {
     sandbox_refused(0);
 }
 
+fn commit_files(fixture: &Fixture, files: &[(&str, usize)]) {
+    for (name, bytes) in files {
+        fs::write(fixture.workspace.join(name), "x = 1\n".repeat(bytes / 6)).unwrap();
+    }
+    git(&fixture.workspace, &["add", "."]);
+    git(
+        &fixture.workspace,
+        &["-c", "core.hooksPath=/dev/null", "commit", "-qm", "large"],
+    );
+}
+
+fn files_plan(files: &[&str]) -> String {
+    json!({"tasks": [
+        {"title": "Make answer return 42", "acceptance": ["answer() returns 42"], "model": "fixture",
+         "dependencies": [], "policy": {"files": files, "check": check("print(1)")}},
+    ]})
+    .to_string()
+}
+
+#[test]
+fn plan_approving_a_file_over_the_bound_is_rejected_at_lint_with_no_repairs() {
+    let fixture = Fixture::new();
+    commit_files(&fixture, &[("calc.py", 156_697)]);
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return files_plan(&["calc.py"]);
+        }
+        good_calc()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Make the answer 42", "fixture", 3, &control)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "too-large-lint",
+        finished,
+    );
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!(status.state, RunState::Failed);
+    assert_eq!(status.repairs, 0);
+    let report = autopilot.report().unwrap();
+    assert!(
+        report.contains("calc.py is 153 KiB; workers can edit files up to 64 KiB. Split the file, or edit it by hand."),
+        "{report}"
+    );
+    assert!(!report.contains("larger model"), "{report}");
+    assert!(!report.contains("--max-repairs"), "{report}");
+    assert_eq!(fixture.store.snapshot().unwrap().tasks.len(), 0);
+}
+
+#[test]
+fn oversized_approved_set_stops_autopilot_without_repairs_or_model_advice() {
+    let fixture = Fixture::new();
+    // Each file fits the per-file bound; together they pass the 96 KiB context bound,
+    // which the planning lint does not see.
+    commit_files(&fixture, &[("a.py", 50_000), ("b.py", 50_000)]);
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return files_plan(&["a.py", "b.py"]);
+        }
+        good_calc()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Make the answer 42", "fixture", 3, &control)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "too-large-worker",
+        finished,
+    );
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!(status.state, RunState::Failed);
+    assert_eq!(status.repairs, 0);
+    let snapshot = fixture.store.snapshot().unwrap();
+    assert_eq!(snapshot.tasks.len(), 1, "no repair task is created");
+    let evidence: alfredo_tui::worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    assert_eq!(
+        evidence.failure_code.as_deref(),
+        Some(alfredo_tui::worker::FILE_TOO_LARGE)
+    );
+    let report = autopilot.report().unwrap();
+    assert!(report.contains("Approved files total"), "{report}");
+    assert!(report.contains("Next"), "{report}");
+    assert!(!report.contains("larger model"), "{report}");
+    assert!(!report.contains("repair budget exhausted"), "{report}");
+    assert!(
+        !server.prompts().iter().any(|p| p.contains("Repair")),
+        "{:?}",
+        server.prompts()
+    );
+}
+
 #[test]
 fn pause_stops_decisions_human_hold_is_never_resolved_and_restart_restores_paused() {
     let fixture = Fixture::new();
