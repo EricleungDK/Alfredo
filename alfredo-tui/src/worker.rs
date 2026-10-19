@@ -728,11 +728,14 @@ fn sanitize_output(text: &str) -> String {
     let mut rest = plain.as_str();
     while let Some(index) = rest.find(MARK) {
         let before = &rest[..index];
+        // Advance by the delimiter's own UTF-8 width: whitespace such as NBSP,
+        // U+2003 or U+3000 spans several bytes, and slicing inside one panics.
         let start = before
-            .rfind(|c: char| {
+            .char_indices()
+            .rfind(|&(_, c)| {
                 c.is_whitespace() || matches!(c, '"' | '\'' | '(' | '[' | '<' | '=' | ',' | '`')
             })
-            .map_or(0, |i| i + 1);
+            .map_or(0, |(i, c)| i + c.len_utf8());
         out.push_str(&before[..start]);
         if !before[start..].starts_with('/') {
             out.push_str(&before[start..]);
@@ -2001,6 +2004,88 @@ mod sanitize_output_tests {
         let out = sanitize_output("\x1b]8;;file:///x\x07/tmp/run/worktree/src/a.rs\x1b]8;;\x07");
         assert!(!out.contains("8;;") && !out.contains("/tmp/run"), "{out}");
         assert!(out.contains("src/a.rs"), "{out}");
+    }
+
+    /// Whitespace delimiters whose UTF-8 width is not one byte.
+    const MULTIBYTE_SPACES: [(&str, char); 3] = [
+        ("no-break space", '\u{a0}'),
+        ("em space", '\u{2003}'),
+        ("ideographic space", '\u{3000}'),
+    ];
+
+    fn receipt_with(stdout: &str, stderr: &str) -> crate::execution::ExecutionReceipt {
+        crate::execution::ExecutionReceipt {
+            schema_version: 1,
+            request_id: String::new(),
+            request_digest: String::new(),
+            effect: String::new(),
+            status: "failed".into(),
+            started_at: String::new(),
+            ended_at: String::new(),
+            exit_code: Some(1),
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            stdout_bytes: stdout.len(),
+            stderr_bytes: stderr.len(),
+            stdout_sha256: String::new(),
+            stderr_sha256: String::new(),
+            effect_started: true,
+            reconciliation_required: false,
+            error_code: String::new(),
+            error_message: String::new(),
+            receipt_id: String::new(),
+            owner_pid: None,
+            owner_identity: String::new(),
+            process_pid: None,
+            process_identity: String::new(),
+            provider: String::new(),
+        }
+    }
+
+    #[test]
+    fn multibyte_whitespace_before_bare_worktree_marker_does_not_panic() {
+        // Attack from the ticket: `error:<ws>/worktree/x` used to panic on the
+        // byte slice one past a multi-byte delimiter.
+        for (name, ws) in MULTIBYTE_SPACES {
+            let input = format!("error:{ws}/worktree/x");
+            assert_eq!(sanitize_output(&input), input, "{name}");
+        }
+    }
+
+    #[test]
+    fn multibyte_whitespace_before_absolute_worktree_path_is_shortened() {
+        for (name, ws) in MULTIBYTE_SPACES
+            .iter()
+            .copied()
+            .chain([("ascii space", ' ')])
+        {
+            let input = format!("error:{ws}/tmp/run/worktree/src/a.rs");
+            assert_eq!(
+                sanitize_output(&input),
+                format!("error:{ws}src/a.rs"),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn multibyte_whitespace_worktree_paths_reach_stdout_and_stderr_tails() {
+        use super::output_tail;
+        for (name, ws) in MULTIBYTE_SPACES {
+            let input = format!("error:{ws}/worktree/x");
+            let stderr_tail = output_tail(&receipt_with("", &input));
+            assert_eq!(
+                stderr_tail,
+                Some(("stderr", input.clone())),
+                "stderr {name}"
+            );
+            let stdout_tail = output_tail(&receipt_with(&input, ""));
+            assert_eq!(
+                stdout_tail,
+                Some(("stdout", input.clone())),
+                "stdout {name}"
+            );
+        }
     }
 }
 
