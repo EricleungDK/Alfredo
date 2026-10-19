@@ -21,12 +21,44 @@ trials). CI runs a one-trial pass of it (`tests/eval_smoke.py`).
    - **Claude Code**: run it with the goal on stdin in the temp repo (see below).
 3. Grade the candidate without reading any screen or log: `git archive` the `alfredo/go-*`
    branch (Claude Code: a commit of the final working tree), extract it, and run the task's
-   `check.sh` there. Exit 0 is a pass. No branch means fail.
+   `check.sh` in the grading sandbox (below). Exit 0 is a pass. No branch means fail.
 4. Delete the temp directory (use `--keep` to inspect it).
 
 `check.sh` lives outside the repo the agent sees, so an agent cannot read or edit its grader.
 `python3 alfredo-tui/eval/run_eval.py --agent alfredo --validate-tasks` checks that every
 `check.sh` fails on its untouched repo.
+
+### Grading sandbox
+
+The candidate is model-written code, and `check.sh` imports it (`from mathx import ...`), so
+grading runs it under bubblewrap with the same profile the worker uses
+(`alfredo-tui/src/worker.rs`, `check_request`):
+
+- `bwrap --unshare-all --unshare-net --die-with-parent --new-session` with a tmpfs `/` and a fresh
+  `/dev`, `/proc` and `/tmp`. The host home directory, your files and the network are not visible.
+- System directories (`/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/etc`) are read-only.
+- Only the extracted export is bound read-write, and `HOME` points at it. `check.sh` is bound
+  read-only at `/grader/check.sh`.
+- The check runs under `prlimit` with the worker's limits: address space 8 GiB, file size 32 MiB,
+  1024 open files, 128 processes. The timeout is 60 s.
+
+Archive members are checked before extraction. An absolute or `..` path, a symlink whose target
+leaves the export, a hardlink outside the archive, or a device or fifo makes the grade fail with
+`refused: ...` and nothing is extracted. After extraction, any symlink that still resolves outside
+the export also fails the grade.
+
+Requirements: `/usr/bin/bwrap` (package `bubblewrap`) and `/usr/bin/prlimit` (`util-linux`). CI
+installs both. Without them grading refuses to run and reports
+`grading sandbox unavailable`, so Alfredo and Claude Code runs stop before the first trial.
+`--unsafe-unsandboxed-grading` is the only way to grade on the host without the sandbox. It
+runs the candidate as you, with your files and network, so use it only on a disposable machine.
+When the sandbox is present the flag changes nothing. `tests/eval_smoke.py` passes no such flag:
+it needs bwrap, and in CI it grades inside the sandbox. `tests/test_eval_grader.py` runs the
+#207 attack (a candidate that writes a marker outside the export) and its live bwrap tests are
+skipped without `/usr/bin/bwrap`.
+
+The sandbox covers the grader only. It does not sandbox the agent run itself (for Claude Code
+see the residual risk below).
 
 ## Tasks
 
@@ -65,6 +97,7 @@ consumed in order and the last repeats; a reply is `{"files": [...]}` or `{"pros
 | `--binary PATH` | `alfredo-tui` binary (default `$ALFREDO_TUI_BINARY`, else `target/debug`) |
 | `--ollama-endpoint URL` | default `http://127.0.0.1:11434`; must be a loopback address |
 | `--tmp-root DIR`, `--keep` | where temp repos go; keep them |
+| `--unsafe-unsandboxed-grading` | grade on the host when bubblewrap is missing (see Grading sandbox) |
 
 Exit code: 0 ok, 1 if the run is flagged (below) or a fixture task did not grade as scripted,
 2 for usage or environment errors (missing binary, Ollama unreachable, `claude` not found).
@@ -106,6 +139,7 @@ Without Bash, Claude Code cannot run tests itself, so it may score lower than Al
 runs the approved check) on tasks like T5. Only Anthropic API-key, OAuth or subscription
 login is supported; Bedrock, Vertex, `apiKeyHelper` and custom-header setups are not passed
 through. It uses your logged-in Claude Code and costs real tokens, so start with `--tasks T1 --trials 1`.
+The grade of its result runs in the grading sandbox, but the Claude Code process itself is not sandboxed.
 
 ## Output
 
