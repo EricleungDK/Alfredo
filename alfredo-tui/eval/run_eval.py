@@ -126,10 +126,20 @@ def make_repo(task, destination):
 
 
 def sandbox_tools():
-    """(bwrap, prlimit) when grading can run sandboxed, else None."""
-    bwrap = '/usr/bin/bwrap' if Path('/usr/bin/bwrap').is_file() else shutil.which('bwrap')
-    prlimit = '/usr/bin/prlimit' if Path('/usr/bin/prlimit').is_file() else shutil.which('prlimit')
-    return (bwrap, prlimit) if bwrap and prlimit else None
+    """(bwrap, prlimit) when grading can run sandboxed, else None.
+
+    Only the trusted absolute installs count. PATH is never consulted: it can be attacker-influenced, and the
+    worker runs the same two binaries from these exact paths (alfredo-tui/src/worker.rs).
+    """
+    bwrap, prlimit = '/usr/bin/bwrap', '/usr/bin/prlimit'
+    return (bwrap, prlimit) if Path(bwrap).is_file() and Path(prlimit).is_file() else None
+
+
+def grading_refusal(unsafe_unsandboxed=False):
+    """SANDBOX_MISSING when grading must refuse to run model-written code, else None."""
+    if sandbox_tools() is None and not unsafe_unsandboxed:
+        return SANDBOX_MISSING
+    return None
 
 
 def sandbox_argv(export, check, bwrap, prlimit):
@@ -196,9 +206,10 @@ def grade(task, repo, ref, *, unsafe_unsandboxed=False):
     """
     if ref is None:
         return False, 'no candidate to grade'
+    refusal = grading_refusal(unsafe_unsandboxed)
+    if refusal:
+        return False, refusal
     tools = sandbox_tools()
-    if tools is None and not unsafe_unsandboxed:
-        return False, SANDBOX_MISSING
     export = Path(tempfile.mkdtemp(prefix='alfredo-eval-grade-', dir=repo.parent))
     try:
         archive = subprocess.run(['git', '-C', str(repo), 'archive', '--format=tar', ref], env=GIT_ENV,
@@ -230,8 +241,9 @@ def grade(task, repo, ref, *, unsafe_unsandboxed=False):
 
 def validate_tasks(tasks, *, unsafe_unsandboxed=False):
     """Every check.sh must fail on the untouched repo, or the grader would pass an empty answer."""
-    if sandbox_tools() is None and not unsafe_unsandboxed:
-        return [SANDBOX_MISSING]
+    refusal = grading_refusal(unsafe_unsandboxed)
+    if refusal:
+        return [refusal]
     problems = []
     for task in tasks:
         root = Path(tempfile.mkdtemp(prefix='alfredo-eval-validate-'))
@@ -897,9 +909,10 @@ def main(argv=None):
     try:
         tasks = load_tasks(HERE, options.tasks.split(',') if options.tasks else None)
         unsafe = options.unsafe_unsandboxed_grading
+        refusal = grading_refusal(unsafe)
+        if refusal:
+            raise EvalError(refusal)
         if sandbox_tools() is None:
-            if not unsafe:
-                raise EvalError(SANDBOX_MISSING)
             print('warning: grading model-written code WITHOUT a sandbox (--unsafe-unsandboxed-grading)',
                   file=sys.stderr)
         if options.validate_tasks:

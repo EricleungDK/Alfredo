@@ -80,7 +80,7 @@ A detached Git worktree from committed HEAD in which a worker runs. It is isolat
 
 ### Sandbox
 
-The bubblewrap and prlimit boundary around worker and check execution.
+The bubblewrap and prlimit boundary around worker and check execution, and around eval grading of model-written code.
 
 ### Execution Provider
 
