@@ -620,9 +620,9 @@ def pass_hat_k(per_task, k):
 
 
 def binary_profile(binary):
-    """Cargo profile of a binary from its path (`target/<profile>/alfredo-tui`), else 'unknown'."""
-    parts = Path(binary).parts
-    return next((p for p in ('release', 'debug') if p in parts), 'unknown')
+    """Cargo profile from the binary's immediate parent directory (`.../<profile>/alfredo-tui`), else 'unknown'."""
+    parent = Path(binary).parent.name
+    return parent if parent in ('release', 'debug') else 'unknown'
 
 
 def aggregate(trials, tasks, config):

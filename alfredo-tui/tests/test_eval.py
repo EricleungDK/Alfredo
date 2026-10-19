@@ -115,7 +115,9 @@ class SchemaTests(unittest.TestCase):
         summary, metrics, warnings, broken = run_eval.aggregate(trials, tasks, config)
         return {'schema_version': 1, 'agent': 'alfredo', 'backend': 'fixture', 'model': 'fixture',
                 'config': {'trials': 3, 'tasks': ['T1-add-function'], 'started_at': 'now', 'cpus': 2,
-                           'agent_version': None, 'binary': '/x/target/release/alfredo-tui', 'profile': 'release'}, 'trials': trials, 'tasks': summary, 'metrics': metrics,
+                           'agent_version': None, 'binary': '/x/target/release/alfredo-tui',
+                           'profile': 'release'},
+                'trials': trials, 'tasks': summary, 'metrics': metrics,
                 'warnings': warnings, 'likely_broken': broken}
 
     def test_valid_document_passes(self):
@@ -249,7 +251,10 @@ class AggregateTests(unittest.TestCase):
 
     def test_profile_is_derived_from_the_binary_path(self):
         for path, profile in [('/x/target/debug/alfredo-tui', 'debug'), ('/x/target/release/alfredo-tui', 'release'),
-                              ('/opt/bin/alfredo-tui', 'unknown')]:
+                              ('/opt/bin/alfredo-tui', 'unknown'),
+                              ('/work/release/proj/target/debug/alfredo-tui', 'debug'),
+                              ('/opt/debug/bin/alfredo-tui', 'unknown'),
+                              ('/tmp/tgt/release/alfredo-tui', 'release')]:
             self.assertEqual(profile, run_eval.binary_profile(Path(path)), path)
 
     def test_debug_profile_warns_on_m11_and_m16_and_release_does_not(self):

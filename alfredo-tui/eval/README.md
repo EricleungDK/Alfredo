@@ -115,7 +115,7 @@ through. It uses your logged-in Claude Code and costs real tokens, so start with
   planner, peak_ctx}, errors{malformed, refused, sandbox}, repairs, wall_s, ttft_ms, rss_kb,
   exit_code, panic`, plus `cold_start_ms`, `overhead_s`, `graded_ref`, `grade_output`, `notes`.
   A value the mode cannot produce is `null`, with the reason in that trial's `unavailable`.
-- `config.binary` is the resolved binary path and `config.profile` its cargo profile (`debug`, `release`, or `unknown` when the path has neither; both `null` for Claude Code).
+- `config.binary` is the resolved binary path and `config.profile` its cargo profile (`debug`, `release`, or `unknown` when the binary's parent directory is neither, e.g. a copied or renamed binary, which gets no warning and no note; both `null` for Claude Code).
 - `tasks`: pass counts per task; `metrics`: `M1`..`M16`, each `{name, value, unit, reason}`
   where `value` is `null` with a `reason` when it cannot be produced; `warnings`;
   `likely_broken`.
