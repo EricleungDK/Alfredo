@@ -543,6 +543,7 @@ fn saved_plan() -> alfredo_tui::planner::SavedDraft {
         origin: None,
         revision: 0,
         plan: alfredo_tui::planner::Plan {
+            usage: None,
             architecture: None,
             prompt: "Implement calculation".into(),
             planner: "fixture".into(),

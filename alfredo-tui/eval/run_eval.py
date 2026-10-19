@@ -305,6 +305,9 @@ class ModelServer:
         self.thread.join(timeout=3)
 
 
+PLANNER_MISMATCH = 'planner_token_mismatch'
+
+
 def model_stats(records, backend):
     """Turns, tokens, ttft and model seconds from recorded requests, with reasons for gaps."""
     unavailable = {}
@@ -353,7 +356,26 @@ def read_state(state):
         if REFUSED.search(detail):
             errors['refused'] += 1
     return {'repairs': repairs, 'repairs_accepted': repairs_accepted, 'tasks_accepted': tasks_accepted,
-            'tool_calls': runs + checks, 'errors': errors}
+            'tool_calls': runs + checks, 'errors': errors, 'planner_tokens': planner_tokens(state)}
+
+
+def planner_tokens(state):
+    """Prompt + completion tokens Alfredo saved in its plan receipts (`usage`); None if it saved none."""
+    total = None
+    for path in state.glob('rust-tasks-v1/*/tasks.json'):
+        for receipt in json.loads(path.read_text(encoding='utf-8')).get('receipts', []):
+            action = receipt.get('request', {}).get('action', {})
+            usage = (action.get('plan') or {}).get('usage') if action.get('kind') == 'plan' else None
+            if usage:
+                total = (total or 0) + usage.get('prompt_tokens', 0) + usage.get('completion_tokens', 0)
+    return total
+
+
+def planner_token_mismatch(server, saved):
+    """Warning text when the planner tokens in state differ from what the server counted, else None."""
+    if server is None or server == saved:
+        return None
+    return f'planner tokens: the server counted {server}, Alfredo saved {saved if saved is not None else "none"}'
 
 
 def peak_rss_kb(pid):
@@ -465,6 +487,9 @@ def alfredo_trial(task, index, options):
                      repairs_accepted=stats['repairs_accepted'], tasks_accepted=stats['tasks_accepted'],
                      overhead_s=round(max(0.0, trial['wall_s'] - model['model_s']), 3))
         trial['unavailable'].update(unavailable)
+        mismatch = planner_token_mismatch(model['tokens']['planner'], stats['planner_tokens'])
+        if mismatch:
+            trial['notes'].append(f'{PLANNER_MISMATCH}: {mismatch}')
         firsts = [r['start'] for r in server.snapshot()]
         if firsts:
             trial['enter_to_request_ms'] = round((min(firsts) - started) * 1000, 1)
@@ -650,6 +675,8 @@ def aggregate(trials, tasks, config):
     for t in trials:
         if t['panic']:
             warnings.append({'code': 'panic', 'task': t['task'], 'message': f'{t["task"]} trial {t["trial"]} panicked'})
+        warnings.extend({'code': PLANNER_MISMATCH, 'task': t['task'], 'message': f'{t["task"]} trial {t["trial"]} {note}'}
+                        for note in t['notes'] if note.startswith(PLANNER_MISMATCH))
         if t['outcome'] == 'harness_error':
             warnings.append({'code': 'harness_error', 'task': t['task'],
                              'message': f'{t["task"]} trial {t["trial"]}: ' + '; '.join(t['notes'])})

@@ -50,6 +50,9 @@ F1 on an empty prompt lists every command. Most used:
 | `/models`, `/model NAME`, `/workspace` | Model and workspace switching |
 | `/scope [JSON]`, `/scope-confirm REV`, `@wayfinder REQUEST` | Project scope agreement |
 
+Chat prompts accept `@path/to/file` mentions: the file's committed HEAD content (at most 8
+files, 32 KiB) is sent with that message; see `docs/reference.md#chat-file-mentions-path`.
+
 `[ID]` defaults to the task selected in the task detail (F2). Everything is stored under
 `~/.local/state/alfredo` (or `--state-dir`), never inside your repository. Workers
 edit detached worktrees from committed HEAD; your branch, index and working files

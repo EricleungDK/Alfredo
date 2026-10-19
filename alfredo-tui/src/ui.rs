@@ -2911,6 +2911,7 @@ mod fit_words_tests {
                     expected_revision: 0,
                     action: Action::Plan {
                         plan: crate::planner::Plan {
+                            usage: None,
                             prompt: "p".into(),
                             planner: "fixture".into(),
                             context: None,

@@ -150,6 +150,11 @@ fn capability_completion_and_parsing_only_admit_native_routes() {
         Some("inspect scope")
     );
     assert_eq!(capability_prompt("mention @wayfinder later").unwrap(), None);
+    assert_eq!(
+        capability_prompt("@calc.py what does it return").unwrap(),
+        None
+    );
+    assert_eq!(capability_prompt("@src/main.rs explain").unwrap(), None);
     let mut app = App::new("fixture".into());
     app.completion = Some(picker);
     for (width, height) in [(100, 24), (32, 10)] {
