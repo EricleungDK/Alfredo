@@ -11,6 +11,8 @@ use std::{
 };
 use tokio::{runtime::Runtime, sync::mpsc, task::JoinHandle};
 
+mod headless;
+
 struct TerminalGuard;
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
@@ -22,7 +24,9 @@ impl Drop for TerminalGuard {
 fn main() {
     if let Err(error) = run() {
         eprintln!("Error: {error}");
-        std::process::exit(1);
+        // Scripted runs report setup and usage errors as 2, like --doctor.
+        let headless = std::env::args().any(|arg| arg == "--headless");
+        std::process::exit(if headless { 2 } else { 1 });
     }
 }
 
@@ -63,6 +67,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut qualification_inspection = None;
     let mut qualification_repetitions = None;
     let mut go_goal: Option<String> = None;
+    let mut headless = false;
     let mut max_repairs = alfredo_tui::autopilot::DEFAULT_MAX_REPAIRS;
     let mut model = std::env::var("ALFREDO_MODEL").unwrap_or_else(|_| "qwen2.5-coder:14b".into());
     let mut endpoint =
@@ -86,6 +91,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 go_goal = Some(goal);
             }
+            "--headless" => headless = true,
             "--max-repairs" => {
                 max_repairs = args
                     .next()
@@ -178,6 +184,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             _ => return Err(format!("Unknown argument: {arg}; use --help").into()),
         }
+    }
+    if headless && (go_goal.is_none() || select || mission.is_some() || doctor) {
+        return Err("--headless needs --go GOAL and opens the repository's default mission; omit --select, --mission, --new-mission and --doctor".into());
     }
     let endpoint = alfredo_tui::provider::normalize_endpoint(&endpoint);
     if model.trim().is_empty() || model.len() > 200 || model.chars().any(char::is_control) {
@@ -274,10 +283,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
-        return Err("Interactive terminal required; use --help for usage".into());
-    }
     let state_dir = state_dir.ok_or("Set --state-dir or ALFREDO_STATE_DIR")?;
+    if headless {
+        let code = headless::run(headless::Options {
+            runtime: &runtime,
+            provider,
+            state_dir,
+            start: workspace.unwrap_or(starting),
+            conversation,
+            model,
+            goal: go_goal.unwrap_or_default(),
+            max_repairs,
+        })?;
+        std::process::exit(code);
+    }
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Err(
+            "Interactive terminal required; use --headless with --go GOAL for scripts, or --help for usage".into(),
+        );
+    }
     // Both automatic and selected choices use the same admission and launch path.
     let launch = |choice| -> Result<Workstation, String> {
         let request = alfredo_tui::selection_command::Request::new(
@@ -1953,7 +1977,7 @@ const HELP_LINES: &[&str] = &[
     "",
     "Usage: alfredo-tui [--model NAME] [--endpoint URL]",
     "  [--select] [--workspace DIR] [--mission NAME | --new-mission NAME] [--state-dir DIR] [--conversation NAME] [--parallel-models 1..8] [--structured-thinking auto|on|off] [--worker-format blocks|json] [--keep-alive DURATION|default] [--num-ctx 2048..262144] [--connect-retries 0..10] [--doctor]",
-    "  [--go GOAL] [--max-repairs 0..16] [--icons nerd|unicode|ascii] [--no-motion]",
+    "  [--go GOAL [--headless]] [--max-repairs 0..16] [--icons nerd|unicode|ascii] [--no-motion]",
     "",
     "Side pane: missions of this repository and the work tree (plan groups, tasks, repairs, architect and chats). F6 focuses it (an overlay below 88 columns): Up/Down move, Tab switches missions/work, Enter opens, Alt+Left/Right fold, Esc returns to the prompt. Enter on another mission switches to it under the /workspace rules.",
     "Agents: Enter on a task or the architect opens its agent view: the instruction, read-only references, the answer as code per file, the check and outcome, then each repair. The prompt then talks to that agent: while it generates a note steers it (cancel, rerun with the note; not a repair), during its check it is queued for a failure, a failed, rejected or review-ready result is repaired with it, accepted work gets a follow-up task, and the architect revises its draft. Same files and check only; held reviews refuse. Esc back · Ctrl+O expand instructions · /watch ID · /tell ID TEXT.",
@@ -1978,6 +2002,7 @@ const HELP_LINES: &[&str] = &[
     "/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /clean [yes] · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME",
     "Enter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry",
     "F2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit",
+    "--headless (with --go GOAL) runs without a terminal: one stderr line per autopilot state change, then one JSON object {state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]} on stdout. Exit 0 all accepted; 1 partial, failed or interrupted (SIGINT/SIGTERM cancel workers like /stop); 2 setup or usage error. Opens the repository's default mission.",
     "",
     "--doctor checks startup prerequisites without entering terminal mode or running inference.",
     "--qualify-inference REPORT [--qualification-repetitions 1..3] runs isolated diagnostic fixtures with baseline/candidate context profiles and one shared client slot. Default: three repetitions; artifacts are retained beside the new report.",

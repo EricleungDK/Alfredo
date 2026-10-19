@@ -14,6 +14,7 @@
 - **Eval**: `alfredo-tui/eval/` (issue #176) runs 6 fixed tasks through Alfredo (fixture or
   local Ollama) or Claude Code and emits schema-valid metrics JSON (M1-M16); fixture mode
   is smoked in CI by `tests/eval_smoke.py`. See `alfredo-tui/eval/README.md`.
+- **Headless** (issue #183): `--go GOAL --headless` (`src/headless.rs`) drives autopilot without a TTY: stderr progress lines, one JSON result on stdout, exit 0/1/2; smoked by `tests/headless_smoke.py`. Follow-ups: migrate `eval/run_eval.py`, `--doctor --json`, goal from stdin, headless `--resume`.
 - **Package**: `python3 alfredo-tui/scripts/package_release.py --output NEWDIR` then
   `python3 alfredo-tui/tests/release_smoke.py NEWDIR/*.tar.gz`.
 - **Docs map**: [root README](../../README.md) (users) ·

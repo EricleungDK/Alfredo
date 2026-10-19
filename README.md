@@ -142,6 +142,10 @@ git merge alfredo/go-<id>              # on your branch, when satisfied
 ```
 
 You can also start unattended: `alfredo-tui --model qwen2.5-coder:14b --go "GOAL"`.
+For scripts and CI, add `--headless`: it runs without a terminal, prints progress lines
+on stderr and ends with one JSON object on stdout
+(`{state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]}`);
+SIGINT/SIGTERM cancel workers like `/stop`.
 Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 `/evidence`, `/accept`, …); press F1 on an empty prompt for the command list.
 
@@ -204,6 +208,7 @@ to save; their diff is kept in the run's evidence. See
 | `--model NAME` | `qwen2.5-coder:14b` (env `ALFREDO_MODEL`) | Model for new conversations |
 | `--endpoint URL` | `http://127.0.0.1:11434` (env `OLLAMA_HOST`) | Ollama HTTP origin |
 | `--go GOAL` | off | Start autopilot on launch |
+| `--headless` | off | With `--go GOAL`: no terminal needed. One stderr line per autopilot state change, then one JSON object on stdout. Exit 0 all accepted, 1 partial/failed/interrupted, 2 setup or usage error |
 | `--max-repairs N` | 3 | Auto-repairs per task, 0–16 (0 disables) |
 | `--workspace DIR` | current repo | Open the repository containing `DIR` |
 | `--mission NAME` / `--new-mission NAME` | `default` | Resume / create a named mission in the repository of the current directory or of `--workspace`; outside a repository `--workspace DIR` is required |
@@ -241,7 +246,7 @@ to save; their diff is kept in the run's evidence. See
   your distro restricts unprivileged user namespaces (Ubuntu 24.04+ AppArmor). Test
   with `bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net true` and allow
   bwrap per your distro's policy.
-- **"Interactive terminal required"**: run in a real terminal, not piped.
+- **"Interactive terminal required"**: run in a real terminal, or use `--headless --go GOAL` for scripts.
 - **"Another alfredo-tui already owns conversation 'default' for this repo"**: another
   terminal owns that conversation set; close it or relaunch with
   `alfredo-tui --conversation other` (both terminals share the task queue).
