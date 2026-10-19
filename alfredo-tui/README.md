@@ -189,6 +189,7 @@ python3 alfredo-tui/tests/autopilot_terminal_smoke.py
 python3 alfredo-tui/tests/headless_smoke.py            # --go --headless without a TTY
 python3 alfredo-tui/tests/agent_terminal_smoke.py
 python3 alfredo-tui/tests/inference_terminal_smoke.py
+python3 alfredo-tui/tests/num_ctx_terminal_smoke.py
 python3 alfredo-tui/tests/recovery_terminal_smoke.py
 python3 alfredo-tui/tests/qualification_cli_smoke.py
 python3 alfredo-tui/tests/eval_smoke.py                # harness eval, fixture mode

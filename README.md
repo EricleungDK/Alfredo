@@ -186,6 +186,7 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 | `--conversation NAME` | `default` | Named conversation set (one terminal owns a set) |
 | `--state-dir DIR` | `~/.local/state/alfredo` (env `ALFREDO_STATE_DIR`) | State location; must be outside the repo |
 | `--keep-alive VALUE` | `30m` (env `ALFREDO_KEEP_ALIVE`) | Ollama `keep_alive`: `30m`, `300`, `-1`, or `default` |
+| `--num-ctx N` | unset (env `ALFREDO_NUM_CTX`) | Ollama input window in tokens, 2048–262144, sent on every request; oversize prompts are refused, not truncated. Unset: server default |
 | `--connect-retries N` | 3 | Auto-retry (1 s, 2 s, 4 s…) before any reply text, 0–10 |
 | `--parallel-models N` | 2 | Concurrent model requests per endpoint across terminals, 1–8 |
 | `--structured-thinking auto\|on\|off` | `off` | Thinking mode for structured (plan/worker) requests |

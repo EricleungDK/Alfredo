@@ -67,6 +67,9 @@ jobs:
       - name: PTY smoke - inference
         timeout-minutes: 10
         run: python3 alfredo-tui/tests/inference_terminal_smoke.py
+      - name: PTY smoke - num-ctx
+        timeout-minutes: 10
+        run: python3 alfredo-tui/tests/num_ctx_terminal_smoke.py
       - name: PTY smoke - recovery
         timeout-minutes: 10
         run: python3 alfredo-tui/tests/recovery_terminal_smoke.py
