@@ -806,8 +806,9 @@ impl Ollama {
         }
         if let Some(context) = self.context_profile.context(self.priority) {
             body["options"]["num_ctx"] = context.into();
-        }
-        if let Some(window) = self.num_ctx_override {
+        } else if let Some(window) = self.num_ctx_override {
+            // A qualification context candidate keeps its recorded window; the user's
+            // --num-ctx applies to baseline (production) requests only.
             // Estimate like the rest of Alfredo: bytes/3 plus the reply budget.
             let bytes: usize = messages
                 .iter()
