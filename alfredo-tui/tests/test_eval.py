@@ -6,12 +6,14 @@ import http.server
 import io
 import importlib.util
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[2]
 EVAL = ROOT / 'alfredo-tui/eval'
@@ -28,6 +30,9 @@ def load(name):
 
 run_eval = load('run_eval')
 schema_check = load('schema_check')
+# These tests grade author-written scripted answers, never model output, so without bwrap they may grade
+# unsandboxed. The sandboxed path is covered by test_eval_grader.py, whose live tests CI runs with bwrap.
+NO_SANDBOX_AVAILABLE = run_eval.sandbox_tools() is None
 
 
 def good_trial(task='T1-add-function', kind='positive', passed=True):
@@ -63,7 +68,7 @@ class TaskSetTests(unittest.TestCase):
             self.assertIn('workers', task['answers'])
 
     def test_every_check_fails_on_the_untouched_repo(self):
-        self.assertEqual([], run_eval.validate_tasks(self.tasks))
+        self.assertEqual([], run_eval.validate_tasks(self.tasks, unsafe_unsandboxed=NO_SANDBOX_AVAILABLE))
 
     def test_scripted_answers_pass_every_positive_check_and_never_the_control(self):
         for task in self.tasks:
@@ -78,7 +83,7 @@ class TaskSetTests(unittest.TestCase):
                         wrote = True
                 run_eval.git(repo, 'add', '-A')
                 run_eval.git(repo, '-c', 'commit.gpgSign=false', 'commit', '-qm', 'answer', '--allow-empty')
-                ok, output = run_eval.grade(task, repo, 'HEAD')
+                ok, output = run_eval.grade(task, repo, 'HEAD', unsafe_unsandboxed=NO_SANDBOX_AVAILABLE)
                 if task['kind'] == 'positive':
                     self.assertTrue(ok, output)
                 else:
@@ -94,7 +99,7 @@ class TaskSetTests(unittest.TestCase):
                 (repo / file['path']).write_text(file['content'])
             run_eval.git(repo, 'add', '-A')
             run_eval.git(repo, '-c', 'commit.gpgSign=false', 'commit', '-qm', 'first')
-            self.assertFalse(run_eval.grade(task, repo, 'HEAD')[0])
+            self.assertFalse(run_eval.grade(task, repo, 'HEAD', unsafe_unsandboxed=NO_SANDBOX_AVAILABLE)[0])
 
     def test_selector_accepts_prefixes_and_rejects_unknown_ids(self):
         self.assertEqual(['T1-add-function'], [t['id'] for t in run_eval.load_tasks(EVAL, ['T1'])])
@@ -103,6 +108,25 @@ class TaskSetTests(unittest.TestCase):
 
     def test_grading_without_a_candidate_fails(self):
         self.assertFalse(run_eval.grade(self.tasks[0], Path('/nonexistent'), None)[0])
+
+
+class SandboxToolTests(unittest.TestCase):
+    def test_accepts_only_the_trusted_absolute_installs(self):
+        with mock.patch.object(run_eval.Path, 'is_file', return_value=True), \
+                mock.patch('shutil.which', side_effect=AssertionError('PATH must not be consulted')):
+            self.assertEqual(('/usr/bin/bwrap', '/usr/bin/prlimit'), run_eval.sandbox_tools())
+
+    def test_path_lookup_never_supplies_the_tools(self):
+        with mock.patch.object(run_eval.Path, 'is_file', return_value=False), \
+                mock.patch('shutil.which', side_effect=AssertionError('PATH must not be consulted')):
+            self.assertIsNone(run_eval.sandbox_tools())
+
+    def test_one_helper_decides_the_grading_refusal(self):
+        with mock.patch.object(run_eval, 'sandbox_tools', return_value=None):
+            self.assertEqual(run_eval.SANDBOX_MISSING, run_eval.grading_refusal())
+            self.assertIsNone(run_eval.grading_refusal(unsafe_unsandboxed=True))
+        with mock.patch.object(run_eval, 'sandbox_tools', return_value=('/usr/bin/bwrap', '/usr/bin/prlimit')):
+            self.assertIsNone(run_eval.grading_refusal())
 
 
 class SchemaTests(unittest.TestCase):

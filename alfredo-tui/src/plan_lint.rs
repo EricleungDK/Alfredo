@@ -301,6 +301,7 @@ fn committed(plan: &Plan) -> impl Fn(&str) -> bool + '_ {
             return true;
         };
         std::process::Command::new("/usr/bin/git")
+            .args(crate::worker::HARDENED_GIT_ARGS)
             .arg("-C")
             .arg(&scope.workspace)
             .args(["--literal-pathspecs", "ls-tree", "--name-only", "-z"])
@@ -332,6 +333,7 @@ fn committed_size(plan: &Plan) -> impl Fn(&str) -> Option<u64> + '_ {
         let context = plan.context.as_ref()?;
         let scope = plan.scope.as_ref()?;
         let output = std::process::Command::new("/usr/bin/git")
+            .args(crate::worker::HARDENED_GIT_ARGS)
             .arg("-C")
             .arg(&scope.workspace)
             .args(["--literal-pathspecs", "cat-file", "-s"])

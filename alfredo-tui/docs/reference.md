@@ -645,7 +645,9 @@ approval. `/run` claims a durable run and creates a detached worktree from commi
 HEAD. Dirty working files are not copied. The model returns complete files as
 FILE blocks (see "Worker answer format"), and Rust rejects unapproved paths before
 writing. The approved check
-runs in Bubblewrap with private network/process namespaces, system tools mounted
+runs in Bubblewrap with private network, process, IPC (SysV shared memory, semaphores
+and queues) and UTS namespaces, plus a cgroup namespace where the kernel allows it;
+the network namespace is always required. System tools mounted
 read-only, and only the isolated worktree writable. Host home directories and
 external toolchains are unavailable. Git filters/includes are rejected at preflight.
 

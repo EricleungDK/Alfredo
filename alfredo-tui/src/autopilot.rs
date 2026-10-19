@@ -113,6 +113,11 @@ impl Saved {
     /// The start warning, also carried by the summary of the run.
     fn dirty_warning(&self) -> Option<String> {
         let (count, head) = self.dirty.as_ref().filter(|(count, _)| *count > 0)?;
+        if *count == crate::worker::UNCHECKED_CHANGES {
+            return Some(format!(
+                "uncommitted changes not checked (repository filters or includes need qualification) · workers see HEAD {head}"
+            ));
+        }
         let (noun, verb) = if *count == 1 {
             ("change", "is")
         } else {
