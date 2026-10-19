@@ -29,6 +29,18 @@ requests 8192. Evidence records the requested temperature and limit. An exhauste
 dependents stay blocked, and independent work continues. Invalid plans are retried
 once with the validation error appended, then autopilot stops.
 
+Plan first: bare `/go` (no goal) runs a plan you already reviewed instead of planning.
+With a `/plan` draft open it saves the draft unchanged (`/plan-save`) and runs those
+tasks; with no draft it runs the mission's saved `/plan-save` tasks that are still
+`proposed` (and not already part of a finished run). No planner request is made. The
+goal shown is the plan's `/plan` prompt. Your review stands in for autopilot's own
+approval of the files and check, but the same unattended lint applies; a plan that
+fails it (or a draft that is still generating, a repair revision, or a draft of a
+stopped autopilot) is refused with the reason, and the draft and tasks are untouched.
+`/go GOAL` with a draft open still refuses and names bare `/go`. With neither a draft
+nor saved proposed tasks, bare `/go` answers `Usage: /go GOAL, or /go to run the open
+plan`.
+
 Without a usable `/usr/bin/bwrap`, `/go`, `--go` and `/run` refuse before any model
 call with `Coding workers need bubblewrap: sudo apt install bubblewrap` (the same
 executable check as `--doctor`). If the sandbox still fails to start during a run, that
