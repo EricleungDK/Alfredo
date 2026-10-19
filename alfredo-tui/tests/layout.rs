@@ -741,6 +741,7 @@ fn planner_outcomes_are_originating_drafts_and_plan_save_is_separate_authority()
         expected_revision: 0,
         action: Action::Plan {
             plan: alfredo_tui::planner::Plan {
+                usage: None,
                 prompt: "A small change".into(),
                 planner: "architect".into(),
                 context: None,
@@ -1508,6 +1509,7 @@ fn automatic_architect_draft_stays_with_review_and_preserves_background_reading(
             plan: Plan {
                 prompt: "Revise the approach".into(),
                 planner: "architect".into(),
+                usage: None,
                 context: None,
                 scope: None,
                 architecture: Some(origin),

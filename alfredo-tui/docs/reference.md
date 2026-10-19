@@ -40,6 +40,14 @@ setup refusal as the first line of stderr (never `execvp` or bind-mount errors);
 class is the typed `failure_code` in the run's evidence. `ALFREDO_TEST_BWRAP_PATH` is a
 test-only seam that redirects only the preflight probe, never the executable a run uses.
 
+A worker reads and rewrites each approved file whole, so an approved file over 64 KiB (or
+approved files totalling over 96 KiB) fails the run before any model call with a typed
+`file-too-large` `failure_code`: `calc.py is 154 KiB; workers can edit files up to 64 KiB.
+Split the file, or edit it by hand.` The same text shows after a manual `/run`. Autopilot
+does not repair it (no repair spent, no larger-model or `--max-repairs` advice) and the
+summary adds a `Next` row. The planning lint rejects a draft that approves a committed file
+over 64 KiB with the same message, so the failure comes at plan time.
+
 Workers see only the committed `HEAD`. When `/go` starts with tracked modifications
 or untracked, non-ignored files, the start notice and the run's summary carry a
 warning line such as `3 uncommitted changes are not visible to workers (based on HEAD
@@ -96,6 +104,13 @@ candidates on the plan's recorded baseline with the dependency merge-tree compos
 and creates one local branch `alfredo/go-<id>`. HEAD, the index and working files are
 untouched; nothing is pushed. The summary lists each task's outcome and the `git switch`
 / `git merge` commands, and says when the branch holds only an accepted subset.
+The finish notice and summary add one totals line, `tokens 12.3k in / 1.1k out · model 38 s`,
+summed over the planner, the workers and the repairs of this run's own tasks (counts
+and total model time as the server reported them; no cost estimate). The line is
+omitted when the server reported no token counts. The planner's counts are saved in the
+plan receipt (`usage`: prompt and completion tokens, model time) when `/plan-save`
+stores the plan; a plan from an older build has none, and a revised draft keeps only its
+last generation's counts. Workers' counts come from their run evidence.
 
 Scope: a confirmed scope, or no scope with an ordinary goal, is used as is. A new-project
 goal (the case that would otherwise enter Wayfinder) records and confirms a minimal
@@ -260,6 +275,19 @@ is loading or busy. Model discovery bypasses this queue.
   `keep_alive` on chat, planner and worker requests. Accepts Go durations (`30m`,
   `1h30m`), integer seconds (`300`; `-1` keeps the model loaded), or `default` to
   omit the field and use the server setting.
+- `--num-ctx N` (env `ALFREDO_NUM_CTX`, 2048–262144 tokens, default unset) sets
+  Ollama `options.num_ctx` on every chat, planner, worker and repair request and on
+  the preload (so the model is not reloaded to resize its window). Unset, the option
+  is omitted and the server's window applies (4096 tokens on many installs unless
+  `OLLAMA_CONTEXT_LENGTH` is set); Alfredo's worker and repair prompts can be far
+  larger, so Ollama may then truncate them silently. With the flag set, a request
+  whose estimated prompt (bytes/3 plus the 4096-token reply budget) exceeds the
+  window is refused before sending with `prompt ≈N tokens > --num-ctx M; shorten
+  the request`. The reply budget counts, so any window of 4096 or less refuses every
+  request; use 8192 or more. After each reply that reports `prompt_eval_count` the chat shows
+  `ctx used/N` (`ctx used/default` when unset), plus "context may be truncated" from
+  95% of a set window. `--doctor` prints a `NOTE context:` line. A larger window
+  uses more VRAM (KV cache), so it is your setting; there is no default.
 - At startup, on workspace switch and on `/model NAME`, Alfredo preloads the model
   in the background (`POST /api/generate` with an empty prompt). Preload bypasses
   the inference queue; failure is only a status.
@@ -644,6 +672,8 @@ binary diff against that evidence, without relying on mutable retained worktree
 files. Older evidence remains readable with no inferred candidate. Snapshot
 failure prevents a new result from becoming review-ready. Candidate refs are
 retained; retirement and storage budgeting for them are not implemented yet.
+Worktrees can be removed with `/clean` (see
+[Clean finished-run worktrees](#clean-finished-run-worktrees)).
 
 For `/after 1,2 description`, each parent must be Accepted and retain a candidate
 commit that verifies against its saved evidence. Before dispatch, the worker
@@ -1222,7 +1252,9 @@ Type `@wayfinder REQUEST` to address the native scope adapter. Tab completes the
 name; arrows select, Enter fills the composer, and Escape dismisses completion.
 Completion never submits a turn. F1 lists this capability alongside commands.
 Unknown leading `@` names and an empty Wayfinder request produce an error and retain
-the draft without model dispatch. Mentions inside ordinary prose are not commands.
+the draft without model dispatch. Mentions inside ordinary prose are not commands, and
+a leading `@` token containing `/` or `.` (for example `@calc.py explain`) is a file
+mention, not a capability name.
 
 An explicit discussion request without a saved scope enters Chart (or Work-through
 for an existing Wayfinder map/ticket). Ordinary read-only prompts outside the capability keep their existing
@@ -1231,6 +1263,29 @@ also accept the prefix; their outcomes retain the same scope receipts and grant 
 task approval or execution. Subsequent discussion reuses the existing flow.
 Other native roles remain accessible through their documented commands; this is
 not a general skill/plugin executor or complete capability-routing implementation.
+
+## Chat file mentions (`@path`)
+
+A token `@relative/path` in a chat prompt, starting at a word boundary (so `a@b.com` and
+`@wayfinder` are not mentions), appends that file's committed HEAD content to the message
+the model receives, as a `FILE path` block under an "Attached files" heading. The
+transcript still shows only what you typed. The block stays part of that turn in the
+request history, so follow-ups still see the file; it counts toward the conversation
+size limit, and it is kept in memory only (not restored after a restart).
+
+- Content comes from Git objects at `HEAD` (never the working tree, so uncommitted edits
+  are not seen), through the same reader family and exclusion rules as planner references:
+  secrets (`.env*`, `*.pem`, `*.key`…), `.git`, `node_modules`, `target`, `dist`, `vendor`
+  are refused. Paths are relative to the repository root; absolute, `..`, empty-segment
+  and symlink or submodule paths are refused, as are directories, binary and non-UTF-8
+  files and files over 256 KiB.
+- Bounds per prompt: at most 8 distinct mentions and 32 KiB of file text; a longer file
+  is cut with `[truncated: N of M bytes]`, and mentions past the budget are not attached.
+- Anything that looks like a path (contains `/` or `.`) but cannot be attached shows a
+  notice naming it and the reason, for example `@calc.py: not attached (not committed at
+  HEAD)`. A bare `@word` that is not a committed file is left alone silently.
+- Not included: directory mentions, Tab completion of paths, mentions in `/go` goals or
+  commands, a chat tool loop. `@wayfinder REQUEST` is unchanged.
 
 ## Recovery at recorded check boundaries
 
@@ -1473,6 +1528,52 @@ shows conversation unrecorded. Task schema v13, conversation-set schema v6 and
 scope v2 remain unchanged; the separately retained agent transcript has schema v1.
 Review-triggered automatic repair proposal/launch, Architect revision routing,
 qualified model selection and retention/storage lifecycle remain unfinished.
+
+## Clean finished-run worktrees
+
+Every worker run executes `git worktree add --detach` into
+`<state>/rust-tasks-v1/<id>/runs/<run>/worktree`. That is a full checkout, so disk use
+grows by one per run, and Git registers each one in the repository's own
+`.git/worktrees/`, so they appear in the user's `git worktree list`. Beside the
+worktree, the run directory holds `evidence.json` (diff, check receipt, candidate ID)
+and the boundary records; these are outside the worktree and are never removed. Two
+more kinds of Git state outlive runs: `refs/alfredo/candidates/<sha>` (one per
+review-ready result) and `refs/alfredo/bases/<sha>` (composed dependency baselines),
+both hidden from `git branch`, plus the `alfredo/go-*` branches autopilot creates.
+
+`/clean` lists, and `/clean yes` removes, worktrees under this mission's own state
+directory; nothing else is ever deleted, and `/clean` never touches the repository's
+branches, refs, index or working files. A run's worktree is removable only when all hold:
+
+- the run has a finish receipt and its task is Accepted, Rejected, Failed or Cancelled
+  (a superseded run, such as one cancelled and requeued, counts when its own finish was
+  Failed or Cancelled). Running, interrupted (no finish receipt), review-ready and
+  held-for-review runs are kept;
+- `evidence.json` is a regular file whose SHA-256 equals the finish receipt's digest, so
+  F3 evidence is intact;
+- when the evidence records a candidate commit, `refs/alfredo/candidates/<commit>` still
+  resolves to exactly that commit, so `/branch` and dependent tasks still work. A
+  finished review-ready or accepted run with no recorded candidate is kept;
+- the path is a real directory (not a symlink) whose canonical path is the run's
+  `worktree` directory and which `git worktree list` registers.
+
+Failed and cancelled runs never save a candidate commit. When the worker finished
+normally, the diff is in the evidence and the worktree is scratch, so they are
+removable without one; untracked check output inside it is discarded with it. Runs
+whose evidence has no captured diff are kept, with the reason "partial work was not
+captured": those recovered after an interrupt (`/recover`, evidence says "patch not
+reconstructed") and those whose diff failed ("Diff unavailable"). There the worktree is
+the only copy of the partial work. Each removal is
+`git worktree remove --force <path>`, which deregisters it. Only when something was
+removed, and only if no stale (`prunable`) worktree entry outside this mission's runs
+exists, does it then run `git worktree prune`; otherwise the prune is skipped and the
+report says so, because a prune would also forget the user's own missing worktrees.
+The run directory must itself be a real directory, not a symlink. `/clean` with no argument
+only lists, with sizes and the reason for each kept run; any other argument is a usage
+error. Both forms are refused while autopilot is running, any coding worker is active
+or `/dispatch` is on. Removal runs on the UI thread, so a very large cleanup pauses
+input until it finishes. Automatic or time-based cleanup, branch deletion and
+`/discard` are not provided.
 
 ## Atomic review-to-repair proposals (task schema v14)
 

@@ -544,6 +544,108 @@ async fn unapproved_model_path_is_rejected_before_any_file_changes() {
 }
 
 #[tokio::test]
+async fn approved_file_over_the_bound_fails_with_a_typed_code_and_no_model_call() {
+    let fixture = Fixture::new();
+    let big: String = (0..2500)
+        .map(|i| format!("def helper_{i}():\n    return {i}\n\n"))
+        .collect();
+    fs::write(fixture.workspace.join("calc.py"), &big).unwrap();
+    for args in [
+        vec!["add", "."],
+        vec!["-c", "core.hooksPath=/dev/null", "commit", "-qm", "big"],
+    ] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&fixture.workspace)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    fixture.permit();
+    // Port 1 refuses connections: the failure must come before any model request.
+    let provider = Ollama::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap();
+    let (snapshot, _) = worker::start(
+        fixture.store.clone(),
+        1,
+        "too-large".into(),
+        3,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(snapshot.tasks[0].status, TaskStatus::Failed);
+    let kib = big.len().div_ceil(1024);
+    let expected = format!(
+        "calc.py is {kib} KiB; workers can edit files up to 64 KiB. Split the file, or edit it by hand."
+    );
+    assert_eq!(snapshot.tasks[0].run.as_ref().unwrap().detail, expected);
+    let evidence: worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    assert_eq!(
+        evidence.failure_code.as_deref(),
+        Some(worker::FILE_TOO_LARGE)
+    );
+    assert_eq!(evidence.detail, expected);
+}
+
+async fn run_with_calc_of(bytes: usize) -> (worker::Evidence, String) {
+    let fixture = Fixture::new();
+    let mut text = "x = 1\n".repeat(bytes / 6);
+    text.push_str(&"#".repeat(bytes - text.len()));
+    assert_eq!(text.len(), bytes);
+    fs::write(fixture.workspace.join("calc.py"), &text).unwrap();
+    for args in [
+        vec!["add", "."],
+        vec!["-c", "core.hooksPath=/dev/null", "commit", "-qm", "edge"],
+    ] {
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&fixture.workspace)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    fixture.permit();
+    let provider = Ollama::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap();
+    let (snapshot, _) = worker::start(
+        fixture.store.clone(),
+        1,
+        "edge".into(),
+        3,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    let evidence: worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    (
+        evidence,
+        snapshot.tasks[0].run.as_ref().unwrap().detail.clone(),
+    )
+}
+
+#[tokio::test]
+async fn file_of_exactly_64_kib_is_read_and_one_byte_more_is_refused() {
+    // Exactly at the bound the worker proceeds to the model (which here refuses).
+    let (evidence, detail) = run_with_calc_of(64 * 1024).await;
+    assert_eq!(evidence.failure_code, None, "{detail}");
+    assert!(!detail.contains("workers can edit"), "{detail}");
+    let (evidence, detail) = run_with_calc_of(64 * 1024 + 1).await;
+    assert_eq!(
+        evidence.failure_code.as_deref(),
+        Some(worker::FILE_TOO_LARGE)
+    );
+    assert_eq!(
+        detail,
+        "calc.py is 65 KiB; workers can edit files up to 64 KiB. Split the file, or edit it by hand."
+    );
+}
+
+#[tokio::test]
 async fn cancellation_during_inference_produces_terminal_receipt_without_edits() {
     let fixture = Fixture::new();
     fixture.permit();
@@ -1697,6 +1799,7 @@ async fn planned_worker_receives_the_saved_scope_brief_with_its_existing_policy(
             architecture: None,
             prompt: "Implement calculation".into(),
             planner: "fixture".into(),
+            usage: None,
             context: None,
             scope: Some(Box::new(binding.clone())),
             tasks: vec![Step {
@@ -2190,6 +2293,7 @@ async fn review_outcomes_hold_resolve_and_preserve_exact_v11_history() {
                 architecture: None,
                 prompt: "Implement answer".into(),
                 planner: "fixture".into(),
+                usage: None,
                 context: None,
                 scope: None,
                 tasks: vec![Step {
@@ -3136,6 +3240,7 @@ async fn review_and_repair_is_atomic_replayable_and_requires_fresh_approval() {
                 architecture: None,
                 prompt: "Implement answer".into(),
                 planner: "fixture".into(),
+                usage: None,
                 context: None,
                 scope: None,
                 tasks: vec![Step {
@@ -3974,6 +4079,7 @@ async fn contracted_repair_resolution_requires_recorded_criterion_review_even_fo
             architecture: None,
             prompt: "Implement answer".into(),
             planner: "fixture".into(),
+            usage: None,
             context: None,
             scope: None,
             tasks: vec![Step {
@@ -4285,6 +4391,7 @@ async fn repeated_architecture_failure_requires_bound_revision_and_fresh_executi
     let plan = Plan {
         prompt: context.prompt.clone(),
         planner: "fixture-architect".into(),
+        usage: None,
         context: None,
         scope: None,
         architecture: Some(context.origin.clone()),
@@ -4541,6 +4648,7 @@ async fn architect_adoption_inherits_declared_dependencies_and_frozen_execution_
     let context = fixture.store.architecture_context(3).unwrap();
     let plan = Plan {
         prompt: context.prompt, planner: "fixture-architect".into(), context: None, scope: None, architecture: Some(context.origin),
+        usage: None,
         tasks: vec![Step { title: "Revise consumer architecture".into(), model: "fixture".into(), dependencies: vec![], acceptance: vec!["Consumer preserves its accepted calculation dependency".into()], policy: WorkPolicy {
             files: vec!["calc.py".into(), "result.txt".into()],
             check: vec!["/usr/bin/python3".into(), "-B".into(), "-c".into(), "from calc import answer; from pathlib import Path; assert answer()==42; assert Path('result.txt').read_text()=='REVISED'".into()],
@@ -4810,6 +4918,7 @@ async fn adopted_architecture_blocks_old_repairs_and_cancelled_draft_can_be_repl
         architecture: Some(context.origin.clone()),
         prompt: context.prompt.clone(),
         planner: context.model.clone(),
+        usage: None,
         context: None,
         scope: None,
         tasks: vec![Step {
@@ -5625,6 +5734,7 @@ fn plan_task(fixture: &Fixture, prompt: &str, title: &str, policy: WorkPolicy) -
             architecture: None,
             prompt: prompt.into(),
             planner: "fixture".into(),
+            usage: None,
             context: None,
             scope: None,
             tasks: vec![Step {
@@ -6724,6 +6834,7 @@ fn accept_refusal_leads_with_the_review_template_for_the_tasks_real_criteria() {
             architecture: None,
             prompt: "Implement answer".into(),
             planner: "fixture".into(),
+            usage: None,
             context: None,
             scope: None,
             tasks: vec![Step {

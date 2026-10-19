@@ -22,6 +22,7 @@ fn plan(tasks: Vec<Step>) -> Plan {
     Plan {
         prompt: "goal".into(),
         planner: "fixture".into(),
+        usage: None,
         tasks,
         context: None,
         scope: None,
@@ -34,7 +35,10 @@ fn tracked(path: &str) -> bool {
         .any(|known| *known == path || known.starts_with(&format!("{path}/")))
 }
 fn lint(plan: &Plan) -> Vec<String> {
-    plan_lint::lint(plan, &tracked, &|program| program != "pytest")
+    plan_lint::lint(plan, &tracked, &|program| program != "pytest", &size)
+}
+fn size(path: &str) -> Option<u64> {
+    (path == "big.py").then_some(156_697)
 }
 
 #[test]
@@ -263,6 +267,39 @@ fn manifests_configs_fixtures_and_docs_are_not_runtime_data() {
 #[test]
 fn committed_data_file_may_be_edited() {
     let edit = plan(vec![step(&["state.json"], &["true"], &[])]);
-    let findings = plan_lint::lint(&edit, &|p| p == "state.json", &|_| true);
+    let findings = plan_lint::lint(&edit, &|p| p == "state.json", &|_| true, &|_| None);
     assert_eq!(findings, Vec::<String>::new());
+}
+
+#[test]
+fn committed_file_over_the_worker_bound_is_rejected_with_the_worker_message() {
+    let large = plan(vec![step(&["big.py"], &["python3", "-c", "print(1)"], &[])]);
+    let all = |_: &str| true;
+    assert_eq!(
+        plan_lint::lint(&large, &all, &all, &size),
+        vec!["big.py is 154 KiB; workers can edit files up to 64 KiB. Split the file, or edit it by hand.".to_string()]
+    );
+    let small = step(&["calc.py"], &["python3", "-c", "print(1)"], &[]);
+    assert_eq!(
+        plan_lint::lint(&plan(vec![small]), &all, &all, &size),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn file_the_plan_creates_is_not_sized_and_is_not_flagged() {
+    // `size` answers only for committed blobs; a new file has none at the baseline.
+    let new_file = plan(vec![step(
+        &["fresh.py"],
+        &["python3", "-c", "print(1)"],
+        &[],
+    )]);
+    assert_eq!(lint(&new_file), Vec::<String>::new());
+    let exact = |_: &str| Some(64 * 1024);
+    let all = |_: &str| true;
+    assert_eq!(
+        plan_lint::lint(&new_file, &all, &all, &exact),
+        Vec::<String>::new(),
+        "exactly 64 KiB is within the bound"
+    );
 }

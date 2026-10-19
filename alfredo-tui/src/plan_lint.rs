@@ -190,6 +190,7 @@ pub fn lint(
     plan: &Plan,
     tracked: &dyn Fn(&str) -> bool,
     program: &dyn Fn(&str) -> bool,
+    size: &dyn Fn(&str) -> Option<u64>,
 ) -> Vec<String> {
     let mut findings = vec![];
     // closure[i]: task indexes task i transitively depends on.
@@ -213,6 +214,11 @@ pub fn lint(
             ));
         }
         for file in &step.policy.files {
+            if let Some(bytes) =
+                size(file).filter(|bytes| *bytes > crate::worker::MAX_APPROVED_FILE)
+            {
+                findings.push(crate::worker::file_too_large(file, bytes));
+            }
             if runtime_data(file) && !tracked(file) {
                 findings.push(format!(
                     "Task {number} lists runtime data file {file}. Files a program writes when it runs become tracked work, and a later check that rewrites them is refused as modifying files outside approved paths. Do not list it: have the code and tests create it in a temp dir (or have the check use a temp path) and list only source, test and config files."
@@ -312,5 +318,31 @@ fn committed(plan: &Plan) -> impl Fn(&str) -> bool + '_ {
 
 /// Findings against the real baseline and check sandbox.
 pub fn findings(plan: &Plan) -> Vec<String> {
-    lint(plan, &committed(plan), &sandbox_program)
+    lint(
+        plan,
+        &committed(plan),
+        &sandbox_program,
+        &committed_size(plan),
+    )
+}
+
+/// Byte size of a committed file at the plan's pinned baseline; `None` when the
+/// plan has no baseline or the path is not a blob there.
+fn committed_size(plan: &Plan) -> impl Fn(&str) -> Option<u64> + '_ {
+    move |path: &str| {
+        let context = plan.context.as_ref()?;
+        let scope = plan.scope.as_ref()?;
+        let output = std::process::Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&scope.workspace)
+            .args(["--literal-pathspecs", "cat-file", "-s"])
+            .arg(format!("{}:{path}", context.baseline))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            return None;
+        }
+        String::from_utf8(output.stdout).ok()?.trim().parse().ok()
+    }
 }

@@ -13,6 +13,7 @@ pub mod ui;
 pub mod worker;
 
 pub mod activity;
+pub mod clean;
 pub mod commands;
 pub mod conversations;
 
@@ -39,6 +40,8 @@ pub mod mission_work;
 pub mod metrics;
 
 pub mod selection;
+
+pub mod wake;
 
 pub mod missions;
 
@@ -96,3 +99,4 @@ pub mod agent_drafts;
 pub mod instruct;
 
 pub mod chat_context;
+pub mod chat_mentions;

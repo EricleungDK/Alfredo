@@ -944,3 +944,103 @@ async fn missing_model_404_names_the_model_with_ollamas_text_and_is_not_retried(
     assert!(error.contains("ollama pull fixture"), "{error}");
     assert!(error.contains("model 'fixture' not found"), "{error}");
 }
+
+#[test]
+fn num_ctx_flag_accepts_only_the_documented_range() {
+    use alfredo_tui::provider::parse_num_ctx;
+    assert_eq!(parse_num_ctx("").unwrap(), None);
+    assert_eq!(parse_num_ctx("default").unwrap(), None);
+    for (text, value) in [("2048", 2048), ("8192", 8192), ("262144", 262_144)] {
+        assert_eq!(parse_num_ctx(text).unwrap(), Some(value));
+    }
+    for invalid in ["2047", "262145", "0", "-1", "8k", "bogus", "99999999999"] {
+        let error = parse_num_ctx(invalid).unwrap_err();
+        assert!(
+            error.contains("2048") && error.contains("262144"),
+            "{error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn num_ctx_is_sent_on_chat_and_preload_and_omitted_when_unset() {
+    let fixture = serve(reserve(), |request, _| match request.path.as_str() {
+        "POST /api/generate" => Reply::Json(200, "{\"done\":true}".into()),
+        _ => done("ok"),
+    });
+    for (setting, expected) in [(None, None), (Some(8192), Some(serde_json::json!(8192)))] {
+        fixture.requests.lock().unwrap().clear();
+        let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(3))
+            .unwrap()
+            .with_num_ctx(setting);
+        let events = run(&provider).await;
+        assert!(matches!(events.last().unwrap().update, Update::Done));
+        provider.preload("fixture").await.unwrap();
+        let requests = fixture.requests.lock().unwrap().clone();
+        for path in ["POST /api/chat", "POST /api/generate"] {
+            let body = &requests.iter().find(|r| r.path == path).unwrap().body;
+            assert_eq!(body["options"].get("num_ctx").cloned(), expected, "{path}");
+        }
+    }
+}
+
+#[tokio::test]
+async fn oversized_prompt_is_refused_before_sending_when_num_ctx_is_set() {
+    let fixture = serve(reserve(), |_, _| done("ok"));
+    let big = || {
+        vec![Message {
+            role: "user".into(),
+            content: "x".repeat(30_000),
+        }]
+    };
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(3))
+        .unwrap()
+        .with_num_ctx(Some(2048));
+    let (sender, mut receiver) = mpsc::channel(128);
+    provider.chat(1, 1, "fixture".into(), big(), sender).await;
+    let mut failure = None;
+    while let Some(event) = receiver.recv().await {
+        if let Update::Failed(reason) = event.update {
+            failure = Some(reason);
+        }
+    }
+    let reason = failure.expect("refused");
+    assert!(
+        reason.contains("prompt ≈")
+            && reason.contains("tokens > --num-ctx 2048; shorten the request"),
+        "{reason}"
+    );
+    assert!(fixture.requests.lock().unwrap().is_empty());
+    // Unset: never refused.
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(3)).unwrap();
+    let (sender, mut receiver) = mpsc::channel(128);
+    provider.chat(1, 1, "fixture".into(), big(), sender).await;
+    while let Some(event) = receiver.recv().await {
+        assert!(!matches!(event.update, Update::Failed(_)));
+    }
+}
+
+#[test]
+fn context_fill_reports_used_over_window_and_warns_near_the_limit() {
+    use alfredo_tui::metrics::Metrics;
+    let used = |count| Metrics {
+        prompt_eval_count: Some(count),
+        ..Default::default()
+    };
+    assert_eq!(
+        used(1200).context_fill(Some(8192)).as_deref(),
+        Some("ctx 1200/8192")
+    );
+    assert_eq!(
+        used(1200).context_fill(None).as_deref(),
+        Some("ctx 1200/default")
+    );
+    let near = used(7800).context_fill(Some(8192)).unwrap();
+    assert!(near.contains("context may be truncated"), "{near}");
+    assert!(!used(7000)
+        .context_fill(Some(8192))
+        .unwrap()
+        .contains("truncated"));
+    assert!(!used(9000).context_fill(None).unwrap().contains("truncated"));
+    assert_eq!(Metrics::default().context_fill(Some(8192)), None);
+}

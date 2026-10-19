@@ -70,6 +70,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
     ),
     ("/reject", "[ID] — reject reviewed evidence"),
     ("/refresh", "reload acknowledged task state"),
+    (
+        "/clean",
+        "[yes] — list, or with yes remove, finished runs' worktrees",
+    ),
     ("/retry-task", "repeat exact failed storage request"),
     (
         "/retry-command",
@@ -100,6 +104,10 @@ pub fn capability_prompt(text: &str) -> Result<Option<&str>, String> {
         return Ok(None);
     }
     let (name, prompt) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
+    // `@src/main.rs explain` is a file mention in ordinary prose, not a capability name.
+    if name.contains(['/', '.']) {
+        return Ok(None);
+    }
     if name != "@wayfinder" {
         return Err("Unknown capability; use @wayfinder or F1 for available commands".into());
     }
@@ -166,7 +174,10 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
             "/scope-retry",
         ],
     ),
-    ("Navigation", &["/workspace", "/activity", "/refresh"]),
+    (
+        "Navigation",
+        &["/workspace", "/activity", "/refresh", "/clean"],
+    ),
     (
         "Advanced",
         &[

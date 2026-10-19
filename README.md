@@ -41,7 +41,8 @@ nothing leaves your machine.
 - **Local-first.** Ollama models on your hardware. No API keys, no cloud; the only
   network peer is your Ollama endpoint.
 - **Your repo stays yours.** Workers edit detached worktrees from committed `HEAD`.
-  The result is a local branch you merge, or don't.
+  The result is a local branch you merge, or don't. Alfredo does leave a little Git
+  state behind; see [What Alfredo leaves behind](#what-alfredo-leaves-behind).
 - **Sandboxed.** Workers and their checks run under bubblewrap with resource limits
   and a task-scoped file and command policy. A worker cannot widen its own scope.
 - **Checks decide, not vibes.** A task is accepted when its approved check passes.
@@ -167,6 +168,31 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 | Ctrl+W / Ctrl+U | Delete word / clear prompt |
 | Ctrl+Q / Ctrl+C | Quit (cancels workers and waits for their results) |
 
+## What Alfredo leaves behind
+
+Everything is under the state directory except a few Git entries in your repository's
+`.git`, none of which touch your branch, index or working files:
+
+- **Run worktrees.** Each worker run checks out the whole repository into
+  `<state>/rust-tasks-v1/<id>/runs/<run>/worktree` (one full checkout per run, so disk
+  use grows with every run) and registers it, so `git worktree list` in your repository
+  shows it.
+- **`refs/alfredo/candidates/<sha>`** keep each reviewed result reachable, and
+  **`refs/alfredo/bases/<sha>`** pin a composed baseline for dependent tasks. Hidden
+  from `git branch`; see them with `git for-each-ref refs/alfredo`. They are small.
+- **`alfredo/go-<id>`** branches are the autopilot results you merge or delete yourself.
+
+Cleanup is manual and explicit. `/clean` lists the worktrees it would remove with their
+total size; `/clean yes` removes those of finished runs (accepted, rejected, failed or
+cancelled) and runs `git worktree prune` (skipped if you have stale worktree entries of
+your own). It keeps runs that are active, interrupted or
+awaiting review, any run whose saved evidence or candidate ref is missing, and runs whose partial work
+was not captured in the evidence (interrupted and recovered). The
+evidence (F3), candidate refs, `/branch` and your `alfredo/go-*` branches are untouched,
+and it is refused while autopilot or a worker is active. Failed runs have no candidate
+to save; their diff is kept in the run's evidence. See
+[the reference](alfredo-tui/docs/reference.md#clean-finished-run-worktrees).
+
 ## Flags
 
 | Flag | Default | Meaning |
@@ -181,6 +207,7 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 | `--conversation NAME` | `default` | Named conversation set (one terminal owns a set) |
 | `--state-dir DIR` | `~/.local/state/alfredo` (env `ALFREDO_STATE_DIR`) | State location; must be outside the repo |
 | `--keep-alive VALUE` | `30m` (env `ALFREDO_KEEP_ALIVE`) | Ollama `keep_alive`: `30m`, `300`, `-1`, or `default` |
+| `--num-ctx N` | unset (env `ALFREDO_NUM_CTX`) | Ollama input window in tokens, 2048–262144, sent on every request; oversize prompts are refused, not truncated. Unset: server default |
 | `--connect-retries N` | 3 | Auto-retry (1 s, 2 s, 4 s…) before any reply text, 0–10 |
 | `--parallel-models N` | 2 | Concurrent model requests per endpoint across terminals, 1–8 |
 | `--structured-thinking auto\|on\|off` | `off` | Thinking mode for structured (plan/worker) requests |

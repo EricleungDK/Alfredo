@@ -1273,7 +1273,7 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         Instant::now(),
         usize::from(inner.width),
     );
-    metadata.extend(timing_line(session).map(|text| Line::styled(text, dim())));
+    metadata.extend(timing_line(session, app.num_ctx).map(|text| Line::styled(text, dim())));
     if !metadata.is_empty() {
         metadata.push(Line::default());
     }
@@ -1385,7 +1385,7 @@ fn capacity_wait_lines(
 }
 
 /// One dim line: queue position or elapsed time, plus generation speed.
-fn timing_line(session: &crate::model::Session) -> Option<String> {
+fn timing_line(session: &crate::model::Session, num_ctx: Option<u32>) -> Option<String> {
     let mut parts = Vec::new();
     if let Some(observation) = session.queue_observation() {
         parts.push(format!(
@@ -1402,6 +1402,7 @@ fn timing_line(session: &crate::model::Session) -> Option<String> {
         parts.push(timing.compact(std::time::Instant::now()));
     }
     if let Some(metrics) = &session.metrics {
+        parts.extend(metrics.context_fill(num_ctx));
         if let (Some(count), Some(duration)) = (
             metrics.eval_count,
             metrics.eval_duration.filter(|value| *value > 0),
@@ -1582,6 +1583,18 @@ fn next_action(snapshot: &crate::tasks::Snapshot, task: &crate::tasks::Task) -> 
         }
         TaskStatus::ReviewReady => Some(format!("/review {id} JSON{GAP}/reject {id}")),
         TaskStatus::NeedsHumanReview => Some(format!("/review {id} JSON")),
+        TaskStatus::Failed
+            if task
+                .run
+                .as_ref()
+                .is_some_and(|run| crate::worker::too_large_advice(&run.detail).is_some()) =>
+        {
+            // A repair cannot shrink the file; say what can, as autopilot's summary does.
+            task.run
+                .as_ref()
+                .and_then(|run| crate::worker::too_large_advice(&run.detail))
+                .map(|(_, next)| next.to_string())
+        }
         TaskStatus::Rejected | TaskStatus::Failed if snapshot.architecture_required(id) => {
             Some(format!("/architect-revise {id}"))
         }
@@ -2910,6 +2923,7 @@ mod fit_words_tests {
                     expected_revision: 0,
                     action: Action::Plan {
                         plan: crate::planner::Plan {
+                            usage: None,
                             prompt: "p".into(),
                             planner: "fixture".into(),
                             context: None,

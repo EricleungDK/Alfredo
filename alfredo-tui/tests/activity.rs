@@ -130,6 +130,7 @@ fn plan_membership_search_and_interleaved_history_keep_exact_entry_prefixes() {
             plan: Plan {
                 prompt: "Keep #draft input text".into(),
                 planner: "architect".into(),
+                usage: None,
                 context: None,
                 scope: None,
                 architecture: None,

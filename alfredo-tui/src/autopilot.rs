@@ -283,7 +283,9 @@ pub struct Submission {
 pub fn is_command(text: &str) -> bool {
     let text = text.trim();
     let verb = text.split_whitespace().next().unwrap_or("");
-    verb == "/go" || matches!(text, "/pause" | "/resume" | "/stop" | "/autopilot")
+    verb == "/go"
+        || verb == "/clean"
+        || matches!(text, "/pause" | "/resume" | "/stop" | "/autopilot")
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -732,7 +734,8 @@ impl Autopilot {
         true
     }
 
-    /// Terminal command entry for `/go`, `/pause`, `/resume`, `/stop`, `/autopilot`.
+    /// Terminal command entry for `/go`, `/pause`, `/resume`, `/stop`, `/autopilot`, and the
+    /// autopilot-gated `/clean`.
     pub fn command(
         &mut self,
         runtime: &Runtime,
@@ -787,6 +790,12 @@ impl Autopilot {
                 tasks.autopilot_report = Some(report);
                 Ok("Autopilot status · /tasks returns to task details".into())
             }
+            _ if text.split_whitespace().next() == Some("/clean") => crate::clean::command(
+                runtime,
+                tasks,
+                self.running(),
+                text.strip_prefix("/clean").unwrap_or(""),
+            ),
             _ => match text.strip_prefix("/go") {
                 Some(goal) if goal.starts_with(char::is_whitespace) && !goal.trim().is_empty() => {
                     self.start(goal, model, max_repairs, tasks)
@@ -1118,7 +1127,21 @@ impl Autopilot {
     }
 
     fn fail(&mut self, tasks: &mut TaskControl, notice: String) {
+        self.fail_with_next(tasks, notice, None);
+    }
+
+    fn fail_with_next(
+        &mut self,
+        tasks: &mut TaskControl,
+        notice: String,
+        next: Option<(String, u32)>,
+    ) {
         let elapsed = self.elapsed();
+        let totals = tasks
+            .snapshot
+            .as_ref()
+            .zip(self.saved.as_ref())
+            .and_then(|(snapshot, saved)| run_usage(tasks, snapshot, saved).line());
         if let Some(saved) = self.saved.as_mut() {
             saved.phase = Phase::Failed;
             saved.finished = Some(saved.started + elapsed);
@@ -1128,12 +1151,36 @@ impl Autopilot {
                 "Reason",
                 clean(&notice, 1024)
             );
+            if let Some((next, repairs)) = &next {
+                report.push_str(&format!("\n{:<LABEL$}{repairs}", "Repairs"));
+                if !next.is_empty() {
+                    report.push_str(&format!("\n{:<LABEL$}{}", "Next", clean(next, 300)));
+                }
+            }
             if let Some(warning) = saved.dirty_warning() {
                 report.push_str(&format!("\n{:<LABEL$}{warning}", "Warning"));
             }
+            if let Some(totals) = &totals {
+                report.push_str(&format!("\n{:<LABEL$}{totals}", "Model"));
+            }
             saved.report = Some(report);
         }
-        self.finished_notice = Some(clean(&format!("Autopilot failed{GAP}{notice}"), 1024));
+        let notice = match next.as_ref() {
+            Some((next, _)) if !next.is_empty() => format!("{notice} {next}"),
+            _ => notice,
+        };
+        let repairs = next
+            .as_ref()
+            .map(|(_, repairs)| format!("{GAP}{}", plural(*repairs, "repair")))
+            .unwrap_or_default();
+        let notice = format!("{notice}{repairs}");
+        let totals = totals
+            .map(|line| format!("{GAP}{line}"))
+            .unwrap_or_default();
+        self.finished_notice = Some(clean(
+            &format!("Autopilot failed{GAP}{notice}{totals}"),
+            1024,
+        ));
         self.set_notice(tasks, notice);
         // A planning failure leaves the unsaved draft panel open; the summary
         // must be what the user sees, as after a task failure.
@@ -1353,6 +1400,17 @@ impl Autopilot {
                 self.fail(tasks, format!("{cause}. {}", crate::doctor::BWRAP_FIX));
                 return Ok(None);
             }
+            if let Some(cause) = find(family.head).and_then(|head| too_large_failure(tasks, head)) {
+                // The last sentence of the shared message is the way forward.
+                let (reason, next) = cause.rsplit_once(". ").unwrap_or((&cause, ""));
+                let repairs: u32 = families.iter().map(|family| family.repairs).sum();
+                self.fail_with_next(
+                    tasks,
+                    format!("{reason}."),
+                    Some((next.to_string(), repairs)),
+                );
+                return Ok(None);
+            }
         }
         let mut command = None;
         let mut retry_recovered: Vec<u64> = Vec::new();
@@ -1568,6 +1626,7 @@ impl Autopilot {
             .count();
         let repairs: u32 = families.iter().map(|family| family.repairs).sum();
         let state = outcome(accepted, families.len());
+        let totals = run_usage(tasks, &snapshot, &saved).line();
         // Labeled sections in the side pane language: dim labels, one blank
         // row between sections, one line per task.
         let mut lines = vec![
@@ -1577,6 +1636,9 @@ impl Autopilot {
             format!("{:<LABEL$}{accepted}/{} accepted", "Tasks", families.len()),
             format!("{:<LABEL$}{repairs}", "Repairs"),
         ];
+        if let Some(totals) = &totals {
+            lines.push(format!("{:<LABEL$}{totals}", "Model"));
+        }
         if let Some(warning) = saved.dirty_warning() {
             lines.push(format!("{:<LABEL$}{warning}", "Warning"));
         }
@@ -1664,6 +1726,9 @@ impl Autopilot {
         if repairs > 0 {
             notice.push_str(&format!("{GAP}{}", plural(repairs, "repair")));
         }
+        if let Some(totals) = &totals {
+            notice.push_str(&format!("{GAP}{totals}"));
+        }
         notice.push_str(&match &branch {
             Some(name) => format!("{GAP}git switch {name}"),
             None => format!("{GAP}no integration branch"),
@@ -1686,6 +1751,47 @@ impl Autopilot {
     }
 }
 
+/// Planner, worker and repair usage of this run's own tasks: the saved plan's
+/// receipt plus the model metrics in each task run's evidence. Anything the
+/// server did not report adds nothing.
+fn run_usage(tasks: &TaskControl, snapshot: &Snapshot, saved: &Saved) -> crate::metrics::Usage {
+    let mut total = crate::metrics::Usage::default();
+    let plan = saved.save_request.as_ref().and_then(|request| {
+        snapshot
+            .receipts
+            .iter()
+            .find(|receipt| &receipt.request.correlation == request)
+    });
+    if let Some(crate::tasks::Action::Plan { plan }) = plan.map(|receipt| &receipt.request.action) {
+        if let Some(usage) = &plan.usage {
+            total.add(usage);
+        }
+    }
+    let Some(first) = saved.first else {
+        return total;
+    };
+    let roots = saved.roots();
+    for task in snapshot.tasks.iter().filter(|task| task.id >= first) {
+        let in_run = snapshot
+            .repair_root(task.id)
+            .is_some_and(|root| roots.contains(&root));
+        if !in_run || task.run.is_none() {
+            continue;
+        }
+        let usage = tasks
+            .store()
+            .evidence(task.id)
+            .ok()
+            .and_then(|text| serde_json::from_str::<crate::worker::Evidence>(&text).ok())
+            .and_then(|evidence| evidence.model_metrics)
+            .and_then(|metrics| crate::metrics::Usage::from_metrics(&metrics));
+        if let Some(usage) = usage {
+            total.add(&usage);
+        }
+    }
+    total
+}
+
 /// Root cause when the head failed because the sandbox could not start. The
 /// run's evidence carries the typed `failure_code`; repairing cannot fix it.
 fn sandbox_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
@@ -1695,6 +1801,18 @@ fn sandbox_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
     let evidence = tasks.store().evidence(head.id).ok()?;
     let evidence = serde_json::from_str::<crate::worker::Evidence>(&evidence).ok()?;
     (evidence.failure_code.as_deref() == Some(crate::execution::SANDBOX_UNAVAILABLE))
+        .then(|| clean(&evidence.detail, 300))
+}
+
+/// Failure text when the head's approved files exceed the worker's bounds. The
+/// run's evidence carries the typed `failure_code`; repairing cannot fix it.
+fn too_large_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
+    if head.status != TaskStatus::Failed {
+        return None;
+    }
+    let evidence = tasks.store().evidence(head.id).ok()?;
+    let evidence = serde_json::from_str::<crate::worker::Evidence>(&evidence).ok()?;
+    (evidence.failure_code.as_deref() == Some(crate::worker::FILE_TOO_LARGE))
         .then(|| clean(&evidence.detail, 300))
 }
 

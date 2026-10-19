@@ -13,7 +13,8 @@ import tomllib
 
 # PTY journeys run against the installed binary; autopilot covers /go end to end,
 # the agent journey steering and instructing workers from the agent view.
-SMOKES = ['terminal_smoke.py', 'inference_terminal_smoke.py', 'qualification_cli_smoke.py',
+SMOKES = ['terminal_smoke.py', 'inference_terminal_smoke.py', 'num_ctx_terminal_smoke.py',
+          'qualification_cli_smoke.py',
           'recovery_terminal_smoke.py', 'autopilot_terminal_smoke.py', 'agent_terminal_smoke.py']
 
 

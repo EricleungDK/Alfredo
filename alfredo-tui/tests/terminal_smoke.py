@@ -315,6 +315,74 @@ class ChatHarnessContext(unittest.TestCase):
                 server.shutdown()
 
 
+class ChatFileMentions(unittest.TestCase):
+    def test_at_path_attaches_committed_file_and_missing_file_notices(self):
+        chats = []
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *_args):
+                pass
+
+            def do_GET(self):
+                body = json.dumps({'models': [{'name': 'fixture'}]}).encode()
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_POST(self):
+                request = json.loads(self.rfile.read(int(self.headers.get('Content-Length', 0))) or b'{}')
+                if self.path == '/api/chat':
+                    chats.append(request)
+                body = (b'{"done":true,"done_reason":"load"}\n' if self.path == '/api/generate'
+                        else ('{"message":{"content":"MENTION_REPLY_%d"},"done":true}\n' % len(chats)).encode())
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/x-ndjson')
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        with tempfile.TemporaryDirectory(prefix='alfredo-mention-state-') as state, tempfile.TemporaryDirectory(prefix='alfredo-mention-repo-') as repo:
+            git = ['git', '-C', repo, '-c', 'user.name=t', '-c', 'user.email=t@t']
+            subprocess.run(git + ['init', '-q', '--template='], check=True)
+            Path(repo, 'calc.py').write_text('def answer():\n    return 42\n')
+            subprocess.run(git + ['add', 'calc.py'], check=True)
+            subprocess.run(git + ['commit', '-q', '-m', 'init'], check=True)
+            Path(repo, 'calc.py').write_text('WORKING_TREE_ONLY = 1\n')
+            env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=state)
+            terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint', f'http://127.0.0.1:{server.server_port}'], repo, env)
+            try:
+                terminal.wait_for('◈ ○ chat 1')
+                terminal.write(b'@calc.py is it right? Look at it now\r')
+                terminal.wait_for('MENTION_REPLY_1')
+                first = next(chat for chat in chats if chat['messages'][-1]['content'].startswith('@calc.py is it right'))
+                sent = first['messages'][-1]['content']
+                self.assertIn('FILE calc.py\ndef answer():\n    return 42\n', sent)
+                self.assertNotIn('WORKING_TREE_ONLY', sent)
+                self.assertIn('@calc.py is it right', terminal.screen())  # the transcript shows what was typed
+                self.assertNotIn('FILE calc.py', terminal.screen())
+                # The follow-up still carries the file.
+                terminal.write(b'and then?\r')
+                terminal.wait_for('MENTION_REPLY_2')
+                follow = chats[-1]['messages']
+                self.assertEqual(follow[-1]['content'], 'and then?')
+                self.assertIn('return 42', follow[-3]['content'])
+                # A missing file, an email and a bare @word: one notice, for the file only.
+                terminal.write(b'check @missing.rs mail a@b.com @everyone\r')
+                terminal.wait_for('@missing.rs: not attached (not committed at HEAD)')
+                self.assertNotIn('everyone: not attached', terminal.screen())
+                terminal.write(b'\x11')
+                self.assertEqual(terminal.process.wait(timeout=5), 0)
+            finally:
+                terminal.close()
+                server.shutdown()
+
+
 class ModelPicker(unittest.TestCase):
     def test_arrow_keys_choose_a_model_from_the_list(self):
         # Regression: /models listed models, but arrows fell through to prompt history.

@@ -135,6 +135,7 @@ fn adopt(snapshot: &mut Snapshot, status: TaskStatus) {
             plan: Plan {
                 prompt: "Revise architecture".into(),
                 planner: "fixture".into(),
+                usage: None,
                 context: None,
                 scope: None,
                 architecture: Some(origin),
@@ -528,6 +529,7 @@ fn review_usage_uses_the_selected_tasks_real_criterion_count() {
             plan: Plan {
                 prompt: "Plan".into(),
                 planner: "fixture".into(),
+                usage: None,
                 context: None,
                 scope: None,
                 architecture: None,

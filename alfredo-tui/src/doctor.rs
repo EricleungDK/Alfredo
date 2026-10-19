@@ -161,6 +161,10 @@ pub async fn inspect(
         passed = false;
         lines.push("FAIL worker platform: coding execution currently requires Linux.".into());
     }
+    lines.push(match provider.num_ctx() {
+        Some(window) => format!("NOTE context: --num-ctx {window} tokens is sent on every request; prompts estimated above it are refused before sending"),
+        None => "NOTE context: not set: Ollama default applies; set --num-ctx for prompts above ~4k tokens".into(),
+    });
     lines.push("Checks do not run inference or a sandboxed task, measure model speed, or prove available GPU memory. Actual sandbox permissions are checked when a worker runs.".into());
     lines.push("Storage checks may initialize private directories/lock files; they do not save conversations or change task receipts.".into());
     lines.push(
