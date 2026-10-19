@@ -98,6 +98,7 @@ impl Workstation {
             self.provider.clone(),
             crate::health::POLL_INTERVAL,
         );
+        self.app.num_ctx = self.provider.num_ctx();
         self.app.health = monitor.view();
         self.app
             .health

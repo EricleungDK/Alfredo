@@ -103,6 +103,14 @@ struct Server {
 }
 impl Server {
     fn new(respond: impl Fn(&Value, usize) -> String + Send + Sync + 'static) -> Self {
+        Self::with_usage(respond, |_| None)
+    }
+    /// `usage` returns the server's final-frame count fields for a request, if any.
+    fn with_usage(
+        respond: impl Fn(&Value, usize) -> String + Send + Sync + 'static,
+        usage: impl Fn(&Value) -> Option<Value> + Send + Sync + 'static,
+    ) -> Self {
+        let usage = Arc::new(usage);
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
@@ -119,7 +127,7 @@ impl Server {
                         continue;
                     }
                 };
-                let (seen, respond) = (seen.clone(), respond.clone());
+                let (seen, respond, usage) = (seen.clone(), respond.clone(), usage.clone());
                 thread::spawn(move || {
                     stream.set_nonblocking(false).unwrap();
                     stream
@@ -158,7 +166,11 @@ impl Server {
                         seen.len() - 1
                     };
                     let content = respond(&request, index);
-                    let body = format!("{}\n", json!({"message":{"content":content},"done":true}));
+                    let mut frame = json!({"message":{"content":content},"done":true});
+                    if let Some(Value::Object(counts)) = usage(&request) {
+                        frame.as_object_mut().unwrap().extend(counts);
+                    }
+                    let body = format!("{frame}\n");
                     let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
                 });
             }
@@ -529,6 +541,87 @@ fn existing_test_is_worker_reference_repairs_carry_output_and_nothing_accepted_r
     assert!(rows[1].contains("   1 repair   "), "{rows:#?}");
 }
 
+fn go_with(server: &Server, fixture: &Fixture) -> (Autopilot, TaskControl) {
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(fixture, server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Make answer return 42 and add app", "fixture", 2, &control)
+        .unwrap();
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "completion",
+        finished,
+    );
+    (autopilot, control)
+}
+
+fn scripted(request: &Value, _: usize) -> String {
+    if planner(request) {
+        return two_task_plan();
+    }
+    let prompt = worker_prompt(request);
+    if prompt.starts_with("Implement this task: Repair #1:") {
+        good_calc()
+    } else if prompt.starts_with("Implement this task: Make answer") {
+        bad_calc()
+    } else {
+        app()
+    }
+}
+
+#[test]
+fn finished_go_sums_planner_worker_and_repair_tokens_and_saves_the_planner_counts() {
+    let fixture = Fixture::new();
+    let server = Server::with_usage(scripted, |request| {
+        let (prompt, eval, ns) = if planner(request) {
+            (1000, 100, 2_000_000_000u64)
+        } else {
+            (200, 50, 1_000_000_000)
+        };
+        Some(json!({"prompt_eval_count": prompt, "eval_count": eval, "total_duration": ns}))
+    });
+    let (mut autopilot, _control) = go_with(&server, &fixture);
+    // Planner 1000/100 + three worker runs (task 1, its repair 3, task 2) of 200/50.
+    let want = "tokens 1.6k in / 250 out · model 5 s";
+    let notice = autopilot.take_finished_notice().unwrap();
+    assert!(notice.contains(want), "{notice}");
+    assert!(autopilot.report().unwrap().contains(want));
+    let snapshot = fixture.store.snapshot().unwrap();
+    let usage = snapshot
+        .receipts
+        .iter()
+        .find_map(|receipt| match &receipt.request.action {
+            Action::Plan { plan } => plan.usage,
+            _ => None,
+        })
+        .expect("plan receipt keeps the planner usage");
+    assert_eq!(
+        (usage.prompt_tokens, usage.completion_tokens, usage.model_ns),
+        (Some(1000), Some(100), Some(2_000_000_000))
+    );
+}
+
+#[test]
+fn finished_go_without_server_counts_has_no_totals_line_and_no_plan_usage() {
+    let fixture = Fixture::new();
+    let server = Server::new(scripted);
+    let (mut autopilot, _control) = go_with(&server, &fixture);
+    let notice = autopilot.take_finished_notice().unwrap();
+    assert!(!notice.contains("tokens"), "{notice}");
+    assert!(!autopilot.report().unwrap().contains("tokens"));
+    let snapshot = fixture.store.snapshot().unwrap();
+    assert!(snapshot
+        .receipts
+        .iter()
+        .all(|receipt| match &receipt.request.action {
+            Action::Plan { plan } => plan.usage.is_none(),
+            _ => true,
+        }));
+}
+
 #[test]
 fn finished_autopilot_replaces_the_stale_start_notice_in_the_footer_once() {
     let fixture = Fixture::new();
@@ -743,18 +836,48 @@ fn exhausted_repairs_hold_the_task_block_dependents_and_integrate_independent_wo
 /// check's own process prints Bubblewrap's setup error as its first stderr line),
 /// driven through the real worker finalize, evidence and settle path.
 fn sandbox_refused(max_repairs: u32) {
+    sandbox_refused_with(max_repairs, |_| None);
+}
+
+#[test]
+fn failed_run_shows_the_token_totals_line_when_the_server_reported_counts() {
+    let (report, notice) = sandbox_refused_with(0, |request| {
+        let (prompt, eval) = if planner(request) {
+            (1000, 100)
+        } else {
+            (200, 50)
+        };
+        Some(json!({"prompt_eval_count": prompt, "eval_count": eval}))
+    });
+    assert!(report.contains("tokens 1.2k in / 150 out"), "{report}");
+    assert!(notice.starts_with("Autopilot failed"), "{notice}");
+    assert!(notice.contains("tokens 1.2k in / 150 out"), "{notice}");
+    let (report, notice) = sandbox_refused_with(0, |_| None);
+    assert!(
+        !report.contains("tokens") && !notice.contains("tokens"),
+        "{report}{notice}"
+    );
+}
+
+fn sandbox_refused_with(
+    max_repairs: u32,
+    usage: impl Fn(&Value) -> Option<Value> + Send + Sync + 'static,
+) -> (String, String) {
     let fixture = Fixture::new();
-    let server = Server::new(|request, _| {
-        if planner(request) {
-            return json!({"tasks": [
+    let server = Server::with_usage(
+        |request, _| {
+            if planner(request) {
+                return json!({"tasks": [
                 {"title": "Make answer return 42", "acceptance": ["answer() returns 42"], "model": "fixture",
                  "dependencies": [], "policy": {"files": ["calc.py"], "check": check(
                     "import sys; sys.stderr.write('bwrap: No permissions to create new namespace\\n'); sys.exit(1)")}},
             ]})
             .to_string();
-        }
-        good_calc()
-    });
+            }
+            good_calc()
+        },
+        usage,
+    );
     let runtime = Runtime::new().unwrap();
     let mut control = control(&fixture, &server, &runtime);
     let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
@@ -774,7 +897,7 @@ fn sandbox_refused(max_repairs: u32) {
         evidence.failure_code.as_deref(),
         Some(alfredo_tui::execution::SANDBOX_UNAVAILABLE)
     );
-    let report = autopilot.report().unwrap();
+    let report = autopilot.report().unwrap().to_string();
     assert!(
         report.contains("bwrap: No permissions to create new namespace"),
         "{report}"
@@ -789,6 +912,8 @@ fn sandbox_refused(max_repairs: u32) {
         "{:?}",
         server.prompts()
     );
+    let notice = autopilot.take_finished_notice().unwrap();
+    (report, notice)
 }
 
 #[test]

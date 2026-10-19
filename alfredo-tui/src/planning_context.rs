@@ -22,7 +22,7 @@ pub struct RepositoryContext {
 fn sha(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|b| b.is_ascii_hexdigit())
 }
-fn path_valid(path: &str) -> bool {
+pub(crate) fn path_valid(path: &str) -> bool {
     !path.is_empty()
         && path.len() <= 512
         && !path.chars().any(char::is_control)
@@ -33,7 +33,7 @@ fn path_valid(path: &str) -> bool {
             .any(|part| part.is_empty() || part == "." || part == "..")
 }
 /// Common secret material and generated/vendor trees are never model inputs.
-fn excluded(lower: &str) -> bool {
+pub(crate) fn excluded(lower: &str) -> bool {
     lower.split('/').any(|part| {
         matches!(part, ".git" | "node_modules" | "target" | "dist" | "vendor")
             || part.starts_with(".env")
@@ -340,4 +340,73 @@ async fn capture_inner(
     context.omitted_sources = total - context.sources.len();
     context.validate()?;
     Ok(context)
+}
+
+/// Largest blob a chat mention may read; bigger files are refused, not cut.
+pub const MENTION_BLOB: usize = 256 * 1024;
+
+/// Committed regular text files at HEAD named by `wanted` (repo-root relative).
+/// Every path gets an entry: its text, or the reason it was not read. Reads Git
+/// objects only, so symlinks, working-tree edits and untracked files never leak.
+pub async fn committed_text(root: &Path, wanted: &[String]) -> Result<Vec<NamedSource>, String> {
+    let top = git(root, &["rev-parse", "--show-toplevel"]).await?;
+    let top = Path::new(top.trim());
+    let head = git(top, &["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]).await?;
+    let head = head.trim();
+    if !sha(head) {
+        return Err("no commit at HEAD".into());
+    }
+    let mut readable: Vec<&str> = Vec::new();
+    let mut result: Vec<NamedSource> = Vec::new();
+    for path in wanted {
+        if !path_valid(path) {
+            result.push(NamedSource {
+                path: path.clone(),
+                content: Err("rejected: absolute, `..` or invalid path"),
+            });
+        } else if excluded(&path.to_lowercase()) {
+            result.push(NamedSource {
+                path: path.clone(),
+                content: Err("excluded as possible secret or generated file"),
+            });
+        } else {
+            readable.push(path);
+        }
+    }
+    if !readable.is_empty() {
+        let mut args = vec!["--literal-pathspecs", "ls-tree", "-l", "-z", head, "--"];
+        args.extend(readable.iter().copied());
+        let tree = git(top, &args).await?;
+        let mut entries = std::collections::BTreeMap::new();
+        for record in tree.split('\0').filter(|record| !record.is_empty()) {
+            let (metadata, path) = record.split_once('\t').ok_or("Malformed Git tree entry")?;
+            let fields: Vec<_> = metadata.split_whitespace().collect();
+            if fields.len() == 4 {
+                entries.insert(path, (fields[0], fields[2], fields[3]));
+            }
+        }
+        for path in readable {
+            let content = match entries.get(path) {
+                None => Err("not committed at HEAD"),
+                Some((mode, _, _)) if *mode == "040000" => Err("is a directory"),
+                Some((mode, _, _)) if !matches!(*mode, "100644" | "100755") => {
+                    Err("not a regular file (symlink or submodule)")
+                }
+                Some((_, _, size)) if size.parse::<usize>().map_or(true, |s| s > MENTION_BLOB) => {
+                    Err("larger than 256 KiB")
+                }
+                Some((_, blob, _)) => match git(top, &["cat-file", "blob", blob]).await {
+                    Ok(text) if !text.contains('\0') => Ok(text),
+                    Ok(_) => Err("binary"),
+                    Err(error) if error.contains("non-UTF-8") => Err("not UTF-8 text"),
+                    Err(error) => return Err(error),
+                },
+            };
+            result.push(NamedSource {
+                path: path.into(),
+                content,
+            });
+        }
+    }
+    Ok(result)
 }

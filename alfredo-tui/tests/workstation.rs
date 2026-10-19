@@ -244,6 +244,7 @@ fn switching_requires_quiescence_without_cancelling_or_starting_work() {
     assert!(work.can_switch().unwrap_err().contains("model discovery"));
     work.app.models_pending = false;
     work.tasks.planner.draft = Some(alfredo_tui::planner::Plan {
+        usage: None,
         architecture: None,
         prompt: "draft".into(),
         planner: "fixture".into(),
@@ -323,6 +324,7 @@ fn restart_restores_reviewable_plan_without_inference_and_retains_stale_save_gua
     let runtime = Runtime::new().unwrap();
     let mut work = fixture.open();
     let plan = alfredo_tui::planner::Plan {
+        usage: None,
         architecture: None,
         prompt: "Implement calculation".into(),
         planner: "fixture".into(),

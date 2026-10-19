@@ -153,6 +153,7 @@ fn hierarchy() -> Fixture {
             plan: Plan {
                 prompt: "Build a parser".into(),
                 planner: "recorded-planner-model".into(),
+                usage: None,
                 tasks: steps,
                 context: None,
                 scope: None,
