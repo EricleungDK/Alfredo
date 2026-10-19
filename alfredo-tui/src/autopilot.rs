@@ -1122,6 +1122,15 @@ impl Autopilot {
     }
 
     fn fail(&mut self, tasks: &mut TaskControl, notice: String) {
+        self.fail_with_next(tasks, notice, None);
+    }
+
+    fn fail_with_next(
+        &mut self,
+        tasks: &mut TaskControl,
+        notice: String,
+        next: Option<(String, u32)>,
+    ) {
         let elapsed = self.elapsed();
         let totals = tasks
             .snapshot
@@ -1137,6 +1146,12 @@ impl Autopilot {
                 "Reason",
                 clean(&notice, 1024)
             );
+            if let Some((next, repairs)) = &next {
+                report.push_str(&format!("\n{:<LABEL$}{repairs}", "Repairs"));
+                if !next.is_empty() {
+                    report.push_str(&format!("\n{:<LABEL$}{}", "Next", clean(next, 300)));
+                }
+            }
             if let Some(warning) = saved.dirty_warning() {
                 report.push_str(&format!("\n{:<LABEL$}{warning}", "Warning"));
             }
@@ -1145,6 +1160,15 @@ impl Autopilot {
             }
             saved.report = Some(report);
         }
+        let notice = match next.as_ref() {
+            Some((next, _)) if !next.is_empty() => format!("{notice} {next}"),
+            _ => notice,
+        };
+        let repairs = next
+            .as_ref()
+            .map(|(_, repairs)| format!("{GAP}{}", plural(*repairs, "repair")))
+            .unwrap_or_default();
+        let notice = format!("{notice}{repairs}");
         let totals = totals
             .map(|line| format!("{GAP}{line}"))
             .unwrap_or_default();
@@ -1369,6 +1393,17 @@ impl Autopilot {
         for family in families.iter().filter(|f| !held_or_done(f, tasks)) {
             if let Some(cause) = find(family.head).and_then(|head| sandbox_failure(tasks, head)) {
                 self.fail(tasks, format!("{cause}. {}", crate::doctor::BWRAP_FIX));
+                return Ok(None);
+            }
+            if let Some(cause) = find(family.head).and_then(|head| too_large_failure(tasks, head)) {
+                // The last sentence of the shared message is the way forward.
+                let (reason, next) = cause.rsplit_once(". ").unwrap_or((&cause, ""));
+                let repairs: u32 = families.iter().map(|family| family.repairs).sum();
+                self.fail_with_next(
+                    tasks,
+                    format!("{reason}."),
+                    Some((next.to_string(), repairs)),
+                );
                 return Ok(None);
             }
         }
@@ -1761,6 +1796,18 @@ fn sandbox_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
     let evidence = tasks.store().evidence(head.id).ok()?;
     let evidence = serde_json::from_str::<crate::worker::Evidence>(&evidence).ok()?;
     (evidence.failure_code.as_deref() == Some(crate::execution::SANDBOX_UNAVAILABLE))
+        .then(|| clean(&evidence.detail, 300))
+}
+
+/// Failure text when the head's approved files exceed the worker's bounds. The
+/// run's evidence carries the typed `failure_code`; repairing cannot fix it.
+fn too_large_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
+    if head.status != TaskStatus::Failed {
+        return None;
+    }
+    let evidence = tasks.store().evidence(head.id).ok()?;
+    let evidence = serde_json::from_str::<crate::worker::Evidence>(&evidence).ok()?;
+    (evidence.failure_code.as_deref() == Some(crate::worker::FILE_TOO_LARGE))
         .then(|| clean(&evidence.detail, 300))
 }
 
