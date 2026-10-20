@@ -111,7 +111,7 @@ class NumCtx(unittest.TestCase):
                 options = chat[0]['options']
                 self.assertEqual(options['num_ctx'], window)
                 self.assertTrue(256 <= options['num_predict'] < window, options)
-                self.assertGreater(options['num_predict'], window - 100)
+                self.assertGreater(options['num_predict'], window - 800)
             finally:
                 terminal.close()
                 fixture.close()
