@@ -339,6 +339,43 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         self.assertEqual(self.fixture.markers(), [])
         self.quit(terminal)
 
+    def hook(self, body):
+        path = self.workspace.parent / 'on-finish.sh'
+        path.write_text('#!/bin/sh\n' + body + '\n')
+        path.chmod(0o755)
+        return path
+
+    def test_on_finish_hook_runs_once_with_the_run_summary_and_failure_shows_a_notice(self):
+        out = self.workspace.parent / 'hook.out'
+        hook = self.hook(f'echo "$ALFREDO_STATE|$ALFREDO_ACCEPTED/$ALFREDO_TOTAL|$ALFREDO_GOAL" >> "{out}"')
+        self.fixture.prose_worker = True
+        terminal = self.terminal(resume=False, env={'ALFREDO_ON_FINISH': str(hook)})
+        terminal.send('/go Make answer return 42 and add app\r')
+        self.screen_has(terminal, 'Autopilot ✗ failed', 90)
+        self.wait_until('hook wrote its file', out.exists)
+        time.sleep(0.5)
+        self.assertEqual(out.read_text(), 'failed|0/2|Make answer return 42 and add app\n')
+        self.quit(terminal)
+
+        broken = self.hook('exit 3')
+        self.fixture.prose_worker = True
+        terminal = Terminal(self.binary, self.fixture.endpoint, self.workspace, self.state, 'autopilot2',
+                            env={'ALFREDO_ON_FINISH': str(broken)})
+        self.terminals.append(terminal)
+        self.screen_has(terminal, 'ALFREDO')
+        terminal.send('/go Make answer return 42 and add app\r')
+        self.screen_has(terminal, '--on-finish hook failed', 90)
+        self.assertIn('Autopilot ✗ failed', terminal.screen())
+        self.quit(terminal)
+
+    def test_on_finish_must_be_an_absolute_executable(self):
+        for value in ['relative.sh', str(self.workspace / 'missing')]:
+            result = subprocess.run([str(self.binary), '--on-finish', value], capture_output=True,
+                                    text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('--on-finish', result.stderr)
+            self.assertEqual(result.stdout, '')
+
     def test_go_without_bubblewrap_is_refused_with_the_fix_and_makes_no_model_calls(self):
         missing = str(self.workspace.parent / 'no-such-bwrap')
         terminal = self.terminal(resume=False, env={'ALFREDO_TEST_BWRAP_PATH': missing})

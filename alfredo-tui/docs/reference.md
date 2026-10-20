@@ -29,6 +29,41 @@ requests 8192. Evidence records the requested temperature and limit. An exhauste
 dependents stay blocked, and independent work continues. Invalid plans are retried
 once with the validation error appended, then autopilot stops.
 
+### Completion hook
+
+`--on-finish PROGRAM` (env `ALFREDO_ON_FINISH`) names one program of yours to run when
+an autopilot run ends `done`, `partial` or `failed`, so a long local run can notify you.
+It is a launch option only; Alfredo never reads a hook from the repository or the
+state directory. `PROGRAM` must be an absolute path to an existing executable regular
+file, or Alfredo exits with a usage error before starting.
+
+- Started directly (no shell, no arguments), outside the sandbox, with your own
+  permissions; standard input, output and error are discarded.
+- Environment: Alfredo's own environment plus `ALFREDO_STATE` (`done`, `partial` or
+  `failed`), `ALFREDO_BRANCH` (integration branch, empty when none),
+  `ALFREDO_GOAL`, `ALFREDO_ACCEPTED`, `ALFREDO_TOTAL` (planned tasks) and
+  `ALFREDO_REPAIRS`. Treat `ALFREDO_GOAL` as untrusted text.
+- Runs on its own thread so the UI never waits; after 10 s it is killed and reaped.
+  Only the program itself is killed: a script should `exec` its last command, or its
+  own children may outlive the limit. Quitting right after a run finishes can skip the
+  hook, and a failure notice is dropped if you switch missions before the hook ends.
+  A spawn failure, non-zero exit or timeout shows a footer notice
+  (`--on-finish hook failed (exit status: 3)`) and never changes autopilot state.
+- Fires when the run first reaches the finished state, including planning failures and
+  a run finished after a crash and `/resume`. The fact is saved with the run
+  (`hook_fired`), so restarting never fires it again and a crash between saving the
+  finish and starting the hook skips it rather than repeating it. `/stop` pauses and
+  is not a finish. Follow-up work that reopens a finished run fires the hook again
+  at its next finish.
+
+```sh
+alfredo-tui --go "add calc.py with tests" \
+  --on-finish "$HOME/bin/alfredo-done"
+# ~/bin/alfredo-done (chmod +x):
+#   #!/bin/sh
+#   notify-send "Alfredo $ALFREDO_STATE" "$ALFREDO_ACCEPTED/$ALFREDO_TOTAL accepted $ALFREDO_BRANCH"
+```
+
 Plan first: bare `/go` (no goal) runs a plan you already reviewed instead of planning.
 With a `/plan` draft open it saves the draft unchanged (`/plan-save`) and runs those
 tasks; with no draft it runs the mission's saved `/plan-save` tasks that are still

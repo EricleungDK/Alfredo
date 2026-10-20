@@ -97,6 +97,7 @@ pub mod agent_view;
 pub mod agent_drafts;
 
 pub mod instruct;
+pub mod on_finish;
 
 pub mod chat_context;
 pub mod chat_mentions;

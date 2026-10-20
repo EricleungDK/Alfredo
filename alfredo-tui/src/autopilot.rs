@@ -105,6 +105,10 @@ struct Saved {
     /// HEAD workers were based on. Absent for clean trees and in older state files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     dirty: Option<(u32, String)>,
+    /// The `--on-finish` hook was started for this finish (at most once per
+    /// finish; cleared when follow-up work reopens the run).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    hook_fired: bool,
 }
 fn is_zero(value: &u32) -> bool {
     *value == 0
@@ -395,6 +399,10 @@ pub struct Autopilot {
     announced_interrupted: bool,
     /// Heads sent to `/recover N requeue` whose outcome is not yet known (not persisted).
     recovering: BTreeSet<u64>,
+    /// The user's `--on-finish` program, if any.
+    on_finish: Option<PathBuf>,
+    /// Failure notices of running hooks, polled by `take_finished_notice`.
+    hook_results: Vec<std::sync::mpsc::Receiver<String>>,
 }
 
 impl Autopilot {
@@ -444,12 +452,61 @@ impl Autopilot {
             finished_notice: None,
             announced_interrupted: false,
             recovering: BTreeSet::new(),
+            on_finish: crate::on_finish::configured(),
+            hook_results: Vec::new(),
         })
     }
 
-    /// The finished loop's one-line result, once; it replaces the stale start notice.
+    /// Override the startup `--on-finish` program (tests).
+    pub fn set_on_finish(&mut self, program: Option<PathBuf>) {
+        self.on_finish = program;
+    }
+
+    /// Start the `--on-finish` hook on its own thread, once per finish. Called
+    /// where the run first becomes done, partial or failed, with the summary
+    /// already stored; a crash between that save and the spawn loses the call
+    /// rather than repeating it. Never changes autopilot state.
+    fn fire_hook(&mut self, state: RunState, accepted: usize, repairs: u32) {
+        let (Some(program), Some(saved)) = (self.on_finish.clone(), self.saved.as_mut()) else {
+            return;
+        };
+        if saved.hook_fired {
+            return;
+        }
+        saved.hook_fired = true;
+        let value = crate::on_finish::env_value;
+        let env = vec![
+            ("ALFREDO_STATE", state.label().to_string()),
+            (
+                "ALFREDO_BRANCH",
+                value(saved.branch.as_deref().unwrap_or("")),
+            ),
+            ("ALFREDO_GOAL", value(&saved.goal)),
+            ("ALFREDO_ACCEPTED", accepted.to_string()),
+            ("ALFREDO_TOTAL", saved.roots().len().to_string()),
+            ("ALFREDO_REPAIRS", repairs.to_string()),
+        ];
+        self.hook_results
+            .push(crate::on_finish::spawn(program, env));
+    }
+
+    /// The finished loop's one-line result, once; it replaces the stale start
+    /// notice. A failed `--on-finish` hook reports through the same footer slot.
     pub fn take_finished_notice(&mut self) -> Option<String> {
-        self.finished_notice.take()
+        if let Some(notice) = self.finished_notice.take() {
+            return Some(notice);
+        }
+        let mut found = None;
+        self.hook_results
+            .retain(|receiver| match receiver.try_recv() {
+                Ok(notice) => {
+                    found.get_or_insert(notice);
+                    false
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => true,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => false,
+            });
+        found
     }
 
     fn elapsed(&self) -> u64 {
@@ -717,6 +774,7 @@ impl Autopilot {
             done: 0,
             total: 0,
             dirty: crate::worker::uncommitted_changes(tasks.workspace()),
+            hook_fired: false,
         });
         self.last = None;
         self.last_key = None;
@@ -993,6 +1051,7 @@ impl Autopilot {
         saved.paused = false;
         saved.finished = None;
         saved.report = None;
+        saved.hook_fired = false;
         if saved.branch.is_some() {
             saved.round += 1;
         }
@@ -1299,6 +1358,17 @@ impl Autopilot {
         next: Option<(String, u32)>,
     ) {
         let elapsed = self.elapsed();
+        let (accepted, repairs) = match (&tasks.snapshot, &self.saved) {
+            (Some(snapshot), Some(saved)) => {
+                let families = families(snapshot, saved, tasks);
+                let accepted = families
+                    .iter()
+                    .filter(|family| matches!(family.settled, Settled::Success(_)))
+                    .count();
+                (accepted, families.iter().map(|family| family.repairs).sum())
+            }
+            _ => (0, 0),
+        };
         let totals = tasks
             .snapshot
             .as_ref()
@@ -1327,6 +1397,7 @@ impl Autopilot {
             }
             saved.report = Some(report);
         }
+        self.fire_hook(RunState::Failed, accepted, repairs);
         let notice = match next.as_ref() {
             Some((next, _)) if !next.is_empty() => format!("{notice} {next}"),
             _ => notice,
@@ -1907,6 +1978,7 @@ impl Autopilot {
             saved.done = accepted as u32;
             saved.total = saved.roots().len() as u32;
         }
+        self.fire_hook(state, accepted, repairs);
         self.set_notice(tasks, notice);
         tasks.set_visible(true);
         tasks.planner.visible = false;

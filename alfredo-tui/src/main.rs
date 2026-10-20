@@ -69,6 +69,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut go_goal: Option<String> = None;
     let mut headless = false;
     let mut max_repairs = alfredo_tui::autopilot::DEFAULT_MAX_REPAIRS;
+    let mut on_finish = std::env::var("ALFREDO_ON_FINISH")
+        .ok()
+        .filter(|value| !value.is_empty());
     let mut model = std::env::var("ALFREDO_MODEL").unwrap_or_else(|_| "qwen2.5-coder:14b".into());
     let mut endpoint =
         std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://127.0.0.1:11434".into());
@@ -98,6 +101,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .and_then(|value| value.parse::<u32>().ok())
                     .filter(|value| *value <= alfredo_tui::autopilot::MAX_REPAIRS)
                     .ok_or("--max-repairs needs a number from 0 to 16")?
+            }
+            "--on-finish" => {
+                on_finish = Some(
+                    args.next()
+                        .ok_or("--on-finish needs an absolute program path")?,
+                )
             }
             "--qualify-inference" => {
                 qualification_output = Some(std::path::PathBuf::from(
@@ -187,6 +196,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if headless && (go_goal.is_none() || select || mission.is_some() || doctor) {
         return Err("--headless needs --go GOAL and opens the repository's default mission; omit --select, --mission, --new-mission and --doctor".into());
+    }
+    if let Some(value) = &on_finish {
+        alfredo_tui::on_finish::configure(alfredo_tui::on_finish::validate(value)?);
     }
     let endpoint = alfredo_tui::provider::normalize_endpoint(&endpoint);
     if model.trim().is_empty() || model.len() > 200 || model.chars().any(char::is_control) {
@@ -2007,7 +2019,8 @@ const HELP_LINES: &[&str] = &[
     "--doctor checks startup prerequisites without entering terminal mode or running inference.",
     "--qualify-inference REPORT [--qualification-repetitions 1..3] runs isolated diagnostic fixtures with baseline/candidate context profiles and one shared client slot. Default: three repetitions; artifacts are retained beside the new report.",
     "--inspect-qualification REPORT validates and summarizes a saved report without replay. No production profile changes or promotion.",
-    "Environment: ALFREDO_MODEL, OLLAMA_HOST, ALFREDO_STATE_DIR, ALFREDO_KEEP_ALIVE, ALFREDO_NUM_CTX, ALFREDO_ICONS, ALFREDO_NO_MOTION, COLORTERM, NO_COLOR",
+    "--on-finish PROGRAM (env ALFREDO_ON_FINISH) runs your executable (absolute path, no shell, outside the sandbox, 10 s limit) when an autopilot run ends done, partial or failed, with ALFREDO_STATE, ALFREDO_BRANCH, ALFREDO_GOAL, ALFREDO_ACCEPTED, ALFREDO_TOTAL and ALFREDO_REPAIRS set.",
+    "Environment: ALFREDO_ON_FINISH, ALFREDO_MODEL, OLLAMA_HOST, ALFREDO_STATE_DIR, ALFREDO_KEEP_ALIVE, ALFREDO_NUM_CTX, ALFREDO_ICONS, ALFREDO_NO_MOTION, COLORTERM, NO_COLOR",
 ];
 
 fn print_help() {

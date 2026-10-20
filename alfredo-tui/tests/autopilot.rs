@@ -3328,3 +3328,148 @@ fn bare_go_refuses_saved_tasks_that_depend_on_unaccepted_work_outside_the_run() 
     let snapshot = fixture.store.snapshot().unwrap();
     assert_eq!(snapshot.tasks[1].status, TaskStatus::Proposed);
 }
+
+fn hook_script(fixture: &Fixture, name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = fixture.root.join(name);
+    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+fn wait_for_lines(path: &Path, count: usize) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let text = fs::read_to_string(path).unwrap_or_default();
+        let lines: Vec<String> = text.lines().map(str::to_owned).collect();
+        if lines.len() >= count || Instant::now() > deadline {
+            return lines;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn on_finish_hook_runs_once_with_the_run_summary_when_the_run_is_done() {
+    let fixture = Fixture::new();
+    let server = one_good_task();
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let out = fixture.root.join("hook.out");
+    let hook = hook_script(
+        &fixture,
+        "hook.sh",
+        &format!(
+            "echo \"$ALFREDO_STATE|$ALFREDO_BRANCH|$ALFREDO_GOAL|$ALFREDO_ACCEPTED|$ALFREDO_TOTAL|$ALFREDO_REPAIRS\" >> {}",
+            out.display()
+        ),
+    );
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.set_on_finish(Some(hook.clone()));
+    autopilot
+        .start("Answer 42", "fixture", 1, &control)
+        .unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "done", finished);
+    let branch = autopilot.status(&control).unwrap().branch.unwrap();
+    let lines = wait_for_lines(&out, 1);
+    assert_eq!(lines, [format!("done|{branch}|Answer 42|1|1|0")]);
+    // Further ticks, and a restart that re-renders the finished run, do not re-fire.
+    for _ in 0..20 {
+        autopilot.tick(&runtime, &mut control);
+        thread::sleep(Duration::from_millis(5));
+    }
+    let mut restarted = Autopilot::open(&fixture.directory(), "default").unwrap();
+    restarted.set_on_finish(Some(hook));
+    for _ in 0..20 {
+        restarted.tick(&runtime, &mut control);
+        thread::sleep(Duration::from_millis(5));
+    }
+    thread::sleep(Duration::from_millis(300));
+    assert_eq!(wait_for_lines(&out, 2).len(), 1);
+}
+
+#[test]
+fn on_finish_hook_failure_shows_a_notice_and_leaves_the_failed_run_unchanged() {
+    let fixture = Fixture::new();
+    let server = Server::new(|request, _| {
+        assert!(planner(request));
+        json!({"tasks": [{"title": "Bad", "acceptance": ["x"], "model": "fixture", "dependencies": [2],
+            "policy": {"files": ["calc.py"], "check": ["true"]}}]})
+        .to_string()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let out = fixture.root.join("hook.out");
+    let hook = hook_script(
+        &fixture,
+        "hook.sh",
+        &format!(
+            "echo \"$ALFREDO_STATE|$ALFREDO_ACCEPTED|$ALFREDO_TOTAL\" >> {}\nexit 3",
+            out.display()
+        ),
+    );
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.set_on_finish(Some(hook));
+    autopilot
+        .start("Improve calc", "fixture", 2, &control)
+        .unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "failure", finished);
+    assert_eq!(wait_for_lines(&out, 1), ["failed|0|0"]);
+    // The result notice comes first, then the hook's own notice.
+    let mut notices = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline && !notices.iter().any(|n: &String| n.contains("--on-finish")) {
+        notices.extend(autopilot.take_finished_notice());
+        thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        notices
+            .iter()
+            .any(|n| n.contains("--on-finish hook failed")),
+        "{notices:?}"
+    );
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+}
+
+#[test]
+fn on_finish_hook_is_not_run_by_stop() {
+    let fixture = Fixture::new();
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let gate = Mutex::new(gate);
+    let server = Server::new(move |request, _| {
+        if planner(request) {
+            return json!({"tasks": [
+                {"title": "Make answer return 42", "acceptance": ["answer() returns 42"], "model": "fixture",
+                 "dependencies": [], "policy": {"files": ["calc.py"], "check": check("from calc import answer; assert answer() == 42")}},
+            ]})
+            .to_string();
+        }
+        let _ = gate.lock().unwrap().recv_timeout(Duration::from_secs(10));
+        good_calc()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let out = fixture.root.join("hook.out");
+    let hook = hook_script(
+        &fixture,
+        "hook.sh",
+        &format!("echo fired >> {}", out.display()),
+    );
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.set_on_finish(Some(hook));
+    autopilot.start("Answer", "fixture", 2, &control).unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "worker", |_, _| {
+        server.count() == 2
+    });
+    autopilot.stop(&runtime, &mut control);
+    drop(release);
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "cancelled",
+        |_, c| c.workers.is_empty(),
+    );
+    thread::sleep(Duration::from_millis(300));
+    assert!(!out.exists());
+}
