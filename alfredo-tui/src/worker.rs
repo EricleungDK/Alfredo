@@ -1486,7 +1486,7 @@ pub async fn start_checked(
     }
     if evidence.status == TaskStatus::ReviewReady {
         observer.stage("Saving candidate snapshot");
-        match save_candidate(&worktree, &evidence, &task).await {
+        match save_candidate(&worktree, &evidence, &task, &before.tasks).await {
             Ok(candidate) => evidence.candidate_commit = Some(candidate),
             Err(error) => {
                 evidence.status = TaskStatus::Failed;
@@ -1970,10 +1970,27 @@ pub(crate) fn commit_line(text: &str, limit: usize) -> String {
         .to_string()
 }
 
-/// Candidate commit message: the task title as subject, provenance in the body.
+/// Title of the original task a repair chain starts from (repair-of-repair included).
+/// Falls back to the task's own title when an ancestor is missing or the chain loops.
+fn root_title<'a>(task: &'a Task, tasks: &'a [Task]) -> &'a str {
+    let mut current = task;
+    for _ in 0..=tasks.len() {
+        let Some(parent) = current.repair_of else {
+            return &current.title;
+        };
+        match tasks.iter().find(|t| t.id == parent) {
+            Some(next) => current = next,
+            None => return &task.title,
+        }
+    }
+    &task.title
+}
+
+/// Candidate commit message: the original task's title as subject (a repair uses its
+/// root task's title, never the failure text), provenance in the body.
 /// Only the tree and parent are verified later, never the message.
-fn candidate_message(task: &Task, run: &str) -> String {
-    let subject = commit_line(&task.title, 72);
+fn candidate_message(task: &Task, tasks: &[Task], run: &str) -> String {
+    let subject = commit_line(root_title(task, tasks), 72);
     let subject = if subject.is_empty() {
         format!("Alfredo task #{}", task.id)
     } else {
@@ -1993,12 +2010,17 @@ fn candidate_message(task: &Task, run: &str) -> String {
     format!("{subject}\n\n{body}")
 }
 
-async fn save_candidate(worktree: &Path, evidence: &Evidence, task: &Task) -> Result<String> {
+async fn save_candidate(
+    worktree: &Path,
+    evidence: &Evidence,
+    task: &Task,
+    tasks: &[Task],
+) -> Result<String> {
     // The worker's private index already tracks new model files with intent-to-add.
     // Untracked check/build output is deliberately excluded from the reviewed snapshot.
     git(worktree, &["add", "--update", "--", "."]).await?;
     let tree = git(worktree, &["write-tree"]).await?;
-    let message = candidate_message(task, &evidence.run);
+    let message = candidate_message(task, tasks, &evidence.run);
     let candidate = git(
         worktree,
         &[
@@ -2084,15 +2106,31 @@ mod commit_message_tests {
 
     #[test]
     fn subject_is_title_and_body_has_provenance() {
-        let message = candidate_message(&task("Add verbose flag", None), "task-3-run-8");
+        let message = candidate_message(&task("Add verbose flag", None), &[], "task-3-run-8");
         let (subject, body) = message.split_once("\n\n").unwrap();
         assert_eq!(subject, "Add verbose flag");
         assert_eq!(
             body,
             "Alfredo task #3 · run task-3-run-8 · files: a.py, b.py · check: python3 -m unittest"
         );
-        let repair = candidate_message(&task("Fix it", Some(2)), "task-4-run-1");
+        let repair = candidate_message(&task("Fix it", Some(2)), &[], "task-4-run-1");
         assert!(repair.ends_with("\n\nRepair of #2"), "{repair}");
+        // A repair, even a repair of a repair, is committed under the root task's title.
+        let mut root = task("Add verbose flag", None);
+        root.id = 1;
+        let mut first = task("Repair #1: autopilot: Check failed (exit 1): stderr: Traceback (most recent call last)", Some(1));
+        first.id = 2;
+        let mut second = task("Repair #2: stderr: Traceback again", Some(2));
+        second.id = 4;
+        let chain = [root, first, second.clone()];
+        let message = candidate_message(&second, &chain, "task-4-run-1");
+        let (subject, body) = message.split_once("\n\n").unwrap();
+        assert_eq!(subject, "Add verbose flag");
+        assert!(
+            !subject.contains("stderr:") && !subject.contains("Traceback"),
+            "{subject}"
+        );
+        assert!(body.ends_with("\n\nRepair of #2"), "{body}");
     }
 
     #[test]
@@ -2104,10 +2142,10 @@ mod commit_message_tests {
         let mixed = commit_line(&format!("{}日本語", "x".repeat(70)), 72);
         assert_eq!(mixed.chars().count(), 72);
         assert!(mixed.ends_with("日本"));
-        let message = candidate_message(&task("Line one\nLine two\x1b]0;x\x07", None), "r");
+        let message = candidate_message(&task("Line one\nLine two\x1b]0;x\x07", None), &[], "r");
         assert_eq!(message.lines().next().unwrap(), "Line one Line two ]0;x");
         assert_eq!(
-            candidate_message(&task("\n\x1b ", None), "r")
+            candidate_message(&task("\n\x1b ", None), &[], "r")
                 .lines()
                 .next()
                 .unwrap(),
