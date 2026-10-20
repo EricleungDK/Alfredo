@@ -263,6 +263,7 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | --- | --- |
 | `src/main.rs` | CLI flags, event loop, key handling |
 | `src/ui.rs`, `src/model.rs` | Rendering and conversation state |
+| `src/compaction.rs` | Chat compaction: summarise older turns into a note, `/clear`, `/compact` |
 | `src/side_pane.rs`, `src/theme.rs` | Side pane projection and keys; icons, status glyphs, palette, spinner |
 | `src/autopilot.rs` | `/go` loop, auto-review, bounded repair, integration branch |
 | `src/tasks.rs`, `src/task_control.rs`, `src/dispatch.rs` | Durable task store, commands, dispatch |
