@@ -135,13 +135,26 @@ pub fn budget(num_ctx: Option<u32>) -> usize {
     .max(2048)
 }
 
+/// Keep at most `limit` bytes of `text` and mark the cut. The result never exceeds
+/// `limit` bytes: the marker is reserved first, sized for the full length (the widest
+/// count it can show), and the cut walks back to a char boundary.
 fn cut_text(text: &str, limit: usize) -> String {
     if text.len() <= limit {
         return text.into();
     }
-    let mut end = limit;
+    let reserve = format!(" [... {} bytes omitted]", text.len()).len();
+    // Too small to hold the marker: keep only the text that fits.
+    let room = if limit > reserve {
+        limit - reserve
+    } else {
+        limit
+    };
+    let mut end = room;
     while !text.is_char_boundary(end) {
         end -= 1;
+    }
+    if room == limit {
+        return text[..end].into();
     }
     format!("{} [... {} bytes omitted]", &text[..end], text.len() - end)
 }
@@ -357,6 +370,16 @@ impl Session {
             Ok(summary) => summary,
             Err(reason) => return Some(Outcome::Failed(reason)),
         };
+        // Checked before any change, so a note that would not save leaves the snapshot as it was.
+        let note = Compaction {
+            turns: self.compaction.as_ref().map_or(0, |c| c.turns) + plan.turns,
+            summary,
+        };
+        if !note.valid() {
+            return Some(Outcome::Failed(
+                "the summary could not be stored".to_string(),
+            ));
+        }
         let cut = plan.cut;
         self.messages.drain(..cut);
         shift(&mut self.sources, cut);
@@ -372,10 +395,7 @@ impl Session {
         for command in &mut self.commands {
             command.after_messages = command.after_messages.saturating_sub(cut);
         }
-        self.compaction = Some(Compaction {
-            turns: self.compaction.as_ref().map_or(0, |c| c.turns) + plan.turns,
-            summary,
-        });
+        self.compaction = Some(note);
         self.scroll.set(0);
         self.reading.set(Default::default());
         // A held prompt is only sent if the draft is untouched and nothing else is running.
