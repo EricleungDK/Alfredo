@@ -3432,6 +3432,38 @@ fn on_finish_hook_failure_shows_a_notice_and_leaves_the_failed_run_unchanged() {
 }
 
 #[test]
+fn finish_hooks_waits_for_a_slow_hook_and_returns_the_failure() {
+    let fixture = Fixture::new();
+    let server = Server::new(|request, _| {
+        assert!(planner(request));
+        json!({"tasks": [{"title": "Bad", "acceptance": ["x"], "model": "fixture", "dependencies": [2],
+            "policy": {"files": ["calc.py"], "check": ["true"]}}]})
+        .to_string()
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let out = fixture.root.join("slow.out");
+    let hook = hook_script(
+        &fixture,
+        "slow.sh",
+        &format!("sleep 1\necho late > {}\nexit 4", out.display()),
+    );
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot.set_on_finish(Some(hook));
+    autopilot
+        .start("Improve calc", "fixture", 2, &control)
+        .unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "failure", finished);
+    let failures = autopilot.finish_hooks(Duration::from_secs(15));
+    assert!(
+        out.exists(),
+        "the hook completed before finish_hooks returned"
+    );
+    assert_eq!(failures, ["--on-finish hook failed (exit status: 4)"]);
+    assert!(autopilot.finish_hooks(Duration::from_secs(1)).is_empty());
+}
+
+#[test]
 fn on_finish_hook_is_not_run_by_stop() {
     let fixture = Fixture::new();
     let (release, gate) = std::sync::mpsc::channel::<()>();

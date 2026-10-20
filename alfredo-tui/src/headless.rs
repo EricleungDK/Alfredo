@@ -93,22 +93,34 @@ impl Progress {
             self.state = Some(status.state);
             match status.state {
                 RunState::Finishing => lines.push("integrating".into()),
-                state if state.finished() => lines.push(format!(
-                    "{} {}/{}{}",
-                    state.label(),
-                    status.done,
-                    status.total,
-                    status
-                        .branch
-                        .as_ref()
-                        .map(|branch| format!(" {branch}"))
-                        .unwrap_or_default()
-                )),
+                // A failed run's line carries the reason, known only at the end.
+                RunState::Failed => {}
+                state if state.finished() => lines.push(finished_line(state, status, "")),
                 _ => {}
             }
         }
         lines
     }
+}
+
+/// The terminal stderr line of a finished run; a failure names its reason.
+fn finished_line(state: RunState, status: &Status, reason: &str) -> String {
+    let branch = status
+        .branch
+        .as_ref()
+        .map(|branch| format!(" {branch}"))
+        .unwrap_or_default();
+    let why = if reason.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", bounded_reason(reason))
+    };
+    format!(
+        "{} {}/{}{branch}{why}",
+        state.label(),
+        status.done,
+        status.total
+    )
 }
 
 /// Status for a run whose saved state is unreadable.
@@ -181,9 +193,14 @@ pub fn run(options: Options) -> Result<i32, String> {
         choice,
         conversation,
     )?;
+    let checker = provider.clone();
     let mut work = Workstation::launch(runtime, &state_dir, request, &model, provider)?;
     work.tasks.refresh(runtime);
     let model = work.app.sessions[work.app.selected].model.clone();
+    // Setup errors (Ollama down, model missing) are exit 2, not a failed run.
+    runtime
+        .block_on(alfredo_tui::doctor::model_server_check(&checker, &model))
+        .map_err(|failure| alfredo_tui::doctor::model_check_message(&model, &failure))?;
     work.autopilot
         .start(&goal, &model, max_repairs, &work.tasks)
         .map_err(|error| format!("--go refused: {error}"))?;
@@ -260,11 +277,20 @@ pub fn run(options: Options) -> Result<i32, String> {
                     .and_then(|report| report.lines().find_map(|line| line.strip_prefix("Reason")))
                     .map_or(reason, |text| text.trim().to_owned());
             }
+            if status.state == RunState::Failed {
+                say(finished_line(status.state, &status, &reason));
+            }
             let _ = writeln!(
                 std::io::stdout(),
                 "{}",
                 result_json(&status, &outcomes, &reason, fatal.is_some())
             );
+            let _ = std::io::stdout().flush();
+            // The JSON is out; now let a started hook finish (or be killed) and report.
+            let grace = alfredo_tui::on_finish::TIMEOUT + Duration::from_secs(5);
+            for failure in work.autopilot.finish_hooks(grace) {
+                say(failure);
+            }
             return Ok(i32::from(status.state != RunState::Done));
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -490,6 +516,21 @@ mod tests {
             progress.lines(&status(RunState::Done, 2), &done),
             ["#1 accepted", "done 2/2 alfredo/go-ab12"]
         );
+    }
+
+    #[test]
+    fn failed_line_carries_the_bounded_reason() {
+        let failed = status(RunState::Failed, 0);
+        assert_eq!(
+            finished_line(RunState::Failed, &failed, "Cannot reach\nOllama"),
+            "failed 0/2 alfredo/go-ab12: Cannot reachOllama"
+        );
+        assert_eq!(
+            finished_line(RunState::Failed, &failed, ""),
+            "failed 0/2 alfredo/go-ab12"
+        );
+        let mut progress = Progress::default();
+        assert!(progress.lines(&failed, &[]).is_empty());
     }
 
     #[test]

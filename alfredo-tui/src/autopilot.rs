@@ -509,6 +509,25 @@ impl Autopilot {
         found
     }
 
+    /// Scripted runs: wait for every started `--on-finish` hook (each thread
+    /// already enforces the 10 s limit, killing and reaping its child) and
+    /// return one failure line per hook that failed; `grace` bounds the wait.
+    pub fn finish_hooks(&mut self, grace: std::time::Duration) -> Vec<String> {
+        let deadline = std::time::Instant::now() + grace;
+        let mut failures = Vec::new();
+        for receiver in self.hook_results.drain(..) {
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            match receiver.recv_timeout(left) {
+                Ok(notice) => failures.push(notice),
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    failures.push("--on-finish hook did not finish in time".into())
+                }
+            }
+        }
+        failures
+    }
+
     fn elapsed(&self) -> u64 {
         match self.saved.as_ref().and_then(|saved| {
             saved

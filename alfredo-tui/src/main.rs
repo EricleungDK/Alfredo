@@ -2014,7 +2014,7 @@ const HELP_LINES: &[&str] = &[
     "/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /clean [yes] · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME",
     "Enter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry",
     "F2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit",
-    "--headless (with --go GOAL) runs without a terminal: one stderr line per autopilot state change, then one JSON object {state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]} on stdout. Exit 0 all accepted; 1 partial, failed or interrupted (SIGINT/SIGTERM cancel workers like /stop); 2 setup or usage error. Opens the repository's default mission.",
+    "--headless (with --go GOAL) runs without a terminal: one stderr line per autopilot state change, then one JSON object {state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]} on stdout. Exit 0 all accepted; 1 partial, failed or interrupted (SIGINT/SIGTERM cancel workers like /stop); 2 setup or usage error (Ollama unreachable, model not installed: Error on stderr, nothing on stdout). A failed run's stderr line carries the reason. Waits for the --on-finish hook after the JSON and reports its failure on stderr. Opens the repository's default mission.",
     "",
     "--doctor checks startup prerequisites without entering terminal mode or running inference.",
     "--qualify-inference REPORT [--qualification-repetitions 1..3] runs isolated diagnostic fixtures with baseline/candidate context profiles and one shared client slot. Default: three repetitions; artifacts are retained beside the new report.",

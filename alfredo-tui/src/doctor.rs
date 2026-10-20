@@ -45,6 +45,37 @@ pub fn sandbox_blocker_at(path: &str) -> Option<String> {
     (!worker_tool_ready(path)).then(|| BWRAP_FIX.to_owned())
 }
 
+/// Why the model server check failed.
+pub enum ModelCheck {
+    /// The catalog was read but does not list the model; carries what is installed.
+    Missing(Vec<String>),
+    Unreachable(String),
+}
+
+/// The endpoint is reachable and lists `model`; shared by `--doctor` and `--headless`.
+pub async fn model_server_check(provider: &Ollama, model: &str) -> Result<(), ModelCheck> {
+    match provider.models().await {
+        Ok(models) if crate::provider::model_installed(&models, model) => Ok(()),
+        Ok(models) => Err(ModelCheck::Missing(models)),
+        Err(error) => Err(ModelCheck::Unreachable(error)),
+    }
+}
+
+/// One-line setup error for a failed [`model_server_check`] (headless).
+pub fn model_check_message(model: &str, failure: &ModelCheck) -> String {
+    match failure {
+        ModelCheck::Missing(models) => format!(
+            "model {} is not installed on this Ollama server (installed: {}). Install it or choose --model",
+            clean(model),
+            models.iter().take(12).map(|m| clean(m)).collect::<Vec<_>>().join(", ")
+        ),
+        ModelCheck::Unreachable(error) => format!(
+            "cannot reach Ollama: {}. Check Ollama is running and --endpoint points to its HTTP origin",
+            clean(error)
+        ),
+    }
+}
+
 pub async fn inspect(
     workspace: &Path,
     state: &Path,
@@ -86,12 +117,12 @@ pub async fn inspect(
             lines.push(format!("FAIL storage: {}. Check --workspace, --state-dir and --conversation; preserve existing state when investigating.", clean(&error)));
         }
     }
-    match provider.models().await {
-        Ok(models) if crate::provider::model_installed(&models, &model) => lines.push(format!(
+    match model_server_check(provider, &model).await {
+        Ok(()) => lines.push(format!(
             "PASS model catalog: {} is installed",
             clean(&model)
         )),
-        Ok(models) => {
+        Err(ModelCheck::Missing(models)) => {
             passed = false;
             lines.push(format!("FAIL model catalog: {} is not listed. Select an installed model or install the intended model on this Ollama server.", clean(&model)));
             lines.push(format!(
@@ -107,7 +138,7 @@ pub async fn inspect(
                 lines.push("Additional models omitted; use /models for the full catalog.".into());
             }
         }
-        Err(error) => {
+        Err(ModelCheck::Unreachable(error)) => {
             passed = false;
             lines.push(format!("FAIL model server: {}. Check Ollama is running and --endpoint points to its HTTP origin.", clean(&error)));
         }
