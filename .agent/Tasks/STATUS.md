@@ -66,7 +66,7 @@
 - **Commit subjects** (#191): candidate commit subject is the task title (72 chars); body has task, run, files and check; the
   `alfredo/go-*` branch ends in a commit whose subject is the goal.
 - **`/go` runs a saved plan** (#181): bare `/go` runs the open `/plan` draft or the mission's saved proposed tasks, with no second planner call.
-- **Eval probes** (#190): `eval/run_eval.py --probes` (`eval/probes.py`) fills M8/M9/M10/M14; #189 releases the model per task.
+- **Eval probes** (#190): `eval/run_eval.py --probes` (`eval/probes.py`) fills M8/M9/M10/M14; #189 records the binary path and cargo profile, warns on debug builds for M11/M16 and adds per-task M3–M6 secondaries.
 - **Planner tokens** (#188): the plan receipt keeps prompt/completion tokens and model time; the `/go` finish notice sums
   tokens over planner, workers and repairs.
 - **Other**: headless driver (#183, see above), file-too-large refusal (#184), resume after crash (#175), understanding-lock retry
