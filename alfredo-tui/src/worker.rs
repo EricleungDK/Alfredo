@@ -489,14 +489,23 @@ pub(crate) const NOT_A_REPOSITORY: &str = "is not a Git repository";
 
 /// Command-line `-c` overrides that every host-side Git call passes. They
 /// outrank repository-local and global config, so a repository cannot make
-/// Alfredo run its own fsmonitor command or hooks while inspecting it.
-pub(crate) const HARDENED_GIT_ARGS: [&str; 6] = [
+/// Alfredo run its own fsmonitor command or hooks while inspecting it. The
+/// submodule settings keep working-tree calls out of gitlink directories: a
+/// nested repository the sandboxed check creates there has its own config,
+/// and its clean filters must never run on the host (#243).
+pub(crate) const HARDENED_GIT_ARGS: [&str; 12] = [
     "-c",
     "core.hooksPath=/dev/null",
     "-c",
     "core.fsmonitor=false",
     "-c",
     "core.quotePath=false",
+    "-c",
+    "diff.ignoreSubmodules=all",
+    "-c",
+    "status.submoduleSummary=false",
+    "-c",
+    "submodule.recurse=false",
 ];
 
 fn git_blocking(workspace: &Path, args: &[&str], stdout: Stdio) -> Option<std::process::Output> {
@@ -596,7 +605,7 @@ pub fn lacks_commits(workspace: &Path) -> bool {
     git_succeeds(workspace, &["rev-parse", "--is-inside-work-tree"]) && !has_head_commit(workspace)
 }
 
-pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
+fn host_git_command(root: &Path, args: &[&str]) -> tokio::process::Command {
     let mut command = tokio::process::Command::new("/usr/bin/git");
     command
         .env_clear()
@@ -611,7 +620,106 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
         .args(HARDENED_GIT_ARGS)
         .arg("-C")
         .arg(root)
-        .args(args)
+        .args(args);
+    command
+}
+
+/// Deadline for one host-side Git step. Every bounded Git call goes through it.
+const GIT_DEADLINE: Duration = Duration::from_secs(30);
+
+async fn within_git_deadline<T>(work: impl std::future::Future<Output = T>) -> Result<T> {
+    tokio::time::timeout(GIT_DEADLINE, work)
+        .await
+        .map_err(|_| "Git exceeded its 30-second deadline".to_string())
+}
+
+/// Refuses a worktree whose index or HEAD holds a gitlink (`160000`). Alfredo
+/// has no submodule support, and a nested repository created inside a gitlink
+/// directory can run its own filters once Git reads it. Only the index and
+/// tree listings run here, never a working-tree read. Each listing is streamed
+/// and stops at the first gitlink, so large trees are not bounded by the
+/// evidence output limit.
+pub(crate) async fn refuse_gitlinks(root: &Path) -> Result<()> {
+    refuse_gitlink_listing(root, "the worktree", &["ls-files", "--stage", "-z"]).await?;
+    refuse_gitlink_listing(root, "the worktree", &["ls-tree", "-r", "-z", "HEAD"]).await
+}
+
+/// Refuses a run's baseline commit that holds a gitlink, before any check runs.
+/// Only the commit's tree listing runs here, never a working-tree read.
+pub(crate) async fn refuse_baseline_gitlinks(root: &Path, baseline: &str) -> Result<()> {
+    refuse_gitlink_listing(
+        root,
+        "the baseline commit",
+        &["ls-tree", "-r", "-z", baseline],
+    )
+    .await
+}
+
+async fn refuse_gitlink_listing(root: &Path, source: &str, args: &[&str]) -> Result<()> {
+    let Some(path) = first_gitlink(root, args).await? else {
+        return Ok(());
+    };
+    let path: String = crate::dashboard::single_line(&path)
+        .chars()
+        .take(200)
+        .collect();
+    Err(format!(
+        "Alfredo does not support submodules: {source} contains a gitlink at \"{path}\"; the run is refused. Remove the submodule from the repository and run /go again"
+    ))
+}
+
+/// The path of the first gitlink in a `-z` listing, read as bytes. A path that
+/// is not UTF-8 is shown lossily; it never stops the scan.
+async fn first_gitlink(root: &Path, args: &[&str]) -> Result<Option<String>> {
+    let mut child = host_git_command(root, args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("Cannot start Git: {e}"))?;
+    let stdout = child.stdout.take().unwrap();
+    let scan = async move {
+        use tokio::io::AsyncBufReadExt;
+        let mut reader = tokio::io::BufReader::new(stdout);
+        let mut record = Vec::new();
+        loop {
+            record.clear();
+            if reader
+                .read_until(b'\0', &mut record)
+                .await
+                .map_err(|e| e.to_string())?
+                == 0
+            {
+                return Ok::<Option<String>, String>(None);
+            }
+            // `<mode> SP <object> [SP <stage>] TAB <path> NUL`; the mode is the
+            // first field, and the path follows the first tab.
+            if record.starts_with(b"160000 ") {
+                let entry = record.strip_suffix(&[0]).unwrap_or(&record);
+                let path = entry
+                    .iter()
+                    .position(|&byte| byte == b'\t')
+                    .map_or(&[][..], |tab| &entry[tab + 1..]);
+                return Ok(Some(String::from_utf8_lossy(path).into_owned()));
+            }
+        }
+    };
+    if let Some(path) = within_git_deadline(scan).await?? {
+        return Ok(Some(path));
+    }
+    let status = within_git_deadline(child.wait())
+        .await?
+        .map_err(|e| e.to_string())?;
+    if !status.success() {
+        return Err("Git failed while checking the worktree for submodules".into());
+    }
+    Ok(None)
+}
+
+pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
+    let mut command = host_git_command(root, args);
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -621,7 +729,7 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
         .map_err(|e| format!("Cannot start Git: {e}"))?;
     let mut stdout = child.stdout.take().unwrap().take((OUTPUT + 1) as u64);
     let mut stderr = child.stderr.take().unwrap().take((OUTPUT + 1) as u64);
-    let result = tokio::time::timeout(Duration::from_secs(30), async {
+    within_git_deadline(async {
         let mut out = Vec::new();
         let mut err = Vec::new();
         let (status, _, _) = tokio::try_join!(
@@ -645,9 +753,7 @@ pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
         }
         String::from_utf8(out).map_err(|_| "Git returned non-UTF-8 output".into())
     })
-    .await
-    .map_err(|_| "Git exceeded its 30-second deadline".to_string())?;
-    result
+    .await?
 }
 
 fn safe_file(root: &Path, relative: &str) -> Result<PathBuf> {
@@ -1342,6 +1448,9 @@ pub async fn start_checked(
             while !cancel.load(Ordering::SeqCst) { tokio::time::sleep(Duration::from_millis(25)).await; }
         } => return Err("Cancelled before run claim; task remains unstarted".into()),
     };
+    // Refused before the run is claimed, so the check never starts with a gitlink
+    // in its baseline to turn into a nested repository (#243).
+    refuse_baseline_gitlinks(&before.workspace, &baseline).await?;
     let (claimed, _) = store.transact_checked(Request {
         correlation,
         expected_revision,
@@ -1448,26 +1557,37 @@ pub async fn start_checked(
         }
     }
     if worktree.exists() {
-        let patch = git(
-            &worktree,
-            &[
-                "diff",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--binary",
-                "HEAD",
-                "--",
-            ],
-        )
-        .await;
+        // The check may have changed the index or created a nested repository
+        // at a gitlink; neither is read on the host (#243).
+        let patch = match refuse_gitlinks(&worktree).await {
+            Ok(()) => {
+                git(
+                    &worktree,
+                    &[
+                        "diff",
+                        "--no-ext-diff",
+                        "--no-textconv",
+                        "--binary",
+                        "HEAD",
+                        "--",
+                    ],
+                )
+                .await
+            }
+            Err(refusal) => Err(refusal),
+        };
         match patch {
             Ok(patch) => evidence.patch = patch,
             Err(error) => {
                 evidence.patch = format!("Diff unavailable: {error}");
                 if evidence.status == TaskStatus::ReviewReady {
                     evidence.status = TaskStatus::Failed;
-                    evidence.detail =
-                        "Check passed but review diff is unavailable; inspection required".into();
+                    evidence.detail = format!(
+                        "Check passed but review diff is unavailable; inspection required: {error}"
+                    )
+                    .chars()
+                    .take(900)
+                    .collect();
                 }
             }
         }
@@ -1900,6 +2020,7 @@ async fn perform(
     if !success {
         return Err(detail);
     }
+    refuse_gitlinks(worktree).await?;
     let changed = git(worktree, &["diff", "--name-only", "HEAD", "--"]).await?;
     if changed
         .lines()
@@ -2019,6 +2140,7 @@ async fn save_candidate(
 ) -> Result<String> {
     // The worker's private index already tracks new model files with intent-to-add.
     // Untracked check/build output is deliberately excluded from the reviewed snapshot.
+    refuse_gitlinks(worktree).await?;
     git(worktree, &["add", "--update", "--", "."]).await?;
     let tree = git(worktree, &["write-tree"]).await?;
     let message = candidate_message(task, tasks, &evidence.run);
@@ -2322,7 +2444,7 @@ mod host_git_tests {
     use super::{has_head_commit, lacks_commits, uncommitted_changes};
     use std::{
         fs,
-        path::PathBuf,
+        path::{Path, PathBuf},
         sync::atomic::{AtomicU64, Ordering},
     };
 
@@ -2511,6 +2633,279 @@ mod host_git_tests {
             Some(super::UNCHECKED_CHANGES),
             "worktree-scoped filter config must report unchecked changes"
         );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Runs `git` in a fixture repository, with the identity the fixtures need.
+    fn fixture_git(dir: &Path, args: &[&str]) {
+        assert!(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args([
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@localhost",
+                    "-c",
+                    "commit.gpgSign=false",
+                ])
+                .args(args)
+                .status()
+                .unwrap()
+                .success(),
+            "git {args:?} failed"
+        );
+    }
+
+    fn fixture_output(dir: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?} failed");
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn unique_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "alfredo-host-git-{name}-{}-{}",
+            std::process::id(),
+            ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    /// Where the gitlink the check's attack relies on is recorded.
+    #[derive(Clone, Copy, Debug)]
+    enum Gitlink {
+        /// In the baseline commit, so the worktree starts with it.
+        Baseline,
+        /// Added to the worktree index only, naming a SHA no repository has.
+        IndexFake,
+        /// Added to the worktree index only, naming the nested repository's real HEAD.
+        IndexNested,
+    }
+
+    /// The #243 layout. `wt/sub` is the gitlink directory the sandboxed check
+    /// turns into a nested repository whose clean filter touches the returned
+    /// marker. Returns the worktree and the marker path.
+    fn gitlink_attack(root: &Path, gitlink: Gitlink) -> (PathBuf, PathBuf) {
+        let repo = root.join("repo");
+        let wt = root.join("wt");
+        let nested = wt.join("sub");
+        let marker = root.join("PWNED");
+        fs::create_dir_all(&repo).unwrap();
+        fixture_git(&repo, &["init", "-q", "-b", "main", "--template="]);
+        fs::write(repo.join("a"), "x\n").unwrap();
+        fixture_git(&repo, &["add", "a"]);
+        if matches!(gitlink, Gitlink::Baseline) {
+            fixture_git(
+                &repo,
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    "160000,1111111111111111111111111111111111111111,sub",
+                ],
+            );
+        }
+        fixture_git(&repo, &["commit", "-qm", "init"]);
+        fixture_git(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "--detach",
+                wt.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        // What the sandboxed check does, all inside wt/sub. The nested
+        // repository's filter is installed only after its own commit.
+        fs::create_dir_all(&nested).unwrap();
+        fixture_git(&nested, &["init", "-q", "-b", "main", "--template="]);
+        fs::write(nested.join("f"), "hi\n").unwrap();
+        fixture_git(&nested, &["add", "f"]);
+        fixture_git(&nested, &["commit", "-qm", "c"]);
+        let nested_head = fixture_output(&nested, &["rev-parse", "HEAD"]);
+        fixture_git(
+            &nested,
+            &[
+                "config",
+                "filter.pwn.clean",
+                &format!("sh -c 'touch {}; cat'", marker.display()),
+            ],
+        );
+        fs::write(nested.join(".gitattributes"), "* filter=pwn\n").unwrap();
+        // Same byte length as the committed file: git must compare content (and run the filter).
+        fs::write(nested.join("f"), "ab\n").unwrap();
+        let sha = match gitlink {
+            Gitlink::Baseline => None,
+            Gitlink::IndexFake => Some("1111111111111111111111111111111111111111".to_string()),
+            Gitlink::IndexNested => Some(nested_head),
+        };
+        if let Some(sha) = sha {
+            fixture_git(
+                &wt,
+                &[
+                    "update-index",
+                    "--add",
+                    "--cacheinfo",
+                    &format!("160000,{sha},sub"),
+                ],
+            );
+        }
+        assert!(!marker.exists(), "fixture setup must not run the filter");
+        (wt, marker)
+    }
+
+    /// #243: the check turns a gitlink (`160000`) directory into a nested
+    /// repository whose own clean filter writes a marker. Host-side worker git
+    /// reads the worktree after the check, so it must never run that filter.
+    /// Covers a gitlink already in the baseline and one the check adds to the
+    /// worktree index, with a fake and with the nested repository's real SHA.
+    #[test]
+    fn host_side_worker_git_never_runs_nested_repo_filter_at_a_gitlink() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        for gitlink in [Gitlink::Baseline, Gitlink::IndexFake, Gitlink::IndexNested] {
+            let root = unique_root("gitlink");
+            let (wt, marker) = gitlink_attack(&root, gitlink);
+
+            // The gitlink refusal lists the index and HEAD only; it must not run the filter.
+            let refusal = runtime.block_on(super::refuse_gitlinks(&wt));
+            assert!(
+                !marker.exists(),
+                "gitlink refusal ran the nested repository's filter ({gitlink:?})"
+            );
+            let refusal = refusal.expect_err("a gitlink in the index or HEAD must be refused");
+            assert!(refusal.contains("gitlink at \"sub\""), "{refusal}");
+
+            // Host-side read-only worker git calls on the worktree after the check. The
+            // hardened settings keep them from entering the gitlink directory.
+            let patch = runtime.block_on(super::git(
+                &wt,
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--binary",
+                    "HEAD",
+                    "--",
+                ],
+            ));
+            let names = runtime.block_on(super::git(&wt, &["diff", "--name-only", "HEAD", "--"]));
+            let _ = uncommitted_changes(&wt);
+            assert!(
+                !marker.exists(),
+                "host-side worker git ran a nested repository's filter at a gitlink ({gitlink:?}; patch: {patch:?}; names: {names:?})"
+            );
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
+
+    /// #243: `add --update -- .` runs the nested repository's filter when the
+    /// index names its real HEAD, even with the hardened settings. So
+    /// `save_candidate` must refuse before it stages anything.
+    #[test]
+    fn save_candidate_refuses_an_index_gitlink_before_staging_runs_its_filter() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let root = unique_root("save");
+        let (wt, marker) = gitlink_attack(&root, Gitlink::IndexNested);
+        let baseline = fixture_output(&wt, &["rev-parse", "HEAD"]);
+        let task = crate::tasks::Task {
+            id: 1,
+            title: "Attack".into(),
+            model: "fixture".into(),
+            dependencies: vec![],
+            status: crate::tasks::TaskStatus::Approved,
+            policy: None,
+            run: None,
+            repair_of: None,
+        };
+        let evidence = super::Evidence {
+            agent: None,
+            run: "task-1-run-1".into(),
+            baseline,
+            status: crate::tasks::TaskStatus::ReviewReady,
+            detail: String::new(),
+            failure_code: None,
+            patch: String::new(),
+            candidate_commit: None,
+            model_metrics: None,
+            generation: None,
+            check: None,
+        };
+        let refusal = runtime
+            .block_on(super::save_candidate(
+                &wt,
+                &evidence,
+                &task,
+                std::slice::from_ref(&task),
+            ))
+            .expect_err("an index gitlink must refuse the candidate");
+        assert!(refusal.contains("gitlink at \"sub\""), "{refusal}");
+        assert!(
+            !marker.exists(),
+            "save_candidate staged the nested repository"
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// #243: a committed non-UTF-8 filename is not a gitlink, so the refusal
+    /// must read the listings as bytes and let such a repository run. A gitlink
+    /// at that same non-UTF-8 path is still refused, rendered lossily.
+    #[test]
+    fn gitlink_refusal_reads_non_utf8_tracked_paths_as_bytes() {
+        use std::os::unix::ffi::OsStrExt;
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let root = unique_root("non-utf8");
+        let repo = root.join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        fixture_git(&repo, &["init", "-q", "-b", "main", "--template="]);
+        let odd = std::ffi::OsStr::from_bytes(b"bad\xff");
+        fs::write(repo.join(odd), "x\n").unwrap();
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["add", "--"])
+            .arg(odd)
+            .status()
+            .unwrap()
+            .success());
+        fixture_git(&repo, &["commit", "-qm", "odd"]);
+        runtime
+            .block_on(super::refuse_gitlinks(&repo))
+            .expect("a non-UTF-8 regular file is not a gitlink");
+
+        let mut spec = b"160000,1111111111111111111111111111111111111111,".to_vec();
+        spec.extend_from_slice(b"bad\xff");
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(&repo)
+            .args(["update-index", "--add", "--cacheinfo"])
+            .arg(std::ffi::OsStr::from_bytes(&spec))
+            .status()
+            .unwrap()
+            .success());
+        let refusal = runtime
+            .block_on(super::refuse_gitlinks(&repo))
+            .expect_err("a gitlink is refused");
+        assert!(refusal.contains("gitlink at \"bad\u{fffd}\""), "{refusal}");
         let _ = fs::remove_dir_all(&root);
     }
 }

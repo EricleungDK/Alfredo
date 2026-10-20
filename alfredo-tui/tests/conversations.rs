@@ -2588,3 +2588,45 @@ fn compaction_notes_need_schema_18_and_older_files_still_upgrade() {
     assert_eq!(saved.schema_version, 19);
     assert!(saved.sessions[0].compaction().is_some());
 }
+
+// #244: an over-long model summary is cut to fit SUMMARY_MAX, so the save that follows
+// succeeds and the stored note stays within the limit, for ASCII and multi-byte text.
+#[test]
+fn oversize_compaction_summary_is_cut_within_limit_and_saves() {
+    use alfredo_tui::model::compaction::SUMMARY_MAX;
+    let summaries = [
+        ("ascii", "word ".repeat(2000)),
+        ("multi-byte", "日本".repeat(2000)),
+        ("two-byte", "é".repeat(5000)),
+    ];
+    for (label, summary) in summaries {
+        let fixture = Fixture::new();
+        let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+        let mut app = App::new("fixture".into());
+        for number in 1..=4 {
+            let session = &mut app.sessions[0];
+            session.insert(&format!("turn{number} {}", "x".repeat(15_000)));
+            session.begin().unwrap();
+            let attempt = session.attempt;
+            session.apply(attempt, Update::Token(format!("reply{number}")));
+            session.apply(attempt, Update::Done);
+        }
+        let plan = app.sessions[0].start_compaction(None, true).unwrap();
+        let attempt = app.sessions[0].attempt;
+        app.sessions[0]
+            .finish_compaction(attempt, &plan, Ok(summary))
+            .unwrap();
+        let compacted = Snapshot::capture(&app, "default");
+        store
+            .save(&compacted)
+            .unwrap_or_else(|reason| panic!("{label}: save failed: {reason}"));
+        let saved = store.load().unwrap().unwrap();
+        let stored = &saved.sessions[0].compaction().unwrap().summary;
+        assert!(
+            stored.len() <= SUMMARY_MAX,
+            "{label}: {} bytes",
+            stored.len()
+        );
+        assert!(stored.contains("bytes omitted]"), "{label}: cut is marked");
+    }
+}

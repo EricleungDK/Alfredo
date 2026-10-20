@@ -78,3 +78,4 @@
 ## Security hardening (2026-10-19)
 
 - Worker sandbox also unshares IPC, UTS and cgroup namespaces (`SANDBOX_ISOLATION_FLAGS`); eval grading runs `check.sh` under bwrap and needs bubblewrap (`--unsafe-unsandboxed-grading` opts out); host git is hardened against repo-local fsmonitor, hooks and filter drivers, and `/go` start reports uncommitted changes as unchecked when local filters or includes are configured.
+- 2026-10-20 (#243, #244): host git ignores submodules and refuses gitlinks in the index, HEAD or the baseline commit before any check runs; compaction summaries are cut to fit `SUMMARY_MAX` and refused if they still do not fit; rustls-webpki and webpki-roots bumped for RUSTSEC-2026-0381/0382.
