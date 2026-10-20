@@ -1,6 +1,6 @@
 # Project Architecture — Alfredo
 
-**Last Updated**: 2026-09-27
+**Last Updated**: 2026-10-20
 
 ## Overview
 
@@ -181,6 +181,40 @@ exact request; unfinished or unavailable proof stays unconfirmed without replay.
 Task schema16 and scope schema2 remain unchanged. The provider admission queue
 is shared across same-user processes for each normalized endpoint. Full concurrent supervision across workspaces, mission
 formation and production qualification remain open.
+
+## Run loop, headless driver, completion hook and `/clean` (2026-10-18 to 2026-10-20)
+
+**Wake-based run loop** (`src/wake.rs`, issue #182). The terminal loop no longer polls input every 33 ms and
+looks at results afterwards. One reader thread is the only caller of `crossterm::event::{poll, read}`
+while the loop is active and forwards input into a single channel; a second, coalesced "something finished"
+wake is raised whenever a Tokio worker of the application runtime is about to park. Every producer of loop-visible
+state (provider streams, planner, task control, worker progress, health) is a task on that runtime, so a send always
+precedes the park and producers never need to know about the loop. Blocking jobs the loop checks with `is_finished`
+go through `spawn_blocking`. The loop keeps a timeout so spinner and elapsed-time redraws still run, and wake-triggered
+passes are capped at a burst of 8 then one per 20 ms; key presses are never delayed by the cap. Code that needs
+terminal input inside the loop (the workspace selector) must read through the same `Input`, not call crossterm.
+
+**Headless driver** (`src/headless.rs`, issue #183). `--go GOAL --headless` builds the same workstation as the TUI
+and drives the same task-control, autopilot and saved-intent barrier in its own loop, with no terminal. Progress is
+one stderr line per state change; stdout carries exactly one JSON result (`state, goal, branch, accepted, total,
+repairs, failed`). Exit 0 means every task was accepted, 1 partial/failed/interrupted, 2 setup or usage error.
+SIGINT/SIGTERM cancel workers like `/stop`. It adds no second execution path: changes to autopilot apply to both
+front ends. Smoked by `tests/headless_smoke.py`.
+
+**Completion hook** (`src/on_finish.rs`, issue #192). `--on-finish PROGRAM` (env `ALFREDO_ON_FINISH`) names one
+absolute executable chosen by the user at launch; it is never read from repository files. When an autopilot run ends
+done, partial or failed it runs once, without a shell and outside the sandbox, with the parent environment plus
+`ALFREDO_*` variables (state, branch, goal, task counts), a 10 second limit and discarded output. A failure only
+produces a footer notice and never changes run state. Start is retried on ETXTBSY.
+
+**`/clean` safety rules** (`src/clean.rs`, issue #185). Every run keeps a full worktree under
+`<state>/rust-tasks-v1/<id>/runs/<run>/worktree`, registered in the repository's own `.git/worktrees`. `/clean` lists
+and `/clean yes` removes (`git worktree remove`, then `prune`) only worktrees of runs that have a finish receipt
+(accepted, rejected, failed, cancelled), whose saved `evidence.json` still matches that receipt and, when the run saved
+a candidate, whose `refs/alfredo/candidates/<sha>` still resolves. Active, interrupted and awaiting-review runs, runs
+with unsaved work (failed evidence capture, recovery after interrupt) and runs with missing evidence or candidate ref
+are kept and the reason is shown. Evidence, candidate refs, `/branch` and `alfredo/go-*` branches are never touched,
+and `/clean` is refused while autopilot or a worker is active.
 
 ## Native Wayfinder first-contact routing
 
