@@ -949,6 +949,12 @@ class TerminalSmoke(unittest.TestCase):
             wait_for(b'Review branch recorded')
             os.write(master, b'/plan Extend calculation with integration checks\r')
             wait_for(b'Review draft paths', timeout=10)
+            # Readable task list by default; Ctrl+O shows the raw JSON and back.
+            wait_for(b'#1 Planned calculation')
+            os.write(master, b'\x0f')
+            wait_for(b'"tasks"')
+            os.write(master, b'\x0f')
+            wait_for(b'#1 Planned calculation')
             self.assertEqual(len(json.loads(saved.read_text())['tasks']), 3)
             os.write(master, b'/plan-revise Add boundary coverage\r')
             wait_for(b'Review revised draft paths', timeout=10)
