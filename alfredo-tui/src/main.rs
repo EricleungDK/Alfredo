@@ -645,10 +645,36 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(job) = jobs[turn.session].take() {
                                 job.abort();
                             }
+                            // Plain chat runs the tool loop on the Coding Workspace (issue #233);
+                            // a Wayfinder scope discussion stays tool-free.
+                            let workspace =
+                                (revision == 0).then(|| work.tasks.workspace().to_path_buf());
                             jobs[turn.session] = Some(runtime.spawn(async move {
-                                provider
-                                    .chat(turn.session, turn.attempt, turn.model, messages, sender)
-                                    .await;
+                                match workspace {
+                                    Some(workspace) => {
+                                        alfredo_tui::chat_tools::run_turn(
+                                            &provider,
+                                            &workspace,
+                                            turn.session,
+                                            turn.attempt,
+                                            turn.model,
+                                            messages,
+                                            sender,
+                                        )
+                                        .await
+                                    }
+                                    None => {
+                                        provider
+                                            .chat(
+                                                turn.session,
+                                                turn.attempt,
+                                                turn.model,
+                                                messages,
+                                                sender,
+                                            )
+                                            .await
+                                    }
+                                }
                             }));
                         }
                     }

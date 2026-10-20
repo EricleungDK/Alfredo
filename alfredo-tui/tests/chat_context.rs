@@ -87,6 +87,22 @@ fn chat_knows_it_is_the_alfredo_harness_without_tasks() {
 }
 
 #[test]
+fn chat_prompt_describes_its_read_only_workspace_tools() {
+    let text = chat_context::system_message(None, |_| None).content;
+    for needle in [
+        "read_file",
+        "list_files",
+        "grep",
+        "Coding Workspace",
+        "@path",
+    ] {
+        assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+    }
+    assert!(!text.contains("cannot browse"), "{text}");
+    assert!(text.contains("cannot edit"), "{text}");
+}
+
+#[test]
 fn chat_sees_goal_task_status_files_and_the_retained_patch() {
     let patch = "diff --git a/app/utils.py b/app/utils.py\n-def unused_helper():\n-    pass\n";
     let message =

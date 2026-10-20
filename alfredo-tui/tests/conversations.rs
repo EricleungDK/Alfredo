@@ -396,7 +396,7 @@ fn source_migration_preserves_v1_and_v2_bytes_without_inventing_legacy_authorshi
         store.save(&current).unwrap();
         assert_eq!(fs::read(&backup).unwrap(), original);
         let saved = store.load().unwrap().unwrap();
-        assert_eq!(saved.schema_version, 18);
+        assert_eq!(saved.schema_version, 19);
         assert!(saved.sessions[0].source(1).is_none());
         assert_eq!(saved.sessions[0].source(3), restored.sessions[0].source(3));
         assert!(store
@@ -719,7 +719,7 @@ fn observed_task_references_survive_restart_without_entering_model_requests() {
     drop(store);
     let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
     let loaded = store.load().unwrap().unwrap();
-    assert_eq!(loaded.schema_version, 18);
+    assert_eq!(loaded.schema_version, 19);
     let mut restored = loaded.restore();
     assert_eq!(restored.sessions[0].task_receipts(), refs);
     assert_eq!(restored.sessions[0].messages.len(), 4);
@@ -1463,7 +1463,7 @@ fn worker_result_reading_line_requires_schema11_and_preserves_exact_v10_backup()
     );
     assert_eq!(position.line, 4);
     let current = Snapshot::capture(&app, "default");
-    assert_eq!(current.schema_version, 18);
+    assert_eq!(current.schema_version, 19);
     let value = serde_json::to_value(&current).unwrap();
     assert_eq!(value["sessions"][0]["reading"]["block_anchor"]["line"], 4);
     let backup = path.with_extension("v10-backup");
@@ -1530,7 +1530,7 @@ fn planner_schema12_preserves_v11_and_restores_only_exact_saved_draft_origin() {
     draft.origin = Some(request.clone());
     let mut snapshot = Snapshot::capture(&app, "default");
     snapshot.plan_draft = Some(draft.clone());
-    assert_eq!(snapshot.schema_version, 18);
+    assert_eq!(snapshot.schema_version, 19);
     let backup = path.with_extension("v11-backup");
     fs::write(&backup, b"conflict").unwrap();
     assert!(store.save(&snapshot).is_err());
@@ -1657,7 +1657,7 @@ fn controller_schema13_preserves_v12_and_never_reactivates_restored_control() {
         app.sessions[1].set_command_state(&id, state);
     }
     let snapshot = Snapshot::capture(&app, "default");
-    assert_eq!(snapshot.schema_version, 18);
+    assert_eq!(snapshot.schema_version, 19);
     let backup = path.with_extension("v12-backup");
     fs::write(&backup, b"conflict").unwrap();
     assert!(store.save(&snapshot).is_err());
@@ -1882,7 +1882,7 @@ fn automatic_run_schema14_requires_its_exact_earlier_enabled_parent_and_preserve
     );
     app.add_session();
     let snapshot = Snapshot::capture(&app, "default");
-    assert_eq!(snapshot.schema_version, 18);
+    assert_eq!(snapshot.schema_version, 19);
     let backup = path.with_extension("v13-backup");
     fs::write(&backup, b"conflicting backup").unwrap();
     assert!(store.save(&snapshot).is_err());
@@ -2452,7 +2452,7 @@ fn selection_schema17_preserves_v16_and_requires_exact_source_identity_without_r
     app.sessions[0].set_command_state(&id, CommandState::Submitted);
     app.add_session();
     let snapshot = Snapshot::capture(&app, "default");
-    assert_eq!(snapshot.schema_version, 18);
+    assert_eq!(snapshot.schema_version, 19);
     let backup = path.with_extension("v16-backup");
     fs::write(&backup, b"conflicting backup").unwrap();
     assert!(store.save(&snapshot).is_err());
@@ -2558,7 +2558,7 @@ fn compaction_notes_need_schema_18_and_older_files_still_upgrade() {
         .finish_compaction(attempt, &plan, Ok("a note".into()))
         .unwrap();
     let compacted = Snapshot::capture(&app, "default");
-    assert_eq!(compacted.schema_version, 18);
+    assert_eq!(compacted.schema_version, 19);
     let path = {
         store.save(&compacted).unwrap();
         fixture.file()
@@ -2570,7 +2570,7 @@ fn compaction_notes_need_schema_18_and_older_files_still_upgrade() {
     fs::write(&path, &bytes).unwrap();
     assert!(store.load().is_err());
     assert_eq!(fs::read(&path).unwrap(), bytes);
-    // A v17 file without one still loads and is upgraded to v18 on the next save,
+    // A v17 file without one still loads and is upgraded to the current schema on the next save,
     // keeping the original as a v17 backup.
     let mut value = serde_json::to_value(&uncompacted).unwrap();
     value["schema_version"] = 17.into();
@@ -2585,6 +2585,6 @@ fn compaction_notes_need_schema_18_and_older_files_still_upgrade() {
         original
     );
     let saved = store.load().unwrap().unwrap();
-    assert_eq!(saved.schema_version, 18);
+    assert_eq!(saved.schema_version, 19);
     assert!(saved.sessions[0].compaction().is_some());
 }

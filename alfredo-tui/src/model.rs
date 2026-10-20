@@ -29,6 +29,57 @@ pub struct Message {
     pub content: String,
 }
 
+/// Internal role of a stored tool-call request: `content` is the JSON array of
+/// [`ToolCall`]s. The provider sends it as an assistant message with `tool_calls`;
+/// results follow as `tool` messages, one per call, in call order (issue #233).
+pub const TOOL_CALLS_ROLE: &str = "tool_calls";
+
+/// One function call the model asked for.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolCall {
+    pub name: String,
+    #[serde(default)]
+    pub arguments: serde_json::Value,
+}
+
+/// One round of the chat tool loop: the calls of one model reply and their results
+/// (same order, same length).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ToolStep {
+    pub calls: Vec<ToolCall>,
+    pub results: Vec<String>,
+}
+impl ToolStep {
+    /// Bytes this step adds to a request (calls as JSON plus results).
+    pub fn bytes(&self) -> usize {
+        serde_json::to_string(&self.calls).map_or(0, |text| text.len())
+            + self.results.iter().map(String::len).sum::<usize>()
+    }
+    /// Model-visible form: the call request, then one `tool` message per result.
+    pub fn messages(&self) -> impl Iterator<Item = Message> + '_ {
+        std::iter::once(Message {
+            role: TOOL_CALLS_ROLE.into(),
+            content: serde_json::to_string(&self.calls).unwrap_or_else(|_| "[]".into()),
+        })
+        .chain(self.results.iter().map(|result| Message {
+            role: "tool".into(),
+            content: result.clone(),
+        }))
+    }
+    pub(crate) fn valid(&self) -> bool {
+        !self.calls.is_empty()
+            && self.calls.len() == self.results.len()
+            && self.calls.len() <= 16
+            && self.calls.iter().all(|call| {
+                !call.name.is_empty()
+                    && call.name.len() <= 64
+                    && !call.name.chars().any(char::is_control)
+            })
+    }
+}
+
 /// Presentation provenance; a reference is not task or scope authority.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -129,6 +180,10 @@ pub enum Update {
     Admitted,
     Thinking,
     Token(String),
+    /// The model asked for tools (provider; consumed by the chat tool loop).
+    ToolCalls(Vec<ToolCall>),
+    /// A tool round finished: calls and results join the reply's context.
+    ToolStep(ToolStep),
     Done,
     Failed(String),
 }
@@ -169,6 +224,10 @@ pub struct Session {
     /// message, keyed by user-message index. Not shown, not saved.
     #[serde(skip)]
     attachments: std::collections::BTreeMap<usize, String>,
+    /// Tool rounds of each reply, keyed by assistant-message index (issue #233).
+    /// Sent before that reply as context; saved (schema v19).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    tool_steps: std::collections::BTreeMap<usize, Vec<ToolStep>>,
     pub scroll: std::cell::Cell<u16>,
     #[serde(
         default,
@@ -224,6 +283,7 @@ impl Session {
             status: Status::Ready,
             attempt: 0,
             attachments: Default::default(),
+            tool_steps: Default::default(),
             scroll: std::cell::Cell::new(0),
             reading: Default::default(),
             transcript_cache: Default::default(),
@@ -616,6 +676,7 @@ impl Session {
         }
         let bytes: usize = self.messages.iter().map(|m| m.content.len()).sum::<usize>()
             + self.attachments.values().map(String::len).sum::<usize>()
+            + self.tool_bytes()
             + self.compaction.as_ref().map_or(0, |c| c.summary.len());
         if bytes + prompt.len() > MAX_TEXT || self.messages.len() + 2 > MAX_MESSAGES {
             return Err(compaction::HARD_CAP);
@@ -655,15 +716,47 @@ impl Session {
                         let user = index - index % 2;
                         user == user_index || !self.interrupted_turn(user)
                     })
-                    .map(|(index, message)| {
+                    .flat_map(|(index, message)| {
                         let mut message = message.clone();
                         if let Some(block) = self.attachments.get(&index) {
                             message.content.push_str(block);
                         }
-                        message
+                        self.tool_steps(index)
+                            .iter()
+                            .flat_map(ToolStep::messages)
+                            .chain(std::iter::once(message))
                     }),
             )
             .collect()
+    }
+
+    /// Tool rounds of the reply at `assistant_index` (empty when none).
+    pub fn tool_steps(&self, assistant_index: usize) -> &[ToolStep] {
+        self.tool_steps
+            .get(&assistant_index)
+            .map_or(&[], Vec::as_slice)
+    }
+
+    pub(crate) fn tool_bytes(&self) -> usize {
+        self.tool_steps
+            .values()
+            .flatten()
+            .map(ToolStep::bytes)
+            .sum()
+    }
+
+    /// Saved tool rounds need schema v19, belong to replies, and are well formed.
+    pub(crate) fn valid_tool_steps(&self, schema: u32) -> bool {
+        self.tool_steps.is_empty()
+            || (schema >= 19
+                && self.tool_steps.len() <= MAX_MESSAGES / 2
+                && self.tool_steps.iter().all(|(index, steps)| {
+                    index % 2 == 1
+                        && *index < self.messages.len()
+                        && !steps.is_empty()
+                        && steps.len() <= 64
+                        && steps.iter().all(ToolStep::valid)
+                }))
     }
 
     /// Attach file context to the user message at `user_index` for this and later
@@ -699,6 +792,7 @@ impl Session {
         // The incomplete assistant message stays visible until an explicit retry.
         self.messages.pop();
         self.sources.remove(&self.messages.len());
+        self.tool_steps.remove(&self.messages.len());
         Ok(self.start())
     }
 
@@ -1255,7 +1349,13 @@ impl Session {
             self.messages
                 .iter()
                 .map(|m| m.content.bytes().filter(|b| *b == b'\n').count() + 3)
-                .sum()
+                .sum::<usize>()
+                + self
+                    .tool_steps
+                    .values()
+                    .flatten()
+                    .map(|step| 2 * step.calls.len() + 1)
+                    .sum::<usize>()
         };
         let reading = self.reading.get();
         let has_worker_result = |command: &crate::console_command::ConsoleCommand| {
@@ -1347,6 +1447,7 @@ impl Session {
                 | Update::Thinking
                 | Update::Metrics(_)
                 | Update::Token(_)
+                | Update::ToolStep(_)
         ) {
             self.sources
                 .entry(self.messages.len() - 1)
@@ -1412,12 +1513,27 @@ impl Session {
                 self.queued = false;
                 self.queue_observation = None;
                 self.capacity_wait = None;
-                let total: usize = self.messages.iter().map(|m| m.content.len()).sum();
+                let total = self.messages.iter().map(|m| m.content.len()).sum::<usize>()
+                    + self.tool_bytes();
                 if total + text.len() > MAX_TEXT {
                     self.status = Status::Failed("Conversation output limit reached".into());
                 } else {
                     self.messages.last_mut().unwrap().content.push_str(&text);
                     self.status = Status::Streaming;
+                }
+            }
+            // Provider-level calls are executed by the tool loop, which reports a step.
+            Update::ToolCalls(_) => {}
+            Update::ToolStep(step) => {
+                let total = self.messages.iter().map(|m| m.content.len()).sum::<usize>()
+                    + self.tool_bytes();
+                if !step.valid() || total + step.bytes() > MAX_TEXT {
+                    self.status = Status::Failed("Conversation output limit reached".into());
+                } else {
+                    self.tool_steps
+                        .entry(self.messages.len() - 1)
+                        .or_default()
+                        .push(step);
                 }
             }
             Update::Done => self.status = Status::Complete,

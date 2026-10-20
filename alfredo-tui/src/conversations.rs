@@ -55,7 +55,7 @@ pub struct Snapshot {
 impl Snapshot {
     pub fn capture(app: &App, namespace: &str) -> Self {
         Self {
-            schema_version: 18,
+            schema_version: 19,
             task_view: None,
             plan_draft: None,
             namespace: namespace.into(),
@@ -64,7 +64,7 @@ impl Snapshot {
         }
     }
     pub(crate) fn validate(&self, namespace: &str) -> Result<()> {
-        if !matches!(self.schema_version, 1..=18)
+        if !matches!(self.schema_version, 1..=19)
             || (self.schema_version == 1 && self.task_view.is_some())
             || (self.schema_version < 5 && self.plan_draft.is_some())
             || self.namespace != namespace
@@ -136,6 +136,9 @@ impl Snapshot {
             }
             if !session.valid_compaction(self.schema_version) {
                 return Err("Conversation compaction note is invalid".into());
+            }
+            if !session.valid_tool_steps(self.schema_version) {
+                return Err("Conversation tool steps are invalid".into());
             }
             if !session.valid_sources(self.schema_version) {
                 return Err("Invalid conversation response sources".into());
@@ -213,6 +216,7 @@ impl Snapshot {
                     .iter()
                     .map(|m| m.content.len())
                     .sum::<usize>()
+                    + session.tool_bytes()
                     > MAX_TEXT
             {
                 return Err("Conversation exceeds supported bounds".into());

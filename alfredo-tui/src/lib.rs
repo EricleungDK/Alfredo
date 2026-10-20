@@ -101,3 +101,4 @@ pub mod on_finish;
 
 pub mod chat_context;
 pub mod chat_mentions;
+pub mod chat_tools;
