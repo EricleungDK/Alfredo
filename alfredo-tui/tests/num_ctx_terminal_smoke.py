@@ -103,6 +103,19 @@ class NumCtx(unittest.TestCase):
             terminal.close()
             fixture.close()
 
+    def test_small_windows_send_a_short_prompt_with_clamped_num_predict(self):
+        for window in (2048, 4096):
+            fixture, terminal = self.chat(['--num-ctx', str(window)], 10)
+            try:
+                chat = [body for path, body in fixture.requests if path == '/api/chat']
+                options = chat[0]['options']
+                self.assertEqual(options['num_ctx'], window)
+                self.assertTrue(256 <= options['num_predict'] < window, options)
+                self.assertGreater(options['num_predict'], window - 800)
+            finally:
+                terminal.close()
+                fixture.close()
+
     def test_unset_omits_the_option_and_shows_default(self):
         fixture, terminal = self.chat([], 1200)
         try:

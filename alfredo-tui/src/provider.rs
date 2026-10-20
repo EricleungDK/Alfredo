@@ -21,6 +21,21 @@ const HEALTH_DEADLINE: Duration = Duration::from_secs(2);
 /// Smallest and largest accepted `--num-ctx` window, in tokens.
 pub const NUM_CTX_RANGE: std::ops::RangeInclusive<u32> = 2048..=262_144;
 
+/// Smallest reply budget a `--num-ctx` request may be left with, in tokens. A request is
+/// refused only when its estimated prompt plus this floor exceeds the window.
+pub const NUM_PREDICT_FLOOR: u32 = 256;
+
+/// Reply limit for a request under a `--num-ctx` window. `num_predict` is a cap, not a
+/// reservation, so it shrinks to what the window leaves after the prompt. `Err` carries
+/// the tokens the window would need (prompt plus floor).
+pub fn fit_num_predict(prompt_tokens: usize, window: u32, cap: u32) -> Result<u32, usize> {
+    let needed = prompt_tokens.saturating_add(NUM_PREDICT_FLOOR as usize);
+    if needed > window as usize {
+        return Err(needed);
+    }
+    Ok(cap.min(window - prompt_tokens as u32))
+}
+
 /// Validate `--num-ctx`. Empty or `default` leaves the option out so the server's
 /// own window applies.
 pub fn parse_num_ctx(value: &str) -> Result<Option<u32>, String> {
@@ -213,6 +228,9 @@ struct Content {
 
 #[derive(Default)]
 struct FrameProgress {
+    /// Effective reply limit sent; `clamped` when --num-ctx shrank it below the cap.
+    limit: u32,
+    clamped: bool,
     bytes: usize,
     thinking_observed: bool,
 }
@@ -804,22 +822,34 @@ impl Ollama {
             }
             body["options"]["temperature"] = temperature_json(self.temperature);
         }
+        let mut clamped = false;
         if let Some(context) = self.context_profile.context(self.priority) {
             body["options"]["num_ctx"] = context.into();
         } else if let Some(window) = self.num_ctx_override {
             // A qualification context candidate keeps its recorded window; the user's
             // --num-ctx applies to baseline (production) requests only.
-            // Estimate like the rest of Alfredo: bytes/3 plus the reply budget.
+            // Estimate like the rest of Alfredo: bytes/3. num_predict is only a cap, so
+            // it is clamped to the room left in the window rather than reserved.
             let bytes: usize = messages
                 .iter()
                 .map(|message| message.role.len() + message.content.len())
                 .sum();
-            let estimate = bytes / 3 + self.num_predict as usize;
-            if estimate > window as usize {
-                return Err(Failure::Final(format!(
-                    "prompt ≈{estimate} tokens > --num-ctx {window}; shorten the request"
-                )));
-            }
+            let prompt = bytes / 3;
+            let limit = match fit_num_predict(prompt, window, self.num_predict) {
+                Ok(limit) => limit,
+                Err(needed) if self.structured => {
+                    return Err(Failure::Final(format!(
+                        "prompt ≈{prompt} tokens > --num-ctx {window}; raise --num-ctx (≈{needed} tokens needed)"
+                    )));
+                }
+                Err(_) => {
+                    return Err(Failure::Final(format!(
+                        "prompt ≈{prompt} tokens > --num-ctx {window}; shorten the request"
+                    )));
+                }
+            };
+            clamped = limit < self.num_predict;
+            body["options"]["num_predict"] = limit.into();
             body["options"]["num_ctx"] = window.into();
         }
         if let Some(keep_alive) = &self.keep_alive {
@@ -894,7 +924,13 @@ impl Ollama {
             });
         }
         let mut pending = Vec::new();
-        let mut progress = FrameProgress::default();
+        let mut progress = FrameProgress {
+            limit: body["options"]["num_predict"]
+                .as_u64()
+                .map_or(self.num_predict, |limit| limit as u32),
+            clamped,
+            ..FrameProgress::default()
+        };
         loop {
             let chunk = match tokio::time::timeout(self.idle_timeout, response.chunk()).await {
                 Err(_) => return Err("Ollama stream stalled; partial reply retained".into()),
@@ -1062,7 +1098,16 @@ impl Ollama {
                     .map_err(|_| "Terminal closed")?;
             }
             if frame.done_reason.as_deref() == Some("length") {
-                return Err(format!("Model output hit the {}-token limit; partial reply retained. Shorten the request or choose another model before retrying", self.num_predict).into());
+                let advice = if progress.clamped {
+                    "raise --num-ctx, shorten the request, or choose another model before retrying"
+                } else {
+                    "Shorten the request or choose another model before retrying"
+                };
+                return Err(format!(
+                    "Model output hit the {}-token limit; partial reply retained. {advice}",
+                    progress.limit
+                )
+                .into());
             }
             if trace.recording.is_none() {
                 sender

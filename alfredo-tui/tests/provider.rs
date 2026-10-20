@@ -1020,6 +1020,134 @@ async fn oversized_prompt_is_refused_before_sending_when_num_ctx_is_set() {
     }
 }
 
+async fn chat_with_prompt(provider: &Ollama, bytes: usize) -> Vec<Event> {
+    let (sender, mut receiver) = mpsc::channel(128);
+    let messages = vec![Message {
+        role: "user".into(),
+        content: "x".repeat(bytes),
+    }];
+    provider
+        .chat(1, 1, "fixture".into(), messages, sender)
+        .await;
+    let mut events = Vec::new();
+    while let Some(event) = receiver.recv().await {
+        events.push(event);
+    }
+    events
+}
+
+fn failure(events: &[Event]) -> Option<String> {
+    events.iter().find_map(|event| match &event.update {
+        Update::Failed(reason) => Some(reason.clone()),
+        _ => None,
+    })
+}
+
+#[tokio::test]
+async fn small_windows_send_short_prompts_with_clamped_num_predict() {
+    // (window, prompt bytes, expected num_predict): estimate = bytes / 3.
+    for (window, bytes, expected) in [
+        (2048, 30, 2038),
+        (4096, 30, 4086),
+        (8192, 13_500, 3692),
+        (8192, 300, 4096),
+        (16384, 300, 4096),
+    ] {
+        let fixture = serve(reserve(), |_, _| done("ok"));
+        let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(3))
+            .unwrap()
+            .with_num_ctx(Some(window));
+        let events = chat_with_prompt(&provider, bytes).await;
+        assert!(failure(&events).is_none(), "{window}: {events:?}");
+        let requests = fixture.requests.lock().unwrap().clone();
+        let options = &requests[0].body["options"];
+        assert_eq!(options["num_ctx"], window, "{window}");
+        // role "user" adds 4 bytes to the estimate.
+        let estimate = (bytes + 4) / 3;
+        let want = expected.min(window as usize - estimate);
+        assert_eq!(options["num_predict"], want, "{window}");
+    }
+}
+
+#[tokio::test]
+async fn refusal_requires_prompt_plus_floor_to_exceed_the_window_and_names_the_caller() {
+    use alfredo_tui::provider::NUM_PREDICT_FLOOR;
+    assert_eq!(NUM_PREDICT_FLOOR, 256);
+    let fixture = serve(reserve(), |_, _| done("ok"));
+    // 2048 window: 1792 tokens + 256 fits exactly; one more token refuses.
+    let fits = (1792 * 3) - 4;
+    let base = Ollama::new(&fixture.endpoint, Duration::from_secs(3))
+        .unwrap()
+        .with_num_ctx(Some(2048));
+    let events = chat_with_prompt(&base, fits).await;
+    assert!(failure(&events).is_none(), "{events:?}");
+    assert_eq!(
+        fixture.requests.lock().unwrap()[0].body["options"]["num_predict"],
+        256
+    );
+    fixture.requests.lock().unwrap().clear();
+    let too_big = fits + 3;
+    let chat = failure(&chat_with_prompt(&base, too_big).await).expect("chat refused");
+    assert!(
+        chat.contains("tokens > --num-ctx 2048") && chat.contains("shorten the request"),
+        "{chat}"
+    );
+    assert!(!chat.contains("4449"), "{chat}");
+    let planner = base
+        .clone()
+        .with_json_schema(serde_json::json!({"type": "object"}));
+    let worker = base.clone().with_structured_text();
+    for provider in [planner, worker] {
+        let reason = failure(&chat_with_prompt(&provider, too_big).await).expect("refused");
+        assert!(
+            reason.contains("raise --num-ctx") && reason.contains("tokens needed"),
+            "{reason}"
+        );
+        assert!(!reason.contains("shorten"), "{reason}");
+    }
+    assert!(fixture.requests.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn length_stop_names_the_effective_limit_and_suggests_raising_num_ctx() {
+    let length = |_: &_, _| {
+        Reply::Json(
+            200,
+            "{\"message\":{\"content\":\"part\"},\"done\":true,\"done_reason\":\"length\"}".into(),
+        )
+    };
+    // Clamped: window 2048, ~100-token prompt -> limit well below 4096.
+    let fixture = serve(reserve(), length);
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(3))
+        .unwrap()
+        .with_num_ctx(Some(2048));
+    let events = chat_with_prompt(&provider, 296).await;
+    let reason = failure(&events).expect("length error");
+    let limit = fixture.requests.lock().unwrap()[0].body["options"]["num_predict"]
+        .as_u64()
+        .unwrap();
+    assert!(limit < 4096);
+    assert!(
+        reason.contains(&format!("{limit}-token limit")) && reason.contains("raise --num-ctx"),
+        "{reason}"
+    );
+    // Unclamped and unset: unchanged wording with the configured cap.
+    let fixture = serve(reserve(), length);
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(3)).unwrap();
+    let reason = failure(&chat_with_prompt(&provider, 30).await).expect("length error");
+    assert!(reason.contains("4096-token limit"), "{reason}");
+    assert!(!reason.contains("--num-ctx"), "{reason}");
+}
+
+#[tokio::test]
+async fn without_num_ctx_the_request_body_is_unchanged() {
+    let fixture = serve(reserve(), |_, _| done("ok"));
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(3)).unwrap();
+    chat_with_prompt(&provider, 60_000).await;
+    let body = fixture.requests.lock().unwrap()[0].body.clone();
+    assert_eq!(body["options"], serde_json::json!({"num_predict": 4096}));
+}
+
 #[test]
 fn context_fill_reports_used_over_window_and_warns_near_the_limit() {
     use alfredo_tui::metrics::Metrics;
@@ -1043,4 +1171,16 @@ fn context_fill_reports_used_over_window_and_warns_near_the_limit() {
         .contains("truncated"));
     assert!(!used(9000).context_fill(None).unwrap().contains("truncated"));
     assert_eq!(Metrics::default().context_fill(Some(8192)), None);
+}
+
+#[test]
+fn fit_num_predict_clamps_to_the_room_left_and_refuses_below_the_floor() {
+    use alfredo_tui::provider::fit_num_predict;
+    assert_eq!(fit_num_predict(0, 2048, 4096), Ok(2048));
+    assert_eq!(fit_num_predict(100, 4096, 4096), Ok(3996));
+    assert_eq!(fit_num_predict(4500, 8192, 4096), Ok(3692));
+    assert_eq!(fit_num_predict(100, 16384, 4096), Ok(4096));
+    assert_eq!(fit_num_predict(1792, 2048, 4096), Ok(256));
+    assert_eq!(fit_num_predict(1793, 2048, 4096), Err(2049));
+    assert_eq!(fit_num_predict(usize::MAX, 2048, 4096), Err(usize::MAX));
 }

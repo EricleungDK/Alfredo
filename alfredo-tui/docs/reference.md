@@ -345,11 +345,15 @@ is loading or busy. Model discovery bypasses this queue.
   the preload (so the model is not reloaded to resize its window). Unset, the option
   is omitted and the server's window applies (4096 tokens on many installs unless
   `OLLAMA_CONTEXT_LENGTH` is set); Alfredo's worker and repair prompts can be far
-  larger, so Ollama may then truncate them silently. With the flag set, a request
-  whose estimated prompt (bytes/3 plus the 4096-token reply budget) exceeds the
-  window is refused before sending with `prompt ≈N tokens > --num-ctx M; shorten
-  the request`. The reply budget counts, so any window of 4096 or less refuses every
-  request; use 8192 or more. After each reply that reports `prompt_eval_count` the chat shows
+  larger, so Ollama may then truncate them silently. With the flag set, `num_predict` (a
+  cap on generated tokens, not a reservation) is clamped to the window minus the
+  estimated prompt (bytes/3), never below a 256-token floor, and a request is refused
+  before sending only when the estimated prompt plus 256 exceeds the window: chat says
+  `prompt ≈N tokens > --num-ctx M; shorten the request`, planner, worker and repair say
+  `raise --num-ctx (≈N tokens needed)` because they cannot shorten anything. A reply cut
+  off by the clamped limit reports the real token limit and suggests raising `--num-ctx`.
+  Short prompts therefore work at any accepted window, including 2048 and 4096.
+  After each reply that reports `prompt_eval_count` the chat shows
   `ctx used/N` (`ctx used/default` when unset), plus "context may be truncated" from
   95% of a set window. `--doctor` prints a `NOTE context:` line. A larger window
   uses more VRAM (KV cache), so it is your setting; there is no default.
