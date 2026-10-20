@@ -731,7 +731,7 @@ workers and waits for their results. Up to four workers may run per terminal.
 Successful worker results now retain a Git candidate commit for the exact reviewed
 diff, parented by the recorded baseline. A `refs/alfredo/candidates/<commit>` ref
 keeps the object reachable; the workspace branch, HEAD and working files stay
-unchanged. Untracked check/build output is excluded. The commit subject is the task title (72 characters at most, control characters
+unchanged. Untracked check/build output is excluded. The commit subject is the task title (for a repair, the original task's title, following repair-of-repair chains; 72 characters at most, control characters
 stripped) and the body reads `Alfredo task #N · run ID · files · check`, plus
 `Repair of #M` for repairs. Evidence stores the optional
 commit ID under its existing digest. Verification checks its sole parent and exact
