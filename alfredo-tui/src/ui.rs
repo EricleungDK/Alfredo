@@ -183,6 +183,9 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
     let agent = tasks.and_then(|tasks| Some((tasks, tasks.agent_shown()?.target)));
     let prompt_title = match agent {
         _ if focused => " Prompt · Esc returns ".to_string(),
+        _ if session.pending_approval().is_some() => {
+            " Approval pending · y approve · n deny · Esc cancels the turn ".to_string()
+        }
         Some((tasks, target)) => crate::agent_view::prompt_title(tasks, target),
         None => " Prompt · Enter send ".to_string(),
     };
@@ -1314,6 +1317,9 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
             Style::default().fg(Color::Red),
         ));
     }
+    if let Some(card) = session.pending_approval() {
+        lines.extend(approval_card_lines(card, width));
+    }
     segments.push(Segment::Run(lines));
     let block = frame_block(
         area,
@@ -2239,6 +2245,42 @@ fn receipt_style(receipt: &crate::tasks::Receipt) -> (&'static str, Color) {
         Action::Decide { decision, .. } if decision.risk.is_some() => ("‖", Color::Magenta),
         _ => ("✓", Color::Green),
     }
+}
+
+/// The pending-action card (issue #235): tool, arguments, diff preview and keys.
+fn approval_card_lines(
+    card: &crate::chat_tools::approval::Card,
+    width: usize,
+) -> Vec<Line<'static>> {
+    let warn = Style::default().fg(Color::Yellow);
+    let mut lines = vec![
+        Line::default(),
+        Line::styled(
+            format!("? Approve {} · {}", card.tool, single_line(&card.summary)),
+            warn.add_modifier(Modifier::BOLD),
+        ),
+    ];
+    let arguments = card.arguments.to_string();
+    let shown: String = arguments.chars().take(width.max(20) * 2).collect();
+    lines.push(Line::styled(format!("  args {}", safe(&shown)), dim()));
+    for line in card.preview.lines() {
+        let color = if line.starts_with('+') {
+            Color::Green
+        } else if line.starts_with('-') {
+            Color::Red
+        } else {
+            Color::DarkGray
+        };
+        lines.push(Line::styled(
+            format!("  {}", safe(line)),
+            Style::default().fg(color),
+        ));
+    }
+    lines.push(Line::styled(
+        "  y approve · n deny · Esc cancels the turn (deny)",
+        warn,
+    ));
+    lines
 }
 
 /// One short human sentence per canonical receipt.

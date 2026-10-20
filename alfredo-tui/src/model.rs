@@ -265,6 +265,10 @@ pub struct Session {
     /// this, never the agent's note.
     #[serde(skip)]
     aside: Option<String>,
+    /// A Chat Agent action waiting for the owner (issue #235). Never saved, so a
+    /// restored session cannot re-ask or run it.
+    #[serde(skip)]
+    approval: Option<(crate::chat_tools::approval::Card, std::time::Instant)>,
 }
 
 impl Session {
@@ -298,6 +302,7 @@ impl Session {
             history_index: None,
             unsent: None,
             rejected: None,
+            approval: None,
             aside: None,
         }
     }
@@ -803,6 +808,7 @@ impl Session {
             content: String::new(),
         });
         self.attempt += 1;
+        self.approval = None;
         self.queued = false;
         self.queue_observation = None;
         self.capacity_wait = None;
@@ -816,8 +822,54 @@ impl Session {
         request
     }
 
+    /// Show `card` (appearing at `now`) while this attempt's turn waits for the
+    /// owner. False (and not shown) for a stale attempt or a finished turn.
+    pub fn await_approval(
+        &mut self,
+        attempt: u64,
+        card: crate::chat_tools::approval::Card,
+        now: std::time::Instant,
+    ) -> bool {
+        if self.attempt != attempt || !self.status.active() {
+            return false;
+        }
+        self.approval = Some((card, now));
+        true
+    }
+
+    /// The pending action card, while the turn is still running.
+    pub fn pending_approval(&self) -> Option<&crate::chat_tools::approval::Card> {
+        self.approval
+            .as_ref()
+            .filter(|_| self.status.active())
+            .map(|(card, _)| card)
+    }
+
+    /// The owner's key on the card: `y` approves, `n` denies, and the card closes.
+    /// Keys before the card is armed ([`crate::chat_tools::approval::ARM`] after it
+    /// appeared) and other keys decide nothing.
+    pub fn answer_approval(
+        &mut self,
+        key: char,
+        now: std::time::Instant,
+    ) -> Option<crate::chat_tools::approval::Decision> {
+        use crate::chat_tools::approval::{Decision, ARM};
+        let (_, shown) = self.approval.as_ref().filter(|_| self.status.active())?;
+        if now.saturating_duration_since(*shown) < ARM {
+            return None;
+        }
+        let decision = match key {
+            'y' => Decision::Approve,
+            'n' => Decision::Deny,
+            _ => return None,
+        };
+        self.approval = None;
+        Some(decision)
+    }
+
     pub fn cancel(&mut self) {
         self.compacting = None;
+        self.approval = None;
         if self.status.active() {
             self.status = Status::Cancelled;
             self.retry = None;

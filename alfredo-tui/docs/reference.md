@@ -1460,8 +1460,41 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   `--num-ctx` estimate, and compaction summarises them with their turn. They are saved
   with the conversation (schema v19; the first save keeps `<conversation>.v18-backup`;
   older builds refuse a v19 file). Retrying a turn drops its tool rounds.
-- **Not available.** Edits, commands and Git operations are not chat tools yet; the
-  model is told so. Wayfinder scope discussions (`@wayfinder`, `/scope`) offer no tools.
+- **Not available.** Commands and Git operations are not chat tools yet; the model is
+  told so. File edits need approval (next section). Wayfinder scope discussions
+  (`@wayfinder`, `/scope`) offer no tools.
+
+## Chat approval and file edits
+
+Two mutating tools change the working tree. Each call pauses the turn for your
+Approval (ADR 0004); there is no skip-approval mode.
+
+| Tool | Arguments | Effect |
+| --- | --- | --- |
+| `write_file` | `path`, `content` | Creates or replaces a UTF-8 text file (parent directory must exist; at most 1 MiB) |
+| `edit_file` | `path`, `old_text`, `new_text` | Replaces the one exact occurrence of `old_text`; zero or several matches are refused |
+
+- **Card.** The transcript shows `? Approve edit_file · edit README.md`, the arguments,
+  and a line diff (`-` old, `+` new, at most 80 lines). The prompt title reads
+  `Approval pending · y approve · n deny · Esc cancels the turn`.
+- **Keys.** The card is modal: `y` and `n` go to it, not the prompt, and are ignored for
+  0.5 s after it appears so typeahead cannot decide it. `y` runs the call; `n` denies it and the model receives `error: the owner
+  denied this action; nothing was changed…` as the tool result, then the turn continues.
+  Esc denies the pending action and ends the turn. Calls in one reply are asked one at a
+  time, in order.
+- **Refused before asking.** Paths follow the read tools' confinement (absolute, `..`,
+  escaping symlinks, `.git`, secrets and generated trees are refused); an `edit_file`
+  whose `old_text` is missing or ambiguous, or a non-UTF-8 or oversized file, returns
+  `error: …` to the model without a card. On approval the target file must still match
+  the preview (content hash, or still absent); otherwise nothing is written and the model
+  gets `error: the file changed since the preview…`.
+- **Outcome log.** Each card's outcome (`approved · applied`, `approved · failed:
+  reason`, `denied`, or `denied · turn cancelled`) is appended to
+  `chat-approvals.jsonl` in the mission's State Directory, after the call ran. It is kept
+  to the newest 500–1000 records and is separate from the task store, so it never uses
+  task receipt capacity. F4 activity lists these first as `chat · Chat edit_file …`.
+- **Restarts.** A pending action is never saved; a restored session shows the turn as
+  interrupted and never re-asks or runs it.
 
 ## Chat file mentions (`@path`)
 

@@ -10,6 +10,31 @@ pub struct Entry {
     pub detail: String,
 }
 
+/// Chat Agent approval outcomes (issue #235), newest first, as activity entries.
+/// They target no task (task 0) and come from the chat-approval log, not receipts.
+pub fn chat_entries(records: &[crate::chat_tools::approval::Record], query: &str) -> Vec<Entry> {
+    let query = query.to_lowercase();
+    records
+        .iter()
+        .enumerate()
+        .rev()
+        .map(|(index, record)| Entry {
+            revision: index as u64 + 1,
+            task: 0,
+            correlation: format!("chat-approval {}", record.at_ms),
+            summary: format!("Chat {} {}", record.tool, record.outcome.label()),
+            detail: record.target.clone(),
+        })
+        // A `#ID` task filter never matches chat outcomes.
+        .filter(|entry| {
+            !query.starts_with('#')
+                && format!("{} {}", entry.summary, entry.detail)
+                    .to_lowercase()
+                    .contains(&query)
+        })
+        .collect()
+}
+
 pub fn entries(snapshot: &Snapshot, query: &str) -> Vec<Entry> {
     iter_entries(snapshot, query).collect()
 }
@@ -135,9 +160,22 @@ pub fn iter_entries<'a>(snapshot: &'a Snapshot, query: &str) -> impl Iterator<It
 /// Cached F4 projection. Entries are rebuilt only when the snapshot revision,
 /// receipt tail or query changes; wrapped row geometry only when the width
 /// changes; and each frame turns only the visible window into styled lines.
+/// Mission, workspace, revision, receipt count, last correlation, query, chat
+/// record count, last chat timestamp.
+type ViewKey = (
+    String,
+    std::path::PathBuf,
+    u64,
+    usize,
+    String,
+    String,
+    usize,
+    u64,
+);
+
 #[derive(Default)]
 pub struct View {
-    key: Option<(String, std::path::PathBuf, u64, usize, String, String)>,
+    key: Option<ViewKey>,
     entries: Vec<Entry>,
     width: u16,
     // One starting row per entry, followed by the total row count.
@@ -158,15 +196,17 @@ fn entry_lines(entry: &Entry) -> Vec<ratatui::text::Line<'static>> {
         style::{Color, Style},
         text::Line,
     };
-    let mut lines = vec![Line::styled(
+    let heading = if entry.task == 0 {
+        format!("chat · {}", safe(&entry.summary))
+    } else {
         format!(
             "r{} · task #{} · {}",
             entry.revision,
             entry.task,
             safe(&entry.summary)
-        ),
-        Style::default().fg(Color::Cyan),
-    )];
+        )
+    };
+    let mut lines = vec![Line::styled(heading, Style::default().fg(Color::Cyan))];
     lines.extend(
         safe(&entry.detail)
             .lines()
@@ -211,6 +251,19 @@ impl View {
         height: u16,
         offset: usize,
     ) -> Window {
+        self.window_with(snapshot, &[], query, width, height, offset)
+    }
+
+    /// As [`View::window`], with chat approval outcomes listed first.
+    pub fn window_with(
+        &mut self,
+        snapshot: &Snapshot,
+        chat: &[crate::chat_tools::approval::Record],
+        query: &str,
+        width: u16,
+        height: u16,
+        offset: usize,
+    ) -> Window {
         if width == 0 || height == 0 {
             return Window {
                 lines: Vec::new(),
@@ -229,9 +282,12 @@ impl View {
                 .map(|receipt| receipt.request.correlation.clone())
                 .unwrap_or_default(),
             query.to_owned(),
+            chat.len(),
+            chat.last().map_or(0, |record| record.at_ms),
         );
         if self.key.as_ref() != Some(&key) {
-            self.entries = entries(snapshot, query);
+            self.entries = chat_entries(chat, query);
+            self.entries.extend(entries(snapshot, query));
             self.builds += 1;
             self.key = Some(key);
             self.width = 0;

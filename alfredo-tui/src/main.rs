@@ -380,6 +380,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut jobs: Vec<Option<JoinHandle<()>>> = (0..MAX_SESSIONS).map(|_| None).collect();
     let (mut model_sender, mut model_receiver) = mpsc::channel(1);
     let (mut compact_sender, mut compact_receiver) = mpsc::channel::<Compacted>(8);
+    // Chat Agent approvals (issue #235): the tool loop asks, the owner answers y/n.
+    let (mut approval_sender, mut approval_receiver) =
+        mpsc::channel::<alfredo_tui::chat_tools::approval::Request>(MAX_SESSIONS);
+    let mut approval_replies: std::collections::HashMap<
+        usize,
+        alfredo_tui::chat_tools::approval::Request,
+    > = Default::default();
     let mut terminal = ratatui::init();
     let _guard = TerminalGuard;
     execute!(io::stdout(), EnableBracketedPaste)?;
@@ -642,6 +649,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             let provider = provider.clone();
                             let sender = sender.clone();
+                            let gate = Some(alfredo_tui::chat_tools::approval::Gate::new(
+                                approval_sender.clone(),
+                                alfredo_tui::chat_tools::approval::Log::for_store(
+                                    work.tasks.store(),
+                                )
+                                .ok(),
+                            ));
                             if let Some(job) = jobs[turn.session].take() {
                                 job.abort();
                             }
@@ -660,6 +674,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                             turn.model,
                                             messages,
                                             sender,
+                                            gate,
                                         )
                                         .await
                                     }
@@ -874,6 +889,44 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     Err(_) => break,
                 }
             }
+            // A mutating chat tool call waits for the owner: show its card.
+            // Cards whose turn ended (Esc, retry, failure) are logged as cancelled.
+            let ended: Vec<usize> = approval_replies
+                .keys()
+                .copied()
+                .filter(|index| {
+                    work.app
+                        .sessions
+                        .get(*index)
+                        .is_none_or(|session| session.pending_approval().is_none())
+                })
+                .collect();
+            for index in ended {
+                if let Some(request) = approval_replies.remove(&index) {
+                    request.cancel();
+                }
+            }
+            while let Ok(request) = approval_receiver.try_recv() {
+                let shown = work
+                    .app
+                    .sessions
+                    .get_mut(request.session)
+                    .is_some_and(|session| {
+                        session.await_approval(
+                            request.attempt,
+                            request.card.clone(),
+                            std::time::Instant::now(),
+                        )
+                    });
+                if shown {
+                    if let Some(old) = approval_replies.insert(request.session, request) {
+                        old.cancel();
+                    }
+                    dirty = true;
+                } else {
+                    request.cancel();
+                }
+            }
             // Finished summaries (issue #187): replace the oldest turns, then send the held prompt.
             let mut resend = None;
             while let Ok((index, attempt, plan, result)) = compact_receiver.try_recv() {
@@ -1013,6 +1066,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                 (sender, receiver) = mpsc::channel(128);
                                                 (model_sender, model_receiver) = mpsc::channel(1);
                                                 (compact_sender, compact_receiver) = mpsc::channel(8);
+                                                (approval_sender, approval_receiver) = mpsc::channel(MAX_SESSIONS);
+                                                for (_, request) in approval_replies.drain() {
+                                                    request.cancel();
+                                                }
                                                 last_task_refresh = std::time::Instant::now();
                                                 last_save = std::time::Instant::now();
                                                 last_missions = None;
@@ -1077,6 +1134,34 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     match key.code {
+                        KeyCode::Char(answer @ ('y' | 'n'))
+                            if !ctrl
+                                && !key.modifiers.contains(KeyModifiers::ALT)
+                                && work.app.pane.focus.is_none()
+                                && work.app.sessions[index].pending_approval().is_some() =>
+                        {
+                            // The card is modal: y/n never reach the prompt, and keys
+                            // before it is armed decide nothing.
+                            match work.app.sessions[index]
+                                .answer_approval(answer, std::time::Instant::now())
+                            {
+                                Some(decision) => {
+                                    if let Some(request) = approval_replies.remove(&index) {
+                                        work.app.notice = format!(
+                                            "{} {} · {} · F4 activity shows the outcome",
+                                            if answer == 'y' { "Approved" } else { "Denied" },
+                                            request.card.tool,
+                                            request.card.summary
+                                        );
+                                        let _ = request.reply.send(decision);
+                                    }
+                                }
+                                None => {
+                                    work.app.notice =
+                                        "Read the approval card first; press y or n again".into()
+                                }
+                            }
+                        }
                         KeyCode::Char('q' | 'c') if ctrl => {
                             work.tasks.disable_dispatch();
                             if !work.tasks.workers.is_empty() {
@@ -1210,6 +1295,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             alfredo_tui::agent_view::close(&mut work.app, &mut work.tasks, true);
                         }
                         KeyCode::Esc => {
+                            // A pending action is denied (logged as cancelled) and the turn ends.
+                            if let Some(request) = approval_replies.remove(&index) {
+                                request.cancel();
+                            }
                             if let Some(job) = jobs[index].take() {
                                 job.abort();
                             }
@@ -1310,6 +1399,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                 (sender, receiver) = mpsc::channel(128);
                                                 (model_sender, model_receiver) = mpsc::channel(1);
                                                 (compact_sender, compact_receiver) = mpsc::channel(8);
+                                                (approval_sender, approval_receiver) = mpsc::channel(MAX_SESSIONS);
+                                                for (_, request) in approval_replies.drain() {
+                                                    request.cancel();
+                                                }
                                                 last_task_refresh = std::time::Instant::now();
                                                 last_save = std::time::Instant::now();
                                             }

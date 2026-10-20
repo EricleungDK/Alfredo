@@ -119,6 +119,13 @@ pub struct TaskControl {
     pub evidence: Option<crate::review::View>,
     pub activity: Option<String>,
     activity_view: std::cell::RefCell<crate::activity::View>,
+    chat_log: std::cell::OnceCell<Option<crate::chat_tools::approval::Log>>,
+    /// Chat approval log cache: (path, length, mtime) and its records.
+    #[allow(clippy::type_complexity)]
+    chat_approvals: std::cell::RefCell<(
+        Option<(std::path::PathBuf, u64, Option<std::time::SystemTime>)>,
+        std::rc::Rc<Vec<crate::chat_tools::approval::Record>>,
+    )>,
     pub run_observations: BTreeMap<u64, String>,
     /// Read-only autopilot projection for rendering; the controller owns decisions.
     pub autopilot: Option<crate::autopilot::Status>,
@@ -225,6 +232,8 @@ impl TaskControl {
             evidence: None,
             activity: None,
             activity_view: Default::default(),
+            chat_log: Default::default(),
+            chat_approvals: Default::default(),
             run_observations: BTreeMap::new(),
             autopilot: None,
             autopilot_report: None,
@@ -1132,9 +1141,33 @@ impl TaskControl {
         width: u16,
         height: u16,
     ) -> crate::activity::Window {
-        self.activity_view
-            .borrow_mut()
-            .window(snapshot, query, width, height, self.scroll)
+        let chat = self.chat_approvals();
+        self.activity_view.borrow_mut().window_with(
+            snapshot,
+            &chat,
+            query,
+            width,
+            height,
+            self.scroll,
+        )
+    }
+
+    /// Chat approval outcomes from the mission's log, reread only when it changes.
+    fn chat_approvals(&self) -> std::rc::Rc<Vec<crate::chat_tools::approval::Record>> {
+        let log = self
+            .chat_log
+            .get_or_init(|| crate::chat_tools::approval::Log::for_store(&self.store).ok());
+        let Some(log) = log else {
+            return Default::default();
+        };
+        let stamp = std::fs::metadata(log.path())
+            .ok()
+            .map(|m| (log.path().to_path_buf(), m.len(), m.modified().ok()));
+        let mut cache = self.chat_approvals.borrow_mut();
+        if cache.0 != stamp {
+            *cache = (stamp, std::rc::Rc::new(log.records()));
+        }
+        cache.1.clone()
     }
 
     /// Times the activity entry list was projected from a snapshot (cache misses).
