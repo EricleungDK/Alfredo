@@ -104,6 +104,61 @@ class HeadlessSmoke(unittest.TestCase):
             self.assertTrue(item['title'] and item['reason'])
         self.assertIn('failed 0/2', err)
 
+    def hook(self, body):
+        path = self.workspace.parent / 'hook.sh'
+        marker = self.workspace.parent / 'marker'
+        path.write_text(f'#!/bin/sh\nmarker="{marker}"\n{body}\n')
+        path.chmod(0o755)
+        return path, marker
+
+    def test_slow_hook_completes_before_exit_and_json_comes_first(self):
+        hook, marker = self.hook('sleep 2; touch "$marker"')
+        started = time.monotonic()
+        code, out, err = self.run_headless('--headless', '--on-finish', str(hook))
+        self.assertEqual(code, 0, err)
+        self.assertTrue(marker.exists(), 'the hook finished before headless exited')
+        self.assertGreaterEqual(time.monotonic() - started, 2)
+        self.assertEqual(self.result(out)['state'], 'done')
+        self.assertNotIn('--on-finish', err)
+
+    def test_failing_hook_is_reported_and_exit_code_follows_the_run(self):
+        hook, _ = self.hook('echo boom >&2; exit 7')
+        code, out, err = self.run_headless('--headless', '--on-finish', str(hook))
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.result(out)['state'], 'done')
+        self.assertIn('--on-finish hook failed (exit status: 7)', err.splitlines())
+
+    def test_hook_past_the_limit_is_killed_and_reported(self):
+        hook, marker = self.hook('exec sleep 30')
+        started = time.monotonic()
+        code, out, err = self.run_headless('--headless', '--on-finish', str(hook))
+        elapsed = time.monotonic() - started
+        self.assertEqual(code, 0, err)
+        self.assertIn('--on-finish hook killed after 10 s', err.splitlines())
+        self.assertLess(elapsed, 25)
+        self.assertEqual(subprocess.run(['pgrep', '-x', '-f', 'sleep 30'], capture_output=True).returncode, 1,
+                         'the hook was reaped')
+
+    def test_unreachable_endpoint_is_a_setup_error_exit_2(self):
+        code, out, err = self.run_headless('--headless', '--endpoint', 'http://127.0.0.1:9')
+        self.assertEqual((code, out), (2, ''), err)
+        self.assertIn('Error: cannot reach Ollama', err)
+
+    def test_missing_model_is_a_setup_error_exit_2(self):
+        code, out, err = self.run_headless('--headless', '--model', 'nosuch:1b')
+        self.assertEqual((code, out), (2, ''), err)
+        self.assertIn('Error: model nosuch:1b is not installed', err)
+        self.assertEqual(self.fixture.markers(), [])
+
+    def test_planning_failure_reason_is_on_the_stderr_line(self):
+        self.fixture.bad_plan = True
+        code, out, err = self.run_headless('--headless')
+        self.assertEqual(code, 1, err)
+        reason = self.result(out)['failed'][0]['reason']
+        self.assertTrue(reason)
+        self.assertRegex(err, r'(?m)^failed 0/0: \S.*')
+        self.assertIn(reason[:40], err)
+
     def test_usage_errors_exit_2_with_nothing_on_stdout(self):
         for extra, goal, message in [(['--headless'], None, '--headless needs --go'),
                                      (['--headless', '--select'], GOAL, '--select')]:

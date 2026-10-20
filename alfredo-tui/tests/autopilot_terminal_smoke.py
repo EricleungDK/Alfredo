@@ -30,6 +30,7 @@ class AutopilotServer:
         self.errors = []
         self.release_app = threading.Event()
         self.prose_worker = False
+        self.bad_plan = False
         # Recovery smoke options: one passing task whose first worker request can be held.
         self.single_task = False
         self.hold_calc = None
@@ -69,7 +70,8 @@ class AutopilotServer:
                              'model': request['model'], 'dependencies': [1],
                              'policy': {'files': ['app.py'], 'check': CHECK_APP}},
                         ]
-                        content = json.dumps({'tasks': tasks[:1] if fixture.single_task else tasks})
+                        content = ('no plan today' if fixture.bad_plan else
+                                   json.dumps({'tasks': tasks[:1] if fixture.single_task else tasks}))
                     elif fixture.prose_worker:
                         marker = 'PROSE'
                         content = 'I would rather talk about it than write any code.'

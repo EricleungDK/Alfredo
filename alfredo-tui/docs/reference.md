@@ -49,6 +49,9 @@ file, or Alfredo exits with a usage error before starting.
   hook, and a failure notice is dropped if you switch missions before the hook ends.
   A spawn failure, non-zero exit or timeout shows a footer notice
   (`--on-finish hook failed (exit status: 3)`) and never changes autopilot state.
+  With `--headless` there is no footer: after the JSON is printed, headless waits for
+  the hook (same 10 s limit, then kill and reap) and prints the same words on stderr;
+  the exit code still follows the run state.
 - Fires when the run first reaches the finished state, including planning failures and
   a run finished after a crash and `/resume`. The fact is saved with the run
   (`hook_fired`), so restarting never fires it again and a crash between saving the
@@ -176,7 +179,10 @@ line on stderr (`plan drafted`, `#1 approved`, `#1 check failed → repair #3`,
 `state` one of `done`, `partial`, `failed` or `paused`. Exit codes: 0 every task
 accepted; 1 partial, failed or interrupted; 2 setup or usage error (`--headless`
 without `--go`, with `--select`, `--mission` or `--new-mission`, no repository, no
-sandbox). SIGINT and SIGTERM stop the run as `/stop` does: workers are cancelled,
+sandbox, Ollama unreachable, model not installed; these print `Error: …` on stderr and
+nothing on stdout, checked before planning with the `--doctor` model checks). A failed
+run ends with `failed 0/0: <reason>` on stderr as well as in the JSON. After the JSON,
+an `--on-finish` hook is awaited (see Completion hook). SIGINT and SIGTERM stop the run as `/stop` does: workers are cancelled,
 the state is kept paused and `/resume` in the TUI continues it. A second signal during the drain reports at once; a runtime error after launch
 stops the run and reports state `failed` (exit 1). Wayfinder-style goals are
 refused (exit 2) because headless has no scope flow. Not covered yet: a

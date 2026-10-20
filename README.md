@@ -145,7 +145,9 @@ You can also start unattended: `alfredo-tui --model qwen2.5-coder:14b --go "GOAL
 For scripts and CI, add `--headless`: it runs without a terminal, prints progress lines
 on stderr and ends with one JSON object on stdout
 (`{state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]}`);
-SIGINT/SIGTERM cancel workers like `/stop`.
+SIGINT/SIGTERM cancel workers like `/stop`. Exit 2 means setup failed (Ollama down, model
+not installed) with the reason on stderr; with `--on-finish`, headless waits for the hook
+(10 s limit) after printing the JSON and reports a failed hook on stderr.
 Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 `/evidence`, `/accept`, …); press F1 on an empty prompt for the command list.
 
@@ -208,7 +210,7 @@ to save; their diff is kept in the run's evidence. See
 | `--model NAME` | `qwen2.5-coder:14b` (env `ALFREDO_MODEL`) | Model for new conversations |
 | `--endpoint URL` | `http://127.0.0.1:11434` (env `OLLAMA_HOST`) | Ollama HTTP origin |
 | `--go GOAL` | off | Start autopilot on launch |
-| `--headless` | off | With `--go GOAL`: no terminal needed. One stderr line per autopilot state change, then one JSON object on stdout. Exit 0 all accepted, 1 partial/failed/interrupted, 2 setup or usage error |
+| `--headless` | off | With `--go GOAL`: no terminal needed. One stderr line per autopilot state change, then one JSON object on stdout. Exit 0 all accepted, 1 partial/failed/interrupted, 2 setup or usage error (including Ollama unreachable or model missing); waits for and reports an `--on-finish` hook |
 | `--max-repairs N` | 3 | Auto-repairs per task, 0–16 (0 disables) |
 | `--on-finish PROGRAM` | off (env `ALFREDO_ON_FINISH`) | Absolute path to your own executable, run when an autopilot run ends `done`, `partial` or `failed` (see [reference](alfredo-tui/docs/reference.md#completion-hook)) |
 | `--workspace DIR` | current repo | Open the repository containing `DIR` |
