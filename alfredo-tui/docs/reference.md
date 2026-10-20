@@ -1416,7 +1416,7 @@ The summary runs off the UI thread; Esc cancels it and keeps your prompt in the 
 
 ## Chat tools (read-only)
 
-A plain chat turn offers the model three read-only tools on the Coding Workspace (your
+A plain chat turn offers the model read-only tools on the Coding Workspace (your
 repository's working tree, so uncommitted edits are seen). They run without asking.
 
 | Tool | Arguments | Returns |
@@ -1424,12 +1424,26 @@ repository's working tree, so uncommitted edits are seen). They run without aski
 | `read_file` | `path`, optional `start_line` | Numbered lines (`N<TAB>text`) of a UTF-8 text file; long files are cut with `[truncated at line N of M; call read_file with start_line=…]` |
 | `list_files` | optional `path` (directory) | Files below it, one relative path per line, depth first in name order; at most 500 |
 | `grep` | `pattern` (literal text), optional `path`, `ignore_case` | `path:line:text` per match; at most 200 matches, lines cut to 200 characters |
+| `git_status` | none | Current branch with upstream ahead/behind, then changed, staged and untracked files (`XY path`) |
+| `git_branch` | none | `current: NAME` (or `current: detached at SHA`), then local branches (including `alfredo/go-*`) with last commit |
+| `git_log` | optional `ref` (default `HEAD`), `max_count` (default 20, at most 200) | `sha date author: subject` per commit, newest first |
+| `git_diff` | optional `base`, `target`, `staged`, `path` | Stat then patch: unstaged changes; `staged=true` staged; `base` alone vs the working tree; `base`+`target` is `base...target` (what a `/go` branch adds, e.g. `base=main target=alfredo/go-12`) |
 
 - **Confinement.** Paths are relative to the repository root. Absolute paths, `..`, and
   symlinks that resolve outside the repository are refused; listing and search never
   follow symlinks. The `@path` exclusions apply: `.git`, secrets (`.env*`, `*.pem`,
   `*.key`, `*.p12`, `*.pfx`), `node_modules`, `target`, `dist`, `vendor`. Binary and
   non-UTF-8 files and files over 4 MiB are not shown.
+- **Git is read-only.** Git tools never fetch or change refs, the index or the working
+  tree: they run with `--no-optional-locks` (no index refresh), hooks and fsmonitor off,
+  no external diff or textconv. `ref`, `base` and `target` must be plain ref names
+  (letters, digits, `._/-~^@{}+`; no leading `-`, `..` or `:`) and follow
+  `--end-of-options`; `path` is a literal pathspec under the same exclusions. Diffs leave
+  out secret files (`.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`) and files renamed or
+  copied from them. Git runs only in the workspace itself (`GIT_CEILING_DIRECTORIES`),
+  a call is stopped after 15 s, and when the repository config defines filter drivers or
+  includes, `git_status` and working-tree or staged diffs are refused (they would run the
+  repository's clean filters); `git_log` and `git_diff` with `base` and `target` still work.
 - **Size.** Every result is capped at 16 KiB; refusals come back to the model as
   `error: …` text it can react to.
 - **Loop.** The model may answer, or ask for tools; Alfredo runs the calls, sends the
