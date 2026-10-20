@@ -1198,7 +1198,7 @@ class TerminalSmoke(unittest.TestCase):
             self.assertEqual(sources['1']['receipt']['revision'], 1)
             self.assertEqual(sources['5']['receipt']['revision'], 3)
             self.assertEqual(sources['7'], {'kind': 'model', 'model': 'fixture'})
-            self.assertEqual(preferences['schema_version'], 18)
+            self.assertEqual(preferences['schema_version'], 19)
             controls = [command for session in preferences['sessions'] for command in session.get('commands', []) if command['intent']['kind'] == 'control']
             self.assertEqual([command['intent']['request']['operation']['enabled'] for command in controls], [True, False])
             self.assertTrue(all(command['state']['kind'] == 'control' for command in controls))

@@ -12,6 +12,8 @@
 //!   their place (the 128 KiB conversation cap applies to what is stored).
 //! - Screen: the transcript starts with a marker line and the note, then the kept turns.
 //! - Failure: nothing changes; the prompt stays in the draft.
+//! - Tool rounds (issue #233) count toward the budget, are summarised with their turn
+//!   and are renumbered with the kept turns.
 
 use super::{Message, Session, MAX_MESSAGES, MAX_TEXT};
 use serde::{Deserialize, Serialize};
@@ -161,6 +163,8 @@ pub fn request(plan: &Plan, num_ctx: Option<u32>) -> Vec<Message> {
         let who = match message.role.as_str() {
             "user" => "User",
             "assistant" => "Assistant",
+            super::TOOL_CALLS_ROLE => "Assistant called tools",
+            "tool" => "Tool result",
             _ => "Earlier summary",
         };
         text.push_str(&format!("{who}: {}\n\n", cut_text(&message.content, each)));
@@ -242,6 +246,7 @@ impl Session {
     fn history_bytes(&self) -> usize {
         self.messages.iter().map(|m| m.content.len()).sum::<usize>()
             + self.attachments.values().map(String::len).sum::<usize>()
+            + self.tool_bytes()
             + self.compaction.as_ref().map_or(0, |c| c.summary.len())
     }
 
@@ -279,7 +284,13 @@ impl Session {
             chosen = Some(cut);
             let kept: usize = (cut..len)
                 .map(|i| {
-                    self.messages[i].content.len() + self.attachments.get(&i).map_or(0, String::len)
+                    self.messages[i].content.len()
+                        + self.attachments.get(&i).map_or(0, String::len)
+                        + self
+                            .tool_steps(i)
+                            .iter()
+                            .map(super::ToolStep::bytes)
+                            .sum::<usize>()
                 })
                 .sum();
             if kept + SUMMARY_MAX + prompt <= target {
@@ -298,7 +309,13 @@ impl Session {
             if self.interrupted_turn(index) {
                 continue;
             }
-            transcript.extend_from_slice(&self.messages[index..index + 2]);
+            transcript.push(self.messages[index].clone());
+            transcript.extend(
+                self.tool_steps(index + 1)
+                    .iter()
+                    .flat_map(super::ToolStep::messages),
+            );
+            transcript.push(self.messages[index + 1].clone());
         }
         Some(Plan {
             turns: cut / 2,
@@ -361,6 +378,7 @@ impl Session {
         self.messages.drain(..cut);
         shift(&mut self.sources, cut);
         shift(&mut self.attachments, cut);
+        shift(&mut self.tool_steps, cut);
         self.interrupted = self
             .interrupted
             .iter()

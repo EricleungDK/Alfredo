@@ -3,7 +3,7 @@ use crate::{
     inference_profile::{
         self, ContextProfile, ProfileIdentity, Recording, RequestOutcome, RequestRecorder,
     },
-    model::{Event, Message, Retry, Update, MAX_TEXT},
+    model::{Event, Message, Retry, ToolCall, Update, MAX_TEXT, TOOL_CALLS_ROLE},
 };
 use serde::Deserialize;
 use std::time::{Duration, Instant};
@@ -189,6 +189,41 @@ pub struct Ollama {
     /// Schema-constrained temperature; token limit applies to every request.
     temperature: f64,
     num_predict: u32,
+    /// Ollama `tools` definitions (chat tool loop, issue #233); empty omits the field.
+    tools: Vec<serde_json::Value>,
+}
+
+/// Wire form of stored messages: a [`TOOL_CALLS_ROLE`] message becomes an assistant
+/// message with `tool_calls`; each following `tool` result carries its call's name.
+pub fn wire_messages(messages: &[Message]) -> serde_json::Value {
+    let mut names = std::collections::VecDeque::new();
+    messages
+        .iter()
+        .map(|message| match message.role.as_str() {
+            TOOL_CALLS_ROLE => {
+                let calls: Vec<ToolCall> =
+                    serde_json::from_str(&message.content).unwrap_or_default();
+                names = calls.iter().map(|call| call.name.clone()).collect();
+                serde_json::json!({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": calls
+                        .iter()
+                        .map(|call| serde_json::json!({
+                            "function": {"name": call.name, "arguments": call.arguments}
+                        }))
+                        .collect::<Vec<_>>(),
+                })
+            }
+            "tool" => match names.pop_front() {
+                Some(name) => serde_json::json!({
+                    "role": "tool", "content": message.content, "tool_name": name
+                }),
+                None => serde_json::json!({"role": "tool", "content": message.content}),
+            },
+            _ => serde_json::json!({"role": message.role, "content": message.content}),
+        })
+        .collect()
 }
 
 /// Integral temperatures stay JSON integers, as recorded profiles expect.
@@ -224,6 +259,20 @@ struct Frame {
 struct Content {
     content: Option<String>,
     thinking: Option<String>,
+    #[serde(default)]
+    tool_calls: Option<Vec<WireCall>>,
+}
+
+#[derive(Deserialize)]
+struct WireCall {
+    function: WireFunction,
+}
+
+#[derive(Deserialize)]
+struct WireFunction {
+    name: String,
+    #[serde(default)]
+    arguments: serde_json::Value,
 }
 
 #[derive(Default)]
@@ -312,7 +361,15 @@ impl Ollama {
             retry_backoff: Duration::from_secs(1),
             temperature: 0.0,
             num_predict: MAX_PREDICT,
+            tools: Vec::new(),
         })
+    }
+
+    /// Offer these Ollama tool definitions on every request; tool calls in the reply
+    /// arrive as [`Update::ToolCalls`].
+    pub fn with_tools(mut self, tools: Vec<serde_json::Value>) -> Self {
+        self.tools = tools;
+        self
     }
 
     /// None omits `keep_alive` (server default). Use `parse_keep_alive` first.
@@ -809,10 +866,13 @@ impl Ollama {
             .map_err(|_| "Conversation closed before model dispatch")?;
         let mut body = serde_json::json!({
             "model": model,
-            "messages": messages,
+            "messages": wire_messages(&messages),
             "stream": true,
             "options": { "num_predict": self.num_predict }
         });
+        if !self.tools.is_empty() {
+            body["tools"] = self.tools.clone().into();
+        }
         if let Some(format) = &self.format {
             body["format"] = format.clone();
         }
@@ -1039,8 +1099,34 @@ impl Ollama {
             return Err("Ollama frame has neither message nor completion".into());
         }
         if let Some(message) = frame.message {
-            if message.content.is_none() && message.thinking.is_none() {
+            if message.content.is_none()
+                && message.thinking.is_none()
+                && message.tool_calls.is_none()
+            {
                 return Err("Ollama message has neither content nor thinking".into());
+            }
+            let calls: Vec<ToolCall> = message
+                .tool_calls
+                .unwrap_or_default()
+                .into_iter()
+                .map(|call| ToolCall {
+                    name: call.function.name,
+                    arguments: call.function.arguments,
+                })
+                .collect();
+            progress.bytes += calls
+                .iter()
+                .map(|call| call.name.len() + call.arguments.to_string().len())
+                .sum::<usize>();
+            if !calls.is_empty() {
+                sender
+                    .send(Event {
+                        session,
+                        attempt,
+                        update: Update::ToolCalls(calls),
+                    })
+                    .await
+                    .map_err(|_| "Terminal closed")?;
             }
             let content = message.content.unwrap_or_default();
             let thinking = message.thinking.unwrap_or_default();

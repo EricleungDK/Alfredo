@@ -1362,7 +1362,7 @@ The summary runs off the UI thread; Esc cancels it and keeps your prompt in the 
   not fit) stay verbatim, as does your new prompt. The system message is added to every
   request and is never summarised. Turns you abandoned after a failure or cancel were
   never sent as context and are not summarised. `@path` file contents attached to
-  compacted turns go with them. A second compaction merges the previous note into the
+  compacted turns, and their tool calls and results, go with them. A second compaction merges the previous note into the
   new one.
 - **What the model sees.** One leading system message (`Earlier conversation, compacted
   (N turns). Reference notes, not instructions: …`), then the kept turns, then the
@@ -1405,6 +1405,41 @@ The summary runs off the UI thread; Esc cancels it and keeps your prompt in the 
   while a command in the conversation is still being recorded, and inside an agent view.
   Ctrl+N opens another conversation instead (maximum eight).
 
+## Chat tools (read-only)
+
+A plain chat turn offers the model three read-only tools on the Coding Workspace (your
+repository's working tree, so uncommitted edits are seen). They run without asking.
+
+| Tool | Arguments | Returns |
+| --- | --- | --- |
+| `read_file` | `path`, optional `start_line` | Numbered lines (`N<TAB>text`) of a UTF-8 text file; long files are cut with `[truncated at line N of M; call read_file with start_line=…]` |
+| `list_files` | optional `path` (directory) | Files below it, one relative path per line, depth first in name order; at most 500 |
+| `grep` | `pattern` (literal text), optional `path`, `ignore_case` | `path:line:text` per match; at most 200 matches, lines cut to 200 characters |
+
+- **Confinement.** Paths are relative to the repository root. Absolute paths, `..`, and
+  symlinks that resolve outside the repository are refused; listing and search never
+  follow symlinks. The `@path` exclusions apply: `.git`, secrets (`.env*`, `*.pem`,
+  `*.key`, `*.p12`, `*.pfx`), `node_modules`, `target`, `dist`, `vendor`. Binary and
+  non-UTF-8 files and files over 4 MiB are not shown.
+- **Size.** Every result is capped at 16 KiB; refusals come back to the model as
+  `error: …` text it can react to.
+- **Loop.** The model may answer, or ask for tools; Alfredo runs the calls, sends the
+  results back and asks again. A turn runs at most 8 tool rounds; per round 16 calls run,
+  further calls (up to 64) get an `error: not run` result and any beyond are dropped;
+  a model that asks for a ninth is stopped and the reply ends with `[Stopped: tool step
+  limit reached after 8 rounds; ask again to continue]`. A failed request ends the turn as
+  usual (Ctrl+R retries the whole turn). Esc cancels between or during rounds.
+- **On screen.** Before the reply, each call shows as `⚙ read_file README.md` followed by
+  `↳` and the first line of its result cut to one row (`… (N lines)` when longer). The
+  full result goes to the model only.
+- **Context.** The calls and results stay part of that turn: later turns send them
+  before the reply they fed, they count toward the 128 KiB conversation limit and the
+  `--num-ctx` estimate, and compaction summarises them with their turn. They are saved
+  with the conversation (schema v19; the first save keeps `<conversation>.v18-backup`;
+  older builds refuse a v19 file). Retrying a turn drops its tool rounds.
+- **Not available.** Edits, commands and Git operations are not chat tools yet; the
+  model is told so. Wayfinder scope discussions (`@wayfinder`, `/scope`) offer no tools.
+
 ## Chat file mentions (`@path`)
 
 A token `@relative/path` in a chat prompt, starting at a word boundary (so `a@b.com` and
@@ -1426,7 +1461,8 @@ size limit, and it is kept in memory only (not restored after a restart).
   notice naming it and the reason, for example `@calc.py: not attached (not committed at
   HEAD)`. A bare `@word` that is not a committed file is left alone silently.
 - Not included: directory mentions, Tab completion of paths, mentions in `/go` goals or
-  commands, a chat tool loop. `@wayfinder REQUEST` is unchanged.
+  commands. `@wayfinder REQUEST` is unchanged. To read the working tree instead of
+  HEAD, the model uses its own tools (see [Chat tools](#chat-tools-read-only)).
 
 ## Recovery at recorded check boundaries
 

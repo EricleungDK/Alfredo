@@ -901,6 +901,8 @@ impl Planner {
                         crate::client_timing::queue_summary(&queue)
                     );
                 }
+                // Planner requests offer no tools.
+                Update::ToolCalls(_) | Update::ToolStep(_) => {}
                 Update::Admitted => {
                     self.notice = "Plan waiting for model server · no action taken".into()
                 }

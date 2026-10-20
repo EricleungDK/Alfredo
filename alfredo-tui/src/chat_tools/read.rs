@@ -1,0 +1,239 @@
+//! Read tier: read_file, list_files, grep on the Coding Workspace working tree.
+use super::{display, excluded, resolve, text_arg, Tier, Tool, MAX_OUTPUT};
+use serde_json::{json, Value};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+};
+
+/// Largest file read_file or grep opens, in bytes.
+const MAX_FILE: u64 = 4 * 1024 * 1024;
+/// Files listed before the listing is cut.
+const MAX_ENTRIES: usize = 500;
+/// Directory entries visited by one walk.
+const MAX_VISITS: usize = 20_000;
+/// Matching lines reported by one grep.
+const MAX_MATCHES: usize = 200;
+/// Characters of one matching line shown.
+const MAX_LINE: usize = 200;
+
+pub const READ_FILE: Tool = Tool {
+    name: "read_file",
+    tier: Tier::Read,
+    description: "Read a UTF-8 text file in the Coding Workspace (the owner's repository working tree). Returns numbered lines (line<TAB>text). Long files are cut; call again with start_line to continue.",
+    parameters: || {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "File path relative to the repository root, e.g. README.md or src/main.rs"},
+                "start_line": {"type": "integer", "description": "First line to return (1-based, default 1)"}
+            },
+            "required": ["path"]
+        })
+    },
+    run: read_file,
+};
+
+pub const LIST_FILES: Tool = Tool {
+    name: "list_files",
+    tier: Tier::Read,
+    description: "List files (recursively) in the Coding Workspace or one of its directories, one relative path per line. Skips .git, secrets (.env*, *.key, *.pem) and generated or vendor trees.",
+    parameters: || {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "description": "Directory relative to the repository root (default: the root)"}
+            }
+        })
+    },
+    run: list_files,
+};
+
+pub const GREP: Tool = Tool {
+    name: "grep",
+    tier: Tier::Read,
+    description: "Search text files in the Coding Workspace for a literal substring. Returns path:line:text per match. Skips .git, secrets, generated or vendor trees and binary files.",
+    parameters: || {
+        json!({
+            "type": "object",
+            "properties": {
+                "pattern": {"type": "string", "description": "Literal text to find (not a regular expression)"},
+                "path": {"type": "string", "description": "File or directory to search, relative to the repository root (default: the root)"},
+                "ignore_case": {"type": "boolean", "description": "Match regardless of case (default false)"}
+            },
+            "required": ["pattern"]
+        })
+    },
+    run: grep,
+};
+
+/// Contents of a regular text file, or why it cannot be read.
+fn text(path: &Path) -> Result<String, String> {
+    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("not a regular file".into());
+    }
+    if metadata.len() > MAX_FILE {
+        return Err(format!(
+            "file is {} bytes, over the {MAX_FILE}-byte read limit; use grep",
+            metadata.len()
+        ));
+    }
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .and_then(|file| file.take(MAX_FILE).read_to_end(&mut bytes))
+        .map_err(|error| error.to_string())?;
+    if bytes.contains(&0) {
+        return Err("binary file; not shown".into());
+    }
+    String::from_utf8(bytes).map_err(|_| "not a UTF-8 text file; not shown".into())
+}
+
+fn read_file(root: &Path, arguments: &Value) -> Result<String, String> {
+    let path = text_arg(arguments, "path")?.ok_or("missing required argument path")?;
+    let start = match arguments.get("start_line") {
+        None | Some(Value::Null) => 1,
+        Some(value) => value
+            .as_u64()
+            .filter(|line| *line >= 1)
+            .ok_or("start_line must be a positive integer")? as usize,
+    };
+    let full = resolve(root, path)?;
+    let content = text(&full).map_err(|error| format!("{path}: {error}"))?;
+    let total = content.lines().count();
+    if total == 0 {
+        return Ok(format!("{path} is empty"));
+    }
+    if start > total {
+        return Err(format!(
+            "{path} has {total} lines; start_line {start} is past the end"
+        ));
+    }
+    let mut out = String::new();
+    for (number, line) in content.lines().enumerate().skip(start - 1) {
+        let entry = format!("{}\t{line}\n", number + 1);
+        if out.len() + entry.len() > MAX_OUTPUT - 120 {
+            out.push_str(&format!(
+                "[truncated at line {number} of {total}; call read_file with start_line={} to continue]",
+                number + 1
+            ));
+            return Ok(out);
+        }
+        out.push_str(&entry);
+    }
+    Ok(out)
+}
+
+/// Regular files under `start` in sorted order; symlinks are never followed.
+/// Returns the files and whether the walk stopped early.
+fn walk(start: &Path, limit: usize) -> (Vec<PathBuf>, bool) {
+    let mut files = Vec::new();
+    let mut stack = vec![start.to_path_buf()];
+    let mut visits = 0;
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut entries: Vec<_> = entries.filter_map(Result::ok).collect();
+        entries.sort_by_key(|entry| entry.file_name());
+        let mut dirs = Vec::new();
+        for entry in entries {
+            visits += 1;
+            if visits > MAX_VISITS || files.len() >= limit {
+                return (files, true);
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if excluded(&entry.file_name().to_string_lossy()) {
+                continue;
+            }
+            if kind.is_dir() {
+                dirs.push(entry.path());
+            } else if kind.is_file() {
+                files.push(entry.path());
+            }
+        }
+        // Depth-first, in name order.
+        stack.extend(dirs.into_iter().rev());
+    }
+    (files, false)
+}
+
+fn list_files(root: &Path, arguments: &Value) -> Result<String, String> {
+    let path = text_arg(arguments, "path")?.unwrap_or(".");
+    let full = resolve(root, path)?;
+    if full.is_file() {
+        return Ok(display(root, &full));
+    }
+    let (files, cut) = walk(&full, MAX_ENTRIES);
+    if files.is_empty() {
+        return Ok("no files".into());
+    }
+    let mut out: String = files
+        .iter()
+        .map(|file| display(root, file) + "\n")
+        .collect();
+    if cut {
+        out.push_str(&format!(
+            "[truncated: first {} files; list a subdirectory with path]",
+            files.len()
+        ));
+    }
+    Ok(out)
+}
+
+fn grep(root: &Path, arguments: &Value) -> Result<String, String> {
+    let pattern = text_arg(arguments, "pattern")?
+        .filter(|pattern| !pattern.is_empty())
+        .ok_or("missing required argument pattern")?;
+    let ignore_case = arguments
+        .get("ignore_case")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let needle = if ignore_case {
+        pattern.to_lowercase()
+    } else {
+        pattern.to_string()
+    };
+    let path = text_arg(arguments, "path")?.unwrap_or(".");
+    let full = resolve(root, path)?;
+    let (files, mut cut) = if full.is_file() {
+        (vec![full], false)
+    } else {
+        walk(&full, MAX_VISITS)
+    };
+    let mut out = String::new();
+    let mut matches = 0;
+    'files: for file in &files {
+        let Ok(content) = text(file) else {
+            continue;
+        };
+        for (number, line) in content.lines().enumerate() {
+            let found = if ignore_case {
+                line.to_lowercase().contains(&needle)
+            } else {
+                line.contains(&needle)
+            };
+            if !found {
+                continue;
+            }
+            if matches == MAX_MATCHES || out.len() > MAX_OUTPUT - 400 {
+                cut = true;
+                break 'files;
+            }
+            matches += 1;
+            let shown: String = line.chars().take(MAX_LINE).collect();
+            out.push_str(&format!("{}:{}:{shown}\n", display(root, file), number + 1));
+        }
+    }
+    if matches == 0 && !cut {
+        return Ok("no matches".into());
+    }
+    if cut {
+        out.push_str(&format!(
+            "[truncated: first {matches} matches; narrow with path or a longer pattern]"
+        ));
+    }
+    Ok(out)
+}

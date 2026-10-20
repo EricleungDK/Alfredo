@@ -58,6 +58,44 @@ fn dim() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
+/// Transcript rows for one tool round: `⚙ name args` per call and the first line of
+/// its result, cut to one row (issue #233). Full results go to the model only.
+fn tool_step_lines(step: &crate::model::ToolStep, width: usize) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    for (call, result) in step.calls.iter().zip(&step.results) {
+        let arguments = match &call.arguments {
+            serde_json::Value::Object(map) => map
+                .values()
+                .map(|value| match value {
+                    serde_json::Value::String(text) => text.clone(),
+                    other => other.to_string(),
+                })
+                .collect::<Vec<_>>()
+                .join(" "),
+            serde_json::Value::Null => String::new(),
+            other => other.to_string(),
+        };
+        let call_text = single_line(&format!("⚙ {} {arguments}", call.name));
+        lines.push(Line::styled(truncate(call_text.trim_end(), width), dim()));
+        let count = result.lines().count();
+        let first = single_line(result.lines().next().unwrap_or(""));
+        let more = if count > 1 {
+            format!(" … ({count} lines)")
+        } else {
+            String::new()
+        };
+        let room = width.saturating_sub(4 + more.width());
+        let first = if first.width() > room {
+            truncate(&first, room)
+        } else {
+            first
+        };
+        lines.push(Line::styled(format!("  ↳ {first}{more}"), dim()));
+    }
+    lines.push(Line::default());
+    lines
+}
+
 /// Side pane width: a quarter of the terminal, 28 to 44 columns.
 pub fn pane_width(width: u16) -> u16 {
     (width / 4).clamp(28, 44)
@@ -1251,6 +1289,10 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         } else {
             color
         };
+        // Tool rounds (issue #233) show before the reply they fed: call, then a cut result.
+        for step in session.tool_steps(index) {
+            lines.extend(tool_step_lines(step, width));
+        }
         base += lines.len();
         segments.push(Segment::Run(std::mem::take(&mut lines)));
         let body = cache.entry(index).lines.len();
