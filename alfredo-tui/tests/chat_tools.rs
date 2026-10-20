@@ -55,9 +55,17 @@ impl Drop for Workspace {
 #[test]
 fn registry_lists_read_tier_tools_as_ollama_function_definitions() {
     let names: Vec<_> = chat_tools::TOOLS.iter().map(|tool| tool.name).collect();
-    assert!(
-        names.starts_with(&["read_file", "list_files", "grep"]),
-        "{names:?}"
+    assert_eq!(
+        names,
+        [
+            "read_file",
+            "list_files",
+            "grep",
+            "git_status",
+            "git_branch",
+            "git_log",
+            "git_diff"
+        ]
     );
     assert!(chat_tools::TOOLS.iter().all(|tool| tool.tier == Tier::Read));
     let definitions = chat_tools::definitions();

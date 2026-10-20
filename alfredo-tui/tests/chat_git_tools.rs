@@ -238,3 +238,50 @@ fn non_repository_is_an_error() {
     let _ = fs::remove_dir_all(&base);
     assert!(output.starts_with("error: "), "{output}");
 }
+
+#[test]
+fn repository_filters_never_run() {
+    let repo = Repo::new();
+    let marker = repo.base.join("filter-ran");
+    let command = format!("touch {}; cat", marker.display());
+    git(&repo.root, &["config", "filter.f.clean", &command]);
+    fs::write(repo.root.join(".gitattributes"), "* filter=f\n").unwrap();
+    fs::write(repo.root.join("README.md"), "# Demo\ndirty\n").unwrap();
+    let _ = fs::remove_file(&marker);
+    for (tool, arguments) in [("git_status", json!({})), ("git_diff", json!({}))] {
+        let output = repo.run(tool, arguments);
+        assert!(output.starts_with("error: "), "{tool}: {output}");
+    }
+    assert!(!marker.exists(), "repository filter ran");
+}
+
+#[test]
+fn non_repository_inside_a_parent_repository_is_an_error() {
+    let repo = Repo::new();
+    let child = repo.root.join("plain");
+    fs::create_dir_all(&child).unwrap();
+    for tool in ["git_status", "git_branch", "git_log"] {
+        let output = chat_tools::dispatch(
+            &child,
+            &ToolCall {
+                name: tool.into(),
+                arguments: json!({}),
+            },
+        );
+        assert!(output.starts_with("error: "), "{tool}: {output}");
+    }
+}
+
+#[test]
+fn renamed_secret_content_is_not_shown() {
+    let repo = Repo::new();
+    fs::write(repo.root.join(".env"), "TOKEN=hunter2\n").unwrap();
+    git(&repo.root, &["add", ".env"]);
+    git(&repo.root, &["commit", "-q", "-m", "env"]);
+    git(&repo.root, &["mv", ".env", "config.txt"]);
+    let output = repo.run("git_diff", json!({"staged": true}));
+    assert!(!output.contains("hunter2"), "{output}");
+    git(&repo.root, &["commit", "-q", "-m", "rename"]);
+    let output = repo.run("git_diff", json!({"base": "HEAD~1", "target": "HEAD"}));
+    assert!(!output.contains("hunter2"), "{output}");
+}

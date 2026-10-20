@@ -1439,7 +1439,11 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   no external diff or textconv. `ref`, `base` and `target` must be plain ref names
   (letters, digits, `._/-~^@{}+`; no leading `-`, `..` or `:`) and follow
   `--end-of-options`; `path` is a literal pathspec under the same exclusions. Diffs leave
-  out secret files (`.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`).
+  out secret files (`.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`) and files renamed or
+  copied from them. Git runs only in the workspace itself (`GIT_CEILING_DIRECTORIES`),
+  a call is stopped after 15 s, and when the repository config defines filter drivers or
+  includes, `git_status` and working-tree or staged diffs are refused (they would run the
+  repository's clean filters); `git_log` and `git_diff` with `base` and `target` still work.
 - **Size.** Every result is capped at 16 KiB; refusals come back to the model as
   `error: …` text it can react to.
 - **Loop.** The model may answer, or ask for tools; Alfredo runs the calls, sends the

@@ -7,7 +7,8 @@ use serde_json::{json, Value};
 use std::{
     io::Read,
     path::Path,
-    process::{Command, Stdio},
+    process::{Command, ExitStatus, Stdio},
+    time::{Duration, Instant},
 };
 
 /// Commits git_log shows by default and at most.
@@ -75,6 +76,7 @@ pub const GIT_DIFF: Tool = Tool {
 };
 
 fn git_status(root: &Path, _: &Value) -> Result<String, String> {
+    refuse_filters(root)?;
     let output = git(
         root,
         &["status", "--short", "--branch", "--untracked-files=normal"],
@@ -142,28 +144,50 @@ fn git_diff(root: &Path, arguments: &Value) -> Result<String, String> {
         Some(_) => return Err("argument staged must be true or false".into()),
     };
     let path = path_arg(arguments)?;
+    let mut selector: Vec<String> = Vec::new();
+    if staged {
+        selector.push("--cached".into());
+    }
+    match (base, target) {
+        (Some(_), Some(_)) if staged => return Err("staged cannot be combined with target".into()),
+        (Some(base), Some(target)) => {
+            selector.extend(["--end-of-options".into(), format!("{base}...{target}")]);
+        }
+        (Some(base), None) => selector.extend(["--end-of-options".into(), base.into()]),
+        (None, Some(_)) => return Err("target needs base (e.g. base=main)".into()),
+        (None, None) => {}
+    }
+    if target.is_none() {
+        refuse_filters(root)?;
+    }
+    let selector: Vec<&str> = selector.iter().map(String::as_str).collect();
+    // Files renamed or copied from a secret are secret too: find them across the
+    // whole tree, then leave them out of the (rename-free) diff.
+    let mut detect = vec![
+        "diff",
+        "--no-ext-diff",
+        "--no-textconv",
+        "--name-status",
+        "-z",
+        "--find-renames",
+        "--find-copies",
+    ];
+    detect.extend(&selector);
+    detect.push("--");
+    let derived: Vec<String> = secret_copies(&git_limited(root, &detect, 4 << 20)?)
+        .into_iter()
+        .map(|path| format!(":(exclude,literal){path}"))
+        .collect();
     let mut args = vec![
         "diff",
         "--no-color",
         "--no-ext-diff",
         "--no-textconv",
+        "--no-renames",
         "--stat",
         "--patch",
     ];
-    if staged {
-        args.push("--cached");
-    }
-    let range;
-    match (base, target) {
-        (Some(_), Some(_)) if staged => return Err("staged cannot be combined with target".into()),
-        (Some(base), Some(target)) => {
-            range = format!("{base}...{target}");
-            args.extend(["--end-of-options", &range]);
-        }
-        (Some(base), None) => args.extend(["--end-of-options", base]),
-        (None, Some(_)) => return Err("target needs base (e.g. base=main)".into()),
-        (None, None) => {}
-    }
+    args.extend(&selector);
     args.push("--");
     let literal;
     match path {
@@ -174,12 +198,32 @@ fn git_diff(root: &Path, arguments: &Value) -> Result<String, String> {
         None => args.push("."),
     }
     args.extend(SECRET_PATHSPECS);
+    args.extend(derived.iter().map(String::as_str));
     let output = git(root, &args)?;
     Ok(if output.is_empty() {
         "(no differences)\n".into()
     } else {
         output
     })
+}
+
+/// Targets of renames and copies whose source is excluded, from `--name-status -z`.
+fn secret_copies(listing: &str) -> Vec<String> {
+    let mut fields = listing.split('\0');
+    let mut found = Vec::new();
+    while let Some(status) = fields.next() {
+        if status.starts_with(['R', 'C']) {
+            let (Some(source), Some(target)) = (fields.next(), fields.next()) else {
+                break;
+            };
+            if excluded(source) && !excluded(target) {
+                found.push(target.to_string());
+            }
+        } else if fields.next().is_none() {
+            break;
+        }
+    }
+    found
 }
 
 /// Optional ref argument that cannot be read as an option, a path or a blob.
@@ -232,7 +276,112 @@ fn path_arg(arguments: &Value) -> Result<Option<String>, String> {
 /// Run read-only git in `root`; stdout is read up to just past [`MAX_OUTPUT`] (the
 /// dispatcher caps it with the marker), then git is stopped.
 fn git(root: &Path, args: &[&str]) -> Result<String, String> {
-    let mut child = Command::new("/usr/bin/git")
+    git_limited(root, args, MAX_OUTPUT * 2)
+}
+
+/// Refuse when the repository config defines filter drivers or includes: `git status`
+/// and working-tree diffs would run the repository's clean filters (as worker host git).
+fn refuse_filters(root: &Path) -> Result<(), String> {
+    let config = git_limited(root, &crate::worker::REPOSITORY_CONFIG_ARGS, 1 << 20)?;
+    if crate::worker::config_needs_qualification(&config) {
+        return Err("repository config defines filter drivers or includes; git status and working-tree diffs are not run (git_log and git_diff with base and target still work)".into());
+    }
+    Ok(())
+}
+
+/// [`git`] reading at most `limit` bytes of stdout.
+fn git_limited(root: &Path, args: &[&str], limit: usize) -> Result<String, String> {
+    let ceiling = root
+        .canonicalize()
+        .map_err(|_| "Coding Workspace is not available".to_string())?;
+    let ceiling = ceiling.parent().unwrap_or(&ceiling).to_path_buf();
+    let mut command = Command::new("/usr/bin/git");
+    hardened(&mut command)
+        .env("GIT_CEILING_DIRECTORIES", ceiling)
+        .arg("-C")
+        .arg(root)
+        .args(args);
+    let (status, out, error) = run_bounded(command, limit, DEADLINE)?;
+    match status {
+        Some(status) if !status.success() => {
+            let first = error.lines().find(|line| !line.trim().is_empty());
+            Err(match first {
+                Some(line) => line.trim().trim_start_matches("fatal: ").to_string(),
+                None => format!("git {} failed", args[0]),
+            })
+        }
+        _ => Ok(String::from_utf8_lossy(&out).into_owned()),
+    }
+}
+
+/// Longest one git call may run.
+const DEADLINE: Duration = Duration::from_secs(15);
+
+/// Run `command`, reading at most `limit` bytes of stdout. Stops it once the limit is
+/// reached (status `None`: output was cut) or `deadline` passes (an error).
+fn run_bounded(
+    mut command: Command,
+    limit: usize,
+    deadline: Duration,
+) -> Result<(Option<ExitStatus>, Vec<u8>, String), String> {
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("cannot start git: {error}"))?;
+    let stderr = child.stderr.take().map(|stderr| {
+        std::thread::spawn(move || {
+            let mut text = String::new();
+            let _ = stderr.take(4096).read_to_string(&mut text);
+            text
+        })
+    });
+    let stdout = child.stdout.take().map(|stdout| {
+        std::thread::spawn(move || {
+            let mut out = Vec::new();
+            let _ = stdout.take(limit as u64).read_to_end(&mut out);
+            out
+        })
+    });
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+            break Some(status);
+        }
+        if stdout.as_ref().is_some_and(|thread| thread.is_finished()) {
+            // Limit reached (or stdout closed): give a closing git a moment, then stop it.
+            std::thread::sleep(Duration::from_millis(20));
+            if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
+                break Some(status);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        if started.elapsed() > deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!(
+                "git took longer than {} s and was stopped",
+                deadline.as_secs()
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let out = stdout
+        .and_then(|thread| thread.join().ok())
+        .unwrap_or_default();
+    let error = stderr
+        .and_then(|thread| thread.join().ok())
+        .unwrap_or_default();
+    let status = status.filter(|_| out.len() < limit);
+    Ok((status, out, error))
+}
+
+/// The clean environment and command-line overrides every git call here uses.
+fn hardened(command: &mut Command) -> &mut Command {
+    command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", "/nonexistent")
@@ -247,40 +396,31 @@ fn git(root: &Path, args: &[&str]) -> Result<String, String> {
         .arg("--no-pager")
         .args(crate::worker::HARDENED_GIT_ARGS)
         .args(["-c", "diff.external=", "-c", "core.pager=cat"])
-        .arg("-C")
-        .arg(root)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| format!("cannot start git: {error}"))?;
-    let stderr = child.stderr.take().map(|stderr| {
-        std::thread::spawn(move || {
-            let mut text = String::new();
-            let _ = stderr.take(4096).read_to_string(&mut text);
-            text
-        })
-    });
-    let mut out = Vec::new();
-    let _ = child
-        .stdout
-        .take()
-        .map(|stdout| stdout.take(MAX_OUTPUT as u64 * 2).read_to_end(&mut out));
-    let cut = out.len() >= MAX_OUTPUT * 2;
-    if cut {
-        let _ = child.kill();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_command_past_its_deadline_is_stopped_with_an_error() {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("5");
+        let started = Instant::now();
+        let error = run_bounded(command, 1024, Duration::from_millis(100)).unwrap_err();
+        assert!(error.contains("stopped"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(3));
     }
-    let status = child.wait().map_err(|error| error.to_string())?;
-    let error = stderr
-        .and_then(|thread| thread.join().ok())
-        .unwrap_or_default();
-    if !cut && !status.success() {
-        let first = error.lines().find(|line| !line.trim().is_empty());
-        return Err(match first {
-            Some(line) => line.trim().trim_start_matches("fatal: ").to_string(),
-            None => format!("git {} failed", args[0]),
-        });
+
+    #[test]
+    fn output_past_the_limit_stops_the_command() {
+        let mut command = Command::new("/usr/bin/yes");
+        let (status, out, _) = {
+            command.arg("x");
+            run_bounded(command, 4096, DEADLINE)
+        }
+        .unwrap();
+        assert!(status.is_none());
+        assert_eq!(out.len(), 4096);
     }
-    Ok(String::from_utf8_lossy(&out).into_owned())
 }
