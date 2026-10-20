@@ -182,6 +182,8 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
         dashboard::Footer::Pane
     } else if agent.is_some() {
         dashboard::Footer::Agent
+    } else if tasks.is_some_and(|tasks| tasks.visible && tasks.planner.visible) {
+        dashboard::Footer::Plan
     } else if tasks.is_some_and(|tasks| tasks.visible) {
         dashboard::Footer::Tasks
     } else {
@@ -684,7 +686,7 @@ fn draw_help(frame: &mut Frame, help: &crate::commands::Completion, area: Rect) 
             .padding(Padding::horizontal(1))
             .title(" Help · ↑↓ choose · Enter fills prompt · Esc close ")
             .title_bottom(
-                " F2 tasks/chat  F3 evidence  F4 activity  F5 pause  F6 pane  Enter agent  ^O expand ",
+                " F2 tasks/chat  F3 evidence  F4 activity  F5 pause  F6 pane  Enter agent  ^O expand/raw plan ",
             )
     };
     frame.render_stateful_widget(
@@ -717,7 +719,7 @@ fn draw_right(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, area: R
                 frame,
                 area,
                 tasks,
-                safe(&tasks.planner.preview())
+                safe(&tasks.planner.view())
                     .lines()
                     .map(|s| Line::from(s.to_owned()))
                     .collect(),

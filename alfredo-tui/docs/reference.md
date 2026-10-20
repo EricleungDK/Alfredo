@@ -808,6 +808,7 @@ The crate is self-contained: the execution provider lives in `src/execution.rs`.
 | Enter in the agent view | Instruct that agent (text); slash commands still run |
 | Escape in the agent view | Return to the previous pane; the agent's draft is kept, also across restarts |
 | Ctrl+O in the agent view | Expand or collapse full instruction text |
+| Ctrl+O in the Plan draft panel | Switch between the readable task list and the raw draft JSON |
 | Up / Down, Tab, Enter in the side pane | Move, switch missions/work, open the row |
 | Left / Right | Move through Unicode grapheme clusters |
 | Home / End | Move to the start / end of the draft |
@@ -1275,6 +1276,12 @@ choice, distinct from absent legacy data. This additive evidence field does not
 change task receipts, scopes, permissions or snapshot schema versions.
 
 ## Refine an unsaved task plan
+
+The Plan draft panel lists the tasks for review: after the header lines (draft source,
+not saved or approved, commit, sources) each task reads `#N Title · deps #a,#b`, then
+`files: …`, `check: <command on one line>` and numbered acceptance criteria. Ctrl+O
+toggles the raw pretty-printed JSON, which is exactly what `/plan-save` stores; a draft
+that cannot be parsed always shows its raw text.
 
 After `/plan REQUEST` completes, use `/plan-revise REQUEST` to refine its tasks,
 paths, checks and dependencies. The planner receives the previous task list,

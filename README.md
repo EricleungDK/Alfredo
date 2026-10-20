@@ -167,6 +167,7 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 | Enter (agent view) | Instruct that agent: steer, queued note, repair, follow-up or plan revision |
 | Esc (agent view) | Back to the previous pane; the agent's unsent draft is kept |
 | Ctrl+O (agent view) | Expand / collapse the full instruction text |
+| Ctrl+O (Plan draft) | Readable task list / raw draft JSON |
 | Alt+Left / Alt+Right | Collapse / expand a task branch |
 | PageUp / PageDown | Scroll transcript, agent view, details or evidence |
 | Tab / Shift+Tab | Next / previous conversation |

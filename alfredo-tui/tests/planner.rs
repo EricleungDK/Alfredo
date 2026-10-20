@@ -331,6 +331,108 @@ fn generated_plan_requires_explicit_save_and_approval_and_renders_narrow_preview
     assert_eq!(fixture.store.snapshot().unwrap().tasks.len(), 2);
     server.join().unwrap();
 }
+fn draw_text(control: &TaskControl, width: u16, height: u16) -> String {
+    let app = alfredo_tui::model::App::new("fixture".into());
+    let mut terminal =
+        ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+    terminal
+        .draw(|frame| alfredo_tui::ui::draw_with_tasks(frame, &app, control))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..height)
+        .map(|y| {
+            (0..width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+#[test]
+fn plan_draft_panel_lists_readable_tasks_and_keeps_raw_json_behind_a_toggle() {
+    let fixture = Fixture::new();
+    let mut draft = plan();
+    draft.tasks = (1..=6u64)
+        .map(|n| Step {
+            title: format!("Task number {n} do something useful"),
+            acceptance: vec![format!("criterion {n}a"), format!("criterion {n}b")],
+            model: "fixture".into(),
+            dependencies: if n == 1 {
+                vec![]
+            } else {
+                vec![1, n - 1]
+                    .into_iter()
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect()
+            },
+            policy: WorkPolicy {
+                files: vec!["calc.py".into(), "tests/test_calc.py".into()],
+                check: vec!["python3".into(), "-c".into(), "print('a b')".into()],
+            },
+        })
+        .collect();
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.set_visible(true);
+    control.planner.visible = true;
+    control.planner.draft = Some(draft.clone());
+    let before = serde_json::to_string_pretty(&draft).unwrap();
+    for (width, height) in [(140, 36), (80, 24)] {
+        let text = draw_text(&control, width, height);
+        assert!(text.contains("Plan draft"), "{text}");
+        assert!(
+            text.contains("Not saved or approved"),
+            "{width}x{height}\n{text}"
+        );
+        assert!(
+            text.contains("#1 Task number 1"),
+            "{width}x{height}\n{text}"
+        );
+        assert!(!text.contains("\"acceptance\""), "{width}x{height}\n{text}");
+        if width == 140 {
+            assert!(
+                text.contains("#3 Task number 3 do something useful · deps #1,#2"),
+                "{text}"
+            );
+            assert!(
+                text.contains("files: calc.py, tests/test_calc.py"),
+                "{text}"
+            );
+            assert!(
+                text.contains("check: python3 -c 'print('\\''a b'\\'')'"),
+                "{text}"
+            );
+            assert!(text.contains("1. criterion 1a"), "{text}");
+        }
+    }
+    // Everything the reviewer needs is within two screens at 140x36.
+    let titles = control.planner.view();
+    for n in 1..=6 {
+        assert!(
+            titles.contains(&format!("#{n} Task number {n}")),
+            "{titles}"
+        );
+    }
+    assert!(
+        titles.lines().count() <= 2 * 33,
+        "{}",
+        titles.lines().count()
+    );
+    // Ctrl+O toggles to the raw JSON; the stored bytes never change.
+    control.planner.raw = true;
+    let raw = draw_text(&control, 140, 36);
+    assert!(raw.contains("\"acceptance\""), "{raw}");
+    assert!(control.planner.preview().ends_with(&before));
+    assert_eq!(
+        serde_json::to_string_pretty(control.planner.draft.as_ref().unwrap()).unwrap(),
+        before
+    );
+    // No parsed draft: the raw partial text is shown even in readable mode.
+    control.planner.raw = false;
+    control.planner.draft = None;
+    control.planner.partial = "{ not json".into();
+    assert!(control.planner.view().ends_with("{ not json"));
+}
 #[test]
 fn planner_instruction_runs_existing_tests_and_keeps_them_out_of_written_files() {
     let runtime = tokio::runtime::Runtime::new().unwrap();

@@ -1061,6 +1061,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 view.expanded = !view.expanded;
                             }
                         }
+                        KeyCode::Char('o')
+                            if ctrl
+                                && work.tasks.visible
+                                && work.tasks.planner.visible
+                                && work.tasks.agent_shown().is_none() =>
+                        {
+                            work.tasks.planner.raw = !work.tasks.planner.raw;
+                        }
                         KeyCode::F(1) if work.app.sessions[index].draft.is_empty() => {
                             work.app.completion = Some(alfredo_tui::commands::Completion::all())
                         }

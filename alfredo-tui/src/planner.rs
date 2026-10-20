@@ -215,6 +215,8 @@ pub struct Planner {
     pub visible: bool,
     pub notice: String,
     pub partial: String,
+    /// Show the raw draft JSON instead of the readable task list (Ctrl+O).
+    pub raw: bool,
     pub metrics: Option<crate::metrics::Metrics>,
     previous: Option<PreviousDraft>,
     job: Option<JoinHandle<()>>,
@@ -980,7 +982,16 @@ impl Planner {
         }
         changed
     }
+    /// The draft as the panel shows it: the readable task list, or the raw JSON
+    /// after Ctrl+O (and while no parsed draft exists).
+    pub fn view(&self) -> String {
+        self.render(!self.raw)
+    }
+    /// Header lines plus the pretty-printed draft JSON (what `/plan-save` stores).
     pub fn preview(&self) -> String {
+        self.render(false)
+    }
+    fn render(&self, readable: bool) -> String {
         let context = self
             .context
             .as_ref()
@@ -1022,8 +1033,44 @@ impl Planner {
                     .join("\n")
             )
         });
-        format!("{}{timing}\n\nFrontier Architect draft · Local Agent worker assignments\nNot saved or approved · committed context only; working edits excluded\n{}{warnings}\n\n{}", self.notice, context, self.draft.as_ref().and_then(|p| serde_json::to_string_pretty(p).ok()).unwrap_or_else(|| self.partial.clone()))
+        format!("{}{timing}\n\nFrontier Architect draft · Local Agent worker assignments\nNot saved or approved · committed context only; working edits excluded\n{}{warnings}\n\n{}", self.notice, context, match &self.draft {
+            Some(plan) if readable => readable_tasks(plan),
+            other => other.as_ref().and_then(|p| serde_json::to_string_pretty(p).ok()).unwrap_or_else(|| self.partial.clone()),
+        })
     }
+}
+
+/// One check argv on one line; arguments with spaces or quotes are single-quoted.
+fn join_check(argv: &[String]) -> String {
+    argv.iter()
+        .map(|arg| {
+            if !arg.is_empty() && !arg.contains(|c: char| c.is_whitespace() || "'\"\\$".contains(c))
+            {
+                arg.clone()
+            } else {
+                format!("'{}'", arg.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Reviewer-friendly task list: `#N Title · deps #a,#b`, files, check, criteria.
+fn readable_tasks(plan: &Plan) -> String {
+    let mut out = format!("Tasks ({}) · Ctrl+O shows the raw JSON", plan.tasks.len());
+    for (index, step) in plan.tasks.iter().enumerate() {
+        out.push_str(&format!("\n\n#{} {}", index + 1, step.title));
+        if !step.dependencies.is_empty() {
+            let deps: Vec<String> = step.dependencies.iter().map(|d| format!("#{d}")).collect();
+            out.push_str(&format!(" · deps {}", deps.join(",")));
+        }
+        out.push_str(&format!("\n  files: {}", step.policy.files.join(", ")));
+        out.push_str(&format!("\n  check: {}", join_check(&step.policy.check)));
+        for (n, criterion) in step.acceptance.iter().enumerate() {
+            out.push_str(&format!("\n  {}. {criterion}", n + 1));
+        }
+    }
+    out
 }
 
 /// User-facing wording for a planner failure. A reply that is not the plan
