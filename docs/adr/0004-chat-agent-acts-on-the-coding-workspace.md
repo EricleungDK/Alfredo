@@ -9,9 +9,9 @@ This supersedes, for chat only, the invariants "Alfredo never modifies the Codin
 ## Approval tiers
 
 - **Read** (files, search, git status/log/diff): auto, no prompt.
-- **Edit** (write or patch files), **shell** (`run_command`) and **git write** (commit, branch, merge, checkout, reset): ask each call.
+- **Edit** (write or patch files), **shell** (`run_command`) and **git write** (commit, switch/create branch, merge): ask each call, unless a per-mission always-allow rule (by tool or command prefix) covers it.
 - **Push** (any write to a remote): always asks. It can never be added to an allow rule.
-- No skip-approval mode.
+- No skip-approval mode. Always-allow rules are stored in the State Directory; a slash command lists and clears them.
 
 ## Shell boundary
 
