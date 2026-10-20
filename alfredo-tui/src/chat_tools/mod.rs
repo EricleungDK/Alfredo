@@ -11,6 +11,7 @@
 //! confined to it ([`resolve`]); outputs are capped at [`MAX_OUTPUT`] bytes. Errors are
 //! returned to the model as `error: ...` text, never raised.
 
+mod git_read;
 mod read;
 mod run;
 
@@ -42,7 +43,15 @@ pub struct Tool {
 }
 
 /// The registry, in the order definitions are offered to the model.
-pub static TOOLS: &[Tool] = &[read::READ_FILE, read::LIST_FILES, read::GREP];
+pub static TOOLS: &[Tool] = &[
+    read::READ_FILE,
+    read::LIST_FILES,
+    read::GREP,
+    git_read::GIT_STATUS,
+    git_read::GIT_BRANCH,
+    git_read::GIT_LOG,
+    git_read::GIT_DIFF,
+];
 
 /// Ollama `tools` definitions for every registered tool.
 pub fn definitions() -> Vec<Value> {

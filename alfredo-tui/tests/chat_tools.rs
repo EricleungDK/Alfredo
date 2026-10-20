@@ -55,10 +55,13 @@ impl Drop for Workspace {
 #[test]
 fn registry_lists_read_tier_tools_as_ollama_function_definitions() {
     let names: Vec<_> = chat_tools::TOOLS.iter().map(|tool| tool.name).collect();
-    assert_eq!(names, ["read_file", "list_files", "grep"]);
+    assert!(
+        names.starts_with(&["read_file", "list_files", "grep"]),
+        "{names:?}"
+    );
     assert!(chat_tools::TOOLS.iter().all(|tool| tool.tier == Tier::Read));
     let definitions = chat_tools::definitions();
-    assert_eq!(definitions.len(), 3);
+    assert_eq!(definitions.len(), chat_tools::TOOLS.len());
     for definition in &definitions {
         assert_eq!(definition["type"], "function");
         assert!(definition["function"]["name"].is_string());
