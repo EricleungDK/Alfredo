@@ -725,6 +725,9 @@ and queues) and UTS namespaces, plus a cgroup namespace where the kernel allows 
 the network namespace is always required. System tools mounted
 read-only, and only the isolated worktree writable. Host home directories and
 external toolchains are unavailable. Git filters/includes are rejected at preflight.
+After the check, a worktree whose index or HEAD holds a submodule (gitlink) entry is
+refused: the run fails and names the path, and no diff or candidate is saved. Alfredo does
+not support submodules, and host-side Git never reads a submodule's working tree.
 
 `/evidence ID` opens a readable check summary, unified diff with signed/colored
 additions and deletions, and separate saved stdout/stderr. It selects the inspected
