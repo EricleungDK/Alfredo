@@ -71,7 +71,7 @@ impl ToolStep {
     pub(crate) fn valid(&self) -> bool {
         !self.calls.is_empty()
             && self.calls.len() == self.results.len()
-            && self.calls.len() <= 16
+            && self.calls.len() <= 64
             && self.calls.iter().all(|call| {
                 !call.name.is_empty()
                     && call.name.len() <= 64

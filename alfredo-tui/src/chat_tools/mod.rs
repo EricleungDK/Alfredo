@@ -71,18 +71,26 @@ pub fn dispatch(root: &Path, call: &ToolCall) -> String {
             names.join(", ")
         );
     };
-    // Some models send the arguments object as a JSON string.
-    let arguments = match &call.arguments {
-        Value::String(text) => serde_json::from_str(text).unwrap_or(Value::Null),
-        Value::Null => Value::Object(Default::default()),
-        other => other.clone(),
-    };
+    let arguments = normalize_arguments(&call.arguments);
     if !arguments.is_object() {
         return "error: arguments must be a JSON object".into();
     }
     match (tool.run)(root, &arguments) {
         Ok(output) => cap(output),
         Err(error) => format!("error: {error}"),
+    }
+}
+
+/// Arguments as Ollama expects them: an object. Some models send the object as a JSON
+/// string; that is parsed. Null becomes `{}`; anything else is kept for dispatch to refuse.
+pub fn normalize_arguments(arguments: &Value) -> Value {
+    match arguments {
+        Value::String(text) => serde_json::from_str::<Value>(text)
+            .ok()
+            .filter(Value::is_object)
+            .unwrap_or_else(|| Value::Object(Default::default())),
+        Value::Null => Value::Object(Default::default()),
+        other => other.clone(),
     }
 }
 

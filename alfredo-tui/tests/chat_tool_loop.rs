@@ -192,6 +192,111 @@ async fn the_loop_stops_at_the_step_cap_with_a_visible_notice() {
 }
 
 #[tokio::test]
+async fn string_arguments_are_stored_and_replayed_as_objects() {
+    let root = workspace("strargs");
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, |_, index| {
+        if index == 0 {
+            tool_call("read_file", json!("{\"path\":\"README.md\"}"))
+        } else {
+            done("ok")
+        }
+    });
+    let mut session = Session::new("fixture".into());
+    session.insert("go");
+    let messages = session.begin().unwrap();
+    for event in run(&fixture.endpoint, &root, messages).await {
+        session.apply(event.attempt, event.update);
+    }
+    assert_eq!(
+        session.tool_steps(1)[0].calls[0].arguments,
+        json!({"path": "README.md"})
+    );
+    let requests = fixture.requests.lock().unwrap();
+    let second = requests[1].body["messages"].as_array().unwrap();
+    let call = &second[second.len() - 2];
+    assert_eq!(
+        call["tool_calls"][0]["function"]["arguments"],
+        json!({"path": "README.md"})
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn calls_past_the_per_round_limit_get_error_results() {
+    let root = workspace("many");
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, |_, index| {
+        if index == 0 {
+            let calls: Vec<_> = (0..20)
+                .map(|_| json!({"function":{"name":"list_files","arguments":{}}}))
+                .collect();
+            Reply::Stream(
+                vec![
+                    format!(
+                        "{}\n",
+                        json!({"message":{"content":"","tool_calls":calls},"done":false})
+                    )
+                    .into_bytes(),
+                    format!("{}\n", json!({"message":{"content":""},"done":true})).into_bytes(),
+                ],
+                Duration::ZERO,
+            )
+        } else {
+            done("ok")
+        }
+    });
+    let mut session = Session::new("fixture".into());
+    session.insert("go");
+    let messages = session.begin().unwrap();
+    for event in run(&fixture.endpoint, &root, messages).await {
+        session.apply(event.attempt, event.update);
+    }
+    assert_eq!(session.status, Status::Complete);
+    let step = &session.tool_steps(1)[0];
+    assert_eq!(step.calls.len(), 20);
+    assert_eq!(step.results.len(), 20);
+    assert!(
+        step.results[19].starts_with("error: "),
+        "{}",
+        step.results[19]
+    );
+    assert!(!step.results[0].starts_with("error: "));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn the_loop_stops_when_a_step_would_pass_the_conversation_limit() {
+    let root = workspace("limit");
+    fs::write(root.join("big.txt"), "b".repeat(15_000)).unwrap();
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, |_, _| {
+        tool_call("read_file", json!({"path": "big.txt"}))
+    });
+    let mut session = Session::new("fixture".into());
+    session.insert(&"p".repeat(16_000));
+    let mut messages = session.begin().unwrap();
+    // Earlier history held by the caller: close to the 128 KiB limit.
+    messages.insert(
+        0,
+        Message {
+            role: "user".into(),
+            content: "h".repeat(120_000),
+        },
+    );
+    for event in run(&fixture.endpoint, &root, messages).await {
+        session.apply(event.attempt, event.update);
+    }
+    assert!(
+        matches!(session.status, Status::Failed(_)),
+        "{:?}",
+        session.status
+    );
+    assert_eq!(fixture.count("POST /api/chat"), 1);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
 async fn num_ctx_accounting_counts_tool_messages() {
     let addr = ollama_fixture::reserve();
     let fixture = ollama_fixture::serve(addr, |_, _| done("ok"));

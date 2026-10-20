@@ -1,7 +1,7 @@
 //! The capped call -> result -> continue loop of one chat turn.
-use super::{definitions, dispatch, Tier, TOOLS};
+use super::{definitions, dispatch, normalize_arguments, Tier, TOOLS};
 use crate::{
-    model::{Event, Message, ToolCall, ToolStep, Update},
+    model::{Event, Message, ToolCall, ToolStep, Update, MAX_TEXT},
     provider::Ollama,
 };
 use std::path::Path;
@@ -11,6 +11,8 @@ use tokio::sync::mpsc::{self, Sender};
 pub const MAX_STEPS: usize = 8;
 /// Calls run from one model reply; extra calls are answered with an error.
 const MAX_CALLS: usize = 16;
+/// Calls kept from one reply; any beyond are dropped (a model this far off is looping).
+const MAX_KEPT: usize = 64;
 /// Shown in the reply when the step cap stops the loop.
 pub const STEP_CAP_NOTICE: &str = "Stopped: tool step limit reached";
 
@@ -78,8 +80,9 @@ pub async fn run_turn(
             return;
         }
         steps += 1;
-        calls.truncate(MAX_CALLS);
+        calls.truncate(MAX_KEPT);
         for call in &mut calls {
+            call.arguments = normalize_arguments(&call.arguments);
             call.name = call
                 .name
                 .chars()
@@ -94,8 +97,12 @@ pub async fn run_turn(
         let run = calls.clone();
         let results = tokio::task::spawn_blocking(move || {
             run.iter()
+                .enumerate()
                 .map(
-                    |call| match TOOLS.iter().find(|tool| tool.name == call.name) {
+                    |(index, call)| match TOOLS.iter().find(|tool| tool.name == call.name) {
+                        _ if index >= MAX_CALLS => format!(
+                            "error: not run; at most {MAX_CALLS} tool calls per reply, ask again"
+                        ),
                         Some(tool) if tool.tier != Tier::Read => {
                             format!(
                                 "error: {} needs approval, which is not available",
@@ -113,6 +120,12 @@ pub async fn run_turn(
             return;
         };
         let step = ToolStep { calls, results };
+        // The session refuses a step past the conversation limit; stop here too.
+        let held: usize = messages.iter().map(|m| m.content.len()).sum();
+        if held + step.bytes() > MAX_TEXT {
+            send(Update::Failed("Conversation output limit reached".into())).await;
+            return;
+        }
         messages.extend(step.messages());
         if !send(Update::ToolStep(step)).await {
             return;

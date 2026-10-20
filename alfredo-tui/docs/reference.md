@@ -1424,7 +1424,8 @@ repository's working tree, so uncommitted edits are seen). They run without aski
 - **Size.** Every result is capped at 16 KiB; refusals come back to the model as
   `error: …` text it can react to.
 - **Loop.** The model may answer, or ask for tools; Alfredo runs the calls, sends the
-  results back and asks again. A turn runs at most 8 tool rounds (16 calls per round);
+  results back and asks again. A turn runs at most 8 tool rounds; per round 16 calls run,
+  further calls (up to 64) get an `error: not run` result and any beyond are dropped;
   a model that asks for a ninth is stopped and the reply ends with `[Stopped: tool step
   limit reached after 8 rounds; ask again to continue]`. A failed request ends the turn as
   usual (Ctrl+R retries the whole turn). Esc cancels between or during rounds.
