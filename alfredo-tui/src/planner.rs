@@ -376,6 +376,7 @@ impl Planner {
             let was_active = self.active();
             self.cancel();
             if !was_active {
+                self.raw = false;
                 self.draft = None;
                 self.draft_origin = None;
                 self.visible = false;
@@ -476,6 +477,7 @@ impl Planner {
         self.draft_origin = saved.origin;
         self.revision = saved.revision;
         self.draft = Some(saved.plan);
+        self.raw = false;
         self.partial.clear();
         self.metrics = None;
         self.visible = true;
@@ -520,6 +522,7 @@ impl Planner {
             self.model = previous.plan.planner.clone();
             self.metrics = previous.metrics;
             self.draft = Some(previous.plan);
+            self.raw = false;
             self.notice.push_str(" · previous draft retained");
         }
     }
@@ -661,6 +664,7 @@ impl Planner {
         .validate()?;
         self.cancel();
         self.draft = None;
+        self.raw = false;
         self.draft_origin = None;
         static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         self.generation = Some(format!(
@@ -961,6 +965,7 @@ impl Planner {
                             let revised = self.previous.take().is_some();
                             self.draft_origin = self.command.clone();
                             self.draft = Some(plan);
+                            self.raw = false;
                             if let Some(saved) = self.checkpoint() {
                                 if let Some(request) = self.command.as_ref() {
                                     if let Some(outcome) = saved.outcome_for(request) {

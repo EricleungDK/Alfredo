@@ -434,6 +434,91 @@ fn plan_draft_panel_lists_readable_tasks_and_keeps_raw_json_behind_a_toggle() {
     assert!(control.planner.view().ends_with("{ not json"));
 }
 #[test]
+fn raw_view_is_reset_by_a_fresh_draft_a_restore_and_a_cancel() {
+    use alfredo_tui::planner_command::Outcome;
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let fixture = Fixture::new();
+    confirm_scope(&fixture.store);
+    let (provider, server) = server(
+        serde_json::json!({"tasks":plan().tasks}).to_string(),
+        true,
+        Duration::ZERO,
+    );
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.set_provider(provider.clone());
+    control.refresh(&runtime);
+    wait(&mut control, |c| !c.pending);
+    // Ctrl+O left on raw from an earlier draft: a new /plan starts readable.
+    control.planner.raw = true;
+    control
+        .command(&runtime, "/plan Implement calculation", "fixture")
+        .unwrap();
+    assert!(!control.planner.raw, "raw survived the start of a new plan");
+    wait(&mut control, |c| c.planner.draft.is_some());
+    assert!(!control.planner.raw, "raw survived a completed new draft");
+    assert!(control.planner.view().contains("#1 "));
+    server.join().unwrap();
+    // Restoring a saved draft is also a fresh draft.
+    let saved = control.planner.checkpoint().unwrap();
+    control.planner.raw = true;
+    control.planner.restore(saved).unwrap();
+    assert!(!control.planner.raw, "raw survived a restore");
+    // Cancelling the draft clears the toggle too.
+    control.planner.raw = true;
+    let request = control
+        .prepare_command("/plan-cancel", "fixture")
+        .unwrap()
+        .expect("a valid draft keeps the durable planner command");
+    let alfredo_tui::command_intent::Intent::Planner { request } = request else {
+        panic!("expected a planner intent");
+    };
+    control
+        .planner
+        .dispatch_command(&runtime, provider, &request, fixture.store.clone())
+        .unwrap();
+    assert!(control.planner.draft.is_none());
+    assert!(!control.planner.raw, "raw survived /plan-cancel");
+    assert!(control
+        .planner
+        .take_command_events()
+        .iter()
+        .any(|e| e.outcome == Outcome::Stopped));
+}
+#[test]
+fn toggling_the_raw_view_does_not_change_what_plan_save_stores() {
+    fn save(toggle: bool) -> (Vec<u8>, String) {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let fixture = Fixture::new();
+        let mut control = TaskControl::new(fixture.store.clone());
+        control.refresh(&runtime);
+        wait(&mut control, |c| !c.pending);
+        control.planner.draft = Some(plan());
+        control.planner.visible = true;
+        if toggle {
+            for raw in [true, false, true, false] {
+                control.planner.raw = raw;
+                let _ = control.planner.view();
+            }
+        }
+        // The exact value `/plan-save` hands to the store.
+        let bytes = serde_json::to_vec(&control.planner.draft_for_save().unwrap()).unwrap();
+        control.command(&runtime, "/plan-save", "fixture").unwrap();
+        wait(&mut control, |c| !c.pending);
+        let tasks = fixture.store.snapshot().unwrap().tasks;
+        assert_eq!(tasks.len(), 2);
+        let stored = tasks
+            .iter()
+            .map(|t| format!("{} {:?} {:?}", t.title, t.status, t.dependencies))
+            .collect::<Vec<_>>()
+            .join("\n");
+        (bytes, stored)
+    }
+    let (untouched_bytes, untouched_tasks) = save(false);
+    let (toggled_bytes, toggled_tasks) = save(true);
+    assert_eq!(toggled_bytes, untouched_bytes);
+    assert_eq!(toggled_tasks, untouched_tasks);
+}
+#[test]
 fn planner_instruction_runs_existing_tests_and_keeps_them_out_of_written_files() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let fixture = Fixture::new();
