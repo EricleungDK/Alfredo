@@ -9,9 +9,11 @@ import json
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -29,6 +31,7 @@ def load(name):
 
 
 run_eval = load('run_eval')
+probes = load('probes')
 schema_check = load('schema_check')
 # These tests grade author-written scripted answers, never model output, so without bwrap they may grade
 # unsandboxed. The sandboxed path is covered by test_eval_grader.py, whose live tests CI runs with bwrap.
@@ -205,7 +208,7 @@ class AggregateTests(unittest.TestCase):
         self.assertEqual(120, metrics['M6']['secondary']['peak_ctx_max'])
         self.assertIsNone(metrics['M3']['value'])
         self.assertEqual('no repair attempted', metrics['M3']['reason'])
-        self.assertIn('Enter/render timestamps', metrics['M8']['reason'])
+        self.assertIn('--probes', metrics['M8']['reason'])
         self.assertEqual(5.0, metrics['M8']['secondary']['enter_to_request_p50_ms'])
         self.assertEqual('keystroke echo', metrics['M9']['name'])
         self.assertEqual('frame render cost', metrics['M10']['name'])
@@ -313,6 +316,170 @@ class AggregateTests(unittest.TestCase):
         _s, metrics, _w, _b = self.run_aggregate([good_trial('A')], [{'id': 'A', 'kind': 'positive'}], count=1)
         self.assertIsNone(metrics['M16']['secondary']['binary_kb'])
         self.assertIsNone(metrics['M16']['secondary']['release_binary_kb'])
+
+
+RENDER_OUTPUT = """running 3 tests
+test measure_mission_work_redraws ... {"schema_version":1,"fixture":"x","snapshot_bytes":1,"cohorts":[{"panel":"activity","viewport":[140,40],"cold_p50_ns":2000000,"cold_p95_ns":3000000,"warm_p50_ns":500000,"warm_p95_ns":900000}],"scope":"s"}
+ok
+test measure_dashboard_streaming_redraws ... {"average_ms":1.25,"fixture":"200 tasks"}
+ok
+test measure_chat_transcript_redraws ... {"fixture":"400 messages","transcript_bytes":9,"warm_p50_ms":0.6,"warm_p95_ms":0.8}
+ok
+"""
+
+
+def probe_results(**override):
+    results = {
+        'chat': {'enter_to_request_ms': [2.0, 4.0, 6.0], 'reply_to_screen_ms': [1.0, 1.5, 3.0]},
+        'echo': {'echo_ms': [float(i) for i in range(1, 101)]},
+        'render': probes.parse_rendering_cost(RENDER_OUTPUT),
+        'recovery': {'recovered': [True, True, False]},
+    }
+    results.update(override)
+    return results
+
+
+class ProbeTests(unittest.TestCase):
+    def aggregate(self, results, **config):
+        return run_eval.aggregate([good_trial('A')], [{'id': 'A', 'kind': 'positive'}],
+                                  {'trials': 1, 'backend': 'fixture', **config}, probes_result=results)
+
+    def test_parses_the_three_rendering_cost_json_lines_into_milliseconds(self):
+        parsed = probes.parse_rendering_cost(RENDER_OUTPUT)
+        self.assertEqual({'cold_p50': 2.0, 'cold_p95': 3.0, 'warm_p50': 0.5, 'warm_p95': 0.9},
+                         parsed['mission_work']['activity@140x40'])
+        self.assertEqual(1.25, parsed['dashboard_average_ms'])
+        self.assertEqual({'warm_p50_ms': 0.6, 'warm_p95_ms': 0.8}, parsed['chat'])
+
+    def test_rendering_cost_output_without_json_is_an_error_not_a_crash(self):
+        self.assertIn('no JSON', probes.parse_rendering_cost('running 0 tests\n')['error'])
+
+    def test_percentiles_use_the_rounded_index_and_handle_no_samples(self):
+        values = list(range(1, 101))
+        self.assertEqual({'p50': 51, 'p95': 95, 'n': 100}, probes.stats(values))
+        self.assertEqual({'p50': None, 'p95': None, 'n': 0}, probes.stats([]))
+
+    def test_probes_fill_m8_m9_m10_and_m14(self):
+        _s, metrics, _w, broken = self.aggregate(probe_results())
+        self.assertFalse(broken)
+        m8 = metrics['M8']
+        self.assertEqual(1.5, m8['value'])  # reply to screen p50
+        self.assertIsNone(m8['reason'])
+        self.assertEqual(3.0, m8['secondary']['reply_to_screen_p95_ms'])
+        self.assertEqual(4.0, m8['secondary']['chat_enter_to_request_p50_ms'])
+        self.assertEqual(6.0, m8['secondary']['chat_enter_to_request_p95_ms'])
+        self.assertEqual(3, m8['secondary']['chats'])
+        self.assertEqual(5.0, m8['secondary']['enter_to_request_p50_ms'], 'the /go figure keeps its meaning')
+        self.assertEqual(95, metrics['M9']['value'])  # echo p95
+        self.assertEqual(51, metrics['M9']['secondary']['echo_p50_ms'])
+        self.assertEqual(100, metrics['M9']['secondary']['keys'])
+        self.assertEqual(0.8, metrics['M10']['value'])  # chat warm p95
+        self.assertEqual(0.6, metrics['M10']['secondary']['chat_warm_p50_ms'])
+        self.assertEqual(1.25, metrics['M10']['secondary']['dashboard_average_ms'])
+        self.assertEqual({'activity@140x40': 0.9}, metrics['M10']['secondary']['mission_work_warm_p95_ms'])
+        self.assertEqual({'activity@140x40': 3.0}, metrics['M10']['secondary']['mission_work_cold_p95_ms'])
+        self.assertEqual(0.667, metrics['M14']['value'])
+        self.assertEqual(3, metrics['M14']['secondary']['trials'])
+        self.assertEqual(2, metrics['M14']['secondary']['recovered'])
+        self.assertEqual([], schema_check.validate(self.document(metrics)))
+
+    def document(self, metrics):
+        return {'schema_version': 1, 'agent': 'alfredo', 'backend': 'fixture', 'model': 'fixture', 'trials': [],
+                'config': {'trials': 1, 'tasks': [], 'started_at': 'x', 'cpus': 1, 'agent_version': None},
+                'tasks': {}, 'metrics': metrics, 'warnings': [], 'likely_broken': False}
+
+    def test_without_probes_the_rows_stay_null_and_point_at_the_flag(self):
+        _s, metrics, _w, _b = self.aggregate(None)
+        for key in ('M8', 'M9', 'M10', 'M14'):
+            self.assertIsNone(metrics[key]['value'])
+            self.assertIn('--probes', metrics[key]['reason'])
+
+    def test_a_failed_probe_nulls_only_its_own_rows_with_the_reason(self):
+        _s, metrics, _w, _b = self.aggregate(probe_results(chat={'error': 'marker never seen'},
+                                                           render={'error': 'cargo failed'}))
+        self.assertIsNone(metrics['M8']['value'])
+        self.assertEqual('marker never seen', metrics['M8']['reason'])
+        self.assertEqual('cargo failed', metrics['M10']['reason'])
+        self.assertEqual(95, metrics['M9']['value'])
+        self.assertEqual(0.667, metrics['M14']['value'])
+
+    def test_skipped_render_probe_gives_a_reason(self):
+        _s, metrics, _w, _b = self.aggregate({k: v for k, v in probe_results().items() if k != 'render'})
+        self.assertIn('--no-render-probe', metrics['M10']['reason'])
+
+    def test_debug_binary_is_noted_on_the_probe_latency_rows(self):
+        _s, metrics, _w, _b = self.aggregate(probe_results(), binary='/x/target/debug/alfredo-tui', profile='debug')
+        for key in ('M8', 'M9', 'M14'):
+            self.assertIn('debug', metrics[key]['note'])
+        self.assertNotIn('debug build', metrics['M10']['note'], 'the render bench is always a release build')
+
+    def test_probes_flag_is_alfredo_only_and_counts_must_be_positive(self):
+        for argv in (['--agent', 'claude-code', '--probes'], ['--agent', 'alfredo', '--probes', '--probe-chats', '0'],
+                     ['--agent', 'alfredo', '--no-render-probe']):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                run_eval.parse_args(argv)
+        options = run_eval.parse_args(['--agent', 'alfredo', '--probes'])
+        self.assertEqual((20, 100, 3, True), (options.probe_chats, options.probe_keys,
+                                              options.probe_recovery_trials, options.render_probe))
+
+    def test_a_raising_probe_nulls_only_its_own_rows_and_the_eval_still_emits_json(self):
+        options = run_eval.parse_args(['--agent', 'alfredo', '--probes', '--probe-recovery-trials', '1'])
+        options.binary = Path('/x/target/release/alfredo-tui')
+        tasks = [{'id': 'A', 'kind': 'positive'}]
+        with mock.patch.object(run_eval.probes, 'run_chat', side_effect=OSError('pty gone')), \
+                mock.patch.object(run_eval.probes, 'run_echo', return_value={'echo_ms': [1.0]}), \
+                mock.patch.object(run_eval, 'recovery_trial', side_effect=subprocess.TimeoutExpired('git', 1)), \
+                mock.patch.object(run_eval.probes, 'run_render', side_effect=RuntimeError('cargo')):
+            results = run_eval.run_probes(options, tasks)
+        _s, metrics, _w, _b = self.aggregate(results)
+        self.assertIn('pty gone', metrics['M8']['reason'])
+        self.assertIn('TimeoutExpired', metrics['M14']['reason'])
+        self.assertIn('cargo', metrics['M10']['reason'])
+        self.assertEqual(1.0, metrics['M9']['value'])
+
+    def test_debug_warning_names_the_probe_rows_only_when_probes_ran(self):
+        tasks = [{'id': 'A', 'kind': 'positive'}]
+        config = dict(binary='/x/target/debug/alfredo-tui', profile='debug')
+        _s, _m, warnings, _b = self.aggregate(probe_results(), probes={'chats': 3}, **config)
+        text = next(w for w in warnings if w['code'] == 'debug_profile')['message']
+        for key in ('M8', 'M9', 'M14'):
+            self.assertIn(key, text)
+        _s, _m, warnings, _b = self.aggregate(None, **config)
+        self.assertNotIn('M8', next(w for w in warnings if w['code'] == 'debug_profile')['message'])
+
+    def test_marker_server_replies_with_the_prompt_keyed_marker_and_stamps_it(self):
+        server = probes.MarkerServer()
+        self.addCleanup(server.close)
+        conn = http.client.HTTPConnection('127.0.0.1', server.server.server_port, timeout=5)
+        conn.request('POST', '/api/chat', json.dumps({'messages': [{'role': 'user', 'content': 'chat 007'}]}),
+                     {'Content-Type': 'application/json'})
+        body = conn.getresponse().read().decode()
+        self.assertIn(probes.marker('007'), body)
+        self.assertLessEqual(server.arrive['007'], server.sent['007'])
+
+    def test_model_server_can_hold_worker_requests_until_released(self):
+        task = run_eval.load_tasks(EVAL, ['T1'])[0]
+        server = run_eval.ModelServer(answers=task['answers'])
+        self.addCleanup(server.close)
+        server.hold_workers = threading.Event()
+        result = []
+
+        def ask():
+            conn = http.client.HTTPConnection('127.0.0.1', server.server.server_port, timeout=10)
+            conn.request('POST', '/api/chat', json.dumps({'messages': [{'role': 'user', 'content':
+                         task['answers']['workers'][0]['prefix']}]}), {'Content-Type': 'application/json'})
+            result.append(conn.getresponse().read())
+
+        thread = threading.Thread(target=ask)
+        thread.start()
+        deadline = time.monotonic() + 5
+        while not server.worker_requests and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual(1, server.worker_requests)
+        self.assertEqual([], result, 'held until released')
+        server.hold_workers.set()
+        thread.join(5)
+        self.assertEqual(1, len(result))
 
 
 class RecorderTests(unittest.TestCase):

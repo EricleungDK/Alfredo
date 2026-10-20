@@ -95,6 +95,9 @@ consumed in order and the last repeats; a reply is `{"files": [...]}` or `{"pros
 | `--out FILE` | write JSON there (default stdout); progress goes to stderr |
 | `--timeout S` | per trial: fixture 120, ollama 900, claude-code 600 |
 | `--binary PATH` | `alfredo-tui` binary (default `$ALFREDO_TUI_BINARY`, else `target/debug`). Use `target/release/alfredo-tui` for M11/M16 that compare with the scoreboard baselines: a debug build adds a `debug_profile` warning and a note on both metrics |
+| `--probes` | Alfredo only, opt-in: also measure M8, M9, M10 and M14 (see Probes). Records `config.probes` (counts, binary, profile) |
+| `--no-render-probe` | with `--probes`: skip the M10 `cargo test --release` (M10 stays `null`, reason says why) |
+| `--probe-chats N`, `--probe-keys N`, `--probe-recovery-trials N` | probe sample sizes; defaults 20 chats, 100 keys, 3 kill/resume trials (smaller values are for smoke tests) |
 | `--ollama-endpoint URL` | default `http://127.0.0.1:11434`; must be a loopback address |
 | `--tmp-root DIR`, `--keep` | where temp repos go; keep them |
 | `--unsafe-unsandboxed-grading` | grade on the host when bubblewrap is missing (see Grading sandbox) |
@@ -163,12 +166,13 @@ The grade of its result runs in the grading sandbox, but the Claude Code process
 | M5 | tool/command calls per task, median: Alfredo worker runs + check runs; Claude Code `tool_use` blocks; `secondary.per_task` as for M4 |
 | M6 | tokens per task: prompt + completion tokens per trial, median; `secondary.peak_ctx_max` is the largest prompt + completion of one request. `secondary.per_task` as for M4. Fixture counts are synthetic (`ceil(chars / 4)`, deterministic), not model counts. Alfredo trials also cross-check the server's planner count against the `usage` saved in the plan receipt and raise a `planner_token_mismatch` warning if they differ |
 | M7 | tool-call error rate: 100 x (malformed + refused + sandbox errors) / M5 calls; `null` if there were no calls |
-| M8 | harness overhead per turn (Enter to request at server, reply to screen, p50 ms): `null`. Reply-to-screen is not measured because spinner redraws make byte-level change detection unreliable at the 30 ms poll. `secondary.enter_to_request_p50_ms` is measured exactly, but for `/go` it includes preflight, git and planning preparation (about 1 s), so do not score it against the ~50 ms chat baseline; `trial.overhead_s` is the whole non-model time |
-| M9 | keystroke echo p50/p95: `null`, the `rendering_cost.rs` bench wrapper is a follow-up |
-| M10 | frame render cost p50/p95: `null`, same follow-up |
+| M8 | harness overhead per turn. With `--probes`: value is reply to screen p50 ms (server finishes sending a marker reply, to the marker appearing in raw pty bytes); `secondary` has `reply_to_screen_p95_ms`, `chat_enter_to_request_p50_ms`/`_p95_ms` (plain chat: Enter to the request reaching the server) and `chats`. `secondary.enter_to_request_p50_ms` is unchanged: the `/go` trial figure, which includes preflight, git and planning preparation, so do not score it against the chat baseline. `trial.overhead_s` is the whole non-model time. Without `--probes`: `null` |
+| M9 | keystroke echo, with `--probes`: value is p95 ms from a key written to the pty to the first output byte, over idle-input keys; `secondary.echo_p50_ms`, `keys`. Target <= 8 ms. Else `null` |
+| M10 | frame render cost, with `--probes`: value is chat transcript warm p95 ms from `tests/rendering_cost.rs`; `secondary` has `chat_warm_p50_ms`, `dashboard_average_ms` and per-cohort `mission_work_warm_p95_ms`/`mission_work_cold_p95_ms` (`panel@WxH`). Else `null` |
 | M11 | cold start to first frame, median ms from spawn until the header is drawn in the pty (Claude Code: first stream event). Debug builds are slower: see `config.profile` and the `debug_profile` warning |
 | M12 | panics/crashes: count of eval trials (all kinds) with a panic, a crash or a non-zero exit; target 0. The smoke suites are not included |
-| M13, M14, M15 | `null`: need repeated builds, a kill probe or static analysis |
+| M14 | crash recovery, with `--probes`: value is the share of kill/resume trials that recovered; `secondary.trials`, `recovered`. A trial runs the first positive task, `kill -9`s Alfredo while its worker request is parked at the fixture server, restarts it (must show `Autopilot ‖ paused` and `interrupted`), sends `/resume`, and counts it only if the task is accepted and the result grades pass. Else `null` |
+| M13, M15 | `null`: need repeated builds or static analysis |
 | M16 | peak RSS during `/go`: median `VmHWM` of the main `alfredo-tui` process in kB (children and process tree not sampled); `secondary.binary_kb` is the size of the binary under test (`config.binary`); `secondary.release_binary_kb` is the same value for a release build, else `null`. A debug build carries the `debug_profile` warning |
 
 Metrics may also carry a `note` (always-true caveats) and `secondary` values.
@@ -184,6 +188,26 @@ If no positive trial passes, `likely_broken` is `true` with a `zero_pass_rate` w
 single positive task at 0% gets `task_zero_pass`). A negative control that passes gets
 `control_passed`. In fixture mode a task that does not grade as scripted gets
 `fixture_mismatch`. Any of these makes the exit code 1.
+
+## Probes
+
+`--agent alfredo --probes` adds four measurements after the trials. All use the binary under test
+(`config.probes.binary`/`profile`; use a release build, a debug build adds a note on M8/M9/M14), and
+none touch your Ollama:
+
+- **M8/M9**: a marker-replying fake server (every reply is a unique `RPLYnnnX` string) and a pty.
+  The probe scans raw pty bytes for the marker, so reply to screen is exact to about a millisecond
+  even while the spinner redraws. M8 runs `--probe-chats` chats; M9 types `--probe-keys` keys.
+- **M10**: shells out to `cargo test --release --locked --test rendering_cost -- --ignored
+  --nocapture` and parses the JSON it prints. This needs a release build of the test crate, which
+  takes several minutes on 2 CPUs the first time (seconds once cached); skip it with
+  `--no-render-probe`. It honours `CARGO_TARGET_DIR`.
+- **M14**: `--probe-recovery-trials` kill -9 / restart / `/resume` runs (the journey of
+  `tests/recovery_terminal_smoke.py`).
+
+A probe that fails leaves only its own rows `null`, with the error as the `reason`. Probes are
+timing-sensitive: they run after the trials, so use an otherwise idle machine and no parallel builds. `tests/eval_smoke.py` runs them
+with tiny counts and no render probe (about 10 s).
 
 ## Limits
 

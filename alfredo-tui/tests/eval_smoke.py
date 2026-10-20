@@ -58,6 +58,28 @@ class EvalSmoke(unittest.TestCase):
             self.assertEqual([out.name], sorted(p.name for p in scratch.iterdir()),
                              'temp repos and state dirs must be removed')
 
+    def test_probes_fill_the_latency_and_recovery_rows(self):
+        """Reduced counts keep this under ~10 s; the render probe (a release cargo build) is skipped."""
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY', str(ROOT / 'alfredo-tui/target/debug/alfredo-tui')))
+        with tempfile.TemporaryDirectory(prefix='alfredo eval probes ') as directory:
+            out = Path(directory) / 'out.json'
+            run = subprocess.run([sys.executable, str(EVAL / 'run_eval.py'), '--agent', 'alfredo', '--backend',
+                                  'fixture', '--trials', '1', '--tasks', 'T1', '--binary', str(binary), '--tmp-root',
+                                  directory, '--out', str(out), '--probes', '--no-render-probe', '--probe-chats', '3',
+                                  '--probe-keys', '10', '--probe-recovery-trials', '1'],
+                                 capture_output=True, text=True, timeout=120)
+            self.assertEqual(0, run.returncode, run.stderr)
+            document = json.loads(out.read_text())
+            self.assertEqual([], schema_check.validate(document))
+            metrics = document['metrics']
+            for key in ('M8', 'M9', 'M14'):
+                self.assertIsNotNone(metrics[key]['value'], f'{key}: {metrics[key]["reason"]}')
+            self.assertEqual(3, metrics['M8']['secondary']['chats'])
+            self.assertEqual(10, metrics['M9']['secondary']['keys'])
+            self.assertEqual(1.0, metrics['M14']['value'])
+            self.assertIn('--no-render-probe', metrics['M10']['reason'])
+            self.assertEqual(document['config']['profile'], document['config']['probes']['profile'])
+
 
 if __name__ == '__main__':
     unittest.main()

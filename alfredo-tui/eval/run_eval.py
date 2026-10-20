@@ -33,6 +33,7 @@ TUI = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(TUI / 'tests'))
 
+import probes  # noqa: E402
 import schema_check  # noqa: E402
 
 SCHEMA_VERSION = 1
@@ -71,12 +72,10 @@ METRIC_NAMES = {
     'M16': ('peak RSS during /go', 'kB, main process, median'),
 }
 FIXED_NULL = {
-    'M9': 'keystroke-echo benches (tests/rendering_cost.rs) are not wrapped by the eval yet (follow-up to #176)',
-    'M10': 'frame-render-cost benches (tests/rendering_cost.rs) are not wrapped by the eval yet (follow-up to #176)',
     'M13': 'flakiness needs repeated identical runs of one build; --trials only samples task outcomes (see M2)',
-    'M14': 'kill/restart recovery needs a dedicated kill probe, which eval trials do not run',
     'M15': 'code health is a static analysis of the source tree, not of an agent run',
 }
+PROBE_OFF = 'not measured: pass --probes (alfredo only) to run the harness probes'
 
 
 class EvalError(Exception):
@@ -271,6 +270,7 @@ class ModelServer:
         self.answers, self.upstream = answers, upstream
         self.lock = threading.Lock()
         self.records, self.errors, self.used = [], [], {}
+        self.hold_workers, self.worker_requests = None, 0  # M14 probe: park worker requests until released
         server = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -348,6 +348,11 @@ class ModelServer:
             request = json.loads(handler.rfile.read(int(handler.headers['Content-Length'])))
             last = request['messages'][-1]['content']
             record['kind'] = 'worker' if last.startswith('Implement this task:') else 'planner'
+            if record['kind'] == 'worker':
+                with self.lock:
+                    self.worker_requests += 1
+                if self.hold_workers is not None:
+                    self.hold_workers.wait(120)
             if self.upstream:
                 self.forward(handler, request, record)
             else:
@@ -619,6 +624,84 @@ def alfredo_trial(task, index, options):
     return trial
 
 
+def recovery_trial(task, options):
+    """M14: kill -9 mid-generation, restart (must come back paused), /resume must accept and grade pass."""
+    from inference_terminal_smoke import Terminal
+
+    root = Path(tempfile.mkdtemp(prefix='alfredo-eval-recovery-', dir=options.tmp_root))
+    server = terminal = None
+    try:
+        workspace, state = root / 'workspace', root / 'state'
+        make_repo(task, workspace)
+        server = ModelServer(answers=task['answers'])
+        server.hold_workers = threading.Event()
+
+        def until(predicate, timeout, label):
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                terminal.pump()
+                if server.errors:
+                    raise EvalError(f'fixture error: {server.errors[0]}')
+                if predicate():
+                    return
+                time.sleep(0.02)
+            raise EvalError(f'timed out waiting for {label}')
+
+        terminal = Terminal(options.binary, server.endpoint, workspace, state, 'eval', model=options.model)
+        until(lambda: 'ALFREDO' in terminal.screen(), 30, 'the header')
+        terminal.send(f'/go {" ".join(task["goal"].split())}\r')
+        until(lambda: server.worker_requests >= 1, 60, 'the worker request')
+        terminal.kill()  # kill -9: no cleanup, no evidence
+        terminal.close()
+        server.hold_workers.set()
+        terminal = Terminal(options.binary, server.endpoint, workspace, state, 'eval', resume=True,
+                            model=options.model)
+        until(lambda: 'Autopilot ‖ paused' in terminal.screen() and 'interrupted' in terminal.screen(), 30,
+              'the restarted TUI to show the run paused and interrupted')
+        terminal.send('/resume\r')
+        until(lambda: 'git switch alfredo/go-' in terminal.screen(), 60, '/resume to accept the task')
+        branches = git(workspace, 'for-each-ref', '--format=%(refname:short)', 'refs/heads/alfredo/').split()
+        return bool(branches) and grade(task, workspace, branches[0],
+                                        unsafe_unsandboxed=options.unsafe_unsandboxed_grading)[0]
+    except (EvalError, AssertionError) as error:
+        print(f'recovery probe: {str(error)[:200]}', file=sys.stderr)
+        return False
+    finally:
+        if terminal:
+            terminal.close()
+        if server:
+            server.hold_workers.set()
+            server.close()
+        remove_tree(root)
+
+
+def run_probes(options, tasks):
+    """All `--probes` measurements; each key is a result dict or {'error': reason}."""
+    binary, results = options.binary, {}
+    task = next((t for t in tasks if t['kind'] == 'positive'), None)
+
+    def recovery():
+        if task is None:
+            return {'error': 'no positive task selected for the recovery probe'}
+        return {'recovered': [recovery_trial(task, options) for _ in range(options.probe_recovery_trials)]}
+
+    steps = [('chat', 'chat latency', lambda: probes.run_chat(binary, options.probe_chats, options.model,
+                                                              options.tmp_root)),
+             ('echo', 'keystroke echo', lambda: probes.run_echo(binary, options.probe_keys, options.model,
+                                                                options.tmp_root)),
+             ('recovery', 'crash recovery', recovery)]
+    if options.render_probe:
+        steps.append(('render', 'render cost (release cargo test; slow on a cold build)',
+                      lambda: probes.run_render(TUI)))
+    for key, label, run in steps:
+        print(f'probe: {label}', file=sys.stderr)
+        try:
+            results[key] = run()
+        except Exception as error:  # one broken probe must not lose the whole eval
+            results[key] = {'error': repr(error)[:200]}
+    return results
+
+
 def parse_claude_stream(lines):
     """Facts from Claude Code's stream-json events (testable without running Claude)."""
     facts = {'turns': None, 'tool_calls': 0, 'tokens': None, 'refused': 0, 'malformed': 0, 'error': None,
@@ -755,7 +838,54 @@ def binary_profile(binary):
     return parent if parent in ('release', 'debug') else 'unknown'
 
 
-def aggregate(trials, tasks, config):
+def probe_metrics(metric, results, go_enter, debug_note):
+    """M8, M9, M10 and M14 from the `--probes` results (None: probes were not run, so the rows are null)."""
+    def row(key, name, build, note=None):
+        result = (results or {}).get(name)
+        if results is None:
+            return metric(key, None, PROBE_OFF, secondary=go_enter if key == 'M8' else None)
+        if result is None:
+            return metric(key, None, 'skipped (--no-render-probe)' if name == 'render' else f'{name} probe not run',
+                          secondary=go_enter if key == 'M8' else None)
+        if 'error' in result:
+            return metric(key, None, result['error'], secondary=go_enter if key == 'M8' else None)
+        value, secondary = build(result)
+        return metric(key, value, 'no samples' if value is None else None, secondary=secondary, note=note)
+
+    def m8(chat):
+        r2s, e2r = probes.stats(chat['reply_to_screen_ms']), probes.stats(chat['enter_to_request_ms'])
+        return r2s['p50'], {**go_enter, 'reply_to_screen_p95_ms': r2s['p95'], 'chat_enter_to_request_p50_ms': e2r['p50'],
+                            'chat_enter_to_request_p95_ms': e2r['p95'], 'chats': r2s['n']}
+
+    def m9(echo):
+        s = probes.stats(echo['echo_ms'])
+        return s['p95'], {'echo_p50_ms': s['p50'], 'keys': s['n']}
+
+    def m10(render):
+        mission = render['mission_work']
+        return render['chat']['warm_p95_ms'], {
+            'chat_warm_p50_ms': render['chat']['warm_p50_ms'], 'dashboard_average_ms': render['dashboard_average_ms'],
+            'mission_work_warm_p95_ms': {k: v['warm_p95'] for k, v in mission.items()},
+            'mission_work_cold_p95_ms': {k: v['cold_p95'] for k, v in mission.items()}}
+
+    def m14(recovery):
+        done = recovery['recovered']
+        return (sum(done) / len(done) if done else None), {'trials': len(done), 'recovered': sum(done)}
+
+    tail = '; ' + debug_note if debug_note else ''
+    return {
+        'M8': row('M8', 'chat', m8, note='value is reply to screen p50 (server send to marker in raw pty bytes); '
+                  'enter_to_request_p50_ms is the /go trial figure (includes preflight and planning), '
+                  'chat_enter_to_request_* is the plain-chat Enter-to-request from the probe' + tail),
+        'M9': row('M9', 'echo', m9, note='value is the p95 from keystroke to first pty output byte, over keys into an idle input' + tail),
+        'M10': row('M10', 'render', m10, note='value is chat warm p95 ms; release `cargo test` of tests/rendering_cost.rs '
+                   '(TestBackend draw, no terminal IO), independent of --binary'),
+        'M14': row('M14', 'recovery', m14, note='value is the share of trials where kill -9 during a worker request, '
+                   'restart (paused, interrupted) and /resume ended accepted and graded pass' + tail),
+    }
+
+
+def aggregate(trials, tasks, config, probes_result=None):
     """Per-task summary, M1..M16 and warnings from the trial list."""
     positives = [t for t in trials if t['kind'] == 'positive']
     summary, warnings = {}, []
@@ -835,8 +965,9 @@ def aggregate(trials, tasks, config):
         debug_note = ('measured on a debug build: not comparable with the release baselines; '
                       'rerun with --binary target/release/alfredo-tui')
         warnings.append({'code': 'debug_profile',
-                         'message': 'binary is a debug build: M11 cold start and M16 peak RSS are not comparable '
-                                    'with the release baselines (scoreboard #159); pass --binary '
+                         'message': 'binary is a debug build: M11 cold start and M16 peak RSS'
+                                    + (', and the probe rows M8, M9 and M14,' if config.get('probes') else '')
+                                    + ' are not comparable with the release baselines (scoreboard #159); pass --binary '
                                     'target/release/alfredo-tui'})
 
     mean = statistics.fmean
@@ -888,11 +1019,8 @@ def aggregate(trials, tasks, config):
     errors = sum(sum(t['errors'].values()) for t in scored)
     metrics['M7'] = metric('M7', 100 * errors / calls if calls else None, 'no tool calls were made')
     enter = [t['enter_to_request_ms'] for t in positives if t['enter_to_request_ms'] is not None]
-    metrics['M8'] = metric(
-        'M8', None, 'needs Enter/render timestamps: reply-to-screen time is not measured because spinner redraws '
-        'make byte-level screen-change detection unreliable at the 30 ms poll; only Enter-to-request is measured '
-        '(secondary, exact: both stamps are taken in this process); trial.overhead_s is the whole non-model time',
-        secondary={'enter_to_request_p50_ms': statistics.median(enter) if enter else None})
+    go_enter = {'enter_to_request_p50_ms': statistics.median(enter) if enter else None}
+    metrics.update(probe_metrics(metric, probes_result, go_enter, debug_note))
     value, reason = over('cold_start_ms', statistics.median)
     metrics['M11'] = metric('M11', value, reason, digits=1, note=debug_note)
     abnormal = sum(1 for t in trials if t['panic'] or t['outcome'] == 'crashed'
@@ -950,9 +1078,25 @@ def parse_args(argv):
     parser.add_argument('--unsafe-unsandboxed-grading', action='store_true',
                         help='grade model-written code on the host when bubblewrap is missing (never needed when '
                              'bwrap is installed; the flag does not disable the sandbox when it is present)')
+    parser.add_argument('--probes', action='store_true',
+                        help='alfredo only: also measure M8 chat latency, M9 keystroke echo, M10 render cost (a release '
+                             '`cargo test`, minutes on a cold build) and M14 kill -9 recovery')
+    parser.add_argument('--no-render-probe', action='store_true',
+                        help='with --probes: skip the slow M10 cargo build (M10 stays null)')
+    parser.add_argument('--probe-chats', type=int, default=probes.DEFAULT_CHATS, help='M8 chats (default 20)')
+    parser.add_argument('--probe-keys', type=int, default=probes.DEFAULT_KEYS, help='M9 keystrokes (default 100)')
+    parser.add_argument('--probe-recovery-trials', type=int, default=probes.DEFAULT_RECOVERY_TRIALS,
+                        help='M14 kill/resume trials (default 3)')
     options = parser.parse_args(argv)
     if options.trials < 1:
         parser.error('--trials must be at least 1')
+    options.render_probe = not options.no_render_probe
+    if options.no_render_probe and not options.probes:
+        parser.error('--no-render-probe needs --probes')
+    if options.probes and options.agent != 'alfredo':
+        parser.error('--probes applies to --agent alfredo only')
+    if min(options.probe_chats, options.probe_keys, options.probe_recovery_trials) < 1:
+        parser.error('--probe-chats, --probe-keys and --probe-recovery-trials must be at least 1')
     if options.agent == 'claude-code':
         if options.backend:
             parser.error('--backend applies to --agent alfredo only; claude-code always uses the Anthropic API')
@@ -1027,7 +1171,13 @@ def main(argv=None):
                 trials.append(trial)
                 print(f'{task["id"]} trial {index}/{options.trials}: {"pass" if trial["pass"] else "FAIL"} '
                       f'({trial["outcome"]}, {trial["wall_s"]:.1f}s)', file=sys.stderr)
-        summary, metrics, warnings, likely_broken = aggregate(trials, tasks, config)
+        probe_results = None
+        if options.probes:
+            config['probes'] = {'chats': options.probe_chats, 'keys': options.probe_keys,
+                                'recovery_trials': options.probe_recovery_trials, 'render': options.render_probe,
+                                'binary': config['binary'], 'profile': config['profile']}
+            probe_results = run_probes(options, tasks)
+        summary, metrics, warnings, likely_broken = aggregate(trials, tasks, config, probe_results)
         config.pop('backend')
         document = {
             'schema_version': SCHEMA_VERSION, 'agent': options.agent, 'backend': options.backend,

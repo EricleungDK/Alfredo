@@ -20,7 +20,15 @@
         "agent_version": {"type": ["string", "null"]},
         "command": {"type": ["array", "null"], "items": {"type": "string"}},
         "binary": {"type": ["string", "null"]},
-        "profile": {"enum": ["debug", "release", "unknown", null]}
+        "profile": {"enum": ["debug", "release", "unknown", null]},
+        "probes": {
+          "type": "object",
+          "properties": {
+            "chats": {"type": "integer", "minimum": 1}, "keys": {"type": "integer", "minimum": 1},
+            "recovery_trials": {"type": "integer", "minimum": 1}, "render": {"type": "boolean"},
+            "binary": {"type": ["string", "null"]}, "profile": {"enum": ["debug", "release", "unknown", null]}
+          }
+        }
       }
     },
     "trials": {
