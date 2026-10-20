@@ -97,6 +97,7 @@ consumed in order and the last repeats; a reply is `{"files": [...]}` or `{"pros
 | `--binary PATH` | `alfredo-tui` binary (default `$ALFREDO_TUI_BINARY`, else `target/debug`). Use `target/release/alfredo-tui` for M11/M16 that compare with the scoreboard baselines: a debug build adds a `debug_profile` warning and a note on both metrics |
 | `--probes` | Alfredo only, opt-in: also measure M8, M9, M10 and M14 (see Probes). Records `config.probes` (counts, binary, profile) |
 | `--no-render-probe` | with `--probes`: skip the M10 `cargo test --release` (M10 stays `null`, reason says why) |
+| `--code-health` | opt-in, either agent: also compute M15 (clippy pedantic, non-test unwrap/expect, largest non-test module, test counts; see Code health). Runs `cargo clippy` and `cargo test -- --list`: minutes on a cold build. Without it M15 is `null` |
 | `--probe-chats N`, `--probe-keys N`, `--probe-recovery-trials N` | probe sample sizes; defaults 20 chats, 100 keys, 3 kill/resume trials (smaller values are for smoke tests) |
 | `--ollama-endpoint URL` | default `http://127.0.0.1:11434`; must be a loopback address |
 | `--tmp-root DIR`, `--keep` | where temp repos go; keep them |
@@ -172,7 +173,8 @@ The grade of its result runs in the grading sandbox, but the Claude Code process
 | M11 | cold start to first frame, median ms from spawn until the header is drawn in the pty (Claude Code: first stream event). Debug builds are slower: see `config.profile` and the `debug_profile` warning |
 | M12 | panics/crashes: count of eval trials (all kinds) with a panic, a crash or a non-zero exit; target 0. The smoke suites are not included |
 | M14 | crash recovery, with `--probes`: value is the share of kill/resume trials that recovered; `secondary.trials`, `recovered`. A trial runs the first positive task, `kill -9`s Alfredo while its worker request is parked at the fixture server, restarts it (must show `Autopilot ‖ paused` and `interrupted`), sends `/resume`, and counts it only if the task is accepted and the result grades pass. Else `null` |
-| M13, M15 | `null`: need repeated builds or static analysis |
+| M13 | `null`: needs repeated builds |
+| M15 | code health, with `--code-health`: value is the `cargo clippy -- -W clippy::pedantic` warning count (lib + bin). `secondary`: `pedantic_lib`, `pedantic_bin`, `unwrap_expect_nontest`, `largest_module {path, loc_nontest}`, `total_loc` (non-test lines of `src/**/*.rs`), `rust_tests`, `rust_tests_ignored`, `py_tests`. A part that cannot be measured is `null` with the cause in `note` (if clippy fails the value itself is `null` with its `reason`). Without the flag: `null`, reason says to pass `--code-health`. Method below |
 | M16 | peak RSS during `/go`: median `VmHWM` of the main `alfredo-tui` process in kB (children and process tree not sampled); `secondary.binary_kb` is the size of the binary under test (`config.binary`); `secondary.release_binary_kb` is the same value for a release build, else `null`. A debug build carries the `debug_profile` warning |
 
 Metrics may also carry a `note` (always-true caveats) and `secondary` values.
@@ -181,6 +183,29 @@ Error classes: `malformed` is a worker answer Alfredo could not parse (no FILE b
 JSON, truncated block); `refused` a file outside the task's allowed paths (Claude Code: a
 denied permission); `sandbox` an unavailable sandbox. Claude Code reports `malformed` for
 rejected edits and `sandbox` as 0. Fixture replies are instant, so `ttft_ms` is `null` there.
+
+### Code health (M15)
+
+`eval/code_health.py` (also runnable alone: `python3 alfredo-tui/eval/code_health.py`) measures:
+
+- **pedantic**: `cargo clippy --locked --lib --bins --message-format=short -- -W clippy::pedantic`; counts the
+  `path:line:col: warning:` lines, never the `generated N warnings` summary lines (counting every line that
+  starts with `warning` gives 2 extra). lib and bin come from those summary lines, which must add up to the
+  diagnostic count or the part is `null`. The number depends on the clippy version (CI pins Rust 1.96.0).
+- **Non-test code**: `src/**/*.rs` minus every item gated by a test-only `#[cfg(...)]`: a predicate that names
+  `test` and has no `not(`, so `#[cfg(test)]`, `#[cfg(all(test, unix))]` and `#[cfg(any(test, ...))]`. The
+  gated item (module, `impl`, `fn`, `use`, struct field, statement) is skipped by brace matching, so real code
+  after a test module still counts, which "everything after the first `#[cfg(test)]`" gets wrong
+  (`execution.rs` has about 700 lines of production code after its first test-only item). A file-level
+  `#![cfg(test)]` hides the file. Comments and string/char literals are masked first. `tests/*.rs` is test
+  code and is excluded from every number here.
+- **unwrap/expect**: `.unwrap(` and `.expect(` occurrences in non-test code (`unwrap_or`, `expect_err` and
+  text in comments or strings do not count).
+- **LOC**: physical lines (`wc -l`, blank lines and comments included) of non-test code; the largest module
+  is the `src/**/*.rs` file with the most (`path` is relative to `alfredo-tui/`).
+- **Tests**: `rust_tests` is the `: test` entries of `cargo test --locked -- --list` minus those of
+  `-- --list --ignored` (`rust_tests_ignored`); `py_tests` is the `def test_` methods in
+  `alfredo-tui/tests/test_*.py` (the `*_smoke.py` journeys are not counted).
 
 ### Broken-task guard
 

@@ -117,7 +117,7 @@
   "$defs": {
     "secondary_value": {
       "type": ["number", "null", "object"],
-      "additionalProperties": {"type": ["number", "null"]}
+      "additionalProperties": {"type": ["number", "null", "string"]}
     },
     "metric": {
       "type": "object",
