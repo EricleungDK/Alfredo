@@ -135,25 +135,22 @@ pub fn budget(num_ctx: Option<u32>) -> usize {
     .max(2048)
 }
 
-/// Keep at most `limit` bytes of `text` and mark the cut. The result never exceeds
-/// `limit` bytes: the marker is reserved first, sized for the full length (the widest
-/// count it can show), and the cut walks back to a char boundary.
+/// Keeps at most `limit` bytes of `text`, marking the cut with the number of bytes
+/// omitted. The result never exceeds `limit` bytes: the marker's space is reserved
+/// first, sized for the full text length, and the cut walks back to a char boundary.
+/// When `limit` is too small to hold the marker, the result is the cut text alone,
+/// with no marker.
 fn cut_text(text: &str, limit: usize) -> String {
     if text.len() <= limit {
         return text.into();
     }
     let reserve = format!(" [... {} bytes omitted]", text.len()).len();
-    // Too small to hold the marker: keep only the text that fits.
-    let room = if limit > reserve {
-        limit - reserve
-    } else {
-        limit
-    };
-    let mut end = room;
+    let marked = limit > reserve;
+    let mut end = if marked { limit - reserve } else { limit };
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    if room == limit {
+    if !marked {
         return text[..end].into();
     }
     format!("{} [... {} bytes omitted]", &text[..end], text.len() - end)
@@ -377,7 +374,7 @@ impl Session {
         };
         if !note.valid() {
             return Some(Outcome::Failed(
-                "the summary could not be stored".to_string(),
+                "the summary was too long to store; the conversation was not compacted".into(),
             ));
         }
         let cut = plan.cut;

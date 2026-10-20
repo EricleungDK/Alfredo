@@ -1360,6 +1360,11 @@ note of at most 4 KiB (about 250 words, at most 2048 reply tokens), then sends y
 prompt. Footer: `Conversation is near its size limit; summarising earlier turns…`, status
 `compacting`, and when the note is ready `N earlier turns compacted into a summary`.
 The summary runs off the UI thread; Esc cancels it and keeps your prompt in the draft.
+- **Too long.** A summary longer than 4 KiB is cut to fit, marker included. The cut
+  ends with `[... N bytes omitted]`, where N is the bytes not kept. A summary that still
+  cannot be stored leaves the conversation uncompacted and shows the notice `the summary
+  was too long to store; the conversation was not compacted`; the conversation and your
+  prompt are unchanged.
 
 - **What is replaced.** The oldest complete turns. The newest two turns (one, if two do
   not fit) stay verbatim, as does your new prompt. The system message is added to every

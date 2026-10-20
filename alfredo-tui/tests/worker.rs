@@ -699,6 +699,64 @@ async fn bare_legacy_approval_cannot_start_a_worker() {
     assert!(fixture.store.snapshot().unwrap().tasks[0].run.is_none());
 }
 
+// #243: a gitlink in the baseline commit is refused before the run is claimed, so no
+// check starts and nothing can turn that gitlink directory into a nested repository.
+#[tokio::test]
+async fn gitlink_in_the_baseline_refuses_the_run_before_the_check_starts() {
+    let fixture = Fixture::new();
+    let marker = fixture.root.join("CHECK_RAN");
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&fixture.workspace)
+        .args([
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            "160000,1111111111111111111111111111111111111111,sub",
+        ])
+        .status()
+        .unwrap()
+        .success());
+    assert!(Command::new("git")
+        .arg("-C")
+        .arg(&fixture.workspace)
+        .args(["-c", "core.hooksPath=/dev/null", "commit", "-qm", "gitlink"])
+        .status()
+        .unwrap()
+        .success());
+    fixture.action(Action::Permit {
+        task: 1,
+        policy: WorkPolicy {
+            files: vec!["calc.py".into(), "notes.txt".into()],
+            check: vec![
+                "/usr/bin/python3".into(),
+                "-B".into(),
+                "-c".into(),
+                format!("open('{}', 'w').close()", marker.display()),
+            ],
+        },
+    });
+    fixture.action(Action::Approve { task: 1 });
+    let provider = Ollama::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap();
+    let revision = fixture.store.snapshot().unwrap().revision;
+    let error = worker::start(
+        fixture.store.clone(),
+        1,
+        "gitlink-baseline".into(),
+        revision,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.contains("gitlink at \"sub\""),
+        "unexpected refusal: {error}"
+    );
+    assert!(!marker.exists(), "the check ran for a refused baseline");
+    assert!(fixture.store.snapshot().unwrap().tasks[0].run.is_none());
+}
+
 #[test]
 fn file_policy_rejects_metadata_traversal_duplicates_and_binary_edits() {
     for file in [

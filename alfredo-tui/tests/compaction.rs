@@ -486,6 +486,27 @@ fn summary_request_is_bounded_and_fits_a_small_window() {
     }
 }
 
+// #244: the cut leaves room for the omitted-bytes suffix, so the note never exceeds
+// SUMMARY_MAX, at every length around the boundary and on char boundaries.
+#[test]
+fn clean_summary_never_exceeds_the_limit_for_any_length_near_the_boundary() {
+    use alfredo_tui::model::compaction::{clean_summary, SUMMARY_MAX};
+    for len in (SUMMARY_MAX - 80)..(SUMMARY_MAX + 80) {
+        for unit in ["a", "é", "日", "😀"] {
+            let text = unit.repeat(len);
+            let cleaned = clean_summary(&text).unwrap();
+            assert!(
+                cleaned.len() <= SUMMARY_MAX,
+                "{unit} x {len}: {} bytes",
+                cleaned.len()
+            );
+            assert!(std::str::from_utf8(cleaned.as_bytes()).is_ok());
+        }
+    }
+    let short = "a".repeat(SUMMARY_MAX);
+    assert_eq!(clean_summary(&short).unwrap(), short, "fits unchanged");
+}
+
 #[test]
 fn a_compacted_conversation_saves_and_loads_and_a_corrupt_note_is_refused() {
     use alfredo_tui::{
@@ -513,25 +534,4 @@ fn a_compacted_conversation_saves_and_loads_and_a_corrupt_note_is_refused() {
     let bad: Snapshot = serde_json::from_value(value).unwrap();
     assert!(store.save(&bad).is_err());
     let _ = std::fs::remove_dir_all(root);
-}
-
-// #244: the cut leaves room for the omitted-bytes suffix, so the note never exceeds
-// SUMMARY_MAX, at every length around the boundary and on char boundaries.
-#[test]
-fn clean_summary_never_exceeds_the_limit_for_any_length_near_the_boundary() {
-    use alfredo_tui::model::compaction::{clean_summary, SUMMARY_MAX};
-    for len in (SUMMARY_MAX - 80)..(SUMMARY_MAX + 80) {
-        for unit in ["a", "é", "日", "😀"] {
-            let text = unit.repeat(len);
-            let cleaned = clean_summary(&text).unwrap();
-            assert!(
-                cleaned.len() <= SUMMARY_MAX,
-                "{unit} x {len}: {} bytes",
-                cleaned.len()
-            );
-            assert!(std::str::from_utf8(cleaned.as_bytes()).is_ok());
-        }
-    }
-    let short = "a".repeat(SUMMARY_MAX);
-    assert_eq!(clean_summary(&short).unwrap(), short, "fits unchanged");
 }
