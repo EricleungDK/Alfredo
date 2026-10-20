@@ -94,5 +94,22 @@ class StatusTests(unittest.TestCase):
         self.assertNotIn('`main` does not yet', status)
 
 
+class SourceLayoutTests(unittest.TestCase):
+    def test_readme_source_layout_names_every_src_module(self):
+        readme = (ROOT / 'alfredo-tui/README.md').read_text(encoding='utf-8')
+        layout = readme.split('## Source layout', 1)[1].split('\n## ', 1)[0]
+        missing = sorted(
+            p.relative_to(ROOT / 'alfredo-tui').as_posix()
+            for p in (ROOT / 'alfredo-tui/src').rglob('*.rs')
+            if p.relative_to(ROOT / 'alfredo-tui').as_posix() not in layout
+        )
+        self.assertEqual(
+            missing, [],
+            'alfredo-tui/README.md "Source layout" does not name these modules: '
+            + ', '.join(missing)
+            + '. Add each as `src/<file>.rs` to an existing group row or a new row '
+            'in that table, with a one-line purpose.')
+
+
 if __name__ == '__main__':
     unittest.main()

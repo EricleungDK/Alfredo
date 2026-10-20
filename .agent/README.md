@@ -4,8 +4,8 @@
 > the native terminal `alfredo-tui`.
 > `Tasks/context.md` is a large historical log; do not rely on it for current state.
 
-**Last Updated**: 2026-09-30
-**Status**: Product is the native terminal `alfredo-tui` (v0.1.0 on `main`; side pane and agent view merged, `v0.1.0` release still a draft, live-model run open).
+**Last Updated**: 2026-10-20
+**Status**: Product is the native terminal `alfredo-tui` (v0.1.0 on `main` plus the `[Unreleased]` work listed in `Tasks/STATUS.md`: wake-based run loop, headless driver, `/clean`, `--on-finish`, `--num-ctx`, `@path`; the `v0.1.0` release is still a draft, live-model run open).
 
 ## Quick Start
 
