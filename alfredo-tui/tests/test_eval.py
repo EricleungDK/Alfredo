@@ -33,6 +33,7 @@ def load(name):
 run_eval = load('run_eval')
 probes = load('probes')
 schema_check = load('schema_check')
+code_health = load('code_health')
 # These tests grade author-written scripted answers, never model output, so without bwrap they may grade
 # unsandboxed. The sandboxed path is covered by test_eval_grader.py, whose live tests CI runs with bwrap.
 NO_SANDBOX_AVAILABLE = run_eval.sandbox_tools() is None
@@ -480,6 +481,143 @@ class ProbeTests(unittest.TestCase):
         server.hold_workers.set()
         thread.join(5)
         self.assertEqual(1, len(result))
+
+
+class CodeHealthTests(unittest.TestCase):
+    """M15: the static code-health numbers (eval/code_health.py)."""
+
+    def scan(self, source):
+        return code_health.scan_source(source)
+
+    def test_inference_admission_shape_counts_only_code_before_the_all_test_module(self):
+        # inference_admission.rs gates its test module with #[cfg(all(test, unix))]: a scan that only knows
+        # #[cfg(test)] counts every unwrap inside it (181 instead of 86 across src at 5f7912f).
+        source = ('fn real() { a.unwrap(); }\n'
+                  '\n'
+                  '#[cfg(all(test, unix))]\n'
+                  'mod tests {\n'
+                  '    use super::*;\n'
+                  '    fn t() { b.unwrap(); c.expect("x"); }\n'
+                  '}\n')
+        result = self.scan(source)
+        self.assertEqual(1, result['unwrap_expect'])
+        self.assertEqual(2, result['loc_nontest'])
+        self.assertEqual(7, result['loc_total'])
+
+    def test_cfg_test_all_test_and_any_test_are_test_code_but_not_test_is_not(self):
+        for attribute in ('#[cfg(test)]', '#[cfg(all(test, unix))]', '#[cfg(any(test, feature = "x"))]',
+                          '  #[cfg(all(test, target_os = "linux"))]'):
+            result = self.scan(f'{attribute}\nmod tests {{ fn t() {{ x.unwrap(); }} }}\nfn real() {{}}\n')
+            self.assertEqual(0, result['unwrap_expect'], attribute)
+            self.assertEqual(1, result['loc_nontest'], attribute)
+        result = self.scan('#[cfg(not(test))]\nfn real() { x.unwrap(); }\n')
+        self.assertEqual(1, result['unwrap_expect'])
+        self.assertEqual(2, result['loc_nontest'])
+
+    def test_code_after_a_test_module_is_still_counted(self):
+        source = ('fn a() { x.unwrap(); }\n#[cfg(test)]\nmod tests {\n    fn t() { y.unwrap(); }\n}\n'
+                  'fn b() { z.expect("late"); }\n')
+        result = self.scan(source)
+        self.assertEqual(2, result['unwrap_expect'])
+        self.assertEqual(2, result['loc_nontest'])
+
+    def test_a_gated_use_fn_or_statement_hides_only_that_item(self):
+        source = ('#[cfg(test)]\nuse std::{a, b};\n'
+                  'fn real() {\n'
+                  '    #[cfg(all(test, unix))]\n'
+                  '    pause(x.unwrap());\n'
+                  '    y.unwrap();\n'
+                  '}\n'
+                  '#[cfg(test)]\n#[allow(dead_code)]\nfn helper(a: [u8; 2]) -> u8 { a.unwrap(); }\n'
+                  'fn tail() {}\n')
+        result = self.scan(source)
+        self.assertEqual(1, result['unwrap_expect'])
+        self.assertEqual(4, result['loc_nontest'])
+
+    def test_comments_strings_and_lookalike_calls_do_not_count(self):
+        source = ('// a.unwrap();\n'
+                  '/* b.unwrap(); /* nested.expect("x") */ */\n'
+                  'fn f() {\n'
+                  '    let s = "c.unwrap()";\n'
+                  '    let r = r#"d.expect("q")"#;\n'
+                  '    e.unwrap_or(1); f.expect_err("no"); g.unwrap_or_else(|| 1);\n'
+                  '    let c = \'{\'; let l: &\'static str = "}";\n'
+                  '    h.unwrap().expect("two");\n'
+                  '}\n')
+        result = self.scan(source)
+        self.assertEqual(2, result['unwrap_expect'])
+
+    def test_braces_inside_strings_chars_and_comments_do_not_end_a_test_module(self):
+        source = ('#[cfg(test)]\nmod tests {\n    fn t() { let a = "}"; let b = \'}\'; /* } */ x.unwrap(); }\n}\n'
+                  'fn real() { y.unwrap(); }\n')
+        result = self.scan(source)
+        self.assertEqual(1, result['unwrap_expect'])
+        self.assertEqual(1, result['loc_nontest'])
+
+    def test_inner_cfg_test_attribute_makes_the_whole_file_test_code(self):
+        result = self.scan('#![cfg(test)]\nfn t() { x.unwrap(); }\n')
+        self.assertEqual((0, 0), (result['unwrap_expect'], result['loc_nontest']))
+
+    def test_scan_tree_picks_the_largest_non_test_module_and_ignores_tests_dir(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'src').mkdir()
+            (root / 'tests').mkdir()
+            (root / 'src/big.rs').write_text('fn a() {}\n#[cfg(test)]\nmod t {\n' + 'fn x() {}\n' * 50 + '}\n')
+            (root / 'src/small.rs').write_text('fn a() {}\nfn b() { x.unwrap(); }\nfn c() {}\n')
+            (root / 'tests/it.rs').write_text('fn t() { x.unwrap(); }\n')
+            tree = code_health.scan_tree(root)
+        self.assertEqual({'path': 'src/small.rs', 'loc_nontest': 3}, tree['largest_module'])
+        self.assertEqual(1, tree['unwrap_expect_nontest'])
+        self.assertEqual(4, tree['total_loc'])
+
+    def test_clippy_counts_diagnostics_not_summary_lines_and_splits_lib_from_bin(self):
+        output = ('src/a.rs:1:1: warning: first\nsrc/b.rs:2:3: warning: second: help: add a `;` here\n'
+                  'warning: `alfredo-tui` (lib) generated 2 warnings (run `cargo clippy --fix`)\n'
+                  'src/main.rs:9:1: warning: third\n'
+                  'warning: `alfredo-tui` (bin "alfredo-tui") generated 1 warning\n')
+        self.assertEqual({'pedantic_lib': 2, 'pedantic_bin': 1, 'pedantic': 3}, code_health.parse_clippy(output))
+        with self.assertRaises(code_health.CodeHealthError):
+            code_health.parse_clippy('src/a.rs:1:1: warning: x\nwarning: `alfredo-tui` (lib) generated 5 warnings\n')
+
+    def test_cargo_test_list_counts_tests_and_ignored_tests(self):
+        listing = 'a::t1: test\na::t2: test\nb::t3: test\n\n3 tests, 0 benchmarks\n'
+        self.assertEqual(3, code_health.count_listed_tests(listing))
+        self.assertEqual(0, code_health.count_listed_tests('\n0 tests, 0 benchmarks\n'))
+
+    def test_python_tests_are_the_def_test_methods_in_tests_test_star_py(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tests = Path(directory) / 'tests'
+            tests.mkdir()
+            (tests / 'test_a.py').write_text('class A:\n    def test_x(self): pass\n    def helper(self): pass\n'
+                                             '    def test_y(self): pass\n')
+            (tests / 'x_smoke.py').write_text('def test_z(): pass\n')
+            self.assertEqual(2, code_health.count_python_tests(Path(directory)))
+
+    def test_m15_is_null_with_its_reason_without_the_option_and_filled_with_it(self):
+        _s, metrics, _w, _b = self.aggregate_with(None)
+        self.assertIsNone(metrics['M15']['value'])
+        self.assertIn('--code-health', metrics['M15']['reason'])
+        health = {'pedantic': 877, 'pedantic_lib': 837, 'pedantic_bin': 40, 'unwrap_expect_nontest': 86,
+                  'largest_module': {'path': 'src/task_control.rs', 'loc_nontest': 2933}, 'total_loc': 100,
+                  'rust_tests': 804, 'rust_tests_ignored': 13, 'py_tests': 89}
+        metrics = self.aggregate_with(health)[1]
+        self.assertEqual(877, metrics['M15']['value'])
+        self.assertEqual({'path': 'src/task_control.rs', 'loc_nontest': 2933},
+                         metrics['M15']['secondary']['largest_module'])
+        self.assertEqual(86, metrics['M15']['secondary']['unwrap_expect_nontest'])
+        doc = {'schema_version': 1, 'agent': 'alfredo', 'backend': 'fixture', 'model': 'fixture', 'config': {},
+               'trials': [], 'tasks': {}, 'metrics': metrics, 'warnings': [], 'likely_broken': False}
+        self.assertEqual([], [e for e in schema_check.validate(doc) if 'M15' in e])
+
+    def aggregate_with(self, health):
+        return run_eval.aggregate([good_trial('A')], [{'id': 'A', 'kind': 'positive'}],
+                                  {'trials': 1, 'backend': 'fixture'}, None, health)
+
+    def test_code_health_flag_parses_for_both_agents(self):
+        self.assertTrue(run_eval.parse_args(['--agent', 'alfredo', '--code-health']).code_health)
+        self.assertFalse(run_eval.parse_args(['--agent', 'alfredo']).code_health)
+        self.assertTrue(run_eval.parse_args(['--agent', 'claude-code', '--code-health']).code_health)
 
 
 class RecorderTests(unittest.TestCase):

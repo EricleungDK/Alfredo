@@ -33,6 +33,7 @@ TUI = HERE.parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(TUI / 'tests'))
 
+import code_health  # noqa: E402
 import probes  # noqa: E402
 import schema_check  # noqa: E402
 
@@ -68,13 +69,13 @@ METRIC_NAMES = {
     'M9': ('keystroke echo', 'ms p50/p95'), 'M10': ('frame render cost', 'ms p50/p95'),
     'M11': ('cold start to first frame', 'ms (median)'),
     'M12': ('panics/crashes', 'count'), 'M13': ('flaky tests', 'count'),
-    'M14': ('crash recovery', 'fraction'), 'M15': ('code health', 'score'),
+    'M14': ('crash recovery', 'fraction'), 'M15': ('code health', 'clippy::pedantic warnings (lib+bin); see secondary'),
     'M16': ('peak RSS during /go', 'kB, main process, median'),
 }
 FIXED_NULL = {
     'M13': 'flakiness needs repeated identical runs of one build; --trials only samples task outcomes (see M2)',
-    'M15': 'code health is a static analysis of the source tree, not of an agent run',
 }
+CODE_HEALTH_OFF = 'not measured: pass --code-health to compute clippy pedantic, unwrap/expect, module size and test counts'
 PROBE_OFF = 'not measured: pass --probes (alfredo only) to run the harness probes'
 
 
@@ -885,7 +886,21 @@ def probe_metrics(metric, results, go_enter, debug_note):
     }
 
 
-def aggregate(trials, tasks, config, probes_result=None):
+def code_health_metric(metric, result):
+    """M15 row: value is the clippy::pedantic count; `secondary` carries the other parts (see code_health.py)."""
+    if result is None:
+        return metric('M15', None, CODE_HEALTH_OFF)
+    reasons = result.get('reasons', {})
+    keys = ('pedantic_lib', 'pedantic_bin', 'unwrap_expect_nontest', 'largest_module', 'total_loc', 'rust_tests',
+            'rust_tests_ignored', 'py_tests')
+    secondary = {key: result.get(key) for key in keys}
+    notes = [f'{part}: {why}' for part, why in reasons.items() if part != 'pedantic']
+    return metric('M15', result.get('pedantic'), reasons.get('pedantic'), secondary=secondary,
+                  note='; '.join(notes + ['non-test = src/**/*.rs minus #[cfg(test)]/all(test..)/any(test..) items '
+                                           '(brace matched); tests/ excluded; see README M15']))
+
+
+def aggregate(trials, tasks, config, probes_result=None, code_health_result=None):
     """Per-task summary, M1..M16 and warnings from the trial list."""
     positives = [t for t in trials if t['kind'] == 'positive']
     summary, warnings = {}, []
@@ -1036,6 +1051,7 @@ def aggregate(trials, tasks, config, probes_result=None):
              + (f'; {debug_note}' if debug_note else ''))
     for key, why in FIXED_NULL.items():
         metrics[key] = metric(key, None, why)
+    metrics['M15'] = code_health_metric(metric, code_health_result)
     return summary, {key: metrics[key] for key in sorted(metrics, key=lambda k: int(k[1:]))}, warnings, likely_broken
 
 
@@ -1083,6 +1099,9 @@ def parse_args(argv):
                              '`cargo test`, minutes on a cold build) and M14 kill -9 recovery')
     parser.add_argument('--no-render-probe', action='store_true',
                         help='with --probes: skip the slow M10 cargo build (M10 stays null)')
+    parser.add_argument('--code-health', action='store_true',
+                        help='also compute M15: clippy pedantic count, non-test unwrap/expect, largest non-test module '
+                             'and test counts (runs cargo clippy and cargo test --list; minutes on a cold build)')
     parser.add_argument('--probe-chats', type=int, default=probes.DEFAULT_CHATS, help='M8 chats (default 20)')
     parser.add_argument('--probe-keys', type=int, default=probes.DEFAULT_KEYS, help='M9 keystrokes (default 100)')
     parser.add_argument('--probe-recovery-trials', type=int, default=probes.DEFAULT_RECOVERY_TRIALS,
@@ -1177,7 +1196,11 @@ def main(argv=None):
                                 'recovery_trials': options.probe_recovery_trials, 'render': options.render_probe,
                                 'binary': config['binary'], 'profile': config['profile']}
             probe_results = run_probes(options, tasks)
-        summary, metrics, warnings, likely_broken = aggregate(trials, tasks, config, probe_results)
+        health = None
+        if options.code_health:
+            numbers, reasons = code_health.collect(TUI)
+            health = {**numbers, 'reasons': reasons}
+        summary, metrics, warnings, likely_broken = aggregate(trials, tasks, config, probe_results, health)
         config.pop('backend')
         document = {
             'schema_version': SCHEMA_VERSION, 'agent': options.agent, 'backend': options.backend,
