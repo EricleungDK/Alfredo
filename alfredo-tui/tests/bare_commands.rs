@@ -111,7 +111,10 @@ fn every_listed_command_typed_bare_is_known() {
     let mut unknown = vec![];
     for (command, _) in COMMANDS {
         // The terminal loop answers these exact words itself, before any parser.
-        if matches!(*command, "/workspace" | "/models" | "/model") {
+        if matches!(
+            *command,
+            "/workspace" | "/models" | "/model" | "/clear" | "/compact"
+        ) {
             continue;
         }
         for typed in [command.to_string(), format!("{command}   ")] {

@@ -22,6 +22,10 @@ A named line of work in one Coding Workspace (default `default`). Each mission r
 
 A named chat set inside a mission. Up to eight are restored per set, and only one terminal may hold a named conversation at a time.
 
+### Compaction
+
+Replacing a long Conversation's oldest turns with a short model-written summary note (automatic near the size limit, or `/compact`). The note is saved in place of those turns; the newest turns stay verbatim. `/clear` restarts a Conversation instead.
+
 ### Side Pane
 
 The left pane listing the repository's missions and the Work Tree. F6 focuses it, and below 88 columns it becomes an overlay.

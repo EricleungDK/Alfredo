@@ -55,7 +55,7 @@ pub struct Snapshot {
 impl Snapshot {
     pub fn capture(app: &App, namespace: &str) -> Self {
         Self {
-            schema_version: 17,
+            schema_version: 18,
             task_view: None,
             plan_draft: None,
             namespace: namespace.into(),
@@ -64,7 +64,7 @@ impl Snapshot {
         }
     }
     pub(crate) fn validate(&self, namespace: &str) -> Result<()> {
-        if !matches!(self.schema_version, 1..=17)
+        if !matches!(self.schema_version, 1..=18)
             || (self.schema_version == 1 && self.task_view.is_some())
             || (self.schema_version < 5 && self.plan_draft.is_some())
             || self.namespace != namespace
@@ -133,6 +133,9 @@ impl Snapshot {
         for (session_index, session) in self.sessions.iter().enumerate() {
             if !session.valid_reading(self.schema_version) {
                 return Err("Invalid conversation reading anchor".into());
+            }
+            if !session.valid_compaction(self.schema_version) {
+                return Err("Conversation compaction note is invalid".into());
             }
             if !session.valid_sources(self.schema_version) {
                 return Err("Invalid conversation response sources".into());

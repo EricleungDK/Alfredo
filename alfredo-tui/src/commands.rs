@@ -88,6 +88,14 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "ID|architect TEXT — instruct an agent: steer, repair, follow up, revise",
     ),
     ("/chat", "return to conversation"),
+    (
+        "/clear",
+        "start this conversation fresh; tasks are kept (Ctrl+N opens another)",
+    ),
+    (
+        "/compact",
+        "summarise older turns into a short note now (also automatic near the size limit)",
+    ),
     ("/models", "list installed models"),
     ("/model", "NAME — select conversation model"),
 ];
@@ -166,6 +174,8 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
         "Chat",
         &[
             "/chat",
+            "/clear",
+            "/compact",
             "/model",
             "/models",
             "@wayfinder",

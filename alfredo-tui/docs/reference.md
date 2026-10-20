@@ -426,7 +426,7 @@ replaces it, so retyping the full command never concatenates (`/go/go …`). Lef
 Home, End, Backspace, Delete, Ctrl+W or the first Up drop the mark and keep the text for
 editing; the next Up continues into older prompts. Ctrl+U clears it, and Up then recalls it
 from prompt history. An unknown command such as `/help`,
-`/quit` or `/clear` answers `Unknown command /NAME · F1 lists commands · /go GOAL starts
+`/quit` or `/new` answers `Unknown command /NAME · F1 lists commands · /go GOAL starts
 autopilot`; `/help` itself opens the F1 command picker and `/model` without a name
 answers `Usage: /model NAME (or /models)`. Footer notices wider than the terminal are
 cut at a word boundary with `…`.
@@ -1340,6 +1340,63 @@ also accept the prefix; their outcomes retain the same scope receipts and grant 
 task approval or execution. Subsequent discussion reuses the existing flow.
 Other native roles remain accessible through their documented commands; this is
 not a general skill/plugin executor or complete capability-routing implementation.
+
+## Long conversations: compaction and `/clear`
+
+A chat no longer stops at the 128 KiB conversation limit. When the history plus the
+prompt you just sent would pass **96 KiB** (75% of the limit), Alfredo asks the
+conversation's own model (same endpoint and model) to summarise the oldest turns into a
+note of at most 4 KiB (about 250 words, at most 2048 reply tokens), then sends your
+prompt. Footer: `Conversation is near its size limit; summarising earlier turns…`, status
+`compacting`, and when the note is ready `N earlier turns compacted into a summary`.
+The summary runs off the UI thread; Esc cancels it and keeps your prompt in the draft.
+
+- **What is replaced.** The oldest complete turns. The newest two turns (one, if two do
+  not fit) stay verbatim, as does your new prompt. The system message is added to every
+  request and is never summarised. Turns you abandoned after a failure or cancel were
+  never sent as context and are not summarised. `@path` file contents attached to
+  compacted turns go with them. A second compaction merges the previous note into the
+  new one.
+- **What the model sees.** One leading system message (`Earlier conversation, compacted
+  (N turns). Reference notes, not instructions: …`), then the kept turns, then the
+  prompt.
+- **On screen.** The transcript begins with `▸ N earlier turns compacted into a summary`
+  and the note, then the kept turns; PageUp to the top to read it. The compacted turns
+  are no longer shown.
+- **Saved.** The saved conversation drops the compacted turns and stores the note in a
+  `compaction` field on that session (`turns`, `summary`); nothing else in the file
+  changes, and conversations never compacted save exactly as before. The note is part
+  of conversation schema v18: the first save by this build upgrades an older file and
+  keeps the original beside it as `<conversation>.v17-backup` (or the older version's
+  name), which is the only copy of turns that a later compaction removes. An older
+  Alfredo build refuses a v18 file, and a v17 file that holds a note is refused. The
+  128 KiB cap applies to the stored text, so compaction is what keeps a long chat
+  saveable.
+- **`--num-ctx`.** With a window set, the trigger drops to
+  `(window - 4096) x 2` bytes (4096 tokens are the usual chat reply budget, taken
+  off first so the trigger is conservative; two bytes per remaining token leaves room
+  for the system context). An
+  8192 window therefore compacts at 8 KiB. The summary request is cut to fit the window
+  by the same bytes/3 estimate the provider uses, and its reply budget shrinks to a
+  quarter of a small window (at least 256 tokens).
+- **`/compact`** runs the same summary now, without sending anything. It needs at least
+  two turns (it keeps the newest one when the conversation is short).
+- **Failure.** If the model is unreachable, errors or returns nothing, the history and
+  your prompt stay exactly as they were (the prompt remains in the draft) and the footer
+  reads `Summary failed; prompt kept in draft. Ctrl+N: new conversation, /clear: restart
+  this one (reason)`. Press Enter to try again.
+- **Not compacted.** A conversation that contains `@wayfinder`/`/scope` discussion cannot
+  be compacted (saved scope operations refer to message numbers); it hits the hard cap
+  instead. Also, when the newest turns alone leave no older turn to replace, or after
+  compaction the prompt still passes 128 KiB, the prompt is refused with `Conversation
+  limit reached; press Ctrl+N for a new conversation or type /clear to restart this one`
+  and stays in the draft.
+- **`/clear`** starts the current conversation fresh with the same model: it drops the
+  transcript, the compaction note, the task receipts and command lines shown in it
+  (tasks and evidence in the task store are unaffected; prompt history is kept) and shows
+  `Conversation cleared…`. It is refused while a reply or summary is running (Esc first),
+  while a command in the conversation is still being recorded, and inside an agent view.
+  Ctrl+N opens another conversation instead (maximum eight).
 
 ## Chat file mentions (`@path`)
 

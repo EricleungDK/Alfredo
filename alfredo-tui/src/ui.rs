@@ -1123,6 +1123,16 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         lines.push(Line::from("Or chat with your local model."));
         lines.push(Line::default());
     }
+    // Compaction (issue #187): the summary note stands where the oldest turns were.
+    if let Some(note) = session.compaction() {
+        lines.push(Line::styled(format!("▸ {}", note.marker()), dim()));
+        lines.extend(
+            note.summary
+                .lines()
+                .map(|line| Line::styled(format!("  {}", safe(line)), dim())),
+        );
+        lines.push(Line::default());
+    }
     let mut receipts = session.task_receipts().iter().peekable();
     // A Wayfinder preparation can finish after a later command was admitted.
     // Render at its saved user-turn boundary, preserving sequence within a boundary.

@@ -54,6 +54,7 @@ F1 on an empty prompt lists every command. Most used:
 | `/tasks [QUERY\|#ID]`, `/activity [QUERY\|#ID]`, `/chat`, `/refresh` | Views |
 | `/clean`, `/clean yes` | List, then remove, the worktrees of finished runs (see below) |
 | `/models`, `/model NAME`, `/workspace` | Model and workspace switching |
+| `/clear`, `/compact` | Restart this conversation (tasks are kept), or summarise its older turns now. Long chats are summarised automatically near the size limit instead of stopping (see `docs/reference.md#long-conversations-compaction-and-clear`) |
 | `/scope [JSON]`, `/scope-confirm REV`, `@wayfinder REQUEST` | Project scope agreement |
 
 Chat prompts accept `@path/to/file` mentions: the file's committed HEAD content (at most 8
@@ -206,6 +207,7 @@ python3 alfredo-tui/tests/headless_smoke.py            # --go --headless without
 python3 alfredo-tui/tests/agent_terminal_smoke.py
 python3 alfredo-tui/tests/inference_terminal_smoke.py
 python3 alfredo-tui/tests/num_ctx_terminal_smoke.py
+python3 alfredo-tui/tests/compaction_terminal_smoke.py
 python3 alfredo-tui/tests/recovery_terminal_smoke.py
 python3 alfredo-tui/tests/qualification_cli_smoke.py
 python3 alfredo-tui/tests/eval_smoke.py                # harness eval, fixture mode
@@ -261,6 +263,7 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | --- | --- |
 | `src/main.rs` | CLI flags, event loop, key handling |
 | `src/ui.rs`, `src/model.rs` | Rendering and conversation state |
+| `src/compaction.rs` | Chat compaction: summarise older turns into a note, `/clear`, `/compact` |
 | `src/side_pane.rs`, `src/theme.rs` | Side pane projection and keys; icons, status glyphs, palette, spinner |
 | `src/autopilot.rs` | `/go` loop, auto-review, bounded repair, integration branch |
 | `src/tasks.rs`, `src/task_control.rs`, `src/dispatch.rs` | Durable task store, commands, dispatch |
