@@ -4,11 +4,19 @@
 
 ### Alfredo
 
-Native Rust (ratatui) terminal, crate `alfredo-tui`, that orchestrates local Ollama coding agents on a Git repository. Everything runs locally; nothing is pushed.
+Native Rust (ratatui) terminal, crate `alfredo-tui`, that orchestrates local Ollama coding agents on a Git repository. Everything runs locally. Only the Chat Agent may change the Coding Workspace or push, and only with Approval.
 
 ### Coding Workspace
 
-The Git repository Alfredo was opened on. It needs at least one commit. Alfredo never modifies its branch, index or working files; state is stored outside it.
+The Git repository Alfredo was opened on. It needs at least one commit. Workers and Autopilot never modify its branch, index or working files; the Chat Agent may, with Approval (`docs/adr/0004-chat-agent-acts-on-the-coding-workspace.md`). State is stored outside it.
+
+### Chat Agent
+
+The conversation's model acting as a tool-calling agent on the Coding Workspace (main checkout). Reads run automatically; edits, shell and git writes need Approval; push always does. Hands large, multi-file or risky work to `/plan` or `/go`.
+
+### Approval
+
+The owner's per-call consent to a Chat Agent action. Tiers: read auto; edit, shell, git write ask; push always asks and is never allowlistable. Shell runs in the Sandbox unless the owner approves a host escalation for that call. No skip-approval mode.
 
 ### State Directory
 
