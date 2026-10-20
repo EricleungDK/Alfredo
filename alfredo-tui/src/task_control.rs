@@ -3101,7 +3101,7 @@ mod unknown_command_tests {
 
     #[test]
     fn unknown_command_names_it_and_points_to_f1_and_go() {
-        for command in ["/help", "/quit", "/exit", "/clear", "/new"] {
+        for command in ["/help", "/quit", "/exit", "/reset", "/new"] {
             let message = parse(command, "model").unwrap_err();
             assert!(message.contains(command), "{message}");
             assert!(message.contains("F1"), "{message}");

@@ -379,6 +379,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let (mut sender, mut receiver) = mpsc::channel(128);
     let mut jobs: Vec<Option<JoinHandle<()>>> = (0..MAX_SESSIONS).map(|_| None).collect();
     let (mut model_sender, mut model_receiver) = mpsc::channel(1);
+    let (mut compact_sender, mut compact_receiver) = mpsc::channel::<Compacted>(8);
     let mut terminal = ratatui::init();
     let _guard = TerminalGuard;
     execute!(io::stdout(), EnableBracketedPaste)?;
@@ -386,6 +387,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     input.spawn_reader()?;
     let result = (|| -> io::Result<()> {
         let mut dirty = true;
+        // A prompt held while earlier turns were summarised, ready to send.
+        let mut resume: Option<Result<Vec<alfredo_tui::model::Message>, &'static str>> = None;
         let mut quit_pending = false;
         let mut pending_command: Option<(usize, String)> = None;
         let mut last_task_refresh = std::time::Instant::now();
@@ -845,8 +848,35 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     Err(_) => break,
                 }
             }
+            // Finished summaries (issue #187): replace the oldest turns, then send the held prompt.
+            let mut resend = None;
+            while let Ok((index, attempt, plan, result)) = compact_receiver.try_recv() {
+                if let Some(session) = work.app.sessions.get_mut(index) {
+                    if let Some(outcome) = session.finish_compaction(attempt, &plan, result) {
+                        work.app.notice = outcome.notice();
+                        if matches!(
+                            outcome,
+                            alfredo_tui::model::compaction::Outcome::Compacted { send: true, .. }
+                        ) {
+                            resend = Some(index);
+                        }
+                        dirty = true;
+                    }
+                }
+            }
+            if let Some(index) = resend {
+                if index == work.app.selected {
+                    work.tasks.set_visible(false);
+                    resume = Some(work.app.sessions[index].begin());
+                } else {
+                    work.app.notice = format!(
+                        "Earlier turns compacted in Chat {}; press Enter there to send your prompt",
+                        index + 1
+                    );
+                }
+            }
             for (session, job) in work.app.sessions.iter().zip(jobs.iter_mut()) {
-                if !session.status.active() {
+                if !session.status.active() && !session.compacting() {
                     if let Some(handle) = job.take() {
                         handle.abort();
                     }
@@ -865,11 +895,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             // Blocks until a key, a runtime worker going idle (a model, planner,
             // worker or task result may be waiting) or the timer fallback.
             // Wakes beyond a short burst are paced to one pass per 20 ms; keys are immediate.
-            let event = match input.wait_paced(Duration::from_millis(33))? {
-                alfredo_tui::wake::Next::Event(event) => event,
-                alfredo_tui::wake::Next::Woken | alfredo_tui::wake::Next::Timeout => continue,
+            let mut request = resume.take();
+            let resumed = request.is_some();
+            let event = if request.is_some() {
+                // The held prompt goes out now; there is no key to wait for.
+                Event::FocusGained
+            } else {
+                match input.wait_paced(Duration::from_millis(33))? {
+                    alfredo_tui::wake::Next::Event(event) => event,
+                    alfredo_tui::wake::Next::Woken | alfredo_tui::wake::Next::Timeout => continue,
+                }
             };
-            let mut request = None;
             dirty = true;
             match event {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
@@ -950,6 +986,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                 }
                                                 (sender, receiver) = mpsc::channel(128);
                                                 (model_sender, model_receiver) = mpsc::channel(1);
+                                                (compact_sender, compact_receiver) = mpsc::channel(8);
                                                 last_task_refresh = std::time::Instant::now();
                                                 last_save = std::time::Instant::now();
                                                 last_missions = None;
@@ -1142,7 +1179,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(job) = jobs[index].take() {
                                 job.abort();
                             }
+                            let summarising = work.app.sessions[index].compacting();
                             work.app.sessions[index].cancel();
+                            if summarising {
+                                work.app.notice =
+                                    "Summary cancelled; your prompt is kept in the draft".into();
+                            }
                         }
                         KeyCode::Char('r') if ctrl => {
                             if work.wayfinder.session_active(index) {
@@ -1233,6 +1275,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                                 for job in jobs.iter_mut().filter_map(Option::take) { job.abort(); }
                                                 (sender, receiver) = mpsc::channel(128);
                                                 (model_sender, model_receiver) = mpsc::channel(1);
+                                                (compact_sender, compact_receiver) = mpsc::channel(8);
                                                 last_task_refresh = std::time::Instant::now();
                                                 last_save = std::time::Instant::now();
                                             }
@@ -1258,6 +1301,53 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             )
                             .unwrap_err();
                             work.app.sessions[index].reject_draft();
+                        }
+                        KeyCode::Enter
+                            if matches!(
+                                work.app.sessions[index].draft.trim(),
+                                "/clear" | "/compact"
+                            ) && work.tasks.agent_shown().is_none() =>
+                        {
+                            let compact = work.app.sessions[index].draft.trim() == "/compact";
+                            if work.wayfinder.session_active(index) {
+                                work.app.notice =
+                                    "Wait for this turn's scope operation first".into();
+                                work.app.sessions[index].reject_draft();
+                            } else if compact {
+                                match spawn_compaction(
+                                    &runtime,
+                                    &provider,
+                                    &compact_sender,
+                                    &mut jobs[index],
+                                    &mut work.app.sessions[index],
+                                    index,
+                                    false,
+                                ) {
+                                    Ok(()) => {
+                                        work.app.sessions[index].remember_submission();
+                                        work.app.sessions[index].clear_draft();
+                                        work.app.notice = "Summarising earlier turns…".into();
+                                    }
+                                    Err(error) => {
+                                        work.app.notice = error.into();
+                                        work.app.sessions[index].reject_draft();
+                                    }
+                                }
+                            } else {
+                                work.app.sessions[index].remember_submission();
+                                match work.app.sessions[index].clear_conversation() {
+                                    Ok(()) => {
+                                        if let Some(job) = jobs[index].take() {
+                                            job.abort();
+                                        }
+                                        work.app.notice = "Conversation cleared. Tasks and their evidence are unchanged; Ctrl+N opens another conversation".into();
+                                    }
+                                    Err(error) => {
+                                        work.app.notice = error.into();
+                                        work.app.sessions[index].reject_draft();
+                                    }
+                                }
+                            }
                         }
                         KeyCode::Enter if work.app.sessions[index].draft.trim() == "/models" => {
                             work.app.models_visible = true;
@@ -1598,7 +1688,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Enter => {
                             work.app.models_visible = false;
                             work.tasks.set_visible(false);
-                            request = Some(work.app.sessions[index].begin());
+                            if work.app.sessions[index].compaction_due(provider.num_ctx()) {
+                                // Near the size limit: summarise the oldest turns first; the
+                                // prompt stays in the draft and is sent once the note is ready.
+                                match spawn_compaction(
+                                    &runtime,
+                                    &provider,
+                                    &compact_sender,
+                                    &mut jobs[index],
+                                    &mut work.app.sessions[index],
+                                    index,
+                                    true,
+                                ) {
+                                    Ok(()) => {
+                                        work.app.notice = "Conversation is near its size limit; summarising earlier turns…".into();
+                                    }
+                                    Err(error) => work.app.notice = error.into(),
+                                }
+                            } else {
+                                request = Some(work.app.sessions[index].begin());
+                            }
                         }
                         KeyCode::Backspace => {
                             work.app.sessions[index].backspace();
@@ -1695,7 +1804,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             work.app.sessions[index]
                                 .apply(attempt, alfredo_tui::model::Update::Failed(error));
                         }
-                        work.app.notice.clear();
+                        // A resumed prompt keeps the "compacted" notice on screen.
+                        if !resumed {
+                            work.app.notice.clear();
+                        }
                     }
                     Err(error) => work.app.notice = error.into(),
                 }
@@ -1724,6 +1836,38 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     conversation_save.map_err(|error| {
         format!("Final conversation save failed: {error}; inspect retained state")
     })?;
+    Ok(())
+}
+
+/// A finished summary request: session, attempt, what it replaces, and the note or reason.
+type Compacted = (
+    usize,
+    u64,
+    alfredo_tui::model::compaction::Plan,
+    Result<String, String>,
+);
+
+/// Start a summary request for the oldest turns of `session` (issue #187). The job
+/// reports through `results`; the session keeps its draft until then.
+fn spawn_compaction(
+    runtime: &Runtime,
+    provider: &Ollama,
+    results: &mpsc::Sender<Compacted>,
+    job: &mut Option<JoinHandle<()>>,
+    session: &mut alfredo_tui::model::Session,
+    index: usize,
+    send: bool,
+) -> Result<(), &'static str> {
+    let plan = session.start_compaction(provider.num_ctx(), send)?;
+    let (provider, results) = (provider.clone(), results.clone());
+    let (model, attempt) = (session.model.clone(), session.attempt);
+    if let Some(old) = job.take() {
+        old.abort();
+    }
+    *job = Some(runtime.spawn(async move {
+        let result = alfredo_tui::model::compaction::summarize(&provider, model, &plan).await;
+        let _ = results.send((index, attempt, plan, result)).await;
+    }));
     Ok(())
 }
 

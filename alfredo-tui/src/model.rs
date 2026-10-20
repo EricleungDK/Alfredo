@@ -2,6 +2,10 @@ use serde::{Deserialize, Serialize};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+#[path = "compaction.rs"]
+pub mod compaction;
+pub use compaction::Compaction;
+
 pub const MAX_TEXT: usize = 128 * 1024;
 pub const MAX_DRAFT: usize = 16 * 1024;
 pub const MAX_SESSIONS: usize = 8;
@@ -143,6 +147,12 @@ pub struct Session {
     pub draft: String,
     cursor: usize,
     pub messages: Vec<Message>,
+    /// Note that replaced the oldest turns (issue #187); see [`compaction`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    compaction: Option<Compaction>,
+    /// A summary request is in flight: the draft it was started with, and whether to send it after.
+    #[serde(skip)]
+    compacting: Option<(String, bool)>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     task_receipts: Vec<TaskReceiptRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -205,6 +215,8 @@ impl Session {
             draft: String::new(),
             cursor: 0,
             messages: Vec::new(),
+            compaction: None,
+            compacting: None,
             task_receipts: Vec::new(),
             commands: Vec::new(),
             sources: Default::default(),
@@ -231,7 +243,10 @@ impl Session {
     }
 
     pub fn status_label(&self) -> std::borrow::Cow<'_, str> {
-        if let Some((retry, deadline)) = self.retry.as_ref().filter(|_| self.status.active()) {
+        if self.compacting.is_some() {
+            "Summarising earlier turns".into()
+        } else if let Some((retry, deadline)) = self.retry.as_ref().filter(|_| self.status.active())
+        {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
             format!(
                 "Reconnecting in {}s · retry {}/{}",
@@ -283,6 +298,9 @@ impl Session {
 
     /// One short word (or `retry N/M`) for the session list.
     pub fn short_status(&self) -> String {
+        if self.compacting.is_some() {
+            return "compacting".into();
+        }
         if let Some((retry, _)) = self.retry.as_ref().filter(|_| self.status.active()) {
             return format!("retry {}/{}", retry.retry, retry.limit);
         }
@@ -593,10 +611,14 @@ impl Session {
         if prompt.is_empty() {
             return Err("Enter a prompt");
         }
+        if self.compacting.is_some() {
+            return Err("Summarising earlier turns; wait for it, or press Esc to keep the draft");
+        }
         let bytes: usize = self.messages.iter().map(|m| m.content.len()).sum::<usize>()
-            + self.attachments.values().map(String::len).sum::<usize>();
+            + self.attachments.values().map(String::len).sum::<usize>()
+            + self.compaction.as_ref().map_or(0, |c| c.summary.len());
         if bytes + prompt.len() > MAX_TEXT || self.messages.len() + 2 > MAX_MESSAGES {
-            return Err("Conversation limit reached; start a new session");
+            return Err(compaction::HARD_CAP);
         }
         self.remember_submission();
         if matches!(self.status, Status::Failed(_) | Status::Cancelled) {
@@ -622,20 +644,25 @@ impl Session {
     /// turns are omitted; `user_index` itself is kept even if it was interrupted.
     pub fn request_through(&self, user_index: usize) -> Vec<Message> {
         let end = (user_index + 1).min(self.messages.len());
-        self.messages[..end]
+        self.compaction
             .iter()
-            .enumerate()
-            .filter(|(index, _)| {
-                let user = index - index % 2;
-                user == user_index || !self.interrupted_turn(user)
-            })
-            .map(|(index, message)| {
-                let mut message = message.clone();
-                if let Some(block) = self.attachments.get(&index) {
-                    message.content.push_str(block);
-                }
-                message
-            })
+            .map(Compaction::message)
+            .chain(
+                self.messages[..end]
+                    .iter()
+                    .enumerate()
+                    .filter(|(index, _)| {
+                        let user = index - index % 2;
+                        user == user_index || !self.interrupted_turn(user)
+                    })
+                    .map(|(index, message)| {
+                        let mut message = message.clone();
+                        if let Some(block) = self.attachments.get(&index) {
+                            message.content.push_str(block);
+                        }
+                        message
+                    }),
+            )
             .collect()
     }
 
@@ -696,6 +723,7 @@ impl Session {
     }
 
     pub fn cancel(&mut self) {
+        self.compacting = None;
         if self.status.active() {
             self.status = Status::Cancelled;
             self.retry = None;

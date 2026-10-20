@@ -70,6 +70,9 @@ jobs:
       - name: PTY smoke - num-ctx
         timeout-minutes: 10
         run: python3 alfredo-tui/tests/num_ctx_terminal_smoke.py
+      - name: PTY smoke - compaction
+        timeout-minutes: 10
+        run: python3 alfredo-tui/tests/compaction_terminal_smoke.py
       - name: PTY smoke - recovery
         timeout-minutes: 10
         run: python3 alfredo-tui/tests/recovery_terminal_smoke.py

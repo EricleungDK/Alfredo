@@ -170,7 +170,7 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 | Alt+Left / Alt+Right | Collapse / expand a task branch |
 | PageUp / PageDown | Scroll transcript, agent view, details or evidence |
 | Tab / Shift+Tab | Next / previous conversation |
-| Ctrl+N | New conversation (max 8) |
+| Ctrl+N | New conversation (max 8); `/clear` restarts the current one, `/compact` summarises its older turns |
 | Esc | Cancel the current model request (keeps partial reply); close pickers. You can then send a new prompt or switch `/model` |
 | Ctrl+R | Retry a failed or cancelled turn, until you send a new prompt |
 | Ctrl+W / Ctrl+U | Delete word / clear prompt |

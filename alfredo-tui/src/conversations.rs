@@ -134,6 +134,9 @@ impl Snapshot {
             if !session.valid_reading(self.schema_version) {
                 return Err("Invalid conversation reading anchor".into());
             }
+            if !session.valid_compaction() {
+                return Err("Conversation compaction note is invalid".into());
+            }
             if !session.valid_sources(self.schema_version) {
                 return Err("Invalid conversation response sources".into());
             }

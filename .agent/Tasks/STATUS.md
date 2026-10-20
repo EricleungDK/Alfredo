@@ -15,6 +15,7 @@
   local Ollama) or Claude Code and emits schema-valid metrics JSON (M1-M16); fixture mode
   is smoked in CI by `tests/eval_smoke.py`. See `alfredo-tui/eval/README.md`. `--probes` (issue #190, `eval/probes.py`) fills M8/M9/M10/M14.
 - **Headless** (issue #183): `--go GOAL --headless` (`src/headless.rs`) drives autopilot without a TTY: stderr progress lines, one JSON result on stdout, exit 0/1/2; smoked by `tests/headless_smoke.py`. Follow-ups: migrate `eval/run_eval.py`, `--doctor --json`, goal from stdin, headless `--resume`.
+- **Compaction** (issue #187, owner decision: summarise, not trim): near 96 KiB (less with `--num-ctx`) the oldest chat turns are summarised by the conversation's model into a `compaction` note stored in place of them (`src/compaction.rs`, child module of `model`); `/compact` and `/clear`; smoked by `tests/compaction_terminal_smoke.py`. Reference: `docs/reference.md#long-conversations-compaction-and-clear`.
 - **Package**: `python3 alfredo-tui/scripts/package_release.py --output NEWDIR` then
   `python3 alfredo-tui/tests/release_smoke.py NEWDIR/*.tar.gz`.
 - **Docs map**: [root README](../../README.md) (users) ·
