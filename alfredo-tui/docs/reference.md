@@ -1355,12 +1355,17 @@ The summary runs off the UI thread; Esc cancels it and keeps your prompt in the 
   are no longer shown.
 - **Saved.** The saved conversation drops the compacted turns and stores the note in a
   `compaction` field on that session (`turns`, `summary`); nothing else in the file
-  changes, and conversations never compacted save exactly as before. An Alfredo build
-  without this feature refuses a file that holds a note. The 128 KiB cap applies to the
-  stored text, so compaction is what keeps a long chat saveable.
+  changes, and conversations never compacted save exactly as before. The note is part
+  of conversation schema v18: the first save by this build upgrades an older file and
+  keeps the original beside it as `<conversation>.v17-backup` (or the older version's
+  name), which is the only copy of turns that a later compaction removes. An older
+  Alfredo build refuses a v18 file, and a v17 file that holds a note is refused. The
+  128 KiB cap applies to the stored text, so compaction is what keeps a long chat
+  saveable.
 - **`--num-ctx`.** With a window set, the trigger drops to
-  `(window - 4096) x 2` bytes (4096 tokens are the chat reply budget the provider
-  reserves; two bytes per remaining token leaves room for the system context). An
+  `(window - 4096) x 2` bytes (4096 tokens are the usual chat reply budget, taken
+  off first so the trigger is conservative; two bytes per remaining token leaves room
+  for the system context). An
   8192 window therefore compacts at 8 KiB. The summary request is cut to fit the window
   by the same bytes/3 estimate the provider uses, and its reply budget shrinks to a
   quarter of a small window (at least 256 tokens).

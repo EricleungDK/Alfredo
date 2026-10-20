@@ -13,3 +13,6 @@
 
 - The remaining hard-cap message now reads `Conversation limit reached; press Ctrl+N for
   a new conversation or type /clear to restart this one`.
+- Saved conversations are now schema v18 (they can hold a compaction note). The first save
+  by this build keeps the previous file as `<conversation>.v17-backup`; older Alfredo
+  builds refuse a v18 file.

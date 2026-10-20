@@ -151,6 +151,126 @@ fn index_bound_state_follows_the_kept_turns() {
     assert!(session.source(13).is_none());
 }
 
+/// A turn whose reply was cancelled; it becomes an interrupted turn once the next one starts.
+fn cancelled_turn(session: &mut Session, number: usize) {
+    session.insert(&format!("turn{number} {}", "x".repeat(PASTE - 10)));
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Token(format!("partial{number}")));
+    session.cancel();
+}
+
+fn run_command(session: &mut Session, task: u64) {
+    session
+        .submit_command(
+            format!("/run {task}"),
+            alfredo_tui::command_intent::Intent::Run {
+                correlation: format!("c{task}"),
+                expected_revision: 1,
+                task,
+            },
+        )
+        .unwrap();
+}
+
+fn receipt(session: &mut Session, revision: u64) {
+    let after_messages = session.messages.len();
+    assert!(
+        session.observe_task_receipt(alfredo_tui::model::TaskReceiptRef {
+            sequence: 0,
+            after_messages,
+            revision,
+            task: 1,
+            correlation: format!("r{revision}"),
+        })
+    );
+}
+
+#[test]
+fn message_numbered_state_is_renumbered_or_clamped_around_the_cut() {
+    let mut session = Session::new("fixture".into());
+    turn(&mut session, 1); // messages 0..2
+    session.attach(0, "ATTACH-OLD".into());
+    receipt(&mut session, 1); // after 2: compacted
+    run_command(&mut session, 1); // after 2: compacted
+    cancelled_turn(&mut session, 2); // messages 2..4, interrupted, compacted
+    for number in 3..=5 {
+        turn(&mut session, number); // messages 4..10
+    }
+    receipt(&mut session, 2); // after 10: the cut itself
+    run_command(&mut session, 2);
+    cancelled_turn(&mut session, 6); // messages 10..12, interrupted, kept
+    turn(&mut session, 7); // messages 12..14
+    session.attach(12, "ATTACH-KEPT".into());
+    receipt(&mut session, 3); // after 14: kept
+    run_command(&mut session, 3);
+    assert_eq!(session.messages.len(), 14);
+    assert!(session.interrupted_turn(2) && session.interrupted_turn(10));
+
+    session.insert("next");
+    let plan = session.start_compaction(None, true).unwrap();
+    assert_eq!(plan.turns, 5);
+    let sent: String = plan.transcript.iter().map(|m| m.content.as_str()).collect();
+    assert!(
+        !sent.contains("turn2 ") && !sent.contains("partial2"),
+        "interrupted turn skipped"
+    );
+    assert!(sent.contains("turn1 ") && sent.contains("turn3 ") && sent.contains("turn5 "));
+    let attempt = session.attempt;
+    session
+        .finish_compaction(attempt, &plan, Ok("note".into()))
+        .unwrap();
+
+    assert_eq!(session.messages.len(), 4);
+    assert!(session.messages[0].content.starts_with("turn6 "));
+    let interrupted: Vec<usize> = (0..4).filter(|i| session.interrupted_turn(*i)).collect();
+    assert_eq!(
+        interrupted,
+        [0],
+        "only the kept interrupted turn remains, renumbered"
+    );
+    // Attachments: the compacted one is gone, the kept one follows its message.
+    let request = session.request_through(2);
+    let all: String = request.iter().map(|m| m.content.as_str()).collect();
+    assert!(!all.contains("ATTACH-OLD"));
+    assert!(all.contains("ATTACH-KEPT"));
+    // Placements inside the compacted range clamp to the top; later ones shift by the cut.
+    let receipts: Vec<usize> = session
+        .task_receipts()
+        .iter()
+        .map(|r| r.after_messages)
+        .collect();
+    assert_eq!(receipts, [0, 0, 4]);
+    let commands: Vec<usize> = session
+        .commands()
+        .iter()
+        .map(|c| c.after_messages)
+        .collect();
+    assert_eq!(commands, [0, 0, 4]);
+    // The renumbered session is still a valid saved conversation and restores identically.
+    use alfredo_tui::{
+        conversations::{ConversationStore, Snapshot},
+        tasks::TaskStore,
+    };
+    let root = std::env::temp_dir().join(format!(
+        "alfredo-compaction-renumber-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(root.join("workspace")).unwrap();
+    let tasks = TaskStore::new(&root.join("state"), &root.join("workspace"), "mission").unwrap();
+    let store = ConversationStore::open(&tasks, "default").unwrap();
+    let mut app = App::new("fixture".into());
+    app.sessions[0] = session;
+    store.save(&Snapshot::capture(&app, "default")).unwrap();
+    let loaded = store.load().unwrap().unwrap().restore();
+    let restored = &loaded.sessions[0];
+    assert_eq!(restored.messages, app.sessions[0].messages);
+    assert!(restored.interrupted_turn(0));
+    assert_eq!(restored.task_receipts().len(), 3);
+    assert_eq!(restored.commands().len(), 3);
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn failure_keeps_history_and_prompt_and_names_the_ways_forward() {
     for result in [

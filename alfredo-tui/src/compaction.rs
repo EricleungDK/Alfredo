@@ -116,13 +116,17 @@ pub fn tokens(num_ctx: Option<u32>) -> u32 {
     })
 }
 
-/// Chat reply budget the provider reserves inside `--num-ctx` (its default `num_predict`).
+/// Chat reply budget (the default `num_predict`). Whether the provider reserves it inside
+/// `--num-ctx` or clamps the reply to what is left of the window, taking it off first
+/// only makes the trigger earlier, never later, so it is safe under both.
 const REPLY_TOKENS: u32 = 4096;
 
 /// Byte budget that triggers compaction: [`COMPACT_AT`], or less when `--num-ctx`
-/// is set. With a window, the chat reply budget comes off first, then about two
+/// is set. With a window, the usual chat reply budget comes off first, then about two
 /// bytes per remaining token leaves room for the system context and tokenizer
-/// variance (the provider estimates bytes/3 and refuses a request that exceeds the window).
+/// variance (the provider estimates bytes/3 against the window). This is deliberately
+/// conservative: it holds whether the provider reserves the full reply budget or only
+/// shrinks the reply to fit.
 pub fn budget(num_ctx: Option<u32>) -> usize {
     match num_ctx {
         Some(window) => COMPACT_AT.min(window.saturating_sub(REPLY_TOKENS) as usize * 2),
@@ -143,7 +147,8 @@ fn cut_text(text: &str, limit: usize) -> String {
 }
 
 /// The summary request: one instruction and the replaced turns as plain text.
-/// Input is bounded so it also fits `--num-ctx` (the provider estimates bytes/3).
+/// Input is bounded so the prompt plus the summary reply budget fits `--num-ctx`
+/// (the provider estimates bytes/3), independent of how it treats the chat reply cap.
 pub fn request(plan: &Plan, num_ctx: Option<u32>) -> Vec<Message> {
     let mut limit = INPUT_MAX;
     if let Some(window) = num_ctx {
@@ -413,7 +418,10 @@ impl Session {
         Ok(())
     }
 
-    pub(crate) fn valid_compaction(&self) -> bool {
-        self.compaction.as_ref().is_none_or(Compaction::valid)
+    /// A note needs conversation schema v18: older builds refuse the unknown field.
+    pub(crate) fn valid_compaction(&self, schema: u32) -> bool {
+        self.compaction
+            .as_ref()
+            .is_none_or(|note| schema >= 18 && note.valid())
     }
 }
