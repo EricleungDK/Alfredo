@@ -65,12 +65,15 @@ pub(crate) fn fingerprint(
     }
     Some(required(arguments, "path").and_then(|path| {
         let target = resolve_target(root, path)?;
+        let at = display(root, &target);
         match std::fs::read(&target) {
             Ok(bytes) => {
                 use sha2::{Digest, Sha256};
-                Ok(format!("{:x}", Sha256::digest(&bytes)))
+                Ok(format!("{at}:{:x}", Sha256::digest(&bytes)))
             }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok("absent".into()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                Ok(format!("{at}:absent"))
+            }
             Err(error) => Err(error.to_string()),
         }
     }))
@@ -130,6 +133,9 @@ fn resolve_target(root: &Path, path: &str) -> Result<PathBuf, String> {
         ));
     }
     match std::fs::symlink_metadata(root.join(relative)) {
+        Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
+            "{path} is a symlink; chat edits change regular files only"
+        )),
         Ok(_) => resolve(root, trimmed),
         Err(_) => {
             let name = relative
@@ -155,6 +161,24 @@ fn resolve_target(root: &Path, path: &str) -> Result<PathBuf, String> {
             Ok(full)
         }
     }
+}
+
+/// Write `text` to `target` without following a symlink placed there since it was
+/// resolved.
+fn write_regular(target: &Path, text: &str) -> Result<(), String> {
+    use std::io::Write;
+    if std::fs::symlink_metadata(target).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Err("target became a symlink; nothing was written".into());
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(target).map_err(|e| e.to_string())?;
+    file.write_all(text.as_bytes()).map_err(|e| e.to_string())
 }
 
 fn read_existing(path: &Path) -> Result<String, String> {
@@ -214,7 +238,7 @@ fn plan_edit(root: &Path, arguments: &Value) -> Result<(PathBuf, String, String)
 
 fn write_file(root: &Path, arguments: &Value) -> Result<String, String> {
     let (target, old, new) = plan_write(root, arguments)?;
-    std::fs::write(&target, &new).map_err(|e| e.to_string())?;
+    write_regular(&target, &new)?;
     Ok(format!(
         "{} {} ({} bytes)",
         if old.is_some() { "wrote" } else { "created" },
@@ -225,7 +249,7 @@ fn write_file(root: &Path, arguments: &Value) -> Result<String, String> {
 
 fn edit_file(root: &Path, arguments: &Value) -> Result<String, String> {
     let (target, _, edited) = plan_edit(root, arguments)?;
-    std::fs::write(&target, &edited).map_err(|e| e.to_string())?;
+    write_regular(&target, &edited)?;
     Ok(format!("edited {} (1 replacement)", display(root, &target)))
 }
 

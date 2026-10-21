@@ -57,6 +57,11 @@ SANDBOX_MISSING = ('grading sandbox unavailable: grading runs model-written code
                    'util-linux (sudo apt install bubblewrap util-linux); refusing to run it unsandboxed. '
                    'Pass --unsafe-unsandboxed-grading only on a disposable machine.')
 LOOPBACK = {'127.0.0.1', 'localhost', '::1'}
+# Chat tasks (task.json "mode": "chat", issue #240) run one `--chat GOAL --headless` turn; the scripted
+# approval policy approves edit_file/write_file inside the task workspace and denies everything else.
+CHAT_POLICY = 'workspace-edits'
+CHAT_READ_TOOLS = ('read_file', 'list_files', 'grep', 'git_status', 'git_branch', 'git_log', 'git_diff')
+CHAT_EDIT_TOOLS = ('edit_file', 'write_file')
 
 METRIC_NAMES = {
     'M1': ('pass@1', 'fraction'), 'M2': ('pass^3', 'fraction'),
@@ -94,7 +99,7 @@ def load_tasks(root, selector=None):
         meta = json.loads((path / 'task.json').read_text(encoding='utf-8'))
         found[path.name] = {
             'id': path.name, 'dir': path, 'title': meta['title'], 'kind': meta['kind'],
-            'scripted_only': bool(meta.get('scripted_only')),
+            'scripted_only': bool(meta.get('scripted_only')), 'mode': meta.get('mode', 'go'),
             'goal': (path / 'goal.md').read_text(encoding='utf-8').strip(),
             'answers': json.loads((path / 'answers.json').read_text(encoding='utf-8')),
             'check': path / 'check.sh',
@@ -331,6 +336,11 @@ class ModelServer:
             self.errors.append(text)
 
     def fixture_reply(self, kind, request, last):
+        if kind == 'chat':
+            # Round n of the tool loop = the number of tool-call rounds already in the request.
+            rounds = sum(1 for m in request['messages'] if m.get('role') == 'assistant' and m.get('tool_calls'))
+            script = self.answers['chat']
+            return script[min(rounds, len(script) - 1)]
         if kind == 'planner':
             tasks = [dict(task, model=request.get('model', 'fixture')) for task in self.answers['plan']['tasks']]
             return json.dumps({'tasks': tasks})
@@ -348,7 +358,10 @@ class ModelServer:
         try:
             request = json.loads(handler.rfile.read(int(handler.headers['Content-Length'])))
             last = request['messages'][-1]['content']
-            record['kind'] = 'worker' if last.startswith('Implement this task:') else 'planner'
+            if request.get('tools'):
+                record['kind'] = 'chat'
+            else:
+                record['kind'] = 'worker' if last.startswith('Implement this task:') else 'planner'
             if record['kind'] == 'worker':
                 with self.lock:
                     self.worker_requests += 1
@@ -358,12 +371,20 @@ class ModelServer:
                 self.forward(handler, request, record)
             else:
                 content = self.fixture_reply(record['kind'], request, last)
+                message = {'content': content}
+                if isinstance(content, dict):  # a scripted chat round
+                    calls = [{'function': {'name': c['name'], 'arguments': c['arguments']}}
+                             for c in content.get('tool_calls', [])]
+                    message = {'role': 'assistant', 'content': content.get('content', '')}
+                    if calls:
+                        message['tool_calls'] = calls
+                    content = message['content'] + json.dumps(calls if calls else '')
                 handler.send_response(200)
                 handler.send_header('Content-Type', 'application/x-ndjson')
                 handler.end_headers()
                 # Deterministic synthetic counts (ceil(chars / 4)); a real server reports its own.
                 chars = sum(len(m.get('content') or '') for m in request['messages'])
-                done = {'message': {'content': content}, 'done': True,
+                done = {'message': message, 'done': True,
                         'prompt_eval_count': -(-chars // 4), 'eval_count': -(-len(content) // 4)}
                 record['prompt'], record['eval'] = done['prompt_eval_count'], done['eval_count']
                 handler.wfile.write((json.dumps(done) + '\n').encode())
@@ -625,6 +646,145 @@ def alfredo_trial(task, index, options):
     return trial
 
 
+def chat_command(binary, endpoint, workspace, state, model, goal):
+    """argv of one headless Chat Agent turn under the scripted, workspace-scoped approval policy."""
+    return [str(binary), '--model', model, '--endpoint', endpoint, '--workspace', str(workspace),
+            '--state-dir', str(state), '--chat', goal, '--headless', '--approve', CHAT_POLICY]
+
+
+def _covers(read, edited):
+    """True when a successful read_file/grep call looked at `edited` (grep without a path searches the root)."""
+    path = (read.get('path') or '').strip().strip('/')
+    if read['tool'] == 'read_file':
+        return path == edited
+    return path in ('', '.') or edited == path or edited.startswith(path + '/')
+
+
+def chat_facts(result):
+    """Trial facts from the `--chat --headless` JSON: calls, error classes, approvals and the read -> edit flow.
+
+    `errors.malformed` counts only malformed calls (unknown tool, bad arguments), `errors.refused` denied
+    approvals; well-formed calls a tool refused (text not found, missing or excluded file) and approved edits
+    that failed are `tool_errors`. `read_before_edit`: a successful read_file or grep of the edited file came
+    before the first applied edit.
+    """
+    calls = result.get('calls') or []
+    approvals = result.get('approvals') or []
+    names = [call['tool'] for call in calls]
+    kinds = [call.get('result') or ('error' if call.get('error') else 'ok') for call in calls]
+    first = next((i for i, call in enumerate(calls) if call['tool'] in CHAT_EDIT_TOOLS and kinds[i] == 'ok'), None)
+    read_before_edit = first is not None and any(
+        call['tool'] in ('read_file', 'grep') and kinds[i] == 'ok'
+        and _covers(call, (calls[first].get('path') or '').strip().strip('/'))
+        for i, call in enumerate(calls[:first]))
+    return {
+        'tool_calls': len(calls),
+        'errors': {'malformed': kinds.count('malformed'), 'refused': kinds.count('denied'), 'sandbox': 0},
+        'tool_errors': kinds.count('error'),
+        'approvals': approvals,
+        'chat': {'policy': result.get('policy'), 'reply': str(result.get('reply') or '')[:400],
+                 'steps': result.get('steps'), 'calls': names, 'read_before_edit': read_before_edit,
+                 'applied': sum(1 for a in approvals if a['outcome'] == 'applied')},
+    }
+
+
+def chat_verdict(passed, output, facts):
+    """A chat trial passes only when check.sh passes AND the edited file was read before the first applied edit."""
+    if passed and not (facts and facts['chat']['read_before_edit']):
+        return False, ('check.sh passed, but read_before_edit is false: no successful read_file/grep of the '
+                       'edited file before the first applied edit\n' + output)[:800]
+    return passed, output
+
+
+def chat_trial(task, index, options):
+    """One `--chat GOAL --headless` turn; the working tree it leaves is committed and graded by check.sh."""
+    trial = blank_trial(task, index)
+    root = Path(tempfile.mkdtemp(prefix='alfredo-eval-', dir=options.tmp_root))
+    server = process = None
+    try:
+        workspace, state = root / 'workspace', root / 'state'
+        make_repo(task, workspace)
+        upstream = None
+        if options.backend == 'ollama':
+            parsed = urllib.parse.urlparse(options.ollama_endpoint)
+            upstream = (parsed.hostname, parsed.port or 11434)
+        server = ModelServer(answers=task['answers'], upstream=upstream)
+        argv = chat_command(options.binary, server.endpoint, workspace, state, options.model,
+                            ' '.join(task['goal'].split()))
+        started = time.monotonic()
+        process = subprocess.Popen(argv, cwd=workspace, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.PIPE, text=True)
+        rss = None
+        out = err = ''
+        while True:
+            rss = peak_rss_kb(process.pid) or rss
+            try:
+                out, err = process.communicate(timeout=0.1)
+                break
+            except subprocess.TimeoutExpired:
+                if time.monotonic() - started > options.timeout:
+                    process.kill()
+                    out, err = process.communicate()
+                    trial['outcome'] = 'timeout'
+                    break
+        trial['wall_s'] = round(time.monotonic() - started, 3)
+        trial['rss_kb'] = rss
+        trial['exit_code'] = process.returncode
+        trial['panic'] = 'panicked at' in err or process.returncode == 101
+        if rss is None:
+            trial['unavailable']['rss_kb'] = '/proc/PID/status was not readable'
+        try:
+            result = json.loads(out.strip().splitlines()[-1]) if out.strip() else None
+        except ValueError:
+            result = None
+        if trial['outcome'] != 'timeout':
+            if server.errors:
+                trial['notes'].append(f'fixture error: {server.errors[0]}')
+            elif result is None:
+                trial['outcome'] = 'crashed' if trial['panic'] else 'harness_error'
+                trial['notes'].append(f'no JSON result (exit {process.returncode}): {err.strip()[-300:]}')
+            else:
+                trial['outcome'] = 'done' if result.get('state') == 'done' else 'failed'
+                if result.get('error'):
+                    trial['notes'].append(f'chat: {result["error"]}'[:400])
+        if result is not None:
+            facts = chat_facts(result)
+            trial.update(tool_calls=facts['tool_calls'], errors=facts['errors'], approvals=facts['approvals'],
+                         chat=facts['chat'], tool_errors=facts['tool_errors'])
+        model, unavailable = model_stats(server.snapshot(), options.backend)
+        trial.update(turns=model['turns'], tokens=model['tokens'], ttft_ms=model['ttft_ms'],
+                     overhead_s=round(max(0.0, trial['wall_s'] - model['model_s']), 3))
+        trial['unavailable'].update(unavailable)
+        trial['unavailable'].update({
+            'repairs': 'a chat turn has no automatic-repair stage',
+            'cold_start_ms': 'a headless chat turn draws no frame',
+            'enter_to_request_ms': 'a headless chat turn has no Enter key',
+        })
+        # Same grader as every task: commit whatever the approved edits left in the tree, archive that commit.
+        git(workspace, 'add', '-A')
+        git(workspace, '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false', 'commit', '-qm',
+            'chat result', '--allow-empty')
+        trial['graded_ref'] = 'HEAD'
+        passed, output = grade(task, workspace, 'HEAD', unsafe_unsandboxed=options.unsafe_unsandboxed_grading)
+        trial['pass'], trial['grade_output'] = chat_verdict(passed, output, facts if result is not None else None)
+        if passed and not trial['pass']:
+            trial['notes'].append('flow: check.sh passed but the edited file was not read before the edit')
+    except Exception as error:  # one broken trial must not abort the whole eval
+        trial['outcome'] = 'harness_error'
+        trial['notes'].append(f'{type(error).__name__}: {error}'[:400])
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+        if server:
+            server.close()
+        if options.keep:
+            print(f'kept {root}', file=sys.stderr)
+        else:
+            remove_tree(root)
+    return trial
+
+
 def recovery_trial(task, options):
     """M14: kill -9 mid-generation, restart (must come back paused), /resume must accept and grade pass."""
     from inference_terminal_smoke import Terminal
@@ -679,7 +839,7 @@ def recovery_trial(task, options):
 def run_probes(options, tasks):
     """All `--probes` measurements; each key is a result dict or {'error': reason}."""
     binary, results = options.binary, {}
-    task = next((t for t in tasks if t['kind'] == 'positive'), None)
+    task = next((t for t in tasks if t['kind'] == 'positive' and t.get('mode') != 'chat'), None)
 
     def recovery():
         if task is None:
@@ -1186,7 +1346,8 @@ def main(argv=None):
         trials = []
         for task in tasks:
             for index in range(1, options.trials + 1):
-                trial = run_trial(task, index, options)
+                runner = chat_trial if options.agent == 'alfredo' and task.get('mode') == 'chat' else run_trial
+                trial = runner(task, index, options)
                 trials.append(trial)
                 print(f'{task["id"]} trial {index}/{options.trials}: {"pass" if trial["pass"] else "FAIL"} '
                       f'({trial["outcome"]}, {trial["wall_s"]:.1f}s)', file=sys.stderr)

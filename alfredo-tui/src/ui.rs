@@ -2252,14 +2252,28 @@ fn approval_card_lines(
     card: &crate::chat_tools::approval::Card,
     width: usize,
 ) -> Vec<Line<'static>> {
+    use crate::chat_tools::approval::CardKind;
     let warn = Style::default().fg(Color::Yellow);
-    let mut lines = vec![
-        Line::default(),
-        Line::styled(
+    let (header, style) = match card.kind {
+        CardKind::Push => (
+            format!("! PUSH {} · {}", card.tool, single_line(&card.summary)),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Red)
+                .add_modifier(Modifier::BOLD),
+        ),
+        CardKind::Edit | CardKind::Git => (
             format!("? Approve {} · {}", card.tool, single_line(&card.summary)),
             warn.add_modifier(Modifier::BOLD),
         ),
-    ];
+    };
+    let mut lines = vec![Line::default(), Line::styled(header, style)];
+    if card.kind == CardKind::Push {
+        lines.push(Line::styled(
+            "  publishes to a remote · asked every time, never always-allowed",
+            Style::default().fg(Color::Red),
+        ));
+    }
     let arguments = card.arguments.to_string();
     let shown: String = arguments.chars().take(width.max(20) * 2).collect();
     lines.push(Line::styled(format!("  args {}", safe(&shown)), dim()));

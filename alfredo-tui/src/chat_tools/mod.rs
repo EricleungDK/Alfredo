@@ -5,6 +5,7 @@
 //! Adding a tool = one function-family file exporting [`Tool`] consts plus one entry
 //! in [`TOOLS`]. Every tool has a [`Tier`]: [`Tier::Read`] runs without asking;
 //! [`Tier::Mutating`] calls pause the loop for owner Approval ([`approval`]);
+//! [`Tier::Push`] calls always do.
 //! [`Tier::Propose`] calls end the turn and prefill the prompt ([`propose`]).
 //!
 //! Tools act on the Coding Workspace (the owner's repository, working tree). Paths are
@@ -14,6 +15,7 @@
 pub mod approval;
 mod edit;
 mod git_read;
+mod git_write;
 pub mod propose;
 mod read;
 mod run;
@@ -37,6 +39,15 @@ pub enum Tier {
     /// Proposes governed work (/plan, /go); changes nothing, so no y/n card: it ends
     /// the turn and prefills the owner's prompt, whose Enter is the confirmation.
     Propose,
+    /// Publishes to a remote (issue #237); always asks, never always-allowed.
+    Push,
+}
+
+impl Tier {
+    /// Whether an always-allow decision (#238) may cover this tier. Push never.
+    pub fn allowlistable(self) -> bool {
+        matches!(self, Tier::Mutating)
+    }
 }
 
 /// One tool the model may call.
@@ -61,6 +72,10 @@ pub static TOOLS: &[Tool] = &[
     git_read::GIT_DIFF,
     edit::WRITE_FILE,
     edit::EDIT_FILE,
+    git_write::GIT_COMMIT,
+    git_write::GIT_SWITCH,
+    git_write::GIT_MERGE,
+    git_write::GIT_PUSH,
     propose::PROPOSE_PLAN,
 ];
 

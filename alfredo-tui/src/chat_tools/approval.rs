@@ -37,6 +37,10 @@ pub enum Decision {
 pub enum CardKind {
     /// Writes working-tree files.
     Edit,
+    /// Changes local Git state: commit, switch branch, merge (issue #237).
+    Git,
+    /// Publishes commits to a remote; shown distinctly, never always-allowed.
+    Push,
 }
 
 /// The pending-action card: tool, arguments, a summary and a diff preview.
@@ -138,6 +142,18 @@ impl Log {
         let Ok(line) = serde_json::to_string(&record) else {
             return;
         };
+        // One writer at a time across threads and processes on this mission.
+        let Ok(lock) = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.path.with_extension("lock"))
+        else {
+            return;
+        };
+        if lock.lock().is_err() {
+            return;
+        }
         let mut records = self.records();
         if records.len() >= 2 * MAX_LOG {
             records.drain(..records.len() + 1 - MAX_LOG);
@@ -147,9 +163,16 @@ impl Log {
                 .filter_map(|r| serde_json::to_string(r).ok())
                 .map(|l| l + "\n")
                 .collect();
-            let temporary = self.path.with_extension("jsonl.tmp");
-            if std::fs::write(&temporary, text).is_ok() {
-                let _ = std::fs::rename(&temporary, &self.path);
+            static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let temporary = self.path.with_extension(format!(
+                "jsonl.{}-{}.tmp",
+                std::process::id(),
+                SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            if std::fs::write(&temporary, text).is_ok()
+                && std::fs::rename(&temporary, &self.path).is_err()
+            {
+                let _ = std::fs::remove_file(&temporary);
             }
             return;
         }
@@ -217,12 +240,15 @@ pub fn card(root: &Path, call: &ToolCall) -> Result<Card, String> {
     if !arguments.is_object() {
         return Err("arguments must be a JSON object".into());
     }
-    let change = super::edit::preview(root, &call.name, &arguments)
-        .ok_or_else(|| format!("{} has no approval preview", call.name))??;
+    let (change, kind) = match super::edit::preview(root, &call.name, &arguments) {
+        Some(change) => (change?, CardKind::Edit),
+        None => super::git_write::preview(root, &call.name, &arguments)
+            .ok_or_else(|| format!("{} has no approval preview", call.name))??,
+    };
     Ok(Card {
         tool: call.name.clone(),
         arguments,
-        kind: CardKind::Edit,
+        kind,
         summary: change.summary,
         preview: change.diff,
         fingerprint: change.fingerprint,
@@ -233,9 +259,14 @@ pub fn card(root: &Path, call: &ToolCall) -> Result<Card, String> {
 /// otherwise dispatch. `Err` is the failure reason.
 pub fn apply(root: &Path, card: &Card) -> Result<String, String> {
     let now = super::edit::fingerprint(root, &card.tool, &card.arguments)
+        .or_else(|| super::git_write::fingerprint(root, &card.tool, &card.arguments))
         .ok_or_else(|| format!("{} has no approval preview", card.tool))??;
     if now != card.fingerprint {
-        return Err("the file changed since the preview; nothing was written. Read it again and re-propose the change".into());
+        return Err(match card.kind {
+            CardKind::Edit => "the file changed since the preview; nothing was written. Read it again and re-propose the change",
+            CardKind::Git | CardKind::Push => "the repository changed since the preview; nothing was run. Check git_status and re-propose",
+        }
+        .into());
     }
     let output = super::dispatch(
         root,

@@ -8,10 +8,7 @@ use crate::{
     provider::Ollama,
 };
 use std::path::Path;
-use tokio::sync::{
-    mpsc::{self, Sender},
-    oneshot,
-};
+use tokio::sync::{mpsc::Sender, oneshot};
 
 /// Tool rounds one turn may run; a model asking for more is stopped with a notice.
 pub const MAX_STEPS: usize = 8;
@@ -53,31 +50,22 @@ pub async fn run_turn(
     };
     let mut steps = 0;
     loop {
-        let (inner, mut events) = mpsc::channel(64);
-        let call = provider.chat(session, attempt, model.clone(), messages.clone(), inner);
-        let forward = async {
-            let mut calls: Vec<ToolCall> = Vec::new();
-            let mut done = false;
-            while let Some(event) = events.recv().await {
-                match event.update {
-                    Update::ToolCalls(found) => calls.extend(found),
-                    Update::Done => done = true,
-                    update => {
-                        if !send(update).await {
-                            return None;
-                        }
-                    }
-                }
-            }
-            Some((calls, done))
-        };
-        let (_, outcome) = tokio::join!(call, forward);
-        // A closed terminal, or a failure the provider already reported.
-        let Some((mut calls, true)) = outcome else {
+        // Tokens go straight to the session sender; `Done` is withheld by the
+        // provider when the round asked for tools. `None`: failed or terminal closed.
+        let Some(mut calls) = provider
+            .chat_round(
+                session,
+                attempt,
+                model.clone(),
+                messages.clone(),
+                sender.clone(),
+            )
+            .await
+        else {
             return;
         };
         if calls.is_empty() {
-            send(Update::Done).await;
+            // The provider already sent `Done` on the same path as the tokens.
             return;
         }
         if steps == MAX_STEPS {
@@ -117,7 +105,7 @@ pub async fn run_turn(
                 _ if proposing && tier != Some(Tier::Propose) => {
                     "error: not run: proposal ends the turn; owner decides via /plan".into()
                 }
-                Some(Tier::Mutating) => match &gate {
+                Some(Tier::Mutating | Tier::Push) => match &gate {
                     None => format!(
                         "error: {} needs approval, which is not available here",
                         call.name
@@ -193,11 +181,25 @@ async fn gated(
             .ok();
         return approval::DENIED.into();
     }
-    let Ok(decision) = decision.await else {
+    // If the turn is aborted (Esc) after the owner answered but before the call is
+    // handed to the blocking pool, the guard still logs exactly one outcome.
+    let mut guard = Undecided {
+        decision: Some(decision),
+        card: card.clone(),
+        log: gate.log.clone(),
+    };
+    let Some(Ok(decision)) = (match guard.decision.as_mut() {
+        Some(receiver) => Some(receiver.await),
+        None => None,
+    }) else {
+        guard.decision = None;
         return approval::DENIED.into();
     };
+    guard.decision = None;
     let root = workspace.to_path_buf();
     let log = gate.log.clone();
+    // No await between here and the spawn: once spawned, the call runs and logs even
+    // if this turn is aborted.
     tokio::task::spawn_blocking(move || {
         let (result, outcome) = match decision {
             Decision::Deny => (approval::DENIED.to_string(), Outcome::Denied),
@@ -213,4 +215,28 @@ async fn gated(
     })
     .await
     .unwrap_or_else(|_| "error: tool execution stopped unexpectedly".into())
+}
+
+/// Logs the outcome of an answered card whose turn was dropped before it ran.
+struct Undecided {
+    decision: Option<oneshot::Receiver<Decision>>,
+    card: approval::Card,
+    log: Option<approval::Log>,
+}
+
+impl Drop for Undecided {
+    fn drop(&mut self) {
+        let (Some(mut receiver), Some(log)) = (self.decision.take(), &self.log) else {
+            return;
+        };
+        let outcome = match receiver.try_recv() {
+            Ok(Decision::Approve) => Outcome::Failed(
+                "turn cancelled before the approved call ran; nothing was written".into(),
+            ),
+            Ok(Decision::Deny) => Outcome::Denied,
+            // Unanswered: the terminal logs it as cancelled.
+            Err(_) => return,
+        };
+        log.append(&self.card, &outcome);
+    }
 }

@@ -58,11 +58,15 @@ F1 on an empty prompt lists every command. Most used:
 | `/scope [JSON]`, `/scope-confirm REV`, `@wayfinder REQUEST` | Project scope agreement |
 
 Chat reads your repository itself: the model can call read-only tools (`read_file`,
-`list_files`, `grep`) on the working tree, so "summarise README" works without naming
+`list_files`, `grep`, `git_status`, `git_branch`, `git_log`, `git_diff`) on the working tree, so "summarise README" works without naming
 the file. Each call and a one-line cut of its result show in the transcript; see
 `docs/reference.md#chat-tools-read-only`. Chat can also edit files (`edit_file`,
 `write_file`): each call shows an approval card with a diff; `y` approves, `n` denies,
-Esc denies and ends the turn (`docs/reference.md#chat-approval-and-file-edits`). Chat prompts also accept `@path/to/file`
+Esc denies and ends the turn (`docs/reference.md#chat-approval-and-file-edits`). Chat can commit, switch branches, merge (`git_commit`, `git_switch`,
+`git_merge`) and push (`git_push`, always asked, card in red) with your approval
+(`docs/reference.md#chat-git-writes-and-push`). For large or risky work chat calls
+`propose_plan`, which only prefills `/plan` or `/go` in your prompt; Enter starts it
+(`docs/reference.md#chat-proposes-governed-work`). Chat prompts also accept `@path/to/file`
 mentions: the file's committed HEAD content (at most 8 files, 32 KiB) is sent with that
 message; see `docs/reference.md#chat-file-mentions-path`.
 
@@ -209,7 +213,7 @@ cargo test --locked --manifest-path alfredo-tui/Cargo.toml
 cargo build --locked --manifest-path alfredo-tui/Cargo.toml
 python3 alfredo-tui/tests/terminal_smoke.py            # PTY journeys against a fake Ollama
 python3 alfredo-tui/tests/autopilot_terminal_smoke.py
-python3 alfredo-tui/tests/headless_smoke.py            # --go --headless without a TTY
+python3 alfredo-tui/tests/headless_smoke.py            # --go --headless without a TTY (--chat --headless: cargo test --test headless_chat)
 python3 alfredo-tui/tests/agent_terminal_smoke.py
 python3 alfredo-tui/tests/inference_terminal_smoke.py
 python3 alfredo-tui/tests/num_ctx_terminal_smoke.py
@@ -280,11 +284,11 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | `src/commands.rs` | Command catalog (F1 picker) |
 | `src/execution.rs` | Bounded process execution: limits, sandbox, process-group cleanup, execution receipts |
 | `src/wake.rs` | Run-loop wake source: one channel for terminal input and "a result is ready" wakes |
-| `src/headless.rs` | `--go GOAL --headless`: autopilot without a terminal, JSON result on stdout |
+| `src/headless.rs` | `--go GOAL --headless`: autopilot without a terminal; `--chat PROMPT --headless`: one Chat Agent turn with a scripted approval policy; JSON result on stdout |
 | `src/on_finish.rs` | `--on-finish PROGRAM` completion hook (no shell, outside the sandbox, 10 s limit) |
 | `src/clean.rs` | `/clean`: removes retained worktrees of finished runs only |
 | `src/chat_mentions.rs`, `src/chat_context.rs` | `@path` mentions (committed HEAD content) and harness context for plain chat turns |
-| `src/chat_tools/mod.rs`, `src/chat_tools/read.rs`, `src/chat_tools/git_read.rs`, `src/chat_tools/run.rs`, `src/chat_tools/edit.rs`, `src/chat_tools/approval.rs`, `src/chat_tools/propose.rs` | Chat tool registry (definitions, tiers, dispatch, path confinement), read-only file and git tools, capped tool loop, write_file/edit_file, approval gate (card, decision, outcome log), propose_plan (prefills /plan or /go) |
+| `src/chat_tools/mod.rs`, `src/chat_tools/read.rs`, `src/chat_tools/git_read.rs`, `src/chat_tools/run.rs`, `src/chat_tools/edit.rs`, `src/chat_tools/approval.rs`, `src/chat_tools/git_write.rs`, `src/chat_tools/propose.rs` | Chat tool registry (definitions, tiers, dispatch, path confinement), read-only file and git tools, capped tool loop, write_file/edit_file, approval gate (card, decision, outcome log), git commit/switch/merge/push, propose_plan (prefills /plan or /go) |
 | `src/workstation.rs`, `src/wayfinder.rs` | One admitted workspace/mission plus its conversation owner; first-contact routing |
 | `src/selection.rs`, `src/selection_command.rs`, `src/selection_store.rs`, `src/missions.rs` | Startup workspace selection, its intent and journal; mission namespace discovery |
 | `src/conversations.rs`, `src/reading.rs`, `src/transcript_cache.rs`, `src/agent_drafts.rs` | Conversation snapshots, reading positions, rendered-message cache, unsent agent drafts |
