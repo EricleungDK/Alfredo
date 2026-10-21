@@ -1326,9 +1326,6 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
             Style::default().fg(Color::Red),
         ));
     }
-    if let Some(card) = session.pending_approval() {
-        lines.extend(approval_card_lines(card, width));
-    }
     segments.push(Segment::Run(lines));
     let block = frame_block(
         area,
@@ -1370,7 +1367,33 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
                 }
             }
         }
+        // The pending card is sized to the viewport so its header, args and key
+        // line all fit; `card_head` is its first line's index and the args offset.
+        let mut card_head = None;
+        if let Some(card) = session.pending_approval() {
+            let (card_lines, head) =
+                approval_card_lines(card, usize::from(width), usize::from(content[1].height));
+            card_head = Some((heights.len(), head));
+            heights.extend(
+                card_lines
+                    .iter()
+                    .map(|line| crate::transcript_cache::line_height(line, width)),
+            );
+            segments.push(Segment::Run(card_lines));
+        }
         let position = session.reading_position_blocks(&heights, content[1].height, &blocks);
+        // Arming waits for the header and args rows to be inside the viewport.
+        session.set_approval_header_drawn(card_head.is_some_and(|(at, head)| {
+            let top = heights[..position.line.min(heights.len())]
+                .iter()
+                .sum::<usize>()
+                + position.row;
+            let first = heights[..(at + 1).min(heights.len())].iter().sum::<usize>();
+            let last = heights[..(at + head + 1).min(heights.len())]
+                .iter()
+                .sum::<usize>();
+            first >= top && last <= top + usize::from(content[1].height)
+        }));
         // Only rows that can reach the viewport are materialised; wrapping them is
         // identical to wrapping the whole tail. Slicing logical lines before the
         // widget's u16 scroll keeps long bounded responses navigable beyond 65,535 rows.
@@ -2260,7 +2283,8 @@ fn receipt_style(receipt: &crate::tasks::Receipt) -> (&'static str, Color) {
 fn approval_card_lines(
     card: &crate::chat_tools::approval::Card,
     width: usize,
-) -> Vec<Line<'static>> {
+    rows: usize,
+) -> (Vec<Line<'static>>, usize) {
     use crate::chat_tools::approval::CardKind;
     let warn = Style::default().fg(Color::Yellow);
     // A host-escalated run_command (#236) gets its own colour and a HOST banner.
@@ -2312,7 +2336,39 @@ fn approval_card_lines(
     let arguments = card.arguments.to_string();
     let shown: String = arguments.chars().take(width.max(20) * 2).collect();
     lines.push(Line::styled(format!("  args {}", safe(&shown)), dim()));
-    for line in card.preview.lines() {
+    // The header, args and key line always fit: a preview taller than the rows
+    // left shows its first lines and a count of the rest (issue #268).
+    let head = lines.len() - 1;
+    let fixed: usize = lines
+        .iter()
+        .map(|line| crate::transcript_cache::line_height(line, width as u16))
+        .sum::<usize>()
+        + 1;
+    let mut budget = rows.saturating_sub(fixed);
+    let preview: Vec<&str> = card.preview.lines().collect();
+    let heights: Vec<usize> = preview
+        .iter()
+        .map(|line| {
+            (safe(line).chars().count() + 2)
+                .div_ceil(width.max(1))
+                .max(1)
+        })
+        .collect();
+    let mut shown = preview.len();
+    if heights.iter().sum::<usize>() > budget {
+        // Keep one row for the count of what is cut.
+        budget = budget.saturating_sub(1);
+        shown = 0;
+        let mut used = 0;
+        for height in &heights {
+            if used + height > budget {
+                break;
+            }
+            used += height;
+            shown += 1;
+        }
+    }
+    for line in &preview[..shown] {
         let color = if line.starts_with('+') {
             Color::Green
         } else if line.starts_with('-') {
@@ -2325,6 +2381,12 @@ fn approval_card_lines(
             Style::default().fg(color),
         ));
     }
+    if shown < preview.len() {
+        lines.push(Line::styled(
+            format!("  [{} more diff lines]", preview.len() - shown),
+            dim(),
+        ));
+    }
     lines.push(Line::styled(
         match crate::chat_tools::allow::offer(card) {
             Some(offer) => format!(
@@ -2335,7 +2397,7 @@ fn approval_card_lines(
         },
         warn,
     ));
-    lines
+    (lines, head)
 }
 
 /// One short human sentence per canonical receipt.

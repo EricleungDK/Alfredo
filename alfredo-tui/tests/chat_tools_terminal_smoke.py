@@ -4,7 +4,9 @@ read_file, Alfredo runs it on the Coding Workspace, shows the call and a cut res
 sends the result back, and the model's answer appears.
 Issue #235 journeys: "redraft README" asks for edit_file; the approval card shows the
 diff; y edits the file in place, n leaves it untouched and the model gets a refusal.
-Issue #264: text typed into the prompt while the card waits never decides it."""
+Issue #264: text typed into the prompt while the card waits never decides it.
+Issue #239 journey: "refactor everything" asks for propose_plan; the turn ends and the
+prompt holds the editable /plan command; nothing else is requested or started."""
 import http.server
 import json
 import os
@@ -49,7 +51,14 @@ class Fixture:
                 last_user = max(i for i, m in enumerate(body['messages']) if m['role'] == 'user')
                 tool_results = [m for m in body['messages'][last_user:] if m['role'] == 'tool']
                 prompt = [m for m in body['messages'] if m['role'] == 'user'][-1]['content']
-                if 'redraft' in prompt and not tool_results:
+                if 'refactor everything' in prompt and not tool_results:
+                    chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
+                        {'function': {'name': 'propose_plan', 'arguments': {
+                            'goal': 'Split PROPOSED_GOAL_MARKER into modules', 'mode': 'plan',
+                            'reason': 'broad refactor'}}}]}, 'done': False}]
+                elif 'refactor everything' in prompt:
+                    chunks = [{'message': {'content': 'SHOULD_NOT_CONTINUE'}, 'done': False}]
+                elif 'redraft' in prompt and not tool_results:
                     chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
                         {'function': {'name': 'edit_file', 'arguments': {
                             'path': 'README.md', 'old_text': 'README_BODY_MARKER: a tiny',
@@ -120,7 +129,7 @@ class ChatTools(unittest.TestCase):
         self.assertEqual(names, ['read_file', 'list_files', 'grep', 'git_status', 'git_branch',
                                  'git_log', 'git_diff', 'write_file', 'edit_file',
                                  'git_commit', 'git_switch', 'git_merge', 'git_push',
-                                 'run_command'])
+                                 'run_command', 'propose_plan'])
         second = chats[1]['messages']
         self.assertEqual(second[-2]['role'], 'assistant')
         self.assertEqual(second[-2]['tool_calls'][0]['function']['name'], 'read_file')
@@ -183,6 +192,14 @@ class ChatTools(unittest.TestCase):
         self.terminal.write(b'n')
         self.terminal.wait_for('MODEL_SAW_DENIAL')
         self.assertEqual(self.readme(), README)
+
+    def test_a_proposal_prefills_the_prompt_and_starts_nothing(self):
+        self.terminal.write(b'refactor everything\r')
+        self.terminal.wait_for('press Enter to start')
+        self.terminal.wait_for('/plan Split PROPOSED_GOAL_MARKER into modules\u258f')
+        time.sleep(0.5)
+        self.assertEqual(len(self.fixture.chats()), 1, 'the turn ended; nothing started')
+        self.assertNotIn('SHOULD_NOT_CONTINUE', self.terminal.screen())
 
 
 if __name__ == '__main__':

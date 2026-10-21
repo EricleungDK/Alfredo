@@ -58,6 +58,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut conversation = "default".to_string();
     let mut parallel_models = 2;
     let mut parallel_models_explicit = false;
+    let mut model_explicit = false;
     let mut structured_thinking = Some(false);
     let mut worker_format = alfredo_tui::worker::WorkerFormat::default();
     let mut keep_alive = std::env::var("ALFREDO_KEEP_ALIVE").unwrap_or_else(|_| "30m".into());
@@ -198,7 +199,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 start_new_mission = arg == "--new-mission";
                 mission = Some(args.next().ok_or("Mission selection needs a name")?);
             }
-            "--model" => model = args.next().ok_or("--model needs a model name")?,
+            "--model" => {
+                model = args.next().ok_or("--model needs a model name")?;
+                model_explicit = true;
+            }
             "--endpoint" => endpoint = args.next().ok_or("--endpoint needs an HTTP(S) origin")?,
             "--help" | "-h" => {
                 print_help();
@@ -293,6 +297,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             mission.as_deref().unwrap_or("default"),
             &conversation,
             &model,
+            model_explicit,
             &provider,
         ));
         println!("{}", report.text);
@@ -332,6 +337,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             start: workspace.unwrap_or(starting),
             conversation,
             model,
+            model_explicit,
             prompt,
             policy: approve.unwrap_or(headless::Policy::Deny),
         })?;
@@ -345,6 +351,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             start: workspace.unwrap_or(starting),
             conversation,
             model,
+            model_explicit,
             goal: go_goal.unwrap_or_default(),
             max_repairs,
         })?;
@@ -1019,7 +1026,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 terminal.draw(|frame| ui::draw_with_tasks(frame, &work.app, &work.tasks))?;
                 dirty = false;
                 // An approval card arms only once it is on screen (selected chat, no
-                // pane, panel, agent view or completion over it); hiding it re-arms.
+                // pane, panel, agent view or completion over it) with its header rows inside
+                // the viewport (issue #268); hiding it re-arms.
                 let chat_shown = work.app.pane.focus.is_none()
                     && !work.app.pane.overlay
                     && work.app.completion.is_none()
@@ -1028,7 +1036,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 let now = std::time::Instant::now();
                 let selected = work.app.selected;
                 for (index, session) in work.app.sessions.iter_mut().enumerate() {
-                    session.approval_visible(chat_shown && index == selected, now);
+                    session.approval_visible(
+                        chat_shown && index == selected && session.approval_header_drawn(),
+                        now,
+                    );
                 }
             }
             // Blocks until a key, a runtime worker going idle (a model, planner,
@@ -2377,8 +2388,9 @@ const HELP_LINES: &[&str] = &[
     "/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /clean [yes] · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME",
     "Enter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry",
     "F2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit",
-    "--headless (with --go GOAL) runs without a terminal: one stderr line per autopilot state change, then one JSON object {state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]} on stdout. Exit 0 all accepted; 1 partial, failed or interrupted (SIGINT/SIGTERM cancel workers like /stop); 2 setup or usage error (Ollama unreachable, model not installed: Error on stderr, nothing on stdout). A failed run's stderr line carries the reason. Waits for the --on-finish hook after the JSON and reports its failure on stderr. Opens the repository's default mission.",
-    "--chat PROMPT --headless runs one Chat Agent turn without a terminal (scripts, evals): read tools run; edit_file/write_file need --approve workspace-edits, which approves them only inside the repository and denies everything else (without it every change is denied). Outcomes go to chat-approvals.jsonl. One JSON object {state, policy, reply, steps, calls:[{tool,path,error,result}], approvals:[{tool,target,outcome,reason}], error} on stdout; exit 0 done, 1 failed or interrupted, 2 setup or usage error. The turn is not saved to the conversation. Interactive chat never skips approval.",
+    "--headless (with --go GOAL) runs without a terminal: one stderr line per autopilot state change, then one JSON object {model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]} on stdout. Exit 0 all accepted; 1 partial, failed or interrupted (SIGINT/SIGTERM cancel workers like /stop); 2 setup or usage error (Ollama unreachable, model not installed: Error on stderr, nothing on stdout). A failed run's stderr line carries the reason. Waits for the --on-finish hook after the JSON and reports its failure on stderr. Opens the repository's default mission.",
+    "--chat PROMPT --headless runs one Chat Agent turn without a terminal (scripts, evals): read tools run; edit_file/write_file need --approve workspace-edits, which approves them only inside the repository and denies everything else (without it every change is denied). Outcomes go to chat-approvals.jsonl. One JSON object {model, state, policy, reply, steps, calls:[{tool,path,error,result}], approvals:[{tool,target,outcome,reason}], error} on stdout; exit 0 done, 1 failed or interrupted, 2 setup or usage error. The turn is not saved to the conversation. Interactive chat never skips approval.",
+    "--model NAME: in the terminal it is the model for new conversations (a restored conversation keeps its saved model). With --headless (--go or --chat) and --doctor an explicit --model is the model for that run even when the conversation has a saved one: it is checked against the installed list first (exit 2 names it), never saved, and echoed as \"model\" in the JSON and on one stderr line. Without --model (or with only ALFREDO_MODEL) the conversation's saved model applies.",
     "",
     "--doctor checks startup prerequisites without entering terminal mode or running inference.",
     "--qualify-inference REPORT [--qualification-repetitions 1..3] runs isolated diagnostic fixtures with baseline/candidate context profiles and one shared client slot. Default: three repetitions; artifacts are retained beside the new report.",
