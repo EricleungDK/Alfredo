@@ -14,13 +14,15 @@ const MAX_ENTRIES: usize = 500;
 const MAX_VISITS: usize = 20_000;
 /// Matching lines reported by one grep.
 const MAX_MATCHES: usize = 200;
+/// Bytes reserved for markers when one line is cut to fit the output.
+const MAX_LINE_MARKER: usize = 300;
 /// Characters of one matching line shown.
 const MAX_LINE: usize = 200;
 
 pub const READ_FILE: Tool = Tool {
     name: "read_file",
     tier: Tier::Read,
-    description: "Read a UTF-8 text file in the Coding Workspace (the owner's repository working tree). Returns numbered lines (line<TAB>text). Long files are cut; call again with start_line to continue.",
+    description: "Read a UTF-8 text file in the Coding Workspace (the owner's repository working tree). Returns numbered lines (line<TAB>text). Long files are cut and over-long lines are shown cut; call again with start_line to continue.",
     parameters: || {
         json!({
             "type": "object",
@@ -112,14 +114,39 @@ fn read_file(root: &Path, arguments: &Value) -> Result<String, String> {
     let mut out = String::new();
     for (number, line) in content.lines().enumerate().skip(start - 1) {
         let entry = format!("{}\t{line}\n", number + 1);
-        if out.len() + entry.len() > MAX_OUTPUT - 120 {
+        if out.len() + entry.len() <= MAX_OUTPUT - 120 {
+            out.push_str(&entry);
+            continue;
+        }
+        if !out.is_empty() {
+            // Stop before it; the next call starts at this line and makes progress.
             out.push_str(&format!(
                 "[truncated at line {number} of {total}; call read_file with start_line={} to continue]",
                 number + 1
             ));
             return Ok(out);
         }
-        out.push_str(&entry);
+        // The line alone exceeds the budget: show its start, cut at a char boundary.
+        let prefix = format!("{}\t", number + 1);
+        let mut end = (MAX_OUTPUT - MAX_LINE_MARKER - prefix.len()).min(line.len());
+        while !line.is_char_boundary(end) {
+            end -= 1;
+        }
+        out.push_str(&prefix);
+        out.push_str(&line[..end]);
+        out.push_str(&format!(
+            "\n[line {} is {} bytes; showed the first {end}]",
+            number + 1,
+            line.len()
+        ));
+        if number + 1 < total {
+            out.push_str(&format!(
+                "\n[truncated at line {} of {total}; call read_file with start_line={} to continue]",
+                number + 1,
+                number + 2
+            ));
+        }
+        return Ok(out);
     }
     Ok(out)
 }

@@ -162,6 +162,53 @@ fn symlinks_cannot_escape_the_workspace() {
 }
 
 #[test]
+fn read_file_cuts_a_single_over_long_line_at_a_char_boundary() {
+    let workspace = Workspace::new();
+    // 3-byte chars: 20,001 bytes, so the budget cut can fall inside a character.
+    let line = "€".repeat(6667);
+    fs::write(workspace.root.join("min.js"), &line).unwrap();
+    let output = workspace.run("read_file", json!({"path": "min.js"}));
+    assert!(output.len() <= MAX_OUTPUT, "{}", output.len());
+    assert!(output.starts_with("1\t€€€"), "{}", &output[..20]);
+    assert!(
+        output.contains("[line 1 is 20001 bytes; showed the first "),
+        "{output}"
+    );
+    assert!(
+        !output.contains("start_line"),
+        "last line has no continuation"
+    );
+    let shown = output.split('\n').next().unwrap().len();
+    assert!(shown > 15 * 1024, "{shown}");
+    let again = workspace.run("read_file", json!({"path": "min.js", "start_line": 1}));
+    assert_eq!(again, output);
+}
+
+#[test]
+fn read_file_continuation_advances_past_a_long_line_after_short_ones() {
+    let workspace = Workspace::new();
+    let long = "x".repeat(20_000);
+    fs::write(
+        workspace.root.join("mixed.txt"),
+        format!("a\nb\n{long}\nlast\n"),
+    )
+    .unwrap();
+    let first = workspace.run("read_file", json!({"path": "mixed.txt"}));
+    assert!(first.starts_with("1\ta\n2\tb\n"), "{first}");
+    assert!(!first.contains("xxx"), "long line is deferred");
+    assert!(first.contains("start_line=3"), "{first}");
+    let second = workspace.run("read_file", json!({"path": "mixed.txt", "start_line": 3}));
+    assert!(second.starts_with("3\txxx"), "{}", &second[..20]);
+    assert!(
+        second.contains("[line 3 is 20000 bytes; showed the first "),
+        "{second}"
+    );
+    assert!(second.contains("start_line=4"), "{second}");
+    let third = workspace.run("read_file", json!({"path": "mixed.txt", "start_line": 4}));
+    assert_eq!(third, "4\tlast\n");
+}
+
+#[test]
 fn secrets_and_generated_trees_are_never_read_listed_or_searched() {
     let workspace = Workspace::new();
     fs::write(workspace.root.join(".env.local"), "TOKEN=SECRET_ENV\n").unwrap();
