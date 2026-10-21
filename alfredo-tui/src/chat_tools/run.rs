@@ -331,6 +331,24 @@ async fn gated(
         Ok(Err(refusal)) => return format!("error: {refusal}"),
         Err(_) => return "error: approval preview stopped unexpectedly".into(),
     };
+    // An always-allow rule (#238) stands in for the keypress only: the preview above
+    // still refuses, and `apply` still checks the fingerprint.
+    if let Some(rules) = gate.rules.clone() {
+        let checked = card.clone();
+        let matched = tokio::task::spawn_blocking(move || rules.matching(&checked))
+            .await
+            .ok()
+            .flatten();
+        if let Some(rule) = matched {
+            let root = workspace.to_path_buf();
+            let log = gate.log.clone();
+            return tokio::task::spawn_blocking(move || {
+                decided(&root, &card, Decision::Approve, log.as_ref(), Some(rule.id))
+            })
+            .await
+            .unwrap_or_else(|_| "error: tool execution stopped unexpectedly".into());
+        }
+    }
     let (reply, decision) = oneshot::channel();
     let request = approval::Request {
         session,
@@ -363,26 +381,44 @@ async fn gated(
     guard.decision = None;
     let root = workspace.to_path_buf();
     let log = gate.log.clone();
+    let rules = gate.rules.clone();
     // No await between here and the spawn: once spawned, the call runs and logs even
     // if this turn is aborted.
     tokio::task::spawn_blocking(move || {
-        let (result, outcome) = match decision {
-            Decision::Deny => (approval::DENIED.to_string(), Outcome::Denied),
-            Decision::Approve => match approval::apply(&root, &card) {
-                Ok(output) => (super::cap(output), Outcome::Applied),
-                Err(reason) => (
-                    super::cap(format!("error: {reason}")),
-                    Outcome::Failed(reason),
-                ),
-            },
+        // `a` adds the rule, then runs this call like `y`. A rule that cannot be
+        // saved still approves this one call.
+        let rule = match (decision, &rules) {
+            (Decision::AlwaysAllow, Some(rules)) => rules.add_for(&card).ok().map(|r| r.id),
+            _ => None,
         };
-        if let Some(log) = log {
-            log.append(&card, &outcome);
-        }
-        result
+        decided(&root, &card, decision, log.as_ref(), rule)
     })
     .await
     .unwrap_or_else(|_| "error: tool execution stopped unexpectedly".into())
+}
+
+/// Run (or deny) a decided card and log the outcome; `rule` approved it, if any.
+fn decided(
+    root: &Path,
+    card: &approval::Card,
+    decision: Decision,
+    log: Option<&approval::Log>,
+    rule: Option<u64>,
+) -> String {
+    let (result, outcome) = match decision {
+        Decision::Deny => (approval::DENIED.to_string(), Outcome::Denied),
+        Decision::Approve | Decision::AlwaysAllow => match approval::apply(root, card) {
+            Ok(output) => (super::cap(output), Outcome::Applied),
+            Err(reason) => (
+                super::cap(format!("error: {reason}")),
+                Outcome::Failed(reason),
+            ),
+        },
+    };
+    if let Some(log) = log {
+        log.append_by(card, &outcome, rule);
+    }
+    result
 }
 
 /// Logs the outcome of an answered card whose turn was dropped before it ran.
@@ -398,7 +434,7 @@ impl Drop for Undecided {
             return;
         };
         let outcome = match receiver.try_recv() {
-            Ok(Decision::Approve) => Outcome::Failed(
+            Ok(Decision::Approve | Decision::AlwaysAllow) => Outcome::Failed(
                 "turn cancelled before the approved call ran; nothing was written".into(),
             ),
             Ok(Decision::Deny) => Outcome::Denied,

@@ -4,9 +4,7 @@
 //! The log is separate from the task store, so it never uses task receipt capacity.
 //!
 //! Generic over tools: a card comes from the tool family's preview function
-//! ([`card`]); later slices add card kinds (sandboxed or host-escalated
-//! `run_command`, git write, push) and an always-allow decision checked before
-//! prompting. A preview error refuses the call without asking.
+//! ([`card`]). Always-allow rules ([`super::allow`]) are checked before prompting. A preview error refuses the call without asking.
 use crate::{model::ToolCall, tasks::TaskStore};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -24,12 +22,13 @@ pub const MAX_LOG: usize = 500;
 /// Log file name in the mission's State Directory.
 pub const LOG_FILE: &str = "chat-approvals.jsonl";
 
-/// What the owner decided. Room is left for an always-allow decision (#238),
-/// which push can never take.
+/// What the owner decided. `AlwaysAllow` approves and adds a rule ([`super::allow`]);
+/// push can never take it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Decision {
     Approve,
     Deny,
+    AlwaysAllow,
 }
 
 /// How a card is presented; later slices add visibly different kinds.
@@ -103,6 +102,9 @@ pub struct Record {
     /// A host-escalated run_command (#236).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub escalated: bool,
+    /// Approved by this always-allow rule (#238), not by a keypress.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<u64>,
 }
 
 /// Bounded append-only JSON-lines log of chat approval outcomes.
@@ -131,6 +133,11 @@ impl Log {
     /// Append one outcome; past `2 * MAX_LOG` records the oldest are dropped. Best
     /// effort: a failed write never blocks chat or tasks.
     pub fn append(&self, card: &Card, outcome: &Outcome) {
+        self.append_by(card, outcome, None)
+    }
+
+    /// [`Log::append`] for a call approved by always-allow `rule`.
+    pub fn append_by(&self, card: &Card, outcome: &Outcome, rule: Option<u64>) {
         let record = Record {
             at_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -153,6 +160,7 @@ impl Log {
                 other => other.clone(),
             },
             escalated: card.escalated(),
+            rule,
         };
         let Ok(line) = serde_json::to_string(&record) else {
             return;
@@ -242,11 +250,25 @@ impl Request {
 pub struct Gate {
     pub sender: mpsc::Sender<Request>,
     pub log: Option<Log>,
+    /// Always-allow rules checked before asking; `None` always asks.
+    pub rules: Option<super::allow::Rules>,
 }
 
 impl Gate {
     pub fn new(sender: mpsc::Sender<Request>, log: Option<Log>) -> Self {
-        Self { sender, log }
+        Self {
+            sender,
+            log,
+            rules: None,
+        }
+    }
+
+    /// Check (and let `a` add to) `rules` before asking.
+    pub fn with_rules(self, rules: super::allow::Rules) -> Self {
+        Self {
+            rules: Some(rules),
+            ..self
+        }
     }
 }
 

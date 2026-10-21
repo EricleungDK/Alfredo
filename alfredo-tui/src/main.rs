@@ -697,13 +697,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             let provider = provider.clone();
                             let sender = sender.clone();
-                            let gate = Some(alfredo_tui::chat_tools::approval::Gate::new(
+                            let mut gate = alfredo_tui::chat_tools::approval::Gate::new(
                                 approval_sender.clone(),
                                 alfredo_tui::chat_tools::approval::Log::for_store(
                                     work.tasks.store(),
                                 )
                                 .ok(),
-                            ));
+                            );
+                            // Always-allow rules of this mission (issue #238).
+                            if let Ok(rules) =
+                                alfredo_tui::chat_tools::allow::Rules::for_store(work.tasks.store())
+                            {
+                                gate = gate.with_rules(rules);
+                            }
+                            let gate = Some(gate);
                             if let Some(job) = jobs[turn.session].take() {
                                 job.abort();
                             }
@@ -1200,7 +1207,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     match key.code {
-                        KeyCode::Char(answer @ ('y' | 'n'))
+                        KeyCode::Char(answer @ ('y' | 'n' | 'a'))
                             if !ctrl
                                 && !key.modifiers.contains(KeyModifiers::ALT)
                                 && work.app.pane.focus.is_none()
@@ -1213,7 +1220,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                     if let Some(request) = approval_replies.remove(&index) {
                                         work.app.notice = format!(
                                             "{} {} · {} · F4 activity shows the outcome",
-                                            if answer == 'y' { "Approved" } else { "Denied" },
+                                            match answer {
+                                                'y' => "Approved",
+                                                'a' => "Always allowed (/allow lists rules)",
+                                                _ => "Denied",
+                                            },
                                             request.card.tool,
                                             request.card.summary
                                         );
@@ -1222,7 +1233,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                                 None => {
                                     work.app.notice =
-                                        "Read the approval card first; press y or n again".into()
+                                        "Read the approval card first; press y or n again (a always allows, not for push)".into()
                                 }
                             }
                         }
@@ -1537,6 +1548,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                         work.app.notice = error.into();
                                         work.app.sessions[index].reject_draft();
                                     }
+                                }
+                            }
+                        }
+                        KeyCode::Enter
+                            if matches!(
+                                work.app.sessions[index].draft.split_whitespace().next(),
+                                Some("/allow")
+                            ) && work.tasks.agent_shown().is_none() =>
+                        {
+                            // Always-allow rules (issue #238): list or clear.
+                            let args =
+                                work.app.sessions[index].draft.trim()["/allow".len()..].to_string();
+                            let result = alfredo_tui::chat_tools::allow::Rules::for_store(
+                                work.tasks.store(),
+                            )
+                            .and_then(|rules| alfredo_tui::chat_tools::allow::slash(&rules, &args));
+                            match result {
+                                Ok(notice) => {
+                                    work.app.sessions[index].remember_submission();
+                                    work.app.sessions[index].clear_draft();
+                                    work.app.notice = notice;
+                                }
+                                Err(error) => {
+                                    work.app.notice = error;
+                                    work.app.sessions[index].reject_draft();
                                 }
                             }
                         }
@@ -2348,6 +2384,7 @@ const HELP_LINES: &[&str] = &[
     "/watch ID|architect · /tell ID|architect TEXT",
     "/clear start this conversation fresh (tasks are kept)",
     "/compact summarise older turns into a short note now (also automatic near the size limit)",
+    "/allow list always-allow rules (a on an approval card adds one; never for push) · /allow clear [ID]",
     "/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /clean [yes] · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME",
     "Enter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry",
     "F2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit",
