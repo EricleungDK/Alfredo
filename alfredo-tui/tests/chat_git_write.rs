@@ -591,6 +591,55 @@ fn push_card_shows_the_push_url() {
     assert!(card.preview.contains("pushed.git"), "{}", card.preview);
 }
 
+/// Issue #267: ssh (and some credential helpers) open /dev/tty for host-key and passphrase
+/// prompts, so the push child must not share the TUI's controlling terminal.
+#[cfg(unix)]
+#[test]
+fn push_child_has_no_controlling_terminal_and_names_the_ssh_prompt() {
+    use std::os::unix::fs::PermissionsExt;
+    let repo = Repo::new();
+    git(
+        &repo.root,
+        &[
+            "remote",
+            "add",
+            "origin",
+            "ssh://git@fake-host.invalid/o/r.git",
+        ],
+    );
+    let marker = repo.base.join("fakessh-session");
+    let script = repo.base.join("fakessh");
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\ncut -d' ' -f6 /proc/$$/stat > '{}'\n\
+             if (exec 3<>/dev/tty) 2>/dev/null; then\n\
+             echo 'FAKESSH-PROMPT: continue connecting (yes/no)?' > /dev/tty\n\
+             read answer < /dev/tty\nfi\n\
+             echo 'Host key verification failed.' >&2\nexit 255\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(repo.root.join("a.txt"), "a\n").unwrap();
+    git(&repo.root, &["add", "a.txt"]);
+    git(&repo.root, &["commit", "-q", "-m", "local work"]);
+    let card = repo.card("git_push", json!({})).unwrap();
+    std::env::set_var("GIT_SSH", &script);
+    let started = Instant::now();
+    let result = approval::apply(&repo.root, &card);
+    std::env::remove_var("GIT_SSH");
+    assert!(started.elapsed() < Duration::from_secs(20), "push hung");
+    let session: i32 = fs::read_to_string(&marker).unwrap().trim().parse().unwrap();
+    // SAFETY: getsid(0) only reads the caller's session id.
+    let ours = unsafe { libc::getsid(0) };
+    assert_ne!(session, ours, "the ssh child shares the TUI's session");
+    let error = result.unwrap_err();
+    assert!(error.contains("ssh needed a terminal prompt"), "{error}");
+    assert!(error.contains("ssh-agent"), "{error}");
+}
+
 #[test]
 fn push_is_refused_when_repository_config_can_run_commands() {
     for (key, value) in [
