@@ -32,14 +32,27 @@ pub(crate) fn path_valid(path: &str) -> bool {
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
 }
+/// Secret material and Git metadata: `.git` components, `.env*`, `*.pem`, `*.key`,
+/// `*.p12`, `*.pfx`. `lower` is a lowercased `/`-separated path.
+pub(crate) fn secret(lower: &str) -> bool {
+    lower
+        .split('/')
+        .any(|part| part == ".git" || part.starts_with(".env"))
+        || [".pem", ".key", ".p12", ".pfx"]
+            .iter()
+            .any(|suffix| lower.ends_with(suffix))
+}
+
+/// Generated and vendor trees: `node_modules`, `target`, `dist`, `vendor`.
+pub(crate) fn generated(lower: &str) -> bool {
+    lower
+        .split('/')
+        .any(|part| matches!(part, "node_modules" | "target" | "dist" | "vendor"))
+}
+
 /// Common secret material and generated/vendor trees are never model inputs.
 pub(crate) fn excluded(lower: &str) -> bool {
-    lower.split('/').any(|part| {
-        matches!(part, ".git" | "node_modules" | "target" | "dist" | "vendor")
-            || part.starts_with(".env")
-    }) || [".pem", ".key", ".p12", ".pfx"]
-        .iter()
-        .any(|suffix| lower.ends_with(suffix))
+    secret(lower) || generated(lower)
 }
 
 /// A committed file named by a check or task text; `content` is Err with the

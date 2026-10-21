@@ -79,7 +79,7 @@ class HeadlessSmoke(unittest.TestCase):
         code, out, err = self.run_headless('--headless')
         self.assertEqual(code, 0, err)
         result = self.result(out)
-        self.assertEqual(set(result), {'state', 'goal', 'branch', 'accepted', 'total', 'repairs', 'failed'})
+        self.assertEqual(set(result), {'model', 'state', 'goal', 'branch', 'accepted', 'total', 'repairs', 'failed'})
         self.assertEqual((result['state'], result['goal'], result['accepted'], result['total'],
                           result['repairs'], result['failed']), ('done', GOAL, 2, 2, 1, []))
         self.assertRegex(result['branch'], r'^alfredo/go-')

@@ -187,6 +187,7 @@ pub async fn run_turn(
                 call.name = "unnamed".into();
             }
         }
+        let proposing = calls.iter().take(MAX_CALLS).any(super::propose::valid);
         let mut results: Vec<String> = Vec::with_capacity(calls.len());
         let held_text: usize = messages.iter().map(|m| m.content.len()).sum();
         let held_window: usize =
@@ -206,6 +207,10 @@ pub async fn run_turn(
             let mut result = match tier {
                 _ if index >= MAX_CALLS => {
                     format!("error: not run; at most {MAX_CALLS} tool calls per reply, ask again")
+                }
+                // A proposal hands off: nothing else in its reply runs or asks.
+                _ if proposing && tier != Some(Tier::Propose) => {
+                    "error: not run: proposal ends the turn; owner decides via /plan".into()
                 }
                 Some(Tier::Mutating | Tier::Push) => match &gate {
                     None => format!(
@@ -255,7 +260,19 @@ pub async fn run_turn(
             }
             results.push(result);
         }
-        messages.extend(ToolStep { calls, results }.messages());
+        let step = ToolStep { calls, results };
+        let proposal = super::propose::prefill(&step);
+        // The step was already reported call by call (`Update::ToolResult`).
+        messages.extend(step.messages());
+        // A proposal hands off to the owner: the turn ends with the command in the prompt.
+        if let Some(command) = proposal {
+            send(Update::Token(format!(
+                "Proposed `{command}`. It is in your prompt: edit it and press Enter to start, or clear it to drop it."
+            )))
+            .await;
+            send(Update::Done).await;
+            return;
+        }
     }
 }
 
