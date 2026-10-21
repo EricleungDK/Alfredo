@@ -1197,9 +1197,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             // y/n answer the card only with an empty draft after a quiet gap
                             // (issue #264); otherwise they fall through to typing.
-                            match work.app.sessions[index]
-                                .answer_approval(answer, key_at)
-                            {
+                            match work.app.sessions[index].answer_approval(answer, key_at) {
                                 Some(decision) => {
                                     if let Some(request) = approval_replies.remove(&index) {
                                         work.app.notice = format!(
