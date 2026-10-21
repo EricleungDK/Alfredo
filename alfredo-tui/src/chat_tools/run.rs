@@ -8,10 +8,7 @@ use crate::{
     provider::Ollama,
 };
 use std::path::Path;
-use tokio::sync::{
-    mpsc::Sender,
-    oneshot,
-};
+use tokio::sync::{mpsc::Sender, oneshot};
 
 /// Tool rounds one turn may run; a model asking for more is stopped with a notice.
 pub const MAX_STEPS: usize = 8;
