@@ -302,7 +302,7 @@ pub(crate) fn diff(old: &str, new: &str) -> String {
     let mut lines = vec![format!("@@ line {} @@", head + 1)];
     lines.extend(old[head..old.len() - tail].iter().map(|l| format!("-{l}")));
     lines.extend(new[head..new.len() - tail].iter().map(|l| format!("+{l}")));
-    let notes = ending_notes(&old_text, &new_text);
+    let notes = ending_notes(old_text, new_text);
     if lines.len() == 1 {
         return if notes.is_empty() {
             "(no line changes)".into()
