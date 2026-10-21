@@ -376,6 +376,82 @@ fn a_timeout_kills_the_whole_process_tree() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Issue #304: a host `run_command` child must not share Alfredo's controlling terminal
+/// (sudo/ssh/git open `/dev/tty` directly and would draw over the TUI and read its keys).
+/// The test re-runs itself as a child whose session has a real controlling tty (a pty
+/// slave attached with TIOCSCTTY), because the test harness itself has none.
+#[cfg(target_os = "linux")]
+#[test]
+fn host_command_has_no_controlling_terminal_even_when_alfredo_has_one() {
+    use std::os::unix::process::CommandExt;
+    const NAME: &str = "host_command_has_no_controlling_terminal_even_when_alfredo_has_one";
+    if std::env::var_os("ALFREDO_TEST_CTTY_CHILD").is_some() {
+        // Sanity: this process really has a controlling terminal.
+        assert!(
+            fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open("/dev/tty")
+                .is_ok(),
+            "the re-run did not get a controlling terminal"
+        );
+        let root = workspace("ctty");
+        let card = approval::card(
+            &root,
+            &call(json!({
+                "command": "ps -o tty= -p $$; echo x > /dev/tty; echo rc=$?; \
+                            echo 'ssh: cannot open /dev/tty' >&2; exit 3",
+                "escalate": true
+            })),
+        )
+        .unwrap();
+        let result = approval::apply(&root, &card).unwrap();
+        let _ = fs::remove_dir_all(&root);
+        assert!(!result.contains("rc=0"), "/dev/tty was writable: {result}");
+        assert!(result.contains("rc="), "{result}");
+        assert!(result.contains('?'), "child has a tty: {result}");
+        assert!(!result.contains("pts/"), "child has a tty: {result}");
+        assert!(result.contains("exit code 3"), "{result}");
+        assert!(result.contains("ssh-agent"), "no terminal hint: {result}");
+        return;
+    }
+    let (mut master, mut slave) = (0, 0);
+    // SAFETY: openpty fills two descriptors we then own.
+    let opened = unsafe {
+        libc::openpty(
+            &mut master,
+            &mut slave,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    assert_eq!(opened, 0, "openpty failed");
+    let mut child = Command::new(std::env::current_exe().unwrap());
+    child
+        .args([NAME, "--exact", "--nocapture", "--test-threads=1"])
+        .env("ALFREDO_TEST_CTTY_CHILD", "1");
+    // SAFETY: only async-signal-safe calls (setsid, ioctl, close) between fork and exec.
+    unsafe {
+        child.pre_exec(move || {
+            libc::setsid();
+            if libc::ioctl(slave, libc::TIOCSCTTY as _, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            libc::close(slave);
+            libc::close(master);
+            Ok(())
+        });
+    }
+    let status = child.status().unwrap();
+    // SAFETY: closing our own descriptors.
+    unsafe {
+        libc::close(master);
+        libc::close(slave);
+    }
+    assert!(status.success(), "the re-run with a controlling tty failed");
+}
+
 #[test]
 fn output_is_capped_with_a_truncation_marker() {
     let root = workspace("cap");

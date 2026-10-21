@@ -731,7 +731,7 @@ pub struct RustExecutionProvider {
 impl RustExecutionProvider {
     pub fn new() -> Self {
         Self {
-            launcher: Box::new(SystemProcessLauncher),
+            launcher: Box::new(SystemProcessLauncher { new_session: false }),
         }
     }
 
@@ -886,7 +886,9 @@ impl Default for RustExecutionProvider {
 
 /// Run `request.argv` directly on the host, without Bubblewrap or request
 /// validation, in its own process group with the request's timeout, output limit
-/// and process-tree kill. Only for owner-approved host escalation (chat
+/// and process-tree kill. The child gets its own session, so it has no controlling
+/// terminal: ssh, sudo and git open `/dev/tty` directly and would otherwise draw over
+/// the TUI and read its keystrokes (issue #304). Only for owner-approved host escalation (chat
 /// `run_command` with `escalate`, issue #236); every other effect goes through
 /// [`RustExecutionProvider`]. `poll` is called every few milliseconds; returning
 /// `Err(ControlSignal::Cancelled(_))` kills the process group (issue #302).
@@ -894,7 +896,7 @@ pub(crate) fn run_on_host(
     request: &ExecutionRequest,
     poll: &mut dyn FnMut() -> Result<(), ControlSignal>,
 ) -> Result<ProcessOutcome, LaunchError> {
-    SystemProcessLauncher.run(
+    SystemProcessLauncher { new_session: true }.run(
         request,
         &mut ExecutionCallbacks {
             output: None,
@@ -904,7 +906,11 @@ pub(crate) fn run_on_host(
     )
 }
 
-struct SystemProcessLauncher;
+/// `new_session` (host escalation only) detaches the child from Alfredo's controlling
+/// terminal with `setsid`; the sandboxed provider path keeps its plain process group.
+struct SystemProcessLauncher {
+    new_session: bool,
+}
 
 impl ProcessLauncher for SystemProcessLauncher {
     fn run(
@@ -921,7 +927,7 @@ impl ProcessLauncher for SystemProcessLauncher {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        configure_process(&mut command, &request.limits);
+        configure_process(&mut command, &request.limits, self.new_session);
         let mut child = command.spawn().map_err(|error| LaunchError {
             failure: StructuredFailure::new(
                 "provider-start-failed",
@@ -1517,18 +1523,25 @@ fn linux_group_has_runnable_member(pgid: u32) -> Option<bool> {
     saw_member.then_some(false)
 }
 
-fn configure_process(command: &mut Command, limits: &ExecutionLimits) {
+/// Own process group for the tree kill; with `new_session`, a new session as well
+/// (`setsid` also makes the child its own group leader, so the group kill still works).
+fn configure_process(command: &mut Command, limits: &ExecutionLimits, new_session: bool) {
     #[cfg(unix)]
     {
         let _ = limits;
         use std::os::unix::process::CommandExt;
         unsafe {
             command.pre_exec(move || {
-                if libc::setpgid(0, 0) != 0 {
+                let (result, call) = if new_session {
+                    (libc::setsid(), "setsid")
+                } else {
+                    (libc::setpgid(0, 0), "setpgid")
+                };
+                if result < 0 {
                     let error = io::Error::last_os_error();
                     return Err(io::Error::new(
                         error.kind(),
-                        format!("setpgid failed: {error}"),
+                        format!("{call} failed: {error}"),
                     ));
                 }
                 Ok(())

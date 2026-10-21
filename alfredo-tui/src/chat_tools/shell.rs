@@ -121,6 +121,7 @@ const MAX_COMMAND: usize = 8 * 1024;
 /// Output kept from the process before it is stopped (the model sees less; see `cap`).
 const OUTPUT_LIMIT: usize = 1024 * 1024;
 /// Shown to the model when a sandboxed command fails.
+const TERMINAL_HINT: &str = "note: host commands run without a terminal, so a command that needs a terminal prompt (sudo password, ssh host key or passphrase, git credentials) cannot run here; use ssh-agent or a credential helper, or ask the owner to run it themselves.";
 const ESCALATE_HINT: &str = "note: ran sandboxed (network off; only the Coding Workspace is writable; .git and tools outside /usr are not available). If it failed for that reason, call run_command again with escalate: true; the owner must approve running it on the host.";
 
 pub const RUN_COMMAND: Tool = Tool {
@@ -460,6 +461,10 @@ fn on_host(plan: &Plan, stop: &Stop) -> Result<String, String> {
         },
     );
     request.environment = std::env::vars().collect();
+    // The child has no terminal (issue #304): fail git prompts instead of hanging.
+    request
+        .environment
+        .insert("GIT_TERMINAL_PROMPT".into(), "0".into());
     let outcome = execution::run_on_host(&request, &mut || cancel_signal(stop))
         .map_err(|error| format!("could not start the command: {}", error.failure.message))?;
     if outcome.status == ProcessOutcomeStatus::Unknown {
@@ -530,9 +535,26 @@ fn report(plan: &Plan, ran: Ran) -> Result<String, String> {
                 text.push('\n');
                 text.push_str(ESCALATE_HINT);
             }
+            if plan.escalate && ran.exit_code != Some(0) && needed_terminal(&ran.stderr) {
+                text.push('\n');
+                text.push_str(TERMINAL_HINT);
+            }
             Ok(format!("{text}\n{output}"))
         }
     }
+}
+
+/// Whether stderr shows the command wanted a terminal it does not have.
+fn needed_terminal(stderr: &str) -> bool {
+    let stderr = stderr.to_lowercase();
+    [
+        "/dev/tty",
+        "no tty",
+        "a terminal is required",
+        "host key verification failed",
+    ]
+    .iter()
+    .any(|needle| stderr.contains(needle))
 }
 
 #[cfg(test)]
