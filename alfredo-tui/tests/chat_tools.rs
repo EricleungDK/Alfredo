@@ -70,7 +70,8 @@ fn registry_lists_read_tier_tools_as_ollama_function_definitions() {
             "git_commit",
             "git_switch",
             "git_merge",
-            "git_push"
+            "git_push",
+            "run_command"
         ]
     );
     assert!(chat_tools::TOOLS[..7]
