@@ -970,6 +970,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             if dirty {
                 terminal.draw(|frame| ui::draw_with_tasks(frame, &work.app, &work.tasks))?;
                 dirty = false;
+                // An approval card arms only once it is on screen (selected chat, no
+                // pane, panel, agent view or completion over it); hiding it re-arms.
+                let chat_shown = work.app.pane.focus.is_none()
+                    && !work.app.pane.overlay
+                    && work.app.completion.is_none()
+                    && !work.tasks.visible
+                    && work.tasks.agent_shown().is_none();
+                let now = std::time::Instant::now();
+                let selected = work.app.selected;
+                for (index, session) in work.app.sessions.iter_mut().enumerate() {
+                    session.approval_visible(chat_shown && index == selected, now);
+                }
             }
             // Blocks until a key, a runtime worker going idle (a model, planner,
             // worker or task result may be waiting) or the timer fallback.

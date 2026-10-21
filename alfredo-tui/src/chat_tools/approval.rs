@@ -138,6 +138,18 @@ impl Log {
         let Ok(line) = serde_json::to_string(&record) else {
             return;
         };
+        // One writer at a time across threads and processes on this mission.
+        let Ok(lock) = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.path.with_extension("lock"))
+        else {
+            return;
+        };
+        if lock.lock().is_err() {
+            return;
+        }
         let mut records = self.records();
         if records.len() >= 2 * MAX_LOG {
             records.drain(..records.len() + 1 - MAX_LOG);
@@ -147,9 +159,16 @@ impl Log {
                 .filter_map(|r| serde_json::to_string(r).ok())
                 .map(|l| l + "\n")
                 .collect();
-            let temporary = self.path.with_extension("jsonl.tmp");
-            if std::fs::write(&temporary, text).is_ok() {
-                let _ = std::fs::rename(&temporary, &self.path);
+            static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let temporary = self.path.with_extension(format!(
+                "jsonl.{}-{}.tmp",
+                std::process::id(),
+                SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            ));
+            if std::fs::write(&temporary, text).is_ok()
+                && std::fs::rename(&temporary, &self.path).is_err()
+            {
+                let _ = std::fs::remove_file(&temporary);
             }
             return;
         }

@@ -418,6 +418,7 @@ fn pending_session() -> Session {
         "stale"
     );
     assert!(session.await_approval(attempt, card, now));
+    session.approval_visible(true, now);
     session
 }
 
