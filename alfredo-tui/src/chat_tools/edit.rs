@@ -163,22 +163,104 @@ fn resolve_target(root: &Path, path: &str) -> Result<PathBuf, String> {
     }
 }
 
-/// Write `text` to `target` without following a symlink placed there since it was
-/// resolved.
+/// Removes the temp file on drop unless the rename succeeded (`armed` cleared).
+struct TempGuard {
+    path: PathBuf,
+    armed: bool,
+}
+
+impl Drop for TempGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// Atomically replace `target` with `text` (issue #265): the bytes go to a temp file
+/// beside the target (`.NAME.alfredo-tmp-RANDOM`), which is synced, given the original's
+/// permission bits and renamed over the target. Any failure leaves the original
+/// byte-identical and removes the temp file. A target with several hardlinks is replaced
+/// by a new file, so the other links keep their old content (the link is broken, not
+/// written through). A symlink at the target is refused; `rename` replaces a symlink
+/// rather than following it, and the temp file is created with `create_new`.
+/// Owner, group and extended attributes of an existing file are not carried over.
 fn write_regular(target: &Path, text: &str) -> Result<(), String> {
+    write_atomic(target, text, || Ok(()))
+}
+
+/// [`write_regular`] with a seam that runs after the temp file is written and synced,
+/// right before the rename; tests inject a failure there.
+fn write_atomic(
+    target: &Path,
+    text: &str,
+    before_rename: impl FnOnce() -> std::io::Result<()>,
+) -> Result<(), String> {
     use std::io::Write;
+    let existing = match std::fs::symlink_metadata(target) {
+        Ok(m) if m.file_type().is_symlink() => {
+            return Err("target became a symlink; nothing was written".into())
+        }
+        Ok(m) if !m.is_file() => return Err("target is not a regular file".into()),
+        Ok(m) => Some(m),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e.to_string()),
+    };
+    let dir = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let name = target
+        .file_name()
+        .ok_or_else(|| "target names no file".to_string())?
+        .to_string_lossy();
+    let name: String = name.chars().take(100).collect();
+    let (mut file, mut guard) = {
+        let mut attempt = 0u32;
+        loop {
+            let suffix = {
+                use std::hash::{BuildHasher, Hasher};
+                let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();
+                hasher.write_u32(std::process::id());
+                hasher.write_u32(attempt);
+                hasher.finish()
+            };
+            let path = dir.join(format!(".{name}.alfredo-tmp-{suffix:016x}"));
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NOFOLLOW);
+            }
+            match options.open(&path) {
+                Ok(file) => break (file, TempGuard { path, armed: true }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists && attempt < 8 => {
+                    attempt += 1;
+                }
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+    };
+    if let Some(metadata) = &existing {
+        file.set_permissions(metadata.permissions())
+            .map_err(|e| e.to_string())?;
+    }
+    file.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())?;
+    drop(file);
+    before_rename().map_err(|e| e.to_string())?;
+    // Re-check right before the swap so a symlink put there meanwhile is not replaced.
     if std::fs::symlink_metadata(target).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err("target became a symlink; nothing was written".into());
     }
-    let mut options = std::fs::OpenOptions::new();
-    options.write(true).create(true).truncate(true);
+    std::fs::rename(&guard.path, target).map_err(|e| e.to_string())?;
+    guard.armed = false;
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_NOFOLLOW);
+    if let Ok(dir) = std::fs::File::open(dir) {
+        let _ = dir.sync_all();
     }
-    let mut file = options.open(target).map_err(|e| e.to_string())?;
-    file.write_all(text.as_bytes()).map_err(|e| e.to_string())
+    Ok(())
 }
 
 fn read_existing(path: &Path) -> Result<String, String> {
@@ -219,12 +301,33 @@ fn plan_edit(root: &Path, arguments: &Value) -> Result<(PathBuf, String, String)
     }
     let target = resolve(root, path)?;
     let current = read_existing(&target)?;
-    match current.matches(old_text).count() {
+    // A file whose every line ends in CRLF is matched and edited as LF text (the model
+    // sees `\r` as nothing), then written back with CRLF. Mixed files are matched on
+    // exact bytes and the replacement is inserted as given.
+    let crlf = line_endings(&current) == "CRLF";
+    let (haystack, old_text, new_text) = if crlf {
+        (
+            current.replace("\r\n", "\n"),
+            old_text.replace("\r\n", "\n"),
+            new_text.replace("\r\n", "\n"),
+        )
+    } else {
+        (current.clone(), old_text.to_string(), new_text.to_string())
+    };
+    match haystack.matches(old_text.as_str()).count() {
         0 => Err(format!(
-            "old_text not found in {path}; read_file and copy the text exactly"
+            "old_text not found in {path}; read_file and copy the text exactly{}",
+            if line_endings(&current) == "mixed" {
+                " (the file mixes CRLF and LF line endings, so old_text must match its exact bytes)"
+            } else {
+                ""
+            }
         )),
         1 => {
-            let edited = current.replacen(old_text, new_text, 1);
+            let mut edited = haystack.replacen(old_text.as_str(), &new_text, 1);
+            if crlf {
+                edited = edited.replace('\n', "\r\n");
+            }
             if edited.len() > MAX_FILE {
                 return Err(format!("result is over the {MAX_FILE}-byte limit"));
             }
@@ -233,6 +336,18 @@ fn plan_edit(root: &Path, arguments: &Value) -> Result<(PathBuf, String, String)
         count => Err(format!(
             "old_text occurs {count} times in {path}; include more surrounding text so it matches once"
         )),
+    }
+}
+
+/// `CRLF` or `LF` when every line break is that, `mixed`, or `none` without breaks.
+fn line_endings(text: &str) -> &'static str {
+    let crlf = text.matches("\r\n").count();
+    let lf = text.matches('\n').count() - crlf;
+    match (crlf, lf) {
+        (0, 0) => "none",
+        (_, 0) => "CRLF",
+        (0, _) => "LF",
+        _ => "mixed",
     }
 }
 
@@ -256,6 +371,7 @@ fn edit_file(root: &Path, arguments: &Value) -> Result<String, String> {
 /// Line diff: unchanged head and tail are skipped; the changed middle shows as
 /// `-` old lines then `+` new lines, cut at [`MAX_PREVIEW_LINES`].
 pub(crate) fn diff(old: &str, new: &str) -> String {
+    let (old_text, new_text) = (old, new);
     let old: Vec<&str> = old.lines().collect();
     let new: Vec<&str> = new.lines().collect();
     let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
@@ -268,13 +384,135 @@ pub(crate) fn diff(old: &str, new: &str) -> String {
     let mut lines = vec![format!("@@ line {} @@", head + 1)];
     lines.extend(old[head..old.len() - tail].iter().map(|l| format!("-{l}")));
     lines.extend(new[head..new.len() - tail].iter().map(|l| format!("+{l}")));
+    let notes = ending_notes(old_text, new_text);
     if lines.len() == 1 {
-        return "(no line changes)".into();
+        return if notes.is_empty() {
+            "(no line changes)".into()
+        } else {
+            notes.join("\n")
+        };
     }
     let total = lines.len();
     if total > MAX_PREVIEW_LINES {
         lines.truncate(MAX_PREVIEW_LINES);
         lines.push(format!("[{} more diff lines]", total - MAX_PREVIEW_LINES));
     }
+    lines.extend(notes);
     lines.join("\n")
+}
+
+/// Card lines for a change to line endings or the final newline, which `lines()` hides.
+/// Empty for a new (empty) file or when the bytes are equal.
+fn ending_notes(old: &str, new: &str) -> Vec<String> {
+    let mut notes = vec![];
+    if old.is_empty() || old == new {
+        return notes;
+    }
+    let (before, after) = (line_endings(old), line_endings(new));
+    if before != after && before != "none" && after != "none" {
+        notes.push(format!("line endings {before} \u{2192} {after}"));
+    }
+    match (old.ends_with('\n'), new.ends_with('\n')) {
+        (true, false) => notes.push("final newline removed".into()),
+        (false, true) => notes.push("final newline added".into()),
+        _ => {}
+    }
+    if notes.is_empty() && old.lines().eq(new.lines()) {
+        notes.push("line endings changed".into());
+    }
+    notes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("alfredo-265-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn leftovers(dir: &Path) -> Vec<String> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("alfredo-tmp"))
+            .collect()
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_original_and_no_temp_file() {
+        let dir = temp_dir("fail");
+        let target = dir.join("a.txt");
+        std::fs::write(&target, "original\n").unwrap();
+        let err = write_atomic(&target, &"x".repeat(48_000), || {
+            Err(std::io::Error::other("injected failure"))
+        })
+        .unwrap_err();
+        assert!(err.contains("injected failure"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"original\n");
+        assert!(leftovers(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_unwritable_directory_leaves_the_original() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("ro");
+        let target = dir.join("a.txt");
+        std::fs::write(&target, "original\n").unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let result = write_regular(&target, "new\n");
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Root ignores directory permissions; the write then succeeds.
+        if result.is_err() {
+            assert_eq!(std::fs::read(&target).unwrap(), b"original\n");
+        }
+        assert!(leftovers(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_hardlinked_file_does_not_change_its_other_link() {
+        let dir = temp_dir("hl");
+        let outside = dir.join("outside.txt");
+        let linked = dir.join("hl.txt");
+        std::fs::write(&outside, "outside\n").unwrap();
+        std::fs::hard_link(&outside, &linked).unwrap();
+        write_regular(&linked, "changed\n").unwrap();
+        assert_eq!(std::fs::read(&outside).unwrap(), b"outside\n");
+        assert_eq!(std::fs::read(&linked).unwrap(), b"changed\n");
+        assert!(leftovers(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn permission_bits_survive_a_replace() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("mode");
+        let target = dir.join("run.sh");
+        std::fs::write(&target, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o751)).unwrap();
+        write_regular(&target, "#!/bin/sh\necho hi\n").unwrap();
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o751);
+        assert_eq!(std::fs::read(&target).unwrap(), b"#!/bin/sh\necho hi\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_new_file_is_created_and_a_symlink_target_is_refused() {
+        let dir = temp_dir("new");
+        let fresh = dir.join("fresh.txt");
+        write_regular(&fresh, "hi\n").unwrap();
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"hi\n");
+        let link = dir.join("link.txt");
+        std::os::unix::fs::symlink(&fresh, &link).unwrap();
+        assert!(write_regular(&link, "no\n").is_err());
+        assert_eq!(std::fs::read(&fresh).unwrap(), b"hi\n");
+        assert!(leftovers(&dir).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

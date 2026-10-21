@@ -374,9 +374,9 @@ is loading or busy. Model discovery bypasses this queue.
   `OLLAMA_CONTEXT_LENGTH` is set); Alfredo's worker and repair prompts can be far
   larger, so Ollama may then truncate them silently. With the flag set, `num_predict` (a
   cap on generated tokens, not a reservation) is clamped to the window minus the
-  estimated prompt (bytes/3), never below a 256-token floor, and a request is refused
+  estimated prompt (bytes/3, including the serialized chat tool definitions), never below a 256-token floor, and a request is refused
   before sending only when the estimated prompt plus 256 exceeds the window: chat says
-  `prompt ≈N tokens > --num-ctx M; shorten the request`, planner, worker and repair say
+  `prompt ≈N tokens > --num-ctx M; run /compact or /clear, press Ctrl+N for a new conversation, or raise --num-ctx`, planner, worker and repair say
   `raise --num-ctx (≈N tokens needed)` because they cannot shorten anything. A reply cut
   off by the clamped limit reports the real token limit and suggests raising `--num-ctx`.
   Short prompts therefore work at any accepted window, including 2048 and 4096.
@@ -1466,7 +1466,19 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   includes, `git_status` and working-tree or staged diffs are refused (they would run the
   repository's clean filters); `git_log` and `git_diff` with `base` and `target` still work.
 - **Size.** Every result is capped at 16 KiB; refusals come back to the model as
-  `error: …` text it can react to.
+  `error: …` text it can react to. Results are also budgeted to the room left. With
+  `--num-ctx`, each result is cut (same `[truncated: …]` marker) to `(window - prompt
+  tokens - 256) × 3/2` bytes when that is under 16 KiB, counting the tool definitions in
+  the prompt estimate. Under the 128 KiB conversation limit a result is cut to what fits
+  with 4 KiB left for the answer. When less than 256 bytes would remain, the result is
+  replaced by `error: not shown; the conversation is near its size limit, answer with what
+  you have or ask for a narrower range` (`the context window (--num-ctx) is nearly full`
+  under `--num-ctx`), and the model gets one more round without tools to answer, so the
+  turn ends with a reply instead of failing. A request refused by the window guard or the
+  conversation limit says how to continue: `/compact` or `/clear`, Ctrl+N, or a larger
+  `--num-ctx`; `/compact` works on that failed conversation. When the window cannot hold
+  the tool definitions (about 3k tokens) plus a 256-token reply floor, as at `--num-ctx
+  2048`, that turn runs as plain chat with a one-line notice.
 - **Loop.** The model may answer, or ask for tools; Alfredo runs the calls, sends the
   results back and asks again. A turn runs at most 8 tool rounds; per round 16 calls run,
   further calls (up to 64) get an `error: not run` result and any beyond are dropped;
@@ -1498,8 +1510,8 @@ Approval (ADR 0004); there is no skip-approval mode.
 
 | Tool | Arguments | Effect |
 | --- | --- | --- |
-| `write_file` | `path`, `content` | Creates or replaces a UTF-8 text file (parent directory must exist; at most 1 MiB) |
-| `edit_file` | `path`, `old_text`, `new_text` | Replaces the one exact occurrence of `old_text`; zero or several matches are refused |
+| `write_file` | `path`, `content` | Creates or replaces a UTF-8 text file (parent directory must exist; at most 1 MiB); writes `content` exactly as given, so LF content replaces CRLF (the card says `line endings CRLF → LF`, `final newline removed` and so on instead of `(no line changes)`) |
+| `edit_file` | `path`, `old_text`, `new_text` | Replaces the one exact occurrence of `old_text`; zero or several matches are refused. In a file whose every line ends in CRLF, `old_text`/`new_text` are matched as LF text and the result keeps CRLF; a file mixing CRLF and LF is matched on exact bytes (the not-found error says so) and `new_text` is inserted as given |
 
 - **Card.** The transcript shows `? Approve edit_file · edit README.md`, the arguments,
   and a line diff (`-` old, `+` new, at most 80 lines). The prompt title reads
@@ -1519,6 +1531,13 @@ Approval (ADR 0004); there is no skip-approval mode.
   the preview (content hash, or still absent); otherwise nothing is written and the model
   gets `error: the file changed since the preview…`. The check covers the resolved path
   as well as the content, and a target that is (or becomes) a symlink is refused.
+- **Atomic writes.** An approved write goes to a temp file beside the target
+  (`.NAME.alfredo-tmp-RANDOM`), is synced, takes the original's permission bits (so an
+  executable stays executable) and is renamed over the target. If anything fails (disk
+  full, size limit, I/O error) the original stays byte-identical and the temp file is
+  removed. A file with several hardlinks is replaced by a new file: the other links keep
+  their old content (the link is broken, never written through). Owner, group and
+  extended attributes of an existing file are not carried over.
 - **Outcome log.** Each card's outcome (`approved · applied`, `approved · failed:
   reason`, `denied`, or `denied · turn cancelled`) is appended to
   `chat-approvals.jsonl` in the mission's State Directory, after the call ran (an
