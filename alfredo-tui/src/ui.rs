@@ -184,7 +184,13 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
     let prompt_title = match agent {
         _ if focused => " Prompt · Esc returns ".to_string(),
         _ if session.pending_approval().is_some() && !session.draft.is_empty() => {
-            " Approval pending · clear the draft to answer y/n · Esc denies ".to_string()
+            " Approval pending · clear the draft to answer y/n/a · Esc denies ".to_string()
+        }
+        _ if session
+            .pending_approval()
+            .is_some_and(crate::chat_tools::allow::offered) =>
+        {
+            " Approval pending · y approve · a always · n deny · Esc cancels the turn ".to_string()
         }
         _ if session.pending_approval().is_some() => {
             " Approval pending · y approve · n deny · Esc cancels the turn ".to_string()
@@ -2308,7 +2314,13 @@ fn approval_card_lines(
         ));
     }
     lines.push(Line::styled(
-        "  y approve · n deny · Esc cancels the turn (deny)",
+        match crate::chat_tools::allow::offer(card) {
+            Some(offer) => format!(
+                "  y approve · {} · n deny · Esc cancels the turn (deny)",
+                safe(&offer)
+            ),
+            None => "  y approve · n deny · Esc cancels the turn (deny)".into(),
+        },
         warn,
     ));
     lines

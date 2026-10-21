@@ -96,6 +96,10 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "/compact",
         "summarise older turns into a short note now (also automatic near the size limit)",
     ),
+    (
+        "/allow",
+        "[clear [ID]] — list or clear always-allow rules (a on an approval card)",
+    ),
     ("/models", "list installed models"),
     ("/model", "NAME — select conversation model"),
 ];
@@ -176,6 +180,7 @@ pub const HELP_GROUPS: &[(&str, &[&str])] = &[
             "/chat",
             "/clear",
             "/compact",
+            "/allow",
             "/model",
             "/models",
             "@wayfinder",
