@@ -302,6 +302,86 @@ fn write_file_previews_creates_and_refuses_excluded_paths() {
     let _ = fs::remove_dir_all(root);
 }
 
+#[test]
+fn edit_file_matches_lf_old_text_in_a_crlf_file_and_keeps_crlf() {
+    let root = workspace("crlf-edit");
+    fs::write(root.join("win.txt"), b"one\r\ntwo\r\nthree\r\n").unwrap();
+    let edit = call(
+        "edit_file",
+        json!({"path": "win.txt", "old_text": "one\ntwo", "new_text": "uno\ndos\ndos-b"}),
+    );
+    let card = approval::card(&root, &edit).unwrap();
+    assert!(!card.preview.contains("line endings"), "{}", card.preview);
+    let result = chat_tools::dispatch(&root, &edit);
+    assert!(!result.starts_with("error"), "{result}");
+    assert_eq!(
+        fs::read(root.join("win.txt")).unwrap(),
+        b"uno\r\ndos\r\ndos-b\r\nthree\r\n"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn edit_file_on_a_mixed_ending_file_matches_exact_bytes() {
+    let root = workspace("mixed-edit");
+    fs::write(root.join("m.txt"), b"a\r\nb\nc\r\n").unwrap();
+    let lf = call(
+        "edit_file",
+        json!({"path": "m.txt", "old_text": "a\nb", "new_text": "x"}),
+    );
+    let result = chat_tools::dispatch(&root, &lf);
+    assert!(result.contains("mixes CRLF and LF"), "{result}");
+    let exact = call(
+        "edit_file",
+        json!({"path": "m.txt", "old_text": "b\nc", "new_text": "y\nz"}),
+    );
+    let result = chat_tools::dispatch(&root, &exact);
+    assert!(!result.starts_with("error"), "{result}");
+    assert_eq!(fs::read(root.join("m.txt")).unwrap(), b"a\r\ny\nz\r\n");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ending_only_writes_show_an_explicit_card_line_and_keep_the_fingerprint() {
+    let root = workspace("ending-card");
+    fs::write(root.join("win.txt"), b"one\r\ntwo\r\nthree\r\n").unwrap();
+    let lf = call(
+        "write_file",
+        json!({"path": "win.txt", "content": "one\ntwo\nthree\n"}),
+    );
+    let card = approval::card(&root, &lf).unwrap();
+    assert!(
+        card.preview.contains("line endings CRLF \u{2192} LF"),
+        "{}",
+        card.preview
+    );
+    assert!(
+        !card.preview.contains("no line changes"),
+        "{}",
+        card.preview
+    );
+    let bare = call(
+        "write_file",
+        json!({"path": "win.txt", "content": "one\r\ntwo\r\nthree"}),
+    );
+    let card = approval::card(&root, &bare).unwrap();
+    assert!(
+        card.preview.contains("final newline removed"),
+        "{}",
+        card.preview
+    );
+    let result = chat_tools::dispatch(&root, &lf);
+    assert!(!result.starts_with("error"), "{result}");
+    assert_eq!(
+        fs::read(root.join("win.txt")).unwrap(),
+        b"one\ntwo\nthree\n"
+    );
+    // Identical content still reports no change.
+    let same = approval::card(&root, &lf).unwrap();
+    assert!(same.preview.contains("no line changes"), "{}", same.preview);
+    let _ = fs::remove_dir_all(root);
+}
+
 #[tokio::test]
 async fn outcomes_are_logged_after_execution_and_shown_in_activity() {
     let dir = log_dir("outcomes");
