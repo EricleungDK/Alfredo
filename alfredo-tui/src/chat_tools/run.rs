@@ -9,7 +9,7 @@ use crate::{
 };
 use std::path::Path;
 use tokio::sync::{
-    mpsc::{self, Sender},
+    mpsc::Sender,
     oneshot,
 };
 
@@ -53,31 +53,22 @@ pub async fn run_turn(
     };
     let mut steps = 0;
     loop {
-        let (inner, mut events) = mpsc::channel(64);
-        let call = provider.chat(session, attempt, model.clone(), messages.clone(), inner);
-        let forward = async {
-            let mut calls: Vec<ToolCall> = Vec::new();
-            let mut done = false;
-            while let Some(event) = events.recv().await {
-                match event.update {
-                    Update::ToolCalls(found) => calls.extend(found),
-                    Update::Done => done = true,
-                    update => {
-                        if !send(update).await {
-                            return None;
-                        }
-                    }
-                }
-            }
-            Some((calls, done))
-        };
-        let (_, outcome) = tokio::join!(call, forward);
-        // A closed terminal, or a failure the provider already reported.
-        let Some((mut calls, true)) = outcome else {
+        // Tokens go straight to the session sender; `Done` is withheld by the
+        // provider when the round asked for tools. `None`: failed or terminal closed.
+        let Some(mut calls) = provider
+            .chat_round(
+                session,
+                attempt,
+                model.clone(),
+                messages.clone(),
+                sender.clone(),
+            )
+            .await
+        else {
             return;
         };
         if calls.is_empty() {
-            send(Update::Done).await;
+            // The provider already sent `Done` on the same path as the tokens.
             return;
         }
         if steps == MAX_STEPS {
