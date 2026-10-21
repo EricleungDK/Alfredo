@@ -301,12 +301,33 @@ fn plan_edit(root: &Path, arguments: &Value) -> Result<(PathBuf, String, String)
     }
     let target = resolve(root, path)?;
     let current = read_existing(&target)?;
-    match current.matches(old_text).count() {
+    // A file whose every line ends in CRLF is matched and edited as LF text (the model
+    // sees `\r` as nothing), then written back with CRLF. Mixed files are matched on
+    // exact bytes and the replacement is inserted as given.
+    let crlf = line_endings(&current) == "CRLF";
+    let (haystack, old_text, new_text) = if crlf {
+        (
+            current.replace("\r\n", "\n"),
+            old_text.replace("\r\n", "\n"),
+            new_text.replace("\r\n", "\n"),
+        )
+    } else {
+        (current.clone(), old_text.to_string(), new_text.to_string())
+    };
+    match haystack.matches(old_text.as_str()).count() {
         0 => Err(format!(
-            "old_text not found in {path}; read_file and copy the text exactly"
+            "old_text not found in {path}; read_file and copy the text exactly{}",
+            if line_endings(&current) == "mixed" {
+                " (the file mixes CRLF and LF line endings, so old_text must match its exact bytes)"
+            } else {
+                ""
+            }
         )),
         1 => {
-            let edited = current.replacen(old_text, new_text, 1);
+            let mut edited = haystack.replacen(old_text.as_str(), &new_text, 1);
+            if crlf {
+                edited = edited.replace('\n', "\r\n");
+            }
             if edited.len() > MAX_FILE {
                 return Err(format!("result is over the {MAX_FILE}-byte limit"));
             }
@@ -315,6 +336,18 @@ fn plan_edit(root: &Path, arguments: &Value) -> Result<(PathBuf, String, String)
         count => Err(format!(
             "old_text occurs {count} times in {path}; include more surrounding text so it matches once"
         )),
+    }
+}
+
+/// `CRLF` or `LF` when every line break is that, `mixed`, or `none` without breaks.
+fn line_endings(text: &str) -> &'static str {
+    let crlf = text.matches("\r\n").count();
+    let lf = text.matches('\n').count() - crlf;
+    match (crlf, lf) {
+        (0, 0) => "none",
+        (_, 0) => "CRLF",
+        (0, _) => "LF",
+        _ => "mixed",
     }
 }
 
@@ -338,6 +371,7 @@ fn edit_file(root: &Path, arguments: &Value) -> Result<String, String> {
 /// Line diff: unchanged head and tail are skipped; the changed middle shows as
 /// `-` old lines then `+` new lines, cut at [`MAX_PREVIEW_LINES`].
 pub(crate) fn diff(old: &str, new: &str) -> String {
+    let (old_text, new_text) = (old, new);
     let old: Vec<&str> = old.lines().collect();
     let new: Vec<&str> = new.lines().collect();
     let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
@@ -350,15 +384,43 @@ pub(crate) fn diff(old: &str, new: &str) -> String {
     let mut lines = vec![format!("@@ line {} @@", head + 1)];
     lines.extend(old[head..old.len() - tail].iter().map(|l| format!("-{l}")));
     lines.extend(new[head..new.len() - tail].iter().map(|l| format!("+{l}")));
+    let notes = ending_notes(old_text, new_text);
     if lines.len() == 1 {
-        return "(no line changes)".into();
+        return if notes.is_empty() {
+            "(no line changes)".into()
+        } else {
+            notes.join("\n")
+        };
     }
     let total = lines.len();
     if total > MAX_PREVIEW_LINES {
         lines.truncate(MAX_PREVIEW_LINES);
         lines.push(format!("[{} more diff lines]", total - MAX_PREVIEW_LINES));
     }
+    lines.extend(notes);
     lines.join("\n")
+}
+
+/// Card lines for a change to line endings or the final newline, which `lines()` hides.
+/// Empty for a new (empty) file or when the bytes are equal.
+fn ending_notes(old: &str, new: &str) -> Vec<String> {
+    let mut notes = vec![];
+    if old.is_empty() || old == new {
+        return notes;
+    }
+    let (before, after) = (line_endings(old), line_endings(new));
+    if before != after && before != "none" && after != "none" {
+        notes.push(format!("line endings {before} \u{2192} {after}"));
+    }
+    match (old.ends_with('\n'), new.ends_with('\n')) {
+        (true, false) => notes.push("final newline removed".into()),
+        (false, true) => notes.push("final newline added".into()),
+        _ => {}
+    }
+    if notes.is_empty() && old.lines().eq(new.lines()) {
+        notes.push("line endings changed".into());
+    }
+    notes
 }
 
 #[cfg(test)]
