@@ -23,7 +23,10 @@ trials). CI runs a one-trial pass of it (`tests/eval_smoke.py`).
      (`chat_trial`). Read tools run; the scripted policy approves `edit_file`/`write_file`
      inside the task workspace and denies anything else, and every outcome is logged to the
      same `chat-approvals.jsonl` as an interactive approval. The candidate is a commit of the
-     working tree the approved edits left.
+     working tree the approved edits left. A chat trial passes only if `check.sh` passes **and**
+     `chat.read_before_edit` holds (a successful `read_file` of the edited file, or `grep` over
+     it, came before the first applied edit); a blind write that happens to pass is a fail
+     with the reason in `grade_output` and `notes`.
    - **Claude Code**: run it with the goal on stdin in the temp repo (see below).
 3. Grade the candidate without reading any screen or log: `git archive` the `alfredo/go-*`
    branch (Claude Code: a commit of the final working tree), extract it, and run the task's
@@ -167,7 +170,9 @@ The grade of its result runs in the grading sandbox, but the Claude Code process
   Chat trials add `approvals[]` (`{tool, target, outcome: applied|failed|denied|cancelled,
   reason}`, from the chat-approval log) and `chat` (`{policy, reply, steps, calls[],
   read_before_edit, applied}`). For them `turns` counts chat requests, `tool_calls` the tool
-  calls, `errors.refused` denied approvals and `errors.malformed` other `error:` results;
+  calls, `errors.refused` denied approvals, `errors.malformed` only malformed calls (unknown
+  tool, bad arguments) and `tool_errors` well-formed calls a tool refused (text not found,
+  missing or excluded file, an approved edit that failed);
   `repairs`, `cold_start_ms` and `enter_to_request_ms` are `null` with a reason.
   A value the mode cannot produce is `null`, with the reason in that trial's `unavailable`.
 - `config.binary` is the resolved binary path and `config.profile` its cargo profile (`debug`, `release`, or `unknown` when the binary's parent directory is neither, e.g. a copied or renamed binary, which gets no warning and no note; both `null` for Claude Code).

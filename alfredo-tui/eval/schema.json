@@ -81,6 +81,7 @@
           "panic": {"type": "boolean"},
           "unavailable": {"type": "object", "additionalProperties": {"type": "string"}},
           "notes": {"type": "array", "items": {"type": "string"}},
+          "tool_errors": {"type": ["integer", "null"], "minimum": 0},
           "approvals": {
             "type": "array",
             "items": {

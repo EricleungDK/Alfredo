@@ -227,3 +227,52 @@ fn unreachable_model_server_is_a_setup_error() {
     assert!(output.stdout.is_empty());
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn interrupt_after_an_approved_edit_leaves_exactly_one_log_record() {
+    let root = repository("interrupt");
+    let held = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let fixture = scripted_chat(vec![
+        tool_calls(&[(
+            "edit_file",
+            json!({"path": "greet.py", "old_text": "'Hello '", "new_text": "'Hi '"}),
+        )]),
+        Reply::Hold(held),
+    ]);
+    let child = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .args(["--model", "fixture", "--endpoint", &fixture.endpoint])
+        .arg("--workspace")
+        .arg(root.join("workspace"))
+        .arg("--state-dir")
+        .arg(root.join("state"))
+        .args(["--chat", "Make greet say Hi", "--headless"])
+        .args(["--approve", "workspace-edits"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while fixture.count("POST /api/chat") < 2 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "second request never came"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let status = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let output = child.wait_with_output().unwrap();
+    let value = result(&output);
+    assert_eq!(output.status.code(), Some(1), "{value}");
+    assert_eq!(value["state"], "failed");
+    assert_eq!(value["error"], "interrupted");
+    assert_eq!(value["approvals"][0]["outcome"], "applied");
+    let log = approvals_log(&root);
+    assert_eq!(log.len(), 1, "{log:?}");
+    assert_eq!(log[0]["outcome"], "applied");
+    let _ = fs::remove_dir_all(&root);
+}

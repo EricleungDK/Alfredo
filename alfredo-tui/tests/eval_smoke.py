@@ -60,6 +60,7 @@ class EvalSmoke(unittest.TestCase):
             self.assertEqual('workspace-edits', chat['chat']['policy'])
             self.assertEqual([('edit_file', 'applied')], [(a['tool'], a['outcome']) for a in chat['approvals']])
             self.assertEqual(4, chat['turns'])
+            self.assertEqual(0, chat['tool_errors'])
             control = next(t for t in document['trials'] if t['kind'] == 'negative_control')
             self.assertGreater(control['errors']['malformed'], 0)
             self.assertEqual([out.name], sorted(p.name for p in scratch.iterdir()),

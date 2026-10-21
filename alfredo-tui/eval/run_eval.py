@@ -652,23 +652,48 @@ def chat_command(binary, endpoint, workspace, state, model, goal):
             '--state-dir', str(state), '--chat', goal, '--headless', '--approve', CHAT_POLICY]
 
 
+def _covers(read, edited):
+    """True when a successful read_file/grep call looked at `edited` (grep without a path searches the root)."""
+    path = (read.get('path') or '').strip().strip('/')
+    if read['tool'] == 'read_file':
+        return path == edited
+    return path in ('', '.') or edited == path or edited.startswith(path + '/')
+
+
 def chat_facts(result):
-    """Trial facts from the `--chat --headless` JSON: calls, error classes, approvals and the read -> edit flow."""
+    """Trial facts from the `--chat --headless` JSON: calls, error classes, approvals and the read -> edit flow.
+
+    `errors.malformed` counts only malformed calls (unknown tool, bad arguments), `errors.refused` denied
+    approvals; well-formed calls a tool refused (text not found, missing or excluded file) and approved edits
+    that failed are `tool_errors`. `read_before_edit`: a successful read_file or grep of the edited file came
+    before the first applied edit.
+    """
     calls = result.get('calls') or []
     approvals = result.get('approvals') or []
     names = [call['tool'] for call in calls]
-    refused = sum(1 for a in approvals if a['outcome'] in ('denied', 'cancelled'))
-    failed = sum(1 for call in calls if call['error'])
-    edits = [i for i, name in enumerate(names) if name in CHAT_EDIT_TOOLS]
+    kinds = [call.get('result') or ('error' if call.get('error') else 'ok') for call in calls]
+    first = next((i for i, call in enumerate(calls) if call['tool'] in CHAT_EDIT_TOOLS and kinds[i] == 'ok'), None)
+    read_before_edit = first is not None and any(
+        call['tool'] in ('read_file', 'grep') and kinds[i] == 'ok'
+        and _covers(call, (calls[first].get('path') or '').strip().strip('/'))
+        for i, call in enumerate(calls[:first]))
     return {
         'tool_calls': len(calls),
-        'errors': {'malformed': max(0, failed - refused), 'refused': refused, 'sandbox': 0},
+        'errors': {'malformed': kinds.count('malformed'), 'refused': kinds.count('denied'), 'sandbox': 0},
+        'tool_errors': kinds.count('error'),
         'approvals': approvals,
         'chat': {'policy': result.get('policy'), 'reply': str(result.get('reply') or '')[:400],
-                 'steps': result.get('steps'), 'calls': names,
-                 'read_before_edit': bool(edits) and any(n in CHAT_READ_TOOLS for n in names[:edits[0]]),
+                 'steps': result.get('steps'), 'calls': names, 'read_before_edit': read_before_edit,
                  'applied': sum(1 for a in approvals if a['outcome'] == 'applied')},
     }
+
+
+def chat_verdict(passed, output, facts):
+    """A chat trial passes only when check.sh passes AND the edited file was read before the first applied edit."""
+    if passed and not (facts and facts['chat']['read_before_edit']):
+        return False, ('check.sh passed, but read_before_edit is false: no successful read_file/grep of the '
+                       'edited file before the first applied edit\n' + output)[:800]
+    return passed, output
 
 
 def chat_trial(task, index, options):
@@ -725,7 +750,7 @@ def chat_trial(task, index, options):
         if result is not None:
             facts = chat_facts(result)
             trial.update(tool_calls=facts['tool_calls'], errors=facts['errors'], approvals=facts['approvals'],
-                         chat=facts['chat'])
+                         chat=facts['chat'], tool_errors=facts['tool_errors'])
         model, unavailable = model_stats(server.snapshot(), options.backend)
         trial.update(turns=model['turns'], tokens=model['tokens'], ttft_ms=model['ttft_ms'],
                      overhead_s=round(max(0.0, trial['wall_s'] - model['model_s']), 3))
@@ -740,8 +765,10 @@ def chat_trial(task, index, options):
         git(workspace, '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false', 'commit', '-qm',
             'chat result', '--allow-empty')
         trial['graded_ref'] = 'HEAD'
-        trial['pass'], trial['grade_output'] = grade(task, workspace, 'HEAD',
-                                                     unsafe_unsandboxed=options.unsafe_unsandboxed_grading)
+        passed, output = grade(task, workspace, 'HEAD', unsafe_unsandboxed=options.unsafe_unsandboxed_grading)
+        trial['pass'], trial['grade_output'] = chat_verdict(passed, output, facts if result is not None else None)
+        if passed and not trial['pass']:
+            trial['notes'].append('flow: check.sh passed but the edited file was not read before the edit')
     except Exception as error:  # one broken trial must not abort the whole eval
         trial['outcome'] = 'harness_error'
         trial['notes'].append(f'{type(error).__name__}: {error}'[:400])

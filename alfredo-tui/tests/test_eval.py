@@ -548,24 +548,57 @@ class ChatTaskTests(unittest.TestCase):
         self.assertEqual({'chat'}, {r['kind'] for r in server.snapshot()})
         self.assertTrue(all(isinstance(r['prompt'], int) for r in server.snapshot()))
 
-    def test_chat_facts_count_calls_errors_denials_and_the_read_edit_flow(self):
+    @staticmethod
+    def call(tool, path=None, result='ok'):
+        return {'tool': tool, 'path': path, 'error': result != 'ok', 'result': result}
+
+    def test_chat_facts_count_calls_error_classes_and_denials(self):
+        call = self.call
         result = {'state': 'done', 'policy': 'workspace-edits', 'reply': 'Fixed.', 'steps': 3,
-                  'calls': [{'tool': 'grep', 'error': False}, {'tool': 'read_file', 'error': True},
-                            {'tool': 'edit_file', 'error': False}, {'tool': 'write_file', 'error': True}],
+                  'calls': [call('grep'), call('read_file', 'units.py'), call('read_file', 'gone.py', 'error'),
+                            call('nope', None, 'malformed'), call('edit_file', 'units.py'),
+                            call('edit_file', 'units.py', 'error'), call('write_file', 'x', 'denied')],
                   'approvals': [{'tool': 'edit_file', 'target': 'edit units.py', 'outcome': 'applied', 'reason': None},
-                                {'tool': 'write_file', 'target': 'new file x', 'outcome': 'denied',
-                                 'reason': None}],
+                                {'tool': 'edit_file', 'target': 'edit units.py', 'outcome': 'failed',
+                                 'reason': 'changed'},
+                                {'tool': 'write_file', 'target': 'new file x', 'outcome': 'denied', 'reason': None}],
                   'error': None}
         facts = run_eval.chat_facts(result)
-        self.assertEqual(4, facts['tool_calls'])
-        self.assertEqual({'malformed': 1, 'refused': 1, 'sandbox': 0}, facts['errors'])
-        self.assertEqual(['grep', 'read_file', 'edit_file', 'write_file'], facts['chat']['calls'])
-        self.assertTrue(facts['chat']['read_before_edit'])
+        self.assertEqual(7, facts['tool_calls'])
+        self.assertEqual({'malformed': 1, 'refused': 1, 'sandbox': 0}, facts['errors'],
+                         'a well-formed call the tool refused and a failed approval are not malformed')
+        self.assertEqual(2, facts['tool_errors'])
+        self.assertEqual(['grep', 'read_file', 'read_file', 'nope', 'edit_file', 'edit_file', 'write_file'],
+                         facts['chat']['calls'])
         self.assertEqual(1, facts['chat']['applied'])
         self.assertEqual('workspace-edits', facts['chat']['policy'])
         self.assertEqual(result['approvals'], facts['approvals'])
-        no_read = run_eval.chat_facts(dict(result, calls=[{'tool': 'edit_file', 'error': False}]))
-        self.assertFalse(no_read['chat']['read_before_edit'])
+
+    def test_read_before_edit_needs_a_read_of_the_edited_file_before_the_first_applied_edit(self):
+        call = self.call
+        for calls, expected in [
+            ([call('read_file', 'units.py'), call('edit_file', 'units.py')], True),
+            ([call('grep'), call('edit_file', 'units.py')], True),
+            ([call('grep', 'src'), call('edit_file', 'src/units.py')], True),
+            ([call('grep', 'other.py'), call('edit_file', 'units.py')], False),
+            ([call('read_file', 'other.py'), call('edit_file', 'units.py')], False),
+            ([call('edit_file', 'units.py'), call('read_file', 'units.py')], False),
+            ([call('read_file', 'units.py', 'error'), call('write_file', 'units.py')], False),
+            ([call('write_file', 'units.py')], False),
+            ([call('read_file', 'units.py'), call('edit_file', 'units.py', 'denied')], False),
+        ]:
+            with self.subTest(calls=calls):
+                self.assertEqual(expected, run_eval.chat_facts({'calls': calls})['chat']['read_before_edit'])
+
+    def test_chat_verdict_needs_check_pass_and_the_read_edit_flow(self):
+        good = {'chat': {'read_before_edit': True}}
+        blind = {'chat': {'read_before_edit': False}}
+        self.assertEqual((True, 'ok'), run_eval.chat_verdict(True, 'ok', good))
+        self.assertEqual((False, 'bad'), run_eval.chat_verdict(False, 'bad', good))
+        passed, output = run_eval.chat_verdict(True, 'ok', blind)
+        self.assertFalse(passed)
+        self.assertIn('read_before_edit', output)
+        self.assertFalse(run_eval.chat_verdict(True, 'ok', None)[0], 'no chat result: no flow evidence')
 
     def test_chat_command_is_headless_and_scoped_to_workspace_edits(self):
         argv = run_eval.chat_command(Path('/bin/alfredo'), 'http://127.0.0.1:1', Path('/w'), Path('/s'), 'm', 'goal')

@@ -203,9 +203,10 @@ There is no other policy and no interactive equivalent: interactive chat always 
 (ADR 0004). `--approve` is refused without `--chat … --headless`, and `--chat` without
 `--headless`. Each outcome is appended to `chat-approvals.jsonl` like an interactive
 decision. Stderr gets one line per tool call and approval; stdout one JSON object
-`{state, policy, reply, steps, calls:[{tool,error}], approvals:[{tool,target,outcome,reason}],
-error}` (`state` `done` or `failed`). Exit 0 done; 1 failed or interrupted (SIGINT/SIGTERM
-cancel the turn); 2 setup or usage error. The turn is not saved to the conversation. The
+`{state, policy, reply, steps, calls:[{tool,path,error,result}], approvals:[{tool,target,outcome,reason}],
+error}` (`state` `done` or `failed`; `result` is `ok`, `denied`, `malformed` or `error`). Exit 0
+done; 1 failed or interrupted (SIGINT/SIGTERM deny further cards, wait up to 10 s for
+answered cards to be logged, then cancel the turn); 2 setup or usage error. The turn is not saved to the conversation. The
 eval uses it for chat tasks (`eval/README.md`).
 
 ## Build and install a development archive

@@ -515,12 +515,41 @@ impl Policy {
     }
 }
 
+/// Class of one tool result: `ok`, `denied` (Approval refused), `malformed` (unknown
+/// tool or bad arguments) or `error` (a well-formed call the tool refused).
+fn classify(result: &str) -> &'static str {
+    let Some(reason) = result.strip_prefix("error: ") else {
+        return "ok";
+    };
+    if result == alfredo_tui::chat_tools::approval::DENIED {
+        return "denied";
+    }
+    let malformed = reason.starts_with("unknown tool ")
+        || reason.starts_with("arguments must be")
+        || reason.starts_with("missing required argument")
+        || (reason.starts_with("argument ")
+            && (reason.contains(" must be ") || reason.ends_with(" is required")))
+        || reason.contains("must be a positive integer");
+    if malformed {
+        "malformed"
+    } else {
+        "error"
+    }
+}
+
+/// One tool call of the turn: name, `path` argument, result class.
+struct Call {
+    tool: String,
+    path: Option<String>,
+    result: &'static str,
+}
+
 /// What one headless chat turn produced, from its events.
 #[derive(Default)]
 struct Turn {
     reply: String,
     steps: usize,
-    calls: Vec<(String, bool)>,
+    calls: Vec<Call>,
     done: bool,
     failure: Option<String>,
 }
@@ -532,16 +561,17 @@ impl Turn {
             Update::ToolStep(step) => {
                 self.steps += 1;
                 for (index, call) in step.calls.iter().enumerate() {
-                    let error = step
-                        .results
-                        .get(index)
-                        .is_none_or(|result| result.starts_with("error:"));
-                    say(format!(
-                        "tool {}{}",
-                        call.name,
-                        if error { " (error)" } else { "" }
-                    ));
-                    self.calls.push((call.name.clone(), error));
+                    let result = step.results.get(index).map_or("error", |r| classify(r));
+                    say(format!("tool {} ({result})", call.name));
+                    self.calls.push(Call {
+                        tool: call.name.clone(),
+                        path: call
+                            .arguments
+                            .get("path")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned),
+                        result,
+                    });
                 }
             }
             Update::Done => self.done = true,
@@ -576,7 +606,10 @@ impl Turn {
             "policy": policy.label(),
             "reply": self.reply.trim(),
             "steps": self.steps,
-            "calls": self.calls.iter().map(|(tool, error)| serde_json::json!({"tool": tool, "error": error})).collect::<Vec<_>>(),
+            "calls": self.calls.iter().map(|call| serde_json::json!({
+                "tool": call.tool, "path": call.path,
+                "error": call.result != "ok", "result": call.result,
+            })).collect::<Vec<_>>(),
             "approvals": approvals,
             "error": error,
         })
@@ -639,7 +672,15 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
     let gate = Gate::new(requests, log.clone());
     let (sender, mut events) = tokio::sync::mpsc::channel(256);
     let mut turn = Turn::default();
-    let interrupted = runtime.block_on(async {
+    // Decisions sent; after a signal every later card is denied, and the turn is only
+    // dropped once each answered card is logged (an approved edit runs and logs itself).
+    let answered = std::sync::atomic::AtomicUsize::new(0);
+    let closing = std::sync::atomic::AtomicBool::new(false);
+    let logged = || {
+        log.as_ref()
+            .map_or(usize::MAX, |log| log.records().len().saturating_sub(before))
+    };
+    runtime.block_on(async {
         let run = alfredo_tui::chat_tools::run_turn(
             &chat,
             &workspace,
@@ -652,7 +693,12 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
         );
         let answer = async {
             while let Some(request) = asked.recv().await {
-                let decision = policy.decide(&request.card);
+                let decision = if closing.load(Ordering::SeqCst) {
+                    Decision::Deny
+                } else {
+                    policy.decide(&request.card)
+                };
+                answered.fetch_add(1, Ordering::SeqCst);
                 say(format!(
                     "approval {}: {}",
                     request.card.summary,
@@ -674,13 +720,21 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
             while INTERRUPTED.load(Ordering::SeqCst) == 0 {
                 tokio::time::sleep(Duration::from_millis(50)).await;
             }
+            closing.store(true, Ordering::SeqCst);
+            let since = Instant::now();
+            while logged() < answered.load(Ordering::SeqCst)
+                && since.elapsed() < Duration::from_secs(10)
+                && INTERRUPTED.load(Ordering::SeqCst) < 2
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
         };
         tokio::select! {
-            _ = async { tokio::join!(run, answer, collect) } => false,
-            () = stop => true,
+            _ = async { tokio::join!(run, answer, collect) } => {}
+            () = stop => {}
         }
     });
-    if interrupted {
+    if INTERRUPTED.load(Ordering::SeqCst) > 0 {
         say("interrupted: turn cancelled");
         turn.failure = Some("interrupted".into());
     }
@@ -806,6 +860,47 @@ mod tests {
     }
 
     #[test]
+    fn results_are_classified_ok_denied_malformed_or_tool_error() {
+        use alfredo_tui::chat_tools::approval::DENIED;
+        assert_eq!(classify("fn x"), "ok");
+        assert_eq!(classify(DENIED), "denied");
+        for malformed in [
+            "error: unknown tool \"x\"; available: read_file",
+            "error: arguments must be a JSON object",
+            "error: argument path must be a string",
+            "error: argument path is required",
+            "error: missing required argument pattern",
+            "error: argument max_count must be a positive integer",
+            "error: start_line must be a positive integer",
+        ] {
+            assert_eq!(classify(malformed), "malformed", "{malformed}");
+        }
+        for tool in [
+            "error: old_text was not found in units.py",
+            "error: no such file or directory: x",
+            "error: .env is excluded (Git metadata, secrets or generated files)",
+        ] {
+            assert_eq!(classify(tool), "error", "{tool}");
+        }
+    }
+
+    #[test]
+    fn calls_keep_their_path_argument() {
+        let mut turn = Turn::default();
+        turn.update(Update::ToolStep(alfredo_tui::model::ToolStep {
+            calls: vec![alfredo_tui::model::ToolCall {
+                name: "read_file".into(),
+                arguments: serde_json::json!({"path": "units.py"}),
+            }],
+            results: vec!["text".into()],
+        }));
+        turn.update(Update::Done);
+        let value = turn.json(Policy::Deny, &[]);
+        assert_eq!(value["calls"][0]["path"], "units.py");
+        assert_eq!(value["calls"][0]["result"], "ok");
+    }
+
+    #[test]
     fn chat_json_reports_calls_approvals_and_state() {
         let mut turn = Turn::default();
         turn.update(Update::Token("Hi".into()));
@@ -828,6 +923,8 @@ mod tests {
         assert_eq!(value["reply"], "Hi");
         assert_eq!(value["steps"], 1);
         assert_eq!(value["calls"][0]["error"], true);
+        assert_eq!(value["calls"][0]["result"], "error");
+        assert_eq!(value["calls"][0]["path"], serde_json::Value::Null);
         assert_eq!(value["approvals"][0]["outcome"], "failed");
         assert_eq!(value["approvals"][0]["reason"], "changed");
         assert_eq!(value["error"], serde_json::Value::Null);
