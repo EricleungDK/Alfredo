@@ -917,6 +917,7 @@ mod tests {
             tool: "edit_file".into(),
             target: "edit a.py".into(),
             outcome: Outcome::Failed("changed".into()),
+            escalated: false,
         }];
         let value = turn.json(Policy::WorkspaceEdits, &records);
         assert_eq!(value["state"], "done");

@@ -550,6 +550,64 @@ fn cancel_and_restore_drop_the_pending_action() {
 }
 
 #[test]
+fn the_prompt_title_says_how_to_answer_when_the_draft_has_text() {
+    let mut app = App::new("m".into());
+    app.sessions[0] = pending_session();
+    app.sessions[0].type_char('h');
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("clear the draft to answer"), "{text}");
+}
+
+#[test]
+fn y_or_n_never_decides_while_the_draft_has_text() {
+    // Issue #264: typeahead into the prompt ("hey", "you", "hold on") must not decide.
+    let mut session = pending_session();
+    let t0 = Instant::now() + Duration::from_secs(1);
+    for (i, ch) in "hey".chars().enumerate() {
+        let at = t0 + Duration::from_secs(i as u64 * 2);
+        session.note_key(at);
+        if session.approval_key_answers(at) {
+            // Only the leading h could be eligible, and it is not y or n.
+            assert_eq!(session.answer_approval(ch, at), None);
+        }
+        session.type_char(ch);
+    }
+    assert_eq!(session.draft, "hey");
+    let later = t0 + Duration::from_secs(60);
+    session.note_key(later);
+    assert!(!session.approval_key_answers(later));
+    assert_eq!(session.answer_approval('y', later), None);
+    assert_eq!(session.answer_approval('n', later), None);
+    assert!(session.pending_approval().is_some());
+}
+
+#[test]
+fn y_with_an_empty_draft_needs_a_quiet_half_second() {
+    let mut session = pending_session();
+    let t0 = Instant::now() + Duration::from_secs(1);
+    // A key just before (for example Backspace on an empty draft) blocks the answer.
+    session.note_key(t0);
+    let fast = t0 + Duration::from_millis(100);
+    session.note_key(fast);
+    assert!(!session.approval_key_answers(fast));
+    assert_eq!(session.answer_approval('y', fast), None);
+    assert!(session.pending_approval().is_some());
+    // After a quiet 0.5 s the key decides.
+    let quiet = fast + approval::ARM + Duration::from_millis(1);
+    session.note_key(quiet);
+    assert!(session.approval_key_answers(quiet));
+    assert_eq!(session.answer_approval('y', quiet), Some(Decision::Approve));
+}
+
+#[test]
 fn keys_before_the_card_is_armed_do_not_decide() {
     let mut session = pending_session();
     let shown = Instant::now();
