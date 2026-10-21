@@ -512,3 +512,127 @@ fn git_and_push_cards_render_their_effect_and_push_is_distinct() {
     assert!(text.contains("never always-allowed"), "{text}");
     assert!(!text.contains("Approve git_push"), "{text}");
 }
+
+#[test]
+fn push_card_shows_the_push_url() {
+    let repo = Repo::new().with_remote();
+    let other = repo.base.join("pushed.git");
+    git(&repo.base, &["init", "-q", "--bare", "pushed.git"]);
+    git(
+        &repo.root,
+        &["config", "remote.origin.pushurl", other.to_str().unwrap()],
+    );
+    fs::write(repo.root.join("a.txt"), "a\n").unwrap();
+    git(&repo.root, &["add", "a.txt"]);
+    git(&repo.root, &["commit", "-q", "-m", "local work"]);
+    let card = repo.card("git_push", json!({})).unwrap();
+    assert!(card.preview.contains("pushed.git"), "{}", card.preview);
+}
+
+#[test]
+fn push_is_refused_when_repository_config_can_run_commands() {
+    for (key, value) in [
+        ("core.sshCommand", "touch MARK"),
+        ("core.askPass", "/bin/true"),
+        ("credential.helper", "!touch MARK"),
+        ("credential.https://x.helper", "store"),
+        ("remote.origin.receivepack", "touch MARK"),
+        ("remote.origin.uploadpack", "touch MARK"),
+        ("http.proxy", "http://x"),
+        ("https.proxy", "http://x"),
+        ("url./tmp/x.insteadOf", "/tmp/y"),
+        ("url./tmp/x.pushInsteadOf", "/tmp/y"),
+        ("protocol.ext.allow", "always"),
+        ("protocol.allow", "always"),
+    ] {
+        let repo = Repo::new().with_remote();
+        fs::write(repo.root.join("a.txt"), "a\n").unwrap();
+        git(&repo.root, &["add", "a.txt"]);
+        git(&repo.root, &["commit", "-q", "-m", "local work"]);
+        git(&repo.root, &["config", key, value]);
+        let error = repo.card("git_push", json!({})).unwrap_err();
+        assert!(
+            error.to_lowercase().contains(&key.to_lowercase()),
+            "{key}: {error}"
+        );
+    }
+}
+
+#[test]
+fn repository_merge_drivers_and_gpg_programs_are_refused() {
+    let repo = Repo::new();
+    git(&repo.root, &["checkout", "-q", "-b", "alfredo/go-3"]);
+    fs::write(repo.root.join("README.md"), "# Go\n").unwrap();
+    git(&repo.root, &["commit", "-q", "-am", "go"]);
+    git(&repo.root, &["checkout", "-q", "main"]);
+    fs::write(repo.root.join("README.md"), "# Main\n").unwrap();
+    git(&repo.root, &["commit", "-q", "-am", "main"]);
+    fs::write(repo.root.join(".gitattributes"), "README.md merge=evil\n").unwrap();
+    git(&repo.root, &["add", ".gitattributes"]);
+    git(&repo.root, &["commit", "-q", "-m", "attrs"]);
+    git(
+        &repo.root,
+        &["config", "merge.evil.driver", "touch MERGE_MARK; false"],
+    );
+    let error = repo
+        .approve("git_merge", json!({"source": "alfredo/go-3"}))
+        .unwrap_err();
+    assert!(error.contains("merge.evil.driver"), "{error}");
+    assert!(!repo.root.join("MERGE_MARK").exists());
+    git(&repo.root, &["config", "--unset", "merge.evil.driver"]);
+    for key in ["gpg.program", "gpg.ssh.program"] {
+        git(&repo.root, &["config", key, "/bin/true"]);
+        fs::write(repo.root.join("b.txt"), "b\n").unwrap();
+        let error = repo
+            .card("git_commit", json!({"message": "b", "files": ["b.txt"]}))
+            .unwrap_err();
+        assert!(error.contains(key), "{error}");
+        git(&repo.root, &["config", "--unset", key]);
+    }
+}
+
+#[test]
+fn large_listings_are_marked_and_fingerprinted_in_full() {
+    let repo = Repo::new();
+    let long = "x".repeat(60);
+    for index in 0..1500 {
+        fs::write(repo.root.join(format!("{long}{index:05}.txt")), "u\n").unwrap();
+    }
+    git(&repo.root, &["add", "."]);
+    let card = repo.card("git_commit", json!({"message": "many"})).unwrap();
+    assert!(card.preview.contains("more"), "{}", card.preview);
+    assert!(card.summary.contains("1500 files"), "{}", card.summary);
+    // A change past the first 32 KiB of status still counts.
+    fs::write(repo.root.join("zzzz-late.txt"), "late\n").unwrap();
+    let error = approval::apply(&repo.root, &card).unwrap_err();
+    assert!(error.contains("changed"), "{error}");
+}
+
+#[test]
+fn a_failed_commit_of_named_files_leaves_the_index_as_it_was() {
+    let repo = Repo::new();
+    fs::write(repo.root.join("new.txt"), "n\n").unwrap();
+    let card = repo
+        .card("git_commit", json!({"message": "n", "files": ["new.txt"]}))
+        .unwrap();
+    fs::write(repo.root.join(".git/refs/heads/main.lock"), "").unwrap();
+    assert!(approval::apply(&repo.root, &card).is_err());
+    fs::remove_file(repo.root.join(".git/refs/heads/main.lock")).unwrap();
+    let status = git(&repo.root, &["status", "--porcelain"]);
+    assert_eq!(status, "?? new.txt\n");
+}
+
+#[test]
+fn merge_with_uncommitted_tracked_changes_is_refused() {
+    let repo = Repo::new();
+    repo.go_branch();
+    fs::write(repo.root.join("README.md"), "# Dirty\n").unwrap();
+    let error = repo
+        .card("git_merge", json!({"source": "alfredo/go-7"}))
+        .unwrap_err();
+    assert!(error.contains("uncommitted"), "{error}");
+    git(&repo.root, &["add", "README.md"]);
+    assert!(repo
+        .card("git_merge", json!({"source": "alfredo/go-7"}))
+        .is_err());
+}

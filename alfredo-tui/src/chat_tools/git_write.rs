@@ -27,6 +27,12 @@ const MAX_FILES: usize = 100;
 const MAX_MESSAGE: usize = 4096;
 /// Commits listed on a merge or push card.
 const MAX_LISTED: usize = 20;
+/// Longest a local write (commit, switch, merge) may run.
+const LOCAL_DEADLINE: Duration = Duration::from_secs(120);
+/// Largest git output read in full (fingerprints, card listings); more is refused.
+const FULL: usize = 64 << 20;
+/// Lines of a file listing shown on a card.
+const MAX_CARD_LINES: usize = 40;
 /// Longest a push may run (network, credential helpers).
 const PUSH_DEADLINE: Duration = Duration::from_secs(120);
 /// Environment a push run must not inherit: it would redirect git elsewhere.
@@ -133,7 +139,7 @@ fn state(root: &Path) -> Result<String, String> {
     let head =
         git_read::git(root, &["rev-parse", "--verify", "--quiet", "HEAD"]).unwrap_or_default();
     let branch = git_read::git(root, &["symbolic-ref", "--quiet", "HEAD"]).unwrap_or_default();
-    let refs = git_read::git(
+    let refs = full(
         root,
         &[
             "for-each-ref",
@@ -142,7 +148,7 @@ fn state(root: &Path) -> Result<String, String> {
             "refs/remotes",
         ],
     )?;
-    let status = git_read::git(
+    let status = full(
         root,
         &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
     )?;
@@ -185,6 +191,70 @@ pub(crate) fn preview(
 }
 
 type CardText = (String, String, CardKind);
+
+/// Complete stdout of a read-only git call; output past [`FULL`] is refused, never cut.
+fn full(root: &Path, args: &[&str]) -> Result<String, String> {
+    let output = git_read::git_limited(root, args, FULL)?;
+    if output.len() >= FULL {
+        return Err(format!(
+            "git {} output is too large to check safely; refused",
+            args[0]
+        ));
+    }
+    Ok(output)
+}
+
+/// Refuse when repository-local config (not the owner's global or system config) sets
+/// keys that make git run a command: merge drivers and signing programs for every write,
+/// and for push also SSH, askpass, credential helpers, pack programs, proxies, URL
+/// rewrites and protocol allow overrides.
+fn refuse_repository_config(root: &Path, push: bool) -> Result<(), String> {
+    let listing = full(root, &["config", "--list", "--show-scope"])?;
+    for line in listing.lines() {
+        let Some((scope, entry)) = line.split_once('\t') else {
+            continue;
+        };
+        if !matches!(scope, "local" | "worktree") {
+            continue;
+        }
+        let key = entry.split('=').next().unwrap_or_default().to_lowercase();
+        let ends = |prefix: &str, suffix: &str| key.starts_with(prefix) && key.ends_with(suffix);
+        let local = ends("merge.", ".driver") || ends("gpg.", ".program");
+        let remote = push
+            && (matches!(
+                key.as_str(),
+                "core.sshcommand"
+                    | "core.askpass"
+                    | "http.proxy"
+                    | "https.proxy"
+                    | "protocol.allow"
+            ) || ends("credential.", ".helper")
+                || ends("remote.", ".receivepack")
+                || ends("remote.", ".uploadpack")
+                || ends("http.", ".proxy")
+                || ends("url.", ".insteadof")
+                || ends("url.", ".pushinsteadof")
+                || ends("protocol.", ".allow"));
+        if local || remote {
+            return Err(format!(
+                "repository config sets {key}, which can make git run a command; refused (the owner can run this git command by hand)"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// What a stopped or failed write may have left behind, for an honest report.
+fn leftovers(root: &Path) -> String {
+    let lock = git_read::git(root, &["rev-parse", "--git-path", "index.lock"])
+        .ok()
+        .map(|path| root.join(path.trim()));
+    if lock.is_some_and(|path| path.exists()) {
+        "; index.lock remains (a stopped or concurrent git write), ask the owner to check the repository".into()
+    } else {
+        String::new()
+    }
+}
 
 fn required<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, String> {
     text_arg(arguments, name)?.ok_or_else(|| format!("argument {name} is required"))
@@ -256,7 +326,7 @@ impl CommitPlan {
                 } else {
                     ""
                 },
-                indent(&self.listing)
+                indent(&cut(&self.listing, MAX_CARD_LINES))
             ),
             CardKind::Git,
         )
@@ -286,16 +356,17 @@ fn plan_commit(root: &Path, arguments: &Value) -> Result<CommitPlan, String> {
             .ok_or("files entries must name files, not the whole repository")?;
         pathspecs.push(format!(":(literal){path}"));
     }
+    refuse_repository_config(root, false)?;
     let branch = current_branch(root)?;
     let listing = if pathspecs.is_empty() {
-        git_read::git(
+        full(
             root,
             &["diff", "--cached", "--no-ext-diff", "--name-status", "--"],
         )?
     } else {
         let mut args = vec!["status", "--porcelain=v1", "--untracked-files=all", "--"];
         args.extend(pathspecs.iter().map(String::as_str));
-        git_read::git(root, &args)?
+        full(root, &args)?
     };
     if listing.trim().is_empty() {
         return Err(if pathspecs.is_empty() {
@@ -318,11 +389,22 @@ fn commit(root: &Path, arguments: &Value) -> Result<String, String> {
     if !plan.pathspecs.is_empty() {
         let mut add = vec!["add", "--"];
         add.extend(plan.pathspecs.iter().map(String::as_str));
-        write(root, &add, Env::Local)?;
+        let index = write(root, &["write-tree"], Env::Local)?;
+        let index = index.trim();
+        write(root, &add, Env::Local).map_err(|error| error + &leftovers(root))?;
         args.push("--");
         args.extend(plan.pathspecs.iter().map(String::as_str));
+        if let Err(error) = write(root, &args, Env::Local) {
+            let restored = match write(root, &["read-tree", "--end-of-options", index], Env::Local)
+            {
+                Ok(_) => "; the index was restored".to_string(),
+                Err(reset) => format!("; restoring the index failed ({reset})"),
+            };
+            return Err(error + &restored + &leftovers(root));
+        }
+    } else {
+        write(root, &args, Env::Local).map_err(|error| error + &leftovers(root))?;
     }
-    write(root, &args, Env::Local)?;
     let made = git_read::git(root, &["log", "-1", "--no-color", "--format=%h %s"])?;
     Ok(format!("committed on {}: {}", plan.branch, made.trim()))
 }
@@ -360,6 +442,7 @@ fn plan_switch(root: &Path, arguments: &Value) -> Result<SwitchPlan, String> {
         .ok_or("argument branch is required")?
         .to_string();
     let create = flag(arguments, "create")?;
+    refuse_repository_config(root, false)?;
     let exists = local_branch_exists(root, &branch);
     if create {
         if exists {
@@ -399,7 +482,8 @@ fn switch(root: &Path, arguments: &Value) -> Result<String, String> {
             root,
             &["switch", "--no-guess", "-c", &plan.branch],
             Env::Local,
-        )?;
+        )
+        .map_err(|error| error + &leftovers(root))?;
         Ok(format!(
             "created {} from {} and switched to it",
             plan.branch, plan.from
@@ -409,7 +493,8 @@ fn switch(root: &Path, arguments: &Value) -> Result<String, String> {
             root,
             &["switch", "--no-guess", "--end-of-options", &plan.branch],
             Env::Local,
-        )?;
+        )
+        .map_err(|error| error + &leftovers(root))?;
         Ok(format!("switched {} → {}", plan.from, plan.branch))
     }
 }
@@ -454,6 +539,7 @@ fn plan_merge(root: &Path, arguments: &Value) -> Result<MergePlan, String> {
         .ok_or("argument source is required")?
         .to_string();
     let target = ref_arg(arguments, "target")?;
+    refuse_repository_config(root, false)?;
     let current = current_branch(root)?;
     if let Some(target) = target {
         if target != current {
@@ -461,6 +547,12 @@ fn plan_merge(root: &Path, arguments: &Value) -> Result<MergePlan, String> {
                 "merge target {target} is not the current branch {current}; git_switch to {target} first"
             ));
         }
+    }
+    let dirty = git_read::git(root, &["status", "--porcelain=v1", "--untracked-files=no"])?;
+    if !dirty.trim().is_empty() {
+        return Err(
+            "tracked files have uncommitted changes; commit or stash them before merging".into(),
+        );
     }
     let commit = format!("{source}^{{commit}}");
     git_read::git(
@@ -535,6 +627,7 @@ fn cut(text: &str, lines: usize) -> String {
 
 fn merge(root: &Path, arguments: &Value) -> Result<String, String> {
     let plan = plan_merge(root, arguments)?;
+    let before = git_read::git(root, &["rev-parse", "HEAD"])?;
     if let Err(error) = write(
         root,
         &["merge", "--no-edit", "--end-of-options", &plan.source],
@@ -543,7 +636,7 @@ fn merge(root: &Path, arguments: &Value) -> Result<String, String> {
         let merging = git_read::git(root, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"])
             .is_ok_and(|sha| !sha.trim().is_empty());
         if !merging {
-            return Err(error);
+            return Err(error + &leftovers(root));
         }
         let conflicted = git_read::git(
             root,
@@ -552,7 +645,15 @@ fn merge(root: &Path, arguments: &Value) -> Result<String, String> {
         .unwrap_or_default();
         let aborted = write(root, &["merge", "--abort"], Env::Local);
         let files: Vec<&str> = conflicted.lines().filter(|l| !l.is_empty()).collect();
+        let restored = git_read::git(root, &["rev-parse", "HEAD"]).is_ok_and(|head| head == before)
+            && git_read::git(root, &["rev-parse", "--verify", "--quiet", "MERGE_HEAD"]).is_err()
+            && leftovers(root).is_empty();
         return Err(match aborted {
+            Ok(_) if !restored => format!(
+                "merge conflict in: {}; merge aborted, but the repository may not be as it was{}; ask the owner to check",
+                files.join(", "),
+                leftovers(root)
+            ),
             Ok(_) => format!(
                 "merge conflict in: {}; merge aborted, the repository is as it was. Ask the owner to resolve it",
                 files.join(", ")
@@ -649,6 +750,7 @@ fn without_credentials(url: &str) -> String {
 
 fn plan_push(root: &Path, arguments: &Value) -> Result<PushPlan, String> {
     let remote = remote_arg(root, arguments)?;
+    refuse_repository_config(root, true)?;
     let branch = match ref_arg(arguments, "branch")? {
         Some(branch) => branch.to_string(),
         None => current_branch(root)?,
@@ -656,9 +758,17 @@ fn plan_push(root: &Path, arguments: &Value) -> Result<PushPlan, String> {
     if !local_branch_exists(root, &branch) {
         return Err(format!("no local branch {branch}"));
     }
-    let url = git_read::git(root, &["remote", "get-url", "--", &remote])
-        .map(|url| without_credentials(url.trim()))
-        .unwrap_or_default();
+    let url = git_read::git(
+        root,
+        &["remote", "get-url", "--push", "--all", "--", &remote],
+    )
+    .map(|urls| {
+        urls.lines()
+            .map(|url| without_credentials(url.trim()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    })
+    .unwrap_or_default();
     let tracking = format!("refs/remotes/{remote}/{branch}");
     let local = format!("refs/heads/{branch}");
     let tracked = git_read::git(
@@ -758,7 +868,7 @@ fn write(root: &Path, args: &[&str], env: Env) -> Result<String, String> {
                     None => command.env_remove(name),
                 };
             }
-            git_read::DEADLINE
+            LOCAL_DEADLINE
         }
         Env::Remote => {
             for name in REDIRECTING_ENV {

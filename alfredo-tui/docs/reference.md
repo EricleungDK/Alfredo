@@ -1531,7 +1531,20 @@ credentials). Each call pauses for Approval like a file edit.
   fsmonitor is off. Commit, switch and merge see your global git config (identity) but
   not the rest of your environment. Push keeps your environment for credential helpers
   and the SSH agent, drops variables that redirect git (`GIT_DIR`, …), and turns
-  prompts off (`GIT_TERMINAL_PROMPT=0`); it stops after 120 s.
+  prompts off (`GIT_TERMINAL_PROMPT=0`); it stops after 120 s (local writes also 120 s).
+- **Repository config is not trusted.** Your global and system git config are; config
+  local to the repository (or worktree) could be planted. Every write is refused when it
+  sets `merge.*.driver`, `gpg.program` or `gpg.*.program`; push is also refused for
+  `core.sshCommand`, `core.askPass`, `credential.*helper`, `remote.*.receivepack` or
+  `uploadpack`, `http(s).proxy`, `url.*.insteadOf` or `pushInsteadOf`, and `protocol.*`
+  allow overrides. The error names the key.
+- **Push URL.** The card shows the push URLs (`pushurl` included). A remote that is a
+  local path or `file://` URL is shown as that path; pushing to it runs that
+  repository's own receive hooks, as any push there would.
+- **Merges need a clean tree.** `git_merge` is refused while tracked files have
+  uncommitted changes, so an aborted merge restores exactly. A failed commit of named
+  files restores the index. If a write is stopped or leaves `index.lock`, the error says
+  so rather than claiming the repository is unchanged.
 
 ## Chat file mentions (`@path`)
 

@@ -290,7 +290,7 @@ pub(crate) fn refuse_filters(root: &Path) -> Result<(), String> {
 }
 
 /// [`git`] reading at most `limit` bytes of stdout.
-fn git_limited(root: &Path, args: &[&str], limit: usize) -> Result<String, String> {
+pub(crate) fn git_limited(root: &Path, args: &[&str], limit: usize) -> Result<String, String> {
     let ceiling = root
         .canonicalize()
         .map_err(|_| "Coding Workspace is not available".to_string())?;
