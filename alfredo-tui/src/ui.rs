@@ -1493,6 +1493,9 @@ fn timing_line(session: &crate::model::Session, num_ctx: Option<u32>) -> Option<
     if let Some(timing) = &session.timing {
         parts.push(timing.compact(std::time::Instant::now()));
     }
+    if session.wait_phase() == Some("running run_command") {
+        parts.push("Esc stops".into());
+    }
     if let Some(metrics) = &session.metrics {
         parts.extend(metrics.context_fill(num_ctx));
         if let (Some(count), Some(duration)) = (

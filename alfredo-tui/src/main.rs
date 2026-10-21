@@ -2045,6 +2045,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     for job in jobs.into_iter().flatten() {
         job.abort();
     }
+    // A host `run_command` outlives its process otherwise (issue #302): kill every
+    // running command's process group and wait for it before the terminal is released.
+    if !alfredo_tui::chat_tools::stop_running_commands(Duration::from_secs(3)) {
+        eprintln!("A chat command did not stop within 3s; check for leftover processes");
+    }
     // Save the chat draft, not an agent's unsent note; close keeps that note in
     // the agent drafts file.
     alfredo_tui::agent_view::close(&mut work.app, &mut work.tasks, false);

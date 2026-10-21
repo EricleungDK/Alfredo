@@ -342,8 +342,12 @@ async fn gated(
         if let Some(rule) = matched {
             let root = workspace.to_path_buf();
             let log = gate.log.clone();
+            let stop_guard = super::shell::StopOnDrop::default();
+            let stop = stop_guard.stop();
             return tokio::task::spawn_blocking(move || {
-                decided(&root, &card, Decision::Approve, log.as_ref(), Some(rule.id))
+                super::shell::scoped(&stop, || {
+                    decided(&root, &card, Decision::Approve, log.as_ref(), Some(rule.id))
+                })
             })
             .await
             .unwrap_or_else(|_| "error: tool execution stopped unexpectedly".into());
@@ -382,16 +386,22 @@ async fn gated(
     let root = workspace.to_path_buf();
     let log = gate.log.clone();
     let rules = gate.rules.clone();
+    // Aborting this turn (Esc, /stop, switch, retry, quit) drops the guard, which
+    // stops a running command; the blocking call then logs `cancelled` (issue #302).
+    let stop_guard = super::shell::StopOnDrop::default();
+    let stop = stop_guard.stop();
     // No await between here and the spawn: once spawned, the call runs and logs even
     // if this turn is aborted.
     tokio::task::spawn_blocking(move || {
-        // `a` adds the rule, then runs this call like `y`. A rule that cannot be
-        // saved still approves this one call.
-        let rule = match (decision, &rules) {
-            (Decision::AlwaysAllow, Some(rules)) => rules.add_for(&card).ok().map(|r| r.id),
-            _ => None,
-        };
-        decided(&root, &card, decision, log.as_ref(), rule)
+        super::shell::scoped(&stop, || {
+            // `a` adds the rule, then runs this call like `y`. A rule that cannot be
+            // saved still approves this one call.
+            let rule = match (decision, &rules) {
+                (Decision::AlwaysAllow, Some(rules)) => rules.add_for(&card).ok().map(|r| r.id),
+                _ => None,
+            };
+            decided(&root, &card, decision, log.as_ref(), rule)
+        })
     })
     .await
     .unwrap_or_else(|_| "error: tool execution stopped unexpectedly".into())
@@ -409,6 +419,13 @@ fn decided(
         Decision::Deny => (approval::DENIED.to_string(), Outcome::Denied),
         Decision::Approve | Decision::AlwaysAllow => match approval::apply(root, card) {
             Ok(output) => (super::cap(output), Outcome::Applied),
+            // A command stopped mid-run (issue #302) was not applied.
+            Err(reason)
+                if matches!(card.kind, approval::CardKind::Shell { .. })
+                    && reason.starts_with("cancelled") =>
+            {
+                (super::cap(format!("error: {reason}")), Outcome::Cancelled)
+            }
             Err(reason) => (
                 super::cap(format!("error: {reason}")),
                 Outcome::Failed(reason),

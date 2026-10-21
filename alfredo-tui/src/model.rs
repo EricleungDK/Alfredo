@@ -263,6 +263,9 @@ pub struct Session {
     /// replaces it unless an editing or cursor key claimed it first.
     #[serde(skip)]
     rejected: Option<String>,
+    /// An approved `run_command` is running (issue #302); cleared by the next update.
+    #[serde(skip)]
+    running_command: bool,
     /// Chat draft set aside while an agent view owns the prompt; snapshots save
     /// this, never the agent's note.
     #[serde(skip)]
@@ -316,6 +319,7 @@ impl Session {
             history_index: None,
             unsent: None,
             rejected: None,
+            running_command: false,
             approval: None,
             approval_header_drawn: std::cell::Cell::new(false),
             key_times: (None, None),
@@ -359,7 +363,9 @@ impl Session {
         if !self.status.active() {
             return None;
         }
-        if self.retry.is_some() {
+        if self.running_command {
+            Some("running run_command")
+        } else if self.retry.is_some() {
             Some("reconnecting")
         } else if self.queued {
             Some("queued")
@@ -386,6 +392,7 @@ impl Session {
             return format!("retry {}/{}", retry.retry, retry.limit);
         }
         match &self.status {
+            Status::Connecting | Status::Streaming if self.running_command => "running".into(),
             Status::Connecting | Status::Streaming if self.queued => "queued".into(),
             Status::Connecting => "thinking".into(),
             Status::Streaming => "streaming".into(),
@@ -931,6 +938,13 @@ impl Session {
             }
             _ => return None,
         };
+        self.running_command = decision != Decision::Deny
+            && self.pending_approval().is_some_and(|card| {
+                matches!(
+                    card.kind,
+                    crate::chat_tools::approval::CardKind::Shell { .. }
+                )
+            });
         self.approval = None;
         Some(decision)
     }
@@ -938,6 +952,7 @@ impl Session {
     pub fn cancel(&mut self) {
         self.compacting = None;
         self.approval = None;
+        self.running_command = false;
         if self.status.active() {
             self.status = Status::Cancelled;
             self.retry = None;
@@ -1578,6 +1593,9 @@ impl Session {
         if !matches!(update, Update::Retrying(_) | Update::Metrics(_)) {
             self.retry = None;
         }
+        if !matches!(update, Update::Metrics(_)) {
+            self.running_command = false;
+        }
         match update {
             Update::Metrics(metrics) => self.metrics = Some(metrics),
             Update::Retrying(retry) => {
@@ -1667,6 +1685,7 @@ impl Session {
             Update::Failed(reason) => self.status = Status::Failed(reason),
         }
         if !self.status.active() {
+            self.running_command = false;
             self.retry = None;
             self.queued = false;
             self.queue_observation = None;

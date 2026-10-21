@@ -467,6 +467,41 @@ fn escalated_cards_look_different_from_sandboxed_ones() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Issue #302: while an approved command runs the chat says so and that Esc stops it.
+#[test]
+fn a_running_command_shows_its_status_and_that_esc_stops_it() {
+    let root = workspace("running");
+    let card = approval::card(&root, &call(json!({"command": "sleep 5"}))).unwrap();
+    let mut session = Session::new("m".into());
+    session.insert("run it");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Admitted);
+    let shown = Instant::now();
+    assert!(session.await_approval(attempt, card, shown));
+    session.approval_visible(true, shown);
+    let armed = shown + approval::ARM + Duration::from_millis(1);
+    assert_eq!(session.answer_approval('y', armed), Some(Decision::Approve));
+    let mut app = App::new("m".into());
+    app.sessions[0] = session;
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+    let text: String = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect();
+    assert!(text.contains("running run_command"), "{text}");
+    assert!(text.contains("Esc stops"), "{text}");
+    assert!(!text.contains("waiting for model"), "{text}");
+    // The next update (the result arriving) ends the status.
+    app.sessions[0].apply(attempt, Update::Thinking);
+    assert_ne!(app.sessions[0].wait_phase(), Some("running run_command"));
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn chat_system_prompt_mentions_run_command_and_escalation() {
     let prompt = alfredo_tui::chat_context::system_message(None, |_| None).content;
