@@ -1,21 +1,21 @@
 {
   "script": "alfredo-tui/recording/record.py",
-  "revision": "10697a9",
+  "revision": "e834517",
   "model": "qwen2.5-coder:14b",
   "goal": "Add initials(name) to textutil.py, e.g. initials('ada lovelace') == 'AL', with unittest tests in test_textutil.py.",
-  "duration_s": 26.1,
+  "duration_s": 26.8,
   "fps": 20,
-  "gif_bytes": 3370951,
+  "gif_bytes": 4161207,
   "width": 1280,
   "height": 720,
   "cuts": [
     {
       "what": "model planning",
-      "seconds": 11.7
+      "seconds": 10.2
     },
     {
       "what": "model coding",
-      "seconds": 3.4
+      "seconds": 4.6
     }
   ]
 }

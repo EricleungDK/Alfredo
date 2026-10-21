@@ -37,6 +37,28 @@ class CutTests(unittest.TestCase):
         self.assertEqual(range(40, 65), timeline.label_frames(40, fps=25, hold=1.0))
 
 
+class TakeTests(unittest.TestCase):
+    @staticmethod
+    def task(i, status='accepted', title=None):
+        return {'id': i, 'status': status, 'title': title or f'Task {i}'}
+
+    def test_two_tasks_one_repair_is_kept_when_tape_watches_the_repair(self):
+        tasks = [self.task(1), self.task(2, 'failed'), self.task(3, title='Repair #2: x')]
+        self.assertTrue(timeline.keep_take(tasks, watch_id=3))
+
+    def test_three_tasks_rejected_because_repair_id_is_not_watched(self):
+        tasks = [self.task(1), self.task(2), self.task(3, 'failed'), self.task(4, title='Repair #3: x')]
+        self.assertFalse(timeline.keep_take(tasks, watch_id=3))
+
+    def test_rejects_unaccepted_repair_no_repair_or_single_task(self):
+        self.assertFalse(timeline.keep_take([self.task(1), self.task(2), self.task(3, 'failed', 'Repair #2')], 3))
+        self.assertFalse(timeline.keep_take([self.task(1), self.task(2)], 3))
+        self.assertFalse(timeline.keep_take([self.task(1, 'failed'), self.task(2, title='Repair #1')], 2))
+
+    def test_watch_id_is_read_from_the_tape(self):
+        self.assertEqual(3, timeline.watch_id('Type "/watch 3"\nEnter\n'))
+
+
 class SpeedTests(unittest.TestCase):
     LINES = [(2.0, 'Hide'), (4.0, 'Show'), (10.0, 'Hide'), (20.0, 'Show'), (24.0, 'Hide')]
 

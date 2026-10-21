@@ -95,3 +95,17 @@ def record(revision, model, goal, duration, fps, gif_bytes, width, height, cuts)
         'height': height,
         'cuts': [{'what': w, 'seconds': s} for w, s in cuts],
     }
+
+
+def watch_id(tape_text):
+    import re
+    return int(re.search(r'/watch (\d+)', tape_text).group(1))
+
+
+def keep_take(tasks, watch_id):
+    """Keep a take only if it matches the tape: >= 2 original tasks, exactly one
+    repair, accepted, and its id is the one the tape opens with /watch."""
+    repairs = [t for t in tasks if t['title'].startswith('Repair')]
+    originals = len(tasks) - len(repairs)
+    return (originals >= 2 and len(repairs) == 1 and repairs[0]['status'] == 'accepted'
+            and repairs[0]['id'] == watch_id)

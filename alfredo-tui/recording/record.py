@@ -39,6 +39,8 @@ def sh(*cmd, **kw):
 
 
 def prepare():
+    if not subprocess.run(['fc-list', ':charset=2442'], capture_output=True, text=True).stdout.strip():
+        sys.exit('no installed font has U+2442 (the repair icon); install one, e.g. copy Segoe UI Symbol into ~/.local/share/fonts, then fc-cache -f')
     shutil.rmtree(HOME, ignore_errors=True)
     (HOME / 'bin').mkdir(parents=True)
     binary = REPO / 'alfredo-tui/target/release/alfredo-tui'
@@ -73,10 +75,7 @@ def good_take():
     if not states:
         return False
     tasks = json.loads(states[0].read_text())['tasks']
-    repairs = [t for t in tasks if t['title'].startswith('Repair')]
-    final = [t for t in tasks if not t['title'].startswith('Repair')]
-    # every original task accepted or superseded by an accepted repair
-    return bool(repairs) and all(t['status'] == 'accepted' for t in repairs) and len(tasks) == len(final) + 1 and len(final) >= 2
+    return timeline.keep_take(tasks, timeline.watch_id((HERE / 'demo.tape').read_text()))
 
 
 def frames(src, dst):
