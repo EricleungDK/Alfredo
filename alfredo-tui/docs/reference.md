@@ -1515,7 +1515,10 @@ Approval (ADR 0004); there is no skip-approval mode.
 
 - **Card.** The transcript shows `? Approve edit_file · edit README.md`, the arguments,
   and a line diff (`-` old, `+` new, at most 80 lines). The prompt title reads
-  `Approval pending · y approve · n deny · Esc cancels the turn`.
+  `Approval pending · y approve · n deny · Esc cancels the turn`. On a short terminal the
+  diff is cut to the rows that fit (`[N more diff lines]`) so the header, arguments and
+  key line stay on screen; the 0.5 s delay below starts only once the header rows are
+  drawn, and PageUp that scrolls them out of view disarms `y`/`n` until they return.
 - **Keys.** `y` and `n` answer the card only when the prompt draft is empty, no other key
   was pressed in the previous 0.5 s, and the card has been on screen for 0.5 s (selected
   conversation, no pane, panel or agent view over it; switching away and back restarts
