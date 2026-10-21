@@ -2282,6 +2282,8 @@ const HELP_LINES: &[&str] = &[
     "@wayfinder REQUEST · /scope [JSON] · /scope-confirm REVISION · /scope-retry",
     "/plan REQUEST · /plan-revise REQUEST · /architect-revise ID · /plan-save · /plan-cancel · /assign ID MODEL · /dispatch on|off",
     "/watch ID|architect · /tell ID|architect TEXT",
+    "/clear start this conversation fresh (tasks are kept)",
+    "/compact summarise older turns into a short note now (also automatic near the size limit)",
     "/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /clean [yes] · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME",
     "Enter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry",
     "F2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit",
@@ -2311,6 +2313,36 @@ mod tests {
         );
         let busy = alfredo_tui::conversations::namespace_in_use("default");
         assert_eq!(super::launch_error_message(busy.clone(), journal), busy);
+    }
+    /// Commands that may stay out of `--help` (none today; justify any addition).
+    const HELP_ALLOW_LIST: &[&str] = &[];
+
+    #[test]
+    fn help_lists_every_slash_command() {
+        let help = super::HELP_LINES.join("\n");
+        let missing: Vec<_> = alfredo_tui::commands::COMMANDS
+            .iter()
+            .map(|(name, _)| *name)
+            .filter(|name| !HELP_ALLOW_LIST.contains(name))
+            .filter(|name| {
+                !help.match_indices(name).any(|(at, _)| {
+                    let after = help[at + name.len()..].chars().next();
+                    !after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '-')
+                })
+            })
+            .collect();
+        assert!(missing.is_empty(), "missing from --help: {missing:?}");
+    }
+
+    #[test]
+    fn readme_names_every_chat_tool() {
+        let readme = include_str!("../README.md");
+        let missing: Vec<_> = alfredo_tui::chat_tools::TOOLS
+            .iter()
+            .map(|tool| tool.name)
+            .filter(|name| !readme.contains(&format!("`{name}`")))
+            .collect();
+        assert!(missing.is_empty(), "missing from README: {missing:?}");
     }
     use super::{
         saved_pending_command, stage_ready_wayfinder, withdraw_pending_architect,
