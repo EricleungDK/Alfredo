@@ -279,6 +279,10 @@ pub struct Session {
     /// the transcript viewport (issue #268). Arming waits for it.
     #[serde(skip)]
     approval_header_drawn: std::cell::Cell<bool>,
+    /// When the key before the current one, and the current one, were pressed
+    /// (issue #264: a y/n only answers a card after a quiet gap).
+    #[serde(skip)]
+    key_times: (Option<std::time::Instant>, Option<std::time::Instant>),
 }
 
 impl Session {
@@ -314,6 +318,7 @@ impl Session {
             rejected: None,
             approval: None,
             approval_header_drawn: std::cell::Cell::new(false),
+            key_times: (None, None),
             aside: None,
         }
     }
@@ -880,15 +885,38 @@ impl Session {
             .map(|(card, _)| card)
     }
 
+    /// Record a key press at `now`. Call before routing the key (issue #264).
+    pub fn note_key(&mut self, now: std::time::Instant) {
+        self.key_times = (self.key_times.1, Some(now));
+    }
+
+    /// Whether the current key (see [`Session::note_key`]) may answer a pending card:
+    /// the draft is empty and no other key came in the previous
+    /// [`crate::chat_tools::approval::ARM`]. Otherwise it is ordinary typing.
+    pub fn approval_key_answers(&self, now: std::time::Instant) -> bool {
+        use crate::chat_tools::approval::ARM;
+        if self.pending_approval().is_none() || !self.draft.is_empty() {
+            return false;
+        }
+        match self.key_times.0 {
+            Some(previous) => now.saturating_duration_since(previous) >= ARM,
+            None => true,
+        }
+    }
+
     /// The owner's key on the card: `y` approves, `n` denies, and the card closes.
     /// Keys before the card is armed ([`crate::chat_tools::approval::ARM`] after it
-    /// appeared) and other keys decide nothing.
+    /// appeared), with text in the draft, or right after another key decide nothing
+    /// (issue #264), and neither do other keys.
     pub fn answer_approval(
         &mut self,
         key: char,
         now: std::time::Instant,
     ) -> Option<crate::chat_tools::approval::Decision> {
         use crate::chat_tools::approval::{Decision, ARM};
+        if !self.approval_key_answers(now) {
+            return None;
+        }
         let (_, shown) = self.approval.as_ref().filter(|_| self.status.active())?;
         let shown = shown.as_ref()?;
         if now.saturating_duration_since(*shown) < ARM {
