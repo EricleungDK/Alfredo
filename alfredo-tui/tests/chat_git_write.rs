@@ -187,6 +187,68 @@ fn commit_selected_files_includes_new_files_and_leaves_others() {
 }
 
 #[test]
+fn commit_of_a_directory_holding_secrets_is_refused_before_asking() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join("cfg")).unwrap();
+    fs::write(repo.root.join("cfg/app.toml"), "a = 1\n").unwrap();
+    fs::write(repo.root.join("cfg/.env"), "TOKEN=x\n").unwrap();
+    fs::write(repo.root.join("cfg/server.key"), "k\n").unwrap();
+    let error = repo
+        .card(
+            "git_commit",
+            json!({"message": "add cfg", "files": ["cfg"]}),
+        )
+        .unwrap_err();
+    assert!(error.contains("cfg/.env"), "{error}");
+    assert!(error.contains("by hand"), "{error}");
+    assert!(git(&repo.root, &["ls-files", "cfg"]).trim().is_empty());
+}
+
+#[test]
+fn commit_of_a_prestaged_secret_is_refused_before_asking() {
+    let repo = Repo::new();
+    fs::write(repo.root.join(".env.local"), "TOKEN=x\n").unwrap();
+    git(&repo.root, &["add", ".env.local"]);
+    let error = repo
+        .card("git_commit", json!({"message": "oops"}))
+        .unwrap_err();
+    assert!(error.contains(".env.local"), "{error}");
+    assert!(error.contains("by hand"), "{error}");
+}
+
+#[test]
+fn a_secret_staged_after_the_preview_is_refused_at_apply() {
+    let repo = Repo::new();
+    fs::write(repo.root.join("a.txt"), "a\n").unwrap();
+    git(&repo.root, &["add", "a.txt"]);
+    let card = repo
+        .card("git_commit", json!({"message": "add a"}))
+        .unwrap();
+    fs::write(repo.root.join("id.pem"), "k\n").unwrap();
+    git(&repo.root, &["add", "id.pem"]);
+    assert!(approval::apply(&repo.root, &card).is_err());
+    assert!(!git(&repo.root, &["ls-tree", "-r", "HEAD"]).contains("id.pem"));
+}
+
+#[test]
+fn commit_of_a_clean_directory_is_allowed_including_generated_trees() {
+    let repo = Repo::new();
+    fs::create_dir_all(repo.root.join("pkg/vendor/lib")).unwrap();
+    fs::create_dir_all(repo.root.join("pkg/dist")).unwrap();
+    fs::write(repo.root.join("pkg/main.go"), "package p\n").unwrap();
+    fs::write(repo.root.join("pkg/vendor/lib/x.go"), "package x\n").unwrap();
+    fs::write(repo.root.join("pkg/dist/out.js"), "1\n").unwrap();
+    repo.approve(
+        "git_commit",
+        json!({"message": "add pkg", "files": ["pkg"]}),
+    )
+    .unwrap();
+    let tracked = git(&repo.root, &["ls-files", "pkg"]);
+    assert!(tracked.contains("pkg/vendor/lib/x.go"), "{tracked}");
+    assert!(tracked.contains("pkg/dist/out.js"), "{tracked}");
+}
+
+#[test]
 fn commit_with_nothing_to_commit_is_refused_before_asking() {
     let repo = Repo::new();
     let error = repo

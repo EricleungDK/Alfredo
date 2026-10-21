@@ -523,6 +523,83 @@ fn the_pending_card_shows_tool_args_diff_and_keys() {
     assert!(text.contains("n deny"));
 }
 
+fn tall_pending_session() -> Session {
+    let root = workspace("tall");
+    let body: String = (1..=200).map(|n| format!("line {n}\n")).collect();
+    let card = approval::card(
+        &root,
+        &call("write_file", json!({"path": "long.txt", "content": body})),
+    )
+    .unwrap();
+    let _ = fs::remove_dir_all(root);
+    let mut session = Session::new("m".into());
+    // A long earlier message gives PgUp something to scroll through.
+    session.insert(&"earlier context line\n".repeat(60));
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Admitted);
+    assert!(session.await_approval(attempt, card, Instant::now()));
+    session
+}
+
+fn screen(terminal: &Terminal<TestBackend>) -> String {
+    let buffer = terminal.backend().buffer();
+    let width = usize::from(buffer.area.width);
+    buffer
+        .content()
+        .chunks(width)
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Mirrors the main loop: draw, then report whether the card's header is on screen.
+fn draw_and_report(terminal: &mut Terminal<TestBackend>, app: &mut App, now: Instant) -> String {
+    terminal.draw(|frame| ui::draw(frame, app)).unwrap();
+    let session = &mut app.sessions[0];
+    let drawn = session.approval_header_drawn();
+    session.approval_visible(drawn, now);
+    screen(terminal)
+}
+
+#[test]
+fn a_tall_card_keeps_its_header_path_and_key_line_on_screen() {
+    let mut app = App::new("m".into());
+    app.sessions[0] = tall_pending_session();
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    let text = draw_and_report(&mut terminal, &mut app, Instant::now());
+    assert!(text.contains("Approve write_file"), "{text}");
+    assert!(text.contains("long.txt"), "{text}");
+    assert!(text.contains("+line 1"), "{text}");
+    assert!(text.contains("more diff lines"), "{text}");
+    assert!(text.contains("y approve · n deny · Esc"), "{text}");
+}
+
+#[test]
+fn a_card_scrolled_out_of_view_does_not_accept_keys_until_its_header_returns() {
+    let mut app = App::new("m".into());
+    app.sessions[0] = tall_pending_session();
+    let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+    let start = Instant::now();
+    draw_and_report(&mut terminal, &mut app, start);
+    let armed = start + approval::ARM + Duration::from_millis(1);
+    app.sessions[0].scroll_rows(-40);
+    let text = draw_and_report(&mut terminal, &mut app, armed);
+    assert!(!text.contains("Approve write_file"), "{text}");
+    let later = armed + approval::ARM * 4;
+    assert_eq!(app.sessions[0].answer_approval('y', later), None);
+    assert_eq!(app.sessions[0].answer_approval('n', later), None);
+    // Back at the bottom: shown again, so armed again only after the delay.
+    app.sessions[0].scroll_rows(40);
+    let text = draw_and_report(&mut terminal, &mut app, later);
+    assert!(text.contains("Approve write_file"), "{text}");
+    assert_eq!(app.sessions[0].answer_approval('y', later), None);
+    assert_eq!(
+        app.sessions[0].answer_approval('n', later + approval::ARM),
+        Some(Decision::Deny)
+    );
+}
+
 #[test]
 fn cancel_and_restore_drop_the_pending_action() {
     let mut session = pending_session();
