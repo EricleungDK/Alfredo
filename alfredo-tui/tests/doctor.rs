@@ -64,19 +64,21 @@ impl Fixture {
         }
     }
     fn command(&self, endpoint: &str) -> Command {
+        self.command_model(endpoint, Some("initial-model"))
+    }
+    /// `None` names no `--model`: the environment default applies, which is not an
+    /// explicit request (one `--model` per command; the first one would win).
+    fn command_model(&self, endpoint: &str, model: Option<&str>) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"));
+        command.args(["--doctor", "--endpoint", endpoint, "--workspace"]);
         command
-            .args([
-                "--doctor",
-                "--model",
-                "initial-model",
-                "--endpoint",
-                endpoint,
-                "--workspace",
-            ])
             .arg(&self.workspace)
             .arg("--state-dir")
             .arg(&self.state);
+        match model {
+            Some(model) => command.args(["--model", model]),
+            None => command.env("ALFREDO_MODEL", "initial-model"),
+        };
         command
     }
 }
@@ -150,7 +152,7 @@ fn doctor_uses_restored_model_without_terminal_or_mutating_saved_state() {
         .collect();
     for (model, expected_code) in [("restored-model", 0), ("different-model", 2)] {
         let (endpoint, server) = catalog(model);
-        let output = fixture.command(&endpoint).output().unwrap();
+        let output = fixture.command_model(&endpoint, None).output().unwrap();
         server.join().unwrap();
         let text = String::from_utf8(output.stdout).unwrap();
         assert_eq!(output.status.code(), Some(expected_code), "{text}");
@@ -160,6 +162,59 @@ fn doctor_uses_restored_model_without_terminal_or_mutating_saved_state() {
             assert_eq!(&fs::read(path).unwrap(), bytes);
         }
     }
+}
+
+#[test]
+fn doctor_explicit_model_beats_the_saved_one_and_saves_nothing() {
+    let fixture = Fixture::new();
+    let tasks = TaskStore::new(&fixture.state, &fixture.workspace, "default").unwrap();
+    let store = ConversationStore::open(&tasks, "default").unwrap();
+    store
+        .save(&Snapshot::capture(
+            &App::new("restored-model".into()),
+            "default",
+        ))
+        .unwrap();
+    drop(store);
+    let directory = tasks.conversation_directory().unwrap();
+    let saved = || {
+        let mut files: Vec<_> = fs::read_dir(&directory)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "json"))
+            .map(|path| (fs::read(&path).unwrap(), path))
+            .collect();
+        files.sort();
+        files
+    };
+    let before = saved();
+    // The flag names an installed model: the doctor checks it, not the saved one.
+    let (endpoint, server) = catalog("flag-model");
+    let output = fixture
+        .command_model(&endpoint, Some("flag-model"))
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(0), "{text}");
+    assert!(text.contains("PASS model catalog: flag-model"), "{text}");
+    // The flag names a missing model although the saved one is installed: FAIL names the flag.
+    let (endpoint, server) = catalog("restored-model");
+    let output = fixture
+        .command_model(&endpoint, Some("typo:1b"))
+        .output()
+        .unwrap();
+    server.join().unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(2), "{text}");
+    assert!(text.contains("FAIL model catalog: typo:1b"), "{text}");
+    assert_eq!(saved(), before);
+    // The typo was never saved: the next doctor without a flag checks the saved model.
+    let (endpoint, server) = catalog("restored-model");
+    let output = fixture.command_model(&endpoint, None).output().unwrap();
+    server.join().unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(0), "{text}");
 }
 
 #[test]

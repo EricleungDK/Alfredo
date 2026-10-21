@@ -175,7 +175,7 @@ and stdout may be pipes), for CI, cron or another tool. It opens the repository'
 default mission like the automatic TUI start. Each autopilot state change prints one
 line on stderr (`plan drafted`, `#1 approved`, `#1 check failed → repair #3`,
 `done 2/2 alfredo/go-ab12`). On exit stdout carries exactly one JSON object:
-`{state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]}` with
+`{model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]}` with
 `state` one of `done`, `partial`, `failed` or `paused`. Exit codes: 0 every task
 accepted; 1 partial, failed or interrupted; 2 setup or usage error (`--headless`
 without `--go`, with `--select`, `--mission` or `--new-mission`, no repository, no
@@ -187,6 +187,14 @@ the state is kept paused and `/resume` in the TUI continues it. A second signal 
 stops the run and reports state `failed` (exit 1). Wayfinder-style goals are
 refused (exit 2) because headless has no scope flow. Not covered yet: a
 goal from stdin, streaming output and a headless resume.
+
+An explicit `--model NAME` (the flag; not `ALFREDO_MODEL` or the default) is the model
+for a headless `--go`, a headless `--chat` and `--doctor`, even when the conversation
+already holds another. It is checked against the installed list before the conversation
+is opened, so a model that is not installed exits 2 naming it and saves nothing; a
+passing run does not overwrite the conversation's saved model. The run prints
+`model NAME` on stderr and reports `"model": "NAME"` in the JSON. Without the flag the
+restored conversation's model applies, as in the terminal.
 
 ### Headless chat (`--chat PROMPT --headless`)
 
@@ -521,7 +529,8 @@ gets an independent `rust-tasks-v1/<sha256>/tasks.json`.
 (default: `default`). Each set restores up to eight conversations. One terminal
 owns a set at a time; use another name for a concurrent terminal sharing the task
 queue. `--model` supplies the initial model for a new set; restored conversations
-keep their saved models, which you can change using `/model` when eligible.
+keep their saved models in the terminal, which you can change using `/model` when eligible.
+(Headless `--go`/`--chat` and `--doctor` instead honour an explicit `--model` for that run.)
 
 A cancelled or failed chat turn does not lock the conversation. Typing a new prompt
 and pressing Enter starts a new turn in the same chat, and `/model NAME` switches the
@@ -1513,9 +1522,14 @@ Approval (ADR 0004); there is no skip-approval mode.
 | `write_file` | `path`, `content` | Creates or replaces a UTF-8 text file (parent directory must exist; at most 1 MiB); writes `content` exactly as given, so LF content replaces CRLF (the card says `line endings CRLF → LF`, `final newline removed` and so on instead of `(no line changes)`) |
 | `edit_file` | `path`, `old_text`, `new_text` | Replaces the one exact occurrence of `old_text`; zero or several matches are refused. In a file whose every line ends in CRLF, `old_text`/`new_text` are matched as LF text and the result keeps CRLF; a file mixing CRLF and LF is matched on exact bytes (the not-found error says so) and `new_text` is inserted as given |
 
+- **Read-only files.** `write_file` and `edit_file` refuse an existing file without the owner write bit (for example `chmod 444`) with `<path> is read-only; …`, before any approval card is raised and again before the write, and leave the file unchanged.
+
 - **Card.** The transcript shows `? Approve edit_file · edit README.md`, the arguments,
   and a line diff (`-` old, `+` new, at most 80 lines). The prompt title reads
-  `Approval pending · y approve · n deny · Esc cancels the turn`.
+  `Approval pending · y approve · n deny · Esc cancels the turn`. On a short terminal the
+  diff is cut to the rows that fit (`[N more diff lines]`) so the header, arguments and
+  key line stay on screen; the 0.5 s delay below starts only once the header rows are
+  drawn, and PageUp that scrolls them out of view disarms `y`/`n` until they return.
 - **Keys.** `y` and `n` answer the card only when the prompt draft is empty, no other key
   was pressed in the previous 0.5 s, and the card has been on screen for 0.5 s (selected
   conversation, no pane, panel or agent view over it; switching away and back restarts
@@ -1576,7 +1590,10 @@ credentials). Each call pauses for Approval like a file edit.
   is aborted (`git merge --abort`) and the repository is left as it was. The model gets
   `error: merge conflict in: …; merge aborted…`.
 - **Refused before asking.** Refs and branches starting with `-` or holding `..`,
-  option-like or magic paths, `..`, `.git` and secret files, remotes that are not a
+  option-like or magic paths, `..`, `.git` and secret files (for `git_commit` the check
+  applies to the expanded commit listing: staged names, or what a directory pathspec
+  expands to, and again at apply; `vendor/`, `dist/`, `target/` and `node_modules/` stay
+  committable), remotes that are not a
   configured remote name (URLs and paths are refused), nothing to commit, an
   already-up-to-date merge or push, a detached HEAD for commit, merge and push, and
   repositories whose config defines filter drivers or includes.
@@ -1636,6 +1653,27 @@ default false), `timeout_seconds` (1–600, default 120).
 - **Sandbox failure.** If bubblewrap is missing or cannot start, the model gets
   `error: the sandbox could not run the command (…); nothing ran on the host…` with a
   suggestion to escalate. Nothing is retried on the host without a new, approved call.
+
+## Chat proposes governed work
+
+For large, multi-file, risky (migrations, broad refactors, deletions) work, or work
+that needs Checks or Review, chat calls `propose_plan` instead of editing (ADR 0004,
+"When chat hands off").
+
+| Tool | Arguments | Effect |
+| --- | --- | --- |
+| `propose_plan` | `goal`, `mode` (`plan` or `go`), `reason` | Ends the turn and puts `/plan <goal>` or `/go <goal>` in the prompt |
+
+- **Nothing starts.** The call changes nothing, so there is no y/n card: the editable
+  prompt is the confirmation. Edit the goal and press Enter to start it through the
+  ordinary `/plan` or `/go` command, or clear the prompt to drop it.
+- **Typed text wins.** If the prompt already holds text, it is kept; the command is
+  still shown in the reply.
+- **Hand-off only.** Other calls in the same reply as a valid proposal are not run
+  (no approval card); each gets `error: not run: proposal ends the turn…`.
+- **Goal.** One line: whitespace is collapsed, control, bidi and other invisible format characters dropped, cut at
+  2000 bytes. A missing goal or a mode other than `plan`/`go` returns `error: …` to
+  the model.
 
 ## Chat file mentions (`@path`)
 
