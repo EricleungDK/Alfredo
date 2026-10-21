@@ -90,6 +90,9 @@ Every autopilot choice is an ordinary command (`/plan`, `/approve`, `/run`,
 
 Chat works without the worker tools; only coding tasks need them.
 
+Chat's file tools (read, search, edit) need a tool-capable Ollama model. If the model
+rejects tools, chat shows one notice and continues as plain chat without them.
+
 ## Install
 
 From source:
