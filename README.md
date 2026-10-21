@@ -213,6 +213,8 @@ to save; their diff is kept in the run's evidence. See
 | `--endpoint URL` | `http://127.0.0.1:11434` (env `OLLAMA_HOST`) | Ollama HTTP origin |
 | `--go GOAL` | off | Start autopilot on launch |
 | `--headless` | off | With `--go GOAL`: no terminal needed. One stderr line per autopilot state change, then one JSON object on stdout. Exit 0 all accepted, 1 partial/failed/interrupted, 2 setup or usage error (including Ollama unreachable or model missing); waits for and reports an `--on-finish` hook |
+| `--chat PROMPT` | – | With `--headless`: run one Chat Agent turn (tools, approvals) without a terminal and print one JSON result. Mutating calls are denied unless `--approve` allows them |
+| `--approve workspace-edits` | deny all | Only with `--chat … --headless`: approve `edit_file`/`write_file` inside the repository, deny everything else (outcomes logged to `chat-approvals.jsonl`). Interactive chat always asks |
 | `--max-repairs N` | 3 | Auto-repairs per task, 0–16 (0 disables) |
 | `--on-finish PROGRAM` | off (env `ALFREDO_ON_FINISH`) | Absolute path to your own executable, run when an autopilot run ends `done`, `partial` or `failed` (see [reference](alfredo-tui/docs/reference.md#completion-hook)) |
 | `--workspace DIR` | current repo | Open the repository containing `DIR` |

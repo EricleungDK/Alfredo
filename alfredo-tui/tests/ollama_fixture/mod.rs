@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 
+#[derive(Clone)]
 pub enum Reply {
     Json(u16, String),
     Stream(Vec<Vec<u8>>, Duration),
@@ -204,4 +205,37 @@ pub fn running(models: &[&str]) -> Reply {
         serde_json::json!({"models": models.iter().map(|name| serde_json::json!({"name":name,"model":name})).collect::<Vec<_>>()})
             .to_string(),
     )
+}
+
+/// One streamed assistant reply asking for `calls` (name, arguments), then done.
+pub fn tool_calls(calls: &[(&str, serde_json::Value)]) -> Reply {
+    let calls: Vec<_> = calls
+        .iter()
+        .map(
+            |(name, arguments)| serde_json::json!({"function":{"name":name,"arguments":arguments}}),
+        )
+        .collect();
+    Reply::Stream(
+        vec![
+            format!(
+                "{}\n",
+                serde_json::json!({"message":{"role":"assistant","content":"","tool_calls":calls},"done":false})
+            )
+            .into_bytes(),
+            format!("{}\n", serde_json::json!({"message":{"content":""},"done":true})).into_bytes(),
+        ],
+        Duration::ZERO,
+    )
+}
+
+/// A scripted chat model: `POST /api/chat` number n gets `script[n]` (the last
+/// entry repeats); every other request is answered as a server running `fixture`.
+pub fn scripted_chat(script: Vec<Reply>) -> Fixture {
+    serve(reserve(), move |request, index| {
+        if request.path == "POST /api/chat" {
+            script[index.min(script.len() - 1)].clone()
+        } else {
+            running(&["fixture"])
+        }
+    })
 }

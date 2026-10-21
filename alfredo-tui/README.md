@@ -211,7 +211,7 @@ cargo test --locked --manifest-path alfredo-tui/Cargo.toml
 cargo build --locked --manifest-path alfredo-tui/Cargo.toml
 python3 alfredo-tui/tests/terminal_smoke.py            # PTY journeys against a fake Ollama
 python3 alfredo-tui/tests/autopilot_terminal_smoke.py
-python3 alfredo-tui/tests/headless_smoke.py            # --go --headless without a TTY
+python3 alfredo-tui/tests/headless_smoke.py            # --go --headless without a TTY (--chat --headless: cargo test --test headless_chat)
 python3 alfredo-tui/tests/agent_terminal_smoke.py
 python3 alfredo-tui/tests/inference_terminal_smoke.py
 python3 alfredo-tui/tests/num_ctx_terminal_smoke.py
@@ -282,7 +282,7 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | `src/commands.rs` | Command catalog (F1 picker) |
 | `src/execution.rs` | Bounded process execution: limits, sandbox, process-group cleanup, execution receipts |
 | `src/wake.rs` | Run-loop wake source: one channel for terminal input and "a result is ready" wakes |
-| `src/headless.rs` | `--go GOAL --headless`: autopilot without a terminal, JSON result on stdout |
+| `src/headless.rs` | `--go GOAL --headless`: autopilot without a terminal; `--chat PROMPT --headless`: one Chat Agent turn with a scripted approval policy; JSON result on stdout |
 | `src/on_finish.rs` | `--on-finish PROGRAM` completion hook (no shell, outside the sandbox, 10 s limit) |
 | `src/clean.rs` | `/clean`: removes retained worktrees of finished runs only |
 | `src/chat_mentions.rs`, `src/chat_context.rs` | `@path` mentions (committed HEAD content) and harness context for plain chat turns |
