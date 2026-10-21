@@ -974,7 +974,10 @@ impl Ollama {
                 }
             }
             let error = match error_text(&mut response).await {
-                Some(text) => format!("Ollama returned HTTP {}: {text}", response.status().as_u16()),
+                Some(text) => format!(
+                    "Ollama returned HTTP {}: {text}",
+                    response.status().as_u16()
+                ),
                 None => format!(
                     "Ollama returned HTTP {}; check the model and server",
                     response.status().as_u16()

@@ -371,17 +371,7 @@ async fn run_as(
 ) -> Vec<Event> {
     let provider = Ollama::new(endpoint, Duration::from_secs(5)).unwrap();
     let (sender, mut receiver) = mpsc::channel(256);
-    chat_tools::run_turn(
-        &provider,
-        root,
-        0,
-        1,
-        model.into(),
-        messages,
-        sender,
-        None,
-    )
-    .await;
+    chat_tools::run_turn(&provider, root, 0, 1, model.into(), messages, sender, None).await;
     let mut events = Vec::new();
     while let Some(event) = receiver.recv().await {
         events.push(event);
@@ -463,7 +453,10 @@ async fn another_400_shows_ollamas_error_text_and_is_not_retried_without_tools()
     let Status::Failed(error) = &session.status else {
         panic!("{:?}", session.status);
     };
-    assert!(error.contains("HTTP 400: context length exceeded"), "{error}");
+    assert!(
+        error.contains("HTTP 400: context length exceeded"),
+        "{error}"
+    );
     assert!(!error.chars().any(|c| c.is_control()), "{error:?}");
     assert!(error.chars().count() < 260, "{error}");
     assert_eq!(fixture.count("POST /api/chat"), 1);
