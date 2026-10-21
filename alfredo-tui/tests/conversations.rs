@@ -181,6 +181,56 @@ fn malformed_future_or_invalid_cursor_state_is_preserved() {
 }
 
 #[test]
+fn unreadable_conversation_errors_name_the_file_and_one_way_out() {
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let mut app = App::new("fixture".into());
+    app.sessions[0].insert("hello");
+    store.save(&Snapshot::capture(&app, "default")).unwrap();
+    let path = fixture.file();
+    let shown = path.display().to_string();
+    let mut future: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    future["schema_version"] = 99.into();
+    let cases = vec![
+        (b"{\"schema_ver".to_vec(), "Malformed conversation state"),
+        (vec![b' '; 12 * 1024 * 1024 + 1], "exceeds 12 MiB"),
+        (serde_json::to_vec(&future).unwrap(), ""),
+        (b"{broken".to_vec(), "Malformed"),
+    ];
+    for (bytes, expected) in cases {
+        fs::write(&path, &bytes).unwrap();
+        let error = store.load().unwrap_err();
+        assert!(error.contains(expected), "{error}");
+        assert!(error.contains(&shown), "{error}");
+        assert!(
+            error.contains(&format!("mv \"{shown}\" \"{shown}.bad\""))
+                && error.contains("--conversation NAME"),
+            "{error}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), bytes);
+    }
+}
+
+#[test]
+fn downgrade_and_backup_differs_errors_name_the_file() {
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let app = App::new("fixture".into());
+    let snapshot = Snapshot::capture(&app, "default");
+    store.save(&snapshot).unwrap();
+    let path = fixture.file();
+    let shown = path.display().to_string();
+    let mut older = snapshot.clone();
+    older.schema_version -= 1;
+    let error = store.save(&older).unwrap_err();
+    assert!(error.contains("downgrade"), "{error}");
+    assert!(
+        error.contains(&shown) && error.contains("--conversation NAME"),
+        "{error}"
+    );
+}
+
+#[test]
 fn final_save_follows_pending_autosave_and_keeps_the_latest_draft() {
     let fixture = Fixture::new();
     let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
@@ -260,7 +310,13 @@ fn legacy_view_migration_preserves_exact_bytes_and_refuses_conflicting_backup() 
     });
     let backup = path.with_extension("v1-backup");
     fs::write(&backup, b"different").unwrap();
-    assert!(store.save(&latest).unwrap_err().contains("backup differs"));
+    let error = store.save(&latest).unwrap_err();
+    assert!(
+        error.contains("backup differs")
+            && error.contains("v1-backup")
+            && error.contains("--conversation NAME"),
+        "{error}"
+    );
     assert_eq!(fs::read(&path).unwrap(), bytes);
     fs::remove_file(&backup).unwrap();
     store.save(&latest).unwrap();
