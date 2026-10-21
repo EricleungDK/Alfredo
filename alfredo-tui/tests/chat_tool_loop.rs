@@ -566,6 +566,30 @@ async fn num_ctx_estimate_counts_the_tool_definitions() {
     assert_eq!(fixture.count("POST /api/chat"), 0);
 }
 
+#[tokio::test]
+async fn a_window_too_small_for_the_tools_runs_the_turn_as_plain_chat() {
+    let root = workspace("tiny");
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, |_, _| done("plain answer"));
+    let mut session = Session::new("fixture".into());
+    session.insert("hi");
+    let messages = session.begin().unwrap();
+    finish(
+        run_ctx(&fixture.endpoint, &root, messages, Some(2048)).await,
+        &mut session,
+    );
+    assert_eq!(session.status, Status::Complete, "{:?}", session.status);
+    assert!(session.messages[1].content.contains("plain answer"));
+    assert!(session.messages[1]
+        .content
+        .contains("too small for the file tools"));
+    assert!(fixture.requests.lock().unwrap()[0]
+        .body
+        .get("tools")
+        .is_none());
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn compact_works_from_a_failed_tool_turn() {
     let mut session = Session::new("fixture".into());

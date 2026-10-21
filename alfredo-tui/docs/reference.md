@@ -1476,7 +1476,9 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   under `--num-ctx`), and the model gets one more round without tools to answer, so the
   turn ends with a reply instead of failing. A request refused by the window guard or the
   conversation limit says how to continue: `/compact` or `/clear`, Ctrl+N, or a larger
-  `--num-ctx`; `/compact` works on that failed conversation.
+  `--num-ctx`; `/compact` works on that failed conversation. When the window cannot hold
+  the tool definitions (about 3k tokens) plus a 256-token reply floor, as at `--num-ctx
+  2048`, that turn runs as plain chat with a one-line notice.
 - **Loop.** The model may answer, or ask for tools; Alfredo runs the calls, sends the
   results back and asks again. A turn runs at most 8 tool rounds; per round 16 calls run,
   further calls (up to 64) get an `error: not run` result and any beyond are dropped;

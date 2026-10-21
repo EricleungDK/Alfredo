@@ -81,11 +81,33 @@ pub async fn run_turn(
                 .is_ok()
         }
     };
-    let tools_bytes = if plain {
+    let mut tools_bytes = if plain {
         0
     } else {
         serde_json::to_string(&definitions()).map_or(0, |text| text.len())
     };
+    // A window too small for the tool definitions plus the reply floor cannot run with
+    // tools at all (they alone are about 3k tokens); this turn runs as plain chat.
+    if let Some(window) = provider.num_ctx().filter(|_| !plain) {
+        let held: usize = messages
+            .iter()
+            .map(|m| m.role.len() + m.content.len())
+            .sum();
+        let needs = |bytes: usize| bytes / 3 + REPLY_FLOOR_TOKENS > window as usize;
+        if needs(held + tools_bytes) && !needs(held) {
+            plain = true;
+            tools_bytes = 0;
+            provider = provider.with_tools(Vec::new());
+            strip_tool_prompt(&mut messages);
+            if !send(Update::Token(format!(
+                "[--num-ctx {window} is too small for the file tools; this reply runs without them]\n\n"
+            )))
+            .await
+            {
+                return;
+            }
+        }
+    }
     let mut steps = 0;
     // Set once a round's results were squeezed out: the next round is offered no tools
     // so the model answers with what it has.
