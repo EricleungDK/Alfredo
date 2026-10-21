@@ -22,7 +22,12 @@ pub fn chat_entries(records: &[crate::chat_tools::approval::Record], query: &str
             revision: index as u64 + 1,
             task: 0,
             correlation: format!("chat-approval {}", record.at_ms),
-            summary: format!("Chat {} {}", record.tool, record.outcome.label()),
+            summary: format!(
+                "Chat {}{} {}",
+                record.tool,
+                if record.escalated { " (HOST)" } else { "" },
+                record.outcome.label()
+            ),
             detail: record.target.clone(),
         })
         // A `#ID` task filter never matches chat outcomes.
