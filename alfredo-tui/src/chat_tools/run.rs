@@ -124,6 +124,7 @@ pub async fn run_turn(
             results.push(result);
         }
         let step = ToolStep { calls, results };
+        let proposal = super::propose::prefill(&step);
         // The session refuses a step past the conversation limit; stop here too.
         let held: usize = messages.iter().map(|m| m.content.len()).sum();
         if held + step.bytes() > MAX_TEXT {
@@ -132,6 +133,15 @@ pub async fn run_turn(
         }
         messages.extend(step.messages());
         if !send(Update::ToolStep(step)).await {
+            return;
+        }
+        // A proposal hands off to the owner: the turn ends with the command in the prompt.
+        if let Some(command) = proposal {
+            send(Update::Token(format!(
+                "Proposed `{command}`. It is in your prompt: edit it and press Enter to start, or clear it to drop it."
+            )))
+            .await;
+            send(Update::Done).await;
             return;
         }
     }

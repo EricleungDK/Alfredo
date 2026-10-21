@@ -214,7 +214,7 @@ python3 alfredo-tui/tests/agent_terminal_smoke.py
 python3 alfredo-tui/tests/inference_terminal_smoke.py
 python3 alfredo-tui/tests/num_ctx_terminal_smoke.py
 python3 alfredo-tui/tests/compaction_terminal_smoke.py
-python3 alfredo-tui/tests/chat_tools_terminal_smoke.py   # read_file round trip; edit approve/deny
+python3 alfredo-tui/tests/chat_tools_terminal_smoke.py   # read_file round trip; edit approve/deny; propose_plan prefill
 python3 alfredo-tui/tests/recovery_terminal_smoke.py
 python3 alfredo-tui/tests/qualification_cli_smoke.py
 python3 alfredo-tui/tests/eval_smoke.py                # harness eval, fixture mode
@@ -284,7 +284,7 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | `src/on_finish.rs` | `--on-finish PROGRAM` completion hook (no shell, outside the sandbox, 10 s limit) |
 | `src/clean.rs` | `/clean`: removes retained worktrees of finished runs only |
 | `src/chat_mentions.rs`, `src/chat_context.rs` | `@path` mentions (committed HEAD content) and harness context for plain chat turns |
-| `src/chat_tools/mod.rs`, `src/chat_tools/read.rs`, `src/chat_tools/git_read.rs`, `src/chat_tools/run.rs`, `src/chat_tools/edit.rs`, `src/chat_tools/approval.rs` | Chat tool registry (definitions, tiers, dispatch, path confinement), read-only file and git tools, capped tool loop, write_file/edit_file, approval gate (card, decision, outcome log) |
+| `src/chat_tools/mod.rs`, `src/chat_tools/read.rs`, `src/chat_tools/git_read.rs`, `src/chat_tools/run.rs`, `src/chat_tools/edit.rs`, `src/chat_tools/approval.rs`, `src/chat_tools/propose.rs` | Chat tool registry (definitions, tiers, dispatch, path confinement), read-only file and git tools, capped tool loop, write_file/edit_file, approval gate (card, decision, outcome log), propose_plan (prefills /plan or /go) |
 | `src/workstation.rs`, `src/wayfinder.rs` | One admitted workspace/mission plus its conversation owner; first-contact routing |
 | `src/selection.rs`, `src/selection_command.rs`, `src/selection_store.rs`, `src/missions.rs` | Startup workspace selection, its intent and journal; mission namespace discovery |
 | `src/conversations.rs`, `src/reading.rs`, `src/transcript_cache.rs`, `src/agent_drafts.rs` | Conversation snapshots, reading positions, rendered-message cache, unsent agent drafts |

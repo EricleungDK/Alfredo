@@ -1496,6 +1496,25 @@ Approval (ADR 0004); there is no skip-approval mode.
 - **Restarts.** A pending action is never saved; a restored session shows the turn as
   interrupted and never re-asks or runs it.
 
+## Chat proposes governed work
+
+For large, multi-file, risky (migrations, broad refactors, deletions) work, or work
+that needs Checks or Review, chat calls `propose_plan` instead of editing (ADR 0004,
+"When chat hands off").
+
+| Tool | Arguments | Effect |
+| --- | --- | --- |
+| `propose_plan` | `goal`, `mode` (`plan` or `go`), `reason` | Ends the turn and puts `/plan <goal>` or `/go <goal>` in the prompt |
+
+- **Nothing starts.** The call changes nothing, so there is no y/n card: the editable
+  prompt is the confirmation. Edit the goal and press Enter to start it through the
+  ordinary `/plan` or `/go` command, or clear the prompt to drop it.
+- **Typed text wins.** If the prompt already holds text, it is kept; the command is
+  still shown in the reply.
+- **Goal.** One line: whitespace is collapsed, control characters dropped, cut at
+  2000 bytes. A missing goal or a mode other than `plan`/`go` returns `error: …` to
+  the model.
+
 ## Chat file mentions (`@path`)
 
 A token `@relative/path` in a chat prompt, starting at a word boundary (so `a@b.com` and

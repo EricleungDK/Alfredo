@@ -105,6 +105,21 @@ fn chat_prompt_describes_its_workspace_tools() {
 }
 
 #[test]
+fn chat_prompt_says_when_to_propose_governed_work() {
+    // Issue #239 / ADR 0004 "When chat hands off".
+    let text = chat_context::system_message(None, |_| None).content;
+    for needle in [
+        "propose_plan",
+        "multi-file",
+        "Checks or Review",
+        "risky",
+        "nothing starts until the owner",
+    ] {
+        assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
+    }
+}
+
+#[test]
 fn chat_sees_goal_task_status_files_and_the_retained_patch() {
     let patch = "diff --git a/app/utils.py b/app/utils.py\n-def unused_helper():\n-    pass\n";
     let message =

@@ -4,7 +4,8 @@
 //!
 //! Adding a tool = one function-family file exporting [`Tool`] consts plus one entry
 //! in [`TOOLS`]. Every tool has a [`Tier`]: [`Tier::Read`] runs without asking;
-//! [`Tier::Mutating`] calls pause the loop for owner Approval ([`approval`]).
+//! [`Tier::Mutating`] calls pause the loop for owner Approval ([`approval`]);
+//! [`Tier::Propose`] calls end the turn and prefill the prompt ([`propose`]).
 //!
 //! Tools act on the Coding Workspace (the owner's repository, working tree). Paths are
 //! confined to it ([`resolve`]); outputs are capped at [`MAX_OUTPUT`] bytes. Errors are
@@ -13,6 +14,7 @@
 pub mod approval;
 mod edit;
 mod git_read;
+pub mod propose;
 mod read;
 mod run;
 
@@ -32,6 +34,9 @@ pub enum Tier {
     Read,
     /// Changes the Coding Workspace; each call needs owner Approval.
     Mutating,
+    /// Proposes governed work (/plan, /go); changes nothing, so no y/n card: it ends
+    /// the turn and prefills the owner's prompt, whose Enter is the confirmation.
+    Propose,
 }
 
 /// One tool the model may call.
@@ -56,6 +61,7 @@ pub static TOOLS: &[Tool] = &[
     git_read::GIT_DIFF,
     edit::WRITE_FILE,
     edit::EDIT_FILE,
+    propose::PROPOSE_PLAN,
 ];
 
 /// Ollama `tools` definitions for every registered tool.
