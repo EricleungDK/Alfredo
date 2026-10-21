@@ -177,6 +177,59 @@ fn without_a_policy_every_mutating_call_is_denied_and_logged() {
 }
 
 #[test]
+fn a_turn_stopped_by_the_step_cap_is_stopped_not_done() {
+    let root = repository("step-cap");
+    let fixture = scripted_chat(vec![tool_calls(&[("list_files", json!({}))])]);
+    let output = run(&root, &fixture, &["--chat", "LOOP", "--headless"]);
+    let value = result(&output);
+    assert_eq!(output.status.code(), Some(1), "{value}");
+    assert_eq!(value["state"], "stopped");
+    assert_eq!(value["stopped"], "step_limit");
+    assert_eq!(value["steps"], 8);
+    assert!(value["error"].as_str().unwrap().contains("step limit"));
+    assert!(!value["reply"].as_str().unwrap().contains("ask again"));
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_errored_call_carries_its_reason_in_json_and_on_stderr() {
+    let root = repository("detail");
+    let fixture = scripted_chat(vec![
+        tool_calls(&[(
+            "write_file",
+            json!({"path": "sub/new.txt", "content": "hi\n"}),
+        )]),
+        done("could not write"),
+    ]);
+    let output = run(
+        &root,
+        &fixture,
+        &[
+            "--chat",
+            "write it",
+            "--headless",
+            "--approve",
+            "workspace-edits",
+        ],
+    );
+    let value = result(&output);
+    assert_eq!(output.status.code(), Some(0), "{value}");
+    assert_eq!(value["state"], "done");
+    assert_eq!(value["stopped"], Value::Null);
+    let call = &value["calls"][0];
+    assert_eq!(call["error"], true);
+    let detail = call["detail"].as_str().unwrap();
+    assert!(detail.contains("does not exist"), "{detail}");
+    assert!(detail.len() <= 200 && !detail.chars().any(char::is_control));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("tool write_file sub/new.txt (error:") && stderr.contains("does not exist"),
+        "{stderr}"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn approve_is_headless_chat_only_and_validated() {
     let root = repository("usage");
     let fixture = scripted_chat(vec![done("unused")]);

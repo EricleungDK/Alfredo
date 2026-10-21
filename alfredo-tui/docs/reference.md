@@ -202,10 +202,16 @@ Approval gate, answered by a scripted policy instead of a card:
 There is no other policy and no interactive equivalent: interactive chat always asks
 (ADR 0004). `--approve` is refused without `--chat … --headless`, and `--chat` without
 `--headless`. Each outcome is appended to `chat-approvals.jsonl` like an interactive
-decision. Stderr gets one line per tool call and approval; stdout one JSON object
-`{state, policy, reply, steps, calls:[{tool,path,error,result}], approvals:[{tool,target,outcome,reason}],
-error}` (`state` `done` or `failed`; `result` is `ok`, `denied`, `malformed` or `error`). Exit 0
-done; 1 failed or interrupted (SIGINT/SIGTERM deny further cards, wait up to 10 s for
+decision. Stderr gets one line per approval and one per tool call (`tool NAME PATH (result)`;
+a call that did not succeed adds the reason: `(error: parent directory of a/b does not exist)`);
+stdout one JSON object
+`{state, stopped, policy, reply, steps, calls:[{tool,path,error,result,detail}], approvals:[{tool,target,outcome,reason}],
+error}`. `state` is `done`, `stopped` or `failed`; `result` is `ok`, `denied`, `malformed` or `error`;
+`detail` is the tool's error text (at most 200 bytes, control characters removed; `null` when
+`error` is false). A turn cut off by the tool step cap (8 rounds) or by the conversation size
+limit is `state` `stopped` with `stopped` `step_limit` or `output_limit` (`null` otherwise) and
+`error` naming the cap; its `reply` is the text before the cut, without the interactive "ask again"
+notice. Exit 0 done; 1 stopped, failed or interrupted (SIGINT/SIGTERM deny further cards, wait up to 10 s for
 answered cards to be logged, then cancel the turn); 2 setup or usage error. The turn is not saved to the conversation. The
 eval uses it for chat tasks (`eval/README.md`).
 

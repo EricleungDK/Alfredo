@@ -186,8 +186,30 @@ pub enum Update {
     ToolCalls(Vec<ToolCall>),
     /// A tool round finished: calls and results join the reply's context.
     ToolStep(ToolStep),
+    /// The chat tool loop ended the turn early (a cap, not the model's answer). Sent
+    /// before the notice text and `Done`/`Failed`, so headless runs can tell it apart.
+    Stopped(Stop),
     Done,
     Failed(String),
+}
+
+/// Why a chat turn was cut off by a cap (issue #278).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stop {
+    /// The tool step cap was reached.
+    StepLimit,
+    /// The conversation had no room left for another round.
+    OutputLimit,
+}
+
+impl Stop {
+    /// The `stopped` value of the headless chat JSON.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::StepLimit => "step_limit",
+            Self::OutputLimit => "output_limit",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1608,6 +1630,7 @@ impl Session {
                         .push(step);
                 }
             }
+            Update::Stopped(_) => {}
             Update::Done => self.status = Status::Complete,
             Update::Failed(reason) => self.status = Status::Failed(reason),
         }

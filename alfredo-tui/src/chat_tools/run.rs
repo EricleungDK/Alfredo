@@ -4,7 +4,7 @@ use super::{
     cap_to, definitions, dispatch_within, normalize_arguments, Tier, MAX_OUTPUT, TOOLS,
 };
 use crate::{
-    model::{Event, Message, ToolCall, ToolStep, Update, MAX_TEXT, OUTPUT_LIMIT},
+    model::{Event, Message, Stop, ToolCall, ToolStep, Update, MAX_TEXT, OUTPUT_LIMIT},
     provider::{Ollama, Round},
 };
 use std::{
@@ -157,6 +157,7 @@ pub async fn run_turn(
             return;
         }
         if last_round {
+            send(Update::Stopped(Stop::OutputLimit)).await;
             send(Update::Token(
                 "\n\n[Stopped: the conversation is near its size limit; /compact or ask again]"
                     .into(),
@@ -166,6 +167,7 @@ pub async fn run_turn(
             return;
         }
         if steps == MAX_STEPS {
+            send(Update::Stopped(Stop::StepLimit)).await;
             send(Update::Token(format!(
                 "\n\n[{STEP_CAP_NOTICE} after {MAX_STEPS} rounds; ask again to continue]"
             )))
@@ -241,6 +243,7 @@ pub async fn run_turn(
             last_round = true;
         }
         if held + step.bytes() > MAX_TEXT {
+            send(Update::Stopped(Stop::OutputLimit)).await;
             send(Update::Failed(OUTPUT_LIMIT.into())).await;
             return;
         }
