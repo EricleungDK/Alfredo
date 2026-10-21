@@ -62,7 +62,7 @@ Chat reads your repository itself: the model can call read-only tools (`read_fil
 the file. Each call and a one-line cut of its result show in the transcript; see
 `docs/reference.md#chat-tools-read-only`. Chat can also edit files (`edit_file`,
 `write_file`): each call shows an approval card with a diff; `y` approves, `n` denies,
-Esc denies and ends the turn (`docs/reference.md#chat-approval-and-file-edits`). Chat prompts also accept `@path/to/file`
+Esc denies and ends the turn (`docs/reference.md#chat-approval-and-file-edits`). `run_command` runs an approved shell command in the Sandbox (network off), or on the host when escalated, behind a red HOST card (`docs/reference.md#chat-shell-commands-run_command`). Chat prompts also accept `@path/to/file`
 mentions: the file's committed HEAD content (at most 8 files, 32 KiB) is sent with that
 message; see `docs/reference.md#chat-file-mentions-path`.
 
@@ -284,7 +284,7 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | `src/on_finish.rs` | `--on-finish PROGRAM` completion hook (no shell, outside the sandbox, 10 s limit) |
 | `src/clean.rs` | `/clean`: removes retained worktrees of finished runs only |
 | `src/chat_mentions.rs`, `src/chat_context.rs` | `@path` mentions (committed HEAD content) and harness context for plain chat turns |
-| `src/chat_tools/mod.rs`, `src/chat_tools/read.rs`, `src/chat_tools/git_read.rs`, `src/chat_tools/run.rs`, `src/chat_tools/edit.rs`, `src/chat_tools/approval.rs` | Chat tool registry (definitions, tiers, dispatch, path confinement), read-only file and git tools, capped tool loop, write_file/edit_file, approval gate (card, decision, outcome log) |
+| `src/chat_tools/mod.rs`, `src/chat_tools/read.rs`, `src/chat_tools/git_read.rs`, `src/chat_tools/run.rs`, `src/chat_tools/edit.rs`, `src/chat_tools/shell.rs`, `src/chat_tools/approval.rs` | Chat tool registry (definitions, tiers, dispatch, path confinement), read-only file and git tools, capped tool loop, write_file/edit_file, run_command (sandboxed or host-escalated), approval gate (card, decision, outcome log) |
 | `src/workstation.rs`, `src/wayfinder.rs` | One admitted workspace/mission plus its conversation owner; first-contact routing |
 | `src/selection.rs`, `src/selection_command.rs`, `src/selection_store.rs`, `src/missions.rs` | Startup workspace selection, its intent and journal; mission namespace discovery |
 | `src/conversations.rs`, `src/reading.rs`, `src/transcript_cache.rs`, `src/agent_drafts.rs` | Conversation snapshots, reading positions, rendered-message cache, unsent agent drafts |

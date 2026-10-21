@@ -2253,13 +2253,25 @@ fn approval_card_lines(
     width: usize,
 ) -> Vec<Line<'static>> {
     let warn = Style::default().fg(Color::Yellow);
+    // A host-escalated run_command (#236) gets its own colour and a HOST banner.
+    let header = if card.escalated() {
+        Style::default().fg(Color::LightRed)
+    } else {
+        warn
+    };
     let mut lines = vec![
         Line::default(),
         Line::styled(
             format!("? Approve {} · {}", card.tool, single_line(&card.summary)),
-            warn.add_modifier(Modifier::BOLD),
+            header.add_modifier(Modifier::BOLD),
         ),
     ];
+    if card.escalated() {
+        lines.push(Line::styled(
+            "  ! HOST · network on · this command runs outside the sandbox",
+            header.add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        ));
+    }
     let arguments = card.arguments.to_string();
     let shown: String = arguments.chars().take(width.max(20) * 2).collect();
     lines.push(Line::styled(format!("  args {}", safe(&shown)), dim()));

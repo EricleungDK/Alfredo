@@ -1496,6 +1496,32 @@ Approval (ADR 0004); there is no skip-approval mode.
 - **Restarts.** A pending action is never saved; a restored session shows the turn as
   interrupted and never re-asks or runs it.
 
+## Chat shell commands (`run_command`)
+
+`run_command` (issue #236, `src/chat_tools/shell.rs`) runs one `sh -c` command after
+Approval. Arguments: `command` (required, at most 8 KiB), `cwd` (relative directory,
+default the repository root; same confinement as the read tools), `escalate` (boolean,
+default false), `timeout_seconds` (1–600, default 120).
+
+- **Sandboxed (default).** Runs in the same bubblewrap Sandbox as worker checks: network
+  off, the Coding Workspace writable, `.git` and system roots read-only, `HOME=/tmp`,
+  only tools under `/usr` and `/bin`. The card reads `? Approve run_command · run sh
+  test.sh` with `cwd . · sandboxed · network off · …` and the exact command.
+- **Escalated.** `escalate: true` runs on the host with your environment and network
+  (for `git push`, package installs). The card is red with a reversed
+  `! HOST · network on` banner and `run on HOST …`. Denying it runs nothing. Escalated
+  outcomes are logged with `"escalated": true` and show as `Chat run_command (HOST) …` in
+  F4. Future always-allow rules (#238) must never cover an escalated card unless the rule
+  is itself for escalated runs (`Card::escalated`, `Request::escalated`).
+- **Result.** The model gets `exit code N · sandboxed|host · cwd …`, then `stdout:` and
+  `stderr:`, cut to 16 KiB with a `[truncated: …]` marker. A failing sandboxed command
+  adds a note suggesting `escalate: true`. Output past 1 MiB stops the process.
+- **Timeout.** The command runs in its own process group; on timeout the whole tree is
+  killed and the model gets `error: timed out after Ns…` (logged as failed).
+- **Sandbox failure.** If bubblewrap is missing or cannot start, the model gets
+  `error: the sandbox could not run the command (…); nothing ran on the host…` with a
+  suggestion to escalate. Nothing is retried on the host without a new, approved call.
+
 ## Chat file mentions (`@path`)
 
 A token `@relative/path` in a chat prompt, starting at a word boundary (so `a@b.com` and

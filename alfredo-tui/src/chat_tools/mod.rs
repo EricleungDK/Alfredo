@@ -15,6 +15,7 @@ mod edit;
 mod git_read;
 mod read;
 mod run;
+mod shell;
 
 pub use run::{run_turn, MAX_STEPS, STEP_CAP_NOTICE};
 
@@ -56,6 +57,7 @@ pub static TOOLS: &[Tool] = &[
     git_read::GIT_DIFF,
     edit::WRITE_FILE,
     edit::EDIT_FILE,
+    shell::RUN_COMMAND,
 ];
 
 /// Ollama `tools` definitions for every registered tool.

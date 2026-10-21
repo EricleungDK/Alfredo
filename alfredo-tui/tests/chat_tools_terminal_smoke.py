@@ -115,7 +115,7 @@ class ChatTools(unittest.TestCase):
         self.assertEqual(len(chats), 2)
         names = [tool['function']['name'] for tool in chats[0]['tools']]
         self.assertEqual(names, ['read_file', 'list_files', 'grep', 'git_status', 'git_branch',
-                                 'git_log', 'git_diff', 'write_file', 'edit_file'])
+                                 'git_log', 'git_diff', 'write_file', 'edit_file', 'run_command'])
         second = chats[1]['messages']
         self.assertEqual(second[-2]['role'], 'assistant')
         self.assertEqual(second[-2]['tool_calls'][0]['function']['name'], 'read_file')

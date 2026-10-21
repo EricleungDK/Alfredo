@@ -1,0 +1,476 @@
+//! Issue #236: run_command runs approved shell commands in the bubblewrap Sandbox
+//! (Coding Workspace writable, network off); `escalate` runs on the host after a
+//! visibly different approval card. Fixture-driven demos: "run the tests" and
+//! "push this branch".
+mod ollama_fixture;
+
+use alfredo_tui::{
+    activity,
+    chat_tools::{
+        self,
+        approval::{self, CardKind, Decision, Gate, Log, Outcome},
+        Tier, TOOLS,
+    },
+    model::{App, Event, Session, ToolCall, Update},
+    provider::Ollama,
+    ui,
+};
+use ollama_fixture::{done, Reply};
+use ratatui::{backend::TestBackend, Terminal};
+use serde_json::json;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
+};
+use tokio::sync::mpsc;
+
+static ID: AtomicU64 = AtomicU64::new(0);
+
+fn workspace(tag: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "alfredo-shell-{tag}-{}-{}",
+        std::process::id(),
+        ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join("test.sh"),
+        "echo TESTS_PASSED\necho made > out.txt\n",
+    )
+    .unwrap();
+    root.canonicalize().unwrap()
+}
+
+/// True when bubblewrap can start a sandbox here; tests needing it skip otherwise.
+fn sandbox_works() -> bool {
+    let ok = Command::new("/usr/bin/bwrap")
+        .args([
+            "--unshare-user",
+            "--unshare-net",
+            "--ro-bind",
+            "/",
+            "/",
+            "--",
+            "/bin/true",
+        ])
+        .status()
+        .is_ok_and(|s| s.success());
+    if !ok {
+        eprintln!("SKIP: bubblewrap unavailable; sandboxed run_command not exercised");
+    }
+    ok
+}
+
+fn tool_call(name: &str, arguments: serde_json::Value) -> Reply {
+    Reply::Stream(
+        vec![
+            format!(
+                "{}\n",
+                json!({"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":name,"arguments":arguments}}]},"done":false})
+            )
+            .into_bytes(),
+            format!("{}\n", json!({"message":{"content":""},"done":true})).into_bytes(),
+        ],
+        Duration::ZERO,
+    )
+}
+
+fn call(arguments: serde_json::Value) -> ToolCall {
+    ToolCall {
+        name: "run_command".into(),
+        arguments,
+    }
+}
+
+fn gate(decision: Decision, log: Option<Log>) -> (Gate, Arc<Mutex<Vec<approval::Card>>>) {
+    let (sender, mut receiver) = mpsc::channel::<approval::Request>(4);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let cards = seen.clone();
+    tokio::spawn(async move {
+        while let Some(request) = receiver.recv().await {
+            cards.lock().unwrap().push(request.card.clone());
+            assert_eq!(
+                request.escalated(),
+                matches!(request.card.kind, CardKind::Shell { escalated: true })
+            );
+            let _ = request.reply.send(decision);
+        }
+    });
+    (Gate::new(sender, log), seen)
+}
+
+/// One turn: the model asks for `first`, then answers "done". Returns the tool
+/// result the model got back.
+async fn turn(root: &Path, first: Reply, gate: Gate) -> (Session, String) {
+    let addr = ollama_fixture::reserve();
+    let first = Mutex::new(Some(first));
+    let fixture = ollama_fixture::serve(addr, move |_, index| {
+        if index == 0 {
+            first.lock().unwrap().take().unwrap()
+        } else {
+            done("done")
+        }
+    });
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(5)).unwrap();
+    let mut session = Session::new("fixture".into());
+    session.insert("run it");
+    let messages = session.begin().unwrap();
+    let (sender, mut receiver) = mpsc::channel::<Event>(256);
+    chat_tools::run_turn(
+        &provider,
+        root,
+        0,
+        1,
+        "fixture".into(),
+        messages,
+        sender,
+        Some(gate),
+    )
+    .await;
+    while let Some(event) = receiver.recv().await {
+        session.apply(event.attempt, event.update);
+    }
+    let bodies: Vec<serde_json::Value> = fixture
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.path == "POST /api/chat")
+        .map(|r| r.body.clone())
+        .collect();
+    let result = bodies
+        .get(1)
+        .and_then(|b| b["messages"].as_array())
+        .and_then(|m| m.last())
+        .and_then(|m| m["content"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    (session, result)
+}
+
+#[test]
+fn run_command_is_registered_mutating_with_an_escalate_flag() {
+    let tool = TOOLS.iter().find(|t| t.name == "run_command").unwrap();
+    assert_eq!(tool.tier, Tier::Mutating);
+    let definition = chat_tools::definitions()
+        .into_iter()
+        .find(|d| d["function"]["name"] == "run_command")
+        .unwrap();
+    let properties = &definition["function"]["parameters"]["properties"];
+    assert_eq!(properties["escalate"]["type"], "boolean");
+    assert_eq!(properties["command"]["type"], "string");
+    assert!(properties["cwd"].is_object());
+    assert!(properties["timeout_seconds"].is_object());
+}
+
+#[test]
+fn cards_show_command_cwd_and_sandbox_or_host() {
+    let root = workspace("cards");
+    fs::create_dir(root.join("sub")).unwrap();
+    let card =
+        approval::card(&root, &call(json!({"command": "sh test.sh", "cwd": "sub"}))).unwrap();
+    assert_eq!(card.kind, CardKind::Shell { escalated: false });
+    assert!(!card.escalated());
+    assert!(card.summary.contains("sh test.sh"), "{}", card.summary);
+    assert!(card.preview.contains("cwd sub"), "{}", card.preview);
+    assert!(card.preview.contains("sandboxed"), "{}", card.preview);
+    assert!(!card.preview.contains("HOST"));
+    let host = approval::card(
+        &root,
+        &call(json!({"command": "git push", "escalate": true})),
+    )
+    .unwrap();
+    assert_eq!(host.kind, CardKind::Shell { escalated: true });
+    assert!(host.escalated());
+    assert!(
+        host.preview.contains("HOST · network on"),
+        "{}",
+        host.preview
+    );
+    assert!(host.preview.contains("cwd ."), "{}", host.preview);
+    // Refused before asking: empty command, cwd outside the workspace, bad timeout.
+    for bad in [
+        json!({"command": "  "}),
+        json!({"command": "ls", "cwd": "../"}),
+        json!({"command": "ls", "cwd": "missing"}),
+        json!({"command": "ls", "escalate": "yes"}),
+        json!({"command": "ls", "timeout_seconds": 0}),
+        json!({"command": "ls", "timeout_seconds": 100000}),
+    ] {
+        assert!(approval::card(&root, &call(bad.clone())).is_err(), "{bad}");
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn run_the_tests_runs_sandboxed_after_approval() {
+    if !sandbox_works() {
+        return;
+    }
+    let root = workspace("tests");
+    let dir = workspace("tests-log");
+    let log = Log::new(&dir);
+    let (gate, cards) = gate(Decision::Approve, Some(log.clone()));
+    let (_, result) = turn(
+        &root,
+        tool_call("run_command", json!({"command": "sh test.sh"})),
+        gate,
+    )
+    .await;
+    assert!(result.contains("TESTS_PASSED"), "{result}");
+    assert!(result.contains("exit code 0"), "{result}");
+    assert!(result.contains("sandboxed"), "{result}");
+    assert_eq!(fs::read_to_string(root.join("out.txt")).unwrap(), "made\n");
+    assert_eq!(
+        cards.lock().unwrap()[0].kind,
+        CardKind::Shell { escalated: false }
+    );
+    let records = log.records();
+    assert!(matches!(records[0].outcome, Outcome::Applied));
+    assert!(!records[0].escalated);
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn the_sandbox_keeps_network_off_and_the_host_read_only() {
+    if !sandbox_works() {
+        return;
+    }
+    let root = workspace("walls");
+    let card = approval::card(
+        &root,
+        &call(
+            json!({"command": "cat /proc/net/dev | grep -c : ; touch /etc/alfredo-x; echo after"}),
+        ),
+    )
+    .unwrap();
+    let result = approval::apply(&root, &card).unwrap();
+    // Only the loopback interface exists inside the network namespace.
+    assert!(
+        result.contains("\n1\n") || result.contains("stdout:\n1\n"),
+        "{result}"
+    );
+    assert!(result.contains("after"), "{result}");
+    let card = approval::card(&root, &call(json!({"command": "exit 3"}))).unwrap();
+    let result = approval::apply(&root, &card).unwrap();
+    assert!(result.contains("exit code 3"), "{result}");
+    // A failing sandboxed command hints at escalation instead of retrying on host.
+    assert!(result.contains("escalate"), "{result}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn push_this_branch_runs_on_host_after_approval_and_is_logged() {
+    let base = workspace("push");
+    let remote = base.join("remote.git");
+    let repo = base.join("repo");
+    let git = |dir: &Path, args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(status.status.success(), "{args:?} {status:?}");
+    };
+    git(&base, &["init", "-q", "--bare", "remote.git"]);
+    git(&base, &["init", "-q", "-b", "feature", "repo"]);
+    fs::write(repo.join("a.txt"), "a\n").unwrap();
+    git(&repo, &["add", "a.txt"]);
+    git(&repo, &["commit", "-q", "-m", "a"]);
+    git(
+        &repo,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    let dir = workspace("push-log");
+    let log = Log::new(&dir);
+    let (gate, cards) = gate(Decision::Approve, Some(log.clone()));
+    let (_, result) = turn(
+        &repo,
+        tool_call(
+            "run_command",
+            json!({"command": "git push origin feature", "escalate": true}),
+        ),
+        gate,
+    )
+    .await;
+    assert!(result.contains("exit code 0"), "{result}");
+    assert!(result.contains("host"), "{result}");
+    assert_eq!(
+        cards.lock().unwrap()[0].kind,
+        CardKind::Shell { escalated: true }
+    );
+    let branches = Command::new("git")
+        .args(["branch", "--list", "feature"])
+        .current_dir(&remote)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&branches.stdout).contains("feature"));
+    let records = log.records();
+    assert!(records[0].escalated);
+    assert!(matches!(records[0].outcome, Outcome::Applied));
+    let entries = activity::chat_entries(&records, "host");
+    assert_eq!(entries.len(), 1, "escalated runs are findable in F4");
+    let _ = fs::remove_dir_all(base);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[tokio::test]
+async fn a_denied_escalation_runs_nothing_and_the_model_gets_a_refusal() {
+    let root = workspace("deny");
+    let dir = workspace("deny-log");
+    let log = Log::new(&dir);
+    let (gate, _) = gate(Decision::Deny, Some(log.clone()));
+    let (_, result) = turn(
+        &root,
+        tool_call(
+            "run_command",
+            json!({"command": "touch host-marker", "escalate": true}),
+        ),
+        gate,
+    )
+    .await;
+    assert!(!root.join("host-marker").exists());
+    assert!(result.contains("denied"), "{result}");
+    assert!(result.contains("nothing"), "{result}");
+    let records = log.records();
+    assert!(records[0].escalated);
+    assert!(matches!(records[0].outcome, Outcome::Denied));
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_timeout_kills_the_whole_process_tree() {
+    let root = workspace("timeout");
+    let card = approval::card(
+        &root,
+        &call(json!({
+            "command": "sleep 30 & echo $! > child.pid; wait",
+            "escalate": true,
+            "timeout_seconds": 1
+        })),
+    )
+    .unwrap();
+    let started = Instant::now();
+    let error = approval::apply(&root, &card).unwrap_err();
+    assert!(started.elapsed() < Duration::from_secs(15));
+    assert!(error.contains("timed out"), "{error}");
+    let pid = fs::read_to_string(root.join("child.pid")).unwrap();
+    let alive = Path::new(&format!("/proc/{}", pid.trim())).exists()
+        && !fs::read_to_string(format!("/proc/{}/stat", pid.trim()))
+            .unwrap_or_default()
+            .contains(") Z ");
+    assert!(!alive, "the background child must be killed with the group");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn output_is_capped_with_a_truncation_marker() {
+    let root = workspace("cap");
+    let card = approval::card(
+        &root,
+        &call(json!({"command": "head -c 200000 /dev/zero | tr '\\0' x", "escalate": true})),
+    )
+    .unwrap();
+    let result = approval::apply(&root, &card).unwrap();
+    assert!(
+        result.len() <= chat_tools::MAX_OUTPUT + 200,
+        "{}",
+        result.len()
+    );
+    assert!(
+        result.contains("[truncated"),
+        "{}",
+        &result[result.len() - 100..]
+    );
+    assert!(result.contains("exit code 0"));
+    let _ = fs::remove_dir_all(root);
+}
+
+fn draw(card: approval::Card) -> String {
+    let mut session = Session::new("m".into());
+    session.insert("run it");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Admitted);
+    assert!(session.await_approval(attempt, card, Instant::now()));
+    let mut app = App::new("m".into());
+    app.sessions[0] = session;
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    buffer.content().iter().map(|cell| cell.symbol()).collect()
+}
+
+fn header_color(card: approval::Card) -> ratatui::style::Color {
+    let mut session = Session::new("m".into());
+    session.insert("run it");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Admitted);
+    assert!(session.await_approval(attempt, card, Instant::now()));
+    let mut app = App::new("m".into());
+    app.sessions[0] = session;
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    let width = buffer.area.width as usize;
+    let text: Vec<_> = buffer
+        .content()
+        .iter()
+        .map(|c| c.symbol().to_string())
+        .collect();
+    let line = (0..buffer.area.height as usize)
+        .find(|row| {
+            text[row * width..(row + 1) * width]
+                .concat()
+                .contains("? Approve")
+        })
+        .unwrap();
+    let column = text[line * width..(line + 1) * width]
+        .iter()
+        .position(|s| s == "?")
+        .unwrap();
+    buffer.content()[line * width + column].fg
+}
+
+#[test]
+fn escalated_cards_look_different_from_sandboxed_ones() {
+    let root = workspace("ui");
+    let sandboxed = approval::card(&root, &call(json!({"command": "sh test.sh"}))).unwrap();
+    let host = approval::card(
+        &root,
+        &call(json!({"command": "git push origin HEAD", "escalate": true})),
+    )
+    .unwrap();
+    let text = draw(sandboxed.clone());
+    assert!(text.contains("Approve run_command"), "{text}");
+    assert!(text.contains("sh test.sh"));
+    assert!(text.contains("sandboxed"));
+    assert!(!text.contains("HOST"));
+    let text = draw(host.clone());
+    assert!(text.contains("HOST · network on"), "{text}");
+    assert!(text.contains("git push origin HEAD"));
+    assert_ne!(header_color(sandboxed), header_color(host));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn chat_system_prompt_mentions_run_command_and_escalation() {
+    let prompt = alfredo_tui::chat_context::system_message(None, |_| None).content;
+    assert!(prompt.contains("run_command"), "{prompt}");
+    assert!(prompt.contains("escalate"), "{prompt}");
+    assert!(!prompt.contains("cannot run commands"), "{prompt}");
+}

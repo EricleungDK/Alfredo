@@ -37,6 +37,10 @@ pub enum Decision {
 pub enum CardKind {
     /// Writes working-tree files.
     Edit,
+    /// Runs a shell command (#236): in the Sandbox, or on the host when `escalated`.
+    /// An always-allow rule (#238) must never cover an escalated card unless the rule
+    /// itself is for escalated runs.
+    Shell { escalated: bool },
 }
 
 /// The pending-action card: tool, arguments, a summary and a diff preview.
@@ -51,6 +55,13 @@ pub struct Card {
     pub preview: String,
     /// State of the target when previewed; an approved call refuses if it changed.
     pub fingerprint: String,
+}
+
+impl Card {
+    /// True for a run that would leave the Sandbox (host, network on).
+    pub fn escalated(&self) -> bool {
+        matches!(self.kind, CardKind::Shell { escalated: true })
+    }
 }
 
 /// What came of one card.
@@ -85,6 +96,9 @@ pub struct Record {
     pub tool: String,
     pub target: String,
     pub outcome: Outcome,
+    /// A host-escalated run_command (#236).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub escalated: bool,
 }
 
 /// Bounded append-only JSON-lines log of chat approval outcomes.
@@ -134,6 +148,7 @@ impl Log {
                 ),
                 other => other.clone(),
             },
+            escalated: card.escalated(),
         };
         let Ok(line) = serde_json::to_string(&record) else {
             return;
@@ -186,6 +201,11 @@ pub struct Request {
 }
 
 impl Request {
+    /// True when approving would run on the host (see [`Card::escalated`]).
+    pub fn escalated(&self) -> bool {
+        self.card.escalated()
+    }
+
     /// Drop the request without a decision and log it as cancelled.
     pub fn cancel(self) {
         if let Some(log) = &self.log {
@@ -217,6 +237,19 @@ pub fn card(root: &Path, call: &ToolCall) -> Result<Card, String> {
     if !arguments.is_object() {
         return Err("arguments must be a JSON object".into());
     }
+    if let Some(shown) = super::shell::preview(root, &call.name, &arguments) {
+        let shown = shown?;
+        return Ok(Card {
+            tool: call.name.clone(),
+            arguments,
+            kind: CardKind::Shell {
+                escalated: shown.escalated,
+            },
+            summary: shown.summary,
+            preview: shown.preview,
+            fingerprint: String::new(),
+        });
+    }
     let change = super::edit::preview(root, &call.name, &arguments)
         .ok_or_else(|| format!("{} has no approval preview", call.name))??;
     Ok(Card {
@@ -232,10 +265,12 @@ pub fn card(root: &Path, call: &ToolCall) -> Result<Card, String> {
 /// Run an approved card: refuse when the target changed since the preview,
 /// otherwise dispatch. `Err` is the failure reason.
 pub fn apply(root: &Path, card: &Card) -> Result<String, String> {
-    let now = super::edit::fingerprint(root, &card.tool, &card.arguments)
-        .ok_or_else(|| format!("{} has no approval preview", card.tool))??;
-    if now != card.fingerprint {
-        return Err("the file changed since the preview; nothing was written. Read it again and re-propose the change".into());
+    if !matches!(card.kind, CardKind::Shell { .. }) {
+        let now = super::edit::fingerprint(root, &card.tool, &card.arguments)
+            .ok_or_else(|| format!("{} has no approval preview", card.tool))??;
+        if now != card.fingerprint {
+            return Err("the file changed since the preview; nothing was written. Read it again and re-propose the change".into());
+        }
     }
     let output = super::dispatch(
         root,
