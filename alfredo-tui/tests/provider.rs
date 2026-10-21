@@ -1006,8 +1006,7 @@ async fn oversized_prompt_is_refused_before_sending_when_num_ctx_is_set() {
     }
     let reason = failure.expect("refused");
     assert!(
-        reason.contains("prompt ≈")
-            && reason.contains("tokens > --num-ctx 2048; shorten the request"),
+        reason.contains("prompt ≈") && reason.contains("tokens > --num-ctx 2048; run /compact"),
         "{reason}"
     );
     assert!(fixture.requests.lock().unwrap().is_empty());
@@ -1089,7 +1088,7 @@ async fn refusal_requires_prompt_plus_floor_to_exceed_the_window_and_names_the_c
     let too_big = fits + 3;
     let chat = failure(&chat_with_prompt(&base, too_big).await).expect("chat refused");
     assert!(
-        chat.contains("tokens > --num-ctx 2048") && chat.contains("shorten the request"),
+        chat.contains("tokens > --num-ctx 2048") && chat.contains("/compact"),
         "{chat}"
     );
     assert!(!chat.contains("4449"), "{chat}");
