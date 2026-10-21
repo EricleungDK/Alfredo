@@ -17,7 +17,7 @@ Plans live in [Tasks/](Tasks/README.md); runnable commands in
 
 - `System/`: architecture.
 - `Tasks/`: [status](Tasks/STATUS.md), [roadmap](Tasks/README.md), plans, historical `context.md`.
-- `SOP/`: [development workflow](SOP/development_workflow.md), [database migrations](SOP/database_migrations.md).
+- `SOP/`: [development workflow](SOP/development_workflow.md), [database migrations](SOP/database_migrations.md), [README recording](SOP/recording.md).
 - `Reports/`: dated evidence (JSON/Markdown) for the terminal.
 
 - [Domain terminology](../CONTEXT.md)
