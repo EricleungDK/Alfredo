@@ -152,8 +152,10 @@ async fn start(escalate: bool, seconds: u32) -> Running {
     tokio::spawn(async move {
         let mut receiver = receiver;
         while let Some(event) = receiver.recv().await {
-            if let Update::ToolStep(step) = event.update {
-                seen.lock().unwrap().extend(step.results);
+            match event.update {
+                Update::ToolStep(step) => seen.lock().unwrap().extend(step.results),
+                Update::ToolResult { result, .. } => seen.lock().unwrap().push(result),
+                _ => {}
             }
         }
     });
