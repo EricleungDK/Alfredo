@@ -1478,7 +1478,10 @@ Approval (ADR 0004); there is no skip-approval mode.
   and a line diff (`-` old, `+` new, at most 80 lines). The prompt title reads
   `Approval pending · y approve · n deny · Esc cancels the turn`.
 - **Keys.** The card is modal: `y` and `n` go to it, not the prompt, and are ignored for
-  0.5 s after it appears so typeahead cannot decide it. `y` runs the call; `n` denies it and the model receives `error: the owner
+  0.5 s after it is first on screen (selected conversation, no pane, panel or agent view
+  over it), so typeahead cannot decide it; switching away and back restarts that delay.
+  Known limit: keys already queued during a terminal stall longer than 0.5 s are not
+  discarded. `y` runs the call; `n` denies it and the model receives `error: the owner
   denied this action; nothing was changed…` as the tool result, then the turn continues.
   Esc denies the pending action and ends the turn. Calls in one reply are asked one at a
   time, in order.
@@ -1487,10 +1490,13 @@ Approval (ADR 0004); there is no skip-approval mode.
   whose `old_text` is missing or ambiguous, or a non-UTF-8 or oversized file, returns
   `error: …` to the model without a card. On approval the target file must still match
   the preview (content hash, or still absent); otherwise nothing is written and the model
-  gets `error: the file changed since the preview…`.
+  gets `error: the file changed since the preview…`. The check covers the resolved path
+  as well as the content, and a target that is (or becomes) a symlink is refused.
 - **Outcome log.** Each card's outcome (`approved · applied`, `approved · failed:
   reason`, `denied`, or `denied · turn cancelled`) is appended to
-  `chat-approvals.jsonl` in the mission's State Directory, after the call ran. It is kept
+  `chat-approvals.jsonl` in the mission's State Directory, after the call ran (an
+  approval whose turn is cancelled before it runs is logged as failed). Appends take a
+  file lock, so several Alfredo processes on one mission do not lose records. It is kept
   to the newest 500–1000 records and is separate from the task store, so it never uses
   task receipt capacity. F4 activity lists these first as `chat · Chat edit_file …`.
 - **Restarts.** A pending action is never saved; a restored session shows the turn as
