@@ -2196,6 +2196,15 @@ the same request. Confirming Shared Understanding still approves no tasks.
 Conversation schema16 adds this turn binding and preserves exact prior snapshots.
 Full mission formation and production launch acceptance remain unfinished.
 
+### Unreadable conversation file
+
+A truncated, oversized or unsupported `conversations-<hash>.json` (under
+`<state-dir>/rust-tasks-v1/<workspace-hash>/`) stops the TUI, headless chat/go and
+`--doctor` for that conversation. The error names the absolute file path and one way
+out: `move it aside (mv "<path>" "<path>.bad")` and start again, or start with
+`--conversation NAME` to use another conversation. The same text appears on the
+`--doctor` `FAIL storage` line. Alfredo never modifies, moves or deletes the file itself.
+
 ### Selection history and recovery
 
 Workspace and mission choices save before creation or handoff. An in-process
