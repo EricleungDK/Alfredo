@@ -358,7 +358,10 @@ async fn gated(
             Decision::Deny => (approval::DENIED.to_string(), Outcome::Denied),
             Decision::Approve => match approval::apply(&root, &card) {
                 Ok(output) => (super::cap(output), Outcome::Applied),
-                Err(reason) => (format!("error: {reason}"), Outcome::Failed(reason)),
+                Err(reason) => (
+                    super::cap(format!("error: {reason}")),
+                    Outcome::Failed(reason),
+                ),
             },
         };
         if let Some(log) = log {

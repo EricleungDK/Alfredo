@@ -1230,6 +1230,44 @@ fn truncate_end(text: &str, budget: usize) -> String {
     text[..end].to_string()
 }
 
+/// Bubblewrap argv up to the command (network off, system roots read-only, `root`
+/// writable, `gitfile` read-only when given, prlimit resource wrapper), shared by
+/// worker checks and chat `run_command`. The command's argv follows.
+pub(crate) fn sandbox_argv(
+    root: &str,
+    gitfile: Option<&str>,
+    limits: &ExecutionLimits,
+) -> Vec<String> {
+    let mut argv: Vec<String> = std::iter::once("/usr/bin/bwrap")
+        .chain(crate::execution::SANDBOX_ISOLATION_FLAGS)
+        .chain([
+            "--tmpfs", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+        ])
+        .map(str::to_string)
+        .collect();
+    for system in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"] {
+        if Path::new(system).exists() {
+            argv.extend(["--ro-bind".into(), system.into(), system.into()]);
+        }
+    }
+    argv.extend(["--bind".into(), root.into(), root.into()]);
+    if let Some(gitfile) = gitfile {
+        argv.extend(["--ro-bind".into(), gitfile.into(), gitfile.into()]);
+    }
+    argv.extend([
+        "--chdir".into(),
+        root.into(),
+        "--".into(),
+        "/usr/bin/prlimit".into(),
+        format!("--as={}", limits.address_space_bytes),
+        format!("--fsize={}", limits.file_size_bytes),
+        format!("--nofile={}", limits.open_file_limit),
+        format!("--nproc={}", limits.process_count_limit),
+        "--".into(),
+    ]);
+    argv
+}
+
 pub fn check_request(worktree: &Path, task: &Task, mission: &str) -> Result<ExecutionRequest> {
     let worktree = worktree.canonicalize().map_err(|e| e.to_string())?;
     let policy = task.policy.as_ref().ok_or("Missing work policy")?;
@@ -1246,35 +1284,7 @@ pub fn check_request(worktree: &Path, task: &Task, mission: &str) -> Result<Exec
         process_count_limit: 128,
         descendant_grace_seconds: 1.0,
     };
-    let mut argv: Vec<String> = std::iter::once("/usr/bin/bwrap")
-        .chain(crate::execution::SANDBOX_ISOLATION_FLAGS)
-        .chain([
-            "--tmpfs", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
-        ])
-        .map(str::to_string)
-        .collect();
-    for system in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc"] {
-        if Path::new(system).exists() {
-            argv.extend(["--ro-bind".into(), system.into(), system.into()]);
-        }
-    }
-    argv.extend([
-        "--bind".into(),
-        root.clone(),
-        root.clone(),
-        "--ro-bind".into(),
-        gitfile.clone(),
-        gitfile.clone(),
-        "--chdir".into(),
-        root.clone(),
-        "--".into(),
-        "/usr/bin/prlimit".into(),
-        format!("--as={}", limits.address_space_bytes),
-        format!("--fsize={}", limits.file_size_bytes),
-        format!("--nofile={}", limits.open_file_limit),
-        format!("--nproc={}", limits.process_count_limit),
-        "--".into(),
-    ]);
+    let mut argv = sandbox_argv(&root, Some(&gitfile), &limits);
     argv.extend(policy.check.clone());
     Ok(ExecutionRequest {
         schema_version: 1,
