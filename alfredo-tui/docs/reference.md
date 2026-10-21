@@ -1513,6 +1513,13 @@ Approval (ADR 0004); there is no skip-approval mode.
   the preview (content hash, or still absent); otherwise nothing is written and the model
   gets `error: the file changed since the preview…`. The check covers the resolved path
   as well as the content, and a target that is (or becomes) a symlink is refused.
+- **Atomic writes.** An approved write goes to a temp file beside the target
+  (`.NAME.alfredo-tmp-RANDOM`), is synced, takes the original's permission bits (so an
+  executable stays executable) and is renamed over the target. If anything fails (disk
+  full, size limit, I/O error) the original stays byte-identical and the temp file is
+  removed. A file with several hardlinks is replaced by a new file: the other links keep
+  their old content (the link is broken, never written through). Owner, group and
+  extended attributes of an existing file are not carried over.
 - **Outcome log.** Each card's outcome (`approved · applied`, `approved · failed:
   reason`, `denied`, or `denied · turn cancelled`) is appended to
   `chat-approvals.jsonl` in the mission's State Directory, after the call ran (an
