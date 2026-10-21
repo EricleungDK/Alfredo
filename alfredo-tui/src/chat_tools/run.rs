@@ -102,6 +102,7 @@ pub async fn run_turn(
                 call.name = "unnamed".into();
             }
         }
+        let proposing = calls.iter().take(MAX_CALLS).any(super::propose::valid);
         let mut results = Vec::with_capacity(calls.len());
         for (index, call) in calls.iter().enumerate() {
             let tier = TOOLS
@@ -111,6 +112,10 @@ pub async fn run_turn(
             let result = match tier {
                 _ if index >= MAX_CALLS => {
                     format!("error: not run; at most {MAX_CALLS} tool calls per reply, ask again")
+                }
+                // A proposal hands off: nothing else in its reply runs or asks.
+                _ if proposing && tier != Some(Tier::Propose) => {
+                    "error: not run: proposal ends the turn; owner decides via /plan".into()
                 }
                 Some(Tier::Mutating) => match &gate {
                     None => format!(

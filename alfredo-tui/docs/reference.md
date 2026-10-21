@@ -1511,7 +1511,9 @@ that needs Checks or Review, chat calls `propose_plan` instead of editing (ADR 0
   ordinary `/plan` or `/go` command, or clear the prompt to drop it.
 - **Typed text wins.** If the prompt already holds text, it is kept; the command is
   still shown in the reply.
-- **Goal.** One line: whitespace is collapsed, control characters dropped, cut at
+- **Hand-off only.** Other calls in the same reply as a valid proposal are not run
+  (no approval card); each gets `error: not run: proposal ends the turn…`.
+- **Goal.** One line: whitespace is collapsed, control, bidi and other invisible format characters dropped, cut at
   2000 bytes. A missing goal or a mode other than `plan`/`go` returns `error: …` to
   the model.
 

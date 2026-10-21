@@ -168,6 +168,76 @@ async fn a_proposal_ends_the_turn_and_prefills_the_prompt() {
     assert_eq!(session.messages.len(), 2, "nothing was sent or started");
 }
 
+#[test]
+fn format_and_bidi_characters_are_dropped_from_the_goal() {
+    let root = workspace("bidi");
+    let goal = "safe\u{202E}txt.exe\u{200B}\u{2066}x\u{2069}\u{FEFF}\u{200F}\u{00AD}";
+    let result = chat_tools::dispatch(
+        &root,
+        &call(json!({"goal": goal, "mode": "plan", "reason": "r\u{202E}"})),
+    );
+    assert!(
+        result.starts_with("proposed: /plan safetxt.exex\n"),
+        "{result:?}"
+    );
+    assert!(!result.contains('\u{202E}'));
+}
+
+#[tokio::test]
+async fn other_calls_beside_a_proposal_are_not_run() {
+    let root = workspace("mixed");
+    fs::write(root.join("a.txt"), "old\n").unwrap();
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, |_, _| {
+        Reply::Stream(
+            vec![
+                format!(
+                    "{}\n",
+                    json!({"message":{"role":"assistant","content":"","tool_calls":[
+                        {"function":{"name":"write_file","arguments":{"path":"a.txt","content":"new\n"}}},
+                        {"function":{"name":"propose_plan","arguments":{"goal":"Big","mode":"go","reason":"r"}}},
+                        {"function":{"name":"read_file","arguments":{"path":"a.txt"}}}
+                    ]},"done":false})
+                )
+                .into_bytes(),
+                format!("{}\n", json!({"message":{"content":""},"done":true})).into_bytes(),
+            ],
+            Duration::ZERO,
+        )
+    });
+    let mut session = Session::new("fixture".into());
+    session.insert("go big");
+    let messages = session.begin().unwrap();
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(5)).unwrap();
+    let (sender, mut receiver) = mpsc::channel(256);
+    let (gate_sender, mut requests) = mpsc::channel(4);
+    let gate = chat_tools::approval::Gate::new(gate_sender, None);
+    let attempt = session.attempt;
+    let asked = tokio::spawn(async move { requests.recv().await.is_some() });
+    chat_tools::run_turn(
+        &provider,
+        &root,
+        0,
+        attempt,
+        "fixture".into(),
+        messages,
+        sender,
+        Some(gate),
+    )
+    .await;
+    while let Some(event) = receiver.recv().await {
+        session.apply(event.attempt, event.update);
+    }
+    assert!(!asked.await.unwrap(), "no approval card was raised");
+    assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "old\n");
+    let results = &session.tool_steps(1)[0].results;
+    assert_eq!(results.len(), 3);
+    assert!(results[0].starts_with("error: not run: proposal ends the turn"));
+    assert!(results[1].starts_with("proposed: /go Big"));
+    assert!(results[2].starts_with("error: not run: proposal ends the turn"));
+    assert_eq!(session.draft, "/go Big");
+}
+
 #[tokio::test]
 async fn a_proposal_never_overwrites_text_the_owner_typed() {
     let mut session = Session::new("fixture".into());
