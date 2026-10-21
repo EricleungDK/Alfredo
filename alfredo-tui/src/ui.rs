@@ -2252,24 +2252,40 @@ fn approval_card_lines(
     card: &crate::chat_tools::approval::Card,
     width: usize,
 ) -> Vec<Line<'static>> {
+    use crate::chat_tools::approval::CardKind;
     let warn = Style::default().fg(Color::Yellow);
     // A host-escalated run_command (#236) gets its own colour and a HOST banner.
-    let header = if card.escalated() {
-        Style::default().fg(Color::LightRed)
-    } else {
-        warn
-    };
-    let mut lines = vec![
-        Line::default(),
-        Line::styled(
-            format!("? Approve {} · {}", card.tool, single_line(&card.summary)),
-            header.add_modifier(Modifier::BOLD),
+    let (header, style) = match card.kind {
+        CardKind::Push => (
+            format!("! PUSH {} · {}", card.tool, single_line(&card.summary)),
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Red)
+                .add_modifier(Modifier::BOLD),
         ),
-    ];
+        CardKind::Edit | CardKind::Git | CardKind::Shell { .. } => {
+            let color = if card.escalated() {
+                Color::LightRed
+            } else {
+                Color::Yellow
+            };
+            (
+                format!("? Approve {} · {}", card.tool, single_line(&card.summary)),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            )
+        }
+    };
+    let mut lines = vec![Line::default(), Line::styled(header, style)];
+    if card.kind == CardKind::Push {
+        lines.push(Line::styled(
+            "  publishes to a remote · asked every time, never always-allowed",
+            Style::default().fg(Color::Red),
+        ));
+    }
     if card.escalated() {
         lines.push(Line::styled(
             "  ! HOST · network on · your environment and credentials (SSH agent, tokens) · runs outside the sandbox",
-            header.add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            style.add_modifier(Modifier::REVERSED),
         ));
     }
     let arguments = card.arguments.to_string();

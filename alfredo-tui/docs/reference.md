@@ -188,6 +188,27 @@ stops the run and reports state `failed` (exit 1). Wayfinder-style goals are
 refused (exit 2) because headless has no scope flow. Not covered yet: a
 goal from stdin, streaming output and a headless resume.
 
+### Headless chat (`--chat PROMPT --headless`)
+
+`alfredo-tui --chat PROMPT --headless [--approve workspace-edits]` runs one Chat Agent
+turn (issue #240) without a terminal, on the repository's default mission, with the same
+system context and tool loop as chat. Read tools run. Mutating calls go through the
+Approval gate, answered by a scripted policy instead of a card:
+
+- no `--approve`: every mutating call is denied;
+- `--approve workspace-edits`: `edit_file` and `write_file` whose path stays inside the
+  repository are approved; anything else (other tools, later card kinds) is denied.
+
+There is no other policy and no interactive equivalent: interactive chat always asks
+(ADR 0004). `--approve` is refused without `--chat … --headless`, and `--chat` without
+`--headless`. Each outcome is appended to `chat-approvals.jsonl` like an interactive
+decision. Stderr gets one line per tool call and approval; stdout one JSON object
+`{state, policy, reply, steps, calls:[{tool,path,error,result}], approvals:[{tool,target,outcome,reason}],
+error}` (`state` `done` or `failed`; `result` is `ok`, `denied`, `malformed` or `error`). Exit 0
+done; 1 failed or interrupted (SIGINT/SIGTERM deny further cards, wait up to 10 s for
+answered cards to be logged, then cancel the turn); 2 setup or usage error. The turn is not saved to the conversation. The
+eval uses it for chat tasks (`eval/README.md`).
+
 ## Build and install a development archive
 
 On Linux x86-64 with Rust 1.96.0 and Python 3.11+, build a native locked candidate:
@@ -1421,7 +1442,7 @@ repository's working tree, so uncommitted edits are seen). They run without aski
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `read_file` | `path`, optional `start_line` | Numbered lines (`N<TAB>text`) of a UTF-8 text file; long files are cut with `[truncated at line N of M; call read_file with start_line=…]` |
+| `read_file` | `path`, optional `start_line` | Numbered lines (`N<TAB>text`) of a UTF-8 text file; long files are cut with `[truncated at line N of M; call read_file with start_line=…]`; a line longer than the output budget is cut at a character boundary and followed by `[line N is M bytes; showed the first K]` |
 | `list_files` | optional `path` (directory) | Files below it, one relative path per line, depth first in name order; at most 500 |
 | `grep` | `pattern` (literal text), optional `path`, `ignore_case` | `path:line:text` per match; at most 200 matches, lines cut to 200 characters |
 | `git_status` | none | Current branch with upstream ahead/behind, then changed, staged and untracked files (`XY path`) |
@@ -1478,7 +1499,10 @@ Approval (ADR 0004); there is no skip-approval mode.
   and a line diff (`-` old, `+` new, at most 80 lines). The prompt title reads
   `Approval pending · y approve · n deny · Esc cancels the turn`.
 - **Keys.** The card is modal: `y` and `n` go to it, not the prompt, and are ignored for
-  0.5 s after it appears so typeahead cannot decide it. `y` runs the call; `n` denies it and the model receives `error: the owner
+  0.5 s after it is first on screen (selected conversation, no pane, panel or agent view
+  over it), so typeahead cannot decide it; switching away and back restarts that delay.
+  Known limit: keys already queued during a terminal stall longer than 0.5 s are not
+  discarded. `y` runs the call; `n` denies it and the model receives `error: the owner
   denied this action; nothing was changed…` as the tool result, then the turn continues.
   Esc denies the pending action and ends the turn. Calls in one reply are asked one at a
   time, in order.
@@ -1487,14 +1511,67 @@ Approval (ADR 0004); there is no skip-approval mode.
   whose `old_text` is missing or ambiguous, or a non-UTF-8 or oversized file, returns
   `error: …` to the model without a card. On approval the target file must still match
   the preview (content hash, or still absent); otherwise nothing is written and the model
-  gets `error: the file changed since the preview…`.
+  gets `error: the file changed since the preview…`. The check covers the resolved path
+  as well as the content, and a target that is (or becomes) a symlink is refused.
 - **Outcome log.** Each card's outcome (`approved · applied`, `approved · failed:
   reason`, `denied`, or `denied · turn cancelled`) is appended to
-  `chat-approvals.jsonl` in the mission's State Directory, after the call ran. It is kept
+  `chat-approvals.jsonl` in the mission's State Directory, after the call ran (an
+  approval whose turn is cancelled before it runs is logged as failed). Appends take a
+  file lock, so several Alfredo processes on one mission do not lose records. It is kept
   to the newest 500–1000 records and is separate from the task store, so it never uses
   task receipt capacity. F4 activity lists these first as `chat · Chat edit_file …`.
 - **Restarts.** A pending action is never saved; a restored session shows the turn as
   interrupted and never re-asks or runs it.
+
+## Chat git writes and push
+
+Four git tools act on your real repository, on the host (your identity and remote
+credentials). Each call pauses for Approval like a file edit.
+
+| Tool | Tier | Arguments | Effect |
+| --- | --- | --- | --- |
+| `git_commit` | Mutating | `message`, optional `files` | Commits the staged changes, or stages and commits exactly `files` (new files too) |
+| `git_switch` | Mutating | `branch`, optional `create` | Switches to a local branch, or creates it at the current commit first |
+| `git_merge` | Mutating | `source`, optional `target` | Merges `source` (e.g. `alfredo/go-12`) into the current branch; `target` must be the current branch |
+| `git_push` | Push | optional `remote` (default `origin`), `branch` (default current) | Pushes the branch to the same name on a configured remote; never forced |
+
+- **Cards.** A commit card lists the files and message; a switch card shows
+  `from → to`; a merge card shows `source → target`, the commits (up to 20) and a file
+  stat; a push card shows the remote (URL without credentials) and the commits to
+  publish. Push cards are visibly different: `! PUSH git_push · …` in red, with
+  `asked every time, never always-allowed`.
+- **Push tier.** `git_push` has its own tier: it always asks, and an always-allow
+  decision can never cover it (`Tier::allowlistable` is false for Push).
+- **Merge conflicts** are never resolved: the conflicted files are listed, the merge
+  is aborted (`git merge --abort`) and the repository is left as it was. The model gets
+  `error: merge conflict in: …; merge aborted…`.
+- **Refused before asking.** Refs and branches starting with `-` or holding `..`,
+  option-like or magic paths, `..`, `.git` and secret files, remotes that are not a
+  configured remote name (URLs and paths are refused), nothing to commit, an
+  already-up-to-date merge or push, a detached HEAD for commit, merge and push, and
+  repositories whose config defines filter drivers or includes.
+- **Changed since the preview.** On approval HEAD, the current branch, local and
+  remote-tracking refs, the index and working-tree status must match the preview;
+  otherwise nothing runs and the model gets `error: the repository changed since the
+  preview…`.
+- **Hardening.** Hooks never run (`core.hooksPath=/dev/null`, as worker host git) and
+  fsmonitor is off. Commit, switch and merge see your global git config (identity) but
+  not the rest of your environment. Push keeps your environment for credential helpers
+  and the SSH agent, drops variables that redirect git (`GIT_DIR`, …), and turns
+  prompts off (`GIT_TERMINAL_PROMPT=0`); it stops after 120 s (local writes also 120 s).
+- **Repository config is not trusted.** Your global and system git config are; config
+  local to the repository (or worktree) could be planted. Every write is refused when it
+  sets `merge.*.driver`, `gpg.program` or `gpg.*.program`; push is also refused for
+  `core.sshCommand`, `core.askPass`, `credential.*helper`, `remote.*.receivepack` or
+  `uploadpack`, `http(s).proxy`, `url.*.insteadOf` or `pushInsteadOf`, and `protocol.*`
+  allow overrides. The error names the key.
+- **Push URL.** The card shows the push URLs (`pushurl` included). A remote that is a
+  local path or `file://` URL is shown as that path; pushing to it runs that
+  repository's own receive hooks, as any push there would.
+- **Merges need a clean tree.** `git_merge` is refused while tracked files have
+  uncommitted changes, so an aborted merge restores exactly. A failed commit of named
+  files restores the index. If a write is stopped or leaves `index.lock`, the error says
+  so rather than claiming the repository is unchanged.
 
 ## Chat shell commands (`run_command`)
 

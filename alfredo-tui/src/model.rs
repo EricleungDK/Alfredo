@@ -268,7 +268,11 @@ pub struct Session {
     /// A Chat Agent action waiting for the owner (issue #235). Never saved, so a
     /// restored session cannot re-ask or run it.
     #[serde(skip)]
-    approval: Option<(crate::chat_tools::approval::Card, std::time::Instant)>,
+    /// The card and when it became visible (None while not on screen).
+    approval: Option<(
+        crate::chat_tools::approval::Card,
+        Option<std::time::Instant>,
+    )>,
 }
 
 impl Session {
@@ -824,6 +828,18 @@ impl Session {
 
     /// Show `card` (appearing at `now`) while this attempt's turn waits for the
     /// owner. False (and not shown) for a stale attempt or a finished turn.
+    /// Whether the card is on screen now. Arming ([`crate::chat_tools::approval::ARM`])
+    /// starts when it first becomes visible and restarts each time it is shown again.
+    pub fn approval_visible(&mut self, visible: bool, now: std::time::Instant) {
+        if let Some((_, shown)) = &mut self.approval {
+            match (visible, *shown) {
+                (true, None) => *shown = Some(now),
+                (false, _) => *shown = None,
+                (true, Some(_)) => {}
+            }
+        }
+    }
+
     pub fn await_approval(
         &mut self,
         attempt: u64,
@@ -833,7 +849,8 @@ impl Session {
         if self.attempt != attempt || !self.status.active() {
             return false;
         }
-        self.approval = Some((card, now));
+        let _ = now;
+        self.approval = Some((card, None));
         true
     }
 
@@ -855,6 +872,7 @@ impl Session {
     ) -> Option<crate::chat_tools::approval::Decision> {
         use crate::chat_tools::approval::{Decision, ARM};
         let (_, shown) = self.approval.as_ref().filter(|_| self.status.active())?;
+        let shown = shown.as_ref()?;
         if now.saturating_duration_since(*shown) < ARM {
             return None;
         }
