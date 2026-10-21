@@ -5,12 +5,15 @@ sends the result back, and the model's answer appears.
 Issue #235 journeys: "redraft README" asks for edit_file; the approval card shows the
 diff; y edits the file in place, n leaves it untouched and the model gets a refusal.
 Issue #264: text typed into the prompt while the card waits never decides it.
-Issue #239 journey: "refactor everything" asks for propose_plan; the turn ends and the
+Issue #302: Esc in the middle of an approved run_command (sandboxed or HOST) and Ctrl+Q
+both kill the command; its later `touch marker` never happens and the approval log says
+cancelled. Issue #239 journey: "refactor everything" asks for propose_plan; the turn ends and the
 prompt holds the editable /plan command; nothing else is requested or started."""
 import http.server
 import json
 import os
 from pathlib import Path
+import select
 import subprocess
 import tempfile
 import threading
@@ -19,6 +22,7 @@ import unittest
 
 from terminal_smoke import Pty
 
+SLOW = 'echo $$ > pid; touch started; sleep 4; touch marker'
 README = '# Demo project\nREADME_BODY_MARKER: a tiny repository used by the smoke.\n'
 
 
@@ -67,6 +71,12 @@ class Fixture:
                     denied = 'denied' in tool_results[-1]['content']
                     chunks = [{'message': {'content': 'MODEL_SAW_DENIAL' if denied else 'MODEL_SAW_EDIT'},
                                'done': False}]
+                elif 'slow command' in prompt and not tool_results:
+                    chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
+                        {'function': {'name': 'run_command', 'arguments': {
+                            'command': SLOW, 'escalate': 'on host' in prompt}}}]}, 'done': False}]
+                elif 'slow command' in prompt:
+                    chunks = [{'message': {'content': 'SLOW_DONE'}, 'done': False}]
                 elif not tool_results:
                     chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
                         {'function': {'name': 'read_file', 'arguments': {'path': 'README.md'}}}]},
@@ -184,6 +194,69 @@ class ChatTools(unittest.TestCase):
         self.assertEqual([r.get('rule') for r in records], [1, 1], records)
         self.terminal.write(b'/allow\r')
         self.terminal.wait_for('#1 edit_file')
+
+    def start_slow_command(self, prompt):
+        root = Path(os.path.realpath(self.repo.name))
+        self.terminal.write(prompt.encode() + b'\r')
+        self.terminal.wait_for('Approve run_command')
+        time.sleep(0.7)
+        self.terminal.write(b'y')
+        deadline = time.time() + 15
+        while not root.joinpath('started').exists() and time.time() < deadline:
+            time.sleep(0.05)
+        self.assertTrue(root.joinpath('started').exists(), 'the command never started')
+        return root
+
+    def approval_outcomes(self):
+        logs = list(Path(self.state.name).rglob('chat-approvals.jsonl'))
+        if not logs:
+            return []
+        return [json.loads(line)['outcome'] for line in logs[0].read_text().splitlines()]
+
+    def alive(self, pid):
+        try:
+            state = Path(f'/proc/{pid}/stat').read_text().rsplit(') ', 1)[1][0]
+        except OSError:
+            return False
+        return state != 'Z'
+
+    def check_esc_stops_the_command(self, prompt):
+        root = self.start_slow_command(prompt)
+        # Issue #302: the status says what runs and that Esc stops it.
+        self.terminal.wait_for('running run_command')
+        self.terminal.wait_for('Esc stops')
+        self.assertNotIn('waiting for model', self.terminal.screen())
+        self.terminal.write(b'\x1b')
+        self.terminal.wait_for('cancelled')
+        deadline = time.time() + 3
+        while 'cancelled' not in self.approval_outcomes() and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertEqual(self.approval_outcomes(), ['cancelled'])
+        time.sleep(5)
+        self.assertFalse(root.joinpath('marker').exists(), 'the command ran on after Esc')
+
+    def test_esc_stops_a_running_sandboxed_command(self):
+        self.check_esc_stops_the_command('slow command')
+
+    def test_esc_stops_a_running_host_command(self):
+        self.check_esc_stops_the_command('slow command on host')
+        pid = int(Path(os.path.realpath(self.repo.name), 'pid').read_text())
+        self.assertFalse(self.alive(pid))
+
+    def test_ctrl_q_kills_a_running_host_command(self):
+        root = self.start_slow_command('slow command on host')
+        pid = int(root.joinpath('pid').read_text())
+        self.assertTrue(self.alive(pid))
+        self.terminal.write(b'\x11')
+        deadline = time.time() + 10
+        while self.terminal.process.poll() is None and time.time() < deadline:
+            if select.select([self.terminal.master], [], [], 0.05)[0]:
+                self.terminal.output.extend(os.read(self.terminal.master, 65536))
+        self.assertIsNotNone(self.terminal.process.poll(), 'Alfredo did not exit')
+        self.assertFalse(self.alive(pid), 'the host command outlived Alfredo')
+        time.sleep(5)
+        self.assertFalse(root.joinpath('marker').exists(), 'the command ran on after quit')
+        self.assertEqual(self.approval_outcomes(), ['cancelled'])
 
     def test_a_denied_edit_never_touches_the_file(self):
         self.terminal.write(b'redraft README\r')

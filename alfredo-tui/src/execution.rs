@@ -888,9 +888,20 @@ impl Default for RustExecutionProvider {
 /// validation, in its own process group with the request's timeout, output limit
 /// and process-tree kill. Only for owner-approved host escalation (chat
 /// `run_command` with `escalate`, issue #236); every other effect goes through
-/// [`RustExecutionProvider`].
-pub(crate) fn run_on_host(request: &ExecutionRequest) -> Result<ProcessOutcome, LaunchError> {
-    SystemProcessLauncher.run(request, &mut ExecutionCallbacks::none())
+/// [`RustExecutionProvider`]. `poll` is called every few milliseconds; returning
+/// `Err(ControlSignal::Cancelled(_))` kills the process group (issue #302).
+pub(crate) fn run_on_host(
+    request: &ExecutionRequest,
+    poll: &mut dyn FnMut() -> Result<(), ControlSignal>,
+) -> Result<ProcessOutcome, LaunchError> {
+    SystemProcessLauncher.run(
+        request,
+        &mut ExecutionCallbacks {
+            output: None,
+            process_started: None,
+            poll: Some(poll),
+        },
+    )
 }
 
 struct SystemProcessLauncher;
