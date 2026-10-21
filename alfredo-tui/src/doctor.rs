@@ -82,6 +82,7 @@ pub async fn inspect(
     mission: &str,
     conversation: &str,
     initial_model: &str,
+    explicit_model: bool,
     provider: &Ollama,
 ) -> Report {
     let mut passed = true;
@@ -101,7 +102,8 @@ pub async fn inspect(
         let store = TaskStore::new(state, &root, mission)?;
         store.snapshot()?;
         let conversations = ConversationStore::open(&store, conversation)?;
-        if let Some(snapshot) = conversations.load()? {
+        // An explicit --model is the run's model; otherwise the restored one is checked.
+        if let (false, Some(snapshot)) = (explicit_model, conversations.load()?) {
             model = snapshot.sessions[snapshot.selected].model.clone();
         }
         Ok(())

@@ -175,7 +175,7 @@ and stdout may be pipes), for CI, cron or another tool. It opens the repository'
 default mission like the automatic TUI start. Each autopilot state change prints one
 line on stderr (`plan drafted`, `#1 approved`, `#1 check failed → repair #3`,
 `done 2/2 alfredo/go-ab12`). On exit stdout carries exactly one JSON object:
-`{state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]}` with
+`{model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]}` with
 `state` one of `done`, `partial`, `failed` or `paused`. Exit codes: 0 every task
 accepted; 1 partial, failed or interrupted; 2 setup or usage error (`--headless`
 without `--go`, with `--select`, `--mission` or `--new-mission`, no repository, no
@@ -187,6 +187,14 @@ the state is kept paused and `/resume` in the TUI continues it. A second signal 
 stops the run and reports state `failed` (exit 1). Wayfinder-style goals are
 refused (exit 2) because headless has no scope flow. Not covered yet: a
 goal from stdin, streaming output and a headless resume.
+
+An explicit `--model NAME` (the flag; not `ALFREDO_MODEL` or the default) is the model
+for a headless `--go`, a headless `--chat` and `--doctor`, even when the conversation
+already holds another. It is checked against the installed list before the conversation
+is opened, so a model that is not installed exits 2 naming it and saves nothing; a
+passing run does not overwrite the conversation's saved model. The run prints
+`model NAME` on stderr and reports `"model": "NAME"` in the JSON. Without the flag the
+restored conversation's model applies, as in the terminal.
 
 ### Headless chat (`--chat PROMPT --headless`)
 
@@ -521,7 +529,8 @@ gets an independent `rust-tasks-v1/<sha256>/tasks.json`.
 (default: `default`). Each set restores up to eight conversations. One terminal
 owns a set at a time; use another name for a concurrent terminal sharing the task
 queue. `--model` supplies the initial model for a new set; restored conversations
-keep their saved models, which you can change using `/model` when eligible.
+keep their saved models in the terminal, which you can change using `/model` when eligible.
+(Headless `--go`/`--chat` and `--doctor` instead honour an explicit `--model` for that run.)
 
 A cancelled or failed chat turn does not lock the conversation. Typing a new prompt
 and pressing Enter starts a new turn in the same chat, and `/model NAME` switches the
