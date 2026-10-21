@@ -212,7 +212,7 @@ to save; their diff is kept in the run's evidence. See
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `--model NAME` | `qwen2.5-coder:14b` (env `ALFREDO_MODEL`) | Model for new conversations |
+| `--model NAME` | `qwen2.5-coder:14b` (env `ALFREDO_MODEL`) | Model for new conversations (a restored conversation keeps its own in the terminal). With `--headless` and `--doctor`, an explicit `--model` is used for that run even over a saved model, checked first (exit 2 names it) and never saved; the headless JSON reports it as `model` |
 | `--endpoint URL` | `http://127.0.0.1:11434` (env `OLLAMA_HOST`) | Ollama HTTP origin |
 | `--go GOAL` | off | Start autopilot on launch |
 | `--headless` | off | With `--go GOAL`: no terminal needed. One stderr line per autopilot state change, then one JSON object on stdout. Exit 0 all accepted, 1 partial/failed/interrupted, 2 setup or usage error (including Ollama unreachable or model missing); waits for and reports an `--on-finish` hook |

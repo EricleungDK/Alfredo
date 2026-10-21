@@ -228,6 +228,173 @@ fn unreachable_model_server_is_a_setup_error() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// A server that lists `fixture` and `nottools` and answers every chat with "ok".
+fn two_models() -> Fixture {
+    ollama_fixture::serve(ollama_fixture::reserve(), |request, _| {
+        if request.path == "POST /api/chat" {
+            done("ok")
+        } else {
+            ollama_fixture::running(&["fixture", "nottools"])
+        }
+    })
+}
+
+/// One command with at most one `--model`: `None` leaves the flag out and sets
+/// `ALFREDO_MODEL` instead (an environment default is not an explicit request).
+fn run_model(root: &Path, fixture: &Fixture, model: Option<&str>, extra: &[&str]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"));
+    command.args(["--endpoint", &fixture.endpoint, "--connect-retries", "0"]);
+    match model {
+        Some(model) => command.args(["--model", model]),
+        None => command.env("ALFREDO_MODEL", "fixture"),
+    };
+    command
+        .arg("--workspace")
+        .arg(root.join("workspace"))
+        .arg("--state-dir")
+        .arg(root.join("state"))
+        .args(extra)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap()
+}
+
+fn chat_models(fixture: &Fixture) -> Vec<String> {
+    fixture
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|r| r.path == "POST /api/chat")
+        .map(|r| r.body["model"].as_str().unwrap_or_default().to_owned())
+        .collect()
+}
+
+fn stderr(output: &Output) -> String {
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn explicit_model_recovers_from_a_mistyped_one_and_a_failed_preflight_saves_nothing() {
+    let root = repository("typo");
+    let fixture = two_models();
+    let chat = ["--chat", "hi", "--headless"];
+    let typo = run_model(&root, &fixture, Some("typo:1b"), &chat);
+    assert_eq!(typo.status.code(), Some(2), "{}", stderr(&typo));
+    assert!(stderr(&typo).contains("typo:1b"), "{}", stderr(&typo));
+    assert!(typo.stdout.is_empty());
+    // Nothing was saved: a run that names no model does not see the typo.
+    let plain = run_model(&root, &fixture, None, &chat);
+    assert_eq!(plain.status.code(), Some(0), "{}", stderr(&plain));
+    assert!(!stderr(&plain).contains("typo"), "{}", stderr(&plain));
+    // And an explicit correction works on the very same state dir.
+    let fixed = run_model(&root, &fixture, Some("nottools"), &chat);
+    assert_eq!(fixed.status.code(), Some(0), "{}", stderr(&fixed));
+    assert_eq!(result(&fixed)["model"], "nottools");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn explicit_model_beats_the_saved_one_for_that_run_only() {
+    let root = repository("explicit");
+    let fixture = two_models();
+    let chat = ["--chat", "hi", "--headless"];
+    // The first run creates the conversation holding `fixture`.
+    let first = run_model(&root, &fixture, Some("fixture"), &chat);
+    assert_eq!(result(&first)["model"], "fixture", "{}", stderr(&first));
+    let other = run_model(&root, &fixture, Some("nottools"), &chat);
+    assert_eq!(other.status.code(), Some(0), "{}", stderr(&other));
+    assert_eq!(result(&other)["model"], "nottools");
+    assert!(
+        stderr(&other).contains("model nottools"),
+        "{}",
+        stderr(&other)
+    );
+    // The saved model is untouched: without a flag the conversation's `fixture` runs.
+    let env_only = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .args(["--endpoint", &fixture.endpoint])
+        .env("ALFREDO_MODEL", "nottools")
+        .arg("--workspace")
+        .arg(root.join("workspace"))
+        .arg("--state-dir")
+        .arg(root.join("state"))
+        .args(chat)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(result(&env_only)["model"], "fixture");
+    assert_eq!(chat_models(&fixture), ["fixture", "nottools", "fixture"]);
+    // An explicit model that is not installed is exit 2 naming it, not a silent fallback.
+    let missing = run_model(&root, &fixture, Some("nosuch:1b"), &chat);
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(
+        stderr(&missing).contains("nosuch:1b"),
+        "{}",
+        stderr(&missing)
+    );
+    assert!(missing.stdout.is_empty());
+    assert_eq!(chat_models(&fixture).len(), 3);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn headless_go_validates_the_explicit_model_even_when_the_conversation_has_one() {
+    let root = repository("go");
+    let fixture = two_models();
+    let first = run_model(
+        &root,
+        &fixture,
+        Some("fixture"),
+        &["--chat", "hi", "--headless"],
+    );
+    assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
+    let go = ["--go", "x", "--headless"];
+    let missing = run_model(&root, &fixture, Some("nosuch:1b"), &go);
+    assert_eq!(missing.status.code(), Some(2), "{}", stderr(&missing));
+    assert!(
+        stderr(&missing).contains("nosuch:1b"),
+        "{}",
+        stderr(&missing)
+    );
+    assert!(missing.stdout.is_empty());
+    // A fresh state dir: the failed preflight leaves no mistyped model behind.
+    let fresh = repository("go-fresh");
+    let typo = run_model(&fresh, &fixture, Some("typo:1b"), &go);
+    assert_eq!(typo.status.code(), Some(2), "{}", stderr(&typo));
+    let plain = run_model(&fresh, &fixture, None, &["--chat", "hi", "--headless"]);
+    assert_eq!(plain.status.code(), Some(0), "{}", stderr(&plain));
+    assert!(!stderr(&plain).contains("typo"));
+    let _ = fs::remove_dir_all(&root);
+    let _ = fs::remove_dir_all(&fresh);
+}
+
+#[test]
+fn headless_go_names_the_explicit_model_in_its_json() {
+    let root = repository("go-json");
+    let fixture = two_models();
+    let first = run_model(
+        &root,
+        &fixture,
+        Some("fixture"),
+        &["--chat", "hi", "--headless"],
+    );
+    assert_eq!(first.status.code(), Some(0), "{}", stderr(&first));
+    let output = run_model(
+        &root,
+        &fixture,
+        Some("nottools"),
+        &["--go", "x", "--headless"],
+    );
+    let value = result(&output);
+    assert_eq!(value["model"], "nottools", "{value} {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("model nottools"),
+        "{}",
+        stderr(&output)
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn interrupt_after_an_approved_edit_leaves_exactly_one_log_record() {
     let root = repository("interrupt");
