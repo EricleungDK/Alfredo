@@ -111,7 +111,9 @@ class NumCtx(unittest.TestCase):
                 options = chat[0]['options']
                 self.assertEqual(options['num_ctx'], window)
                 self.assertTrue(256 <= options['num_predict'] < window, options)
-                self.assertGreater(options['num_predict'], window - 1000)  # tool definitions (incl. propose_plan) count against the prompt
+                # 2048 runs without the tool definitions (issue #255); at 4096 they are
+                # about 3.4k tokens of the estimate (propose_plan included), leaving roughly 650 for the reply.
+                self.assertGreater(options['num_predict'], window - 800 if window == 2048 else 500)
             finally:
                 terminal.close()
                 fixture.close()
