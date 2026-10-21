@@ -5,7 +5,7 @@ use alfredo_tui::{
     provider::Ollama,
     ui,
 };
-use ollama_fixture::{done, reserve, running, serve, Reply};
+use ollama_fixture::{done, reserve, running, serve, serve_at, Reply};
 use ratatui::{backend::TestBackend, Terminal};
 use std::{
     sync::{
@@ -74,7 +74,7 @@ async fn server_restart_mid_session_recovers_request_and_health_without_restart(
         first.update,
         Update::Admitted | Update::Retrying(_)
     ));
-    let fixture = serve(addr, |request, _| match request.path.as_str() {
+    let fixture = serve_at(addr, |request, _| match request.path.as_str() {
         "GET /api/ps" => running(&["fixture"]),
         "POST /api/chat" => done("back"),
         _ => Reply::Json(404, "{}".into()),

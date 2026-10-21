@@ -2,14 +2,14 @@
 //! closes its connection so each client request is observable separately.
 #![allow(dead_code)]
 use std::{
-    io::{Read, Write},
+    io::{ErrorKind, Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[derive(Clone)]
@@ -48,11 +48,53 @@ pub fn endpoint(addr: SocketAddr) -> String {
     format!("http://{addr}")
 }
 
+/// Bind `addr`, retrying briefly on `AddrInUse` (a short-lived squatter such as
+/// a parallel test's ephemeral client port usually lets go within milliseconds).
+fn bind_retrying(addr: SocketAddr, patience: Duration) -> std::io::Result<TcpListener> {
+    let deadline = Instant::now() + patience;
+    loop {
+        match TcpListener::bind(addr) {
+            Err(error) if error.kind() == ErrorKind::AddrInUse && Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(20));
+            }
+            other => return other,
+        }
+    }
+}
+
+/// Serve on the reserved `addr`. `reserve` closes its listener, so another test
+/// or process may take the port before this binds (issue #300): after a short
+/// retry this falls back to a fresh port, and `Fixture::endpoint` is always the
+/// real address. Callers must therefore use `fixture.endpoint`, never a
+/// precomputed `endpoint(addr)`; callers that must be refused on `addr` until
+/// the server starts use `serve_at`.
 pub fn serve<H>(addr: SocketAddr, handler: H) -> Fixture
 where
     H: Fn(&Request, usize) -> Reply + Send + Sync + 'static,
 {
-    let listener = TcpListener::bind(addr).unwrap();
+    let listener = bind_retrying(addr, Duration::from_millis(100))
+        .or_else(|_| TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    start(listener, handler)
+}
+
+/// Serve on exactly `addr`, for callers that handed `endpoint(addr)` to the code
+/// under test while it was still refusing connections. A collision there is
+/// genuine, so wait up to 3 s for the port and then panic naming it.
+pub fn serve_at<H>(addr: SocketAddr, handler: H) -> Fixture
+where
+    H: Fn(&Request, usize) -> Reply + Send + Sync + 'static,
+{
+    let listener = bind_retrying(addr, Duration::from_secs(3))
+        .unwrap_or_else(|error| panic!("fixture could not bind reserved {addr}: {error}"));
+    start(listener, handler)
+}
+
+fn start<H>(listener: TcpListener, handler: H) -> Fixture
+where
+    H: Fn(&Request, usize) -> Reply + Send + Sync + 'static,
+{
+    let addr = listener.local_addr().unwrap();
     listener.set_nonblocking(true).unwrap();
     let requests = Arc::new(Mutex::new(Vec::new()));
     let stop = Arc::new(AtomicBool::new(false));
@@ -238,4 +280,51 @@ pub fn scripted_chat(script: Vec<Reply>) -> Fixture {
             running(&["fixture"])
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn get(endpoint: &str) -> String {
+        let mut stream = TcpStream::connect(endpoint.trim_start_matches("http://")).unwrap();
+        stream
+            .write_all(b"GET /api/tags HTTP/1.1\r\nHost: fixture\r\n\r\n")
+            .unwrap();
+        let mut reply = String::new();
+        stream.read_to_string(&mut reply).unwrap();
+        reply
+    }
+
+    #[test]
+    fn serve_survives_another_listener_taking_the_reserved_port() {
+        let addr = reserve();
+        let squatter = TcpListener::bind(addr).unwrap();
+        let fixture = serve(addr, |_, _| done("ok"));
+        assert_ne!(fixture.endpoint, endpoint(addr));
+        assert!(get(&fixture.endpoint).contains("200 OK"));
+        drop(squatter);
+    }
+
+    #[test]
+    fn serve_binds_the_reserved_port_when_it_is_still_free() {
+        let addr = reserve();
+        let fixture = serve(addr, |_, _| done("ok"));
+        assert_eq!(fixture.endpoint, endpoint(addr));
+        assert!(get(&fixture.endpoint).contains("200 OK"));
+    }
+
+    #[test]
+    fn serve_at_waits_for_a_port_that_is_released_shortly() {
+        let addr = reserve();
+        let squatter = TcpListener::bind(addr).unwrap();
+        let release = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            drop(squatter);
+        });
+        let fixture = serve_at(addr, |_, _| done("ok"));
+        release.join().unwrap();
+        assert_eq!(fixture.endpoint, endpoint(addr));
+        assert!(get(&fixture.endpoint).contains("200 OK"));
+    }
 }
