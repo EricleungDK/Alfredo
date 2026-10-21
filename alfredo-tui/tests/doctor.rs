@@ -163,6 +163,43 @@ fn doctor_uses_restored_model_without_terminal_or_mutating_saved_state() {
 }
 
 #[test]
+fn doctor_storage_failure_names_the_corrupt_conversation_file_and_a_way_out() {
+    let fixture = Fixture::new();
+    let tasks = TaskStore::new(&fixture.state, &fixture.workspace, "default").unwrap();
+    let store = ConversationStore::open(&tasks, "default").unwrap();
+    store
+        .save(&Snapshot::capture(&App::new("m".into()), "default"))
+        .unwrap();
+    drop(store);
+    let file = fs::read_dir(tasks.conversation_directory().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .find(|path| path.extension().is_some_and(|e| e == "json"))
+        .unwrap();
+    fs::write(&file, b"{\"schema_ver").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    let output = fixture.command(&endpoint).output().unwrap();
+    let text = String::from_utf8(output.stdout).unwrap();
+    let shown = file.canonicalize().unwrap().display().to_string();
+    assert_eq!(output.status.code(), Some(2), "{text}");
+    let line = text
+        .lines()
+        .find(|l| l.starts_with("FAIL storage"))
+        .unwrap();
+    assert!(
+        line.contains(&shown) && line.contains("--conversation NAME"),
+        "{line}"
+    );
+    assert!(
+        line.contains(&format!("mv \"{shown}\" \"{shown}.bad\"")),
+        "{line}"
+    );
+    assert_eq!(fs::read(&file).unwrap(), b"{\"schema_ver");
+}
+
+#[test]
 fn doctor_reports_storage_and_server_failures_together_without_erasing_state() {
     let fixture = Fixture::new();
     fs::write(&fixture.state, "keep original bytes").unwrap();
