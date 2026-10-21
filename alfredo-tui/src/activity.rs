@@ -23,10 +23,14 @@ pub fn chat_entries(records: &[crate::chat_tools::approval::Record], query: &str
             task: 0,
             correlation: format!("chat-approval {}", record.at_ms),
             summary: format!(
-                "Chat {}{} {}",
+                "Chat {}{} {}{}",
                 record.tool,
                 if record.escalated { " (HOST)" } else { "" },
-                record.outcome.label()
+                record.outcome.label(),
+                record
+                    .rule
+                    .map(|id| format!(" · by always-allow rule #{id}"))
+                    .unwrap_or_default()
             ),
             detail: record.target.clone(),
         })

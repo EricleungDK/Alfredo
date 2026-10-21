@@ -1589,7 +1589,7 @@ credentials). Each call pauses for Approval like a file edit.
   `from → to`; a merge card shows `source → target`, the commits (up to 20) and a file
   stat; a push card shows the remote (URL without credentials) and the commits to
   publish. Push cards are visibly different: `! PUSH git_push · …` in red, with
-  `asked every time, never always-allowed`.
+  `asked every time, never always-allowed`, and offer no `a`.
 - **Push tier.** `git_push` has its own tier: it always asks, and an always-allow
   decision can never cover it (`Tier::allowlistable` is false for Push).
 - **Merge conflicts** are never resolved: the conflicted files are listed, the merge
@@ -1645,8 +1645,8 @@ default false), `timeout_seconds` (1–600, default 120).
   `! HOST · network on · your environment and credentials (SSH agent, tokens)` banner
   and `run on HOST …`. Denying it runs nothing. Escalated
   outcomes are logged with `"escalated": true` and show as `Chat run_command (HOST) …` in
-  F4. Future always-allow rules (#238) must never cover an escalated card unless the rule
-  is itself for escalated runs (`Card::escalated`, `Request::escalated`).
+  F4. An always-allow rule covers an escalated card only when the rule is itself
+  escalated (see [always-allow rules](#chat-always-allow-rules)).
 - **Result.** The model gets `exit code N · sandboxed|host · cwd …`, then `stdout:` and
   `stderr:`; each keeps its last 10 KiB / 5 KiB behind a `[cut: …]` marker (failures
   print last). Error results are capped at 16 KiB too. The cwd must resolve to the same
@@ -1659,6 +1659,41 @@ default false), `timeout_seconds` (1–600, default 120).
 - **Sandbox failure.** If bubblewrap is missing or cannot start, the model gets
   `error: the sandbox could not run the command (…); nothing ran on the host…` with a
   suggestion to escalate. Nothing is retried on the host without a new, approved call.
+
+## Chat always-allow rules
+
+Press `a` on an approval card (issue #238, `src/chat_tools/allow.rs`) to approve the call
+and add a rule; later calls the rule covers in this mission run without a card. `a` obeys
+the same 0.5 s arm delay and empty-draft rule as `y`/`n`. The card's key line names the
+rule `a` would add.
+
+- **What a rule covers.** `write_file`, `edit_file`, `git_commit`, `git_switch`,
+  `git_merge`: every call of that tool. `run_command`: one command prefix, matched on whole
+  whitespace-separated words (`cargo test` covers `cargo test --lib`, not `cargo testx`).
+  A sandboxed rule allows ANY arguments after its words (`cargo test --config …`), so its
+  reach is bounded only by the Sandbox; the card says so. A host (escalated) rule matches
+  only its exact command. Rules ignore `cwd`.
+  A command containing any of `; & | ` `` ` `` `$ > < ( ) \` or a newline matches only a
+  rule that is exactly that command (`cargo test; rm -rf ~` never matches `cargo test`).
+- **Never push.** `git_push` cards (Push tier, `Tier::allowlistable` false) offer no `a`,
+  and no rule matches them, including rules added by hand to the file. The same holds for
+  a `run_command` that invokes `git … push` (`git -C x push`, `git -c k=v push`, any
+  path to git): its card reads `push: asked every time`. Read tools and
+  `propose_plan` are never gated, so no rule applies to them.
+- **Escalated runs.** A rule records whether it is for host (`escalate: true`) runs. A
+  sandboxed rule never covers a host run and a host rule never covers a sandboxed one;
+  a host rule never matches extra arguments.
+  `a` on a red HOST card reads `a always allow on HOST (escalated rule) …` and adds a host
+  rule.
+- **Still checked.** A rule only replaces the keypress: refusals before asking still
+  refuse, and the fingerprint (file content, repository state, cwd) is still checked at
+  apply. The outcome goes to `chat-approvals.jsonl` with `"rule": ID`; F4 shows
+  `… approved · applied · by always-allow rule #ID`.
+- **Storage.** `chat-allow.json` in the mission's State Directory; restored on restart. A
+  malformed file counts as no rules. At most 200 rules.
+- **`/allow`** lists rules (`#ID tool …`); `/allow clear` removes all; `/allow clear ID`
+  removes one.
+- **Headless** `--chat` never reads rules; its `--approve` policy decides.
 
 ## Chat proposes governed work
 

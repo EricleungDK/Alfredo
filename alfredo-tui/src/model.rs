@@ -926,7 +926,8 @@ impl Session {
         }
     }
 
-    /// The owner's key on the card: `y` approves, `n` denies, and the card closes.
+    /// The owner's key on the card: `y` approves, `n` denies, `a` always allows (not on
+    /// a push card; see [`crate::chat_tools::allow`]), and the card closes.
     /// Keys before the card is armed ([`crate::chat_tools::approval::ARM`] after it
     /// appeared), with text in the draft, or right after another key decide nothing
     /// (issue #264), and neither do other keys.
@@ -947,6 +948,9 @@ impl Session {
         let decision = match key {
             'y' => Decision::Approve,
             'n' => Decision::Deny,
+            'a' if crate::chat_tools::allow::offered(self.pending_approval()?) => {
+                Decision::AlwaysAllow
+            }
             _ => return None,
         };
         self.approval = None;

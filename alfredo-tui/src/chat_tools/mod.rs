@@ -12,6 +12,7 @@
 //! confined to it ([`resolve`]); outputs are capped at [`MAX_OUTPUT`] bytes. Errors are
 //! returned to the model as `error: ...` text, never raised.
 
+pub mod allow;
 pub mod approval;
 mod edit;
 mod git_read;
