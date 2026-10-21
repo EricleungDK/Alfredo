@@ -109,3 +109,8 @@ def keep_take(tasks, watch_id):
     originals = len(tasks) - len(repairs)
     return (originals >= 2 and len(repairs) == 1 and repairs[0]['status'] == 'accepted'
             and repairs[0]['id'] == watch_id)
+
+
+def has_font(fc_list_output, family):
+    """True if `fc-list :charset=... family` output names exactly this family."""
+    return any(family in (n.strip() for n in line.split(',')) for line in fc_list_output.splitlines())

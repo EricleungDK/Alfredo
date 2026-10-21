@@ -26,6 +26,7 @@ import timeline  # noqa: E402
 HOME = Path('/tmp/demo-home')
 WORK = Path('/tmp/alfredo-demo-rec')
 MODEL = 'qwen2.5-coder:14b'
+ICON_FONT = 'Noto Sans Symbols 2'
 # order of Hide..Show gaps in demo.tape; None = not labelled (goal typed unrecorded)
 CUT_NAMES = [None, 'model planning', 'model coding']
 LABEL_HOLD = 1.2
@@ -39,8 +40,9 @@ def sh(*cmd, **kw):
 
 
 def prepare():
-    if not subprocess.run(['fc-list', ':charset=2442'], capture_output=True, text=True).stdout.strip():
-        sys.exit('no installed font has U+2442 (the repair icon); install one, e.g. copy Segoe UI Symbol into ~/.local/share/fonts, then fc-cache -f')
+    found = subprocess.run(['fc-list', ':charset=2442', 'family'], capture_output=True, text=True).stdout
+    if not timeline.has_font(found, ICON_FONT):
+        sys.exit(f'{ICON_FONT} (OFL) is required for the repair icon U+2442; see .agent/SOP/recording.md')
     shutil.rmtree(HOME, ignore_errors=True)
     (HOME / 'bin').mkdir(parents=True)
     binary = REPO / 'alfredo-tui/target/release/alfredo-tui'

@@ -59,6 +59,16 @@ class TakeTests(unittest.TestCase):
         self.assertEqual(3, timeline.watch_id('Type "/watch 3"\nEnter\n'))
 
 
+class FontTests(unittest.TestCase):
+    def test_requires_the_open_font_for_the_repair_icon(self):
+        self.assertTrue(timeline.has_font('Noto Sans Symbols 2\n', 'Noto Sans Symbols 2'))
+        self.assertTrue(timeline.has_font('DejaVu Sans,x\nNoto Sans Symbols 2,Noto Sans Symbols2\n', 'Noto Sans Symbols 2'))
+
+    def test_other_fonts_do_not_count(self):
+        self.assertFalse(timeline.has_font('Segoe UI Symbol\n', 'Noto Sans Symbols 2'))
+        self.assertFalse(timeline.has_font('', 'Noto Sans Symbols 2'))
+
+
 class SpeedTests(unittest.TestCase):
     LINES = [(2.0, 'Hide'), (4.0, 'Show'), (10.0, 'Hide'), (20.0, 'Show'), (24.0, 'Hide')]
 

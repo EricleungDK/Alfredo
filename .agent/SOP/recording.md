@@ -4,7 +4,13 @@ Reproduce: `python3 alfredo-tui/recording/record.py` (writes `docs/assets/tui-re
 `tui-recording.json`).
 
 - Needs `vhs` 0.12.1 and `ttyd` 1.7.7 on `PATH` (release binaries into `~/.local/bin`), ffmpeg,
-- Font: the repair icon is U+2442 (⑂), absent from common Linux mono fonts; `record.py` refuses to run unless fontconfig has a font for it (local run used Segoe UI Symbol copied to `~/.local/share/fonts`, not committed).
+- Font: the repair icon is U+2442 (⑂), absent from common Linux mono fonts. `record.py` refuses to run unless
+  fontconfig has **Noto Sans Symbols 2** (SIL OFL 1.1, Copyright 2022 The Noto Project Authors) for it. Install in
+  user space, not committed:
+  `curl -sLO https://github.com/notofonts/symbols/releases/download/NotoSansSymbols2-v2.008/NotoSansSymbols2-v2.008.zip`
+  (sha256 `346c930bbe8eb946701a05c54e9c11a2094dee1d93c387bf1771c0a3e335688f`), unzip, copy
+  `NotoSansSymbols2/hinted/ttf/NotoSansSymbols2-Regular.ttf` to `~/.local/share/fonts/`, `fc-cache -f`.
+  Do not use proprietary fonts (e.g. Segoe UI Symbol) for published frames.
   Pillow, Ollama with `qwen2.5-coder:14b`, and a release build.
 - Real run: `demo.tape` drives VHS at 2560x1440 against a sample repo made by `sample_repo.sh`
   (HOME `/tmp/demo-home`, prompt `$ `, author "Demo"; no personal paths in frames).

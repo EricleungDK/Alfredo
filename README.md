@@ -26,7 +26,7 @@ A native terminal that plans, runs, checks and repairs coding tasks with your ow
   <img src="docs/assets/tui-recording.gif" alt="alfredo-tui in a sample repository: the header shows the model warm, /go starts autopilot, two tasks run in isolated worktrees, one check fails and is repaired, the agent view shows the repair worker, and the summary names the review branch while main stays untouched" width="860">
 </p>
 
-<sub>A real run, not a mock-up: `qwen2.5-coder:14b` on a throwaway sample repo, 26 s, one failed check
+<sub>A real run, not a mock-up: `qwen2.5-coder:14b` on a throwaway sample repo, 25 s, one failed check
 repaired automatically; the two model waits are cut and labelled. [MP4](docs/assets/tui-recording.mp4) ·
 [WebM](docs/assets/tui-recording.webm) · [poster](docs/assets/tui-recording-poster.png) ·
 [recording script](alfredo-tui/recording/record.py) · [still: repair](docs/assets/screenshot-repair.png) ·
