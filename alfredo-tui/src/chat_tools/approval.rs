@@ -37,6 +37,10 @@ pub enum Decision {
 pub enum CardKind {
     /// Writes working-tree files.
     Edit,
+    /// Changes local Git state: commit, switch branch, merge (issue #237).
+    Git,
+    /// Publishes commits to a remote; shown distinctly, never always-allowed.
+    Push,
 }
 
 /// The pending-action card: tool, arguments, a summary and a diff preview.
@@ -236,12 +240,15 @@ pub fn card(root: &Path, call: &ToolCall) -> Result<Card, String> {
     if !arguments.is_object() {
         return Err("arguments must be a JSON object".into());
     }
-    let change = super::edit::preview(root, &call.name, &arguments)
-        .ok_or_else(|| format!("{} has no approval preview", call.name))??;
+    let (change, kind) = match super::edit::preview(root, &call.name, &arguments) {
+        Some(change) => (change?, CardKind::Edit),
+        None => super::git_write::preview(root, &call.name, &arguments)
+            .ok_or_else(|| format!("{} has no approval preview", call.name))??,
+    };
     Ok(Card {
         tool: call.name.clone(),
         arguments,
-        kind: CardKind::Edit,
+        kind,
         summary: change.summary,
         preview: change.diff,
         fingerprint: change.fingerprint,
@@ -252,9 +259,14 @@ pub fn card(root: &Path, call: &ToolCall) -> Result<Card, String> {
 /// otherwise dispatch. `Err` is the failure reason.
 pub fn apply(root: &Path, card: &Card) -> Result<String, String> {
     let now = super::edit::fingerprint(root, &card.tool, &card.arguments)
+        .or_else(|| super::git_write::fingerprint(root, &card.tool, &card.arguments))
         .ok_or_else(|| format!("{} has no approval preview", card.tool))??;
     if now != card.fingerprint {
-        return Err("the file changed since the preview; nothing was written. Read it again and re-propose the change".into());
+        return Err(match card.kind {
+            CardKind::Edit => "the file changed since the preview; nothing was written. Read it again and re-propose the change",
+            CardKind::Git | CardKind::Push => "the repository changed since the preview; nothing was run. Check git_status and re-propose",
+        }
+        .into());
     }
     let output = super::dispatch(
         root,
