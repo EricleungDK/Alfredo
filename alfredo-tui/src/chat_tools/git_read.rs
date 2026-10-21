@@ -227,7 +227,7 @@ fn secret_copies(listing: &str) -> Vec<String> {
 }
 
 /// Optional ref argument that cannot be read as an option, a path or a blob.
-fn ref_arg<'a>(arguments: &'a Value, name: &str) -> Result<Option<&'a str>, String> {
+pub(crate) fn ref_arg<'a>(arguments: &'a Value, name: &str) -> Result<Option<&'a str>, String> {
     let Some(value) = text_arg(arguments, name)?.map(str::trim) else {
         return Ok(None);
     };
@@ -247,7 +247,7 @@ fn ref_arg<'a>(arguments: &'a Value, name: &str) -> Result<Option<&'a str>, Stri
 }
 
 /// Optional repository-relative path: no options, pathspec magic, `..` or exclusions.
-fn path_arg(arguments: &Value) -> Result<Option<String>, String> {
+pub(crate) fn path_arg(arguments: &Value) -> Result<Option<String>, String> {
     let Some(path) = text_arg(arguments, "path")?.map(str::trim) else {
         return Ok(None);
     };
@@ -275,13 +275,13 @@ fn path_arg(arguments: &Value) -> Result<Option<String>, String> {
 
 /// Run read-only git in `root`; stdout is read up to just past [`MAX_OUTPUT`] (the
 /// dispatcher caps it with the marker), then git is stopped.
-fn git(root: &Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     git_limited(root, args, MAX_OUTPUT * 2)
 }
 
 /// Refuse when the repository config defines filter drivers or includes: `git status`
 /// and working-tree diffs would run the repository's clean filters (as worker host git).
-fn refuse_filters(root: &Path) -> Result<(), String> {
+pub(crate) fn refuse_filters(root: &Path) -> Result<(), String> {
     let config = git_limited(root, &crate::worker::REPOSITORY_CONFIG_ARGS, 1 << 20)?;
     if crate::worker::config_needs_qualification(&config) {
         return Err("repository config defines filter drivers or includes; git status and working-tree diffs are not run (git_log and git_diff with base and target still work)".into());
@@ -315,11 +315,11 @@ fn git_limited(root: &Path, args: &[&str], limit: usize) -> Result<String, Strin
 }
 
 /// Longest one git call may run.
-const DEADLINE: Duration = Duration::from_secs(15);
+pub(crate) const DEADLINE: Duration = Duration::from_secs(15);
 
 /// Run `command`, reading at most `limit` bytes of stdout. Stops it once the limit is
 /// reached (status `None`: output was cut) or `deadline` passes (an error).
-fn run_bounded(
+pub(crate) fn run_bounded(
     mut command: Command,
     limit: usize,
     deadline: Duration,
@@ -380,7 +380,7 @@ fn run_bounded(
 }
 
 /// The clean environment and command-line overrides every git call here uses.
-fn hardened(command: &mut Command) -> &mut Command {
+pub(crate) fn hardened(command: &mut Command) -> &mut Command {
     command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")

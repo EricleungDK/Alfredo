@@ -1496,6 +1496,43 @@ Approval (ADR 0004); there is no skip-approval mode.
 - **Restarts.** A pending action is never saved; a restored session shows the turn as
   interrupted and never re-asks or runs it.
 
+## Chat git writes and push
+
+Four git tools act on your real repository, on the host (your identity and remote
+credentials). Each call pauses for Approval like a file edit.
+
+| Tool | Tier | Arguments | Effect |
+| --- | --- | --- | --- |
+| `git_commit` | Mutating | `message`, optional `files` | Commits the staged changes, or stages and commits exactly `files` (new files too) |
+| `git_switch` | Mutating | `branch`, optional `create` | Switches to a local branch, or creates it at the current commit first |
+| `git_merge` | Mutating | `source`, optional `target` | Merges `source` (e.g. `alfredo/go-12`) into the current branch; `target` must be the current branch |
+| `git_push` | Push | optional `remote` (default `origin`), `branch` (default current) | Pushes the branch to the same name on a configured remote; never forced |
+
+- **Cards.** A commit card lists the files and message; a switch card shows
+  `from → to`; a merge card shows `source → target`, the commits (up to 20) and a file
+  stat; a push card shows the remote (URL without credentials) and the commits to
+  publish. Push cards are visibly different: `! PUSH git_push · …` in red, with
+  `asked every time, never always-allowed`.
+- **Push tier.** `git_push` has its own tier: it always asks, and an always-allow
+  decision can never cover it (`Tier::allowlistable` is false for Push).
+- **Merge conflicts** are never resolved: the conflicted files are listed, the merge
+  is aborted (`git merge --abort`) and the repository is left as it was. The model gets
+  `error: merge conflict in: …; merge aborted…`.
+- **Refused before asking.** Refs and branches starting with `-` or holding `..`,
+  option-like or magic paths, `..`, `.git` and secret files, remotes that are not a
+  configured remote name (URLs and paths are refused), nothing to commit, an
+  already-up-to-date merge or push, a detached HEAD for commit, merge and push, and
+  repositories whose config defines filter drivers or includes.
+- **Changed since the preview.** On approval HEAD, the current branch, local and
+  remote-tracking refs, the index and working-tree status must match the preview;
+  otherwise nothing runs and the model gets `error: the repository changed since the
+  preview…`.
+- **Hardening.** Hooks never run (`core.hooksPath=/dev/null`, as worker host git) and
+  fsmonitor is off. Commit, switch and merge see your global git config (identity) but
+  not the rest of your environment. Push keeps your environment for credential helpers
+  and the SSH agent, drops variables that redirect git (`GIT_DIR`, …), and turns
+  prompts off (`GIT_TERMINAL_PROMPT=0`); it stops after 120 s.
+
 ## Chat file mentions (`@path`)
 
 A token `@relative/path` in a chat prompt, starting at a word boundary (so `a@b.com` and

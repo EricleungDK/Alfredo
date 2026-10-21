@@ -66,7 +66,11 @@ fn registry_lists_read_tier_tools_as_ollama_function_definitions() {
             "git_log",
             "git_diff",
             "write_file",
-            "edit_file"
+            "edit_file",
+            "git_commit",
+            "git_switch",
+            "git_merge",
+            "git_push"
         ]
     );
     assert!(chat_tools::TOOLS[..7]

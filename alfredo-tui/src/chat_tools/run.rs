@@ -112,7 +112,7 @@ pub async fn run_turn(
                 _ if index >= MAX_CALLS => {
                     format!("error: not run; at most {MAX_CALLS} tool calls per reply, ask again")
                 }
-                Some(Tier::Mutating) => match &gate {
+                Some(Tier::Mutating | Tier::Push) => match &gate {
                     None => format!(
                         "error: {} needs approval, which is not available here",
                         call.name
