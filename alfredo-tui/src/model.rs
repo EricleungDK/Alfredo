@@ -273,6 +273,10 @@ pub struct Session {
         crate::chat_tools::approval::Card,
         Option<std::time::Instant>,
     )>,
+    /// Set by the last draw: the pending card's header and args rows were inside
+    /// the transcript viewport (issue #268). Arming waits for it.
+    #[serde(skip)]
+    approval_header_drawn: std::cell::Cell<bool>,
 }
 
 impl Session {
@@ -307,6 +311,7 @@ impl Session {
             unsent: None,
             rejected: None,
             approval: None,
+            approval_header_drawn: std::cell::Cell::new(false),
             aside: None,
         }
     }
@@ -838,6 +843,17 @@ impl Session {
                 (true, Some(_)) => {}
             }
         }
+    }
+
+    /// Whether the last draw put the pending card's header and args rows in the
+    /// viewport. Pass it as part of `visible` to [`Self::approval_visible`].
+    pub fn approval_header_drawn(&self) -> bool {
+        self.approval_header_drawn.get()
+    }
+
+    /// Called by the draw: the card's header rows are (not) in the viewport.
+    pub fn set_approval_header_drawn(&self, drawn: bool) {
+        self.approval_header_drawn.set(drawn);
     }
 
     pub fn await_approval(
