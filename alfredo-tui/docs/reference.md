@@ -1511,7 +1511,7 @@ Approval (ADR 0004); there is no skip-approval mode.
 | Tool | Arguments | Effect |
 | --- | --- | --- |
 | `write_file` | `path`, `content` | Creates or replaces a UTF-8 text file (parent directory must exist; at most 1 MiB); writes `content` exactly as given, so LF content replaces CRLF (the card says `line endings CRLF → LF`, `final newline removed` and so on instead of `(no line changes)`) |
-| `edit_file` | `path`, `old_text`, `new_text` | Replaces the one exact occurrence of `old_text`; zero or several matches are refused. In a file whose every line ends in CRLF, `old_text`/`new_text` are matched as LF text and the result keeps CRLF; a file mixing CRLF and LF is matched on exact bytes (the not-found error says so) and `new_text` is inserted as given |
+| `edit_file` | `path`, `old_text`, `new_text` | Replaces the one exact occurrence of `old_text`; zero or several matches are refused, as is an edit that changes nothing (identical `old_text` and `new_text`, or line-ending changes in an all-CRLF file; use `write_file` to change endings). In a file whose every line ends in CRLF, `old_text`/`new_text` are matched as LF text and the result keeps CRLF; a file mixing CRLF and LF is matched on exact bytes (the not-found error says so) and `new_text` is inserted as given |
 
 - **Card.** The transcript shows `? Approve edit_file · edit README.md`, the arguments,
   and a line diff (`-` old, `+` new, at most 80 lines). The prompt title reads

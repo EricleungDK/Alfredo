@@ -244,6 +244,10 @@ async fn invalid_edits_are_refused_before_asking() {
             "secret",
             json!({"path": ".env", "old_text": "a", "new_text": "b"}),
         ),
+        (
+            "identical",
+            json!({"path": "README.md", "old_text": "Old intro line.", "new_text": "Old intro line."}),
+        ),
     ] {
         let root = workspace(tag);
         fs::write(root.join(".env"), "a\n").unwrap();
@@ -379,6 +383,50 @@ fn ending_only_writes_show_an_explicit_card_line_and_keep_the_fingerprint() {
     // Identical content still reports no change.
     let same = approval::card(&root, &lf).unwrap();
     assert!(same.preview.contains("no line changes"), "{}", same.preview);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn edit_file_refuses_identical_new_text_with_clear_error() {
+    let root = workspace("edit-identical");
+    fs::write(root.join("f.txt"), "a\nb\n").unwrap();
+    let edit = call(
+        "edit_file",
+        json!({"path": "f.txt", "old_text": "b", "new_text": "b"}),
+    );
+    let card = approval::card(&root, &edit);
+    assert_eq!(
+        card.unwrap_err(),
+        "new_text is identical to old_text; nothing to change"
+    );
+    let result = chat_tools::dispatch(&root, &edit);
+    assert_eq!(
+        result,
+        "error: new_text is identical to old_text; nothing to change"
+    );
+    assert_eq!(fs::read_to_string(root.join("f.txt")).unwrap(), "a\nb\n");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn edit_file_refuses_line_ending_only_change_in_crlf_file() {
+    let root = workspace("edit-crlf-noop");
+    fs::write(root.join("win.txt"), b"a\r\nb\r\n").unwrap();
+    let edit = call(
+        "edit_file",
+        json!({"path": "win.txt", "old_text": "b\r\n", "new_text": "b\n"}),
+    );
+    let card = approval::card(&root, &edit);
+    assert_eq!(
+        card.unwrap_err(),
+        "edit_file keeps the file's CRLF endings; use write_file to change them"
+    );
+    let result = chat_tools::dispatch(&root, &edit);
+    assert_eq!(
+        result,
+        "error: edit_file keeps the file's CRLF endings; use write_file to change them"
+    );
+    assert_eq!(fs::read(root.join("win.txt")).unwrap(), b"a\r\nb\r\n");
     let _ = fs::remove_dir_all(root);
 }
 

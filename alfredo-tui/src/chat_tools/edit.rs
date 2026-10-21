@@ -294,9 +294,9 @@ fn plan_write(root: &Path, arguments: &Value) -> Result<(PathBuf, Option<String>
 /// (target, current content, edited content)
 fn plan_edit(root: &Path, arguments: &Value) -> Result<(PathBuf, String, String), String> {
     let path = required(arguments, "path")?;
-    let old_text = required(arguments, "old_text")?;
-    let new_text = required(arguments, "new_text")?;
-    if old_text.is_empty() {
+    let raw_old_text = required(arguments, "old_text")?;
+    let raw_new_text = required(arguments, "new_text")?;
+    if raw_old_text.is_empty() {
         return Err("old_text must not be empty".into());
     }
     let target = resolve(root, path)?;
@@ -308,11 +308,15 @@ fn plan_edit(root: &Path, arguments: &Value) -> Result<(PathBuf, String, String)
     let (haystack, old_text, new_text) = if crlf {
         (
             current.replace("\r\n", "\n"),
-            old_text.replace("\r\n", "\n"),
-            new_text.replace("\r\n", "\n"),
+            raw_old_text.replace("\r\n", "\n"),
+            raw_new_text.replace("\r\n", "\n"),
         )
     } else {
-        (current.clone(), old_text.to_string(), new_text.to_string())
+        (
+            current.clone(),
+            raw_old_text.to_string(),
+            raw_new_text.to_string(),
+        )
     };
     match haystack.matches(old_text.as_str()).count() {
         0 => Err(format!(
@@ -330,6 +334,13 @@ fn plan_edit(root: &Path, arguments: &Value) -> Result<(PathBuf, String, String)
             }
             if edited.len() > MAX_FILE {
                 return Err(format!("result is over the {MAX_FILE}-byte limit"));
+            }
+            if edited == current {
+                return Err(if raw_old_text == raw_new_text {
+                    "new_text is identical to old_text; nothing to change".into()
+                } else {
+                    "edit_file keeps the file's CRLF endings; use write_file to change them".into()
+                });
             }
             Ok((target, current, edited))
         }
