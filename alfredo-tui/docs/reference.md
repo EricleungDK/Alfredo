@@ -537,7 +537,12 @@ and pressing Enter starts a new turn in the same chat, and `/model NAME` switche
 model for it. The interrupted turn (its prompt and any partial reply or failure) stays
 in the transcript, headed `· interrupted, not sent as context`, but it is dropped
 from the messages sent to the model: the new request carries only the earlier
-completed turns, never the orphaned prompt or the partial reply. Once the new turn
+completed turns, never the orphaned prompt or the partial reply. The exception is a
+turn that already applied a change (an approved write, edit or git action): every
+executed call shows as a `⚙` row as soon as it finishes, and the next request keeps
+that turn's prompt plus a short "already applied" note so the model knows the files
+changed (its heading then reads `· interrupted, applied changes sent as context`).
+Pending, denied and failed calls and read-only results are not sent. Once the new turn
 starts, the interrupted turn is no longer retryable with Ctrl+R; Ctrl+R before
 sending anything new still retries it exactly as before. Which turns were moved past
 is saved with the conversation, so a restart does not send them to the model either.

@@ -133,6 +133,100 @@ fn request_through_omits_earlier_interrupted_turns_but_keeps_its_own_target() {
     );
 }
 
+/// Issue #271: results as the tool loop reports them, one call at a time.
+fn ran(session: &mut Session, name: &str, path: &str, result: &str, new_round: bool) {
+    session.apply(
+        1,
+        Update::ToolResult {
+            call: alfredo_tui::model::ToolCall {
+                name: name.into(),
+                arguments: serde_json::json!({"path": path}),
+            },
+            result: result.into(),
+            new_round,
+        },
+    );
+}
+
+#[test]
+fn an_interrupted_turn_keeps_its_applied_changes_for_the_next_request() {
+    let mut session = Session::new("m".into());
+    session.insert("make files");
+    session.begin().unwrap();
+    ran(
+        &mut session,
+        "write_file",
+        "a.txt",
+        "wrote a.txt (3 bytes)",
+        true,
+    );
+    ran(&mut session, "read_file", "r.txt", "READ_ONLY_BODY", false);
+    ran(
+        &mut session,
+        "write_file",
+        "denied.txt",
+        "error: the owner denied this action",
+        false,
+    );
+    ran(
+        &mut session,
+        "edit_file",
+        "b.txt",
+        "error: the file changed",
+        false,
+    );
+    // Rounds join as calls finish; one round, four calls.
+    assert_eq!(session.tool_steps(1).len(), 1);
+    assert_eq!(session.tool_steps(1)[0].calls.len(), 4);
+    session.cancel();
+    session.insert("hello");
+    let request = session.begin().unwrap();
+    let all: String = request.iter().map(|m| m.content.as_str()).collect();
+    assert_eq!(request.first().unwrap().content, "make files");
+    assert!(all.contains("write_file a.txt: wrote a.txt"), "{all}");
+    for left_out in ["READ_ONLY_BODY", "denied.txt", "b.txt"] {
+        assert!(!all.contains(left_out), "{left_out} leaked: {all}");
+    }
+    assert_eq!(request.last().unwrap().content, "hello");
+    // The transcript keeps every executed call, applied or not.
+    assert_eq!(session.tool_steps(1)[0].calls.len(), 4);
+}
+
+#[test]
+fn an_interrupted_turn_with_only_reads_or_refusals_is_still_dropped() {
+    let mut session = Session::new("m".into());
+    session.insert("look around");
+    session.begin().unwrap();
+    ran(&mut session, "read_file", "r.txt", "body", true);
+    ran(&mut session, "write_file", "d.txt", "error: denied", false);
+    session.apply(1, Update::Failed("connection lost".into()));
+    session.insert("hello");
+    assert_eq!(roles(&session.begin().unwrap()), [("user", "hello")]);
+}
+
+#[test]
+fn applied_steps_of_an_interrupted_turn_survive_a_restart() {
+    let mut app = App::new("m".into());
+    let session = &mut app.sessions[0];
+    session.insert("make files");
+    session.begin().unwrap();
+    ran(session, "write_file", "a.txt", "wrote a.txt", true);
+    session.cancel();
+    session.insert("hello");
+    session.begin().unwrap();
+    session.apply(2, Update::Done);
+    let (root, store) = store();
+    store.save(&Snapshot::capture(&app, "default")).unwrap();
+    let mut restored = store.load().unwrap().unwrap().restore();
+    assert_eq!(restored.sessions[0].tool_steps(1).len(), 1);
+    restored.sessions[0].insert("again");
+    let request = restored.sessions[0].begin().unwrap();
+    assert!(request
+        .iter()
+        .any(|m| m.content.contains("write_file a.txt: wrote a.txt")));
+    let _ = std::fs::remove_dir_all(root);
+}
+
 #[test]
 fn cancel_then_model_switch_then_retry_uses_the_new_model() {
     let mut app = App::new("original".into());

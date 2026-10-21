@@ -902,7 +902,7 @@ impl Planner {
                     );
                 }
                 // Planner requests offer no tools.
-                Update::ToolCalls(_) | Update::ToolStep(_) => {}
+                Update::ToolCalls(_) | Update::ToolStep(_) | Update::ToolResult { .. } => {}
                 Update::Admitted => {
                     self.notice = "Plan waiting for model server · no action taken".into()
                 }

@@ -1291,7 +1291,13 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
             )
         };
         let heading = if session.interrupted_turn(index - index % 2) {
-            format!("{heading} · interrupted, not sent as context")
+            let kept = session.applied_note(index - index % 2 + 1).is_some();
+            let sent = if kept {
+                "applied changes sent as context"
+            } else {
+                "not sent as context"
+            };
+            format!("{heading} · interrupted, {sent}")
         } else {
             heading
         };
