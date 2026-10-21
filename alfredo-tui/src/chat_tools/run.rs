@@ -225,11 +225,19 @@ pub async fn run_turn(
         }
         let mut step = ToolStep { calls, results };
         // The session refuses a step past the conversation limit. Results were budgeted
-        // above; if the step still would not fit, replace them all with a note and let
-        // the model answer instead of failing the turn.
+        // above; if the step still would not fit, replace the read results with a note
+        // (the short reports of writes that already ran are kept, so the model knows they
+        // happened) and let the model answer instead of failing the turn.
         let held: usize = messages.iter().map(|m| m.content.len()).sum();
         if held + step.bytes() > MAX_TEXT {
-            step.results = vec![NEAR_LIMIT_NOTE.to_string(); step.results.len()];
+            for (call, result) in step.calls.iter().zip(step.results.iter_mut()) {
+                let wrote = TOOLS.iter().any(|tool| {
+                    tool.name == call.name && matches!(tool.tier, Tier::Mutating | Tier::Push)
+                });
+                if !wrote {
+                    *result = NEAR_LIMIT_NOTE.to_string();
+                }
+            }
             last_round = true;
         }
         if held + step.bytes() > MAX_TEXT {
