@@ -18,14 +18,14 @@ const PREFIX: &str = "proposed: ";
 pub const PROPOSE_PLAN: Tool = Tool {
     name: "propose_plan",
     tier: Tier::Propose,
-    description: "Hand large or risky work to /plan or /go: puts the command in the owner's prompt and ends your turn; the owner starts it.",
+    description: "Put /plan or /go <goal> in the owner's prompt; ends your turn.",
     parameters: || {
         json!({
             "type": "object",
             "properties": {
-                "goal": {"type": "string", "description": "One-sentence goal"},
-                "mode": {"type": "string", "enum": ["plan", "go"], "description": "plan = draft for review; go = plan and run"},
-                "reason": {"type": "string", "description": "Why not in chat"}
+                "goal": {"type": "string"},
+                "mode": {"type": "string", "enum": ["plan", "go"]},
+                "reason": {"type": "string"}
             },
             "required": ["goal", "mode", "reason"]
         })

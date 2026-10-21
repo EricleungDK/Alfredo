@@ -99,9 +99,13 @@ fn chat_prompt_describes_its_workspace_tools() {
         assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
     }
     assert!(!text.contains("cannot browse"), "{text}");
-    // Issue #235: chat edits files with approval; commands and Git stay out of reach.
+    // Issue #235/#236: chat edits files and runs commands only with approval.
     assert!(!text.contains("cannot edit"), "{text}");
-    assert!(text.contains("cannot run commands"), "{text}");
+    assert!(!text.contains("cannot run commands"), "{text}");
+    assert!(
+        text.contains("run_command") && text.contains("escalate"),
+        "{text}"
+    );
 }
 
 #[test]

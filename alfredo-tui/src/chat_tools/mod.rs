@@ -19,6 +19,7 @@ mod git_write;
 pub mod propose;
 mod read;
 mod run;
+mod shell;
 
 pub use run::{run_turn, MAX_STEPS, STEP_CAP_NOTICE};
 
@@ -76,6 +77,7 @@ pub static TOOLS: &[Tool] = &[
     git_write::GIT_SWITCH,
     git_write::GIT_MERGE,
     git_write::GIT_PUSH,
+    shell::RUN_COMMAND,
     propose::PROPOSE_PLAN,
 ];
 
@@ -117,7 +119,7 @@ pub fn dispatch_within(root: &Path, call: &ToolCall, limit: usize) -> String {
     }
     match (tool.run)(root, &arguments) {
         Ok(output) => cap_to(output, limit),
-        Err(error) => format!("error: {error}"),
+        Err(error) => cap_to(format!("error: {error}"), limit),
     }
 }
 

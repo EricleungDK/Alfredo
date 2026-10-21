@@ -884,6 +884,15 @@ impl Default for RustExecutionProvider {
     }
 }
 
+/// Run `request.argv` directly on the host, without Bubblewrap or request
+/// validation, in its own process group with the request's timeout, output limit
+/// and process-tree kill. Only for owner-approved host escalation (chat
+/// `run_command` with `escalate`, issue #236); every other effect goes through
+/// [`RustExecutionProvider`].
+pub(crate) fn run_on_host(request: &ExecutionRequest) -> Result<ProcessOutcome, LaunchError> {
+    SystemProcessLauncher.run(request, &mut ExecutionCallbacks::none())
+}
+
 struct SystemProcessLauncher;
 
 impl ProcessLauncher for SystemProcessLauncher {

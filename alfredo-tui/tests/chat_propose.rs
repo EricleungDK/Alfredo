@@ -196,7 +196,8 @@ async fn other_calls_beside_a_proposal_are_not_run() {
                     json!({"message":{"role":"assistant","content":"","tool_calls":[
                         {"function":{"name":"write_file","arguments":{"path":"a.txt","content":"new\n"}}},
                         {"function":{"name":"propose_plan","arguments":{"goal":"Big","mode":"go","reason":"r"}}},
-                        {"function":{"name":"read_file","arguments":{"path":"a.txt"}}}
+                        {"function":{"name":"read_file","arguments":{"path":"a.txt"}}},
+                        {"function":{"name":"run_command","arguments":{"command":"echo new > a.txt","escalate":true}}}
                     ]},"done":false})
                 )
                 .into_bytes(),
@@ -231,10 +232,11 @@ async fn other_calls_beside_a_proposal_are_not_run() {
     assert!(!asked.await.unwrap(), "no approval card was raised");
     assert_eq!(fs::read_to_string(root.join("a.txt")).unwrap(), "old\n");
     let results = &session.tool_steps(1)[0].results;
-    assert_eq!(results.len(), 3);
+    assert_eq!(results.len(), 4);
     assert!(results[0].starts_with("error: not run: proposal ends the turn"));
     assert!(results[1].starts_with("proposed: /go Big"));
     assert!(results[2].starts_with("error: not run: proposal ends the turn"));
+    assert!(results[3].starts_with("error: not run: proposal ends the turn"));
     assert_eq!(session.draft, "/go Big");
 }
 

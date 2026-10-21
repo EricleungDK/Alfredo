@@ -4,6 +4,7 @@ read_file, Alfredo runs it on the Coding Workspace, shows the call and a cut res
 sends the result back, and the model's answer appears.
 Issue #235 journeys: "redraft README" asks for edit_file; the approval card shows the
 diff; y edits the file in place, n leaves it untouched and the model gets a refusal.
+Issue #264: text typed into the prompt while the card waits never decides it.
 Issue #239 journey: "refactor everything" asks for propose_plan; the turn ends and the
 prompt holds the editable /plan command; nothing else is requested or started."""
 import http.server
@@ -125,7 +126,8 @@ class ChatTools(unittest.TestCase):
         names = [tool['function']['name'] for tool in chats[0]['tools']]
         self.assertEqual(names, ['read_file', 'list_files', 'grep', 'git_status', 'git_branch',
                                  'git_log', 'git_diff', 'write_file', 'edit_file',
-                                 'git_commit', 'git_switch', 'git_merge', 'git_push', 'propose_plan'])
+                                 'git_commit', 'git_switch', 'git_merge', 'git_push',
+                                 'run_command', 'propose_plan'])
         second = chats[1]['messages']
         self.assertEqual(second[-2]['role'], 'assistant')
         self.assertEqual(second[-2]['tool_calls'][0]['function']['name'], 'read_file')
@@ -142,10 +144,13 @@ class ChatTools(unittest.TestCase):
         self.terminal.wait_for('Approve edit_file')
         self.terminal.wait_for('+REDRAFTED_MARKER')
         self.assertEqual(self.readme(), README, 'nothing written before approval')
-        # Typeahead right after the card appears is ignored (arm delay).
-        self.terminal.write(b'y')
-        self.terminal.wait_for('press y or n again')
+        # Issue #264: a message typed while the card waits goes to the draft and never
+        # decides it, even a leading or later y/n.
+        time.sleep(1.0)
+        self.terminal.write(b'hey, you')
+        self.terminal.wait_for('clear the draft to answer')
         self.assertEqual(self.readme(), README)
+        self.terminal.write(b'\x7f' * len('hey, you'))
         time.sleep(0.7)
         self.terminal.write(b'y')
         self.terminal.wait_for('MODEL_SAW_EDIT')
