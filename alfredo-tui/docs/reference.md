@@ -1647,13 +1647,19 @@ rule `a` would add.
 - **What a rule covers.** `write_file`, `edit_file`, `git_commit`, `git_switch`,
   `git_merge`: every call of that tool. `run_command`: one command prefix, matched on whole
   whitespace-separated words (`cargo test` covers `cargo test --lib`, not `cargo testx`).
+  A sandboxed rule allows ANY arguments after its words (`cargo test --config …`), so its
+  reach is bounded only by the Sandbox; the card says so. A host (escalated) rule matches
+  only its exact command. Rules ignore `cwd`.
   A command containing any of `; & | ` `` ` `` `$ > < ( ) \` or a newline matches only a
   rule that is exactly that command (`cargo test; rm -rf ~` never matches `cargo test`).
 - **Never push.** `git_push` cards (Push tier, `Tier::allowlistable` false) offer no `a`,
-  and no rule matches them, including rules added by hand to the file. Read tools are
+  and no rule matches them, including rules added by hand to the file. The same holds for
+  a `run_command` that invokes `git … push` (`git -C x push`, `git -c k=v push`, any
+  path to git): its card reads `push: asked every time`. Read tools are
   never gated.
 - **Escalated runs.** A rule records whether it is for host (`escalate: true`) runs. A
-  sandboxed rule never covers a host run and a host rule never covers a sandboxed one.
+  sandboxed rule never covers a host run and a host rule never covers a sandboxed one;
+  a host rule never matches extra arguments.
   `a` on a red HOST card reads `a always allow on HOST (escalated rule) …` and adds a host
   rule.
 - **Still checked.** A rule only replaces the keypress: refusals before asking still

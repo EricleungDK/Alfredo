@@ -348,3 +348,57 @@ async fn an_auto_approved_call_is_still_refused_when_the_preview_no_longer_appli
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(state);
 }
+
+#[test]
+fn escalated_rules_match_only_the_exact_command() {
+    let state = dir("exact-host");
+    let rules = Rules::new(&state);
+    let host = rules.add_for(&shell("npm install", true)).unwrap();
+    assert_eq!(rules.matching(&shell("npm install", true)), Some(host));
+    assert_eq!(
+        rules.matching(&shell("npm install attacker-pkg", true)),
+        None
+    );
+    assert!(!allow::describe(&rules.list()[0]).contains("longer"));
+    let _ = fs::remove_dir_all(state);
+}
+
+#[test]
+fn git_push_through_run_command_is_never_allowlistable() {
+    let state = dir("shell-push");
+    let rules = Rules::new(&state);
+    for command in [
+        "git push origin feat --force",
+        "git -C x push",
+        "git -c k=v push origin feat:main",
+    ] {
+        for escalated in [false, true] {
+            let card = shell(command, escalated);
+            assert!(!allow::offered(&card), "{command}");
+            assert!(allow::offer(&card).is_none());
+            assert!(rules.add_for(&card).is_err());
+        }
+    }
+    fs::write(
+        state.join(allow::FILE),
+        r#"[{"id":1,"tool":"run_command","command":"git","escalated":true},{"id":2,"tool":"run_command","command":"git push origin feat --force","escalated":true},{"id":3,"tool":"run_command","command":"git"}]"#,
+    )
+    .unwrap();
+    assert_eq!(
+        rules.matching(&shell("git push origin feat --force", true)),
+        None
+    );
+    assert_eq!(rules.matching(&shell("git push", false)), None);
+    // Other git commands stay allowlistable.
+    assert!(rules.matching(&shell("git status", false)).is_some());
+    let host = screen(shell("git push origin feat", true));
+    assert!(host.contains("push: asked every time"), "{host}");
+    let _ = fs::remove_dir_all(state);
+}
+
+#[test]
+fn a_sandboxed_prefix_card_says_any_arguments_are_allowed() {
+    let text = allow::offer(&shell("cargo test", false)).unwrap();
+    assert!(text.contains("ANY arguments"), "{text}");
+    assert!(text.contains("sandboxed only"), "{text}");
+}

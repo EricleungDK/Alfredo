@@ -8,6 +8,10 @@
 //!   from a hand-edited file.
 //! - A run_command rule matches only runs with the same `escalated` flag, so a
 //!   sandboxed rule never covers a host run (and the reverse).
+//! - A host (escalated) rule matches only its exact command. A sandboxed rule is a
+//!   prefix: ANY arguments after it are allowed (the sandbox bounds the impact).
+//! - A run_command invoking `git … push` ([`pushes`]) is never offered or matched.
+//! - Rules ignore the call's `cwd`.
 //! - Command prefixes match whole whitespace-separated words. A command holding a
 //!   shell operator ([`METACHARS`]) matches only a rule that is exactly that command.
 //! - A malformed file is read as no rules (fail closed).
@@ -41,12 +45,38 @@ pub struct Rule {
     pub escalated: bool,
 }
 
-/// Whether `card` may be always-allowed: an allowlistable tool and not a push card.
+/// Whether `card` may be always-allowed: an allowlistable tool, not a push card, and
+/// not a run_command that invokes `git … push`.
 pub fn offered(card: &Card) -> bool {
     card.kind != CardKind::Push
         && TOOLS
             .iter()
             .any(|tool| tool.name == card.tool && tool.tier.allowlistable())
+        && !command_of(card).is_some_and(pushes)
+}
+
+/// Whether a shell command may run `git push`: a `git` word (any path) followed later
+/// by a `push` word, quotes ignored (`git -C x push`, `git -c k=v push`). Deliberately
+/// broad; a false positive only means the card asks every time.
+pub fn pushes(command: &str) -> bool {
+    let words: Vec<String> = command
+        .split(|c: char| c.is_whitespace() || METACHARS.contains(&c))
+        .map(|w| w.trim_matches(|c| c == '"' || c == '\'').to_string())
+        .collect();
+    words
+        .iter()
+        .position(|w| w == "git" || w.ends_with("/git"))
+        .is_some_and(|at| words[at + 1..].iter().any(|w| w == "push"))
+}
+
+/// Whether a rule only matches its exact command: host (escalated) rules, and commands
+/// holding shell operators.
+fn exact(rule: &Rule) -> bool {
+    rule.escalated
+        || rule
+            .command
+            .as_deref()
+            .is_some_and(|c| c.contains(METACHARS))
 }
 
 /// Whether a rule for `rule` (a command prefix) covers `command`. See the module notes.
@@ -79,7 +109,8 @@ pub fn matches(rule: &Rule, card: &Card) -> bool {
         CardKind::Shell { escalated } => {
             rule.escalated == escalated
                 && match (&rule.command, command_of(card)) {
-                    (Some(rule), Some(command)) => command_matches(rule, command),
+                    (Some(text), Some(command)) if exact(rule) => text.trim() == command.trim(),
+                    (Some(text), Some(command)) => command_matches(text, command),
                     _ => false,
                 }
         }
@@ -128,10 +159,10 @@ pub fn describe(rule: &Rule) -> String {
             rule.id,
             clean(&rule.tool),
             clean(command),
-            if command.contains(METACHARS) {
+            if exact(rule) {
                 " (exactly)"
             } else {
-                " (and longer commands starting with these words)"
+                " (ANY arguments after it, sandboxed only)"
             },
             if rule.escalated {
                 " · on HOST (escalated)"
@@ -160,10 +191,10 @@ pub fn offer(card: &Card) -> Option<String> {
                 .filter(|c| !c.is_control())
                 .take(80)
                 .collect::<String>(),
-            if command.contains(METACHARS) {
+            if exact(&rule) {
                 " exactly"
             } else {
-                " and longer commands starting with it"
+                " with ANY arguments after it, sandboxed only"
             }
         ),
     })

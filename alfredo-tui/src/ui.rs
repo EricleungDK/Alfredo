@@ -2291,6 +2291,18 @@ fn approval_card_lines(
             Style::default().fg(Color::Red),
         ));
     }
+    if card.tool == "run_command"
+        && card
+            .arguments
+            .get("command")
+            .and_then(|c| c.as_str())
+            .is_some_and(crate::chat_tools::allow::pushes)
+    {
+        lines.push(Line::styled(
+            "  push: asked every time, never always-allowed",
+            Style::default().fg(Color::Red),
+        ));
+    }
     if card.escalated() {
         lines.push(Line::styled(
             "  ! HOST · network on · your environment and credentials (SSH agent, tokens) · runs outside the sandbox",
