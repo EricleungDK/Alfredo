@@ -391,6 +391,243 @@ async fn num_ctx_accounting_counts_tool_messages() {
     assert_eq!(fixture.count("POST /api/chat"), 0);
 }
 
+/// Like `run`, with the provider's `--num-ctx` set.
+async fn run_ctx(
+    endpoint: &str,
+    root: &std::path::Path,
+    messages: Vec<Message>,
+    num_ctx: Option<u32>,
+) -> Vec<Event> {
+    let provider = Ollama::new(endpoint, Duration::from_secs(5))
+        .unwrap()
+        .with_num_ctx(num_ctx);
+    let (sender, mut receiver) = mpsc::channel(256);
+    chat_tools::run_turn(
+        &provider,
+        root,
+        0,
+        1,
+        "fixture".into(),
+        messages,
+        sender,
+        None,
+    )
+    .await;
+    let mut events = Vec::new();
+    while let Some(event) = receiver.recv().await {
+        events.push(event);
+    }
+    events
+}
+
+/// A model that keeps reading `path` while it is offered tools and answers once it is not.
+fn reader(path: &'static str) -> impl Fn(&ollama_fixture::Request, usize) -> Reply {
+    move |request, _| {
+        if request.body.get("tools").is_some() {
+            tool_call("read_file", json!({"path": path}))
+        } else {
+            done("final answer")
+        }
+    }
+}
+
+fn finish(events: Vec<Event>, session: &mut Session) {
+    for event in events {
+        session.apply(event.attempt, event.update);
+    }
+}
+
+#[tokio::test]
+async fn a_16kb_read_completes_under_num_ctx_4096() {
+    let root = workspace("ctx4096");
+    fs::write(root.join("big.rs"), "fn x() {}\n".repeat(1_700)).unwrap();
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, |request, index| {
+        if index == 0 {
+            tool_call("read_file", json!({"path": "big.rs"}))
+        } else {
+            assert!(request.body.get("tools").is_some());
+            done("final answer")
+        }
+    });
+    let mut session = Session::new("fixture".into());
+    session.insert("read big.rs");
+    let messages = session.begin().unwrap();
+    finish(
+        run_ctx(&fixture.endpoint, &root, messages, Some(4096)).await,
+        &mut session,
+    );
+    assert_eq!(session.status, Status::Complete, "{:?}", session.status);
+    assert!(session.messages[1].content.contains("final answer"));
+    let result = &session.tool_steps(1)[0].results[0];
+    assert!(
+        result.contains("[truncated: "),
+        "{}",
+        &result[result.len() - 80..]
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn repeated_reads_under_num_ctx_8192_end_with_an_answer() {
+    let root = workspace("bigloop");
+    let lines: String = (1..=5_000).map(|n| format!("line {n}\n")).collect();
+    fs::write(root.join("big.txt"), lines).unwrap();
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, reader("big.txt"));
+    let mut session = Session::new("fixture".into());
+    session.insert("read big.txt again and again");
+    let messages = session.begin().unwrap();
+    finish(
+        run_ctx(&fixture.endpoint, &root, messages, Some(8192)).await,
+        &mut session,
+    );
+    assert_eq!(session.status, Status::Complete, "{:?}", session.status);
+    assert!(session.messages[1].content.contains("final answer"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn eight_large_reads_at_the_default_window_end_with_an_answer() {
+    let root = workspace("eight");
+    let lines: String = (1..=20_000).map(|n| format!("line {n}\n")).collect();
+    fs::write(root.join("huge.txt"), lines).unwrap();
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, reader("huge.txt"));
+    let mut session = Session::new("fixture".into());
+    session.insert("read huge.txt");
+    let messages = session.begin().unwrap();
+    finish(run(&fixture.endpoint, &root, messages).await, &mut session);
+    assert_eq!(session.status, Status::Complete, "{:?}", session.status);
+    assert!(session.messages[1].content.contains("final answer"));
+    // The squeezed round is followed by one request without tools, never by a failure.
+    let requests = fixture.requests.lock().unwrap();
+    assert!(requests.len() <= MAX_STEPS + 1);
+    assert!(requests.last().unwrap().body.get("tools").is_none());
+    drop(requests);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn a_result_with_no_room_left_becomes_a_note_and_the_model_answers() {
+    let root = workspace("note");
+    fs::write(root.join("big.txt"), "b".repeat(15_000)).unwrap();
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, reader("big.txt"));
+    let mut session = Session::new("fixture".into());
+    session.insert("go");
+    let mut messages = session.begin().unwrap();
+    messages.insert(
+        0,
+        Message {
+            role: "user".into(),
+            content: "h".repeat(127_000),
+        },
+    );
+    finish(run(&fixture.endpoint, &root, messages).await, &mut session);
+    assert_eq!(session.status, Status::Complete, "{:?}", session.status);
+    let result = &session.tool_steps(1)[0].results[0];
+    assert!(result.contains("near its size limit"), "{result}");
+    assert!(session.messages[1].content.contains("final answer"));
+    assert_eq!(fixture.count("POST /api/chat"), 2);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn num_ctx_estimate_counts_the_tool_definitions() {
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, |_, _| done("ok"));
+    let tools = chat_tools::definitions();
+    let tool_bytes = serde_json::to_string(&tools).unwrap().len();
+    assert!(tool_bytes > 3_000, "{tool_bytes}");
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(5))
+        .unwrap()
+        .with_num_ctx(Some(2048))
+        .with_tools(tools);
+    // Messages alone (about 1,000 tokens) fit; with the tools they pass the window.
+    let content = "m".repeat(2_900);
+    let messages = vec![Message {
+        role: "user".into(),
+        content,
+    }];
+    let (sender, mut receiver) = mpsc::channel(64);
+    provider
+        .chat(0, 1, "fixture".into(), messages, sender)
+        .await;
+    let mut failure = None;
+    while let Some(event) = receiver.recv().await {
+        if let Update::Failed(error) = event.update {
+            failure = Some(error);
+        }
+    }
+    let failure = failure.expect("refused once the tools are counted");
+    assert!(failure.contains("--num-ctx 2048"), "{failure}");
+    assert!(failure.contains("/compact"), "{failure}");
+    assert_eq!(fixture.count("POST /api/chat"), 0);
+}
+
+#[tokio::test]
+async fn a_window_too_small_for_the_tools_runs_the_turn_as_plain_chat() {
+    let root = workspace("tiny");
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, |_, _| done("plain answer"));
+    let mut session = Session::new("fixture".into());
+    session.insert("hi");
+    let messages = session.begin().unwrap();
+    finish(
+        run_ctx(&fixture.endpoint, &root, messages, Some(2048)).await,
+        &mut session,
+    );
+    assert_eq!(session.status, Status::Complete, "{:?}", session.status);
+    assert!(session.messages[1].content.contains("plain answer"));
+    assert!(session.messages[1]
+        .content
+        .contains("too small for the file tools"));
+    assert!(fixture.requests.lock().unwrap()[0]
+        .body
+        .get("tools")
+        .is_none());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn compact_works_from_a_failed_tool_turn() {
+    let mut session = Session::new("fixture".into());
+    for n in 0..3 {
+        session.insert(&format!("question {n}"));
+        session.begin().unwrap();
+        let attempt = session.attempt;
+        session.apply(attempt, Update::Token(format!("answer {n}")));
+        session.apply(attempt, Update::Done);
+    }
+    session.insert("read big.rs");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(
+        attempt,
+        Update::ToolStep(alfredo_tui::model::ToolStep {
+            calls: vec![ToolCall {
+                name: "read_file".into(),
+                arguments: json!({"path": "big.rs"}),
+            }],
+            results: vec!["x".repeat(16_000)],
+        }),
+    );
+    session.apply(
+        attempt,
+        Update::Failed("prompt ≈5471 tokens > --num-ctx 4096; run /compact".into()),
+    );
+    assert!(matches!(session.status, Status::Failed(_)));
+    let plan = session
+        .start_compaction(Some(4096), true)
+        .expect("compactable");
+    let attempt = session.attempt;
+    session
+        .finish_compaction(attempt, &plan, Ok("summary".into()))
+        .expect("compacted");
+    assert!(session.compaction().is_some());
+}
+
 #[tokio::test]
 async fn a_failed_model_request_ends_the_turn_without_more_steps() {
     let root = workspace("fail");

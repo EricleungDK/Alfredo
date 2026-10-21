@@ -7,6 +7,8 @@ pub mod compaction;
 pub use compaction::Compaction;
 
 pub const MAX_TEXT: usize = 128 * 1024;
+/// Failure text when a reply or tool step would pass [`MAX_TEXT`]; names the ways out.
+pub const OUTPUT_LIMIT: &str = "Conversation output limit reached; run /compact or /clear, or press Ctrl+N for a new conversation";
 pub const MAX_DRAFT: usize = 16 * 1024;
 pub const MAX_SESSIONS: usize = 8;
 pub const MAX_MESSAGES: usize = 4096;
@@ -1602,7 +1604,7 @@ impl Session {
                 let total = self.messages.iter().map(|m| m.content.len()).sum::<usize>()
                     + self.tool_bytes();
                 if total + text.len() > MAX_TEXT {
-                    self.status = Status::Failed("Conversation output limit reached".into());
+                    self.status = Status::Failed(OUTPUT_LIMIT.into());
                 } else {
                     self.messages.last_mut().unwrap().content.push_str(&text);
                     self.status = Status::Streaming;
@@ -1614,7 +1616,7 @@ impl Session {
                 let total = self.messages.iter().map(|m| m.content.len()).sum::<usize>()
                     + self.tool_bytes();
                 if !step.valid() || total + step.bytes() > MAX_TEXT {
-                    self.status = Status::Failed("Conversation output limit reached".into());
+                    self.status = Status::Failed(OUTPUT_LIMIT.into());
                 } else {
                     self.tool_steps
                         .entry(self.messages.len() - 1)
