@@ -362,3 +362,110 @@ async fn a_failed_model_request_ends_the_turn_without_more_steps() {
     assert_eq!(fixture.count("POST /api/chat"), 2);
     let _ = fs::remove_dir_all(root);
 }
+
+async fn run_as(
+    endpoint: &str,
+    root: &std::path::Path,
+    model: &str,
+    messages: Vec<Message>,
+) -> Vec<Event> {
+    let provider = Ollama::new(endpoint, Duration::from_secs(5)).unwrap();
+    let (sender, mut receiver) = mpsc::channel(256);
+    chat_tools::run_turn(
+        &provider,
+        root,
+        0,
+        1,
+        model.into(),
+        messages,
+        sender,
+        None,
+    )
+    .await;
+    let mut events = Vec::new();
+    while let Some(event) = receiver.recv().await {
+        events.push(event);
+    }
+    events
+}
+
+fn begin(session: &mut Session, text: &str) -> Vec<Message> {
+    session.insert(text);
+    let mut messages = session.begin().unwrap();
+    messages.insert(0, alfredo_tui::chat_context::system_message(None, |_| None));
+    messages
+}
+
+#[tokio::test]
+async fn a_model_without_tool_support_falls_back_to_plain_chat_once() {
+    let root = workspace("notools");
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, |request, _| {
+        if request.body.get("tools").is_some() {
+            Reply::Json(
+                400,
+                r#"{"error":"registry.ollama.ai/library/gemma:2b does not support tools"}"#.into(),
+            )
+        } else {
+            done("plain hello")
+        }
+    });
+    let model = "notools-model";
+    let mut session = Session::new(model.into());
+    let messages = begin(&mut session, "hi");
+    let events = run_as(&fixture.endpoint, &root, model, messages).await;
+    for event in events {
+        session.apply(event.attempt, event.update);
+    }
+    let reply = &session.messages.last().unwrap().content;
+    assert!(reply.contains("plain hello"), "{reply}");
+    assert!(
+        reply.contains(&format!(
+            "Model {model} has no tool support; chat is running without file tools"
+        )),
+        "{reply}"
+    );
+    assert!(!matches!(session.status, Status::Failed(_)));
+    let requests = fixture.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 2);
+    assert!(requests[0].body.get("tools").is_some());
+    assert!(requests[1].body.get("tools").is_none());
+    let system = requests[1].body["messages"][0]["content"].as_str().unwrap();
+    assert!(!system.contains("read_file"), "{system}");
+    assert!(system.contains("no tools"), "{system}");
+
+    // A later turn skips tools without probing and shows no second notice.
+    let mut later = Session::new(model.into());
+    let messages = begin(&mut later, "again");
+    for event in run_as(&fixture.endpoint, &root, model, messages).await {
+        later.apply(event.attempt, event.update);
+    }
+    let reply = &later.messages.last().unwrap().content;
+    assert!(!reply.contains("no tool support"), "{reply}");
+    let requests = fixture.requests.lock().unwrap().clone();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].body.get("tools").is_none());
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn another_400_shows_ollamas_error_text_and_is_not_retried_without_tools() {
+    let root = workspace("other400");
+    let addr = ollama_fixture::reserve();
+    let long = "x".repeat(400);
+    let body = json!({"error": format!("context\u{7} length exceeded {long}")}).to_string();
+    let fixture = ollama_fixture::serve(addr, move |_, _| Reply::Json(400, body.clone()));
+    let mut session = Session::new("other400-model".into());
+    let messages = begin(&mut session, "hi");
+    for event in run_as(&fixture.endpoint, &root, "other400-model", messages).await {
+        session.apply(event.attempt, event.update);
+    }
+    let Status::Failed(error) = &session.status else {
+        panic!("{:?}", session.status);
+    };
+    assert!(error.contains("HTTP 400: context length exceeded"), "{error}");
+    assert!(!error.chars().any(|c| c.is_control()), "{error:?}");
+    assert!(error.chars().count() < 260, "{error}");
+    assert_eq!(fixture.count("POST /api/chat"), 1);
+    let _ = fs::remove_dir_all(root);
+}

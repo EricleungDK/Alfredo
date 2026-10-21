@@ -1460,6 +1460,12 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   `--num-ctx` estimate, and compaction summarises them with their turn. They are saved
   with the conversation (schema v19; the first save keeps `<conversation>.v18-backup`;
   older builds refuse a v19 file). Retrying a turn drops its tool rounds.
+- **Needs a tool-capable model.** If Ollama answers HTTP 400 `... does not support
+  tools`, that round is retried once without tools and chat continues as plain chat:
+  one notice (`Model X has no tool support; chat is running without file tools`) is
+  shown, the system prompt stops promising tools, and later turns with that model in
+  the same session send none. Other HTTP errors show Ollama's own `error` text (about
+  200 characters, control characters removed) and are not retried without tools.
 - **Not available.** Commands and Git operations are not chat tools yet; the model is
   told so. File edits need approval (next section). Wayfinder scope discussions
   (`@wayfinder`, `/scope`) offer no tools.

@@ -973,10 +973,13 @@ impl Ollama {
                     return Err(Failure::Final(error));
                 }
             }
-            let error = format!(
-                "Ollama returned HTTP {}; check the model and server",
-                response.status().as_u16()
-            );
+            let error = match error_text(&mut response).await {
+                Some(text) => format!("Ollama returned HTTP {}: {text}", response.status().as_u16()),
+                None => format!(
+                    "Ollama returned HTTP {}; check the model and server",
+                    response.status().as_u16()
+                ),
+            };
             return Err(if response.status().is_server_error() {
                 Failure::BeforeContent(error)
             } else {
@@ -1221,6 +1224,28 @@ pub const MISSING_MODEL_MARKER: &str = " is not installed (Ollama: ";
 pub fn model_installed(installed: &[String], model: &str) -> bool {
     crate::models::contains_model(installed, model)
 }
+
+/// Ollama's own `error` text from a failed response, control characters stripped and
+/// cut to about 200 characters; None when the body is not JSON with a string `error`.
+async fn error_text(response: &mut reqwest::Response) -> Option<String> {
+    let chunk = tokio::time::timeout(Duration::from_secs(2), response.chunk())
+        .await
+        .ok()?
+        .ok()??;
+    let value: serde_json::Value = serde_json::from_slice(&chunk[..chunk.len().min(4096)]).ok()?;
+    let text: String = value
+        .get("error")?
+        .as_str()?
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(200)
+        .collect();
+    Some(text).filter(|text| !text.trim().is_empty())
+}
+
+/// Part of Ollama's HTTP 400 text for a model that rejects `tools`. The chat tool loop
+/// retries once without tools when a failure carries it.
+pub const NO_TOOLS_MARKER: &str = "does not support tools";
 
 /// A 404 whose JSON body says the model was not found, mapped to an error that
 /// names the model, keeps Ollama's own text and says how to fix it.
