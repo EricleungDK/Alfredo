@@ -47,7 +47,9 @@ class Fixture:
                     self.end_headers()
                     self.wfile.write(payload)
                     return
-                tool_results = [m for m in body['messages'] if m['role'] == 'tool']
+                # Results of this turn only (after the latest user message).
+                last_user = max(i for i, m in enumerate(body['messages']) if m['role'] == 'user')
+                tool_results = [m for m in body['messages'][last_user:] if m['role'] == 'tool']
                 prompt = [m for m in body['messages'] if m['role'] == 'user'][-1]['content']
                 if 'refactor everything' in prompt and not tool_results:
                     chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
@@ -156,6 +158,32 @@ class ChatTools(unittest.TestCase):
         self.terminal.wait_for('MODEL_SAW_EDIT')
         self.assertIn('REDRAFTED_MARKER: a small', self.readme())
         self.terminal.wait_for('Approved edit_file')
+
+    def test_always_allow_then_an_identical_edit_runs_without_a_card(self):
+        # Issue #238: a on the card adds a rule; the next identical edit is auto-approved.
+        self.terminal.write(b'redraft README\r')
+        self.terminal.wait_for('a always allow edit_file')
+        time.sleep(0.7)
+        self.terminal.write(b'a')
+        self.terminal.wait_for('MODEL_SAW_EDIT')
+        self.terminal.wait_for('Always allowed')
+        Path(os.path.realpath(self.repo.name), 'README.md').write_text(README)
+        self.terminal.write(b'redraft README again\r')
+        deadline = time.time() + 15
+        while 'REDRAFTED_MARKER' not in self.readme() and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertIn('REDRAFTED_MARKER: a small', self.readme(), 'auto-approved, no keypress')
+        logs = list(Path(self.state.name).rglob('chat-approvals.jsonl'))
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            records = [json.loads(line) for line in logs[0].read_text().splitlines()] if logs else []
+            if len(records) == 2:
+                break
+            time.sleep(0.1)
+            logs = list(Path(self.state.name).rglob('chat-approvals.jsonl'))
+        self.assertEqual([r.get('rule') for r in records], [1, 1], records)
+        self.terminal.write(b'/allow\r')
+        self.terminal.wait_for('#1 edit_file')
 
     def test_a_denied_edit_never_touches_the_file(self):
         self.terminal.write(b'redraft README\r')

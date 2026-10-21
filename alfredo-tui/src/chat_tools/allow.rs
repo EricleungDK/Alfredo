@@ -1,0 +1,330 @@
+//! Always-allow rules (issue #238, ADR 0004): the owner answers `a` on an approval card
+//! and later identical actions in this mission run without asking. A rule covers one
+//! tool (`edit_file`, `git_commit`, …) or, for `run_command`, one command prefix;
+//! rules live in `chat-allow.json` in the mission's State Directory.
+//!
+//! Strict by design:
+//! - Only [`super::Tier::allowlistable`] tools match; `git_push` and push cards never do, even
+//!   from a hand-edited file.
+//! - A run_command rule matches only runs with the same `escalated` flag, so a
+//!   sandboxed rule never covers a host run (and the reverse).
+//! - A host (escalated) rule matches only its exact command. A sandboxed rule is a
+//!   prefix: ANY arguments after it are allowed (the sandbox bounds the impact).
+//! - A run_command invoking `git … push` ([`pushes`]) is never offered or matched.
+//! - Rules ignore the call's `cwd`.
+//! - Command prefixes match whole whitespace-separated words. A command holding a
+//!   shell operator ([`METACHARS`]) matches only a rule that is exactly that command.
+//! - A malformed file is read as no rules (fail closed).
+//!
+//! Matching only replaces the owner's keypress: the card is still previewed (refusals
+//! still refuse), the fingerprint is still checked at apply, and the outcome is logged
+//! with the rule id.
+use super::{approval::Card, approval::CardKind, TOOLS};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+
+/// Rules file name in the mission's State Directory.
+pub const FILE: &str = "chat-allow.json";
+/// Characters that make a command eligible only for an exact-command rule.
+pub const METACHARS: &[char] = &[
+    ';', '&', '|', '`', '$', '>', '<', '\n', '\r', '\\', '(', ')',
+];
+/// Most rules kept per mission.
+const MAX_RULES: usize = 200;
+
+/// One always-allow rule.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Rule {
+    pub id: u64,
+    pub tool: String,
+    /// run_command only: the command prefix (whole words).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// run_command only: covers host (escalated) runs, and only those.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub escalated: bool,
+}
+
+/// Whether `card` may be always-allowed: an allowlistable tool, not a push card, and
+/// not a run_command that invokes `git … push`.
+pub fn offered(card: &Card) -> bool {
+    card.kind != CardKind::Push
+        && TOOLS
+            .iter()
+            .any(|tool| tool.name == card.tool && tool.tier.allowlistable())
+        && !command_of(card).is_some_and(pushes)
+}
+
+/// Whether a shell command may run `git push`: a `git` word (any path) followed later
+/// by a `push` word, quotes ignored (`git -C x push`, `git -c k=v push`). Deliberately
+/// broad; a false positive only means the card asks every time.
+pub fn pushes(command: &str) -> bool {
+    let words: Vec<String> = command
+        .split(|c: char| c.is_whitespace() || METACHARS.contains(&c))
+        .map(|w| w.trim_matches(|c| c == '"' || c == '\'').to_string())
+        .collect();
+    words
+        .iter()
+        .position(|w| w == "git" || w.ends_with("/git"))
+        .is_some_and(|at| words[at + 1..].iter().any(|w| w == "push"))
+}
+
+/// Whether a rule only matches its exact command: host (escalated) rules, and commands
+/// holding shell operators.
+fn exact(rule: &Rule) -> bool {
+    rule.escalated
+        || rule
+            .command
+            .as_deref()
+            .is_some_and(|c| c.contains(METACHARS))
+}
+
+/// Whether a rule for `rule` (a command prefix) covers `command`. See the module notes.
+pub fn command_matches(rule: &str, command: &str) -> bool {
+    let (rule, command) = (rule.trim(), command.trim());
+    if rule.is_empty() {
+        return false;
+    }
+    if rule == command {
+        return true;
+    }
+    if rule.contains(METACHARS) || command.contains(METACHARS) {
+        return false;
+    }
+    let words: Vec<&str> = rule.split_whitespace().collect();
+    let mut given = command.split_whitespace();
+    words.iter().all(|word| given.next() == Some(word))
+}
+
+fn command_of(card: &Card) -> Option<&str> {
+    card.arguments.get("command").and_then(|c| c.as_str())
+}
+
+/// Whether `rule` covers `card`.
+pub fn matches(rule: &Rule, card: &Card) -> bool {
+    if !offered(card) || rule.tool != card.tool {
+        return false;
+    }
+    match card.kind {
+        CardKind::Shell { escalated } => {
+            rule.escalated == escalated
+                && match (&rule.command, command_of(card)) {
+                    (Some(text), Some(command)) if exact(rule) => text.trim() == command.trim(),
+                    (Some(text), Some(command)) => command_matches(text, command),
+                    _ => false,
+                }
+        }
+        _ => rule.command.is_none() && !rule.escalated,
+    }
+}
+
+/// The rule `a` would add for `card` (id 0), or why none can.
+pub fn rule_for(card: &Card) -> Result<Rule, String> {
+    if !offered(card) {
+        return Err(format!("{} can never be always-allowed", card.tool));
+    }
+    Ok(match card.kind {
+        CardKind::Shell { escalated } => Rule {
+            id: 0,
+            tool: card.tool.clone(),
+            command: Some(
+                command_of(card)
+                    .map(str::trim)
+                    .filter(|c| !c.is_empty())
+                    .ok_or("run_command has no command")?
+                    .to_string(),
+            ),
+            escalated,
+        },
+        _ => Rule {
+            id: 0,
+            tool: card.tool.clone(),
+            command: None,
+            escalated: false,
+        },
+    })
+}
+
+/// One line naming what a rule covers.
+pub fn describe(rule: &Rule) -> String {
+    let clean = |text: &str| -> String {
+        text.chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .take(120)
+            .collect()
+    };
+    match &rule.command {
+        Some(command) => format!(
+            "#{} {} `{}`{}{}",
+            rule.id,
+            clean(&rule.tool),
+            clean(command),
+            if exact(rule) {
+                " (exactly)"
+            } else {
+                " (ANY arguments after it, sandboxed only)"
+            },
+            if rule.escalated {
+                " · on HOST (escalated)"
+            } else {
+                " · sandboxed"
+            }
+        ),
+        None => format!("#{} {} (every call)", rule.id, clean(&rule.tool)),
+    }
+}
+
+/// Card hint for `a`, or `None` when the card cannot be always-allowed.
+pub fn offer(card: &Card) -> Option<String> {
+    let rule = rule_for(card).ok()?;
+    Some(match &rule.command {
+        None => format!("a always allow {} in this mission", rule.tool),
+        Some(command) => format!(
+            "a always allow{} `{}`{}",
+            if rule.escalated {
+                " on HOST (escalated rule)"
+            } else {
+                ""
+            },
+            command
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(80)
+                .collect::<String>(),
+            if exact(&rule) {
+                " exactly"
+            } else {
+                " with ANY arguments after it, sandboxed only"
+            }
+        ),
+    })
+}
+
+/// The rules of one mission.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rules {
+    path: PathBuf,
+}
+
+impl Rules {
+    pub fn new(directory: &Path) -> Self {
+        Self {
+            path: directory.join(FILE),
+        }
+    }
+
+    /// The rules beside the mission's task store.
+    pub fn for_store(store: &crate::tasks::TaskStore) -> Result<Self, String> {
+        Ok(Self::new(&store.conversation_directory()?))
+    }
+
+    /// Rules, oldest first. A missing or malformed file is no rules.
+    pub fn list(&self) -> Vec<Rule> {
+        std::fs::read_to_string(&self.path)
+            .ok()
+            .filter(|text| text.len() <= 1024 * 1024)
+            .and_then(|text| serde_json::from_str(&text).ok())
+            .unwrap_or_default()
+    }
+
+    /// The first rule covering `card`.
+    pub fn matching(&self, card: &Card) -> Option<Rule> {
+        self.list().into_iter().find(|rule| matches(rule, card))
+    }
+
+    /// Add the rule for `card` (an equal rule is reused).
+    pub fn add_for(&self, card: &Card) -> Result<Rule, String> {
+        let wanted = rule_for(card)?;
+        self.update(|rules| {
+            if let Some(rule) = rules.iter().find(|r| {
+                r.tool == wanted.tool
+                    && r.command == wanted.command
+                    && r.escalated == wanted.escalated
+            }) {
+                return Ok(rule.clone());
+            }
+            if rules.len() >= MAX_RULES {
+                return Err(format!("at most {MAX_RULES} rules; /allow clear some"));
+            }
+            let rule = Rule {
+                id: rules.iter().map(|r| r.id).max().unwrap_or(0) + 1,
+                ..wanted
+            };
+            rules.push(rule.clone());
+            Ok(rule)
+        })
+    }
+
+    /// Remove rule `id`.
+    pub fn remove(&self, id: u64) -> Result<Rule, String> {
+        self.update(|rules| {
+            let index = rules
+                .iter()
+                .position(|r| r.id == id)
+                .ok_or_else(|| format!("no rule #{id}; /allow lists them"))?;
+            Ok(rules.remove(index))
+        })
+    }
+
+    /// Remove every rule; returns how many there were.
+    pub fn clear(&self) -> Result<usize, String> {
+        self.update(|rules| Ok(std::mem::take(rules).len()))
+    }
+
+    /// Read, change and atomically rewrite the file under a lock.
+    fn update<T>(
+        &self,
+        change: impl FnOnce(&mut Vec<Rule>) -> Result<T, String>,
+    ) -> Result<T, String> {
+        let failed = |e: std::io::Error| format!("rules not saved: {e}");
+        let lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(self.path.with_extension("lock"))
+            .map_err(failed)?;
+        lock.lock().map_err(failed)?;
+        let mut rules = self.list();
+        let result = change(&mut rules)?;
+        let text = serde_json::to_string_pretty(&rules).map_err(|e| e.to_string())?;
+        let temporary = self
+            .path
+            .with_extension(format!("json.{}.tmp", std::process::id()));
+        std::fs::write(&temporary, text).map_err(failed)?;
+        std::fs::rename(&temporary, &self.path).map_err(|e| {
+            let _ = std::fs::remove_file(&temporary);
+            failed(e)
+        })?;
+        Ok(result)
+    }
+}
+
+/// `/allow [clear [ID]]`: `args` is the text after `/allow`. `Ok` is the notice.
+pub fn slash(rules: &Rules, args: &str) -> Result<String, String> {
+    let words: Vec<&str> = args.split_whitespace().collect();
+    match words.as_slice() {
+        [] => {
+            let list = rules.list();
+            if list.is_empty() {
+                return Ok("No always-allow rules · press a on an approval card to add one".into());
+            }
+            Ok(format!(
+                "Always-allow rules: {} · /allow clear [ID] removes",
+                list.iter().map(describe).collect::<Vec<_>>().join(" · ")
+            ))
+        }
+        ["clear"] => rules
+            .clear()
+            .map(|count| format!("Cleared {count} always-allow rule(s); every action asks again")),
+        ["clear", id] => {
+            let id = id
+                .trim_start_matches('#')
+                .parse::<u64>()
+                .map_err(|_| "Usage: /allow clear [ID]".to_string())?;
+            rules
+                .remove(id)
+                .map(|rule| format!("Removed {}", describe(&rule)))
+        }
+        _ => Err("Usage: /allow · /allow clear · /allow clear ID".into()),
+    }
+}
