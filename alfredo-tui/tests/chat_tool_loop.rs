@@ -461,10 +461,88 @@ async fn a_16kb_read_completes_under_num_ctx_4096() {
     assert!(session.messages[1].content.contains("final answer"));
     let result = &session.tool_steps(1)[0].results[0];
     assert!(
-        result.contains("[truncated: "),
+        result.contains("[truncated"),
         "{}",
         &result[result.len() - 80..]
     );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn budgeted_read_file_ends_on_a_whole_line_with_the_continuation_hint() {
+    let root = workspace("ctx4096hint");
+    let body: String = (1..=8000)
+        .map(|n| format!("line {n:05} some filler text here\n"))
+        .collect();
+    fs::write(root.join("big.txt"), body).unwrap();
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, |_, index| {
+        if index == 0 {
+            tool_call("read_file", json!({"path": "big.txt"}))
+        } else {
+            done("final answer")
+        }
+    });
+    let mut session = Session::new("fixture".into());
+    session.insert("read big.txt");
+    let messages = session.begin().unwrap();
+    finish(
+        run_ctx(&fixture.endpoint, &root, messages, Some(4096)).await,
+        &mut session,
+    );
+    let result = &session.tool_steps(1)[0].results[0];
+    let (shown, footer) = result.rsplit_once('\n').unwrap();
+    let last: usize = shown
+        .rsplit('\n')
+        .next()
+        .unwrap()
+        .split('\t')
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        footer,
+        format!(
+            "[truncated at line {last} of 8000; call read_file with start_line={} to continue]",
+            last + 1
+        )
+    );
+    assert!(shown.ends_with("some filler text here"), "{shown}");
+    assert!(
+        last > 5 && result.len() < 4096 * 3,
+        "{} bytes",
+        result.len()
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[tokio::test]
+async fn budgeted_grep_is_cut_on_a_newline() {
+    let root = workspace("ctx4096grep");
+    let body: String = (1..=400)
+        .map(|n| format!("needle line {n:05} some filler text here\n"))
+        .collect();
+    fs::write(root.join("big.txt"), body).unwrap();
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, |_, index| {
+        if index == 0 {
+            tool_call("grep", json!({"pattern": "needle"}))
+        } else {
+            done("final answer")
+        }
+    });
+    let mut session = Session::new("fixture".into());
+    session.insert("grep needle");
+    let messages = session.begin().unwrap();
+    finish(
+        run_ctx(&fixture.endpoint, &root, messages, Some(4096)).await,
+        &mut session,
+    );
+    let result = &session.tool_steps(1)[0].results[0];
+    let (shown, footer) = result.rsplit_once('\n').unwrap();
+    assert!(footer.starts_with("[truncated: "), "{footer}");
+    assert!(shown.ends_with("some filler text here"), "{shown}");
     let _ = fs::remove_dir_all(root);
 }
 
