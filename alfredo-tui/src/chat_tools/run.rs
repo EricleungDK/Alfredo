@@ -5,9 +5,13 @@ use super::{
 };
 use crate::{
     model::{Event, Message, ToolCall, ToolStep, Update, MAX_TEXT},
-    provider::Ollama,
+    provider::{Ollama, Round},
 };
-use std::path::Path;
+use std::{
+    collections::HashSet,
+    path::Path,
+    sync::{Mutex, OnceLock},
+};
 use tokio::sync::{mpsc::Sender, oneshot};
 
 /// Tool rounds one turn may run; a model asking for more is stopped with a notice.
@@ -18,6 +22,12 @@ const MAX_CALLS: usize = 16;
 const MAX_KEPT: usize = 64;
 /// Shown in the reply when the step cap stops the loop.
 pub const STEP_CAP_NOTICE: &str = "Stopped: tool step limit reached";
+
+/// Models Ollama refused `tools` for this session (issue #254); later turns skip tools.
+fn no_tools_models() -> &'static Mutex<HashSet<String>> {
+    static MODELS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    MODELS.get_or_init(Mutex::default)
+}
 
 /// Run one chat turn: request a reply with the tools offered; while the model asks for
 /// tools, run them, report a [`Update::ToolStep`], and ask again with the results.
@@ -34,7 +44,20 @@ pub async fn run_turn(
     sender: Sender<Event>,
     gate: Option<Gate>,
 ) {
-    let provider = provider.clone().with_tools(definitions());
+    let known = |model: &str| {
+        no_tools_models()
+            .lock()
+            .is_ok_and(|models| models.contains(model))
+    };
+    let mut plain = known(&model);
+    let mut provider = if plain {
+        provider.clone()
+    } else {
+        provider.clone().with_tools(definitions())
+    };
+    if plain {
+        strip_tool_prompt(&mut messages);
+    }
     let send = |update| {
         let sender = sender.clone();
         async move {
@@ -51,18 +74,39 @@ pub async fn run_turn(
     let mut steps = 0;
     loop {
         // Tokens go straight to the session sender; `Done` is withheld by the
-        // provider when the round asked for tools. `None`: failed or terminal closed.
-        let Some(mut calls) = provider
-            .chat_round(
+        // provider when the round asked for tools. A model that refuses tools has
+        // its failure held back so the round is retried once in plain chat.
+        let mut calls = match provider
+            .chat_round_probing(
                 session,
                 attempt,
                 model.clone(),
                 messages.clone(),
                 sender.clone(),
+                !plain,
             )
             .await
-        else {
-            return;
+        {
+            Round::Calls(calls) => calls,
+            Round::Stopped => return,
+            Round::Rejected => {
+                // Retry this round once without tools; later turns skip them without probing.
+                plain = true;
+                provider = provider.with_tools(Vec::new());
+                if let Ok(mut models) = no_tools_models().lock() {
+                    models.insert(model.clone());
+                }
+                strip_tool_prompt(&mut messages);
+                let name: String = model.chars().filter(|c| !c.is_control()).collect();
+                if !send(Update::Token(format!(
+                    "[Model {name} has no tool support; chat is running without file tools]\n\n"
+                )))
+                .await
+                {
+                    return;
+                }
+                continue;
+            }
         };
         if calls.is_empty() {
             // The provider already sent `Done` on the same path as the tokens.
@@ -137,6 +181,13 @@ pub async fn run_turn(
             send(Update::Done).await;
             return;
         }
+    }
+}
+
+/// Drop the sentences promising file tools from the chat system prompt.
+fn strip_tool_prompt(messages: &mut [Message]) {
+    for message in messages.iter_mut().filter(|m| m.role == "system") {
+        message.content = crate::chat_context::without_tools(&message.content);
     }
 }
 

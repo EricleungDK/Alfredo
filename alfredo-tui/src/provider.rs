@@ -235,6 +235,16 @@ fn temperature_json(value: f64) -> serde_json::Value {
     }
 }
 
+/// Outcome of one tool-loop round (`Ollama::chat_round_probing`).
+pub enum Round {
+    /// The round finished; the tool calls it asked for (possibly none).
+    Calls(Vec<ToolCall>),
+    /// The model rejected tools; the failure was withheld for a plain retry.
+    Rejected,
+    /// The round failed (`Failed` sent) or the receiver closed.
+    Stopped,
+}
+
 #[derive(Default)]
 struct Trace {
     started: Option<Instant>,
@@ -703,9 +713,36 @@ impl Ollama {
         messages: Vec<Message>,
         sender: Sender<Event>,
     ) -> Option<Vec<ToolCall>> {
-        self.run_chat(session, attempt, model, messages, sender, true, || async {
-            Ok(())
-        })
+        match self
+            .chat_round_probing(session, attempt, model, messages, sender, false)
+            .await
+        {
+            Round::Calls(calls) => Some(calls),
+            Round::Rejected | Round::Stopped => None,
+        }
+    }
+
+    /// As `chat_round`, but with `probe` set a failure saying the model does not
+    /// support tools is withheld (no `Failed` sent) and reported as `Rejected`, so
+    /// the caller can retry the round without tools (issue #254).
+    pub async fn chat_round_probing(
+        &self,
+        session: usize,
+        attempt: u64,
+        model: String,
+        messages: Vec<Message>,
+        sender: Sender<Event>,
+        probe: bool,
+    ) -> Round {
+        self.run_chat(
+            session,
+            attempt,
+            model,
+            messages,
+            sender,
+            Some(probe),
+            || async { Ok(()) },
+        )
         .await
     }
 
@@ -724,7 +761,7 @@ impl Ollama {
         Check: FnMut() -> Checked,
         Checked: std::future::Future<Output = Result<(), String>>,
     {
-        self.run_chat(session, attempt, model, messages, sender, false, check)
+        self.run_chat(session, attempt, model, messages, sender, None, check)
             .await;
     }
 
@@ -736,9 +773,9 @@ impl Ollama {
         model: String,
         messages: Vec<Message>,
         sender: Sender<Event>,
-        collect: bool,
+        collect: Option<bool>,
         mut check: Check,
-    ) -> Option<Vec<ToolCall>>
+    ) -> Round
     where
         Check: FnMut() -> Checked,
         Checked: std::future::Future<Output = Result<(), String>>,
@@ -746,7 +783,7 @@ impl Ollama {
         let mut trace = Trace {
             started: self.recorder.as_ref().map(|_| Instant::now()),
             recording: None,
-            calls: collect.then(Vec::new),
+            calls: collect.map(|_| Vec::new()),
         };
         // Recorded qualification requests measure one exact wire request.
         let limit = if self.recorder.is_some() {
@@ -803,10 +840,13 @@ impl Ollama {
             });
         }
         let failure = match result {
-            Ok(Ok(())) => return Some(trace.calls.take().unwrap_or_default()),
+            Ok(Ok(())) => return Round::Calls(trace.calls.take().unwrap_or_default()),
             Ok(Err(error)) => error,
             Err(_) => "Request exceeded the ten-minute deadline; partial reply retained".into(),
         };
+        if collect == Some(true) && failure.contains(NO_TOOLS_MARKER) {
+            return Round::Rejected;
+        }
         let _ = sender
             .send(Event {
                 session,
@@ -814,7 +854,7 @@ impl Ollama {
                 update: Update::Failed(failure),
             })
             .await;
-        None
+        Round::Stopped
     }
 
     async fn stream<Check, Checked>(
@@ -1014,10 +1054,16 @@ impl Ollama {
                     return Err(Failure::Final(error));
                 }
             }
-            let error = format!(
-                "Ollama returned HTTP {}; check the model and server",
-                response.status().as_u16()
-            );
+            let error = match error_text(&mut response).await {
+                Some(text) => format!(
+                    "Ollama returned HTTP {}: {text}",
+                    response.status().as_u16()
+                ),
+                None => format!(
+                    "Ollama returned HTTP {}; check the model and server",
+                    response.status().as_u16()
+                ),
+            };
             return Err(if response.status().is_server_error() {
                 Failure::BeforeContent(error)
             } else {
@@ -1265,6 +1311,28 @@ pub const MISSING_MODEL_MARKER: &str = " is not installed (Ollama: ";
 pub fn model_installed(installed: &[String], model: &str) -> bool {
     crate::models::contains_model(installed, model)
 }
+
+/// Ollama's own `error` text from a failed response, control characters stripped and
+/// cut to about 200 characters; None when the body is not JSON with a string `error`.
+async fn error_text(response: &mut reqwest::Response) -> Option<String> {
+    let chunk = tokio::time::timeout(Duration::from_secs(2), response.chunk())
+        .await
+        .ok()?
+        .ok()??;
+    let value: serde_json::Value = serde_json::from_slice(&chunk[..chunk.len().min(4096)]).ok()?;
+    let text: String = value
+        .get("error")?
+        .as_str()?
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(200)
+        .collect();
+    Some(text).filter(|text| !text.trim().is_empty())
+}
+
+/// Part of Ollama's HTTP 400 text for a model that rejects `tools`. The chat tool loop
+/// retries once without tools when a failure carries it.
+pub const NO_TOOLS_MARKER: &str = "does not support tools";
 
 /// A 404 whose JSON body says the model was not found, mapped to an error that
 /// names the model, keeps Ollama's own text and says how to fix it.
