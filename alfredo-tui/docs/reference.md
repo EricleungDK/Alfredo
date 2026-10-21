@@ -1421,7 +1421,7 @@ repository's working tree, so uncommitted edits are seen). They run without aski
 
 | Tool | Arguments | Returns |
 | --- | --- | --- |
-| `read_file` | `path`, optional `start_line` | Numbered lines (`N<TAB>text`) of a UTF-8 text file; long files are cut with `[truncated at line N of M; call read_file with start_line=…]` |
+| `read_file` | `path`, optional `start_line` | Numbered lines (`N<TAB>text`) of a UTF-8 text file; long files are cut with `[truncated at line N of M; call read_file with start_line=…]`; a line longer than the output budget is cut at a character boundary and followed by `[line N is M bytes; showed the first K]` |
 | `list_files` | optional `path` (directory) | Files below it, one relative path per line, depth first in name order; at most 500 |
 | `grep` | `pattern` (literal text), optional `path`, `ignore_case` | `path:line:text` per match; at most 200 matches, lines cut to 200 characters |
 | `git_status` | none | Current branch with upstream ahead/behind, then changed, staged and untracked files (`XY path`) |
