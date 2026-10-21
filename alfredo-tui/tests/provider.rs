@@ -549,7 +549,7 @@ async fn structured_thinking_policy_is_sent_only_for_schema_requests() {
 
 mod ollama_fixture;
 use alfredo_tui::model::Retry;
-use ollama_fixture::{done, reserve, serve, Reply};
+use ollama_fixture::{done, reserve, serve, serve_at, Reply};
 
 fn prompt() -> Vec<Message> {
     vec![Message {
@@ -644,7 +644,7 @@ async fn refused_connection_before_content_retries_with_backoff_until_server_sta
             assert_eq!((event.session, event.attempt), (4, 7));
             if fixture.is_none() && matches!(event.update, Update::Retrying(_)) {
                 fixture = Some(
-                    tokio::task::spawn_blocking(move || serve(addr, |_, _| done("recovered")))
+                    tokio::task::spawn_blocking(move || serve_at(addr, |_, _| done("recovered")))
                         .await
                         .unwrap(),
                 );

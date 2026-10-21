@@ -543,7 +543,12 @@ and pressing Enter starts a new turn in the same chat, and `/model NAME` switche
 model for it. The interrupted turn (its prompt and any partial reply or failure) stays
 in the transcript, headed `· interrupted, not sent as context`, but it is dropped
 from the messages sent to the model: the new request carries only the earlier
-completed turns, never the orphaned prompt or the partial reply. Once the new turn
+completed turns, never the orphaned prompt or the partial reply. The exception is a
+turn that already applied a change (an approved write, edit or git action): every
+executed call shows as a `⚙` row as soon as it finishes, and the next request keeps
+that turn's prompt plus a short "already applied" note so the model knows the files
+changed (its heading then reads `· interrupted, applied changes sent as context`).
+Pending, denied and failed calls and read-only results are not sent. Once the new turn
 starts, the interrupted turn is no longer retryable with Ctrl+R; Ctrl+R before
 sending anything new still retries it exactly as before. Which turns were moved past
 is saved with the conversation, so a restart does not send them to the model either.
@@ -1659,6 +1664,13 @@ default false), `timeout_seconds` (1–600, default 120).
   killed and the model gets `error: timed out after Ns…` (logged as failed). Known
   limitation: on the host, a process that leaves the group (`setsid`, daemonizing) escapes
   the kill; inside the sandbox bubblewrap's PID namespace ends it.
+- **Esc, `/stop`, quit.** Esc, `/stop`, switching chats with a cancel, Ctrl+R and every
+  way of leaving Alfredo (Ctrl+Q) kill a running command's whole process group within
+  about a second, sandboxed or on the host; Alfredo waits up to 3 s for it on exit. The
+  approval log records `cancelled` (not `applied`) and the chat status reads
+  `running run_command · Ns · Esc stops` while it runs. A rule-approved run (no card)
+  is stopped the same way. A closed terminal (SIGHUP) or `kill -9` cannot run the cleanup:
+  sandboxed children still die with bubblewrap's `--die-with-parent`, a host command may not.
 - **Sandbox failure.** If bubblewrap is missing or cannot start, the model gets
   `error: the sandbox could not run the command (…); nothing ran on the host…` with a
   suggestion to escalate. Nothing is retried on the host without a new, approved call.

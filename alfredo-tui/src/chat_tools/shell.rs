@@ -7,14 +7,111 @@
 //! start is reported with a suggestion to escalate; nothing is retried on the host.
 use super::{display, resolve, text_arg, Tier, Tool};
 use crate::execution::{
-    self, ExecutionAuthority, ExecutionLimits, ExecutionRequest, ExecutionSandbox,
-    ProcessOutcomeStatus, RustExecutionProvider,
+    self, ControlSignal, ExecutionAuthority, ExecutionCallbacks, ExecutionLimits, ExecutionRequest,
+    ExecutionSandbox, ProcessOutcomeStatus, RustExecutionProvider,
 };
 use serde_json::{json, Value};
 use std::{
+    cell::RefCell,
     collections::BTreeMap,
     path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant},
 };
+
+/// Flag that ends the `run_command` call holding it (issue #302).
+#[derive(Clone, Default)]
+pub(crate) struct Stop(Arc<AtomicBool>);
+
+impl Stop {
+    fn stopped(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// Owns a [`Stop`] and sets it on drop, so a turn aborted by Esc, `/stop`, a chat
+/// switch, a retry or quit kills the command's process group instead of leaving it to
+/// finish (its future, which holds this, is dropped on abort).
+#[derive(Default)]
+pub(crate) struct StopOnDrop(Stop);
+
+impl StopOnDrop {
+    pub(crate) fn stop(&self) -> Stop {
+        self.0.clone()
+    }
+}
+
+impl Drop for StopOnDrop {
+    fn drop(&mut self) {
+        self.0 .0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Stop flags of the calls in flight, for [`stop_all`].
+static ACTIVE: Mutex<Vec<Arc<AtomicBool>>> = Mutex::new(Vec::new());
+
+thread_local! {
+    static CURRENT: RefCell<Option<Stop>> = const { RefCell::new(None) };
+}
+
+/// Run `body` (an approved call and the logging of its outcome) so that `stop` ends a
+/// `run_command` inside it and [`stop_all`] waits for it.
+pub(crate) fn scoped<T>(stop: &Stop, body: impl FnOnce() -> T) -> T {
+    struct Leave(Arc<AtomicBool>);
+    impl Drop for Leave {
+        fn drop(&mut self) {
+            if let Ok(mut active) = ACTIVE.lock() {
+                active.retain(|flag| !Arc::ptr_eq(flag, &self.0));
+            }
+            CURRENT.with(|current| *current.borrow_mut() = None);
+        }
+    }
+    if let Ok(mut active) = ACTIVE.lock() {
+        active.push(stop.0.clone());
+    }
+    CURRENT.with(|current| *current.borrow_mut() = Some(stop.clone()));
+    let _leave = Leave(stop.0.clone());
+    body()
+}
+
+/// Stop every `run_command` in flight and wait up to `wait` for them to be killed and
+/// logged. True when none is left. Called on quit so a host command never outlives
+/// Alfredo (issue #302).
+pub fn stop_all(wait: Duration) -> bool {
+    if let Ok(active) = ACTIVE.lock() {
+        for flag in active.iter() {
+            flag.store(true, Ordering::SeqCst);
+        }
+    }
+    let deadline = Instant::now() + wait;
+    loop {
+        if ACTIVE.lock().map_or(true, |active| active.is_empty()) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// The stop of the call running on this thread; a fresh one outside [`scoped`].
+fn current_stop() -> Stop {
+    CURRENT.with(|current| current.borrow().clone().unwrap_or_default())
+}
+
+fn cancel_signal(stop: &Stop) -> Result<(), ControlSignal> {
+    if stop.stopped() {
+        Err(ControlSignal::Cancelled(
+            "the owner stopped the command".into(),
+        ))
+    } else {
+        Ok(())
+    }
+}
 
 /// Default and largest timeout, in seconds.
 const DEFAULT_TIMEOUT: u64 = 120;
@@ -146,10 +243,14 @@ fn plan(root: &Path, arguments: &Value) -> Result<Plan, String> {
 
 fn run_command(root: &Path, arguments: &Value) -> Result<String, String> {
     let plan = plan(root, arguments)?;
+    let stop = current_stop();
+    if stop.stopped() {
+        return Err("cancelled before it started; nothing ran".into());
+    }
     if plan.escalate {
-        on_host(&plan)
+        on_host(&plan, &stop)
     } else {
-        sandboxed(root, &plan, crate::doctor::BWRAP)
+        sandboxed(root, &plan, crate::doctor::BWRAP, &stop)
     }
 }
 
@@ -211,7 +312,7 @@ fn sandbox_failure(reason: &str) -> String {
 
 /// Run in the bubblewrap Sandbox at `bwrap`: the worker check boundary rooted at the
 /// Coding Workspace, then `cd` to the cwd inside it.
-fn sandboxed(root: &Path, plan: &Plan, bwrap: &str) -> Result<String, String> {
+fn sandboxed(root: &Path, plan: &Plan, bwrap: &str, stop: &Stop) -> Result<String, String> {
     if !Path::new(bwrap).is_file() {
         return Err(sandbox_failure(&format!(
             "bubblewrap is not installed at {bwrap}"
@@ -287,8 +388,16 @@ fn sandboxed(root: &Path, plan: &Plan, bwrap: &str) -> Result<String, String> {
         ("HOME".into(), "/tmp".into()),
         ("CI".into(), "1".into()),
     ]);
+    let mut poll = || cancel_signal(stop);
     let receipt = RustExecutionProvider::new()
-        .execute(&request)
+        .execute_with_callbacks(
+            &request,
+            &mut ExecutionCallbacks {
+                output: None,
+                process_started: None,
+                poll: Some(&mut poll),
+            },
+        )
         .map_err(|failure| sandbox_failure(&failure.message))?;
     if execution::sandbox_unavailable_receipt(&receipt) {
         let reason = if receipt.stderr.trim().is_empty() {
@@ -337,7 +446,7 @@ fn git_common_dir(root: &Path) -> Option<String> {
 }
 
 /// Run on the host (owner-approved escalation): the owner's environment, network on.
-fn on_host(plan: &Plan) -> Result<String, String> {
+fn on_host(plan: &Plan, stop: &Stop) -> Result<String, String> {
     let cwd = plan.cwd.to_string_lossy().into_owned();
     let mut request = request(
         vec!["/bin/sh".into(), "-c".into(), plan.command.clone()],
@@ -351,7 +460,7 @@ fn on_host(plan: &Plan) -> Result<String, String> {
         },
     );
     request.environment = std::env::vars().collect();
-    let outcome = execution::run_on_host(&request)
+    let outcome = execution::run_on_host(&request, &mut || cancel_signal(stop))
         .map_err(|error| format!("could not start the command: {}", error.failure.message))?;
     if outcome.status == ProcessOutcomeStatus::Unknown {
         return Err(format!(
@@ -404,7 +513,9 @@ fn report(plan: &Plan, ran: Ran) -> Result<String, String> {
             "timed out after {}s ({place}); the command and its child processes were killed\n{output}",
             plan.timeout
         )),
-        ProcessOutcomeStatus::Cancelled => Err(format!("cancelled ({place})\n{output}")),
+        ProcessOutcomeStatus::Cancelled => Err(format!(
+            "cancelled ({place}); the command and its child processes were killed\n{output}"
+        )),
         status => {
             let code = ran
                 .exit_code
@@ -435,7 +546,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let plan = plan(&root, &json!({"command": "touch ran"})).unwrap();
-        let error = sandboxed(&root, &plan, "/nonexistent/bwrap").unwrap_err();
+        let error = sandboxed(&root, &plan, "/nonexistent/bwrap", &Stop::default()).unwrap_err();
         assert!(error.contains("escalate: true"), "{error}");
         assert!(error.contains("nothing ran on the host"), "{error}");
         assert!(!root.join("ran").exists());

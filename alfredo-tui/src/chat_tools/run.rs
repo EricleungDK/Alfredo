@@ -40,7 +40,7 @@ fn no_tools_models() -> &'static Mutex<HashSet<String>> {
 }
 
 /// Run one chat turn: request a reply with the tools offered; while the model asks for
-/// tools, run them, report a [`Update::ToolStep`], and ask again with the results.
+/// tools, run them, report each call as an [`Update::ToolResult`] when it finishes, and ask again with the results.
 /// Emits the same events as [`Ollama::chat`] (one final `Done` or `Failed`).
 /// Mutating calls ask `gate` one at a time; without a gate they are refused.
 #[allow(clippy::too_many_arguments)]
@@ -195,6 +195,8 @@ pub async fn run_turn(
         let held_window: usize =
             held_text + messages.iter().map(|m| m.role.len()).sum::<usize>() + tools_bytes;
         let calls_bytes = serde_json::to_string(&calls).map_or(0, |text| text.len());
+        // Bytes of this round already reported to the session.
+        let mut reported = 0;
         for (index, call) in calls.iter().enumerate() {
             let used: usize = results.iter().map(String::len).sum::<usize>() + calls_bytes;
             let room = Room::of(provider.num_ctx(), held_text, held_window, used);
@@ -203,7 +205,8 @@ pub async fn run_turn(
                 .iter()
                 .find(|tool| tool.name == call.name)
                 .map(|tool| tool.tier);
-            let result = match tier {
+            let wrote = matches!(tier, Some(Tier::Mutating | Tier::Push));
+            let mut result = match tier {
                 _ if index >= MAX_CALLS => {
                     format!("error: not run; at most {MAX_CALLS} tool calls per reply, ask again")
                 }
@@ -228,35 +231,42 @@ pub async fn run_turn(
                 }
                 _ => blocking(workspace, call, room.limit).await,
             };
+            // The session refuses a result past the conversation limit. Results were
+            // budgeted above; if this one still would not fit, a read result becomes a
+            // note (a write's short report is kept, so the model knows it happened)
+            // and the model answers instead of the turn failing.
+            let step_bytes = |result: &str| {
+                serde_json::to_string(call).map_or(0, |text| text.len()) + result.len()
+            };
+            if held_text + reported + step_bytes(&result) > MAX_TEXT {
+                if !wrote {
+                    result = NEAR_LIMIT_NOTE.to_string();
+                }
+                last_round = true;
+            }
+            if held_text + reported + step_bytes(&result) > MAX_TEXT {
+                send(Update::Stopped(Stop::OutputLimit)).await;
+                send(Update::Failed(OUTPUT_LIMIT.into())).await;
+                return;
+            }
+            reported += step_bytes(&result);
+            // Reported as soon as it finishes: a turn cancelled or failed during a
+            // later call still keeps the ones that already ran (issue #271).
+            if !send(Update::ToolResult {
+                call: call.clone(),
+                result: result.clone(),
+                new_round: index == 0,
+            })
+            .await
+            {
+                return;
+            }
             results.push(result);
         }
-        let mut step = ToolStep { calls, results };
+        let step = ToolStep { calls, results };
         let proposal = super::propose::prefill(&step);
-        // The session refuses a step past the conversation limit. Results were budgeted
-        // above; if the step still would not fit, replace the read results with a note
-        // (the short reports of writes that already ran are kept, so the model knows they
-        // happened) and let the model answer instead of failing the turn.
-        let held: usize = messages.iter().map(|m| m.content.len()).sum();
-        if held + step.bytes() > MAX_TEXT {
-            for (call, result) in step.calls.iter().zip(step.results.iter_mut()) {
-                let wrote = TOOLS.iter().any(|tool| {
-                    tool.name == call.name && matches!(tool.tier, Tier::Mutating | Tier::Push)
-                });
-                if !wrote {
-                    *result = NEAR_LIMIT_NOTE.to_string();
-                }
-            }
-            last_round = true;
-        }
-        if held + step.bytes() > MAX_TEXT {
-            send(Update::Stopped(Stop::OutputLimit)).await;
-            send(Update::Failed(OUTPUT_LIMIT.into())).await;
-            return;
-        }
+        // The step was already reported call by call (`Update::ToolResult`).
         messages.extend(step.messages());
-        if !send(Update::ToolStep(step)).await {
-            return;
-        }
         // A proposal hands off to the owner: the turn ends with the command in the prompt.
         if let Some(command) = proposal {
             send(Update::Token(format!(
@@ -345,8 +355,12 @@ async fn gated(
         if let Some(rule) = matched {
             let root = workspace.to_path_buf();
             let log = gate.log.clone();
+            let stop_guard = super::shell::StopOnDrop::default();
+            let stop = stop_guard.stop();
             return tokio::task::spawn_blocking(move || {
-                decided(&root, &card, Decision::Approve, log.as_ref(), Some(rule.id))
+                super::shell::scoped(&stop, || {
+                    decided(&root, &card, Decision::Approve, log.as_ref(), Some(rule.id))
+                })
             })
             .await
             .unwrap_or_else(|_| "error: tool execution stopped unexpectedly".into());
@@ -385,16 +399,22 @@ async fn gated(
     let root = workspace.to_path_buf();
     let log = gate.log.clone();
     let rules = gate.rules.clone();
+    // Aborting this turn (Esc, /stop, switch, retry, quit) drops the guard, which
+    // stops a running command; the blocking call then logs `cancelled` (issue #302).
+    let stop_guard = super::shell::StopOnDrop::default();
+    let stop = stop_guard.stop();
     // No await between here and the spawn: once spawned, the call runs and logs even
     // if this turn is aborted.
     tokio::task::spawn_blocking(move || {
-        // `a` adds the rule, then runs this call like `y`. A rule that cannot be
-        // saved still approves this one call.
-        let rule = match (decision, &rules) {
-            (Decision::AlwaysAllow, Some(rules)) => rules.add_for(&card).ok().map(|r| r.id),
-            _ => None,
-        };
-        decided(&root, &card, decision, log.as_ref(), rule)
+        super::shell::scoped(&stop, || {
+            // `a` adds the rule, then runs this call like `y`. A rule that cannot be
+            // saved still approves this one call.
+            let rule = match (decision, &rules) {
+                (Decision::AlwaysAllow, Some(rules)) => rules.add_for(&card).ok().map(|r| r.id),
+                _ => None,
+            };
+            decided(&root, &card, decision, log.as_ref(), rule)
+        })
     })
     .await
     .unwrap_or_else(|_| "error: tool execution stopped unexpectedly".into())
@@ -412,6 +432,13 @@ fn decided(
         Decision::Deny => (approval::DENIED.to_string(), Outcome::Denied),
         Decision::Approve | Decision::AlwaysAllow => match approval::apply(root, card) {
             Ok(output) => (super::cap(output), Outcome::Applied),
+            // A command stopped mid-run (issue #302) was not applied.
+            Err(reason)
+                if matches!(card.kind, approval::CardKind::Shell { .. })
+                    && reason.starts_with("cancelled") =>
+            {
+                (super::cap(format!("error: {reason}")), Outcome::Cancelled)
+            }
             Err(reason) => (
                 super::cap(format!("error: {reason}")),
                 Outcome::Failed(reason),

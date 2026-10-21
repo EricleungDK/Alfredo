@@ -610,40 +610,50 @@ impl Turn {
             Update::Stopped(stop) => self.stopped = Some(stop),
             Update::ToolStep(step) => {
                 self.steps += 1;
-                for (index, call) in step.calls.iter().enumerate() {
-                    let text = step.results.get(index);
-                    let result = text.map_or("error", |r| classify(r));
-                    let path = call
-                        .arguments
-                        .get("path")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned);
-                    let detail =
-                        (result != "ok").then(|| text.map_or_else(String::new, |r| detail_of(r)));
-                    let target: String = path
-                        .iter()
-                        .flat_map(|p| p.chars().filter(|c| !c.is_control()).take(DETAIL_MAX))
-                        .collect();
-                    say(format!(
-                        "tool {}{}{target} ({result}{})",
-                        call.name,
-                        if target.is_empty() { "" } else { " " },
-                        detail
-                            .as_ref()
-                            .map_or_else(String::new, |d| format!(": {d}")),
-                    ));
-                    self.calls.push(Call {
-                        tool: call.name.clone(),
-                        path,
-                        result,
-                        detail,
-                    });
+                for (call, result) in step.calls.iter().zip(&step.results) {
+                    self.record(call, result);
                 }
+            }
+            Update::ToolResult {
+                call,
+                result,
+                new_round,
+            } => {
+                self.steps += usize::from(new_round);
+                self.record(&call, &result);
             }
             Update::Done => self.done = true,
             Update::Failed(reason) => self.failure = Some(reason),
             _ => {}
         }
+    }
+
+    fn record(&mut self, call: &alfredo_tui::model::ToolCall, text: &str) {
+        let result = classify(text);
+        let path = call
+            .arguments
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let detail = (result != "ok").then(|| detail_of(text));
+        let target: String = path
+            .iter()
+            .flat_map(|p| p.chars().filter(|c| !c.is_control()).take(DETAIL_MAX))
+            .collect();
+        say(format!(
+            "tool {}{}{target} ({result}{})",
+            call.name,
+            if target.is_empty() { "" } else { " " },
+            detail
+                .as_ref()
+                .map_or_else(String::new, |d| format!(": {d}")),
+        ));
+        self.calls.push(Call {
+            tool: call.name.clone(),
+            path,
+            result,
+            detail,
+        });
     }
 
     fn json(&self, model: &str, policy: Policy, records: &[Record]) -> serde_json::Value {
