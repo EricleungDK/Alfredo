@@ -1897,7 +1897,7 @@ async fn perform(
                 Some(Update::Admitted) => { inference_started = Instant::now(); observer.stage("Waiting for model server"); },
                 Some(Update::Retrying(_)) => observer.stage("Reconnecting to model server"),
                 Some(Update::Token(text)) => { observer.content(&text); answer.push_str(&text); },
-                Some(Update::ToolCalls(_) | Update::ToolStep(_)) => {},
+                Some(Update::ToolCalls(_) | Update::ToolStep(_) | Update::ToolResult { .. }) => {},
                 Some(Update::Done) => { done = true; break; },
                 Some(Update::Failed(reason)) => { error = Some(reason); break; },
                 None => break,

@@ -749,3 +749,120 @@ async fn another_400_shows_ollamas_error_text_and_is_not_retried_without_tools()
     assert_eq!(fixture.count("POST /api/chat"), 1);
     let _ = fs::remove_dir_all(root);
 }
+
+/// A reply asking for several tools at once.
+fn tool_calls(calls: &[(&str, serde_json::Value)]) -> Reply {
+    let calls: Vec<_> = calls
+        .iter()
+        .map(|(name, arguments)| json!({"function":{"name":name,"arguments":arguments}}))
+        .collect();
+    Reply::Stream(
+        vec![
+            format!(
+                "{}\n",
+                json!({"message":{"role":"assistant","content":"","tool_calls":calls},"done":false})
+            )
+            .into_bytes(),
+            format!("{}\n", json!({"message":{"content":""},"done":true})).into_bytes(),
+        ],
+        Duration::ZERO,
+    )
+}
+
+/// Issue #271: a two-call round whose first call was approved and applied and whose
+/// second card was cancelled keeps the applied call in the transcript and in the
+/// next request; the unanswered call is in neither.
+#[tokio::test]
+async fn an_applied_call_survives_a_cancelled_round_and_reaches_the_next_request() {
+    use alfredo_tui::chat_tools::approval::{self, Decision, Gate};
+    let root = workspace("cancelled-round");
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, |_, _| {
+        tool_calls(&[
+            ("write_file", json!({"path": "big.txt", "content": "one"})),
+            (
+                "write_file",
+                json!({"path": "second.txt", "content": "two"}),
+            ),
+        ])
+    });
+    // Approve the first card; leave the second unanswered, as when Esc is pressed.
+    let (gate_sender, mut cards) = mpsc::channel::<approval::Request>(4);
+    tokio::spawn(async move {
+        let mut asked = 0;
+        let mut held = Vec::new();
+        while let Some(request) = cards.recv().await {
+            asked += 1;
+            if asked == 1 {
+                let _ = request.reply.send(Decision::Approve);
+            } else {
+                held.push(request);
+            }
+        }
+    });
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(5)).unwrap();
+    let mut session = Session::new("fixture".into());
+    session.insert("make files");
+    let messages = session.begin().unwrap();
+    let (sender, mut receiver) = mpsc::channel::<Event>(256);
+    let worker_root = root.clone();
+    let job = tokio::spawn(async move {
+        chat_tools::run_turn(
+            &provider,
+            &worker_root,
+            0,
+            1,
+            "fixture".into(),
+            messages,
+            sender,
+            Some(Gate::new(gate_sender, None)),
+        )
+        .await;
+    });
+    // Apply events until the applied call shows in the session; the turn is then
+    // waiting on the second card.
+    let seen = tokio::time::timeout(Duration::from_secs(3), async {
+        while !session
+            .tool_steps(1)
+            .iter()
+            .any(|step| step.calls.iter().any(|call| call.name == "write_file"))
+        {
+            let Some(event) = receiver.recv().await else {
+                return false;
+            };
+            session.apply(event.attempt, event.update);
+        }
+        true
+    })
+    .await;
+    assert_eq!(seen, Ok(true), "the applied call never reached the session");
+    job.abort();
+    session.cancel();
+    assert_eq!(fs::read_to_string(root.join("big.txt")).unwrap(), "one");
+    assert!(!root.join("second.txt").exists());
+    let steps = session.tool_steps(1);
+    assert_eq!(steps.iter().map(|s| s.calls.len()).sum::<usize>(), 1);
+    assert_eq!(steps[0].calls[0].arguments["path"], "big.txt");
+
+    session.insert("hello");
+    let request = session.begin().unwrap();
+    let text: Vec<String> = request
+        .iter()
+        .map(|m| format!("{}: {}", m.role, m.content))
+        .collect();
+    assert!(
+        text.iter().any(|m| m.starts_with("user: make files")),
+        "{text:?}"
+    );
+    let applied = text
+        .iter()
+        .filter(|m| m.contains("big.txt"))
+        .collect::<Vec<_>>();
+    assert!(!applied.is_empty(), "applied step missing: {text:?}");
+    assert!(
+        !text.iter().any(|m| m.contains("second.txt")),
+        "unanswered call leaked: {text:?}"
+    );
+    assert_eq!(text.last().unwrap(), "user: hello");
+    let _ = fs::remove_dir_all(root);
+}

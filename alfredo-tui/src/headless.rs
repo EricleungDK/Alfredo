@@ -560,24 +560,36 @@ impl Turn {
             Update::Token(text) => self.reply.push_str(&text),
             Update::ToolStep(step) => {
                 self.steps += 1;
-                for (index, call) in step.calls.iter().enumerate() {
-                    let result = step.results.get(index).map_or("error", |r| classify(r));
-                    say(format!("tool {} ({result})", call.name));
-                    self.calls.push(Call {
-                        tool: call.name.clone(),
-                        path: call
-                            .arguments
-                            .get("path")
-                            .and_then(serde_json::Value::as_str)
-                            .map(str::to_owned),
-                        result,
-                    });
+                for (call, result) in step.calls.iter().zip(&step.results) {
+                    self.record(call, result);
                 }
+            }
+            Update::ToolResult {
+                call,
+                result,
+                new_round,
+            } => {
+                self.steps += usize::from(new_round);
+                self.record(&call, &result);
             }
             Update::Done => self.done = true,
             Update::Failed(reason) => self.failure = Some(reason),
             _ => {}
         }
+    }
+
+    fn record(&mut self, call: &alfredo_tui::model::ToolCall, result: &str) {
+        let result = classify(result);
+        say(format!("tool {} ({result})", call.name));
+        self.calls.push(Call {
+            tool: call.name.clone(),
+            path: call
+                .arguments
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            result,
+        });
     }
 
     fn json(&self, policy: Policy, records: &[Record]) -> serde_json::Value {

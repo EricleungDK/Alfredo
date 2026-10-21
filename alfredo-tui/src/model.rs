@@ -186,6 +186,14 @@ pub enum Update {
     ToolCalls(Vec<ToolCall>),
     /// A tool round finished: calls and results join the reply's context.
     ToolStep(ToolStep),
+    /// One call of a tool round finished (issue #271): it joins the transcript and
+    /// context at once, so a turn cut short later keeps what already ran.
+    /// `new_round` opens a new [`ToolStep`]; otherwise it extends the last one.
+    ToolResult {
+        call: ToolCall,
+        result: String,
+        new_round: bool,
+    },
     Done,
     Failed(String),
 }
@@ -713,7 +721,9 @@ impl Session {
     }
 
     /// Model context ending at the user message `user_index`: earlier interrupted
-    /// turns are omitted; `user_index` itself is kept even if it was interrupted.
+    /// turns are omitted, except that a turn which applied a change keeps its prompt
+    /// and a compact note of what was applied (issue #271); `user_index` itself is
+    /// kept even if it was interrupted.
     pub fn request_through(&self, user_index: usize) -> Vec<Message> {
         let end = (user_index + 1).min(self.messages.len());
         self.compaction
@@ -723,22 +733,83 @@ impl Session {
                 self.messages[..end]
                     .iter()
                     .enumerate()
-                    .filter(|(index, _)| {
+                    .filter_map(|(index, message)| {
                         let user = index - index % 2;
-                        user == user_index || !self.interrupted_turn(user)
-                    })
-                    .flat_map(|(index, message)| {
+                        let dropped = user != user_index && self.interrupted_turn(user);
+                        let note = if dropped {
+                            Some(self.applied_note(user + 1)?)
+                        } else {
+                            None
+                        };
+                        if dropped && note.is_none() {
+                            return None;
+                        }
                         let mut message = message.clone();
                         if let Some(block) = self.attachments.get(&index) {
                             message.content.push_str(block);
                         }
-                        self.tool_steps(index)
-                            .iter()
-                            .flat_map(ToolStep::messages)
-                            .chain(std::iter::once(message))
-                    }),
+                        Some(match note {
+                            // The reply of a kept interrupted turn is only the note.
+                            Some(note) if index % 2 == 1 => vec![Message {
+                                role: message.role,
+                                content: note,
+                            }],
+                            Some(_) => vec![message],
+                            None => self
+                                .tool_steps(index)
+                                .iter()
+                                .flat_map(ToolStep::messages)
+                                .chain(std::iter::once(message))
+                                .collect(),
+                        })
+                    })
+                    .flatten(),
             )
             .collect()
+    }
+
+    /// What the interrupted reply at `assistant_index` already changed: one line per
+    /// executed mutating call whose outcome was not an error (denied, failed and
+    /// never-answered calls are left out). `None` when nothing was applied.
+    pub(crate) fn applied_note(&self, assistant_index: usize) -> Option<String> {
+        use crate::chat_tools::{Tier, TOOLS};
+        let applied: Vec<String> = self
+            .tool_steps(assistant_index)
+            .iter()
+            .flat_map(|step| step.calls.iter().zip(&step.results))
+            .filter(|(call, result)| {
+                !result.starts_with("error:")
+                    && TOOLS.iter().any(|tool| {
+                        tool.name == call.name && matches!(tool.tier, Tier::Mutating | Tier::Push)
+                    })
+            })
+            .map(|(call, result)| {
+                let target = call
+                    .arguments
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("")
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(160)
+                    .collect::<String>();
+                let report: String = result
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(160)
+                    .collect();
+                format!("- {} {target}: {report}", call.name)
+            })
+            .collect();
+        (!applied.is_empty()).then(|| {
+            format!(
+                "[This turn was interrupted. Already applied before it stopped:\n{}]",
+                applied.join("\n")
+            )
+        })
     }
 
     /// Tool rounds of the reply at `assistant_index` (empty when none).
@@ -1520,6 +1591,7 @@ impl Session {
                 | Update::Metrics(_)
                 | Update::Token(_)
                 | Update::ToolStep(_)
+                | Update::ToolResult { .. }
         ) {
             self.sources
                 .entry(self.messages.len() - 1)
@@ -1606,6 +1678,30 @@ impl Session {
                         .entry(self.messages.len() - 1)
                         .or_default()
                         .push(step);
+                }
+            }
+            Update::ToolResult {
+                call,
+                result,
+                new_round,
+            } => {
+                let total = self.messages.iter().map(|m| m.content.len()).sum::<usize>()
+                    + self.tool_bytes();
+                let step = ToolStep {
+                    calls: vec![call],
+                    results: vec![result],
+                };
+                if !step.valid() || total + step.bytes() > MAX_TEXT {
+                    self.status = Status::Failed(OUTPUT_LIMIT.into());
+                } else {
+                    let rounds = self.tool_steps.entry(self.messages.len() - 1).or_default();
+                    match rounds.last_mut() {
+                        Some(open) if !new_round && open.calls.len() < 64 => {
+                            open.calls.extend(step.calls);
+                            open.results.extend(step.results);
+                        }
+                        _ => rounds.push(step),
+                    }
                 }
             }
             Update::Done => self.status = Status::Complete,
