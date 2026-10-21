@@ -8,9 +8,10 @@
 use alfredo_tui::{
     autopilot::{RunState, Status, TaskOutcome},
     chat_tools::approval::{Card, CardKind, Decision, Gate, Log, Outcome, Record},
+    chat_tools::{MAX_STEPS, STEP_CAP_NOTICE},
     command_intent::Intent,
     console_command::{bounded_reason, CommandState},
-    model::Update,
+    model::{Stop, Update},
     provider::Ollama,
     tasks::TaskStatus,
     workstation::Workstation,
@@ -563,11 +564,30 @@ fn classify(result: &str) -> &'static str {
     }
 }
 
-/// One tool call of the turn: name, `path` argument, result class.
+/// One tool call of the turn: name, `path` argument, result class, and for a result
+/// that is not `ok` the tool's error text (bounded, no control characters).
 struct Call {
     tool: String,
     path: Option<String>,
     result: &'static str,
+    detail: Option<String>,
+}
+
+/// Longest `detail` of a call, in bytes.
+const DETAIL_MAX: usize = 200;
+
+/// The tool's error text without its `error: ` prefix, control characters removed,
+/// cut to [`DETAIL_MAX`] bytes on a character boundary.
+fn detail_of(result: &str) -> String {
+    let text = result.strip_prefix("error: ").unwrap_or(result);
+    let mut detail = String::new();
+    for c in text.chars().filter(|c| !c.is_control()) {
+        if detail.len() + c.len_utf8() > DETAIL_MAX {
+            break;
+        }
+        detail.push(c);
+    }
+    detail
 }
 
 /// What one headless chat turn produced, from its events.
@@ -578,12 +598,16 @@ struct Turn {
     calls: Vec<Call>,
     done: bool,
     failure: Option<String>,
+    /// Set when a cap ended the turn (issue #278): state `stopped`, exit 1.
+    stopped: Option<Stop>,
 }
 
 impl Turn {
     fn update(&mut self, update: Update) {
         match update {
-            Update::Token(text) => self.reply.push_str(&text),
+            // After a stop the text is only the TUI's "ask again" notice.
+            Update::Token(text) if self.stopped.is_none() => self.reply.push_str(&text),
+            Update::Stopped(stop) => self.stopped = Some(stop),
             Update::ToolStep(step) => {
                 self.steps += 1;
                 for (call, result) in step.calls.iter().zip(&step.results) {
@@ -604,25 +628,45 @@ impl Turn {
         }
     }
 
-    fn record(&mut self, call: &alfredo_tui::model::ToolCall, result: &str) {
-        let result = classify(result);
-        say(format!("tool {} ({result})", call.name));
+    fn record(&mut self, call: &alfredo_tui::model::ToolCall, text: &str) {
+        let result = classify(text);
+        let path = call
+            .arguments
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned);
+        let detail = (result != "ok").then(|| detail_of(text));
+        let target: String = path
+            .iter()
+            .flat_map(|p| p.chars().filter(|c| !c.is_control()).take(DETAIL_MAX))
+            .collect();
+        say(format!(
+            "tool {}{}{target} ({result}{})",
+            call.name,
+            if target.is_empty() { "" } else { " " },
+            detail
+                .as_ref()
+                .map_or_else(String::new, |d| format!(": {d}")),
+        ));
         self.calls.push(Call {
             tool: call.name.clone(),
-            path: call
-                .arguments
-                .get("path")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned),
+            path,
             result,
+            detail,
         });
     }
 
     fn json(&self, model: &str, policy: Policy, records: &[Record]) -> serde_json::Value {
-        let error = match (&self.failure, self.done) {
-            (Some(reason), _) => Some(reason.clone()),
-            (None, true) => None,
-            (None, false) => Some("the turn ended without a reply".to_string()),
+        let error = match (&self.failure, self.done, self.stopped) {
+            (Some(reason), _, _) => Some(reason.clone()),
+            (None, _, Some(Stop::StepLimit)) => Some(format!(
+                "{STEP_CAP_NOTICE} after {MAX_STEPS} rounds; the turn was cut off"
+            )),
+            (None, _, Some(Stop::OutputLimit)) => {
+                Some("the conversation is near its size limit; the turn was cut off".to_string())
+            }
+            (None, true, None) => None,
+            (None, false, None) => Some("the turn ended without a reply".to_string()),
         };
         let approvals: Vec<_> = records
             .iter()
@@ -641,13 +685,19 @@ impl Turn {
             .collect();
         serde_json::json!({
             "model": model,
-            "state": if error.is_none() { "done" } else { "failed" },
+            "state": match (&error, self.stopped) {
+                (None, _) => "done",
+                (_, Some(_)) => "stopped",
+                _ => "failed",
+            },
+            "stopped": self.stopped.map(Stop::label),
             "policy": policy.label(),
             "reply": self.reply.trim(),
             "steps": self.steps,
             "calls": self.calls.iter().map(|call| serde_json::json!({
                 "tool": call.tool, "path": call.path,
                 "error": call.result != "ok", "result": call.result,
+                "detail": call.detail,
             })).collect::<Vec<_>>(),
             "approvals": approvals,
             "error": error,
@@ -785,6 +835,7 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
     if INTERRUPTED.load(Ordering::SeqCst) > 0 {
         say("interrupted: turn cancelled");
         turn.failure = Some("interrupted".into());
+        turn.stopped = None;
     }
     let records = log.map_or_else(Vec::new, |log| log.records());
     let value = turn.json(&model, policy, records.get(before..).unwrap_or(&[]));
@@ -946,6 +997,40 @@ mod tests {
         let value = turn.json("m", Policy::Deny, &[]);
         assert_eq!(value["calls"][0]["path"], "units.py");
         assert_eq!(value["calls"][0]["result"], "ok");
+    }
+
+    #[test]
+    fn detail_is_bounded_single_line_text_without_the_error_prefix() {
+        assert_eq!(detail_of("error: no such file\x1b[0m\n"), "no such file[0m");
+        let long = format!("error: {}", "é".repeat(300));
+        let detail = detail_of(&long);
+        assert!(detail.len() <= DETAIL_MAX && detail.len() >= DETAIL_MAX - 1);
+        assert!(detail.chars().all(|c| c == 'é'));
+    }
+
+    #[test]
+    fn a_stop_is_its_own_state_and_hides_the_ask_again_notice() {
+        let mut turn = Turn::default();
+        turn.update(Update::Token("partial".into()));
+        turn.update(Update::Stopped(Stop::StepLimit));
+        turn.update(Update::Token("\n\n[... ask again to continue]".into()));
+        turn.update(Update::Done);
+        let value = turn.json("m", Policy::Deny, &[]);
+        assert_eq!(value["state"], "stopped");
+        assert_eq!(value["stopped"], "step_limit");
+        assert_eq!(value["reply"], "partial");
+        assert!(value["error"].as_str().unwrap().contains(STEP_CAP_NOTICE));
+        assert!(value["error"]
+            .as_str()
+            .unwrap()
+            .contains(&MAX_STEPS.to_string()));
+        let mut limit = Turn::default();
+        limit.update(Update::Stopped(Stop::OutputLimit));
+        limit.update(Update::Failed("Conversation output limit reached".into()));
+        let value = limit.json("m", Policy::Deny, &[]);
+        assert_eq!(value["state"], "stopped");
+        assert_eq!(value["stopped"], "output_limit");
+        assert_eq!(value["error"], "Conversation output limit reached");
     }
 
     #[test]
