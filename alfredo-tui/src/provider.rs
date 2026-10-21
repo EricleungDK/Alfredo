@@ -971,10 +971,17 @@ impl Ollama {
             // --num-ctx applies to baseline (production) requests only.
             // Estimate like the rest of Alfredo: bytes/3. num_predict is only a cap, so
             // it is clamped to the room left in the window rather than reserved.
-            let bytes: usize = messages
-                .iter()
-                .map(|message| message.role.len() + message.content.len())
-                .sum();
+            // The serialized tool definitions travel in the prompt too (issue #255).
+            let tools: usize = if self.tools.is_empty() {
+                0
+            } else {
+                serde_json::to_string(&self.tools).map_or(0, |text| text.len())
+            };
+            let bytes: usize = tools
+                + messages
+                    .iter()
+                    .map(|message| message.role.len() + message.content.len())
+                    .sum::<usize>();
             let prompt = bytes / 3;
             let limit = match fit_num_predict(prompt, window, self.num_predict) {
                 Ok(limit) => limit,
@@ -985,7 +992,7 @@ impl Ollama {
                 }
                 Err(_) => {
                     return Err(Failure::Final(format!(
-                        "prompt ≈{prompt} tokens > --num-ctx {window}; shorten the request"
+                        "prompt ≈{prompt} tokens > --num-ctx {window}; run /compact or /clear, press Ctrl+N for a new conversation, or raise --num-ctx"
                     )));
                 }
             };
@@ -1274,7 +1281,7 @@ impl Ollama {
             }
             if frame.done_reason.as_deref() == Some("length") {
                 let advice = if progress.clamped {
-                    "raise --num-ctx, shorten the request, or choose another model before retrying"
+                    "raise --num-ctx, run /compact or /clear, or choose another model before retrying"
                 } else {
                     "Shorten the request or choose another model before retrying"
                 };

@@ -374,9 +374,9 @@ is loading or busy. Model discovery bypasses this queue.
   `OLLAMA_CONTEXT_LENGTH` is set); Alfredo's worker and repair prompts can be far
   larger, so Ollama may then truncate them silently. With the flag set, `num_predict` (a
   cap on generated tokens, not a reservation) is clamped to the window minus the
-  estimated prompt (bytes/3), never below a 256-token floor, and a request is refused
+  estimated prompt (bytes/3, including the serialized chat tool definitions), never below a 256-token floor, and a request is refused
   before sending only when the estimated prompt plus 256 exceeds the window: chat says
-  `prompt ≈N tokens > --num-ctx M; shorten the request`, planner, worker and repair say
+  `prompt ≈N tokens > --num-ctx M; run /compact or /clear, press Ctrl+N for a new conversation, or raise --num-ctx`, planner, worker and repair say
   `raise --num-ctx (≈N tokens needed)` because they cannot shorten anything. A reply cut
   off by the clamped limit reports the real token limit and suggests raising `--num-ctx`.
   Short prompts therefore work at any accepted window, including 2048 and 4096.
@@ -1466,7 +1466,17 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   includes, `git_status` and working-tree or staged diffs are refused (they would run the
   repository's clean filters); `git_log` and `git_diff` with `base` and `target` still work.
 - **Size.** Every result is capped at 16 KiB; refusals come back to the model as
-  `error: …` text it can react to.
+  `error: …` text it can react to. Results are also budgeted to the room left. With
+  `--num-ctx`, each result is cut (same `[truncated: …]` marker) to `(window - prompt
+  tokens - 256) × 3/2` bytes when that is under 16 KiB, counting the tool definitions in
+  the prompt estimate. Under the 128 KiB conversation limit a result is cut to what fits
+  with 4 KiB left for the answer. When less than 256 bytes would remain, the result is
+  replaced by `error: not shown; the conversation is near its size limit, answer with what
+  you have or ask for a narrower range` (`the context window (--num-ctx) is nearly full`
+  under `--num-ctx`), and the model gets one more round without tools to answer, so the
+  turn ends with a reply instead of failing. A request refused by the window guard or the
+  conversation limit says how to continue: `/compact` or `/clear`, Ctrl+N, or a larger
+  `--num-ctx`; `/compact` works on that failed conversation.
 - **Loop.** The model may answer, or ask for tools; Alfredo runs the calls, sends the
   results back and asks again. A turn runs at most 8 tool rounds; per round 16 calls run,
   further calls (up to 64) get an `error: not run` result and any beyond are dropped;

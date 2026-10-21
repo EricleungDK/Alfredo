@@ -92,6 +92,11 @@ pub fn definitions() -> Vec<Value> {
 
 /// Run one call. Unknown tools and bad arguments come back as `error: ...` text.
 pub fn dispatch(root: &Path, call: &ToolCall) -> String {
+    dispatch_within(root, call, MAX_OUTPUT)
+}
+
+/// [`dispatch`] with the output cut to `limit` bytes (at most [`MAX_OUTPUT`]).
+pub fn dispatch_within(root: &Path, call: &ToolCall, limit: usize) -> String {
     let Some(tool) = TOOLS.iter().find(|tool| tool.name == call.name) else {
         let names: Vec<_> = TOOLS.iter().map(|tool| tool.name).collect();
         return format!(
@@ -105,7 +110,7 @@ pub fn dispatch(root: &Path, call: &ToolCall) -> String {
         return "error: arguments must be a JSON object".into();
     }
     match (tool.run)(root, &arguments) {
-        Ok(output) => cap(output),
+        Ok(output) => cap_to(output, limit),
         Err(error) => format!("error: {error}"),
     }
 }
@@ -125,10 +130,16 @@ pub fn normalize_arguments(arguments: &Value) -> Value {
 
 /// Cut `text` to [`MAX_OUTPUT`] bytes on a character boundary, with a marker.
 pub(crate) fn cap(text: String) -> String {
-    if text.len() <= MAX_OUTPUT {
+    cap_to(text, MAX_OUTPUT)
+}
+
+/// Cut `text` to `limit` bytes (never more than [`MAX_OUTPUT`]), with the same marker.
+pub(crate) fn cap_to(text: String, limit: usize) -> String {
+    let limit = limit.min(MAX_OUTPUT);
+    if text.len() <= limit {
         return text;
     }
-    let mut end = MAX_OUTPUT;
+    let mut end = limit;
     while !text.is_char_boundary(end) {
         end -= 1;
     }
