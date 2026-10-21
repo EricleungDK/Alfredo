@@ -1521,9 +1521,14 @@ Approval (ADR 0004); there is no skip-approval mode.
 - **Card.** The transcript shows `? Approve edit_file · edit README.md`, the arguments,
   and a line diff (`-` old, `+` new, at most 80 lines). The prompt title reads
   `Approval pending · y approve · n deny · Esc cancels the turn`.
-- **Keys.** The card is modal: `y` and `n` go to it, not the prompt, and are ignored for
-  0.5 s after it is first on screen (selected conversation, no pane, panel or agent view
-  over it), so typeahead cannot decide it; switching away and back restarts that delay.
+- **Keys.** `y` and `n` answer the card only when the prompt draft is empty, no other key
+  was pressed in the previous 0.5 s, and the card has been on screen for 0.5 s (selected
+  conversation, no pane, panel or agent view over it; switching away and back restarts
+  that delay). Otherwise they are ordinary typing: while the draft has text, `y` and `n`
+  go into it and never decide the card, and the prompt title reads `Approval pending ·
+  clear the draft to answer y/n · Esc denies`. Typing a message while a card waits
+  ("hey, check the remote first") therefore cannot approve or deny it. A single `y` or
+  `n` as the first key after a pause is still an answer.
   Known limit: keys already queued during a terminal stall longer than 0.5 s are not
   discarded. `y` runs the call; `n` denies it and the model receives `error: the owner
   denied this action; nothing was changed…` as the tool result, then the turn continues.
@@ -1602,6 +1607,40 @@ credentials). Each call pauses for Approval like a file edit.
   uncommitted changes, so an aborted merge restores exactly. A failed commit of named
   files restores the index. If a write is stopped or leaves `index.lock`, the error says
   so rather than claiming the repository is unchanged.
+
+## Chat shell commands (`run_command`)
+
+`run_command` (issue #236, `src/chat_tools/shell.rs`) runs one `sh -c` command after
+Approval. Arguments: `command` (required, at most 8 KiB), `cwd` (relative directory,
+default the repository root; same confinement as the read tools), `escalate` (boolean,
+default false), `timeout_seconds` (1–600, default 120).
+
+- **Sandboxed (default).** Runs in the same bubblewrap Sandbox as worker checks: network
+  off, the Coding Workspace writable, `.git` and system roots read-only, `HOME=/tmp`,
+  tools under `/usr` and `/bin`. A linked worktree's shared Git directory is mounted
+  read-only so `git` reads work. If `~/.cargo` / `~/.rustup` exist they are mounted
+  read-only with `CARGO_HOME`, `RUSTUP_HOME`, `~/.cargo/bin` on `PATH` and
+  `CARGO_NET_OFFLINE=true`, so `cargo test` works with already-fetched dependencies. The card reads `? Approve run_command · run sh
+  test.sh` with `cwd . · sandboxed · network off · …` and the exact command.
+- **Escalated.** `escalate: true` runs on the host with your environment and network
+  (for `git push`, package installs). The card is red with a reversed
+  `! HOST · network on · your environment and credentials (SSH agent, tokens)` banner
+  and `run on HOST …`. Denying it runs nothing. Escalated
+  outcomes are logged with `"escalated": true` and show as `Chat run_command (HOST) …` in
+  F4. Future always-allow rules (#238) must never cover an escalated card unless the rule
+  is itself for escalated runs (`Card::escalated`, `Request::escalated`).
+- **Result.** The model gets `exit code N · sandboxed|host · cwd …`, then `stdout:` and
+  `stderr:`; each keeps its last 10 KiB / 5 KiB behind a `[cut: …]` marker (failures
+  print last). Error results are capped at 16 KiB too. The cwd must resolve to the same
+  directory at approval as at preview, or nothing runs. A failing sandboxed command
+  adds a note suggesting `escalate: true`. Output past 1 MiB stops the process.
+- **Timeout.** The command runs in its own process group; on timeout the whole tree is
+  killed and the model gets `error: timed out after Ns…` (logged as failed). Known
+  limitation: on the host, a process that leaves the group (`setsid`, daemonizing) escapes
+  the kill; inside the sandbox bubblewrap's PID namespace ends it.
+- **Sandbox failure.** If bubblewrap is missing or cannot start, the model gets
+  `error: the sandbox could not run the command (…); nothing ran on the host…` with a
+  suggestion to escalate. Nothing is retried on the host without a new, approved call.
 
 ## Chat file mentions (`@path`)
 
