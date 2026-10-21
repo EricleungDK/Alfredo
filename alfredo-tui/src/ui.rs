@@ -2268,7 +2268,7 @@ fn approval_card_lines(
     ];
     if card.escalated() {
         lines.push(Line::styled(
-            "  ! HOST · network on · this command runs outside the sandbox",
+            "  ! HOST · network on · your environment and credentials (SSH agent, tokens) · runs outside the sandbox",
             header.add_modifier(Modifier::BOLD | Modifier::REVERSED),
         ));
     }

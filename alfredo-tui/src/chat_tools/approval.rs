@@ -247,7 +247,7 @@ pub fn card(root: &Path, call: &ToolCall) -> Result<Card, String> {
             },
             summary: shown.summary,
             preview: shown.preview,
-            fingerprint: String::new(),
+            fingerprint: shown.cwd,
         });
     }
     let change = super::edit::preview(root, &call.name, &arguments)
@@ -265,7 +265,13 @@ pub fn card(root: &Path, call: &ToolCall) -> Result<Card, String> {
 /// Run an approved card: refuse when the target changed since the preview,
 /// otherwise dispatch. `Err` is the failure reason.
 pub fn apply(root: &Path, card: &Card) -> Result<String, String> {
-    if !matches!(card.kind, CardKind::Shell { .. }) {
+    if matches!(card.kind, CardKind::Shell { .. }) {
+        if super::shell::cwd(root, &card.arguments)? != card.fingerprint {
+            return Err(
+                "the cwd changed since the preview; nothing ran. Re-propose the command".into(),
+            );
+        }
+    } else {
         let now = super::edit::fingerprint(root, &card.tool, &card.arguments)
             .ok_or_else(|| format!("{} has no approval preview", card.tool))??;
         if now != card.fingerprint {

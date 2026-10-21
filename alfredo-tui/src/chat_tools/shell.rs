@@ -59,6 +59,13 @@ pub(crate) struct Shown {
     pub summary: String,
     pub preview: String,
     pub escalated: bool,
+    /// Canonical cwd at preview; an approved call refuses if it resolves elsewhere.
+    pub cwd: String,
+}
+
+/// Canonical cwd of a run_command call (see [`Shown::cwd`]).
+pub(crate) fn cwd(root: &Path, arguments: &Value) -> Result<String, String> {
+    plan(root, arguments).map(|plan| plan.cwd.to_string_lossy().into_owned())
 }
 
 /// Card content, or why the call is refused before asking. `None` for other tools.
@@ -68,7 +75,7 @@ pub(crate) fn preview(root: &Path, name: &str, arguments: &Value) -> Option<Resu
     }
     Some(plan(root, arguments).map(|plan| {
         let place = if plan.escalate {
-            "HOST · network on · outside the sandbox"
+            "HOST · network on · your environment and credentials (SSH agent, tokens) · outside the sandbox"
         } else {
             "sandboxed · network off · only the Coding Workspace writable"
         };
@@ -87,6 +94,7 @@ pub(crate) fn preview(root: &Path, name: &str, arguments: &Value) -> Option<Resu
             ),
             preview,
             escalated: plan.escalate,
+            cwd: plan.cwd.to_string_lossy().into_owned(),
         }
     }))
 }
@@ -221,14 +229,48 @@ fn sandboxed(root: &Path, plan: &Plan, bwrap: &str) -> Result<String, String> {
     let mut argv =
         crate::worker::sandbox_argv(&root_text, gitfile.as_deref(), &limits(plan.timeout));
     argv[0] = bwrap.to_string();
+    // Read-only extras outside the workspace: a linked worktree's Git directory, and
+    // the owner's rustup toolchain (used offline).
+    let mut extras: Vec<String> = Vec::new();
+    if git.is_file() {
+        extras.extend(git_common_dir(&root));
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let toolchain = |name: &str| {
+        home.as_ref()
+            .and_then(|h| h.join(name).canonicalize().ok())
+            .filter(|p| p.is_dir())
+            .and_then(|p| p.to_str().map(str::to_string))
+    };
+    let cargo_home = toolchain(".cargo");
+    let rustup_home = toolchain(".rustup");
+    extras.extend(cargo_home.iter().chain(&rustup_home).cloned());
+    extras.retain(|path| !Path::new(path).starts_with(&root));
+    extras.dedup();
+    let at = argv
+        .iter()
+        .position(|a| a == "--chdir")
+        .unwrap_or(argv.len());
+    let binds: Vec<String> = extras
+        .iter()
+        .flat_map(|p| ["--ro-bind".to_string(), p.clone(), p.clone()])
+        .collect();
+    argv.splice(at..at, binds);
     argv.extend([
         "/bin/sh".into(),
         "-c".into(),
-        "cd -- \"$1\" && exec /bin/sh -c \"$2\"".into(),
+        "if [ \"$3\" != - ]; then export CARGO_HOME=\"$3\" PATH=\"$3/bin:$PATH\" CARGO_NET_OFFLINE=true; fi; if [ \"$4\" != - ]; then export RUSTUP_HOME=\"$4\"; fi; cd -- \"$1\" && exec /bin/sh -c \"$2\"".into(),
         "alfredo".into(),
         plan.cwd.to_string_lossy().into_owned(),
         plan.command.clone(),
+        cargo_home.clone().unwrap_or_else(|| "-".into()),
+        rustup_home.clone().unwrap_or_else(|| "-".into()),
     ]);
+    let readonly: Vec<(String, String)> = gitfile
+        .iter()
+        .chain(&extras)
+        .map(|p| (p.clone(), p.clone()))
+        .collect();
     let mut request = request(
         argv,
         root_text.clone(),
@@ -237,7 +279,7 @@ fn sandboxed(root: &Path, plan: &Plan, bwrap: &str) -> Result<String, String> {
             mode: "bubblewrap".into(),
             readable_roots: vec![root_text.clone()],
             writable_roots: vec![root_text],
-            readonly_bindings: gitfile.iter().map(|g| (g.clone(), g.clone())).collect(),
+            readonly_bindings: readonly,
         },
     );
     request.environment = BTreeMap::from([
@@ -280,6 +322,20 @@ fn sandboxed(root: &Path, plan: &Plan, bwrap: &str) -> Result<String, String> {
     )
 }
 
+/// The shared Git directory of a linked worktree (holds its per-worktree gitdir too).
+fn git_common_dir(root: &Path) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    let path = Path::new(text.trim()).canonicalize().ok()?;
+    (output.status.success() && path.is_dir())
+        .then(|| path.to_str().map(str::to_string))
+        .flatten()
+}
+
 /// Run on the host (owner-approved escalation): the owner's environment, network on.
 fn on_host(plan: &Plan) -> Result<String, String> {
     let cwd = plan.cwd.to_string_lossy().into_owned();
@@ -314,13 +370,34 @@ fn on_host(plan: &Plan) -> Result<String, String> {
     )
 }
 
+/// Bytes kept from the end of each stream; together they stay under `MAX_OUTPUT`, so
+/// stderr is never pushed out by long stdout. Failures print last, so tails are kept.
+const STDOUT_BUDGET: usize = 10 * 1024;
+const STDERR_BUDGET: usize = 5 * 1024;
+
+/// The last `budget` bytes of `text` (on a character boundary), with a marker when cut.
+fn tail(text: &str, budget: usize) -> String {
+    if text.len() <= budget {
+        return text.to_string();
+    }
+    let mut start = text.len() - budget;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    format!(
+        "[cut: first {start} of {} bytes omitted]\n{}",
+        text.len(),
+        &text[start..]
+    )
+}
+
 /// Exit code first, then output; a timeout is an error (the tree was killed).
 fn report(plan: &Plan, ran: Ran) -> Result<String, String> {
     let place = if plan.escalate { "host" } else { "sandboxed" };
     let output = format!(
         "stdout:\n{}\nstderr:\n{}",
-        ran.stdout.trim_end(),
-        ran.stderr.trim_end()
+        tail(ran.stdout.trim_end(), STDOUT_BUDGET),
+        tail(ran.stderr.trim_end(), STDERR_BUDGET)
     );
     match ran.status {
         ProcessOutcomeStatus::TimedOut => Err(format!(

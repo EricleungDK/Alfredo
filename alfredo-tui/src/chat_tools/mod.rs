@@ -93,7 +93,7 @@ pub fn dispatch(root: &Path, call: &ToolCall) -> String {
     }
     match (tool.run)(root, &arguments) {
         Ok(output) => cap(output),
-        Err(error) => format!("error: {error}"),
+        Err(error) => cap(format!("error: {error}")),
     }
 }
 

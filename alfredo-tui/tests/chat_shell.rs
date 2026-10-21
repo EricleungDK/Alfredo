@@ -390,11 +390,7 @@ fn output_is_capped_with_a_truncation_marker() {
         "{}",
         result.len()
     );
-    assert!(
-        result.contains("[truncated"),
-        "{}",
-        &result[result.len() - 100..]
-    );
+    assert!(result.contains("[cut"), "{}", &result[result.len() - 100..]);
     assert!(result.contains("exit code 0"));
     let _ = fs::remove_dir_all(root);
 }
@@ -462,6 +458,10 @@ fn escalated_cards_look_different_from_sandboxed_ones() {
     assert!(!text.contains("HOST"));
     let text = draw(host.clone());
     assert!(text.contains("HOST · network on"), "{text}");
+    assert!(
+        text.contains("credentials"),
+        "the banner names what escalation exposes"
+    );
     assert!(text.contains("git push origin HEAD"));
     assert_ne!(header_color(sandboxed), header_color(host));
     let _ = fs::remove_dir_all(root);
@@ -473,4 +473,123 @@ fn chat_system_prompt_mentions_run_command_and_escalation() {
     assert!(prompt.contains("run_command"), "{prompt}");
     assert!(prompt.contains("escalate"), "{prompt}");
     assert!(!prompt.contains("cannot run commands"), "{prompt}");
+}
+
+#[tokio::test]
+async fn timeout_errors_reaching_the_model_are_capped() {
+    let root = workspace("errcap");
+    let (gate, _) = gate(Decision::Approve, None);
+    let (_, result) = turn(
+        &root,
+        tool_call(
+            "run_command",
+            json!({"command": "head -c 300000 /dev/zero | tr '\\0' x; sleep 30", "escalate": true, "timeout_seconds": 1}),
+        ),
+        gate,
+    )
+    .await;
+    assert!(
+        result.contains("timed out"),
+        "{}",
+        &result[..200.min(result.len())]
+    );
+    assert!(
+        result.len() <= chat_tools::MAX_OUTPUT + 200,
+        "{}",
+        result.len()
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn stderr_and_output_tails_survive_long_stdout() {
+    let root = workspace("tails");
+    let card = approval::card(
+        &root,
+        &call(json!({
+            "command": "head -c 100000 /dev/zero | tr '\\0' x; echo STDOUT_END; head -c 50000 /dev/zero | tr '\\0' y >&2; echo ERR_TAIL >&2",
+            "escalate": true
+        })),
+    )
+    .unwrap();
+    let result = approval::apply(&root, &card).unwrap();
+    assert!(
+        result.len() <= chat_tools::MAX_OUTPUT + 200,
+        "{}",
+        result.len()
+    );
+    assert!(result.starts_with("exit code 0"), "{}", &result[..100]);
+    assert!(result.contains("STDOUT_END"));
+    assert!(result.contains("ERR_TAIL"));
+    assert!(result.contains("[cut"), "truncation is marked");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn sandboxed_cargo_works_when_a_rustup_toolchain_exists() {
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    if !home.join(".cargo/bin/cargo").exists() || !sandbox_works() {
+        eprintln!("SKIP: no ~/.cargo toolchain");
+        return;
+    }
+    let root = workspace("cargo");
+    let card = approval::card(&root, &call(json!({"command": "cargo --version"}))).unwrap();
+    let result = approval::apply(&root, &card).unwrap();
+    assert!(result.starts_with("exit code 0"), "{result}");
+    assert!(result.contains("cargo "), "{result}");
+    let card = approval::card(&root, &call(json!({"command": "echo $CARGO_NET_OFFLINE"}))).unwrap();
+    assert!(approval::apply(&root, &card).unwrap().contains("true"));
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn git_works_sandboxed_in_a_linked_worktree() {
+    if !sandbox_works() {
+        return;
+    }
+    let base = workspace("linked");
+    let git = |dir: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?} {out:?}");
+    };
+    git(&base, &["init", "-q", "-b", "main", "main"]);
+    let main = base.join("main");
+    fs::write(main.join("a.txt"), "a\n").unwrap();
+    git(&main, &["add", "a.txt"]);
+    git(&main, &["commit", "-q", "-m", "a"]);
+    git(&main, &["worktree", "add", "-q", "-b", "wt", "../wt"]);
+    let wt = base.join("wt");
+    let card = approval::card(&wt, &call(json!({"command": "git log --oneline -1"}))).unwrap();
+    let result = approval::apply(&wt, &card).unwrap();
+    assert!(result.starts_with("exit code 0"), "{result}");
+    assert!(result.contains(" a"), "{result}");
+    let _ = fs::remove_dir_all(base);
+}
+
+#[test]
+fn a_cwd_swapped_after_the_preview_is_refused() {
+    let root = workspace("swap");
+    fs::create_dir(root.join("sub")).unwrap();
+    fs::create_dir(root.join("other")).unwrap();
+    let card = approval::card(
+        &root,
+        &call(json!({"command": "touch ran", "cwd": "sub", "escalate": true})),
+    )
+    .unwrap();
+    fs::remove_dir(root.join("sub")).unwrap();
+    std::os::unix::fs::symlink(root.join("other"), root.join("sub")).unwrap();
+    let error = approval::apply(&root, &card).unwrap_err();
+    assert!(error.contains("cwd"), "{error}");
+    assert!(!root.join("other/ran").exists());
+    let _ = fs::remove_dir_all(root);
 }
