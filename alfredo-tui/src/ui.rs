@@ -183,6 +183,9 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
     let agent = tasks.and_then(|tasks| Some((tasks, tasks.agent_shown()?.target)));
     let prompt_title = match agent {
         _ if focused => " Prompt · Esc returns ".to_string(),
+        _ if session.pending_approval().is_some() && !session.draft.is_empty() => {
+            " Approval pending · clear the draft to answer y/n · Esc denies ".to_string()
+        }
         _ if session.pending_approval().is_some() => {
             " Approval pending · y approve · n deny · Esc cancels the turn ".to_string()
         }
