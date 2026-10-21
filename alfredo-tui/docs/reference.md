@@ -1583,7 +1583,10 @@ credentials). Each call pauses for Approval like a file edit.
   fsmonitor is off. Commit, switch and merge see your global git config (identity) but
   not the rest of your environment. Push keeps your environment for credential helpers
   and the SSH agent, drops variables that redirect git (`GIT_DIR`, …), and turns
-  prompts off (`GIT_TERMINAL_PROMPT=0`); it stops after 120 s (local writes also 120 s).
+  prompts off (`GIT_TERMINAL_PROMPT=0`). Every write child also runs in its own session
+  with no controlling terminal, so ssh cannot prompt for a host key or passphrase on
+  `/dev/tty`; the push fails fast and says to add the key to ssh-agent or run git push
+  yourself. It stops after 120 s (local writes also 120 s).
 - **Repository config is not trusted.** Your global and system git config are; config
   local to the repository (or worktree) could be planted. Every write is refused when it
   sets `merge.*.driver`, `gpg.program` or `gpg.*.program`; push is also refused for

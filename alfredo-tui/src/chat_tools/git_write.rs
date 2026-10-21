@@ -852,6 +852,35 @@ enum Env {
     Remote,
 }
 
+const TERMINAL_HINT: &str = "ssh needed a terminal prompt (host key or passphrase); add the key to ssh-agent or run git push yourself";
+
+/// Start the child in its own session so it has no controlling terminal: ssh and some
+/// credential helpers open `/dev/tty` directly, which `GIT_TERMINAL_PROMPT=0` and a null
+/// stdin do not stop, and would draw over the TUI and compete for its keystrokes.
+fn detach_from_terminal(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid is async-signal-safe and touches no memory.
+        unsafe {
+            command.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = command;
+}
+
+/// Whether git's stderr shows ssh wanted a prompt it could not have.
+fn needed_terminal(error: &str) -> bool {
+    let error = error.to_lowercase();
+    ["/dev/tty", "no tty", "host key verification failed"]
+        .iter()
+        .any(|needle| error.contains(needle))
+}
+
 /// Run a writing git command in `root`. `Err` is git's message.
 fn write(root: &Path, args: &[&str], env: Env) -> Result<String, String> {
     let ceiling = root
@@ -889,9 +918,13 @@ fn write(root: &Path, args: &[&str], env: Env) -> Result<String, String> {
         .arg("-C")
         .arg(root)
         .args(args);
+    detach_from_terminal(&mut command);
     let (status, out, error) = git_read::run_bounded(command, MAX_OUTPUT * 2, deadline)?;
     match status {
         Some(status) if !status.success() => {
+            if matches!(env, Env::Remote) && needed_terminal(&error) {
+                return Err(TERMINAL_HINT.to_string());
+            }
             let lines: Vec<&str> = error
                 .lines()
                 .map(str::trim)
@@ -927,5 +960,12 @@ mod tests {
             "git@github.com:o/r.git"
         );
         assert_eq!(without_credentials("/tmp/r.git"), "/tmp/r.git");
+    }
+
+    #[test]
+    fn ssh_terminal_failures_are_recognised() {
+        assert!(needed_terminal("Host key verification failed.\n"));
+        assert!(needed_terminal("could not open /dev/tty: No such device"));
+        assert!(!needed_terminal("Permission denied (publickey)."));
     }
 }
