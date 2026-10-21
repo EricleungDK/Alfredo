@@ -1552,7 +1552,10 @@ credentials). Each call pauses for Approval like a file edit.
   is aborted (`git merge --abort`) and the repository is left as it was. The model gets
   `error: merge conflict in: …; merge aborted…`.
 - **Refused before asking.** Refs and branches starting with `-` or holding `..`,
-  option-like or magic paths, `..`, `.git` and secret files, remotes that are not a
+  option-like or magic paths, `..`, `.git` and secret files (for `git_commit` the check
+  applies to the expanded commit listing: staged names, or what a directory pathspec
+  expands to, and again at apply; `vendor/`, `dist/`, `target/` and `node_modules/` stay
+  committable), remotes that are not a
   configured remote name (URLs and paths are refused), nothing to commit, an
   already-up-to-date merge or push, a detached HEAD for commit, merge and push, and
   repositories whose config defines filter drivers or includes.

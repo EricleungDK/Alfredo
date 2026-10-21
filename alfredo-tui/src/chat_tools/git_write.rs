@@ -358,6 +358,7 @@ fn plan_commit(root: &Path, arguments: &Value) -> Result<CommitPlan, String> {
     }
     refuse_repository_config(root, false)?;
     let branch = current_branch(root)?;
+    refuse_secrets(root, &pathspecs)?;
     let listing = if pathspecs.is_empty() {
         full(
             root,
@@ -381,6 +382,58 @@ fn plan_commit(root: &Path, arguments: &Value) -> Result<CommitPlan, String> {
         pathspecs,
         listing: listing.trim_end().to_string(),
     })
+}
+
+/// Refuse when any file the commit would take (the staged names, or git's expansion of
+/// the pathspecs) is a secret or `.git` path. Generated trees stay committable. Runs in
+/// `plan_commit`, so it applies at preview and again at apply.
+fn refuse_secrets(root: &Path, pathspecs: &[String]) -> Result<(), String> {
+    let mut names = Vec::new();
+    if pathspecs.is_empty() {
+        let out = full(
+            root,
+            &[
+                "diff",
+                "--cached",
+                "--no-ext-diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                "--",
+            ],
+        )?;
+        names.extend(out.split('\0').filter(|n| !n.is_empty()).map(String::from));
+    } else {
+        let mut args = vec![
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+        ];
+        args.extend(pathspecs.iter().map(String::as_str));
+        let out = full(root, &args)?;
+        let mut entries = out.split('\0').filter(|e| !e.is_empty());
+        while let Some(entry) = entries.next() {
+            let Some((code, name)) = entry.split_at_checked(3) else {
+                continue;
+            };
+            names.push(name.to_string());
+            if code.contains(['R', 'C']) {
+                // A rename or copy is followed by its source name.
+                names.extend(entries.next().map(String::from));
+            }
+        }
+    }
+    match names
+        .iter()
+        .find(|name| crate::planning_context::secret(&name.to_lowercase()))
+    {
+        Some(name) => Err(format!(
+            "refused: {name} looks like a secret (.env*, *.pem, *.key, *.p12, *.pfx or .git); commit it by hand if intended"
+        )),
+        None => Ok(()),
+    }
 }
 
 fn commit(root: &Path, arguments: &Value) -> Result<String, String> {
