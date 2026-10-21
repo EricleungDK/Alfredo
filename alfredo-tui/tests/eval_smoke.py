@@ -53,6 +53,13 @@ class EvalSmoke(unittest.TestCase):
             self.assertEqual(0, document['metrics']['M12']['value'])
             repaired = next(t for t in document['trials'] if t['task'].startswith('T2-'))
             self.assertEqual(1, repaired['repairs'])
+            chat = next(t for t in document['trials'] if t['task'].startswith('T7-'))
+            self.assertTrue(chat['pass'], chat)
+            self.assertEqual(['grep', 'read_file', 'edit_file'], chat['chat']['calls'])
+            self.assertTrue(chat['chat']['read_before_edit'])
+            self.assertEqual('workspace-edits', chat['chat']['policy'])
+            self.assertEqual([('edit_file', 'applied')], [(a['tool'], a['outcome']) for a in chat['approvals']])
+            self.assertEqual(4, chat['turns'])
             control = next(t for t in document['trials'] if t['kind'] == 'negative_control')
             self.assertGreater(control['errors']['malformed'], 0)
             self.assertEqual([out.name], sorted(p.name for p in scratch.iterdir()),

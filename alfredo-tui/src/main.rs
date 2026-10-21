@@ -25,7 +25,8 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("Error: {error}");
         // Scripted runs report setup and usage errors as 2, like --doctor.
-        let headless = std::env::args().any(|arg| arg == "--headless");
+        let headless = std::env::args()
+            .any(|arg| matches!(arg.as_str(), "--headless" | "--chat" | "--approve"));
         std::process::exit(if headless { 2 } else { 1 });
     }
 }
@@ -68,6 +69,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut qualification_repetitions = None;
     let mut go_goal: Option<String> = None;
     let mut headless = false;
+    let mut chat_prompt: Option<String> = None;
+    let mut approve: Option<headless::Policy> = None;
     let mut max_repairs = alfredo_tui::autopilot::DEFAULT_MAX_REPAIRS;
     let mut on_finish = std::env::var("ALFREDO_ON_FINISH")
         .ok()
@@ -95,6 +98,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 go_goal = Some(goal);
             }
             "--headless" => headless = true,
+            "--chat" => {
+                let prompt = args.next().ok_or("--chat needs a PROMPT")?;
+                if prompt.trim().is_empty() {
+                    return Err("--chat needs a nonempty PROMPT".into());
+                }
+                chat_prompt = Some(prompt);
+            }
+            "--approve" => {
+                approve = Some(headless::Policy::parse(
+                    &args
+                        .next()
+                        .ok_or("--approve needs a policy: workspace-edits")?,
+                )?)
+            }
             "--max-repairs" => {
                 max_repairs = args
                     .next()
@@ -194,8 +211,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             _ => return Err(format!("Unknown argument: {arg}; use --help").into()),
         }
     }
-    if headless && (go_goal.is_none() || select || mission.is_some() || doctor) {
-        return Err("--headless needs --go GOAL and opens the repository's default mission; omit --select, --mission, --new-mission and --doctor".into());
+    if go_goal.is_some() && chat_prompt.is_some() {
+        return Err("Choose either --go or --chat".into());
+    }
+    if chat_prompt.is_some() && !headless {
+        return Err("--chat needs --headless (interactive chat is the terminal)".into());
+    }
+    if approve.is_some() && chat_prompt.is_none() {
+        return Err("--approve applies only to --chat PROMPT --headless".into());
+    }
+    if headless
+        && ((go_goal.is_none() && chat_prompt.is_none()) || select || mission.is_some() || doctor)
+    {
+        return Err("--headless needs --go GOAL or --chat PROMPT and opens the repository's default mission; omit --select, --mission, --new-mission and --doctor".into());
     }
     if let Some(value) = &on_finish {
         alfredo_tui::on_finish::configure(alfredo_tui::on_finish::validate(value)?);
@@ -296,6 +324,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let state_dir = state_dir.ok_or("Set --state-dir or ALFREDO_STATE_DIR")?;
+    if let Some(prompt) = chat_prompt {
+        let code = headless::run_chat(headless::ChatOptions {
+            runtime: &runtime,
+            provider,
+            state_dir,
+            start: workspace.unwrap_or(starting),
+            conversation,
+            model,
+            prompt,
+            policy: approve.unwrap_or(headless::Policy::Deny),
+        })?;
+        std::process::exit(code);
+    }
     if headless {
         let code = headless::run(headless::Options {
             runtime: &runtime,
@@ -2260,7 +2301,7 @@ const HELP_LINES: &[&str] = &[
     "",
     "Usage: alfredo-tui [--model NAME] [--endpoint URL]",
     "  [--select] [--workspace DIR] [--mission NAME | --new-mission NAME] [--state-dir DIR] [--conversation NAME] [--parallel-models 1..8] [--structured-thinking auto|on|off] [--worker-format blocks|json] [--keep-alive DURATION|default] [--num-ctx 2048..262144] [--connect-retries 0..10] [--doctor]",
-    "  [--go GOAL [--headless]] [--max-repairs 0..16] [--icons nerd|unicode|ascii] [--no-motion]",
+    "  [--go GOAL [--headless] | --chat PROMPT --headless [--approve workspace-edits]] [--max-repairs 0..16] [--icons nerd|unicode|ascii] [--no-motion]",
     "",
     "Side pane: missions of this repository and the work tree (plan groups, tasks, repairs, architect and chats). F6 focuses it (an overlay below 88 columns): Up/Down move, Tab switches missions/work, Enter opens, Alt+Left/Right fold, Esc returns to the prompt. Enter on another mission switches to it under the /workspace rules.",
     "Agents: Enter on a task or the architect opens its agent view: the instruction, read-only references, the answer as code per file, the check and outcome, then each repair. The prompt then talks to that agent: while it generates a note steers it (cancel, rerun with the note; not a repair), during its check it is queued for a failure, a failed, rejected or review-ready result is repaired with it, accepted work gets a follow-up task, and the architect revises its draft. Same files and check only; held reviews refuse. Esc back · Ctrl+O expand instructions · /watch ID · /tell ID TEXT.",
@@ -2286,6 +2327,7 @@ const HELP_LINES: &[&str] = &[
     "Enter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry",
     "F2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit",
     "--headless (with --go GOAL) runs without a terminal: one stderr line per autopilot state change, then one JSON object {state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]} on stdout. Exit 0 all accepted; 1 partial, failed or interrupted (SIGINT/SIGTERM cancel workers like /stop); 2 setup or usage error (Ollama unreachable, model not installed: Error on stderr, nothing on stdout). A failed run's stderr line carries the reason. Waits for the --on-finish hook after the JSON and reports its failure on stderr. Opens the repository's default mission.",
+    "--chat PROMPT --headless runs one Chat Agent turn without a terminal (scripts, evals): read tools run; edit_file/write_file need --approve workspace-edits, which approves them only inside the repository and denies everything else (without it every change is denied). Outcomes go to chat-approvals.jsonl. One JSON object {state, policy, reply, steps, calls:[{tool,error}], approvals:[{tool,target,outcome,reason}], error} on stdout; exit 0 done, 1 failed or interrupted, 2 setup or usage error. The turn is not saved to the conversation. Interactive chat never skips approval.",
     "",
     "--doctor checks startup prerequisites without entering terminal mode or running inference.",
     "--qualify-inference REPORT [--qualification-repetitions 1..3] runs isolated diagnostic fixtures with baseline/candidate context profiles and one shared client slot. Default: three repetitions; artifacts are retained beside the new report.",

@@ -80,7 +80,32 @@
           "exit_code": {"type": ["integer", "null"]},
           "panic": {"type": "boolean"},
           "unavailable": {"type": "object", "additionalProperties": {"type": "string"}},
-          "notes": {"type": "array", "items": {"type": "string"}}
+          "notes": {"type": "array", "items": {"type": "string"}},
+          "approvals": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["tool", "target", "outcome"],
+              "properties": {
+                "tool": {"type": "string"},
+                "target": {"type": "string"},
+                "outcome": {"enum": ["applied", "failed", "denied", "cancelled"]},
+                "reason": {"type": ["string", "null"]}
+              }
+            }
+          },
+          "chat": {
+            "type": "object",
+            "required": ["policy", "calls", "read_before_edit", "applied"],
+            "properties": {
+              "policy": {"enum": ["workspace-edits", "deny"]},
+              "reply": {"type": "string"},
+              "steps": {"type": ["integer", "null"], "minimum": 0},
+              "calls": {"type": "array", "items": {"type": "string"}},
+              "read_before_edit": {"type": "boolean"},
+              "applied": {"type": "integer", "minimum": 0}
+            }
+          }
         }
       }
     },

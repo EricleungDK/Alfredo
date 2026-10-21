@@ -3,10 +3,14 @@
 //! saved-intent barrier in its own loop; progress goes to stderr, the result is
 //! one JSON object on stdout and the exit code tells the outcome (0 all accepted,
 //! 1 partial/failed/interrupted; setup and usage errors are the caller's 2).
+//! `--chat PROMPT --headless` ([`run_chat`]) runs one Chat Agent turn the same way;
+//! its Approval gate is answered by a scripted [`Policy`], never by a skip mode.
 use alfredo_tui::{
     autopilot::{RunState, Status, TaskOutcome},
+    chat_tools::approval::{Card, CardKind, Decision, Gate, Log, Outcome, Record},
     command_intent::Intent,
     console_command::{bounded_reason, CommandState},
+    model::Update,
     provider::Ollama,
     tasks::TaskStatus,
     workstation::Workstation,
@@ -14,7 +18,7 @@ use alfredo_tui::{
 use std::{
     collections::BTreeSet,
     io::Write,
-    path::PathBuf,
+    path::{Component, PathBuf},
     sync::atomic::{AtomicU32, Ordering},
     time::{Duration, Instant},
 };
@@ -459,6 +463,234 @@ fn stage_dispatch(work: &mut Workstation, pending: &mut Option<(usize, String)>)
     }
 }
 
+/// How `--chat --headless` answers the Approval gate (ADR 0004 forbids a
+/// skip-approval mode; this is scripted, headless-only and scoped).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Policy {
+    /// No `--approve`: every mutating call is denied (and logged).
+    Deny,
+    /// `--approve workspace-edits`: approve `edit_file` and `write_file` cards whose
+    /// path stays inside the Coding Workspace; deny everything else.
+    WorkspaceEdits,
+}
+
+impl Policy {
+    pub fn parse(text: &str) -> Result<Self, String> {
+        match text {
+            "workspace-edits" => Ok(Policy::WorkspaceEdits),
+            other => Err(format!(
+                "--approve {:?} is unknown; the only policy is workspace-edits (approve edit_file/write_file inside the Coding Workspace, deny everything else)",
+                other.chars().take(40).collect::<String>()
+            )),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Policy::Deny => "deny",
+            Policy::WorkspaceEdits => "workspace-edits",
+        }
+    }
+
+    pub fn decide(self, card: &Card) -> Decision {
+        let inside = |path: &str| {
+            let path = std::path::Path::new(path.trim());
+            !path.as_os_str().is_empty()
+                && path
+                    .components()
+                    .all(|part| matches!(part, Component::Normal(_) | Component::CurDir))
+        };
+        let edit = card.kind == CardKind::Edit
+            && matches!(card.tool.as_str(), "edit_file" | "write_file")
+            && card
+                .arguments
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(inside);
+        if self == Policy::WorkspaceEdits && edit {
+            Decision::Approve
+        } else {
+            Decision::Deny
+        }
+    }
+}
+
+/// What one headless chat turn produced, from its events.
+#[derive(Default)]
+struct Turn {
+    reply: String,
+    steps: usize,
+    calls: Vec<(String, bool)>,
+    done: bool,
+    failure: Option<String>,
+}
+
+impl Turn {
+    fn update(&mut self, update: Update) {
+        match update {
+            Update::Token(text) => self.reply.push_str(&text),
+            Update::ToolStep(step) => {
+                self.steps += 1;
+                for (index, call) in step.calls.iter().enumerate() {
+                    let error = step
+                        .results
+                        .get(index)
+                        .is_none_or(|result| result.starts_with("error:"));
+                    say(format!(
+                        "tool {}{}",
+                        call.name,
+                        if error { " (error)" } else { "" }
+                    ));
+                    self.calls.push((call.name.clone(), error));
+                }
+            }
+            Update::Done => self.done = true,
+            Update::Failed(reason) => self.failure = Some(reason),
+            _ => {}
+        }
+    }
+
+    fn json(&self, policy: Policy, records: &[Record]) -> serde_json::Value {
+        let error = match (&self.failure, self.done) {
+            (Some(reason), _) => Some(reason.clone()),
+            (None, true) => None,
+            (None, false) => Some("the turn ended without a reply".to_string()),
+        };
+        let approvals: Vec<_> = records
+            .iter()
+            .map(|record| {
+                let (outcome, reason) = match &record.outcome {
+                    Outcome::Applied => ("applied", None),
+                    Outcome::Failed(reason) => ("failed", Some(reason.clone())),
+                    Outcome::Denied => ("denied", None),
+                    Outcome::Cancelled => ("cancelled", None),
+                };
+                serde_json::json!({
+                    "tool": record.tool, "target": record.target,
+                    "outcome": outcome, "reason": reason,
+                })
+            })
+            .collect();
+        serde_json::json!({
+            "state": if error.is_none() { "done" } else { "failed" },
+            "policy": policy.label(),
+            "reply": self.reply.trim(),
+            "steps": self.steps,
+            "calls": self.calls.iter().map(|(tool, error)| serde_json::json!({"tool": tool, "error": error})).collect::<Vec<_>>(),
+            "approvals": approvals,
+            "error": error,
+        })
+    }
+}
+
+pub struct ChatOptions<'a> {
+    pub runtime: &'a Runtime,
+    pub provider: Ollama,
+    pub state_dir: PathBuf,
+    pub start: PathBuf,
+    pub conversation: String,
+    pub model: String,
+    pub prompt: String,
+    pub policy: Policy,
+}
+
+/// `--chat PROMPT --headless`: one Chat Agent turn (tools, Approval gate answered by
+/// `policy`, outcomes in the chat-approval log) on the repository's default mission.
+/// One JSON object on stdout; exit 0 when the turn finished, 1 failed or interrupted.
+/// The turn is not saved to the conversation.
+pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
+    let ChatOptions {
+        runtime,
+        provider,
+        state_dir,
+        start,
+        conversation,
+        model,
+        prompt,
+        policy,
+    } = options;
+    let choice = runtime
+        .block_on(alfredo_tui::selection::automatic(&start, &state_dir))?
+        .ok_or_else(|| alfredo_tui::selection::not_a_repository_notice(&start))?;
+    let request = alfredo_tui::selection_command::Request::new(
+        alfredo_tui::selection_command::Origin::Startup,
+        choice,
+        conversation,
+    )?;
+    let chat = provider.clone();
+    let work = Workstation::launch(runtime, &state_dir, request, &model, provider)?;
+    let model = work.app.sessions[work.app.selected].model.clone();
+    runtime
+        .block_on(alfredo_tui::doctor::model_server_check(&chat, &model))
+        .map_err(|failure| alfredo_tui::doctor::model_check_message(&model, &failure))?;
+    let workspace = work.tasks.workspace().to_path_buf();
+    let log = Log::for_store(work.tasks.store()).ok();
+    let before = log.as_ref().map_or(0, |log| log.records().len());
+    let messages = vec![
+        work.tasks.chat_context(),
+        alfredo_tui::model::Message {
+            role: "user".into(),
+            content: prompt,
+        },
+    ];
+    say(format!("chat · approvals: {}", policy.label()));
+    catch_signals();
+    let (requests, mut asked) = tokio::sync::mpsc::channel(4);
+    let gate = Gate::new(requests, log.clone());
+    let (sender, mut events) = tokio::sync::mpsc::channel(256);
+    let mut turn = Turn::default();
+    let interrupted = runtime.block_on(async {
+        let run = alfredo_tui::chat_tools::run_turn(
+            &chat,
+            &workspace,
+            0,
+            1,
+            model,
+            messages,
+            sender,
+            Some(gate),
+        );
+        let answer = async {
+            while let Some(request) = asked.recv().await {
+                let decision = policy.decide(&request.card);
+                say(format!(
+                    "approval {}: {}",
+                    request.card.summary,
+                    if decision == Decision::Approve {
+                        "approved"
+                    } else {
+                        "denied"
+                    }
+                ));
+                let _ = request.reply.send(decision);
+            }
+        };
+        let collect = async {
+            while let Some(event) = events.recv().await {
+                turn.update(event.update);
+            }
+        };
+        let stop = async {
+            while INTERRUPTED.load(Ordering::SeqCst) == 0 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        };
+        tokio::select! {
+            _ = async { tokio::join!(run, answer, collect) } => false,
+            () = stop => true,
+        }
+    });
+    if interrupted {
+        say("interrupted: turn cancelled");
+        turn.failure = Some("interrupted".into());
+    }
+    let records = log.map_or_else(Vec::new, |log| log.records());
+    let value = turn.json(policy, records.get(before..).unwrap_or(&[]));
+    let _ = writeln!(std::io::stdout(), "{value}");
+    let _ = std::io::stdout().flush();
+    Ok(i32::from(value["state"] != "done"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,6 +763,78 @@ mod tests {
         );
         let mut progress = Progress::default();
         assert!(progress.lines(&failed, &[]).is_empty());
+    }
+
+    fn card(tool: &str, kind: CardKind, path: &str) -> Card {
+        Card {
+            tool: tool.into(),
+            arguments: serde_json::json!({ "path": path }),
+            kind,
+            summary: format!("edit {path}"),
+            preview: String::new(),
+            fingerprint: String::new(),
+        }
+    }
+
+    #[test]
+    fn workspace_edits_approves_only_edit_tools_inside_the_workspace() {
+        let policy = Policy::parse("workspace-edits").unwrap();
+        for tool in ["edit_file", "write_file"] {
+            assert_eq!(
+                policy.decide(&card(tool, CardKind::Edit, "src/a.py")),
+                Decision::Approve
+            );
+            for path in ["../a.py", "/etc/passwd", "", "a/../../b"] {
+                assert_eq!(
+                    policy.decide(&card(tool, CardKind::Edit, path)),
+                    Decision::Deny,
+                    "{path}"
+                );
+            }
+        }
+        assert_eq!(
+            policy.decide(&card("run_command", CardKind::Edit, "a.py")),
+            Decision::Deny
+        );
+        assert_eq!(
+            Policy::Deny.decide(&card("edit_file", CardKind::Edit, "a.py")),
+            Decision::Deny
+        );
+        assert!(Policy::parse("all")
+            .unwrap_err()
+            .contains("workspace-edits"));
+    }
+
+    #[test]
+    fn chat_json_reports_calls_approvals_and_state() {
+        let mut turn = Turn::default();
+        turn.update(Update::Token("Hi".into()));
+        turn.update(Update::ToolStep(alfredo_tui::model::ToolStep {
+            calls: vec![alfredo_tui::model::ToolCall {
+                name: "edit_file".into(),
+                arguments: serde_json::json!({}),
+            }],
+            results: vec!["error: denied".into()],
+        }));
+        turn.update(Update::Done);
+        let records = [Record {
+            at_ms: 1,
+            tool: "edit_file".into(),
+            target: "edit a.py".into(),
+            outcome: Outcome::Failed("changed".into()),
+        }];
+        let value = turn.json(Policy::WorkspaceEdits, &records);
+        assert_eq!(value["state"], "done");
+        assert_eq!(value["reply"], "Hi");
+        assert_eq!(value["steps"], 1);
+        assert_eq!(value["calls"][0]["error"], true);
+        assert_eq!(value["approvals"][0]["outcome"], "failed");
+        assert_eq!(value["approvals"][0]["reason"], "changed");
+        assert_eq!(value["error"], serde_json::Value::Null);
+        let mut failed = Turn::default();
+        failed.update(Update::Failed("down".into()));
+        assert_eq!(failed.json(Policy::Deny, &[])["state"], "failed");
+        assert_eq!(Turn::default().json(Policy::Deny, &[])["state"], "failed");
     }
 
     #[test]

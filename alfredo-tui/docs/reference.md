@@ -188,6 +188,26 @@ stops the run and reports state `failed` (exit 1). Wayfinder-style goals are
 refused (exit 2) because headless has no scope flow. Not covered yet: a
 goal from stdin, streaming output and a headless resume.
 
+### Headless chat (`--chat PROMPT --headless`)
+
+`alfredo-tui --chat PROMPT --headless [--approve workspace-edits]` runs one Chat Agent
+turn (issue #240) without a terminal, on the repository's default mission, with the same
+system context and tool loop as chat. Read tools run. Mutating calls go through the
+Approval gate, answered by a scripted policy instead of a card:
+
+- no `--approve`: every mutating call is denied;
+- `--approve workspace-edits`: `edit_file` and `write_file` whose path stays inside the
+  repository are approved; anything else (other tools, later card kinds) is denied.
+
+There is no other policy and no interactive equivalent: interactive chat always asks
+(ADR 0004). `--approve` is refused without `--chat … --headless`, and `--chat` without
+`--headless`. Each outcome is appended to `chat-approvals.jsonl` like an interactive
+decision. Stderr gets one line per tool call and approval; stdout one JSON object
+`{state, policy, reply, steps, calls:[{tool,error}], approvals:[{tool,target,outcome,reason}],
+error}` (`state` `done` or `failed`). Exit 0 done; 1 failed or interrupted (SIGINT/SIGTERM
+cancel the turn); 2 setup or usage error. The turn is not saved to the conversation. The
+eval uses it for chat tasks (`eval/README.md`).
+
 ## Build and install a development archive
 
 On Linux x86-64 with Rust 1.96.0 and Python 3.11+, build a native locked candidate:

@@ -50,6 +50,24 @@ def good_trial(task='T1-add-function', kind='positive', passed=True):
     return trial
 
 
+def apply_chat_script(task, repo):
+    """Apply the scripted edit_file/write_file calls of a chat task, as the approved tools would."""
+    wrote = False
+    for reply in task['answers']['chat']:
+        for call in reply.get('tool_calls', []):
+            args = call['arguments']
+            if call['name'] == 'write_file':
+                (repo / args['path']).write_text(args['content'])
+            elif call['name'] == 'edit_file':
+                text = (repo / args['path']).read_text()
+                assert text.count(args['old_text']) == 1, args
+                (repo / args['path']).write_text(text.replace(args['old_text'], args['new_text']))
+            else:
+                continue
+            wrote = True
+    return wrote
+
+
 class TaskSetTests(unittest.TestCase):
     def setUp(self):
         self.tasks = run_eval.load_tasks(EVAL)
@@ -68,8 +86,21 @@ class TaskSetTests(unittest.TestCase):
             for name in ('goal.md', 'check.sh', 'answers.json', 'task.json'):
                 self.assertTrue((task['dir'] / name).is_file(), f'{task["id"]}/{name}')
             self.assertTrue(any((task['dir'] / 'repo').iterdir()), task['id'])
-            self.assertIn('plan', task['answers'])
-            self.assertIn('workers', task['answers'])
+            if task['mode'] == 'chat':
+                self.assertIn('chat', task['answers'])
+            else:
+                self.assertIn('plan', task['answers'])
+                self.assertIn('workers', task['answers'])
+
+    def test_ships_a_chat_tool_task_scripted_read_then_edit_then_reply(self):
+        chat = [t for t in self.tasks if t['mode'] == 'chat']
+        self.assertTrue(any(t['id'].startswith('T7-') for t in chat))
+        for task in chat:
+            names = [call['name'] for reply in task['answers']['chat'] for call in reply.get('tool_calls', [])]
+            edits = [i for i, n in enumerate(names) if n in ('edit_file', 'write_file')]
+            self.assertTrue(edits, task['id'])
+            self.assertTrue(any(n in run_eval.CHAT_READ_TOOLS for n in names[:edits[0]]), names)
+            self.assertIn('content', task['answers']['chat'][-1], 'the script ends with a plain reply')
 
     def test_every_check_fails_on_the_untouched_repo(self):
         self.assertEqual([], run_eval.validate_tasks(self.tasks, unsafe_unsandboxed=NO_SANDBOX_AVAILABLE))
@@ -80,7 +111,9 @@ class TaskSetTests(unittest.TestCase):
                 repo = Path(tmp) / 'repo'
                 run_eval.make_repo(task, repo)
                 wrote = False
-                for entry in reversed(task['answers']['workers']):  # repair entries are listed first
+                if task['mode'] == 'chat':
+                    wrote = apply_chat_script(task, repo)
+                for entry in reversed(task['answers'].get('workers', [])):  # repair entries are listed first
                     reply = entry['replies'][-1]
                     for file in reply.get('files', []):
                         (repo / file['path']).write_text(file['content'])
@@ -481,6 +514,75 @@ class ProbeTests(unittest.TestCase):
         server.hold_workers.set()
         thread.join(5)
         self.assertEqual(1, len(result))
+
+
+class ChatTaskTests(unittest.TestCase):
+    def setUp(self):
+        self.task = next(t for t in run_eval.load_tasks(EVAL) if t['mode'] == 'chat')
+
+    def ask(self, server, messages, tools=True):
+        conn = http.client.HTTPConnection('127.0.0.1', server.server.server_port, timeout=5)
+        body = {'model': 'fixture', 'messages': messages}
+        if tools:
+            body['tools'] = [{'type': 'function', 'function': {'name': 'read_file'}}]
+        conn.request('POST', '/api/chat', json.dumps(body), {'Content-Type': 'application/json'})
+        lines = [json.loads(line) for line in conn.getresponse().read().decode().splitlines() if line.strip()]
+        return lines[-1]
+
+    def test_fixture_answers_each_tool_round_with_the_scripted_calls(self):
+        server = run_eval.ModelServer(answers=self.task['answers'])
+        self.addCleanup(server.close)
+        script = self.task['answers']['chat']
+        messages = [{'role': 'system', 'content': 'ctx'}, {'role': 'user', 'content': self.task['goal']}]
+        for round_ in script:
+            final = self.ask(server, messages)
+            self.assertTrue(final['done'])
+            if 'tool_calls' in round_:
+                calls = final['message']['tool_calls']
+                self.assertEqual([c['name'] for c in round_['tool_calls']], [c['function']['name'] for c in calls])
+                messages += [{'role': 'assistant', 'content': '', 'tool_calls': calls},
+                             {'role': 'tool', 'content': 'ok', 'tool_name': calls[0]['function']['name']}]
+            else:
+                self.assertEqual(round_['content'], final['message']['content'])
+        self.assertEqual([], server.errors)
+        self.assertEqual({'chat'}, {r['kind'] for r in server.snapshot()})
+        self.assertTrue(all(isinstance(r['prompt'], int) for r in server.snapshot()))
+
+    def test_chat_facts_count_calls_errors_denials_and_the_read_edit_flow(self):
+        result = {'state': 'done', 'policy': 'workspace-edits', 'reply': 'Fixed.', 'steps': 3,
+                  'calls': [{'tool': 'grep', 'error': False}, {'tool': 'read_file', 'error': True},
+                            {'tool': 'edit_file', 'error': False}, {'tool': 'write_file', 'error': True}],
+                  'approvals': [{'tool': 'edit_file', 'target': 'edit units.py', 'outcome': 'applied', 'reason': None},
+                                {'tool': 'write_file', 'target': 'new file x', 'outcome': 'denied',
+                                 'reason': None}],
+                  'error': None}
+        facts = run_eval.chat_facts(result)
+        self.assertEqual(4, facts['tool_calls'])
+        self.assertEqual({'malformed': 1, 'refused': 1, 'sandbox': 0}, facts['errors'])
+        self.assertEqual(['grep', 'read_file', 'edit_file', 'write_file'], facts['chat']['calls'])
+        self.assertTrue(facts['chat']['read_before_edit'])
+        self.assertEqual(1, facts['chat']['applied'])
+        self.assertEqual('workspace-edits', facts['chat']['policy'])
+        self.assertEqual(result['approvals'], facts['approvals'])
+        no_read = run_eval.chat_facts(dict(result, calls=[{'tool': 'edit_file', 'error': False}]))
+        self.assertFalse(no_read['chat']['read_before_edit'])
+
+    def test_chat_command_is_headless_and_scoped_to_workspace_edits(self):
+        argv = run_eval.chat_command(Path('/bin/alfredo'), 'http://127.0.0.1:1', Path('/w'), Path('/s'), 'm', 'goal')
+        self.assertEqual(['--chat', 'goal', '--headless', '--approve', 'workspace-edits'], argv[-5:])
+        self.assertIn('--workspace', argv)
+        self.assertIn('--state-dir', argv)
+
+    def test_schema_accepts_chat_fields_and_rejects_a_bad_outcome(self):
+        trial = good_trial(self.task['id'])
+        trial['approvals'] = [{'tool': 'edit_file', 'target': 'edit units.py', 'outcome': 'applied', 'reason': None}]
+        trial['chat'] = {'policy': 'workspace-edits', 'reply': 'ok', 'steps': 3, 'calls': ['grep', 'edit_file'],
+                         'read_before_edit': True, 'applied': 1}
+        document = SchemaTests().document()
+        document['trials'][0] = trial
+        self.assertEqual([], schema_check.validate(document))
+        trial['approvals'][0]['outcome'] = 'skipped'
+        self.assertTrue(any('not in' in p for p in schema_check.validate(document)))
 
 
 class CodeHealthTests(unittest.TestCase):
