@@ -1630,6 +1630,13 @@ impl Session {
                 if !step.valid() || total + step.bytes() > MAX_TEXT {
                     self.status = Status::Failed(OUTPUT_LIMIT.into());
                 } else {
+                    // A chat proposal (#239) fills an empty prompt; typed text is kept.
+                    if let Some(command) = crate::chat_tools::propose::prefill(&step) {
+                        if self.draft.trim().is_empty() && self.history_index.is_none() {
+                            self.draft = command;
+                            self.end();
+                        }
+                    }
                     self.tool_steps
                         .entry(self.messages.len() - 1)
                         .or_default()

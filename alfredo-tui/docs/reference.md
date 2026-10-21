@@ -1637,6 +1637,27 @@ default false), `timeout_seconds` (1–600, default 120).
   `error: the sandbox could not run the command (…); nothing ran on the host…` with a
   suggestion to escalate. Nothing is retried on the host without a new, approved call.
 
+## Chat proposes governed work
+
+For large, multi-file, risky (migrations, broad refactors, deletions) work, or work
+that needs Checks or Review, chat calls `propose_plan` instead of editing (ADR 0004,
+"When chat hands off").
+
+| Tool | Arguments | Effect |
+| --- | --- | --- |
+| `propose_plan` | `goal`, `mode` (`plan` or `go`), `reason` | Ends the turn and puts `/plan <goal>` or `/go <goal>` in the prompt |
+
+- **Nothing starts.** The call changes nothing, so there is no y/n card: the editable
+  prompt is the confirmation. Edit the goal and press Enter to start it through the
+  ordinary `/plan` or `/go` command, or clear the prompt to drop it.
+- **Typed text wins.** If the prompt already holds text, it is kept; the command is
+  still shown in the reply.
+- **Hand-off only.** Other calls in the same reply as a valid proposal are not run
+  (no approval card); each gets `error: not run: proposal ends the turn…`.
+- **Goal.** One line: whitespace is collapsed, control, bidi and other invisible format characters dropped, cut at
+  2000 bytes. A missing goal or a mode other than `plan`/`go` returns `error: …` to
+  the model.
+
 ## Chat file mentions (`@path`)
 
 A token `@relative/path` in a chat prompt, starting at a word boundary (so `a@b.com` and
