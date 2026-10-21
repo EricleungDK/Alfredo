@@ -1,0 +1,1 @@
+km_to_miles in this repository returns the wrong value. Use your tools: find the function, read its file, then edit it so km_to_miles converts kilometres to miles (1 mile = 1.609344 km). Keep miles_to_km unchanged.

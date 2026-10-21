@@ -235,10 +235,22 @@ fn temperature_json(value: f64) -> serde_json::Value {
     }
 }
 
+/// Outcome of one tool-loop round (`Ollama::chat_round_probing`).
+pub enum Round {
+    /// The round finished; the tool calls it asked for (possibly none).
+    Calls(Vec<ToolCall>),
+    /// The model rejected tools; the failure was withheld for a plain retry.
+    Rejected,
+    /// The round failed (`Failed` sent) or the receiver closed.
+    Stopped,
+}
+
 #[derive(Default)]
 struct Trace {
     started: Option<Instant>,
     recording: Option<Recording>,
+    /// `Some` while a tool round collects its calls instead of emitting them.
+    calls: Option<Vec<ToolCall>>,
 }
 
 #[derive(Deserialize)]
@@ -689,6 +701,51 @@ impl Ollama {
         .await;
     }
 
+    /// One chat round of the tool loop. Updates go straight to `sender`; tool calls
+    /// are returned instead of emitted, and `Done` is withheld when there are any
+    /// (the caller sends it after the final tool-less round). `None` means the round
+    /// failed (`Failed` already sent) or the receiver closed.
+    pub async fn chat_round(
+        &self,
+        session: usize,
+        attempt: u64,
+        model: String,
+        messages: Vec<Message>,
+        sender: Sender<Event>,
+    ) -> Option<Vec<ToolCall>> {
+        match self
+            .chat_round_probing(session, attempt, model, messages, sender, false)
+            .await
+        {
+            Round::Calls(calls) => Some(calls),
+            Round::Rejected | Round::Stopped => None,
+        }
+    }
+
+    /// As `chat_round`, but with `probe` set a failure saying the model does not
+    /// support tools is withheld (no `Failed` sent) and reported as `Rejected`, so
+    /// the caller can retry the round without tools (issue #254).
+    pub async fn chat_round_probing(
+        &self,
+        session: usize,
+        attempt: u64,
+        model: String,
+        messages: Vec<Message>,
+        sender: Sender<Event>,
+        probe: bool,
+    ) -> Round {
+        self.run_chat(
+            session,
+            attempt,
+            model,
+            messages,
+            sender,
+            Some(probe),
+            || async { Ok(()) },
+        )
+        .await
+    }
+
     /// Revalidate captured inputs after shared capacity is acquired. Rejection
     /// produces a normal Failed event before any HTTP request is sent. The
     /// check runs again on every automatic reconnection.
@@ -699,14 +756,34 @@ impl Ollama {
         model: String,
         messages: Vec<Message>,
         sender: Sender<Event>,
-        mut check: Check,
+        check: Check,
     ) where
+        Check: FnMut() -> Checked,
+        Checked: std::future::Future<Output = Result<(), String>>,
+    {
+        self.run_chat(session, attempt, model, messages, sender, None, check)
+            .await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn run_chat<Check, Checked>(
+        &self,
+        session: usize,
+        attempt: u64,
+        model: String,
+        messages: Vec<Message>,
+        sender: Sender<Event>,
+        collect: Option<bool>,
+        mut check: Check,
+    ) -> Round
+    where
         Check: FnMut() -> Checked,
         Checked: std::future::Future<Output = Result<(), String>>,
     {
         let mut trace = Trace {
             started: self.recorder.as_ref().map(|_| Instant::now()),
             recording: None,
+            calls: collect.map(|_| Vec::new()),
         };
         // Recorded qualification requests measure one exact wire request.
         let limit = if self.recorder.is_some() {
@@ -763,10 +840,13 @@ impl Ollama {
             });
         }
         let failure = match result {
-            Ok(Ok(())) => return,
+            Ok(Ok(())) => return Round::Calls(trace.calls.take().unwrap_or_default()),
             Ok(Err(error)) => error,
             Err(_) => "Request exceeded the ten-minute deadline; partial reply retained".into(),
         };
+        if collect == Some(true) && failure.contains(NO_TOOLS_MARKER) {
+            return Round::Rejected;
+        }
         let _ = sender
             .send(Event {
                 session,
@@ -774,6 +854,7 @@ impl Ollama {
                 update: Update::Failed(failure),
             })
             .await;
+        Round::Stopped
     }
 
     async fn stream<Check, Checked>(
@@ -1124,7 +1205,9 @@ impl Ollama {
                 .iter()
                 .map(|call| call.name.len() + call.arguments.to_string().len())
                 .sum::<usize>();
-            if !calls.is_empty() {
+            if let Some(held) = &mut trace.calls {
+                held.extend(calls);
+            } else if !calls.is_empty() {
                 sender
                     .send(Event {
                         session,
@@ -1201,7 +1284,8 @@ impl Ollama {
                 )
                 .into());
             }
-            if trace.recording.is_none() {
+            let withheld = trace.calls.as_ref().is_some_and(|held| !held.is_empty());
+            if trace.recording.is_none() && !withheld {
                 sender
                     .send(Event {
                         session,

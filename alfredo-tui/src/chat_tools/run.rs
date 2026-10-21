@@ -5,17 +5,14 @@ use super::{
 };
 use crate::{
     model::{Event, Message, ToolCall, ToolStep, Update, MAX_TEXT},
-    provider::{Ollama, NO_TOOLS_MARKER},
+    provider::{Ollama, Round},
 };
 use std::{
     collections::HashSet,
     path::Path,
     sync::{Mutex, OnceLock},
 };
-use tokio::sync::{
-    mpsc::{self, Sender},
-    oneshot,
-};
+use tokio::sync::{mpsc::Sender, oneshot};
 
 /// Tool rounds one turn may run; a model asking for more is stopped with a notice.
 pub const MAX_STEPS: usize = 8;
@@ -76,54 +73,43 @@ pub async fn run_turn(
     };
     let mut steps = 0;
     loop {
-        let (inner, mut events) = mpsc::channel(64);
-        let call = provider.chat(session, attempt, model.clone(), messages.clone(), inner);
-        let mut rejected = false;
-        let forward = async {
-            let mut calls: Vec<ToolCall> = Vec::new();
-            let mut done = false;
-            while let Some(event) = events.recv().await {
-                match event.update {
-                    // The model refuses tools: hold the failure back and retry plain.
-                    Update::Failed(text) if !plain && text.contains(NO_TOOLS_MARKER) => {
-                        rejected = true;
-                    }
-                    Update::ToolCalls(found) => calls.extend(found),
-                    Update::Done => done = true,
-                    update => {
-                        if !send(update).await {
-                            return None;
-                        }
-                    }
-                }
-            }
-            Some((calls, done))
-        };
-        let (_, outcome) = tokio::join!(call, forward);
-        if rejected {
-            // Retry this round once without tools; later turns skip them without probing.
-            plain = true;
-            provider = provider.with_tools(Vec::new());
-            if let Ok(mut models) = no_tools_models().lock() {
-                models.insert(model.clone());
-            }
-            strip_tool_prompt(&mut messages);
-            let name: String = model.chars().filter(|c| !c.is_control()).collect();
-            if !send(Update::Token(format!(
-                "[Model {name} has no tool support; chat is running without file tools]\n\n"
-            )))
+        // Tokens go straight to the session sender; `Done` is withheld by the
+        // provider when the round asked for tools. A model that refuses tools has
+        // its failure held back so the round is retried once in plain chat.
+        let mut calls = match provider
+            .chat_round_probing(
+                session,
+                attempt,
+                model.clone(),
+                messages.clone(),
+                sender.clone(),
+                !plain,
+            )
             .await
-            {
-                return;
+        {
+            Round::Calls(calls) => calls,
+            Round::Stopped => return,
+            Round::Rejected => {
+                // Retry this round once without tools; later turns skip them without probing.
+                plain = true;
+                provider = provider.with_tools(Vec::new());
+                if let Ok(mut models) = no_tools_models().lock() {
+                    models.insert(model.clone());
+                }
+                strip_tool_prompt(&mut messages);
+                let name: String = model.chars().filter(|c| !c.is_control()).collect();
+                if !send(Update::Token(format!(
+                    "[Model {name} has no tool support; chat is running without file tools]\n\n"
+                )))
+                .await
+                {
+                    return;
+                }
+                continue;
             }
-            continue;
-        }
-        // A closed terminal, or a failure the provider already reported.
-        let Some((mut calls, true)) = outcome else {
-            return;
         };
         if calls.is_empty() {
-            send(Update::Done).await;
+            // The provider already sent `Done` on the same path as the tokens.
             return;
         }
         if steps == MAX_STEPS {
@@ -158,7 +144,7 @@ pub async fn run_turn(
                 _ if index >= MAX_CALLS => {
                     format!("error: not run; at most {MAX_CALLS} tool calls per reply, ask again")
                 }
-                Some(Tier::Mutating) => match &gate {
+                Some(Tier::Mutating | Tier::Push) => match &gate {
                     None => format!(
                         "error: {} needs approval, which is not available here",
                         call.name
@@ -231,11 +217,25 @@ async fn gated(
             .ok();
         return approval::DENIED.into();
     }
-    let Ok(decision) = decision.await else {
+    // If the turn is aborted (Esc) after the owner answered but before the call is
+    // handed to the blocking pool, the guard still logs exactly one outcome.
+    let mut guard = Undecided {
+        decision: Some(decision),
+        card: card.clone(),
+        log: gate.log.clone(),
+    };
+    let Some(Ok(decision)) = (match guard.decision.as_mut() {
+        Some(receiver) => Some(receiver.await),
+        None => None,
+    }) else {
+        guard.decision = None;
         return approval::DENIED.into();
     };
+    guard.decision = None;
     let root = workspace.to_path_buf();
     let log = gate.log.clone();
+    // No await between here and the spawn: once spawned, the call runs and logs even
+    // if this turn is aborted.
     tokio::task::spawn_blocking(move || {
         let (result, outcome) = match decision {
             Decision::Deny => (approval::DENIED.to_string(), Outcome::Denied),
@@ -251,4 +251,28 @@ async fn gated(
     })
     .await
     .unwrap_or_else(|_| "error: tool execution stopped unexpectedly".into())
+}
+
+/// Logs the outcome of an answered card whose turn was dropped before it ran.
+struct Undecided {
+    decision: Option<oneshot::Receiver<Decision>>,
+    card: approval::Card,
+    log: Option<approval::Log>,
+}
+
+impl Drop for Undecided {
+    fn drop(&mut self) {
+        let (Some(mut receiver), Some(log)) = (self.decision.take(), &self.log) else {
+            return;
+        };
+        let outcome = match receiver.try_recv() {
+            Ok(Decision::Approve) => Outcome::Failed(
+                "turn cancelled before the approved call ran; nothing was written".into(),
+            ),
+            Ok(Decision::Deny) => Outcome::Denied,
+            // Unanswered: the terminal logs it as cancelled.
+            Err(_) => return,
+        };
+        log.append(&self.card, &outcome);
+    }
 }

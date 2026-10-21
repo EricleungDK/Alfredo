@@ -100,6 +100,56 @@ async fn tool_call_frames_parse_into_events_and_requests_carry_tools() {
     assert_eq!(body["tools"], json!(chat_tools::definitions()));
 }
 
+/// Issue #253: a chat round writes straight to the caller's sender (no forwarding
+/// hop in `run_turn`); a tool-less round delivers `Done` on that same path, and a
+/// round that asks for tools returns its calls and withholds `Done`.
+#[tokio::test]
+async fn chat_round_writes_to_the_callers_sender_without_a_forwarding_hop() {
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, |_, _| done("hello"));
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(5)).unwrap();
+    let (sender, mut receiver) = mpsc::channel(64);
+    let calls = provider
+        .chat_round(0, 1, "fixture".into(), vec![], sender)
+        .await;
+    assert_eq!(calls, Some(vec![]));
+    // The sender was moved in and dropped on return, so everything the round
+    // produced is already queued on the caller's channel, `Done` last.
+    let mut updates = Vec::new();
+    while let Some(event) = receiver.recv().await {
+        updates.push(event.update);
+    }
+    assert!(matches!(updates.last(), Some(Update::Done)));
+    assert_eq!(
+        updates.iter().filter(|u| matches!(u, Update::Done)).count(),
+        1
+    );
+    assert!(updates
+        .iter()
+        .any(|u| matches!(u, Update::Token(t) if t == "hello")));
+
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, |_, _| tool_call("list_files", json!({})));
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(5)).unwrap();
+    let (sender, mut receiver) = mpsc::channel(64);
+    let calls = provider
+        .chat_round(0, 1, "fixture".into(), vec![], sender)
+        .await;
+    assert_eq!(
+        calls,
+        Some(vec![ToolCall {
+            name: "list_files".into(),
+            arguments: json!({})
+        }])
+    );
+    while let Some(event) = receiver.recv().await {
+        assert!(
+            !matches!(event.update, Update::Done | Update::ToolCalls(_)),
+            "a tool round must not emit Done or ToolCalls"
+        );
+    }
+}
+
 #[tokio::test]
 async fn plain_providers_send_no_tools() {
     let addr = ollama_fixture::reserve();

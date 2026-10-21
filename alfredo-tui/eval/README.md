@@ -9,7 +9,7 @@ cargo build --manifest-path alfredo-tui/Cargo.toml        # the binary under tes
 python3 alfredo-tui/eval/run_eval.py --agent alfredo --backend fixture --trials 3 --out out.json
 ```
 
-Fixture mode is deterministic, needs no model, and takes about 40 s on 2 CPUs (6 tasks x 3
+Fixture mode is deterministic, needs no model, and takes about 40 s on 2 CPUs (7 tasks x 3
 trials). CI runs a one-trial pass of it (`tests/eval_smoke.py`).
 
 ## How a trial works
@@ -18,6 +18,15 @@ trials). CI runs a one-trial pass of it (`tests/eval_smoke.py`).
 2. Run the agent on `goal.md`:
    - **Alfredo**: start the TUI in a pty with a fresh `--state-dir`, send `/go <goal>`, wait for
      `git switch alfredo/go-` (done) or `Autopilot ✗ failed`, then quit with Ctrl+Q.
+   - **Alfredo, chat tasks** (`task.json` `"mode": "chat"`, issue #240): run one Chat Agent
+     turn headless, `alfredo-tui --chat <goal> --headless --approve workspace-edits`
+     (`chat_trial`). Read tools run; the scripted policy approves `edit_file`/`write_file`
+     inside the task workspace and denies anything else, and every outcome is logged to the
+     same `chat-approvals.jsonl` as an interactive approval. The candidate is a commit of the
+     working tree the approved edits left. A chat trial passes only if `check.sh` passes **and**
+     `chat.read_before_edit` holds (a successful `read_file` of the edited file, or `grep` over
+     it, came before the first applied edit); a blind write that happens to pass is a fail
+     with the reason in `grade_output` and `notes`.
    - **Claude Code**: run it with the goal on stdin in the temp repo (see below).
 3. Grade the candidate without reading any screen or log: `git archive` the `alfredo/go-*`
    branch (Claude Code: a commit of the final working tree), extract it, and run the task's
@@ -74,6 +83,7 @@ see the residual risk below).
 | `T4-prose-control` | **negative control**: the worker only replies in prose; must grade as failed |
 | `T5-test-and-fix` | fix a bug and add a regression test file |
 | `T6-multifile-rename` | rename a function across four files |
+| `T7-chat-tool-edit` | Chat Agent tools: `grep` -> `read_file` -> approved `edit_file` fixes a function (chat mode) |
 
 The negative control is scripted, so it runs only with `--backend fixture`; other modes list
 it under `config.skipped_tasks`. `--tasks T1,T4` selects tasks by id or prefix.
@@ -82,6 +92,11 @@ it under `config.skipped_tasks`. `--tasks T1,T4` selects tasks by id or prefix.
 `{"prefix": ..., "replies": [...]}` matched in order against the start of the worker prompt
 (`Implement this task: ...`, repairs start `Implement this task: Repair #`). Replies are
 consumed in order and the last repeats; a reply is `{"files": [...]}` or `{"prose": "..."}`.
+
+A chat task's `answers.json` has `chat` instead: one entry per tool round,
+`{"tool_calls": [{"name": ..., "arguments": {...}}]}`, ending with `{"content": "..."}`. The
+fixture recognises a chat request by its `tools` and answers round n (the number of
+assistant tool-call messages already in the request) with entry n.
 
 ## Options
 
@@ -152,6 +167,13 @@ The grade of its result runs in the grading sandbox, but the Claude Code process
 - `trials[]`: `task, kind, trial, pass, outcome, turns, tool_calls, tokens{prompt, eval,
   planner, peak_ctx}, errors{malformed, refused, sandbox}, repairs, wall_s, ttft_ms, rss_kb,
   exit_code, panic`, plus `cold_start_ms`, `overhead_s`, `graded_ref`, `grade_output`, `notes`.
+  Chat trials add `approvals[]` (`{tool, target, outcome: applied|failed|denied|cancelled,
+  reason}`, from the chat-approval log) and `chat` (`{policy, reply, steps, calls[],
+  read_before_edit, applied}`). For them `turns` counts chat requests, `tool_calls` the tool
+  calls, `errors.refused` denied approvals, `errors.malformed` only malformed calls (unknown
+  tool, bad arguments) and `tool_errors` well-formed calls a tool refused (text not found,
+  missing or excluded file, an approved edit that failed);
+  `repairs`, `cold_start_ms` and `enter_to_request_ms` are `null` with a reason.
   A value the mode cannot produce is `null`, with the reason in that trial's `unavailable`.
 - `config.binary` is the resolved binary path and `config.profile` its cargo profile (`debug`, `release`, or `unknown` when the binary's parent directory is neither, e.g. a copied or renamed binary, which gets no warning and no note; both `null` for Claude Code).
 - `tasks`: pass counts per task; `metrics`: `M1`..`M16`, each `{name, value, unit, reason}`
