@@ -363,6 +363,14 @@ impl ConversationStore {
         }
         Ok(())
     }
+    /// Name the file and one concrete way out; the original is never touched.
+    fn unreadable(&self, problem: &str) -> String {
+        let path = self.path.display();
+        let problem = problem.trim_end_matches(['.', ';']);
+        format!(
+            "{problem} ({path}); original preserved. Move it aside (mv \"{path}\" \"{path}.bad\") or start with --conversation NAME"
+        )
+    }
     pub fn load(&self) -> Result<Option<Snapshot>> {
         match fs::symlink_metadata(&self.path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -375,12 +383,14 @@ impl ConversationStore {
             .read_to_end(&mut bytes)
             .map_err(|e| e.to_string())?;
         if bytes.len() > LIMIT {
-            return Err("Conversation file exceeds 12 MiB; original preserved".into());
+            return Err(self.unreadable("Conversation file exceeds 12 MiB"));
         }
         let snapshot: Snapshot = serde_json::from_slice(&bytes)
-            .map_err(|_| "Malformed conversation state; original preserved")?;
-        snapshot.validate(&self.namespace)?;
-        self.validate_selection_identity(&snapshot)?;
+            .map_err(|_| self.unreadable("Malformed conversation state"))?;
+        snapshot
+            .validate(&self.namespace)
+            .and_then(|()| self.validate_selection_identity(&snapshot))
+            .map_err(|error| self.unreadable(&error))?;
         Ok(Some(snapshot))
     }
     pub fn save(&self, snapshot: &Snapshot) -> Result<()> {
@@ -392,7 +402,7 @@ impl ConversationStore {
         }
         if let Some(previous) = self.load()? {
             if previous.schema_version > snapshot.schema_version {
-                return Err("Conversation schema downgrade refused; original preserved".into());
+                return Err(self.unreadable("Conversation schema downgrade refused"));
             }
             if previous.schema_version < snapshot.schema_version {
                 let mut original = Vec::new();
@@ -425,9 +435,10 @@ impl ConversationStore {
                             .read_to_end(&mut retained)
                             .map_err(|e| e.to_string())?;
                         if retained != original {
-                            return Err(
-                                "Legacy conversation backup differs; original preserved".into()
-                            );
+                            return Err(self.unreadable(&format!(
+                                "Legacy conversation backup {} differs",
+                                backup.display()
+                            )));
                         }
                     }
                     Err(error) => return Err(error.to_string()),
