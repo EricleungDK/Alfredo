@@ -6,6 +6,7 @@
 //! in [`TOOLS`]. Every tool has a [`Tier`]: [`Tier::Read`] runs without asking;
 //! [`Tier::Mutating`] calls pause the loop for owner Approval ([`approval`]);
 //! [`Tier::Push`] calls always do.
+//! [`Tier::Propose`] calls end the turn and prefill the prompt ([`propose`]).
 //!
 //! Tools act on the Coding Workspace (the owner's repository, working tree). Paths are
 //! confined to it ([`resolve`]); outputs are capped at [`MAX_OUTPUT`] bytes. Errors are
@@ -15,6 +16,7 @@ pub mod approval;
 mod edit;
 mod git_read;
 mod git_write;
+pub mod propose;
 mod read;
 mod run;
 mod shell;
@@ -35,6 +37,9 @@ pub enum Tier {
     Read,
     /// Changes the Coding Workspace; each call needs owner Approval.
     Mutating,
+    /// Proposes governed work (/plan, /go); changes nothing, so no y/n card: it ends
+    /// the turn and prefills the owner's prompt, whose Enter is the confirmation.
+    Propose,
     /// Publishes to a remote (issue #237); always asks, never always-allowed.
     Push,
 }
@@ -73,6 +78,7 @@ pub static TOOLS: &[Tool] = &[
     git_write::GIT_MERGE,
     git_write::GIT_PUSH,
     shell::RUN_COMMAND,
+    propose::PROPOSE_PLAN,
 ];
 
 /// Ollama `tools` definitions for every registered tool.

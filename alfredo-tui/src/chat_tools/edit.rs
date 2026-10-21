@@ -202,7 +202,10 @@ fn write_atomic(
             return Err("target became a symlink; nothing was written".into())
         }
         Ok(m) if !m.is_file() => return Err("target is not a regular file".into()),
-        Ok(m) => Some(m),
+        Ok(m) => {
+            refuse_read_only(&m, &target.to_string_lossy())?;
+            Some(m)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e.to_string()),
     };
@@ -263,6 +266,24 @@ fn write_atomic(
     Ok(())
 }
 
+/// Refuse a target whose owner write bit is clear. `rename` ignores the file's own
+/// permissions, so without this check the atomic write would replace a `chmod 444` file.
+fn refuse_read_only(metadata: &std::fs::Metadata, shown: &str) -> Result<(), String> {
+    #[cfg(unix)]
+    let read_only = {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o200 == 0
+    };
+    #[cfg(not(unix))]
+    let read_only = metadata.permissions().readonly();
+    if read_only {
+        return Err(format!(
+            "{shown} is read-only; nothing was written. Ask the user to make it writable (chmod u+w) if the change is intended"
+        ));
+    }
+    Ok(())
+}
+
 fn read_existing(path: &Path) -> Result<String, String> {
     let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
     if !metadata.is_file() {
@@ -284,6 +305,10 @@ fn plan_write(root: &Path, arguments: &Value) -> Result<(PathBuf, Option<String>
     }
     let target = resolve_target(root, path)?;
     let old = if target.exists() {
+        refuse_read_only(
+            &std::fs::metadata(&target).map_err(|e| e.to_string())?,
+            path,
+        )?;
         Some(read_existing(&target)?)
     } else {
         None
@@ -300,6 +325,9 @@ fn plan_edit(root: &Path, arguments: &Value) -> Result<(PathBuf, String, String)
         return Err("old_text must not be empty".into());
     }
     let target = resolve(root, path)?;
+    if let Ok(metadata) = std::fs::metadata(&target) {
+        refuse_read_only(&metadata, path)?;
+    }
     let current = read_existing(&target)?;
     // A file whose every line ends in CRLF is matched and edited as LF text (the model
     // sees `\r` as nothing), then written back with CRLF. Mixed files are matched on
@@ -499,6 +527,32 @@ mod tests {
         let mode = std::fs::metadata(&target).unwrap().permissions().mode();
         assert_eq!(mode & 0o7777, 0o751);
         assert_eq!(std::fs::read(&target).unwrap(), b"#!/bin/sh\necho hi\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_read_only_file_is_refused_at_planning_and_at_the_write() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("readonly");
+        let target = dir.join("locked.txt");
+        std::fs::write(&target, "locked\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o444)).unwrap();
+        let write = json!({"path": "locked.txt", "content": "new\n"});
+        let edit = json!({"path": "locked.txt", "old_text": "locked", "new_text": "open"});
+        for (name, args) in [("write_file", &write), ("edit_file", &edit)] {
+            let error = preview(&dir, name, args).unwrap().err().expect(name);
+            assert!(error.contains("locked.txt is read-only"), "{name}: {error}");
+        }
+        assert!(write_file(&dir, &write)
+            .unwrap_err()
+            .contains("is read-only"));
+        assert!(edit_file(&dir, &edit).unwrap_err().contains("is read-only"));
+        let error = write_regular(&target, "new\n").unwrap_err();
+        assert!(error.contains("is read-only"), "{error}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"locked\n");
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o444);
+        assert!(leftovers(&dir).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

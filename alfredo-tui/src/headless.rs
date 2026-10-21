@@ -53,6 +53,8 @@ pub struct Options<'a> {
     pub start: PathBuf,
     pub conversation: String,
     pub model: String,
+    /// `--model` was given on the command line: it wins over the conversation's saved model.
+    pub model_explicit: bool,
     pub goal: String,
     pub max_repairs: u32,
 }
@@ -145,6 +147,7 @@ fn stopped_status(goal: &str) -> Status {
 
 /// The one JSON result object.
 fn result_json(
+    model: &str,
     status: &Status,
     outcomes: &[TaskOutcome],
     reason: &str,
@@ -165,6 +168,7 @@ fn result_json(
         }));
     }
     serde_json::json!({
+        "model": model,
         "state": status.state.label(),
         "goal": status.goal,
         "branch": status.branch,
@@ -173,6 +177,22 @@ fn result_json(
         "repairs": status.repairs,
         "failed": failed,
     })
+}
+
+/// The model this run uses: an explicit `--model` as given (the conversation's saved
+/// model is left alone, never written), otherwise the restored conversation's model.
+fn run_model(work: &Workstation, flag: String, explicit: bool) -> String {
+    if explicit {
+        flag
+    } else {
+        work.app.sessions[work.app.selected].model.clone()
+    }
+}
+
+fn preflight(runtime: &Runtime, provider: &Ollama, model: &str) -> Result<(), String> {
+    runtime
+        .block_on(alfredo_tui::doctor::model_server_check(provider, model))
+        .map_err(|failure| alfredo_tui::doctor::model_check_message(model, &failure))
 }
 
 /// Run the goal to its end. `Err` is a setup error; otherwise the exit code.
@@ -184,6 +204,7 @@ pub fn run(options: Options) -> Result<i32, String> {
         start,
         conversation,
         model,
+        model_explicit,
         goal,
         max_repairs,
     } = options;
@@ -199,13 +220,18 @@ pub fn run(options: Options) -> Result<i32, String> {
         conversation,
     )?;
     let checker = provider.clone();
+    // Setup errors (Ollama down, model missing) are exit 2, not a failed run. An explicit
+    // model is checked before launch creates and saves the conversation with it.
+    if model_explicit {
+        preflight(runtime, &checker, &model)?;
+    }
     let mut work = Workstation::launch(runtime, &state_dir, request, &model, provider)?;
     work.tasks.refresh(runtime);
-    let model = work.app.sessions[work.app.selected].model.clone();
-    // Setup errors (Ollama down, model missing) are exit 2, not a failed run.
-    runtime
-        .block_on(alfredo_tui::doctor::model_server_check(&checker, &model))
-        .map_err(|failure| alfredo_tui::doctor::model_check_message(&model, &failure))?;
+    let model = run_model(&work, model, model_explicit);
+    if !model_explicit {
+        preflight(runtime, &checker, &model)?;
+    }
+    say(format!("model {model}"));
     work.autopilot
         .start(&goal, &model, max_repairs, &work.tasks)
         .map_err(|error| format!("--go refused: {error}"))?;
@@ -288,7 +314,7 @@ pub fn run(options: Options) -> Result<i32, String> {
             let _ = writeln!(
                 std::io::stdout(),
                 "{}",
-                result_json(&status, &outcomes, &reason, fatal.is_some())
+                result_json(&model, &status, &outcomes, &reason, fatal.is_some())
             );
             let _ = std::io::stdout().flush();
             // The JSON is out; now let a started hook finish (or be killed) and report.
@@ -620,7 +646,7 @@ impl Turn {
         }
     }
 
-    fn json(&self, policy: Policy, records: &[Record]) -> serde_json::Value {
+    fn json(&self, model: &str, policy: Policy, records: &[Record]) -> serde_json::Value {
         let error = match (&self.failure, self.done, self.stopped) {
             (Some(reason), _, _) => Some(reason.clone()),
             (None, _, Some(Stop::StepLimit)) => Some(format!(
@@ -648,6 +674,7 @@ impl Turn {
             })
             .collect();
         serde_json::json!({
+            "model": model,
             "state": match (&error, self.stopped) {
                 (None, _) => "done",
                 (_, Some(_)) => "stopped",
@@ -675,6 +702,8 @@ pub struct ChatOptions<'a> {
     pub start: PathBuf,
     pub conversation: String,
     pub model: String,
+    /// `--model` was given on the command line: it wins over the conversation's saved model.
+    pub model_explicit: bool,
     pub prompt: String,
     pub policy: Policy,
 }
@@ -691,6 +720,7 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
         start,
         conversation,
         model,
+        model_explicit,
         prompt,
         policy,
     } = options;
@@ -703,11 +733,14 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
         conversation,
     )?;
     let chat = provider.clone();
+    if model_explicit {
+        preflight(runtime, &chat, &model)?;
+    }
     let work = Workstation::launch(runtime, &state_dir, request, &model, provider)?;
-    let model = work.app.sessions[work.app.selected].model.clone();
-    runtime
-        .block_on(alfredo_tui::doctor::model_server_check(&chat, &model))
-        .map_err(|failure| alfredo_tui::doctor::model_check_message(&model, &failure))?;
+    let model = run_model(&work, model, model_explicit);
+    if !model_explicit {
+        preflight(runtime, &chat, &model)?;
+    }
     let workspace = work.tasks.workspace().to_path_buf();
     let log = Log::for_store(work.tasks.store()).ok();
     let before = log.as_ref().map_or(0, |log| log.records().len());
@@ -718,7 +751,10 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
             content: prompt,
         },
     ];
-    say(format!("chat · approvals: {}", policy.label()));
+    say(format!(
+        "chat · model {model} · approvals: {}",
+        policy.label()
+    ));
     catch_signals();
     let (requests, mut asked) = tokio::sync::mpsc::channel(4);
     let gate = Gate::new(requests, log.clone());
@@ -738,7 +774,7 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
             &workspace,
             0,
             1,
-            model,
+            model.clone(),
             messages,
             sender,
             Some(gate),
@@ -792,7 +828,7 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
         turn.stopped = None;
     }
     let records = log.map_or_else(Vec::new, |log| log.records());
-    let value = turn.json(policy, records.get(before..).unwrap_or(&[]));
+    let value = turn.json(&model, policy, records.get(before..).unwrap_or(&[]));
     let _ = writeln!(std::io::stdout(), "{value}");
     let _ = std::io::stdout().flush();
     Ok(i32::from(value["state"] != "done"))
@@ -948,7 +984,7 @@ mod tests {
             results: vec!["text".into()],
         }));
         turn.update(Update::Done);
-        let value = turn.json(Policy::Deny, &[]);
+        let value = turn.json("m", Policy::Deny, &[]);
         assert_eq!(value["calls"][0]["path"], "units.py");
         assert_eq!(value["calls"][0]["result"], "ok");
     }
@@ -969,7 +1005,7 @@ mod tests {
         turn.update(Update::Stopped(Stop::StepLimit));
         turn.update(Update::Token("\n\n[... ask again to continue]".into()));
         turn.update(Update::Done);
-        let value = turn.json(Policy::Deny, &[]);
+        let value = turn.json("m", Policy::Deny, &[]);
         assert_eq!(value["state"], "stopped");
         assert_eq!(value["stopped"], "step_limit");
         assert_eq!(value["reply"], "partial");
@@ -981,7 +1017,7 @@ mod tests {
         let mut limit = Turn::default();
         limit.update(Update::Stopped(Stop::OutputLimit));
         limit.update(Update::Failed("Conversation output limit reached".into()));
-        let value = limit.json(Policy::Deny, &[]);
+        let value = limit.json("m", Policy::Deny, &[]);
         assert_eq!(value["state"], "stopped");
         assert_eq!(value["stopped"], "output_limit");
         assert_eq!(value["error"], "Conversation output limit reached");
@@ -1006,7 +1042,7 @@ mod tests {
             outcome: Outcome::Failed("changed".into()),
             escalated: false,
         }];
-        let value = turn.json(Policy::WorkspaceEdits, &records);
+        let value = turn.json("m", Policy::WorkspaceEdits, &records);
         assert_eq!(value["state"], "done");
         assert_eq!(value["reply"], "Hi");
         assert_eq!(value["steps"], 1);
@@ -1018,8 +1054,11 @@ mod tests {
         assert_eq!(value["error"], serde_json::Value::Null);
         let mut failed = Turn::default();
         failed.update(Update::Failed("down".into()));
-        assert_eq!(failed.json(Policy::Deny, &[])["state"], "failed");
-        assert_eq!(Turn::default().json(Policy::Deny, &[])["state"], "failed");
+        assert_eq!(failed.json("m", Policy::Deny, &[])["state"], "failed");
+        assert_eq!(
+            Turn::default().json("m", Policy::Deny, &[])["state"],
+            "failed"
+        );
     }
 
     #[test]
@@ -1030,13 +1069,25 @@ mod tests {
             0,
             Some(Err("rejected by review".into())),
         )];
-        let value = result_json(&status(RunState::Partial, 1), &outcomes, "", false);
+        let value = result_json("m", &status(RunState::Partial, 1), &outcomes, "", false);
         assert_eq!(value["failed"][0]["reason"], "rejected by review");
         assert_eq!(value["state"], "partial");
-        let value = result_json(&status(RunState::Failed, 0), &[], "planner gave up", false);
+        let value = result_json(
+            "m",
+            &status(RunState::Failed, 0),
+            &[],
+            "planner gave up",
+            false,
+        );
         assert_eq!(value["failed"][0]["reason"], "planner gave up");
         // A runtime error is listed even beside failed tasks.
-        let value = result_json(&status(RunState::Failed, 0), &outcomes, "save failed", true);
+        let value = result_json(
+            "m",
+            &status(RunState::Failed, 0),
+            &outcomes,
+            "save failed",
+            true,
+        );
         assert_eq!(value["failed"][1]["reason"], "save failed");
         assert_eq!(value["failed"][1]["id"], serde_json::Value::Null);
     }
