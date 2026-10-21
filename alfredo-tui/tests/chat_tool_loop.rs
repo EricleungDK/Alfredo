@@ -40,7 +40,17 @@ fn workspace(tag: &str) -> PathBuf {
 async fn run(endpoint: &str, root: &std::path::Path, messages: Vec<Message>) -> Vec<Event> {
     let provider = Ollama::new(endpoint, Duration::from_secs(5)).unwrap();
     let (sender, mut receiver) = mpsc::channel(256);
-    chat_tools::run_turn(&provider, root, 0, 1, "fixture".into(), messages, sender).await;
+    chat_tools::run_turn(
+        &provider,
+        root,
+        0,
+        1,
+        "fixture".into(),
+        messages,
+        sender,
+        None,
+    )
+    .await;
     let mut events = Vec::new();
     while let Some(event) = receiver.recv().await {
         events.push(event);

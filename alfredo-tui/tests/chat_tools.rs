@@ -64,10 +64,14 @@ fn registry_lists_read_tier_tools_as_ollama_function_definitions() {
             "git_status",
             "git_branch",
             "git_log",
-            "git_diff"
+            "git_diff",
+            "write_file",
+            "edit_file"
         ]
     );
-    assert!(chat_tools::TOOLS.iter().all(|tool| tool.tier == Tier::Read));
+    assert!(chat_tools::TOOLS[..7]
+        .iter()
+        .all(|tool| tool.tier == Tier::Read));
     let definitions = chat_tools::definitions();
     assert_eq!(definitions.len(), chat_tools::TOOLS.len());
     for definition in &definitions {
@@ -89,7 +93,7 @@ fn registry_lists_read_tier_tools_as_ollama_function_definitions() {
 fn unknown_tools_and_bad_arguments_are_errors_for_the_model() {
     let workspace = Workspace::new();
     assert!(workspace
-        .run("write_file", json!({"path": "x"}))
+        .run("delete_everything", json!({"path": "x"}))
         .starts_with("error: unknown tool"));
     assert!(workspace.run("read_file", json!({})).starts_with("error: "));
     assert!(workspace

@@ -3,14 +3,15 @@
 //! loop ([`run_turn`]).
 //!
 //! Adding a tool = one function-family file exporting [`Tool`] consts plus one entry
-//! in [`TOOLS`]. Every tool has a [`Tier`]; today only [`Tier::Read`] exists and runs
-//! without asking. Later slices add mutating tiers whose calls pause the loop for
-//! approval; the loop consults the tier before running a call.
+//! in [`TOOLS`]. Every tool has a [`Tier`]: [`Tier::Read`] runs without asking;
+//! [`Tier::Mutating`] calls pause the loop for owner Approval ([`approval`]).
 //!
 //! Tools act on the Coding Workspace (the owner's repository, working tree). Paths are
 //! confined to it ([`resolve`]); outputs are capped at [`MAX_OUTPUT`] bytes. Errors are
 //! returned to the model as `error: ...` text, never raised.
 
+pub mod approval;
+mod edit;
 mod git_read;
 mod read;
 mod run;
@@ -29,6 +30,8 @@ pub const MAX_OUTPUT: usize = 16 * 1024;
 pub enum Tier {
     /// Reads the Coding Workspace; runs automatically.
     Read,
+    /// Changes the Coding Workspace; each call needs owner Approval.
+    Mutating,
 }
 
 /// One tool the model may call.
@@ -51,6 +54,8 @@ pub static TOOLS: &[Tool] = &[
     git_read::GIT_BRANCH,
     git_read::GIT_LOG,
     git_read::GIT_DIFF,
+    edit::WRITE_FILE,
+    edit::EDIT_FILE,
 ];
 
 /// Ollama `tools` definitions for every registered tool.

@@ -87,7 +87,7 @@ fn chat_knows_it_is_the_alfredo_harness_without_tasks() {
 }
 
 #[test]
-fn chat_prompt_describes_its_read_only_workspace_tools() {
+fn chat_prompt_describes_its_workspace_tools() {
     let text = chat_context::system_message(None, |_| None).content;
     for needle in [
         "read_file",
@@ -99,7 +99,9 @@ fn chat_prompt_describes_its_read_only_workspace_tools() {
         assert!(text.contains(needle), "missing {needle:?} in:\n{text}");
     }
     assert!(!text.contains("cannot browse"), "{text}");
-    assert!(text.contains("cannot edit"), "{text}");
+    // Issue #235: chat edits files with approval; commands and Git stay out of reach.
+    assert!(!text.contains("cannot edit"), "{text}");
+    assert!(text.contains("cannot run commands"), "{text}");
 }
 
 #[test]

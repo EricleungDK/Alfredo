@@ -33,7 +33,7 @@ failed check repaired automatically. [Still: repair](docs/assets/screenshot-repa
 Type `/go Add a --verbose flag to the CLI and a test for it`. Alfredo plans the work,
 runs each task in an isolated Git worktree inside a sandbox, runs the task's check,
 repairs failures, and leaves one local branch, `alfredo/go-<id>`, for you to review.
-Your branch, index and working files are never touched, nothing is pushed, and
+`/go` never touches your branch, index or working files (only chat edits you approve do), nothing is pushed, and
 nothing leaves your machine.
 
 ## Why Alfredo
@@ -176,6 +176,7 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 | Ctrl+N | New conversation (max 8); `/clear` restarts the current one, `/compact` summarises its older turns |
 | Esc | Cancel the current model request (keeps partial reply); close pickers. You can then send a new prompt or switch `/model` |
 | Ctrl+R | Retry a failed or cancelled turn, until you send a new prompt |
+| y / n (approval card) | Approve / deny a chat file edit; Esc denies and ends the turn |
 | Ctrl+W / Ctrl+U | Delete word / clear prompt |
 | Ctrl+Q / Ctrl+C | Quit (cancels workers and waits for their results) |
 
