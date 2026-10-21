@@ -46,7 +46,7 @@
 
 ## Open decisions for owner
 - Publish the `v0.1.0` draft release after review.
-- Refresh `docs/assets/demo.gif` and the two screenshots when the UI changes (recorded 2026-09-29 from a real run).
+- Rerun `alfredo-tui/recording/record.py` ([SOP](../SOP/recording.md)) and refresh the two screenshots when the UI changes. README recording `docs/assets/tui-recording.{gif,mp4,webm}` + poster: real run 2026-10-21 (26 s, 1280x720, 2 labelled model-wait cuts); replaced the 2026-09-29 `demo.gif`.
 
 ## Open follow-ups (2026-09-30)
 - UI follow-ups from #99 (Manual tasks grouping, steered output, fences, agent

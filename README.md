@@ -23,11 +23,13 @@ A native terminal that plans, runs, checks and repairs coding tasks with your ow
 </div>
 
 <p align="center">
-  <img src="docs/assets/demo.gif" alt="alfredo-tui running /go: plan, worker, failed check, automatic repair, accepted branch" width="860">
+  <img src="docs/assets/tui-recording.gif" alt="alfredo-tui in a sample repository: the header shows the model warm, /go starts autopilot, two tasks run in isolated worktrees, one check fails and is repaired, the agent view shows the repair worker, and the summary names the review branch while main stays untouched" width="860">
 </p>
 
-<sub>A real run, not a mock-up: `qwen2.5-coder:14b` on a scratch repo, 18 seconds of autopilot, one
-failed check repaired automatically. [Still: repair](docs/assets/screenshot-repair.png) ·
+<sub>A real run, not a mock-up: `qwen2.5-coder:14b` on a throwaway sample repo, 26 s, one failed check
+repaired automatically; the two model waits are cut and labelled. [MP4](docs/assets/tui-recording.mp4) ·
+[WebM](docs/assets/tui-recording.webm) · [poster](docs/assets/tui-recording-poster.png) ·
+[recording script](alfredo-tui/recording/record.py) · [still: repair](docs/assets/screenshot-repair.png) ·
 [still: done](docs/assets/screenshot-done.png)</sub>
 
 Type `/go Add a --verbose flag to the CLI and a test for it`. Alfredo plans the work,
