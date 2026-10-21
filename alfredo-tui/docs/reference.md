@@ -1498,9 +1498,14 @@ Approval (ADR 0004); there is no skip-approval mode.
 - **Card.** The transcript shows `? Approve edit_file · edit README.md`, the arguments,
   and a line diff (`-` old, `+` new, at most 80 lines). The prompt title reads
   `Approval pending · y approve · n deny · Esc cancels the turn`.
-- **Keys.** The card is modal: `y` and `n` go to it, not the prompt, and are ignored for
-  0.5 s after it is first on screen (selected conversation, no pane, panel or agent view
-  over it), so typeahead cannot decide it; switching away and back restarts that delay.
+- **Keys.** `y` and `n` answer the card only when the prompt draft is empty, no other key
+  was pressed in the previous 0.5 s, and the card has been on screen for 0.5 s (selected
+  conversation, no pane, panel or agent view over it; switching away and back restarts
+  that delay). Otherwise they are ordinary typing: while the draft has text, `y` and `n`
+  go into it and never decide the card, and the prompt title reads `Approval pending ·
+  clear the draft to answer y/n · Esc denies`. Typing a message while a card waits
+  ("hey, check the remote first") therefore cannot approve or deny it. A single `y` or
+  `n` as the first key after a pause is still an answer.
   Known limit: keys already queued during a terminal stall longer than 0.5 s are not
   discarded. `y` runs the call; `n` denies it and the model receives `error: the owner
   denied this action; nothing was changed…` as the tool result, then the turn continues.

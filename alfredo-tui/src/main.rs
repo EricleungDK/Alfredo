@@ -1043,6 +1043,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
                     let index = work.app.selected;
+                    let key_at = std::time::Instant::now();
+                    work.app.sessions[index].note_key(key_at);
                     if let Some(completion) = work.app.completion.as_mut() {
                         match key.code {
                             KeyCode::Up | KeyCode::BackTab => {
@@ -1191,12 +1193,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                             if !ctrl
                                 && !key.modifiers.contains(KeyModifiers::ALT)
                                 && work.app.pane.focus.is_none()
-                                && work.app.sessions[index].pending_approval().is_some() =>
+                                && work.app.sessions[index].approval_key_answers(key_at) =>
                         {
-                            // The card is modal: y/n never reach the prompt, and keys
-                            // before it is armed decide nothing.
+                            // y/n answer the card only with an empty draft after a quiet gap
+                            // (issue #264); otherwise they fall through to typing.
                             match work.app.sessions[index]
-                                .answer_approval(answer, std::time::Instant::now())
+                                .answer_approval(answer, key_at)
                             {
                                 Some(decision) => {
                                     if let Some(request) = approval_replies.remove(&index) {
