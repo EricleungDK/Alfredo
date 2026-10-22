@@ -883,6 +883,7 @@ The crate is self-contained: the execution provider lives in `src/execution.rs`.
 | Enter in the agent view | Instruct that agent (text); slash commands still run |
 | Escape in the agent view | Return to the previous pane; the agent's draft is kept, also across restarts |
 | Ctrl+O in the agent view | Expand or collapse full instruction text |
+| Ctrl+O in the conversation | Show every tool result in the open conversation in full (up to 200 lines each, then `… N more lines`) or back to one line; starts collapsed, not saved, shown in the footer hints |
 | Ctrl+O in the Plan draft panel | Switch between the readable task list and the raw draft JSON |
 | Up / Down, Tab, Enter in the side pane | Move, switch missions/work, open the row |
 | Left / Right | Move through Unicode grapheme clusters |
@@ -1547,7 +1548,11 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   usual (Ctrl+R retries the whole turn). Esc cancels between or during rounds.
 - **On screen.** Before the reply, each call shows as `⚙ read_file README.md` followed by
   `↳` and the first line of its result cut to one row (`… (N lines)` when longer). The
-  full result goes to the model only.
+  full result goes to the model. Ctrl+O in the conversation shows every result of the
+  open conversation in full instead, each capped at 200 lines followed by `… N more
+  lines`; Ctrl+O again returns to one line. A conversation starts collapsed, the footer
+  hint says which state is active, and the choice is not saved (the full text is, with the
+  tool step, so it shows after a reload).
 - **Context.** The calls and results stay part of that turn: later turns send them
   before the reply they fed, they count toward the 128 KiB conversation limit and the
   `--num-ctx` estimate, and compaction summarises them with their turn. They are saved
