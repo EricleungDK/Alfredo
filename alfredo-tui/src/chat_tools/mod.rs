@@ -159,7 +159,7 @@ pub(crate) fn cap_to(text: String, limit: usize) -> String {
         end -= 1;
     }
     // A budgeted cut of multi-line text ends on a whole line.
-    if limit < MAX_OUTPUT {
+    if limit < MAX_OUTPUT && text.as_bytes().get(end) != Some(&b'\n') {
         if let Some(newline) = text[..end].rfind('\n').filter(|at| *at > 0) {
             end = newline;
         }

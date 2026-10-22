@@ -461,7 +461,7 @@ async fn a_16kb_read_completes_under_num_ctx_4096() {
     assert!(session.messages[1].content.contains("final answer"));
     let result = &session.tool_steps(1)[0].results[0];
     assert!(
-        result.contains("[truncated"),
+        result.contains("[truncated at line"),
         "{}",
         &result[result.len() - 80..]
     );
@@ -510,7 +510,7 @@ async fn budgeted_read_file_ends_on_a_whole_line_with_the_continuation_hint() {
     );
     assert!(shown.ends_with("some filler text here"), "{shown}");
     assert!(
-        last > 5 && result.len() < 4096 * 3,
+        last > 5 && result.len() <= 4096 * 3 / 2,
         "{} bytes",
         result.len()
     );
