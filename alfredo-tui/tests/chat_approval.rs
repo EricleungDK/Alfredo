@@ -264,6 +264,132 @@ async fn invalid_edits_are_refused_before_asking() {
     }
 }
 
+/// Issue #272: write_file under missing directories lists them on the card, creates
+/// them on approval, and refuses unsafe ancestors before asking.
+#[test]
+fn write_file_creates_new_directories_after_a_card_that_lists_them() {
+    let root = workspace("newdirs");
+    let new = call(
+        "write_file",
+        json!({"path": "src/util/deep/mod.rs", "content": "pub fn x() {}\n"}),
+    );
+    let card = approval::card(&root, &new).unwrap();
+    assert!(
+        card.summary
+            .contains("new directories: src, src/util, src/util/deep"),
+        "{}",
+        card.summary
+    );
+    assert!(card
+        .preview
+        .starts_with("new directories: src, src/util, src/util/deep"));
+    assert!(!root.join("src").exists(), "preview never creates");
+    approval::apply(&root, &card).unwrap();
+    assert_eq!(
+        fs::read_to_string(root.join("src/util/deep/mod.rs")).unwrap(),
+        "pub fn x() {}\n"
+    );
+    // Only the missing level is listed when part of the path exists.
+    let card = approval::card(
+        &root,
+        &call(
+            "write_file",
+            json!({"path": "src/util/b/c.rs", "content": "x\n"}),
+        ),
+    )
+    .unwrap();
+    assert!(
+        card.summary.ends_with("(new directories: src/util/b)"),
+        "{}",
+        card.summary
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn write_file_refuses_unsafe_missing_parents_before_asking() {
+    let root = workspace("newdirs-refused");
+    let outside = workspace("newdirs-outside");
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+        std::os::unix::fs::symlink(root.join("nowhere"), root.join("dangling")).unwrap();
+    }
+    fs::write(root.join("afile"), "x").unwrap();
+    for path in [
+        "link/x/y.txt",
+        "dangling/x/y.txt",
+        "afile/x/y.txt",
+        ".git/x/y",
+        ".GIT/x/y",
+        ".Git/x/y",
+        "a/.git/y/z",
+        "x/.env/y",
+        "node_modules/x/y.js",
+        "a/target/x/y",
+        "../x/y",
+        "a/../../x/y",
+        "/tmp/x/y",
+    ] {
+        let card = approval::card(
+            &root,
+            &call("write_file", json!({"path": path, "content": "x\n"})),
+        );
+        assert!(card.is_err(), "{path} must be refused before asking");
+    }
+    assert!(!outside.join("x").exists());
+    assert!(!root.join(".git").exists() && !root.join("x").exists() && !root.join("a").exists());
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(outside);
+}
+
+#[test]
+fn write_file_new_directories_refuse_when_an_ancestor_changes_after_the_card() {
+    for (tag, change) in [("file", 0), ("dir", 1), ("symlink", 2)] {
+        let root = workspace(&format!("newdirs-race-{tag}"));
+        let outside = workspace(&format!("newdirs-race-out-{tag}"));
+        let new = call(
+            "write_file",
+            json!({"path": "src/util/mod.rs", "content": "x\n"}),
+        );
+        let card = approval::card(&root, &new).unwrap();
+        match change {
+            0 => fs::write(root.join("src"), "i am a file").unwrap(),
+            1 => fs::create_dir_all(root.join("src")).unwrap(),
+            _ => {
+                #[cfg(unix)]
+                std::os::unix::fs::symlink(&outside, root.join("src")).unwrap();
+            }
+        }
+        let result = approval::apply(&root, &card);
+        assert!(result.is_err(), "{tag}: {result:?}");
+        assert!(!root.join("src/util").exists(), "{tag}");
+        assert!(!outside.join("util").exists(), "{tag}");
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn write_file_does_not_create_directories_in_a_read_only_directory() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = workspace("newdirs-ro");
+    fs::create_dir(root.join("ro")).unwrap();
+    fs::set_permissions(root.join("ro"), fs::Permissions::from_mode(0o555)).unwrap();
+    let card = approval::card(
+        &root,
+        &call(
+            "write_file",
+            json!({"path": "ro/a/b.txt", "content": "x\n"}),
+        ),
+    );
+    fs::set_permissions(root.join("ro"), fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(card.is_err(), "read-only anchor refused");
+    assert!(!root.join("ro/a").exists());
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn write_file_previews_creates_and_refuses_excluded_paths() {
     let root = workspace("write");
@@ -274,7 +400,7 @@ fn write_file_previews_creates_and_refuses_excluded_paths() {
             json!({"path": "docs/new.md", "content": "hello\n"}),
         ),
     );
-    assert!(card.is_err(), "missing parent directory is refused");
+    assert!(card.is_ok(), "missing parent directory gets a card");
     fs::create_dir_all(root.join("docs")).unwrap();
     let new = call(
         "write_file",

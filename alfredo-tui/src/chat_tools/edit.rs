@@ -13,7 +13,7 @@ const MAX_PREVIEW_LINES: usize = 80;
 pub const WRITE_FILE: Tool = Tool {
     name: "write_file",
     tier: Tier::Mutating,
-    description: "Create or replace a UTF-8 text file in the Coding Workspace with the given full content. Needs the owner's approval each call; the owner sees a diff. Prefer edit_file for small changes to an existing file. The parent directory must exist.",
+    description: "Create or replace a UTF-8 text file in the Coding Workspace with the given full content. Needs the owner's approval each call; the owner sees a diff. Prefer edit_file for small changes to an existing file. Creates missing directories.",
     parameters: || {
         json!({
             "type": "object",
@@ -53,7 +53,8 @@ pub(crate) struct Change {
     pub fingerprint: String,
 }
 
-/// Content hash of the call's target file, or `absent`. `None` when `name` is not
+/// Content hash of the call's target file, or `absent`. A write_file target under
+/// missing directories adds `+dirs:` and the directories it would create. `None` when `name` is not
 /// one of these tools.
 pub(crate) fn fingerprint(
     root: &Path,
@@ -64,7 +65,10 @@ pub(crate) fn fingerprint(
         return None;
     }
     Some(required(arguments, "path").and_then(|path| {
-        let target = resolve_target(root, path)?;
+        let Target {
+            path: target,
+            new_dirs,
+        } = resolve_target(root, path, name == "write_file")?;
         let at = display(root, &target);
         match std::fs::read(&target) {
             Ok(bytes) => {
@@ -72,7 +76,15 @@ pub(crate) fn fingerprint(
                 Ok(format!("{at}:{:x}", Sha256::digest(&bytes)))
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                Ok(format!("{at}:absent"))
+                let dirs = new_dirs
+                    .iter()
+                    .map(|dir| display(root, dir))
+                    .collect::<Vec<_>>();
+                if dirs.is_empty() {
+                    Ok(format!("{at}:absent"))
+                } else {
+                    Ok(format!("{at}:absent+dirs:{}", dirs.join(",")))
+                }
             }
             Err(error) => Err(error.to_string()),
         }
@@ -91,13 +103,31 @@ pub(crate) fn preview(
         Err(error) => return Some(Err(error)),
     };
     Some(match name {
-        "write_file" => plan_write(root, arguments).map(|(path, old, new)| Change {
-            summary: match &old {
-                Some(_) => format!("replace {}", display(root, &path)),
-                None => format!("new file {}", display(root, &path)),
-            },
-            diff: diff(old.as_deref().unwrap_or(""), &new),
-            fingerprint,
+        "write_file" => plan_write(root, arguments).map(|(path, old, new, new_dirs)| {
+            let dirs = new_dirs
+                .iter()
+                .map(|dir| display(root, dir))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let body = diff(old.as_deref().unwrap_or(""), &new);
+            Change {
+                summary: match (&old, dirs.is_empty()) {
+                    (Some(_), _) => format!("replace {}", display(root, &path)),
+                    (None, true) => format!("new file {}", display(root, &path)),
+                    (None, false) => {
+                        format!(
+                            "new file {} (new directories: {dirs})",
+                            display(root, &path)
+                        )
+                    }
+                },
+                diff: if dirs.is_empty() {
+                    body
+                } else {
+                    format!("new directories: {dirs}\n{body}")
+                },
+                fingerprint,
+            }
         }),
         "edit_file" => plan_edit(root, arguments).map(|(path, old, new)| Change {
             summary: format!("edit {}", display(root, &path)),
@@ -112,8 +142,18 @@ fn required<'a>(arguments: &'a Value, name: &str) -> Result<&'a str, String> {
     text_arg(arguments, name)?.ok_or_else(|| format!("argument {name} is required"))
 }
 
-/// Resolve a path that may not exist yet: its parent must exist inside the workspace.
-fn resolve_target(root: &Path, path: &str) -> Result<PathBuf, String> {
+/// A resolved write target and the missing directories (outermost first) that
+/// must be created before the file can be written.
+struct Target {
+    path: PathBuf,
+    new_dirs: Vec<PathBuf>,
+}
+
+/// Resolve a path that may not exist yet. Its parent must exist inside the workspace,
+/// unless `create_dirs` (write_file) and every missing parent lies below a real,
+/// non-symlink, writable directory inside the workspace; the missing ones are then
+/// returned in [`Target::new_dirs`]. The same exclusion policy applies to each of them.
+fn resolve_target(root: &Path, path: &str, create_dirs: bool) -> Result<Target, String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err("argument path is required".into());
@@ -132,19 +172,26 @@ fn resolve_target(root: &Path, path: &str) -> Result<PathBuf, String> {
             "{path} is excluded (Git metadata, secrets or generated files)"
         ));
     }
+    let existing = |path: PathBuf| Target {
+        path,
+        new_dirs: Vec::new(),
+    };
     match std::fs::symlink_metadata(root.join(relative)) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
             "{path} is a symlink; chat edits change regular files only"
         )),
-        Ok(_) => resolve(root, trimmed),
+        Ok(_) => resolve(root, trimmed).map(existing),
         Err(_) => {
             let name = relative
                 .file_name()
                 .ok_or_else(|| format!("path {path:?} names no file"))?;
             let parent = relative.parent().filter(|p| !p.as_os_str().is_empty());
             let parent = match parent {
-                Some(parent) => resolve(root, &parent.to_string_lossy())
-                    .map_err(|_| format!("parent directory of {path} does not exist"))?,
+                Some(parent) => match resolve(root, &parent.to_string_lossy()) {
+                    Ok(parent) => parent,
+                    Err(_) if create_dirs => return plan_new_dirs(root, path, relative),
+                    Err(_) => return Err(format!("parent directory of {path} does not exist")),
+                },
                 None => root
                     .canonicalize()
                     .map_err(|_| "Coding Workspace is not available".to_string())?,
@@ -158,9 +205,116 @@ fn resolve_target(root: &Path, path: &str) -> Result<PathBuf, String> {
                     "{path} is excluded (Git metadata, secrets or generated files)"
                 ));
             }
-            Ok(full)
+            Ok(existing(full))
         }
     }
+}
+
+/// Walk `relative` from the workspace root one component at a time (no symlink is
+/// followed) to the first missing parent; every component before it must be a real
+/// directory. Returns the target under the canonical root plus the directories to create.
+fn plan_new_dirs(root: &Path, path: &str, relative: &Path) -> Result<Target, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|_| "Coding Workspace is not available".to_string())?;
+    let names: Vec<_> = relative
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(name) => Some(name),
+            _ => None,
+        })
+        .collect();
+    let (file, parents) = names
+        .split_last()
+        .ok_or_else(|| format!("path {path:?} names no file"))?;
+    let mut current = root.clone();
+    let mut new_dirs: Vec<PathBuf> = Vec::new();
+    for name in parents {
+        current.push(name);
+        if !new_dirs.is_empty() {
+            new_dirs.push(current.clone());
+            continue;
+        }
+        match std::fs::symlink_metadata(&current) {
+            Ok(m) if m.file_type().is_symlink() => {
+                return Err(format!(
+                    "{path}: {} is a symlink; new directories are not created through symlinks",
+                    display(&root, &current)
+                ))
+            }
+            Ok(m) if m.is_dir() => {}
+            Ok(_) => {
+                return Err(format!(
+                    "parent of {path} is not a directory: {}",
+                    display(&root, &current)
+                ))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => new_dirs.push(current.clone()),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+    let anchor = new_dirs
+        .first()
+        .and_then(|first| first.parent())
+        .ok_or_else(|| format!("parent directory of {path} does not exist"))?;
+    refuse_read_only(
+        &std::fs::metadata(anchor).map_err(|e| e.to_string())?,
+        &display(&root, anchor),
+    )?;
+    let full = current.join(file);
+    for checked in new_dirs.iter().chain(std::iter::once(&full)) {
+        if excluded(&display(&root, checked)) {
+            return Err(format!(
+                "{path} is excluded (Git metadata, secrets or generated files)"
+            ));
+        }
+    }
+    Ok(Target {
+        path: full,
+        new_dirs,
+    })
+}
+
+/// Create `dirs` (outermost first) one level at a time. Each step must create a real
+/// directory: before each, the parent is re-canonicalized and must still lie under the
+/// canonical root and be a real directory (not a symlink). Any failure removes the
+/// directories this call already made (only empty ones go).
+fn create_dirs(root: &Path, dirs: &[PathBuf]) -> Result<(), String> {
+    let root = root
+        .canonicalize()
+        .map_err(|_| "Coding Workspace is not available".to_string())?;
+    let mut made: Vec<&PathBuf> = Vec::new();
+    let result = (|| {
+        for dir in dirs {
+            if let Some(parent) = dir.parent() {
+                let metadata = std::fs::symlink_metadata(parent).map_err(|e| e.to_string())?;
+                let inside = parent
+                    .canonicalize()
+                    .map(|real| real.starts_with(&root))
+                    .unwrap_or(false);
+                if metadata.file_type().is_symlink() || !metadata.is_dir() || !inside {
+                    return Err(format!(
+                        "{} is not a real directory inside the workspace any more; nothing more was created",
+                        parent.display()
+                    ));
+                }
+            }
+            std::fs::create_dir(dir)
+                .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+            made.push(dir);
+            let metadata = std::fs::symlink_metadata(dir).map_err(|e| e.to_string())?;
+            if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                return Err(format!("{} is not a real directory", dir.display()));
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        for dir in made.iter().rev() {
+            let _ = std::fs::remove_dir(dir);
+        }
+    }
+    result
 }
 
 /// Removes the temp file on drop unless the rename succeeded (`armed` cleared).
@@ -296,14 +450,20 @@ fn read_existing(path: &Path) -> Result<String, String> {
         .map_err(|_| "not a UTF-8 text file".into())
 }
 
-/// (target, current content if any, new content)
-fn plan_write(root: &Path, arguments: &Value) -> Result<(PathBuf, Option<String>, String), String> {
+/// (target, current content if any, new content, directories to create first)
+fn plan_write(
+    root: &Path,
+    arguments: &Value,
+) -> Result<(PathBuf, Option<String>, String, Vec<PathBuf>), String> {
     let path = required(arguments, "path")?;
     let content = required(arguments, "content")?;
     if content.len() > MAX_FILE {
         return Err(format!("content is over the {MAX_FILE}-byte limit"));
     }
-    let target = resolve_target(root, path)?;
+    let Target {
+        path: target,
+        new_dirs,
+    } = resolve_target(root, path, true)?;
     let old = if target.exists() {
         refuse_read_only(
             &std::fs::metadata(&target).map_err(|e| e.to_string())?,
@@ -313,7 +473,7 @@ fn plan_write(root: &Path, arguments: &Value) -> Result<(PathBuf, Option<String>
     } else {
         None
     };
-    Ok((target, old, content.to_string()))
+    Ok((target, old, content.to_string(), new_dirs))
 }
 
 /// (target, current content, edited content)
@@ -391,8 +551,15 @@ fn line_endings(text: &str) -> &'static str {
 }
 
 fn write_file(root: &Path, arguments: &Value) -> Result<String, String> {
-    let (target, old, new) = plan_write(root, arguments)?;
-    write_regular(&target, &new)?;
+    let (target, old, new, new_dirs) = plan_write(root, arguments)?;
+    create_dirs(root, &new_dirs)?;
+    if let Err(error) = write_regular(&target, &new) {
+        // Take back the directories this call made (only empty ones go).
+        for dir in new_dirs.iter().rev() {
+            let _ = std::fs::remove_dir(dir);
+        }
+        return Err(error);
+    }
     Ok(format!(
         "{} {} ({} bytes)",
         if old.is_some() { "wrote" } else { "created" },
