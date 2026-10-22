@@ -196,8 +196,8 @@ fn an_errored_call_carries_its_reason_in_json_and_on_stderr() {
     let root = repository("detail");
     let fixture = scripted_chat(vec![
         tool_calls(&[(
-            "write_file",
-            json!({"path": "sub/new.txt", "content": "hi\n"}),
+            "edit_file",
+            json!({"path": "sub/new.txt", "old_text": "a", "new_text": "b"}),
         )]),
         done("could not write"),
     ]);
@@ -223,7 +223,7 @@ fn an_errored_call_carries_its_reason_in_json_and_on_stderr() {
     assert!(detail.len() <= 200 && !detail.chars().any(char::is_control));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("tool write_file sub/new.txt (error:") && stderr.contains("does not exist"),
+        stderr.contains("tool edit_file sub/new.txt (error:") && stderr.contains("does not exist"),
         "{stderr}"
     );
     let _ = fs::remove_dir_all(&root);
