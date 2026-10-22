@@ -1063,6 +1063,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     let index = work.app.selected;
                     let key_at = std::time::Instant::now();
                     work.app.sessions[index].note_key(key_at);
+                    work.app.transient_rows.clear();
                     if let Some(completion) = work.app.completion.as_mut() {
                         match key.code {
                             KeyCode::Up | KeyCode::BackTab => {
@@ -1568,7 +1569,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 Ok(notice) => {
                                     work.app.sessions[index].remember_submission();
                                     work.app.sessions[index].clear_draft();
-                                    work.app.notice = notice;
+                                    if args.trim().is_empty() && notice.contains('\n') {
+                                        work.app.notice.clear();
+                                        work.app.transient_rows =
+                                            notice.lines().map(str::to_string).collect();
+                                    } else {
+                                        work.app.notice = notice;
+                                    }
                                 }
                                 Err(error) => {
                                     work.app.notice = error;

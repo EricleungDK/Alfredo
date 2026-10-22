@@ -44,6 +44,25 @@ impl Drop for Fixture {
 }
 
 #[test]
+fn a_read_only_view_reads_beside_the_owner_and_never_saves() {
+    let fixture = Fixture::new();
+    let owner = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let mut app = App::new("owned-model".into());
+    app.sessions[0].insert("draft");
+    owner.save(&Snapshot::capture(&app, "default")).unwrap();
+    assert!(ConversationStore::open(&fixture.tasks, "default").is_err());
+    let view = ConversationStore::open_readonly(&fixture.tasks, "default").unwrap();
+    let seen = view.load().unwrap().unwrap().restore();
+    assert_eq!(seen.sessions[0].model, "owned-model");
+    let before = fs::read(fixture.file()).unwrap();
+    assert!(view.save(&Snapshot::capture(&app, "default")).is_err());
+    assert_eq!(fs::read(fixture.file()).unwrap(), before);
+    // Looking at a conversation nobody saved creates nothing.
+    let none = ConversationStore::open_readonly(&fixture.tasks, "other").unwrap();
+    assert!(none.load().unwrap().is_none());
+}
+
+#[test]
 fn restart_restores_models_selection_drafts_and_partial_text_without_replay() {
     let fixture = Fixture::new();
     let store = ConversationStore::open(&fixture.tasks, "default").unwrap();

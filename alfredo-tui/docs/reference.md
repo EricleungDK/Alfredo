@@ -234,7 +234,10 @@ error}`. `state` is `done`, `stopped` or `failed`; `result` is `ok`, `denied`, `
 limit is `state` `stopped` with `stopped` `step_limit` or `output_limit` (`null` otherwise) and
 `error` naming the cap; its `reply` is the text before the cut, without the interactive "ask again"
 notice. Exit 0 done; 1 stopped, failed or interrupted (SIGINT/SIGTERM deny further cards, wait up to 10 s for
-answered cards to be logged, then cancel the turn); 2 setup or usage error. The turn is not saved to the conversation. The
+answered cards to be logged, then cancel the turn); 2 setup or usage error. The turn is not saved to the conversation, and
+it does not own it: it takes no conversation lock, reads the conversation only for its saved model, and so runs beside an
+open TUI or another headless chat on the same repository (`--go --headless` still takes the lock). Concurrent runs append
+whole lines to `chat-approvals.jsonl` (a per-mission file lock serializes each append). The
 eval uses it for chat tasks (`eval/README.md`).
 
 ## Build and install a development archive
@@ -1726,8 +1729,13 @@ rule `a` would add.
   `… approved · applied · by always-allow rule #ID`.
 - **Storage.** `chat-allow.json` in the mission's State Directory; restored on restart. A
   malformed file counts as no rules. At most 200 rules.
-- **`/allow`** lists rules (`#ID tool …`); `/allow clear` removes all; `/allow clear ID`
-  removes one.
+- **`/allow`** lists every rule in full, one wrapped row per rule under the transcript
+  (`#ID`, tool, the exact command / ANY arguments / every call, sandboxed or HOST) until
+  the next key; `/allow clear` removes all; `/allow clear ID` removes one.
+- **Rule marker.** The `⚙` row of a call a rule approved reads `⚙ run_command (rule #N) …`;
+  calls approved with `y` or `a` on a card have no marker. A rule-approved `run_command`
+  shows `running run_command · Ns · Esc stops` while it runs. The marker is display
+  only and is not saved with the conversation.
 - **Headless** `--chat` never reads rules; its `--approve` policy decides.
 
 ## Chat proposes governed work
