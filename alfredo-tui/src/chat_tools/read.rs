@@ -1,9 +1,10 @@
 //! Read tier: read_file, list_files, grep on the Coding Workspace working tree.
-use super::{display, excluded, resolve, text_arg, Tier, Tool, MAX_OUTPUT};
+use super::{budget, display, excluded, resolve, text_arg, Tier, Tool, MAX_OUTPUT};
 use serde_json::{json, Value};
 use std::{
     io::Read,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 /// Largest file read_file or grep opens, in bytes.
@@ -12,6 +13,10 @@ const MAX_FILE: u64 = 4 * 1024 * 1024;
 const MAX_ENTRIES: usize = 500;
 /// Directory entries visited by one walk.
 const MAX_VISITS: usize = 20_000;
+/// Bytes of file content one grep scans before it stops (issue #257).
+const GREP_SCAN_BYTES: u64 = 64 * 1024 * 1024;
+/// Wall time one grep may run before it stops (issue #257).
+const GREP_WALL: Duration = Duration::from_secs(10);
 /// Matching lines reported by one grep.
 const MAX_MATCHES: usize = 200;
 /// Bytes reserved for markers when one line is cut to fit the output.
@@ -224,6 +229,21 @@ fn list_files(root: &Path, arguments: &Value) -> Result<String, String> {
 }
 
 fn grep(root: &Path, arguments: &Value) -> Result<String, String> {
+    grep_within(root, arguments, GREP_SCAN_BYTES, GREP_WALL)
+}
+
+/// [`grep`] with its scan budget as parameters: it stops once `scan_bytes` of file
+/// content were read or `wall` passed, and ends at once when the round is cancelled.
+fn grep_within(
+    root: &Path,
+    arguments: &Value,
+    scan_bytes: u64,
+    wall: Duration,
+) -> Result<String, String> {
+    let started = Instant::now();
+    let round = budget::current();
+    let mut scanned = 0u64;
+    let mut stopped = false;
     let pattern = text_arg(arguments, "pattern")?
         .filter(|pattern| !pattern.is_empty())
         .ok_or("missing required argument pattern")?;
@@ -246,6 +266,17 @@ fn grep(root: &Path, arguments: &Value) -> Result<String, String> {
     let mut out = String::new();
     let mut matches = 0;
     'files: for file in &files {
+        if round.as_ref().is_some_and(|b| b.cancel.is_set()) {
+            return Err("cancelled".into());
+        }
+        if scanned >= scan_bytes
+            || started.elapsed() >= wall
+            || round.as_ref().is_some_and(budget::Budget::expired)
+        {
+            stopped = true;
+            break;
+        }
+        scanned += std::fs::metadata(file).map_or(0, |m| m.len().min(MAX_FILE));
         let Ok(content) = text(file) else {
             continue;
         };
@@ -267,7 +298,7 @@ fn grep(root: &Path, arguments: &Value) -> Result<String, String> {
             out.push_str(&format!("{}:{}:{shown}\n", display(root, file), number + 1));
         }
     }
-    if matches == 0 && !cut {
+    if matches == 0 && !cut && !stopped {
         return Ok("no matches".into());
     }
     if cut {
@@ -275,5 +306,114 @@ fn grep(root: &Path, arguments: &Value) -> Result<String, String> {
             "[truncated: first {matches} matches; narrow with path or a longer pattern]"
         ));
     }
+    if stopped {
+        if cut {
+            out.push('\n');
+        }
+        out.push_str(&format!(
+            "[stopped: scanned {:.1} MiB in {:.1} s; narrow with path]",
+            scanned as f64 / (1024.0 * 1024.0),
+            started.elapsed().as_secs_f64()
+        ));
+    }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static ID: AtomicU64 = AtomicU64::new(0);
+
+    fn tree(files: usize, size: usize) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "alfredo-grep-budget-{}-{}",
+            std::process::id(),
+            ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in 0..files {
+            let body = format!("needle {n}\n{}", "x".repeat(size));
+            std::fs::write(dir.join(format!("f{n:03}.txt")), body).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn grep_stops_at_the_byte_budget_and_keeps_the_matches_found() {
+        let dir = tree(10, 1000);
+        let out = grep_within(
+            &dir,
+            &json!({"pattern": "needle"}),
+            2500,
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        // Three files fit before 2500 bytes are reached (each is ~1008).
+        assert_eq!(out.matches("needle").count(), 3, "{out}");
+        assert!(out.contains("f000.txt:1:needle 0"), "{out}");
+        assert!(out.contains("[stopped: scanned 0.0 MiB in "), "{out}");
+        assert!(out.ends_with("narrow with path]"), "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn grep_stops_at_the_wall_deadline() {
+        let dir = tree(5, 100);
+        let out = grep_within(
+            &dir,
+            &json!({"pattern": "needle"}),
+            u64::MAX,
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert!(out.starts_with("[stopped: scanned 0.0 MiB"), "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_grep_within_budget_has_no_stop_marker() {
+        let dir = tree(3, 100);
+        let out = grep_within(
+            &dir,
+            &json!({"pattern": "needle"}),
+            u64::MAX,
+            Duration::from_secs(60),
+        )
+        .unwrap();
+        assert!(!out.contains("[stopped"), "{out}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Removes its directory on drop, so a failed assertion leaves nothing behind.
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn a_grep_cancelled_before_or_during_the_scan_ends_at_the_next_file() {
+        // 40 files of 1 MiB, no match: a full scan would read all of them.
+        let dir = tree(40, 1 << 20);
+        let _cleanup = Cleanup(dir.clone());
+        let owner = budget::CancelOnDrop::default();
+        let round = budget::Budget::new(Duration::from_secs(300), owner.flag());
+        // The flag is set before the scan starts; the first file check must see it.
+        drop(owner);
+        let started = Instant::now();
+        let out = budget::within(&round, || {
+            grep_within(
+                &dir,
+                &json!({"pattern": "absent-text"}),
+                u64::MAX,
+                Duration::from_secs(300),
+            )
+        });
+        assert_eq!(out, Err("cancelled".to_string()));
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 }

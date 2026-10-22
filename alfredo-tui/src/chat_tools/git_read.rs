@@ -418,8 +418,13 @@ pub(crate) fn run_bounded(
         Ok(out)
     });
     // Reading ends at the end of the output, or once `limit` bytes are in. A command that
-    // holds its output open past the deadline is stopped here.
+    // holds its output open past the deadline, or whose round is cancelled or spent
+    // (issue #257), is stopped here and is an error, never a partial result.
     while !reader.is_finished() {
+        if let Some(note) = round_stop_note() {
+            stop(&mut child);
+            return Err(note);
+        }
         if started.elapsed() > deadline {
             stop(&mut child);
             return Err(deadline_error(deadline));
@@ -446,6 +451,10 @@ pub(crate) fn run_bounded(
                     return Err(error.to_string());
                 }
             }
+            if let Some(note) = round_stop_note() {
+                stop(&mut child);
+                return Err(note);
+            }
             if started.elapsed() > deadline {
                 stop(&mut child);
                 return Err(deadline_error(deadline));
@@ -464,6 +473,13 @@ pub(crate) fn run_bounded(
         }
     }
     Ok((status, out, error))
+}
+
+/// The error text when the round this call runs in was cancelled or is spent (issue #257).
+fn round_stop_note() -> Option<String> {
+    super::budget::current()
+        .and_then(|budget| budget.stop_note())
+        .map(|note| note.trim_start_matches("error: ").to_string())
 }
 
 fn deadline_error(deadline: Duration) -> String {
@@ -585,6 +601,27 @@ mod tests {
         let error = run_bounded(command, 1024, Duration::from_millis(100)).unwrap_err();
         assert!(error.contains("stopped"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn a_cancelled_or_spent_round_stops_a_running_git_call_at_once() {
+        use crate::chat_tools::budget::{within, Budget, Cancel};
+        let run = |budget: Budget| {
+            let mut command = Command::new("/bin/sleep");
+            command.arg("5");
+            let started = Instant::now();
+            let error = within(&budget, || run_bounded(command, 1024, DEADLINE)).unwrap_err();
+            assert!(started.elapsed() < Duration::from_secs(1));
+            error
+        };
+        let cancel = Cancel::default();
+        cancel.set();
+        assert_eq!(
+            run(Budget::new(Duration::from_secs(30), cancel)),
+            "cancelled"
+        );
+        let spent = run(Budget::new(Duration::ZERO, Cancel::default()));
+        assert!(spent.contains("round time limit"), "{spent}");
     }
 
     #[test]
