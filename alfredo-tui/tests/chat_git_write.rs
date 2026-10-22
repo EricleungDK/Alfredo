@@ -22,13 +22,34 @@ use std::{
     process::Command,
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard,
     },
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
 
 static ID: AtomicU64 = AtomicU64::new(0);
+
+/// Held by every test that sets GIT_SSH: the process environment is shared.
+static SSH: Mutex<()> = Mutex::new(());
+
+/// A GIT_SSH stand-in that runs the remote command locally, so a push reaches a bare
+/// repository through an `ssh://localhost` URL (a local-path remote is refused, #309).
+fn ssh_stand_in(base: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let script = base.join("ssh-stand-in");
+    fs::write(
+        &script,
+        "#!/bin/sh\nfor last; do :; done\nexec sh -c \"$(printf '%s' \"$last\" | sed 's/^git-/git /')\"\n",
+    )
+    .unwrap();
+    fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    script
+}
+
+fn ssh_url(path: &Path) -> String {
+    format!("ssh://localhost{}", path.display())
+}
 
 fn git(root: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
@@ -45,6 +66,8 @@ fn git(root: &Path, args: &[&str]) -> String {
 struct Repo {
     base: PathBuf,
     root: PathBuf,
+    /// Set once a remote is configured: GIT_SSH is the stand-in for this test.
+    ssh: Option<MutexGuard<'static, ()>>,
 }
 
 impl Repo {
@@ -64,20 +87,23 @@ impl Repo {
         fs::write(root.join("README.md"), "# Demo\n").unwrap();
         git(&root, &["add", "."]);
         git(&root, &["commit", "-q", "-m", "initial commit"]);
-        Self { base, root }
+        Self {
+            base,
+            root,
+            ssh: None,
+        }
     }
 
     /// A local bare remote named origin with main pushed.
-    fn with_remote(self) -> Self {
-        let bare = self.base.join("remote.git");
+    fn with_remote(mut self) -> Self {
+        self.ssh = Some(SSH.lock().unwrap_or_else(|error| error.into_inner()));
+        std::env::set_var("GIT_SSH", ssh_stand_in(&self.base));
+        let bare = self.remote();
         git(
             &self.base,
             &["init", "-q", "--bare", "-b", "main", "remote.git"],
         );
-        git(
-            &self.root,
-            &["remote", "add", "origin", bare.to_str().unwrap()],
-        );
+        git(&self.root, &["remote", "add", "origin", &ssh_url(&bare)]);
         git(&self.root, &["push", "-q", "-u", "origin", "main"]);
         self
     }
@@ -612,7 +638,7 @@ fn push_card_shows_the_push_url() {
     git(&repo.base, &["init", "-q", "--bare", "pushed.git"]);
     git(
         &repo.root,
-        &["config", "remote.origin.pushurl", other.to_str().unwrap()],
+        &["config", "remote.origin.pushurl", &ssh_url(&other)],
     );
     fs::write(repo.root.join("a.txt"), "a\n").unwrap();
     git(&repo.root, &["add", "a.txt"]);
@@ -627,6 +653,7 @@ fn push_card_shows_the_push_url() {
 #[test]
 fn push_child_has_no_controlling_terminal_and_names_the_ssh_prompt() {
     use std::os::unix::fs::PermissionsExt;
+    let _ssh = SSH.lock().unwrap_or_else(|error| error.into_inner());
     let repo = Repo::new();
     git(
         &repo.root,
