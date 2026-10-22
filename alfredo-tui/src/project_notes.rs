@@ -37,19 +37,9 @@ impl Notes {
     /// outside the workspace (symlink) or not a regular file: `None`.
     pub fn load(workspace: &Path) -> Option<Self> {
         let path = crate::chat_tools::resolve(workspace, FILE).ok()?;
-        let mut options = std::fs::OpenOptions::new();
-        options.read(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            // A FIFO swapped in after resolve must not block the open.
-            options.custom_flags(libc::O_NONBLOCK);
-        }
-        let file = options.open(&path).ok()?;
-        let metadata = file.metadata().ok()?;
-        if !metadata.is_file() {
-            return None;
-        }
+        // Opened without following links and checked by handle, so a swap after resolve
+        // is refused (issue #360).
+        let (file, len) = crate::chat_tools::open_confined(workspace, &path).ok()?;
         let mut raw = Vec::new();
         file.take(MAX_NOTES as u64 + 1).read_to_end(&mut raw).ok()?;
         let cut = raw.len() > MAX_NOTES;
@@ -63,7 +53,7 @@ impl Notes {
         if text.trim().is_empty() {
             return None;
         }
-        let bytes = metadata.len() as usize;
+        let bytes = len as usize;
         let mut text = text;
         if cut {
             text.push_str(&format!(
@@ -145,10 +135,8 @@ mod tests {
     #[test]
     fn notes_do_not_leak_outside_text_when_agents_md_is_swapped_for_a_symlink() {
         const ITERATIONS: usize = 200_000;
-        let base = std::env::temp_dir().join(format!(
-            "alfredo-notes-swap-race-{}",
-            std::process::id()
-        ));
+        let base =
+            std::env::temp_dir().join(format!("alfredo-notes-swap-race-{}", std::process::id()));
         let _cleanup = Cleanup(base.clone());
         let root = base.join("repo");
         std::fs::create_dir_all(&root).unwrap();

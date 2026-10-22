@@ -1,5 +1,5 @@
 //! Read tier: read_file, list_files, grep on the Coding Workspace working tree.
-use super::{budget, display, excluded, resolve, text_arg, Tier, Tool, MAX_OUTPUT};
+use super::{budget, display, excluded, open_confined, resolve, text_arg, Tier, Tool, MAX_OUTPUT};
 use serde_json::{json, Value};
 use std::{
     io::Read,
@@ -74,21 +74,19 @@ pub const GREP: Tool = Tool {
     run: grep,
 };
 
-/// Contents of a regular text file, or why it cannot be read.
-fn text(path: &Path) -> Result<String, String> {
-    let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
-    if !metadata.is_file() {
-        return Err("not a regular file".into());
-    }
-    if metadata.len() > MAX_FILE {
+/// Contents of a regular text file inside the workspace, or why it cannot be read.
+/// `path` is a path [`resolve`] returned; the size and the bytes come from the opened
+/// handle, so a file swapped after the check is refused (issue #360).
+fn text(root: &Path, path: &Path) -> Result<String, String> {
+    let (file, len) = open_confined(root, path)?;
+    if len > MAX_FILE {
         return Err(format!(
-            "file is {} bytes, over the {MAX_FILE}-byte read limit; use grep",
-            metadata.len()
+            "file is {len} bytes, over the {MAX_FILE}-byte read limit; use grep"
         ));
     }
     let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .and_then(|file| file.take(MAX_FILE).read_to_end(&mut bytes))
+    file.take(MAX_FILE)
+        .read_to_end(&mut bytes)
         .map_err(|error| error.to_string())?;
     if bytes.contains(&0) {
         return Err("binary file; not shown".into());
@@ -117,7 +115,7 @@ pub(crate) fn read_file_within(
             .ok_or("start_line must be a positive integer")? as usize,
     };
     let full = resolve(root, path)?;
-    let content = text(&full).map_err(|error| format!("{path}: {error}"))?;
+    let content = text(root, &full).map_err(|error| format!("{path}: {error}"))?;
     let total = content.lines().count();
     if total == 0 {
         return Ok(format!("{path} is empty"));
@@ -277,7 +275,7 @@ fn grep_within(
             break;
         }
         scanned += std::fs::metadata(file).map_or(0, |m| m.len().min(MAX_FILE));
-        let Ok(content) = text(file) else {
+        let Ok(content) = text(root, file) else {
             continue;
         };
         for (number, line) in content.lines().enumerate() {
@@ -393,6 +391,91 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    /// A workspace `repo/` and an outside directory, under a fresh base directory.
+    #[cfg(unix)]
+    fn confined_sandbox() -> (PathBuf, PathBuf, Cleanup) {
+        let base = std::env::temp_dir().join(format!(
+            "alfredo-confined-{}-{}",
+            std::process::id(),
+            ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let cleanup = Cleanup(base.clone());
+        let root = base.join("repo");
+        std::fs::create_dir_all(root.join("notes")).unwrap();
+        std::fs::create_dir_all(base.join("outside")).unwrap();
+        std::fs::write(root.join("real.txt"), "inside\n").unwrap();
+        std::fs::write(base.join("outside/AGENTS.md"), "TOPSECRET-OUTSIDE\n").unwrap();
+        (base, root, cleanup)
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_regular_file_opens_and_its_handle_reports_its_size() {
+        let (_base, root, _cleanup) = confined_sandbox();
+        let (_file, len) = open_confined(&root, &root.join("real.txt")).unwrap();
+        assert_eq!(len, "inside\n".len() as u64);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_swapped_for_a_symlink_after_the_check_is_refused() {
+        // `resolve` saw repo/notes/AGENTS.md; the directory is now a link outside.
+        let (base, root, _cleanup) = confined_sandbox();
+        std::fs::remove_dir(root.join("notes")).unwrap();
+        std::os::unix::fs::symlink(base.join("outside"), root.join("notes")).unwrap();
+        let result = open_confined(&root, &root.join("notes/AGENTS.md"));
+        assert!(
+            result.is_err(),
+            "outside file opened through a directory link"
+        );
+        assert!(result
+            .err()
+            .unwrap()
+            .contains("leaves the Coding Workspace"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_directory_swapped_for_a_link_into_git_metadata_is_refused_as_excluded() {
+        let (_base, root, _cleanup) = confined_sandbox();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::remove_dir(root.join("notes")).unwrap();
+        std::os::unix::fs::symlink(root.join(".git"), root.join("notes")).unwrap();
+        let error = open_confined(&root, &root.join("notes/HEAD"))
+            .err()
+            .unwrap();
+        assert!(error.contains("excluded"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_as_the_last_component_is_refused_even_inside_the_workspace() {
+        let (_base, root, _cleanup) = confined_sandbox();
+        std::os::unix::fs::symlink(root.join("real.txt"), root.join("leaf")).unwrap();
+        let error = open_confined(&root, &root.join("leaf")).err().unwrap();
+        assert!(error.contains("symbolic link"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_refused_at_once_instead_of_blocking_the_open() {
+        let (_base, root, _cleanup) = confined_sandbox();
+        let fifo = root.join("pipe");
+        let c_path = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = open_confined(&root, &fifo).err();
+            let _ = sender.send(result);
+        });
+        // A blocking open would never answer; the test then fails rather than hangs.
+        let result = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("opening a FIFO blocked");
+        assert_eq!(result.as_deref(), Some("not a regular file"));
     }
 
     #[test]
