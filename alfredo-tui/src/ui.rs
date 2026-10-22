@@ -60,9 +60,16 @@ fn dim() -> Style {
 
 /// Transcript rows for one tool round: `⚙ name args` per call and the first line of
 /// its result, cut to one row (issue #233). Full results go to the model only.
-fn tool_step_lines(step: &crate::model::ToolStep, width: usize) -> Vec<Line<'static>> {
+/// `rule_of` names the always-allow rule that approved the call at that position of the
+/// step (issue #320); the row then says `rule #N`.
+fn tool_step_lines(
+    step: &crate::model::ToolStep,
+    width: usize,
+    rule_of: impl Fn(usize) -> Option<u64>,
+) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
-    for (call, result) in step.calls.iter().zip(&step.results) {
+    for (position, (call, result)) in step.calls.iter().zip(&step.results).enumerate() {
+        let rule = rule_of(position).map_or(String::new(), |id| format!(" (rule #{id})"));
         let arguments = match &call.arguments {
             serde_json::Value::Object(map) => map
                 .values()
@@ -75,7 +82,7 @@ fn tool_step_lines(step: &crate::model::ToolStep, width: usize) -> Vec<Line<'sta
             serde_json::Value::Null => String::new(),
             other => other.to_string(),
         };
-        let call_text = single_line(&format!("⚙ {} {arguments}", call.name));
+        let call_text = single_line(&format!("⚙ {}{rule} {arguments}", call.name));
         lines.push(Line::styled(truncate(call_text.trim_end(), width), dim()));
         let count = result.lines().count();
         let first = single_line(result.lines().next().unwrap_or(""));
@@ -1308,8 +1315,12 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
             color
         };
         // Tool rounds (issue #233) show before the reply they fed: call, then a cut result.
+        let mut first_call = 0;
         for step in session.tool_steps(index) {
-            lines.extend(tool_step_lines(step, width));
+            lines.extend(tool_step_lines(step, width, |at| {
+                session.rule_of(index, first_call + at)
+            }));
+            first_call += step.calls.len();
         }
         base += lines.len();
         segments.push(Segment::Run(std::mem::take(&mut lines)));
@@ -1375,6 +1386,18 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         }
         // The pending card is sized to the viewport so its header, args and key
         // line all fit; `card_head` is its first line's index and the args offset.
+        if !app.transient_rows.is_empty() {
+            let rows: Vec<Line<'static>> = app
+                .transient_rows
+                .iter()
+                .map(|row| Line::styled(safe(row), dim()))
+                .collect();
+            heights.extend(
+                rows.iter()
+                    .map(|line| crate::transcript_cache::line_height(line, width)),
+            );
+            segments.push(Segment::Run(rows));
+        }
         let mut card_head = None;
         if let Some(card) = session.pending_approval() {
             let (card_lines, head) =
