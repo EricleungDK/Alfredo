@@ -359,6 +359,12 @@ pub(crate) fn run_bounded(
             let _ = child.wait();
             break None;
         }
+        // A read round's budget (issue #257): the turn was cancelled or the round ran out.
+        if let Some(note) = super::budget::current().and_then(|b| b.stop_note()) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(note.trim_start_matches("error: ").to_string());
+        }
         if started.elapsed() > deadline {
             let _ = child.kill();
             let _ = child.wait();
@@ -410,6 +416,27 @@ mod tests {
         let error = run_bounded(command, 1024, Duration::from_millis(100)).unwrap_err();
         assert!(error.contains("stopped"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn a_cancelled_or_spent_round_stops_a_running_git_call_at_once() {
+        use crate::chat_tools::budget::{within, Budget, Cancel};
+        let run = |budget: Budget| {
+            let mut command = Command::new("/bin/sleep");
+            command.arg("5");
+            let started = Instant::now();
+            let error = within(&budget, || run_bounded(command, 1024, DEADLINE)).unwrap_err();
+            assert!(started.elapsed() < Duration::from_secs(1));
+            error
+        };
+        let cancel = Cancel::default();
+        cancel.set();
+        assert_eq!(
+            run(Budget::new(Duration::from_secs(30), cancel)),
+            "cancelled"
+        );
+        let spent = run(Budget::new(Duration::ZERO, Cancel::default()));
+        assert!(spent.contains("round time limit"), "{spent}");
     }
 
     #[test]

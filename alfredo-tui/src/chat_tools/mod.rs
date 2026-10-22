@@ -14,6 +14,7 @@
 
 pub mod allow;
 pub mod approval;
+mod budget;
 mod edit;
 mod git_read;
 mod git_write;
@@ -103,6 +104,20 @@ pub fn definitions() -> Vec<Value> {
 /// Run one call. Unknown tools and bad arguments come back as `error: ...` text.
 pub fn dispatch(root: &Path, call: &ToolCall) -> String {
     dispatch_within(root, call, MAX_OUTPUT)
+}
+
+/// [`dispatch_within`] under a round [`budget::Budget`]: read tools stop early when it
+/// runs out or its cancel flag is set (issue #257).
+pub(crate) fn dispatch_budgeted(
+    root: &Path,
+    call: &ToolCall,
+    limit: usize,
+    budget: &budget::Budget,
+) -> String {
+    if let Some(note) = budget.stop_note() {
+        return note.into();
+    }
+    budget::within(budget, || dispatch_within(root, call, limit))
 }
 
 /// [`dispatch`] with the output cut to `limit` bytes (at most [`MAX_OUTPUT`]).

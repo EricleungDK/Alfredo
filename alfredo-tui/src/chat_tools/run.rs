@@ -1,7 +1,8 @@
 //! The capped call -> result -> continue loop of one chat turn.
 use super::{
     approval::{self, Decision, Gate, Outcome},
-    cap_to, definitions, dispatch_within, normalize_arguments, Tier, MAX_OUTPUT, TOOLS,
+    budget::{Budget, CancelOnDrop, ROUND_LIMIT, ROUND_LIMIT_NOTE},
+    cap_to, definitions, dispatch_budgeted, normalize_arguments, Tier, MAX_OUTPUT, TOOLS,
 };
 use crate::{
     model::{Event, Message, Stop, ToolCall, ToolStep, Update, MAX_TEXT, OUTPUT_LIMIT},
@@ -109,6 +110,9 @@ pub async fn run_turn(
         }
     }
     let mut steps = 0;
+    // Set when this future is dropped (Esc, /stop, switch, quit): blocking read calls
+    // see it and end instead of running on (issue #257).
+    let cancel = CancelOnDrop::default();
     // Set once a round's results were squeezed out: the next round is offered no tools
     // so the model answers with what it has.
     let mut last_round = false;
@@ -197,6 +201,7 @@ pub async fn run_turn(
         let calls_bytes = serde_json::to_string(&calls).map_or(0, |text| text.len());
         // Bytes of this round already reported to the session.
         let mut reported = 0;
+        let budget = Budget::new(ROUND_LIMIT, cancel.flag());
         for (index, call) in calls.iter().enumerate() {
             let used: usize = results.iter().map(String::len).sum::<usize>() + calls_bytes;
             let room = Room::of(provider.num_ctx(), held_text, held_window, used);
@@ -225,11 +230,12 @@ pub async fn run_turn(
                         cap_to(result, room.limit.max(MIN_RESULT))
                     }
                 },
+                _ if budget.expired() => ROUND_LIMIT_NOTE.to_string(),
                 _ if room.limit < MIN_RESULT => {
                     last_round = true;
                     room.note.to_string()
                 }
-                _ => blocking(workspace, call, room.limit).await,
+                _ => blocking(workspace, call, room.limit, &budget).await,
             };
             // The session refuses a result past the conversation limit. Results were
             // budgeted above; if this one still would not fit, a read result becomes a
@@ -318,11 +324,13 @@ impl Room {
     }
 }
 
-/// Run one call off the async thread, its output cut to `limit` bytes.
-async fn blocking(workspace: &Path, call: &ToolCall, limit: usize) -> String {
+/// Run one call off the async thread, its output cut to `limit` bytes, under the
+/// round's time and cancel `budget`.
+async fn blocking(workspace: &Path, call: &ToolCall, limit: usize, budget: &Budget) -> String {
     let root = workspace.to_path_buf();
     let call = call.clone();
-    tokio::task::spawn_blocking(move || dispatch_within(&root, &call, limit))
+    let budget = budget.clone();
+    tokio::task::spawn_blocking(move || dispatch_budgeted(&root, &call, limit, &budget))
         .await
         .unwrap_or_else(|_| "error: tool execution stopped unexpectedly".into())
 }
@@ -485,5 +493,32 @@ impl Drop for Undecided {
             Err(_) => return,
         };
         log.append(&self.card, &outcome);
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use crate::chat_tools::budget::Cancel;
+    use std::time::Duration;
+
+    fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
+        ToolCall {
+            name: name.into(),
+            arguments,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_call_after_the_round_deadline_is_not_run() {
+        let dir = std::env::temp_dir().join(format!("alfredo-round-limit-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.txt"), "hello\n").unwrap();
+        let live = Budget::new(Duration::from_secs(30), Cancel::default());
+        let call = call("read_file", serde_json::json!({"path": "a.txt"}));
+        assert!(blocking(&dir, &call, 4096, &live).await.contains("hello"));
+        let spent = Budget::new(Duration::ZERO, Cancel::default());
+        assert_eq!(blocking(&dir, &call, 4096, &spent).await, ROUND_LIMIT_NOTE);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
