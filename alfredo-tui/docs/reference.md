@@ -1489,7 +1489,10 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   `error: …` text it can react to. Results are also budgeted to the room left. With
   `--num-ctx`, each result is cut (same `[truncated: …]` marker) to `(window - prompt
   tokens - 256) × 3/2` bytes when that is under 16 KiB, counting the tool definitions in
-  the prompt estimate. Under the 128 KiB conversation limit a result is cut to what fits
+  the prompt estimate. A budgeted `read_file` is sized to the budget, so it still ends on
+  a whole line with the `[truncated at line N of M; call read_file with start_line=…]`
+  continuation line; other budget cuts end on a newline before the marker.
+  Under the 128 KiB conversation limit a result is cut to what fits
   with 4 KiB left for the answer. When less than 256 bytes would remain, the result is
   replaced by `error: not shown; the conversation is near its size limit, answer with what
   you have or ask for a narrower range` (`the context window (--num-ctx) is nearly full`
@@ -1651,7 +1654,10 @@ default false), `timeout_seconds` (1–600, default 120).
 - **Escalated.** `escalate: true` runs on the host with your environment and network
   (for `git push`, package installs). The card is red with a reversed
   `! HOST · network on · your environment and credentials (SSH agent, tokens)` banner
-  and `run on HOST …`. Denying it runs nothing. Escalated
+  and `run on HOST …`. Denying it runs nothing.
+  The command runs in its own session with no controlling terminal, so a prompt that
+  needs one (sudo password, ssh passphrase or host key, git credentials) fails with a
+  note to use ssh-agent or a credential helper instead of drawing over the TUI. Escalated
   outcomes are logged with `"escalated": true` and show as `Chat run_command (HOST) …` in
   F4. An always-allow rule covers an escalated card only when the rule is itself
   escalated (see [always-allow rules](#chat-always-allow-rules)).
