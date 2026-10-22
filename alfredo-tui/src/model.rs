@@ -376,6 +376,8 @@ impl Session {
     pub fn status_label(&self) -> std::borrow::Cow<'_, str> {
         if self.compacting.is_some() {
             "Summarising earlier turns".into()
+        } else if self.pending_approval().is_some() {
+            "Waiting for your approval".into()
         } else if let Some((retry, deadline)) = self.retry.as_ref().filter(|_| self.status.active())
         {
             let left = deadline.saturating_duration_since(std::time::Instant::now());
@@ -409,7 +411,9 @@ impl Session {
         if !self.status.active() {
             return None;
         }
-        if self.running_command {
+        if self.pending_approval().is_some() {
+            Some("waiting for approval")
+        } else if self.running_command {
             Some("running run_command")
         } else if self.retry.is_some() {
             Some("reconnecting")
@@ -433,6 +437,9 @@ impl Session {
     pub fn short_status(&self) -> String {
         if self.compacting.is_some() {
             return "compacting".into();
+        }
+        if self.pending_approval().is_some() {
+            return "approve?".into();
         }
         if let Some((retry, _)) = self.retry.as_ref().filter(|_| self.status.active()) {
             return format!("retry {}/{}", retry.retry, retry.limit);
@@ -999,7 +1006,9 @@ impl Session {
         if self.attempt != attempt || !self.status.active() {
             return false;
         }
-        let _ = now;
+        if let Some(timing) = &mut self.timing {
+            timing.pause(now);
+        }
         self.approval = Some((card, None));
         true
     }
@@ -1058,6 +1067,9 @@ impl Session {
             }
             _ => return None,
         };
+        if let Some(timing) = &mut self.timing {
+            timing.resume(now);
+        }
         self.running_command = decision != Decision::Deny
             && self.pending_approval().is_some_and(|card| {
                 matches!(
@@ -1904,6 +1916,14 @@ pub struct App {
 }
 
 impl App {
+    /// A card was raised in chat `index`. Only the selected chat shows it, so a
+    /// background chat gets a notice (issue #273).
+    pub fn note_approval_wait(&mut self, index: usize) {
+        if index != self.selected {
+            self.notice = format!("Chat {} needs approval", index + 1);
+        }
+    }
+
     pub fn new(model: String) -> Self {
         Self {
             sessions: vec![Session::new(model)],

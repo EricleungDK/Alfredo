@@ -1570,6 +1570,11 @@ Approval (ADR 0004); there is no skip-approval mode.
   diff is cut to the rows that fit (`[N more diff lines]`) so the header, arguments and
   key line stay on screen; the 0.5 s delay below starts only once the header rows are
   drawn, and PageUp that scrolls them out of view disarms `y`/`n` until they return.
+- **Waiting on you.** While a card is pending the chat's side-pane row and its frame title
+  read `approve?` (amber `●`, no spinner) instead of `thinking`, and the timing line says
+  `waiting for approval`. The turn clock leaves out the time the card waited, so the
+  elapsed seconds are model time only. When a card is raised in a chat that is not
+  selected, the notice line reads `Chat N needs approval`. `/go` rows are unchanged.
 - **Keys.** `y` and `n` answer the card only when the prompt draft is empty, no other key
   was pressed in the previous 0.5 s, and the card has been on screen for 0.5 s (selected
   conversation, no pane, panel or agent view over it; switching away and back restarts

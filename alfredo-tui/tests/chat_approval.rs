@@ -697,6 +697,71 @@ fn the_pending_card_shows_tool_args_diff_and_keys() {
     assert!(text.contains("n deny"));
 }
 
+/// Issue #273: a chat parked on a card says it needs the owner, not "thinking".
+#[test]
+fn a_pending_card_shows_approve_in_the_side_pane_row_and_the_header() {
+    let mut app = App::new("m".into());
+    app.sessions[0] = pending_session();
+    assert_eq!(app.sessions[0].short_status(), "approve?");
+    assert_eq!(app.sessions[0].wait_phase(), Some("waiting for approval"));
+    assert_eq!(app.sessions[0].status_label(), "Waiting for your approval");
+    let mut terminal = Terminal::new(TestBackend::new(140, 40)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+    let text = screen(&terminal);
+    let rows: Vec<&str> = text.lines().filter(|row| row.contains("chat 1")).collect();
+    assert!(
+        rows.iter().any(|row| row.contains("approve?")),
+        "side pane row: {text}"
+    );
+    assert!(!text.contains("thinking"), "{text}");
+    assert!(!text.contains("waiting for model"), "{text}");
+    assert!(text.contains("Chat 1 · approve?"), "header: {text}");
+    // The card is answered: the turn is model time again.
+    let after = Instant::now() + approval::ARM;
+    assert!(app.sessions[0].answer_approval('y', after).is_some());
+    assert_ne!(app.sessions[0].short_status(), "approve?");
+}
+
+#[test]
+fn the_turn_clock_excludes_the_time_spent_waiting_on_the_owner() {
+    let mut session = Session::new("m".into());
+    session.insert("redraft README");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Admitted);
+    let card = pending_session().pending_approval().unwrap().clone();
+    let started = Instant::now();
+    let raised = started + Duration::from_secs(2);
+    assert!(session.await_approval(attempt, card, raised));
+    session.approval_visible(true, raised);
+    // The owner is away for 30 s.
+    let answered = raised + Duration::from_secs(30);
+    assert!(session.answer_approval('y', answered).is_some());
+    let later = answered + Duration::from_secs(1);
+    let timing = session.timing.as_ref().unwrap();
+    // `Timing::new` ran at begin(), so measure what the clock added since the card.
+    let during = timing.compact(later);
+    let before = timing.compact(raised);
+    let added: f64 = during.trim_end_matches('s').parse::<f64>().unwrap()
+        - before.trim_end_matches('s').parse::<f64>().unwrap();
+    assert!(
+        (0.9..=1.1).contains(&added),
+        "30 s of owner wait must not count: {before} -> {during}"
+    );
+}
+
+#[test]
+fn a_card_in_a_background_chat_posts_a_needs_approval_notice() {
+    let mut app = App::new("m".into());
+    app.sessions.push(pending_session());
+    app.selected = 0;
+    app.note_approval_wait(1);
+    assert_eq!(app.notice, "Chat 2 needs approval");
+    app.notice.clear();
+    app.note_approval_wait(0);
+    assert_eq!(app.notice, "", "the selected chat shows the card itself");
+}
+
 fn tall_pending_session() -> Session {
     let root = workspace("tall");
     let body: String = (1..=200).map(|n| format!("line {n}\n")).collect();
