@@ -791,6 +791,14 @@ starts, and nothing is recorded. After the check, a worktree whose index or HEAD
 refused: the run fails and names the path, and no diff or candidate is saved. Alfredo does
 not support submodules, and host-side Git never reads a submodule's working tree.
 
+A passing check does not make a run reviewable when the worker changed nothing. If the
+candidate diff against the baseline is empty, the run is `Failed` with a detail that
+starts `No files changed:` and names the allowed files; the evidence (check receipt and
+empty diff) is still saved, and no candidate is kept. Autopilot repairs it like any
+other failure, and the repair prompt states that the previous attempt changed nothing.
+When the repair budget runs out, `--headless` exits 1 and the report ends with the usual
+`Next: … /repair ID <hint>` line.
+
 `/evidence ID` opens a readable check summary, unified diff with signed/colored
 additions and deletions, and separate saved stdout/stderr. It selects the inspected
 task, so `/accept` or `/reject` without an ID acts on that evidence. PageUp/PageDown
