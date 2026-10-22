@@ -684,6 +684,24 @@ fn finished_autopilot_replaces_the_stale_start_notice_in_the_footer_once() {
 }
 
 #[test]
+fn saved_state_with_an_out_of_range_repair_limit_is_not_loaded() {
+    let fixture = Fixture::new();
+    let directory = fixture.directory();
+    fs::create_dir_all(&directory).unwrap();
+    fs::write(
+        autopilot::state_path(&directory, "default"),
+        json!({"version": 1, "id": "0123456789abcdef", "goal": "Goal", "model": "fixture",
+            "max_repairs": 2, "phase": "done", "paused": false, "started": 100, "finished": 160,
+            "first": 1, "count": 1, "limits": {"1": 300}})
+        .to_string(),
+    )
+    .unwrap();
+    let control = TaskControl::new(fixture.store.clone());
+    let opened = Autopilot::open(&directory, "default");
+    assert!(opened.map_or(true, |autopilot| autopilot.status(&control).is_none()));
+}
+
+#[test]
 fn finished_state_saved_by_an_older_build_still_loads_with_an_honest_state() {
     use sha2::{Digest, Sha256};
     let fixture = Fixture::new();

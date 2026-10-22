@@ -32,6 +32,8 @@ const ATTEMPTS: u32 = 3;
 const MAX_STATE: usize = 256 * 1024;
 pub const DEFAULT_MAX_REPAIRS: u32 = 3;
 pub const MAX_REPAIRS: u32 = 16;
+/// The task store holds at most 256 tasks, so no family can have more repairs.
+const TASK_BOUND: u32 = 256;
 /// Planning attempts per goal: the first plan plus two validation re-plans.
 const PLAN_ATTEMPTS: u32 = 3;
 
@@ -160,8 +162,11 @@ impl Saved {
             || self.id.len() != 16
             || !self.id.bytes().all(|b| b.is_ascii_hexdigit())
             || self.max_repairs > MAX_REPAIRS
-            || self.limits.len() > 4096
-            || self.limits.values().any(|limit| *limit > 4096)
+            || self.limits.len() > TASK_BOUND as usize
+            || self
+                .limits
+                .values()
+                .any(|limit| *limit > MAX_REPAIRS + TASK_BOUND)
         {
             return Err("Unsupported or invalid autopilot state".into());
         }
