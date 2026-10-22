@@ -113,10 +113,11 @@ struct Saved {
     /// families saved after that point is the owner's `/repair` and re-enters the loop.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     finished_through: Option<u64>,
-    /// Extra repairs per family granted by the owner's explicit `/repair` after a
-    /// finish; `--max-repairs` stays the automatic bound.
+    /// Per family, the repairs counted when the owner's explicit `/repair` re-entered
+    /// the loop: room for that one repair and no more, so its failure ends the family
+    /// again instead of spending automatic repairs the owner never asked for.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    granted: BTreeMap<u64, u32>,
+    limits: BTreeMap<u64, u32>,
 }
 fn is_zero(value: &u32) -> bool {
     *value == 0
@@ -148,9 +149,9 @@ impl Saved {
     fn active(&self) -> bool {
         !matches!(self.phase, Phase::Done | Phase::Failed)
     }
-    /// Automatic repairs allowed for a family, plus the owner's explicit ones.
+    /// Repairs allowed for a family: `--max-repairs`, unless an owner repair set it.
     fn repair_limit(&self, root: u64) -> u32 {
-        self.max_repairs + self.granted.get(&root).copied().unwrap_or(0)
+        self.limits.get(&root).copied().unwrap_or(self.max_repairs)
     }
     fn validate(&self) -> Result<(), String> {
         if self.version != VERSION
@@ -159,6 +160,8 @@ impl Saved {
             || self.id.len() != 16
             || !self.id.bytes().all(|b| b.is_ascii_hexdigit())
             || self.max_repairs > MAX_REPAIRS
+            || self.limits.len() > 4096
+            || self.limits.values().any(|limit| *limit > 4096)
         {
             return Err("Unsupported or invalid autopilot state".into());
         }
@@ -807,7 +810,7 @@ impl Autopilot {
             dirty: crate::worker::uncommitted_changes(tasks.workspace()),
             hook_fired: false,
             finished_through: None,
-            granted: BTreeMap::new(),
+            limits: BTreeMap::new(),
         });
         self.last = None;
         self.last_key = None;
@@ -860,6 +863,7 @@ impl Autopilot {
             let repairable: Vec<String> = tasks
                 .snapshot
                 .as_ref()
+                .filter(|_| saved.phase == Phase::Done)
                 .map(|snapshot| {
                     families(snapshot, saved, tasks)
                         .iter()
@@ -1131,22 +1135,35 @@ impl Autopilot {
             return;
         };
         let roots = saved.roots();
-        let mut grants: Vec<u64> = snapshot
+        let mut repaired: Vec<u64> = snapshot
             .tasks
             .iter()
             .filter(|task| task.id > through && task.status != TaskStatus::Cancelled)
             .filter_map(|task| snapshot.repair_root(task.repair_of?))
             .filter(|root| roots.contains(root))
             .collect();
-        if grants.is_empty() {
-            saved.finished_through = Some(highest_task(snapshot));
+        let latest = highest_task(snapshot);
+        let moved = latest != through;
+        saved.finished_through = Some(latest);
+        // A run stopped by `fail()` (sandbox refusal, file too large) may still have
+        // other families open; resuming would drive all of them. It stays finished.
+        if repaired.is_empty() || saved.phase != Phase::Done {
+            if moved {
+                self.persist();
+            }
             return;
         }
-        grants.sort_unstable();
-        for root in grants {
-            *saved.granted.entry(root).or_default() += 1;
+        repaired.sort_unstable();
+        repaired.dedup();
+        let counted: Vec<(u64, u32)> = families(snapshot, saved, tasks)
+            .iter()
+            .filter(|family| repaired.contains(&family.root))
+            .map(|family| (family.root, family.repairs))
+            .collect();
+        let saved = self.saved.as_mut().unwrap();
+        for (root, repairs) in counted {
+            saved.limits.insert(root, repairs);
         }
-        saved.finished_through = Some(highest_task(snapshot));
         let elapsed = self.elapsed();
         self.resume_running(elapsed);
     }

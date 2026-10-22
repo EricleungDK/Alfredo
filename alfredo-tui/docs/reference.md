@@ -156,11 +156,13 @@ re-enters the autopilot loop: it approves the repair, runs it, auto-reviews it w
 check passes and, once accepted, counts it for the parent's family, so dependents that
 were blocked on it run and the run ends `done` (or `partial` if other families are
 still stuck) on a new `alfredo/go-<id>` branch (`-N` suffix when one already exists)
-that holds the accepted work. The repair adds exactly one repair to its family's
-`--max-repairs` budget; if it fails too the run ends `failed` again with `Last failure:`
+that holds the accepted work. The repair gets room for exactly that one repair
+in its family (never extra automatic ones, however often it is cancelled and repeated);
+if it fails too the run ends `failed` again with `Last failure:`
 and a `Next:` line for the new ID. Other stuck families stay stuck, and only a repair
 saved after the run finished re-enters the loop, so a restart never replays anything.
-`/repair` while autopilot is running or paused behaves as before, and `/resume` after a
+A run stopped by an environment failure (sandbox refusal, file too large) is not
+re-entered. `/repair` while autopilot is running or paused behaves as before, and `/resume` after a
 finished run names `/repair ID <hint>` and `/go GOAL` instead of only "already finished".
 
 When every planned task is accepted, held or failed, autopilot composes the accepted
