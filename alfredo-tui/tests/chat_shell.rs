@@ -546,6 +546,103 @@ fn escalated_cards_look_different_from_sandboxed_ones() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Issue #305: format (Cf) characters must never reach the terminal from a card or a
+/// tool-step row; they show as `<U+XXXX>` so the owner sees the text differs.
+const CF: [char; 4] = ['\u{202E}', '\u{200B}', '\u{2066}', '\u{E0041}'];
+
+fn assert_no_cf(text: &str) {
+    for c in CF.into_iter().chain(['\u{FEFF}', '\u{2069}']) {
+        assert!(!text.contains(c), "raw U+{:04X} drawn: {text}", c as u32);
+    }
+}
+
+fn draw_steps(step: alfredo_tui::model::ToolStep) -> String {
+    let mut session = Session::new("m".into());
+    session.insert("run it");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Admitted);
+    session.apply(attempt, Update::ToolStep(step));
+    session.apply(attempt, Update::Token("done".into()));
+    session.apply(attempt, Update::Done);
+    let mut app = App::new("m".into());
+    app.sessions[0] = session;
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    buffer.content().iter().map(|cell| cell.symbol()).collect()
+}
+
+#[test]
+fn a_run_command_card_never_draws_format_characters() {
+    let root = workspace("cf-run");
+    let command = "echo \u{202E}fdsa\u{200B}x \u{2066}y\u{E0041}z";
+    let card = approval::card(&root, &call(json!({"command": command}))).unwrap();
+    let text = draw(card);
+    assert_no_cf(&text);
+    for shown in ["<U+202E>", "<U+200B>", "<U+2066>", "<U+E0041>"] {
+        assert!(text.contains(shown), "{shown} missing: {text}");
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn file_and_git_cards_never_draw_format_characters() {
+    let root = workspace("cf-edit");
+    let mut card = approval::card(&root, &call(json!({"command": "true"}))).unwrap();
+    card.kind = CardKind::Edit;
+    card.tool = "write_file".into();
+    card.summary = "write n\u{202E}ew\u{200B}.txt".into();
+    card.preview = "+x\u{2066}y\u{E0041}\n-o\u{202E}ld".into();
+    card.arguments = json!({"path": "n\u{202E}ew\u{200B}.txt", "content": "x\u{2066}y"});
+    let text = draw(card.clone());
+    assert_no_cf(&text);
+    assert!(text.contains("<U+202E>"), "{text}");
+    card.tool = "git_commit".into();
+    card.kind = CardKind::Git;
+    card.summary = "commit \u{202E}fix\u{E0041}".into();
+    let text = draw(card);
+    assert_no_cf(&text);
+    assert!(text.contains("<U+E0041>"), "{text}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn tool_step_rows_never_draw_format_characters() {
+    let text = draw_steps(alfredo_tui::model::ToolStep {
+        calls: vec![ToolCall {
+            name: "run_command".into(),
+            arguments: json!({"command": "echo \u{202E}fdsa\u{200B}x \u{2066}y\u{E0041}z"}),
+        }],
+        results: vec!["ok \u{202E}rev\u{FEFF}".into()],
+    });
+    assert_no_cf(&text);
+    assert!(text.contains("<U+202E>"), "{text}");
+}
+
+#[test]
+fn cards_and_rows_keep_cjk_accents_and_emoji() {
+    let root = workspace("cf-plain");
+    let card = approval::card(&root, &call(json!({"command": "echo 你好 café 🙂"}))).unwrap();
+    let text = draw(card);
+    assert!(text.contains("café"), "{text}");
+    assert!(text.contains('🙂') && text.contains('你'), "{text}");
+    assert!(!text.contains("<U+"), "{text}");
+    let text = draw_steps(alfredo_tui::model::ToolStep {
+        calls: vec![ToolCall {
+            name: "run_command".into(),
+            arguments: json!({"command": "echo 你好 café 🙂"}),
+        }],
+        results: vec!["你好 café 🙂".into()],
+    });
+    assert!(
+        text.contains('🙂') && text.contains("café") && text.contains('你'),
+        "{text}"
+    );
+    assert!(!text.contains("<U+"), "{text}");
+    let _ = fs::remove_dir_all(root);
+}
+
 /// Issue #302: while an approved command runs the chat says so and that Esc stops it.
 #[test]
 fn a_running_command_shows_its_status_and_that_esc_stops_it() {
