@@ -221,7 +221,7 @@ pub async fn run_turn(
                     ),
                     // An approved write still runs; only its (short) report is capped.
                     Some(gate) => {
-                        let result = gated(workspace, gate, session, attempt, call).await;
+                        let result = gated(workspace, gate, session, attempt, call, &sender).await;
                         cap_to(result, room.limit.max(MIN_RESULT))
                     }
                 },
@@ -336,6 +336,7 @@ async fn gated(
     session: usize,
     attempt: u64,
     call: &ToolCall,
+    events: &Sender<Event>,
 ) -> String {
     let root = workspace.to_path_buf();
     let preview = call.clone();
@@ -353,6 +354,18 @@ async fn gated(
             .ok()
             .flatten();
         if let Some(rule) = matched {
+            // Display only (issue #320): tells the session this call runs under a rule,
+            // so its row says `rule #N` and a command shows `running run_command`.
+            let _ = events
+                .send(Event {
+                    session,
+                    attempt,
+                    update: Update::RuleRunning {
+                        tool: call.name.clone(),
+                        rule: rule.id,
+                    },
+                })
+                .await;
             let root = workspace.to_path_buf();
             let log = gate.log.clone();
             let stop_guard = super::shell::StopOnDrop::default();

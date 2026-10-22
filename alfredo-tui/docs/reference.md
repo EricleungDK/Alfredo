@@ -149,6 +149,22 @@ Identical consecutive `plan failed` lines in the chat collapse to one line with 
 count (`×3`), and `/autopilot` after a planning failure shows the summary instead of
 the stale plan draft panel.
 
+`/repair ID <hint>` is the way back from that summary. The `Next:` line names the ID it
+accepts (the family's newest failed repair). After a run that ended `failed` or
+`partial`, `/repair ID <hint>` on a task of that run saves the Proposed repair and
+re-enters the autopilot loop: it approves the repair, runs it, auto-reviews it when its
+check passes and, once accepted, counts it for the parent's family, so dependents that
+were blocked on it run and the run ends `done` (or `partial` if other families are
+still stuck) on a new `alfredo/go-<id>` branch (`-N` suffix when one already exists)
+that holds the accepted work. The repair gets room for exactly that one repair
+in its family (never extra automatic ones, however often it is cancelled and repeated);
+if it fails too the run ends `failed` again with `Last failure:`
+and a `Next:` line for the new ID. Other stuck families stay stuck, and only a repair
+saved after the run finished re-enters the loop, so a restart never replays anything.
+A run stopped by an environment failure (sandbox refusal, file too large) is not
+re-entered. `/repair` while autopilot is running or paused behaves as before, and `/resume` after a
+finished run names `/repair ID <hint>` and `/go GOAL` instead of only "already finished".
+
 When every planned task is accepted, held or failed, autopilot composes the accepted
 candidates on the plan's recorded baseline with the dependency merge-tree composition
 and creates one local branch `alfredo/go-<id>`. HEAD, the index and working files are
@@ -220,7 +236,10 @@ error}`. `state` is `done`, `stopped` or `failed`; `result` is `ok`, `denied`, `
 limit is `state` `stopped` with `stopped` `step_limit` or `output_limit` (`null` otherwise) and
 `error` naming the cap; its `reply` is the text before the cut, without the interactive "ask again"
 notice. Exit 0 done; 1 stopped, failed or interrupted (SIGINT/SIGTERM deny further cards, wait up to 10 s for
-answered cards to be logged, then cancel the turn); 2 setup or usage error. The turn is not saved to the conversation. The
+answered cards to be logged, then cancel the turn); 2 setup or usage error. The turn is not saved to the conversation, and
+it does not own it: it takes no conversation lock, reads the conversation only for its saved model, and so runs beside an
+open TUI or another headless chat on the same repository (`--go --headless` still takes the lock). Concurrent runs append
+whole lines to `chat-approvals.jsonl` (a per-mission file lock serializes each append). The
 eval uses it for chat tasks (`eval/README.md`).
 
 ## Build and install a development archive
@@ -1489,7 +1508,10 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   `error: …` text it can react to. Results are also budgeted to the room left. With
   `--num-ctx`, each result is cut (same `[truncated: …]` marker) to `(window - prompt
   tokens - 256) × 3/2` bytes when that is under 16 KiB, counting the tool definitions in
-  the prompt estimate. Under the 128 KiB conversation limit a result is cut to what fits
+  the prompt estimate. A budgeted `read_file` is sized to the budget, so it still ends on
+  a whole line with the `[truncated at line N of M; call read_file with start_line=…]`
+  continuation line; other budget cuts end on a newline before the marker.
+  Under the 128 KiB conversation limit a result is cut to what fits
   with 4 KiB left for the answer. When less than 256 bytes would remain, the result is
   replaced by `error: not shown; the conversation is near its size limit, answer with what
   you have or ask for a narrower range` (`the context window (--num-ctx) is nearly full`
@@ -1530,7 +1552,7 @@ Approval (ADR 0004); there is no skip-approval mode.
 
 | Tool | Arguments | Effect |
 | --- | --- | --- |
-| `write_file` | `path`, `content` | Creates or replaces a UTF-8 text file (parent directory must exist; at most 1 MiB); writes `content` exactly as given, so LF content replaces CRLF (the card says `line endings CRLF → LF`, `final newline removed` and so on instead of `(no line changes)`) |
+| `write_file` | `path`, `content` | Creates or replaces a UTF-8 text file (missing parent directories are created after approval and listed on the card as `new directories: src, src/util`; they are refused before asking when a parent exists as a file or symlink, or the path is `.git`, secret, generated or outside the workspace, or the first existing parent is read-only; at most 1 MiB); writes `content` exactly as given, so LF content replaces CRLF (the card says `line endings CRLF → LF`, `final newline removed` and so on instead of `(no line changes)`) |
 | `edit_file` | `path`, `old_text`, `new_text` | Replaces the one exact occurrence of `old_text`; zero or several matches are refused, as is an edit that changes nothing (identical `old_text` and `new_text`, or line-ending changes in an all-CRLF file; use `write_file` to change endings). In a file whose every line ends in CRLF, `old_text`/`new_text` are matched as LF text and the result keeps CRLF; a file mixing CRLF and LF is matched on exact bytes (the not-found error says so) and `new_text` is inserted as given |
 
 - **Read-only files.** `write_file` and `edit_file` refuse an existing file without the owner write bit (for example `chmod 444`) with `<path> is read-only; …`, before any approval card is raised and again before the write, and leave the file unchanged.
@@ -1651,7 +1673,10 @@ default false), `timeout_seconds` (1–600, default 120).
 - **Escalated.** `escalate: true` runs on the host with your environment and network
   (for `git push`, package installs). The card is red with a reversed
   `! HOST · network on · your environment and credentials (SSH agent, tokens)` banner
-  and `run on HOST …`. Denying it runs nothing. Escalated
+  and `run on HOST …`. Denying it runs nothing.
+  The command runs in its own session with no controlling terminal, so a prompt that
+  needs one (sudo password, ssh passphrase or host key, git credentials) fails with a
+  note to use ssh-agent or a credential helper instead of drawing over the TUI. Escalated
   outcomes are logged with `"escalated": true` and show as `Chat run_command (HOST) …` in
   F4. An always-allow rule covers an escalated card only when the rule is itself
   escalated (see [always-allow rules](#chat-always-allow-rules)).
@@ -1706,8 +1731,13 @@ rule `a` would add.
   `… approved · applied · by always-allow rule #ID`.
 - **Storage.** `chat-allow.json` in the mission's State Directory; restored on restart. A
   malformed file counts as no rules. At most 200 rules.
-- **`/allow`** lists rules (`#ID tool …`); `/allow clear` removes all; `/allow clear ID`
-  removes one.
+- **`/allow`** lists every rule in full, one wrapped row per rule under the transcript
+  (`#ID`, tool, the exact command / ANY arguments / every call, sandboxed or HOST) until
+  the next key; `/allow clear` removes all; `/allow clear ID` removes one.
+- **Rule marker.** The `⚙` row of a call a rule approved reads `⚙ run_command (rule #N) …`;
+  calls approved with `y` or `a` on a card have no marker. A rule-approved `run_command`
+  shows `running run_command · Ns · Esc stops` while it runs. The marker is display
+  only and is not saved with the conversation.
 - **Headless** `--chat` never reads rules; its `--approve` policy decides.
 
 ## Chat proposes governed work

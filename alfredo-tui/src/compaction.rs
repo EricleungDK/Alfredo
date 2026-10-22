@@ -399,6 +399,7 @@ impl Session {
         shift(&mut self.sources, cut);
         shift(&mut self.attachments, cut);
         shift(&mut self.tool_steps, cut);
+        shift(&mut self.rule_marks, cut);
         self.interrupted = self
             .interrupted
             .iter()

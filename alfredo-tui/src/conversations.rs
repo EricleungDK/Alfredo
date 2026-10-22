@@ -311,10 +311,11 @@ pub struct ConversationStore {
     namespace: String,
     workspace: PathBuf,
     mission: String,
-    _owner: StoreLock,
+    /// `None` for a read-only view that never saves (see [`ConversationStore::open_readonly`]).
+    _owner: Option<StoreLock>,
 }
 impl ConversationStore {
-    pub fn open(tasks: &TaskStore, namespace: &str) -> Result<Self> {
+    fn at(tasks: &TaskStore, namespace: &str) -> Result<(Self, PathBuf, String)> {
         if namespace.trim().is_empty()
             || namespace.len() > 120
             || namespace.chars().any(char::is_control)
@@ -323,20 +324,32 @@ impl ConversationStore {
         }
         let root = tasks.conversation_directory()?;
         let digest = format!("{:x}", Sha256::digest(namespace.as_bytes()));
+        let store = Self {
+            path: root.join(format!("conversations-{digest}.json")),
+            root: root.clone(),
+            namespace: namespace.into(),
+            workspace: tasks.identity().0.to_owned(),
+            mission: tasks.identity().1.to_owned(),
+            _owner: None,
+        };
+        Ok((store, root, digest))
+    }
+    pub fn open(tasks: &TaskStore, namespace: &str) -> Result<Self> {
+        let (mut store, root, digest) = Self::at(tasks, namespace)?;
         let owner = regular_file(
             &root.join(format!("conversations-{digest}.lock")),
             true,
             true,
         )?;
         owner.try_lock().map_err(|_| namespace_in_use(namespace))?;
-        Ok(Self {
-            path: root.join(format!("conversations-{digest}.json")),
-            root,
-            namespace: namespace.into(),
-            workspace: tasks.identity().0.to_owned(),
-            mission: tasks.identity().1.to_owned(),
-            _owner: StoreLock(owner),
-        })
+        store._owner = Some(StoreLock(owner));
+        Ok(store)
+    }
+    /// A view that reads the saved conversation without owning it: no lock is taken
+    /// or created, so it works beside an open owner, and [`ConversationStore::save`]
+    /// is refused. For callers that never write the conversation (headless chat).
+    pub fn open_readonly(tasks: &TaskStore, namespace: &str) -> Result<Self> {
+        Ok(Self::at(tasks, namespace)?.0)
     }
     fn validate_selection_identity(&self, snapshot: &Snapshot) -> Result<()> {
         for command in snapshot
@@ -394,6 +407,9 @@ impl ConversationStore {
         Ok(Some(snapshot))
     }
     pub fn save(&self, snapshot: &Snapshot) -> Result<()> {
+        if self._owner.is_none() {
+            return Err("Conversation opened read-only; it is never saved".into());
+        }
         snapshot.validate(&self.namespace)?;
         self.validate_selection_identity(snapshot)?;
         let bytes = serde_json::to_vec(snapshot).map_err(|e| e.to_string())?;

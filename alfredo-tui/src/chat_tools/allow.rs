@@ -45,10 +45,13 @@ pub struct Rule {
     pub escalated: bool,
 }
 
-/// Whether `card` may be always-allowed: an allowlistable tool, not a push card, and
-/// not a run_command that invokes `git … push`.
+/// Whether `card` may be always-allowed: an allowlistable tool, not a push card, not a
+/// run_command that invokes `git … push`, and not a write_file that creates directories
+/// (issue #272: those always ask, so a rule for write_file never covers making directories;
+/// the card fingerprint carries `+dirs:` exactly then).
 pub fn offered(card: &Card) -> bool {
     card.kind != CardKind::Push
+        && !(card.tool == "write_file" && card.fingerprint.contains("+dirs:"))
         && TOOLS
             .iter()
             .any(|tool| tool.name == card.tool && tool.tier.allowlistable())
@@ -145,12 +148,11 @@ pub fn rule_for(card: &Card) -> Result<Rule, String> {
     })
 }
 
-/// One line naming what a rule covers.
+/// One line naming what a rule covers, in full (the view wraps it; issue #320).
 pub fn describe(rule: &Rule) -> String {
     let clean = |text: &str| -> String {
         text.chars()
             .map(|c| if c.is_control() { ' ' } else { c })
-            .take(120)
             .collect()
     };
     match &rule.command {
@@ -299,7 +301,8 @@ impl Rules {
     }
 }
 
-/// `/allow [clear [ID]]`: `args` is the text after `/allow`. `Ok` is the notice.
+/// `/allow [clear [ID]]`: `args` is the text after `/allow`. `Ok` is the notice; the rule
+/// list is several lines (a heading, then one row per rule).
 pub fn slash(rules: &Rules, args: &str) -> Result<String, String> {
     let words: Vec<&str> = args.split_whitespace().collect();
     match words.as_slice() {
@@ -308,9 +311,10 @@ pub fn slash(rules: &Rules, args: &str) -> Result<String, String> {
             if list.is_empty() {
                 return Ok("No always-allow rules · press a on an approval card to add one".into());
             }
+            // One row per rule (issue #320); the terminal shows the rows wrapped.
             Ok(format!(
-                "Always-allow rules: {} · /allow clear [ID] removes",
-                list.iter().map(describe).collect::<Vec<_>>().join(" · ")
+                "Always-allow rules · /allow clear [ID] removes\n{}",
+                list.iter().map(describe).collect::<Vec<_>>().join("\n")
             ))
         }
         ["clear"] => rules

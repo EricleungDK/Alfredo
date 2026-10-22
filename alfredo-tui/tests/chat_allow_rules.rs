@@ -249,7 +249,7 @@ fn edit_call() -> Reply {
     )
 }
 
-async fn turn(root: &Path, gate: Gate) {
+async fn turn(root: &Path, gate: Gate) -> Vec<Event> {
     let addr = ollama_fixture::reserve();
     let first = Mutex::new(Some(edit_call()));
     let fixture = ollama_fixture::serve(addr, move |_, index| {
@@ -275,7 +275,11 @@ async fn turn(root: &Path, gate: Gate) {
         Some(gate),
     )
     .await;
-    while receiver.recv().await.is_some() {}
+    let mut events = Vec::new();
+    while let Some(event) = receiver.recv().await {
+        events.push(event);
+    }
+    events
 }
 
 fn gate(decision: Decision, log: &Log, rules: &Rules) -> (Gate, Arc<Mutex<usize>>) {
@@ -327,6 +331,211 @@ async fn always_allow_then_an_identical_action_runs_without_asking_and_is_logged
     let _ = fs::remove_dir_all(state);
 }
 
+/// The session after a turn's events, as the terminal applies them.
+fn replay(events: Vec<Event>) -> Session {
+    let mut session = Session::new("fixture".into());
+    session.insert("edit");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    for event in events {
+        session.apply(attempt, event.update);
+    }
+    session
+}
+
+fn rows(session: Session, width: u16) -> String {
+    let mut app = App::new("m".into());
+    app.sessions[0] = session;
+    let mut terminal = Terminal::new(TestBackend::new(width, 40)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    buffer
+        .content()
+        .chunks(usize::from(width))
+        .map(|row| row.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Issue #320: only a rule-approved call's row says which rule approved it.
+#[tokio::test]
+async fn only_a_rule_approved_call_says_rule_n_on_its_row() {
+    let root = dir("mark");
+    let state = dir("mark-state");
+    let log = Log::new(&state);
+    let rules = Rules::new(&state);
+    let (first, _) = gate(Decision::Approve, &log, &rules);
+    let keypress = replay(turn(&root, first).await);
+    assert!(
+        !rows(keypress, 120).contains("rule #"),
+        "a y-approved call has no rule marker"
+    );
+    let rule = rules.add_for(&plain("edit_file", CardKind::Edit)).unwrap();
+    fs::write(root.join("README.md"), README).unwrap();
+    let (second, asked) = gate(Decision::Deny, &log, &rules);
+    let by_rule = replay(turn(&root, second).await);
+    assert_eq!(*asked.lock().unwrap(), 0);
+    let screen = rows(by_rule, 120);
+    assert!(screen.contains(&format!("(rule #{})", rule.id)), "{screen}");
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(state);
+}
+
+/// Issue #320: a rule-approved run_command shows `running run_command` while it runs.
+#[tokio::test]
+async fn a_rule_approved_run_command_reads_running_run_command_until_it_ends() {
+    if !Path::new("/usr/bin/bwrap").exists() && !Path::new("/bin/bwrap").exists() {
+        eprintln!("SKIP: bubblewrap unavailable");
+        return;
+    }
+    let root = dir("running");
+    let state = dir("running-state");
+    let log = Log::new(&state);
+    let rules = Rules::new(&state);
+    let command = "touch started; sleep 3";
+    rules.add_for(&shell(command, false)).unwrap();
+    let addr = ollama_fixture::reserve();
+    let arguments = json!({"command": command});
+    let first = Mutex::new(Some(Reply::Stream(
+        vec![
+            format!(
+                "{}\n",
+                json!({"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"run_command","arguments":arguments}}]},"done":false})
+            )
+            .into_bytes(),
+            format!("{}\n", json!({"message":{"content":""},"done":true})).into_bytes(),
+        ],
+        Duration::ZERO,
+    )));
+    let fixture = ollama_fixture::serve(addr, move |_, index| {
+        if index == 0 {
+            first.lock().unwrap().take().unwrap()
+        } else {
+            done("done")
+        }
+    });
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(5)).unwrap();
+    let mut session = Session::new("fixture".into());
+    session.insert("run it");
+    let messages = session.begin().unwrap();
+    let attempt = session.attempt;
+    let (sender, mut receiver) = mpsc::channel::<Event>(256);
+    let (gate, asked) = gate(Decision::Deny, &log, &rules);
+    let workspace = root.clone();
+    let handle = tokio::spawn(async move {
+        chat_tools::run_turn(
+            &provider,
+            &workspace,
+            0,
+            attempt,
+            "fixture".into(),
+            messages,
+            sender,
+            Some(gate),
+        )
+        .await
+    });
+    let mut seen = false;
+    while let Some(event) = receiver.recv().await {
+        let running = matches!(event.update, Update::RuleRunning { .. });
+        session.apply(attempt, event.update);
+        if running {
+            seen = true;
+            assert_eq!(session.wait_phase(), Some("running run_command"));
+            assert_eq!(session.short_status(), "running");
+            // Esc clears it at once; the turn was cancelled by the owner.
+            let mut stopped = session.clone();
+            stopped.cancel();
+            assert_eq!(stopped.wait_phase(), None);
+        }
+    }
+    handle.await.unwrap();
+    assert!(seen, "the rule path reports the running command");
+    assert_eq!(*asked.lock().unwrap(), 0, "no card was shown");
+    assert_eq!(session.wait_phase(), None, "cleared once the result is in");
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(state);
+}
+
+/// A rule announced for a call that never reported (Esc) marks no later call.
+#[test]
+fn a_cancelled_rule_run_does_not_mark_the_next_turns_card_approved_call() {
+    let mut session = Session::new("m".into());
+    session.insert("go");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(
+        attempt,
+        Update::RuleRunning {
+            tool: "run_command".into(),
+            rule: 7,
+        },
+    );
+    session.cancel();
+    session.insert("again");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(
+        attempt,
+        Update::ToolResult {
+            call: alfredo_tui::model::ToolCall {
+                name: "edit_file".into(),
+                arguments: json!({}),
+            },
+            result: "ok".into(),
+            new_round: true,
+        },
+    );
+    let at = session.messages.len() - 1;
+    assert_eq!(session.rule_of(at, 0), None);
+}
+
+/// Issue #320: `/allow` lists every rule in full on its own wrapped row.
+#[test]
+fn allow_lists_every_rule_in_full_at_100_columns() {
+    let state = dir("list");
+    let rules = Rules::new(&state);
+    let long = format!(
+        "cargo test --features {}",
+        "very-long-feature-name-".repeat(6)
+    );
+    rules.add_for(&shell(&long, false)).unwrap();
+    rules.add_for(&plain("edit_file", CardKind::Edit)).unwrap();
+    rules.add_for(&shell("echo onhost true", true)).unwrap();
+    let listed = allow::slash(&rules, "").unwrap();
+    assert_eq!(listed.lines().count(), 4, "heading and one row per rule");
+    assert!(!listed.contains('…'), "{listed}");
+    let mut app = App::new("m".into());
+    app.transient_rows = listed.lines().map(str::to_string).collect();
+    let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer().clone();
+    // Only the chat pane (right of the side pane) is read, row by row.
+    let screen = buffer
+        .content()
+        .chunks(100)
+        .map(|row| {
+            let row: String = row.iter().map(|cell| cell.symbol()).collect();
+            row.split("││")
+                .nth(1)
+                .unwrap_or("")
+                .trim_end_matches('│')
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let squashed: String = screen.chars().filter(|c| !c.is_whitespace()).collect();
+    for line in listed.lines().skip(1) {
+        let wanted: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            squashed.contains(&wanted),
+            "missing in full: {line}\n{screen}"
+        );
+    }
+    assert!(listed.contains("on HOST"), "{listed}");
+    let _ = fs::remove_dir_all(state);
+}
+
 #[tokio::test]
 async fn an_auto_approved_call_is_still_refused_when_the_preview_no_longer_applies() {
     // The rule never bypasses preview refusal: an edit whose old_text is gone is refused
@@ -347,6 +556,41 @@ async fn an_auto_approved_call_is_still_refused_when_the_preview_no_longer_appli
     assert!(log.records().is_empty());
     let _ = fs::remove_dir_all(root);
     let _ = fs::remove_dir_all(state);
+}
+
+/// Issue #272: a write_file rule never covers a write that creates directories.
+#[test]
+fn a_write_file_rule_does_not_cover_directory_creating_writes() {
+    let root = dir("write-dirs");
+    fs::create_dir(root.join("docs")).unwrap();
+    let card = |path: &str| {
+        approval::card(
+            &root,
+            &alfredo_tui::model::ToolCall {
+                name: "write_file".into(),
+                arguments: json!({"path": path, "content": "x\n"}),
+            },
+        )
+        .unwrap()
+    };
+    let rules = Rules::new(&dir("write-dirs-state"));
+    let existing = card("docs/a.md");
+    rules.add_for(&existing).unwrap();
+    assert!(rules.matching(&existing).is_some());
+    assert!(
+        rules.matching(&card("docs/b.md")).is_some(),
+        "existing dir still auto-approved"
+    );
+    let creating = card("docs/new/deep/c.md");
+    assert!(creating.summary.contains("new directories"));
+    assert!(!allow::offered(&creating), "no always-allow offered");
+    assert!(allow::offer(&creating).is_none());
+    assert!(allow::rule_for(&creating).is_err());
+    assert!(
+        rules.matching(&creating).is_none(),
+        "a missing dir still asks"
+    );
+    let _ = fs::remove_dir_all(root);
 }
 
 #[test]
