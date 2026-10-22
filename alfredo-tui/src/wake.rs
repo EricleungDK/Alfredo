@@ -56,8 +56,16 @@ pub enum Next {
 /// Hang-up and terminate requests received by the interactive process (issue #342).
 static HANGUP: AtomicU32 = AtomicU32::new(0);
 
-extern "C" fn on_hangup(_: libc::c_int) {
-    HANGUP.fetch_add(1, Ordering::SeqCst);
+extern "C" fn on_hangup(signum: libc::c_int) {
+    // The first signal asks for an orderly quit; a second one means the quit is stuck,
+    // so it gets the default action (end the process) like before the handler existed.
+    if HANGUP.fetch_add(1, Ordering::SeqCst) >= 1 {
+        // SAFETY: signal and raise are async-signal-safe.
+        unsafe {
+            libc::signal(signum, libc::SIG_DFL);
+            libc::raise(signum);
+        }
+    }
 }
 
 /// Make SIGHUP (closed terminal, dropped ssh) and SIGTERM request a quit like Ctrl+Q

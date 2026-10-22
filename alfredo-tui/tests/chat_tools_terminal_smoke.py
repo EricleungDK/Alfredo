@@ -6,8 +6,8 @@ Issue #235 journeys: "redraft README" asks for edit_file; the approval card show
 diff; y edits the file in place, n leaves it untouched and the model gets a refusal.
 Issue #264: text typed into the prompt while the card waits never decides it.
 Issue #302: Esc in the middle of an approved run_command (sandboxed or HOST) and Ctrl+Q
-both kill the command; so do SIGHUP and SIGTERM (issue #342); its later `touch marker` never happens and the approval log says
-cancelled. Issue #239 journey: "refactor everything" asks for propose_plan; the turn ends and the
+both kill the command, and so do SIGHUP and SIGTERM (issue #342); its later `touch marker`
+never happens and the approval log says cancelled. Issue #239 journey: "refactor everything" asks for propose_plan; the turn ends and the
 prompt holds the editable /plan command; nothing else is requested or started."""
 import http.server
 import json
@@ -16,8 +16,8 @@ from pathlib import Path
 import select
 import signal
 import subprocess
-import termios
 import tempfile
+import termios
 import threading
 import time
 import unittest
