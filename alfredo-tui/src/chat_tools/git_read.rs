@@ -165,6 +165,7 @@ fn git_diff(root: &Path, arguments: &Value) -> Result<String, String> {
         "-z",
         "--find-renames",
         "--find-copies",
+        "--find-copies-harder",
     ];
     detect.extend(&selector);
     detect.push("--");
@@ -176,6 +177,11 @@ fn git_diff(root: &Path, arguments: &Value) -> Result<String, String> {
             "too many changed files to check for secret files; narrow with path or a smaller range"
                 .into(),
         );
+    }
+    // Names are read lossily: a replacement character may hide the bytes that made a
+    // name secret, so such a name is refused rather than matched.
+    if listing.contains('\u{FFFD}') {
+        return Err("a changed file name is not UTF-8; git_diff is not run".into());
     }
     let hidden: Vec<String> = secret_names(&listing)?
         .into_iter()

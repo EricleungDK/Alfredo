@@ -424,29 +424,35 @@ fn refuse_secrets(root: &Path, pathspecs: &[String]) -> Result<(), String> {
                 names.extend(entries.next().map(String::from));
             }
         }
-        // Status shows a rename only when both names are in the pathspec, so a secret
-        // staged under a new name outside it (`git mv .npmrc docs/notes.txt`) is found
-        // here: the sources of every staged rename or copy in the whole index.
-        let index = full(
-            root,
-            &[
-                "diff",
-                "--cached",
-                "--no-ext-diff",
-                "--find-renames",
-                "--find-copies",
-                "--name-status",
-                "-z",
-                "--",
-            ],
-        )?;
-        let mut fields = index.split('\0').filter(|f| !f.is_empty());
-        while let Some(status) = fields.next() {
-            let first = fields.next();
-            if status.starts_with(['R', 'C']) {
-                names.extend(first.map(String::from));
-                fields.next();
-            }
+    }
+    // Status shows a rename only when both names are in the pathspec, and the staged
+    // name listing above shows a copy as a plain add, so a secret staged under a new
+    // name (`git mv .npmrc docs/notes.txt`, `cp .npmrc config.txt`) is found here: the
+    // sources of every staged rename or copy in the whole index, in either mode.
+    let index = full(
+        root,
+        &[
+            "diff",
+            "--cached",
+            "--no-ext-diff",
+            "--find-renames",
+            "--find-copies",
+            "--find-copies-harder",
+            "--name-status",
+            "-z",
+            "--",
+        ],
+    )?;
+    // Read lossily: a replacement character may hide the bytes that made a name secret.
+    if index.contains('\u{FFFD}') {
+        return Err("a staged file name is not UTF-8; the commit is refused".into());
+    }
+    let mut fields = index.split('\0').filter(|f| !f.is_empty());
+    while let Some(status) = fields.next() {
+        let first = fields.next();
+        if status.starts_with(['R', 'C']) {
+            names.extend(first.map(String::from));
+            fields.next();
         }
     }
     match names

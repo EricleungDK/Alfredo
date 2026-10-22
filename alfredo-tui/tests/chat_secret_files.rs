@@ -272,3 +272,45 @@ fn commit_of_a_secret_renamed_to_a_plain_name_is_refused() {
     assert!(error.contains(".npmrc"), "{error}");
     assert!(error.contains("by hand"), "{error}");
 }
+
+/// Review of #312: a changed secret whose file name is not UTF-8 is not shown by
+/// git_diff; such a name is refused rather than matched after lossy decoding.
+#[cfg(unix)]
+#[test]
+fn git_diff_refuses_a_changed_secret_with_a_non_utf8_name() {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+    let repo = Repo::plain();
+    let name = OsStr::from_bytes(b"k\xff.pem");
+    fs::write(repo.root.join(name), "SECRET-BYTES v1\n").unwrap();
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-q", "-m", "key v1"]);
+    fs::write(repo.root.join(name), "SECRET-BYTES v2\n").unwrap();
+    let output = repo.run("git_diff", json!({}));
+    assert!(!output.contains("SECRET-BYTES"), "git_diff: {output}");
+}
+
+/// Review of #312: a secret copied unchanged to a plain name (`cp .npmrc config.txt`,
+/// then `git add`) is not shown by git_diff and is refused by git_commit, with or
+/// without a pathspec.
+#[test]
+fn copy_of_an_unchanged_secret_is_hidden_and_refused() {
+    let repo = Repo::plain();
+    repo.write(".npmrc", "_authToken=SECRET-COPY\n");
+    git(&repo.root, &["add", "-f", ".npmrc"]);
+    git(&repo.root, &["commit", "-q", "-m", "add npmrc"]);
+    fs::copy(repo.root.join(".npmrc"), repo.root.join("config.txt")).unwrap();
+    git(&repo.root, &["add", "config.txt"]);
+    let staged = repo.run("git_diff", json!({"staged": true}));
+    assert!(!staged.contains("SECRET-COPY"), "staged git_diff: {staged}");
+    let whole = repo
+        .card("git_commit", json!({"message": "copy"}))
+        .unwrap_err();
+    assert!(whole.contains(".npmrc"), "{whole}");
+    let named = repo
+        .card(
+            "git_commit",
+            json!({"message": "copy", "files": ["config.txt"]}),
+        )
+        .unwrap_err();
+    assert!(named.contains(".npmrc"), "{named}");
+}

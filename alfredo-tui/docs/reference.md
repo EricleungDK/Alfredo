@@ -1504,6 +1504,9 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`, `*.tfvars` and
   `*.tfvars.json`. Names that only look similar stay readable, for example
   `environment.rs`, `keys.md`, `credentials.md`, `secrets.md` and `ssh_client.rs`.
+  Limits: a secret renamed and heavily edited in one change, below git's rename similarity
+  threshold, is not recognised as that secret, and git_diff reads the changed names and
+  the patch in two git calls, so a file changed between them is not covered.
 - **Git is read-only.** Git tools never fetch or change refs, the index or the working
   tree: they run with `--no-optional-locks` (no index refresh), hooks and fsmonitor off,
   no external diff or textconv. `ref`, `base` and `target` must be plain ref names
