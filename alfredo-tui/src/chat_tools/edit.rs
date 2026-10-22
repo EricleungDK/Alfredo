@@ -53,7 +53,7 @@ pub(crate) struct Change {
     pub fingerprint: String,
 }
 
-/// Content hash of the call's target file, or `absent`; a write_file target under
+/// Content hash of the call's target file, or `absent`. A write_file target under
 /// missing directories adds `+dirs:` and the directories it would create. `None` when `name` is not
 /// one of these tools.
 pub(crate) fn fingerprint(
@@ -276,25 +276,45 @@ fn plan_new_dirs(root: &Path, path: &str, relative: &Path) -> Result<Target, Str
 }
 
 /// Create `dirs` (outermost first) one level at a time. Each step must create a real
-/// directory: an entry that appeared meanwhile, a symlink, or a missing parent aborts.
-fn create_dirs(dirs: &[PathBuf]) -> Result<(), String> {
-    for dir in dirs {
-        if let Some(parent) = dir.parent() {
-            let metadata = std::fs::symlink_metadata(parent).map_err(|e| e.to_string())?;
+/// directory: before each, the parent is re-canonicalized and must still lie under the
+/// canonical root and be a real directory (not a symlink). Any failure removes the
+/// directories this call already made (only empty ones go).
+fn create_dirs(root: &Path, dirs: &[PathBuf]) -> Result<(), String> {
+    let root = root
+        .canonicalize()
+        .map_err(|_| "Coding Workspace is not available".to_string())?;
+    let mut made: Vec<&PathBuf> = Vec::new();
+    let result = (|| {
+        for dir in dirs {
+            if let Some(parent) = dir.parent() {
+                let metadata = std::fs::symlink_metadata(parent).map_err(|e| e.to_string())?;
+                let inside = parent
+                    .canonicalize()
+                    .map(|real| real.starts_with(&root))
+                    .unwrap_or(false);
+                if metadata.file_type().is_symlink() || !metadata.is_dir() || !inside {
+                    return Err(format!(
+                        "{} is not a real directory inside the workspace any more; nothing more was created",
+                        parent.display()
+                    ));
+                }
+            }
+            std::fs::create_dir(dir)
+                .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+            made.push(dir);
+            let metadata = std::fs::symlink_metadata(dir).map_err(|e| e.to_string())?;
             if metadata.file_type().is_symlink() || !metadata.is_dir() {
-                return Err(format!(
-                    "{} is not a real directory any more; nothing more was created",
-                    parent.display()
-                ));
+                return Err(format!("{} is not a real directory", dir.display()));
             }
         }
-        std::fs::create_dir(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-        let metadata = std::fs::symlink_metadata(dir).map_err(|e| e.to_string())?;
-        if metadata.file_type().is_symlink() || !metadata.is_dir() {
-            return Err(format!("{} is not a real directory", dir.display()));
+        Ok(())
+    })();
+    if result.is_err() {
+        for dir in made.iter().rev() {
+            let _ = std::fs::remove_dir(dir);
         }
     }
-    Ok(())
+    result
 }
 
 /// Removes the temp file on drop unless the rename succeeded (`armed` cleared).
@@ -532,7 +552,7 @@ fn line_endings(text: &str) -> &'static str {
 
 fn write_file(root: &Path, arguments: &Value) -> Result<String, String> {
     let (target, old, new, new_dirs) = plan_write(root, arguments)?;
-    create_dirs(&new_dirs)?;
+    create_dirs(root, &new_dirs)?;
     if let Err(error) = write_regular(&target, &new) {
         // Take back the directories this call made (only empty ones go).
         for dir in new_dirs.iter().rev() {

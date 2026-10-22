@@ -349,6 +349,41 @@ async fn an_auto_approved_call_is_still_refused_when_the_preview_no_longer_appli
     let _ = fs::remove_dir_all(state);
 }
 
+/// Issue #272: a write_file rule never covers a write that creates directories.
+#[test]
+fn a_write_file_rule_does_not_cover_directory_creating_writes() {
+    let root = dir("write-dirs");
+    fs::create_dir(root.join("docs")).unwrap();
+    let card = |path: &str| {
+        approval::card(
+            &root,
+            &alfredo_tui::model::ToolCall {
+                name: "write_file".into(),
+                arguments: json!({"path": path, "content": "x\n"}),
+            },
+        )
+        .unwrap()
+    };
+    let rules = Rules::new(&dir("write-dirs-state"));
+    let existing = card("docs/a.md");
+    rules.add_for(&existing).unwrap();
+    assert!(rules.matching(&existing).is_some());
+    assert!(
+        rules.matching(&card("docs/b.md")).is_some(),
+        "existing dir still auto-approved"
+    );
+    let creating = card("docs/new/deep/c.md");
+    assert!(creating.summary.contains("new directories"));
+    assert!(!allow::offered(&creating), "no always-allow offered");
+    assert!(allow::offer(&creating).is_none());
+    assert!(allow::rule_for(&creating).is_err());
+    assert!(
+        rules.matching(&creating).is_none(),
+        "a missing dir still asks"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn escalated_rules_match_only_the_exact_command() {
     let state = dir("exact-host");
