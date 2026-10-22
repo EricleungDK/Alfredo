@@ -737,25 +737,33 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
     let choice = runtime
         .block_on(alfredo_tui::selection::automatic(&start, &state_dir))?
         .ok_or_else(|| alfredo_tui::selection::not_a_repository_notice(&start))?;
-    let request = alfredo_tui::selection_command::Request::new(
-        alfredo_tui::selection_command::Origin::Startup,
-        choice,
-        conversation,
-    )?;
     let chat = provider.clone();
     if model_explicit {
         preflight(runtime, &chat, &model)?;
     }
-    let work = Workstation::launch(runtime, &state_dir, request, &model, provider)?;
-    let model = run_model(&work, model, model_explicit);
+    // Read-only: the turn is not saved, so it neither owns the conversation nor
+    // takes the selection journal, and runs beside an open TUI or another chat.
+    let view = alfredo_tui::workstation::ChatView::open(
+        &state_dir,
+        &choice.target(),
+        choice.mission.name(),
+        choice.mission.start_new(),
+        &conversation,
+    )?;
+    let model = if model_explicit {
+        model
+    } else {
+        view.saved_model.unwrap_or(model)
+    };
     if !model_explicit {
         preflight(runtime, &chat, &model)?;
     }
-    let workspace = work.tasks.workspace().to_path_buf();
-    let log = Log::for_store(work.tasks.store()).ok();
+    let work = view.tasks;
+    let workspace = work.workspace().to_path_buf();
+    let log = Log::for_store(work.store()).ok();
     let before = log.as_ref().map_or(0, |log| log.records().len());
     let messages = vec![
-        work.tasks.chat_context(),
+        work.chat_context(),
         alfredo_tui::model::Message {
             role: "user".into(),
             content: prompt,

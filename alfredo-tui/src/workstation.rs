@@ -28,6 +28,41 @@ pub struct Workstation {
     /// Dropped with this workstation: switching or quitting stops the poll.
     health: Option<crate::health::Monitor>,
 }
+/// What a headless Chat Agent turn needs from a repository's default mission and a
+/// conversation, without owning either: the task store's chat context and the model
+/// the conversation last saved. Nothing is locked, saved or journaled, so it runs
+/// beside an open TUI or another headless chat.
+pub struct ChatView {
+    pub tasks: TaskControl,
+    pub saved_model: Option<String>,
+}
+impl ChatView {
+    pub fn open(
+        state: &Path,
+        workspace: &Path,
+        mission: &str,
+        start_new: bool,
+        conversation: &str,
+    ) -> Result<Self, String> {
+        let store = TaskStore::new(state, workspace, mission)?;
+        // Another run started the same mission first: resume it.
+        match store.select_mission(start_new) {
+            Err(error) if start_new && error == crate::tasks::MISSION_EXISTS => {
+                store.select_mission(false)?
+            }
+            other => other?,
+        }
+        let snapshot = store.snapshot()?;
+        let saved = ConversationStore::open_readonly(&store, conversation)?.load()?;
+        let saved_model = saved.map(|saved| {
+            let app = saved.restore();
+            app.sessions[app.selected].model.clone()
+        });
+        let mut tasks = TaskControl::new(store);
+        tasks.snapshot = Some(snapshot);
+        Ok(Self { tasks, saved_model })
+    }
+}
 impl Workstation {
     pub fn open(
         state: &Path,
