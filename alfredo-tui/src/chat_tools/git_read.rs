@@ -389,7 +389,7 @@ fn git_command(root: &Path, args: &[&str]) -> Result<Command, String> {
 /// [`git_command`] whose verification also runs within `deadline`: the caller's budget covers
 /// every git process it starts, the check included.
 fn git_command_within(root: &Path, args: &[&str], deadline: Duration) -> Result<Command, String> {
-    let verified = verified_git_dir_within(root, deadline)?;
+    let verified = verified_git_dir_within(root, deadline, Config::Hardened)?;
     let mut command = hardened_command(root)?;
     pin_git_dir(&mut command, root, &verified);
     command.args(args);
@@ -431,17 +431,32 @@ const OUTSIDE: &str = "the workspace's .git points outside the Coding Workspace 
 /// file points back at `root/.git`. Anything else, including a `commondir` file that
 /// leads elsewhere, is refused. Paths are compared canonically, so symlinks, `..`, relative
 /// back-references and whitespace in the gitfile cannot hide another repository.
-pub(crate) fn verified_git_dir(root: &Path) -> Result<VerifiedGit, String> {
-    verified_git_dir_within(root, DEADLINE)
+pub(crate) fn verified_git_dir(root: &Path, config: Config) -> Result<VerifiedGit, String> {
+    verified_git_dir_within(root, DEADLINE, config)
+}
+
+/// The git configuration a check runs under: the read tier's hardened one, or a write's,
+/// which also reads the owner's global config (identity and `safe.directory`).
+#[derive(Clone, Copy)]
+pub(crate) enum Config {
+    Hardened,
+    Owner,
 }
 
 /// [`verified_git_dir`] with its one git call stopped at `deadline`. A repository config
 /// that blocks git (a FIFO include) is then an error within the caller's budget.
-fn verified_git_dir_within(root: &Path, deadline: Duration) -> Result<VerifiedGit, String> {
+fn verified_git_dir_within(
+    root: &Path,
+    deadline: Duration,
+    config: Config,
+) -> Result<VerifiedGit, String> {
     let root = root
         .canonicalize()
         .map_err(|_| "Coding Workspace is not available".to_string())?;
     let mut command = hardened_command(&root)?;
+    if matches!(config, Config::Owner) {
+        owner_config(&mut command);
+    }
     command.args([
         "rev-parse",
         "--path-format=absolute",
@@ -620,6 +635,19 @@ fn deadline_error(deadline: Duration) -> String {
 fn stop(child: &mut Child) {
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// The owner's global git config for a write: its identity and `safe.directory`, which the
+/// read tier keeps off. Applied after [`hardened`].
+pub(crate) fn owner_config(command: &mut Command) -> &mut Command {
+    command.env_remove("GIT_CONFIG_GLOBAL");
+    for name in ["HOME", "XDG_CONFIG_HOME"] {
+        match std::env::var_os(name) {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    command
 }
 
 /// The clean environment and command-line overrides every git call here uses.

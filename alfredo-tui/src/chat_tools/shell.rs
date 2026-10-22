@@ -485,7 +485,7 @@ fn toolchain_binds(home: Option<&Path>) -> Toolchain {
 /// does not: the sandbox then has no extra bind and git inside it cannot reach another
 /// repository.
 fn git_common_dir(root: &Path) -> Option<String> {
-    let verified = git_read::verified_git_dir(root).ok()?;
+    let verified = git_read::verified_git_dir(root, git_read::Config::Hardened).ok()?;
     verified.common_dir.to_str().map(str::to_string)
 }
 

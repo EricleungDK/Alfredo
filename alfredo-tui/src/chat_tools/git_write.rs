@@ -322,16 +322,10 @@ fn config_listing(root: &Path) -> Result<String, String> {
 /// no other environment; discovery stops above the parent. Pinned to the verified git
 /// directory, so a write never lands in another repository (issue #359).
 fn local_command(root: &Path) -> Result<Command, String> {
-    let verified = git_read::verified_git_dir(root)?;
+    let verified = git_read::verified_git_dir(root, git_read::Config::Owner)?;
     let ceiling = ceiling(root)?;
     let mut command = Command::new("/usr/bin/git");
-    git_read::hardened(&mut command).env_remove("GIT_CONFIG_GLOBAL");
-    for name in ["HOME", "XDG_CONFIG_HOME"] {
-        match std::env::var_os(name) {
-            Some(value) => command.env(name, value),
-            None => command.env_remove(name),
-        };
-    }
+    git_read::owner_config(git_read::hardened(&mut command));
     command
         .env("GIT_CEILING_DIRECTORIES", ceiling)
         .arg("-C")
@@ -1149,7 +1143,7 @@ fn write(root: &Path, args: &[&str], env: Env) -> Result<String, String> {
     let (mut command, deadline) = match env {
         Env::Local => (local_command(root)?, LOCAL_DEADLINE),
         Env::Remote => {
-            let verified = git_read::verified_git_dir(root)?;
+            let verified = git_read::verified_git_dir(root, git_read::Config::Owner)?;
             let mut command = Command::new("/usr/bin/git");
             for name in REDIRECTING_ENV {
                 command.env_remove(name);
