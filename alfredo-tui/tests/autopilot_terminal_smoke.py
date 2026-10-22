@@ -31,6 +31,9 @@ class AutopilotServer:
         self.release_app = threading.Event()
         self.prose_worker = False
         self.bad_plan = False
+        # Recovery-by-/repair option: every automatic repair writes wrong content until `fixed`.
+        self.bad_repairs = False
+        self.fixed = False
         # Recovery smoke options: one passing task whose first worker request can be held.
         self.single_task = False
         self.hold_calc = None
@@ -75,9 +78,10 @@ class AutopilotServer:
                     elif fixture.prose_worker:
                         marker = 'PROSE'
                         content = 'I would rather talk about it than write any code.'
-                    elif prompt.startswith('Implement this task: Repair #1:'):
-                        marker = 'REPAIR'
-                        content = json.dumps({'files': [{'path': 'calc.py', 'content': 'def answer():\n    return 42\n'}]})
+                    elif prompt.startswith('Implement this task: Repair #'):
+                        wrong = fixture.bad_repairs and not fixture.fixed
+                        marker = 'BADREPAIR' if wrong else 'REPAIR'
+                        content = json.dumps({'files': [{'path': 'calc.py', 'content': 'def answer():\n    return %d\n' % (41 if wrong else 42)}]})
                     elif prompt.startswith('Implement this task: Make answer'):
                         marker = 'CALC'
                         content = json.dumps({'files': [{'path': 'calc.py', 'content': 'def answer():\n    return %d\n' % (42 if fixture.single_task else 41)}]})
@@ -314,6 +318,37 @@ class AutopilotTerminalSmoke(unittest.TestCase):
         branches = self.git('for-each-ref', '--format=%(refname:short)', 'refs/heads/alfredo/').split()
         self.assertEqual(len(branches), 1, branches)
         self.assertEqual(self.git('show', f'{branches[0]}:calc.py'), 'def answer():\n    return 42')
+        self.quit(terminal)
+
+    def test_repair_after_a_failed_go_reenters_the_loop_and_builds_the_branch(self):
+        self.fixture.bad_repairs = True
+        self.fixture.release_app.set()
+        head = self.git('rev-parse', 'HEAD')
+        terminal = self.terminal(resume=False)
+        terminal.send('/go Make answer return 42 and add app\r')
+        self.screen_has(terminal, 'Autopilot ✗ failed', 90)
+        self.screen_has(terminal, 'repair budget exhausted (3/3)')
+        self.screen_has(terminal, '/repair 5 <hint>')
+        self.assertEqual(self.fixture.markers(), ['PLAN', 'CALC', 'BADREPAIR', 'BADREPAIR', 'BADREPAIR'])
+        self.assertEqual(self.git('for-each-ref', 'refs/heads/alfredo/'), '')
+        terminal.send('/resume\r')
+        self.screen_has(terminal, '/repair 5 <hint> retries the failed task')
+
+        self.fixture.fixed = True
+        terminal.send('/repair 5 return 42 please\r')
+        self.screen_has(terminal, 'git switch alfredo/go-', 90)
+        self.assertEqual(self.fixture.markers()[5:], ['REPAIR', 'APP'])
+        self.assertEqual(self.statuses(), [
+            (1, 'failed', None), (2, 'accepted', None), (3, 'failed', 1),
+            (4, 'failed', 3), (5, 'failed', 4), (6, 'accepted', 5)])
+        self.assertIn('Autopilot ✓ done   2/2', terminal.screen())
+        branches = self.git('for-each-ref', '--format=%(refname:short)', 'refs/heads/alfredo/').split()
+        self.assertEqual(len(branches), 1, branches)
+        self.assertTrue(branches[0].startswith('alfredo/go-'), branches)
+        self.assertEqual(self.git('show', f'{branches[0]}:calc.py'), 'def answer():\n    return 42')
+        self.assertIn('answer={answer()}', self.git('show', f'{branches[0]}:app.py'))
+        self.assertEqual(self.git('rev-parse', 'HEAD'), head)
+        self.assertEqual(self.git('status', '--porcelain'), '')
         self.quit(terminal)
 
     def test_failed_summary_shows_the_cause_and_a_next_step_when_the_model_writes_prose(self):
