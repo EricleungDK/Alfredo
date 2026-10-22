@@ -409,7 +409,10 @@ fn host_command_has_no_controlling_terminal_even_when_alfredo_has_one() {
         let _ = fs::remove_dir_all(&root);
         assert!(!result.contains("rc=0"), "/dev/tty was writable: {result}");
         assert!(result.contains("rc="), "{result}");
-        assert!(result.contains('?'), "child has a tty: {result}");
+        assert!(
+            result.lines().any(|line| line.trim() == "?"),
+            "child has a tty: {result}"
+        );
         assert!(!result.contains("pts/"), "child has a tty: {result}");
         assert!(result.contains("exit code 3"), "{result}");
         assert!(result.contains("ssh-agent"), "no terminal hint: {result}");

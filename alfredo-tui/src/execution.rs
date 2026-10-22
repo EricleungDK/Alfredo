@@ -888,8 +888,8 @@ impl Default for RustExecutionProvider {
 /// validation, in its own process group with the request's timeout, output limit
 /// and process-tree kill. The child gets its own session, so it has no controlling
 /// terminal: ssh, sudo and git open `/dev/tty` directly and would otherwise draw over
-/// the TUI and read its keystrokes (issue #304). Only for owner-approved host escalation (chat
-/// `run_command` with `escalate`, issue #236); every other effect goes through
+/// the TUI and read its keystrokes (issue #304). Only for owner-approved host
+/// escalation (chat `run_command` with `escalate`, issue #236); every other effect goes through
 /// [`RustExecutionProvider`]. `poll` is called every few milliseconds; returning
 /// `Err(ControlSignal::Cancelled(_))` kills the process group (issue #302).
 pub(crate) fn run_on_host(

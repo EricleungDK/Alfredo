@@ -120,8 +120,9 @@ const MAX_TIMEOUT: u64 = 600;
 const MAX_COMMAND: usize = 8 * 1024;
 /// Output kept from the process before it is stopped (the model sees less; see `cap`).
 const OUTPUT_LIMIT: usize = 1024 * 1024;
-/// Shown to the model when a sandboxed command fails.
+/// Shown to the model when a host command fails because it wanted a terminal prompt.
 const TERMINAL_HINT: &str = "note: host commands run without a terminal, so a command that needs a terminal prompt (sudo password, ssh host key or passphrase, git credentials) cannot run here; use ssh-agent or a credential helper, or ask the owner to run it themselves.";
+/// Shown to the model when a sandboxed command fails.
 const ESCALATE_HINT: &str = "note: ran sandboxed (network off; only the Coding Workspace is writable; .git and tools outside /usr are not available). If it failed for that reason, call run_command again with escalate: true; the owner must approve running it on the host.";
 
 pub const RUN_COMMAND: Tool = Tool {
