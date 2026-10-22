@@ -119,7 +119,12 @@ pub fn dispatch_within(root: &Path, call: &ToolCall, limit: usize) -> String {
     if !arguments.is_object() {
         return "error: arguments must be a JSON object".into();
     }
-    match (tool.run)(root, &arguments) {
+    let result = if tool.name == "read_file" {
+        read::read_file_within(root, &arguments, limit)
+    } else {
+        (tool.run)(root, &arguments)
+    };
+    match result {
         Ok(output) => cap_to(output, limit),
         Err(error) => cap_to(format!("error: {error}"), limit),
     }
@@ -152,6 +157,12 @@ pub(crate) fn cap_to(text: String, limit: usize) -> String {
     let mut end = limit;
     while !text.is_char_boundary(end) {
         end -= 1;
+    }
+    // A budgeted cut of multi-line text ends on a whole line.
+    if limit < MAX_OUTPUT && text.as_bytes().get(end) != Some(&b'\n') {
+        if let Some(newline) = text[..end].rfind('\n').filter(|at| *at > 0) {
+            end = newline;
+        }
     }
     format!(
         "{}\n[truncated: {end} of {} bytes]",
