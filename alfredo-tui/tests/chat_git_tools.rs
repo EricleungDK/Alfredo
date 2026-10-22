@@ -361,3 +361,22 @@ fn renamed_secret_content_is_not_shown() {
     let output = repo.run("git_diff", json!({"base": "HEAD~1", "target": "HEAD"}));
     assert!(!output.contains("hunter2"), "{output}");
 }
+
+/// #309 e: core.worktree points git at files outside the workspace; the Read tier must
+/// never show their content.
+#[test]
+fn a_worktree_outside_the_workspace_is_never_read() {
+    let repo = Repo::new();
+    let outside = repo.base.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("README.md"), "OUTSIDE-CONTENT\n").unwrap();
+    git(
+        &repo.root,
+        &["config", "core.worktree", outside.to_str().unwrap()],
+    );
+    for (name, arguments) in [("git_status", json!({})), ("git_diff", json!({}))] {
+        let output = repo.run(name, arguments);
+        assert!(!output.contains("OUTSIDE-CONTENT"), "{name}: {output}");
+        assert!(output.starts_with("error:"), "{name}: {output}");
+    }
+}
