@@ -5,8 +5,9 @@
 use super::{excluded, text_arg, Tier, Tool, MAX_OUTPUT};
 use serde_json::{json, Value};
 use std::{
+    fs,
     io::Read,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     time::{Duration, Instant},
 };
@@ -309,7 +310,8 @@ pub(crate) fn refuse_filters(root: &Path) -> Result<(), String> {
 /// late listing is an error (run_bounded stops git), so the gate never trusts a prefix.
 fn refuse_filters_within(root: &Path, limit: usize, deadline: Duration) -> Result<(), String> {
     const NOT_RUN: &str = "git status and working-tree diffs are not run (git_log and git_diff with base and target still work)";
-    let (status, out, error) = run_bounded(git_command(root, &FILTER_KEYS_ARGS)?, limit, deadline)?;
+    let command = git_command_within(root, &FILTER_KEYS_ARGS, deadline)?;
+    let (status, out, error) = run_bounded(command, limit, deadline)?;
     match status {
         None => Err(format!(
             "repository config is too large to check for filter drivers; {NOT_RUN}"
@@ -355,20 +357,48 @@ pub(crate) fn git_limited(root: &Path, args: &[&str], limit: usize) -> Result<St
 /// Run git in `root`, stdout read up to `limit` bytes. The flag is whether the output was
 /// cut at `limit`; a git that fails is an error with its first message line.
 fn git_output(root: &Path, args: &[&str], limit: usize) -> Result<(bool, String), String> {
-    let (status, out, error) = run_bounded(git_command(root, args)?, limit, DEADLINE)?;
+    read_output(git_command(root, args)?, args[0], limit, DEADLINE)
+}
+
+/// Run `command` (git, named `verb` in messages), stdout read up to `limit` bytes within
+/// `deadline`; see [`git_output`].
+fn read_output(
+    command: Command,
+    verb: &str,
+    limit: usize,
+    deadline: Duration,
+) -> Result<(bool, String), String> {
+    let (status, out, error) = run_bounded(command, limit, deadline)?;
     let cut = status.is_none();
     if status.is_some_and(|status| !status.success()) {
         let first = error.lines().find(|line| !line.trim().is_empty());
         return Err(match first {
             Some(line) => line.trim().trim_start_matches("fatal: ").to_string(),
-            None => format!("git {} failed", args[0]),
+            None => format!("git {verb} failed"),
         });
     }
     Ok((cut, String::from_utf8_lossy(&out).into_owned()))
 }
 
-/// `git -C root ARGS` with the hardened environment; discovery stops above the parent.
+/// `git -C root ARGS` with the hardened environment, pinned to the git directory that
+/// [`verified_git_dir`] checked (issue #359).
 fn git_command(root: &Path, args: &[&str]) -> Result<Command, String> {
+    git_command_within(root, args, DEADLINE)
+}
+
+/// [`git_command`] whose verification also runs within `deadline`: the caller's budget covers
+/// every git process it starts, the check included.
+fn git_command_within(root: &Path, args: &[&str], deadline: Duration) -> Result<Command, String> {
+    let verified = verified_git_dir_within(root, deadline)?;
+    let mut command = hardened_command(root)?;
+    pin_git_dir(&mut command, root, &verified);
+    command.args(args);
+    Ok(command)
+}
+
+/// `git -C root` with the hardened environment; discovery stops above the parent. Not
+/// pinned: only [`verified_git_dir`] runs it unpinned, to learn where the repository is.
+fn hardened_command(root: &Path) -> Result<Command, String> {
     let ceiling = root
         .canonicalize()
         .map_err(|_| "Coding Workspace is not available".to_string())?;
@@ -377,9 +407,106 @@ fn git_command(root: &Path, args: &[&str]) -> Result<Command, String> {
     hardened(&mut command)
         .env("GIT_CEILING_DIRECTORIES", ceiling)
         .arg("-C")
-        .arg(root)
-        .args(args);
+        .arg(root);
     Ok(command)
+}
+
+/// The git directories of the Coding Workspace's repository, verified by
+/// [`verified_git_dir`] (issue #359).
+pub(crate) struct VerifiedGit {
+    /// The directory git works in: `<root>/.git`, or `<common>/worktrees/<name>` of a linked
+    /// worktree.
+    pub(crate) git_dir: PathBuf,
+    /// `git_dir` itself, or the main repository's `.git` for a linked worktree.
+    pub(crate) common_dir: PathBuf,
+}
+
+/// Refusal when the workspace's repository is not its own (issue #359).
+const OUTSIDE: &str = "the workspace's .git points outside the Coding Workspace (its git directory is neither the workspace's own nor a linked worktree of it); git tools refuse";
+
+/// Where git keeps the repository of the Coding Workspace at `root`, verified before any
+/// git call trusts it (issue #359). Accepted: `root/.git` as a real directory that is both
+/// the git and the common directory; or `root/.git` as a gitfile to a linked worktree
+/// `<common>/worktrees/<name>`, where `<common>` is a directory and the entry's `gitdir`
+/// file points back at `root/.git`. Anything else, including a `commondir` file that
+/// leads elsewhere, is refused. Paths are compared canonically, so symlinks, `..`, relative
+/// back-references and whitespace in the gitfile cannot hide another repository.
+pub(crate) fn verified_git_dir(root: &Path) -> Result<VerifiedGit, String> {
+    verified_git_dir_within(root, DEADLINE)
+}
+
+/// [`verified_git_dir`] with its one git call stopped at `deadline`. A repository config
+/// that blocks git (a FIFO include) is then an error within the caller's budget.
+fn verified_git_dir_within(root: &Path, deadline: Duration) -> Result<VerifiedGit, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|_| "Coding Workspace is not available".to_string())?;
+    let mut command = hardened_command(&root)?;
+    command.args([
+        "rev-parse",
+        "--path-format=absolute",
+        "--absolute-git-dir",
+        "--git-common-dir",
+    ]);
+    let (cut, listing) = read_output(command, "rev-parse", 64 << 10, deadline)?;
+    let lines: Vec<&str> = listing.lines().collect();
+    let [git_dir, common_dir] = lines[..] else {
+        return Err(format!("cannot locate the repository; {OUTSIDE}"));
+    };
+    if cut {
+        return Err(format!("cannot locate the repository; {OUTSIDE}"));
+    }
+    let git_dir = canonical_dir(git_dir)?;
+    let common_dir = canonical_dir(common_dir)?;
+    let dot_git = root.join(".git");
+    let kind = fs::symlink_metadata(&dot_git).map_err(|_| OUTSIDE.to_string())?;
+    let dot_git = dot_git.canonicalize().map_err(|_| OUTSIDE.to_string())?;
+    let verified = if kind.is_dir() {
+        // A plain repository: nothing redirects it (a `commondir` file would).
+        git_dir == dot_git && common_dir == dot_git
+    } else if kind.is_file() {
+        // A linked worktree: its entry sits in the main repository's worktrees directory,
+        // and the entry points back at this workspace. The main repository is not inside
+        // the workspace: a repository the chat can write to is not the owner's.
+        let entry_of_main = git_dir != common_dir
+            && !common_dir.starts_with(&root)
+            && git_dir.parent() == Some(common_dir.join("worktrees").as_path());
+        let back = fs::read_to_string(git_dir.join("gitdir")).map_err(|_| OUTSIDE.to_string())?;
+        let back = git_dir.join(back.trim_end());
+        entry_of_main && back.canonicalize().is_ok_and(|back| back == dot_git)
+    } else {
+        false
+    };
+    if !verified {
+        return Err(OUTSIDE.to_string());
+    }
+    Ok(VerifiedGit {
+        git_dir,
+        common_dir,
+    })
+}
+
+/// A git-reported directory, canonical, or the refusal when it is not a directory.
+fn canonical_dir(text: &str) -> Result<PathBuf, String> {
+    Path::new(text)
+        .canonicalize()
+        .ok()
+        .filter(|path| path.is_dir())
+        .ok_or_else(|| OUTSIDE.to_string())
+}
+
+/// Point `command` (already `-C root`) at the verified git directory and work tree, so git
+/// uses the directory that was checked, not whatever `.git` says when it runs (issue #359).
+pub(crate) fn pin_git_dir<'a>(
+    command: &'a mut Command,
+    root: &Path,
+    verified: &VerifiedGit,
+) -> &'a mut Command {
+    command
+        .arg("--git-dir")
+        .arg(&verified.git_dir)
+        .arg("--work-tree")
+        .arg(root)
 }
 
 /// Longest one git call may run.

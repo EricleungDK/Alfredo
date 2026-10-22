@@ -319,8 +319,10 @@ fn config_listing(root: &Path) -> Result<String, String> {
 }
 
 /// `git -C root` for a local write: hardened, with the owner's HOME (global identity) and
-/// no other environment; discovery stops above the parent.
+/// no other environment; discovery stops above the parent. Pinned to the verified git
+/// directory, so a write never lands in another repository (issue #359).
 fn local_command(root: &Path) -> Result<Command, String> {
+    let verified = git_read::verified_git_dir(root)?;
     let ceiling = ceiling(root)?;
     let mut command = Command::new("/usr/bin/git");
     git_read::hardened(&mut command).env_remove("GIT_CONFIG_GLOBAL");
@@ -334,6 +336,7 @@ fn local_command(root: &Path) -> Result<Command, String> {
         .env("GIT_CEILING_DIRECTORIES", ceiling)
         .arg("-C")
         .arg(root);
+    git_read::pin_git_dir(&mut command, root, &verified);
     Ok(command)
 }
 
@@ -1146,6 +1149,7 @@ fn write(root: &Path, args: &[&str], env: Env) -> Result<String, String> {
     let (mut command, deadline) = match env {
         Env::Local => (local_command(root)?, LOCAL_DEADLINE),
         Env::Remote => {
+            let verified = git_read::verified_git_dir(root)?;
             let mut command = Command::new("/usr/bin/git");
             for name in REDIRECTING_ENV {
                 command.env_remove(name);
@@ -1157,7 +1161,9 @@ fn write(root: &Path, args: &[&str], env: Env) -> Result<String, String> {
                 .env("LC_ALL", "C")
                 .env("GIT_PAGER", "cat")
                 .arg("-C")
-                .arg(root)
+                .arg(root);
+            // Pinned like the local writes: a push cannot be redirected either (issue #359).
+            git_read::pin_git_dir(&mut command, root, &verified)
                 .arg("--no-pager")
                 .args(crate::worker::HARDENED_GIT_ARGS)
                 .args(["-c", "protocol.ext.allow=never"]);
