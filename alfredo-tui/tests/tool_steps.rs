@@ -180,3 +180,97 @@ fn transcript_shows_each_tool_call_and_a_truncated_result() {
     );
     assert!(text.contains("FINAL_ANSWER"));
 }
+
+fn screen_text(app: &App, width: u16, height: u16) -> String {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn numbered(count: usize) -> String {
+    (0..count)
+        .map(|n| format!("line {n}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn ctrl_o_toggles_full_tool_results_and_the_footer_says_which() {
+    let mut app = App::new("m".into());
+    tool_turn(&mut app.sessions[0], "show", &numbered(5), "FINAL");
+    assert!(!app.sessions[0].tool_results_expanded, "starts collapsed");
+    let collapsed = screen_text(&app, 120, 40);
+    assert!(collapsed.contains("↳ line 0 … (5 lines)"), "{collapsed}");
+    assert!(!collapsed.contains("line 3"), "{collapsed}");
+    assert!(collapsed.contains("^O expand results"), "{collapsed}");
+
+    app.sessions[0].toggle_tool_results();
+    let full = screen_text(&app, 120, 40);
+    for n in 0..5 {
+        assert!(full.contains(&format!("line {n}")), "{full}");
+    }
+    assert!(!full.contains("(5 lines)"), "{full}");
+    assert!(full.contains("^O collapse results"), "{full}");
+    assert!(full.contains("FINAL"), "{full}");
+
+    app.sessions[0].toggle_tool_results();
+    assert_eq!(screen_text(&app, 120, 40), collapsed);
+}
+
+#[test]
+fn full_tool_results_are_capped_at_200_lines() {
+    let mut app = App::new("m".into());
+    tool_turn(&mut app.sessions[0], "show", &numbered(250), "FINAL");
+    app.sessions[0].toggle_tool_results();
+    // Tall enough to hold the whole expanded transcript.
+    let full = screen_text(&app, 120, 400);
+    assert!(full.contains("line 199"), "{full}");
+    assert!(!full.contains("line 200"), "{full}");
+    assert!(full.contains("… 50 more lines"), "{full}");
+    // Exactly 200 lines is shown whole, with no marker.
+    let mut exact = App::new("m".into());
+    tool_turn(&mut exact.sessions[0], "show", &numbered(200), "FINAL");
+    exact.sessions[0].toggle_tool_results();
+    let text = screen_text(&exact, 120, 400);
+    assert!(
+        text.contains("line 199") && !text.contains("more lines"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_reloaded_conversation_shows_the_full_stored_result_when_expanded() {
+    let root = std::env::temp_dir().join(format!("alfredo-tool-expand-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("workspace")).unwrap();
+    let tasks = TaskStore::new(&root.join("state"), &root.join("workspace"), "mission").unwrap();
+    let store = ConversationStore::open(&tasks, "default").unwrap();
+    let mut app = App::new("m".into());
+    tool_turn(&mut app.sessions[0], "show", &numbered(30), "FINAL");
+    app.sessions[0].toggle_tool_results();
+    store.save(&Snapshot::capture(&app, "default")).unwrap();
+    let restored = store.load().unwrap().unwrap().restore();
+    assert!(
+        !restored.sessions[0].tool_results_expanded,
+        "the toggle is not persisted"
+    );
+    let collapsed = screen_text(&restored, 120, 60);
+    assert!(collapsed.contains("(30 lines)"), "{collapsed}");
+    let mut restored = restored;
+    restored.sessions[0].toggle_tool_results();
+    let full = screen_text(&restored, 120, 60);
+    assert!(
+        full.contains("line 0") && full.contains("line 29"),
+        "{full}"
+    );
+    drop(store);
+    let _ = std::fs::remove_dir_all(root);
+}
