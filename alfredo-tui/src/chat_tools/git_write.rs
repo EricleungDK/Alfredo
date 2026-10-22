@@ -1185,6 +1185,9 @@ mod tests {
             "ssh://git@github.com:22/o/r.git",
             "git@github.com:o/r.git",
             "github.com:o/r.git",
+            "user@host:~/x",
+            "host:path/x.git",
+            "gitlab.example.com:group/r.git",
         ] {
             assert!(push_url_allowed(url), "{url}");
         }
@@ -1206,6 +1209,16 @@ mod tests {
             "ssh://a@b@github.com/o/r.git",
             "git@github.com@evil:o/r.git",
             "HTTPS://github.com/o/r.git",
+            // scp-style: a URL scheme word, a second `:` or `@` in the path, no name.
+            "evil.invalid:x@github.com:o/r.git",
+            "https:github.com/o/r.git",
+            "ssh:github.com/o/r.git",
+            "evil:tok@github.com:o/r.git",
+            "git@github.com:o/r.git:x",
+            "git@github.com:o/r@x",
+            "1234:o/r.git",
+            " https://github.com/o/r.git",
+            "https://github.com/o/r.git ",
             "git@-oProxy:o/r.git",
             "-oProxyCommand=x:o/r.git",
             "https://github.com:port/o/r.git",

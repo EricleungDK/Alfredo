@@ -982,10 +982,17 @@ fn push_remotes_must_be_https_ssh_or_scp_style() {
         "https://github.com\\@evil/x",
         "ssh://a@b@github.com/o/r.git",
         "git@github.com@evil:o/r.git",
+        // scp-style: git reads the host before the first `:`, so these reach other hosts.
+        "evil.invalid:x@github.com:o/r.git",
+        "https:github.com/o/r.git",
+        "evil:tok@github.com:o/r.git",
+        "git@github.com:o/r.git:x",
+        "git@github.com:o/r@x",
     ] {
         git(&repo.root, &["remote", "set-url", "origin", url]);
         let error = repo.card("git_push", json!({})).unwrap_err();
         assert!(error.contains("is not https://"), "{url}: {error}");
+        assert!(!error.contains("tok@"), "a token was printed: {error}");
     }
 }
 
