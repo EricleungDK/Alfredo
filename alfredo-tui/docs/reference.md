@@ -220,7 +220,10 @@ error}`. `state` is `done`, `stopped` or `failed`; `result` is `ok`, `denied`, `
 limit is `state` `stopped` with `stopped` `step_limit` or `output_limit` (`null` otherwise) and
 `error` naming the cap; its `reply` is the text before the cut, without the interactive "ask again"
 notice. Exit 0 done; 1 stopped, failed or interrupted (SIGINT/SIGTERM deny further cards, wait up to 10 s for
-answered cards to be logged, then cancel the turn); 2 setup or usage error. The turn is not saved to the conversation. The
+answered cards to be logged, then cancel the turn); 2 setup or usage error. The turn is not saved to the conversation, and
+it does not own it: it takes no conversation lock, reads the conversation only for its saved model, and so runs beside an
+open TUI or another headless chat on the same repository (`--go --headless` still takes the lock). Concurrent runs append
+whole lines to `chat-approvals.jsonl` (a per-mission file lock serializes each append). The
 eval uses it for chat tasks (`eval/README.md`).
 
 ## Build and install a development archive

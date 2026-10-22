@@ -352,7 +352,15 @@ fn explicit_model_beats_the_saved_one_for_that_run_only() {
     let root = repository("explicit");
     let fixture = two_models();
     let chat = ["--chat", "hi", "--headless"];
-    // The first run creates the conversation holding `fixture`.
+    // A chat turn never saves the conversation; a headless go run does, holding `fixture`.
+    let go = run_model(
+        &root,
+        &fixture,
+        Some("fixture"),
+        &["--go", "x", "--headless"],
+    );
+    assert!(!conversation_files(&root).is_empty(), "{}", stderr(&go));
+    let go_requests = chat_models(&fixture).len();
     let first = run_model(&root, &fixture, Some("fixture"), &chat);
     assert_eq!(result(&first)["model"], "fixture", "{}", stderr(&first));
     let other = run_model(&root, &fixture, Some("nottools"), &chat);
@@ -376,7 +384,8 @@ fn explicit_model_beats_the_saved_one_for_that_run_only() {
         .output()
         .unwrap();
     assert_eq!(result(&env_only)["model"], "fixture");
-    assert_eq!(chat_models(&fixture), ["fixture", "nottools", "fixture"]);
+    let after_go = chat_models(&fixture).split_off(go_requests);
+    assert_eq!(after_go, ["fixture", "nottools", "fixture"]);
     // An explicit model that is not installed is exit 2 naming it, not a silent fallback.
     let missing = run_model(&root, &fixture, Some("nosuch:1b"), &chat);
     assert_eq!(missing.status.code(), Some(2));
@@ -386,7 +395,7 @@ fn explicit_model_beats_the_saved_one_for_that_run_only() {
         stderr(&missing)
     );
     assert!(missing.stdout.is_empty());
-    assert_eq!(chat_models(&fixture).len(), 3);
+    assert_eq!(chat_models(&fixture).len(), go_requests + 3);
     let _ = fs::remove_dir_all(&root);
 }
 
@@ -494,5 +503,112 @@ fn interrupt_after_an_approved_edit_leaves_exactly_one_log_record() {
     let log = approvals_log(&root);
     assert_eq!(log.len(), 1, "{log:?}");
     assert_eq!(log[0]["outcome"], "applied");
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// The mission's state directory: the one holding `mission.json`, created by any run.
+fn mission_directory(root: &Path) -> PathBuf {
+    let tasks = root.join("state/rust-tasks-v1");
+    fs::read_dir(&tasks)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .find(|path| path.join("mission.json").exists())
+        .expect("a run created the mission directory")
+}
+
+/// Hold the exclusive owner lock of conversation `name`, as an open TUI does.
+fn hold_conversation(root: &Path, name: &str) -> fs::File {
+    use sha2::{Digest, Sha256};
+    let digest = format!("{:x}", Sha256::digest(name.as_bytes()));
+    let file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(mission_directory(root).join(format!("conversations-{digest}.lock")))
+        .unwrap();
+    file.try_lock().expect("nobody else holds it yet");
+    file
+}
+
+fn conversation_files(root: &Path) -> Vec<String> {
+    fs::read_dir(mission_directory(root))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("conversations-") && name.ends_with(".json"))
+        .collect()
+}
+
+/// A model that asks for one denied edit, then answers: safe to share between runs.
+fn edit_then_done() -> Fixture {
+    ollama_fixture::serve(ollama_fixture::reserve(), |request, _| {
+        if request.path != "POST /api/chat" {
+            return ollama_fixture::running(&["fixture"]);
+        }
+        let answered = request.body["messages"]
+            .as_array()
+            .and_then(|messages| messages.last())
+            .is_some_and(|last| last["role"] == "tool");
+        if answered {
+            done("Denied, as expected.")
+        } else {
+            tool_calls(&[(
+                "edit_file",
+                json!({"path": "greet.py", "old_text": "'Hello '", "new_text": "'Hi '"}),
+            )])
+        }
+    })
+}
+
+#[test]
+fn headless_chat_runs_beside_an_owner_of_the_default_conversation() {
+    let root = repository("owned");
+    let fixture = two_models();
+    let chat = ["--chat", "hi", "--headless"];
+    assert_eq!(run(&root, &fixture, &chat).status.code(), Some(0));
+    let _owner = hold_conversation(&root, "default");
+    let beside = run(&root, &fixture, &chat);
+    assert_eq!(beside.status.code(), Some(0), "{}", stderr(&beside));
+    assert_eq!(result(&beside)["state"], "done");
+    // `--go --headless` still takes the owner lock.
+    let go = run(&root, &fixture, &["--go", "x", "--headless"]);
+    assert_eq!(go.status.code(), Some(2), "{}", stderr(&go));
+    assert!(
+        stderr(&go).contains("already owns conversation"),
+        "{}",
+        stderr(&go)
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn headless_chat_writes_no_conversation_file() {
+    let root = repository("nofile");
+    let fixture = two_models();
+    let output = run(&root, &fixture, &["--chat", "hi", "--headless"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    assert_eq!(conversation_files(&root), Vec::<String>::new());
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn concurrent_headless_chats_both_succeed_and_keep_the_approval_log_whole() {
+    let root = repository("parallel");
+    let fixture = edit_then_done();
+    let chat = ["--chat", "Make greet say Hi", "--headless"];
+    let outputs: Vec<_> = std::thread::scope(|scope| {
+        let runs: Vec<_> = (0..4)
+            .map(|_| scope.spawn(|| run(&root, &fixture, &chat)))
+            .collect();
+        runs.into_iter().map(|run| run.join().unwrap()).collect()
+    });
+    for output in &outputs {
+        assert_eq!(output.status.code(), Some(0), "{}", stderr(output));
+        assert_eq!(result(output)["approvals"][0]["outcome"], "denied");
+    }
+    // `approvals_log` parses every line: a torn append would panic there.
+    assert_eq!(approvals_log(&root).len(), 4);
+    assert_eq!(conversation_files(&root), Vec::<String>::new());
     let _ = fs::remove_dir_all(&root);
 }
