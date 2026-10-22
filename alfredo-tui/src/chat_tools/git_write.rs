@@ -204,10 +204,15 @@ fn full(root: &Path, args: &[&str]) -> Result<String, String> {
     if output.len() >= FULL {
         return Err(format!(
             "git {} output is too large to check safely; refused",
-            args[0]
+            verb(args)
         ));
     }
     Ok(output)
+}
+
+/// The git subcommand of an argument list, for messages (`git` alone when empty).
+fn verb<'a>(args: &[&'a str]) -> &'a str {
+    args.first().copied().unwrap_or("git")
 }
 
 /// Repository-local and worktree config keys a chat git write may run under (#309). None
@@ -273,14 +278,14 @@ fn shown(text: &str) -> String {
 /// program or send data elsewhere. Refused by name, for every chat git write.
 fn refuse_repository_config(root: &Path) -> Result<(), String> {
     let listing = config_listing(root)?;
-    for line in listing.lines() {
-        let Some((scope, entry)) = line.split_once('\t') else {
-            continue;
-        };
+    // Records are `scope NUL key LF value NUL` (a bare key has no LF). A subsection name
+    // may hold `=`, so the key is split from the value at the newline, never at `=`.
+    let mut fields = listing.split('\0');
+    while let (Some(scope), Some(entry)) = (fields.next(), fields.next()) {
         if !matches!(scope, "local" | "worktree") {
             continue;
         }
-        let (key, value) = entry.split_once('=').unwrap_or((entry, "true"));
+        let (key, value) = entry.split_once('\n').unwrap_or((entry, "true"));
         let key = key.to_lowercase();
         if !allowed_local_key(&key, value) {
             return Err(format!(
@@ -296,7 +301,7 @@ fn refuse_repository_config(root: &Path) -> Result<(), String> {
 /// and the owner's global config, never a cut listing.
 fn config_listing(root: &Path) -> Result<String, String> {
     let mut command = local_command(root)?;
-    command.args(["config", "--list", "--show-scope"]);
+    command.args(["config", "--null", "--list", "--show-scope"]);
     let (status, out, error) = git_read::run_bounded(command, FULL, LOCAL_DEADLINE)?;
     match status {
         None => Err("repository config is too large to check; refused".into()),
@@ -883,10 +888,17 @@ fn remote_arg(root: &Path, arguments: &Value) -> Result<String, String> {
     Ok(remote.to_string())
 }
 
-/// Whether git_push may send to `url`: `https://`, `ssh://` or scp-style `[user@]host:path`,
-/// with a host that cannot read as a command-line option (#309). Local paths, `file://`,
-/// `git://`, `http://`, `ext::` and the other remote helpers are refused.
+/// Whether git_push may send to `url`: `https://`, `ssh://` or scp-style `[user@]host:path`
+/// (#309). The URL is parsed as one fixed form: the scheme is exactly lowercase, the
+/// authority ends at the first `/`, it holds at most one `@`, and the host is a plain name
+/// that cannot read as an option. Characters that libcurl or git read differently from a
+/// plain host (`?`, `#`, `\`, `%`, whitespace, control characters) and every other remote
+/// helper (`ext::`, `file://`, `git://`, `http://`, local paths) are refused.
 fn push_url_allowed(url: &str) -> bool {
+    let odd = |c: char| c.is_whitespace() || c.is_control() || "?#\\%".contains(c);
+    if url.chars().any(odd) || url.matches('@').count() > 1 || url.contains("::") {
+        return false;
+    }
     let plain = |text: &str| {
         !text.is_empty()
             && text
@@ -894,25 +906,30 @@ fn push_url_allowed(url: &str) -> bool {
                 .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
     };
     let word = |text: &str| plain(text) && text.starts_with(|c: char| c.is_ascii_alphanumeric());
-    if url.contains("::") {
-        return false;
-    }
-    if let Some(rest) = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("ssh://"))
-    {
+    let user_ok = |user: &str| {
+        !user.is_empty()
+            && !user.starts_with('-')
+            && user
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._-:".contains(c))
+    };
+    if let Some((scheme, rest)) = url.split_once("://") {
+        if scheme != "https" && scheme != "ssh" {
+            return false;
+        }
         let authority = rest.split('/').next().unwrap_or_default();
-        let (user, hostport) = match authority.rsplit_once('@') {
+        let (user, hostport) = match authority.split_once('@') {
             Some((user, hostport)) => (Some(user), hostport),
             None => (None, authority),
         };
-        let (host, port) = hostport.split_once(':').unwrap_or((hostport, ""));
-        return word(host)
-            && port.chars().all(|c| c.is_ascii_digit())
-            && user.is_none_or(|user| !user.starts_with('-'));
-    }
-    if url.contains("://") {
-        return false;
+        let (host, port_ok) = match hostport.split_once(':') {
+            Some((host, port)) => (
+                host,
+                !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()),
+            ),
+            None => (hostport, true),
+        };
+        return word(host) && port_ok && user.is_none_or(user_ok);
     }
     let Some((left, path)) = url.split_once(':') else {
         return false;
@@ -1116,7 +1133,7 @@ fn write(root: &Path, args: &[&str], env: Env) -> Result<String, String> {
         // Cut output: git was stopped part-way, so the result is not known. Never success.
         None => Err(format!(
             "git {} printed too much output and was stopped; check git status",
-            args[0]
+            verb(args)
         )),
         Some(status) if !status.success() => {
             if matches!(env, Env::Remote) && needed_terminal(&error) {
@@ -1133,7 +1150,7 @@ fn write(root: &Path, args: &[&str], env: Env) -> Result<String, String> {
                 .take(4)
                 .collect();
             Err(if lines.is_empty() {
-                format!("git {} failed", args[0])
+                format!("git {} failed", verb(args))
             } else {
                 lines.join("; ")
             })
@@ -1182,6 +1199,13 @@ mod tests {
             "ext::sh -c touch MARK",
             "fd::3",
             "ssh://-oProxyCommand=x/r.git",
+            "https://evil-probe.invalid?@github.com/o/r.git",
+            "https://evil-probe.invalid#@github.com/o/r.git",
+            "https://a@b@github.com/x",
+            "https://github.com\\@evil/x",
+            "ssh://a@b@github.com/o/r.git",
+            "git@github.com@evil:o/r.git",
+            "HTTPS://github.com/o/r.git",
             "git@-oProxy:o/r.git",
             "-oProxyCommand=x:o/r.git",
             "https://github.com:port/o/r.git",
