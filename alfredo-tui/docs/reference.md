@@ -1706,8 +1706,13 @@ default false), `timeout_seconds` (1–600, default 120).
   about a second, sandboxed or on the host; Alfredo waits up to 3 s for it on exit. The
   approval log records `cancelled` (not `applied`) and the chat status reads
   `running run_command · Ns · Esc stops` while it runs. A rule-approved run (no card)
-  is stopped the same way. A closed terminal (SIGHUP) or `kill -9` cannot run the cleanup:
-  sandboxed children still die with bubblewrap's `--die-with-parent`, a host command may not.
+  is stopped the same way. A closed terminal (SIGHUP) or `kill` (SIGTERM) quits like
+  Ctrl+Q: the interactive TUI handles both, kills the command, logs `cancelled`, saves and
+  restores the terminal. `kill -9` cannot run the cleanup: sandboxed children still die
+  with bubblewrap's `--die-with-parent`, a host command may not. An in-flight `git_push`
+  can finish after Alfredo exits: it has no stop path yet, so Esc, Ctrl+Q, SIGHUP and SIGTERM
+  leave it running (a push already sent may complete unlogged). A repeated signal more than 5 s
+  after the first ends the process at once.
 - **Sandbox failure.** If bubblewrap is missing or cannot start, the model gets
   `error: the sandbox could not run the command (…); nothing ran on the host…` with a
   suggestion to escalate. Nothing is retried on the host without a new, approved call.
