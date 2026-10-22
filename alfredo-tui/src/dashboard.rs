@@ -13,19 +13,21 @@ pub fn safe(text: &str) -> String {
         .collect()
 }
 
-/// Controls plus format (Cf) characters: bidi overrides and isolates, zero-width and
-/// invisible marks could make a prompt or an approval card show other text than runs.
-/// Line and paragraph separators (U+2028, U+2029, and NEL U+0085) start a new line in
-/// a log or prompt, so they are hidden too (issue #361).
+/// Line breaks (NEL, line and paragraph separators): each starts a new line in a log or
+/// prompt, so single-line output turns them into a space and [`hidden`] flags them.
+const LINE_SEPARATORS: [char; 3] = ['\u{0085}', '\u{2028}', '\u{2029}'];
+
+/// Controls, line separators ([`LINE_SEPARATORS`], issue #361) and format (Cf)
+/// characters: bidi overrides and isolates, zero-width and invisible marks could make a
+/// prompt or an approval card show other text than runs.
 /// Shared by `propose_plan` and project notes (stripped) and the approval card (shown,
 /// see [`safe_visible`]).
 pub fn hidden(c: char) -> bool {
     c.is_control()
+        || LINE_SEPARATORS.contains(&c)
         || matches!(
             c,
-            '\u{0085}'
-                | '\u{2028}'..='\u{2029}'
-                | '\u{00AD}'
+            '\u{00AD}'
                 | '\u{0600}'..='\u{0605}'
                 | '\u{061C}'
                 | '\u{06DD}'
@@ -67,13 +69,16 @@ pub fn single_line_visible(text: &str) -> String {
     safe_visible(&line_breaks_as_spaces(text))
 }
 
-/// Line breaks (LF, tab, NEL and the Unicode line and paragraph separators) become a
-/// space, so single-line output never starts a second line (issue #361).
+/// LF, tab and the [`LINE_SEPARATORS`] become a space, so single-line output never starts
+/// a second line (issue #361).
 fn line_breaks_as_spaces(text: &str) -> String {
     text.chars()
-        .map(|c| match c {
-            '\n' | '\t' | '\u{0085}' | '\u{2028}' | '\u{2029}' => ' ',
-            _ => c,
+        .map(|c| {
+            if matches!(c, '\n' | '\t') || LINE_SEPARATORS.contains(&c) {
+                ' '
+            } else {
+                c
+            }
         })
         .collect()
 }
