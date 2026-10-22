@@ -20,6 +20,9 @@ pub struct Timing {
     admitted: Option<Instant>,
     first: Option<Instant>,
     ended: Option<Instant>,
+    /// Intervals spent waiting on the owner (an approval card). They are not model
+    /// time, so every reported duration leaves them out. An open one has no end.
+    pauses: Vec<(Instant, Option<Instant>)>,
 }
 impl Timing {
     pub fn new(now: Instant) -> Self {
@@ -28,7 +31,33 @@ impl Timing {
             admitted: None,
             first: None,
             ended: None,
+            pauses: Vec::new(),
         }
+    }
+    /// The owner's turn starts: stop counting model time.
+    pub fn pause(&mut self, now: Instant) {
+        if self.ended.is_none() && !self.paused() {
+            self.pauses.push((now, None));
+        }
+    }
+    /// The owner answered: model time counts again.
+    pub fn resume(&mut self, now: Instant) {
+        if let Some((_, end)) = self.pauses.last_mut().filter(|(_, end)| end.is_none()) {
+            *end = Some(now);
+        }
+    }
+    pub fn paused(&self) -> bool {
+        self.pauses.iter().any(|(_, end)| end.is_none())
+    }
+    /// Seconds from `from` to `to`, minus the owner-wait overlapping that span.
+    fn span(&self, to: Instant, from: Instant) -> f64 {
+        let mut total = to.saturating_duration_since(from);
+        for (start, end) in &self.pauses {
+            let end = end.or(self.ended).unwrap_or(to);
+            let (start, end) = ((*start).max(from), end.min(to));
+            total = total.saturating_sub(end.saturating_duration_since(start));
+        }
+        total.as_secs_f64()
     }
     pub fn admit(&mut self, now: Instant) {
         if self.ended.is_none() {
@@ -49,14 +78,11 @@ impl Timing {
     /// Short form for the transcript: elapsed seconds only.
     pub fn compact(&self, now: Instant) -> String {
         let end = self.ended.unwrap_or(now);
-        format!(
-            "{:.1}s",
-            end.saturating_duration_since(self.started).as_secs_f64()
-        )
+        format!("{:.1}s", self.span(end, self.started))
     }
     pub fn summary(&self, now: Instant) -> String {
         let end = self.ended.unwrap_or(now);
-        let seconds = |to: Instant, from: Instant| to.saturating_duration_since(from).as_secs_f64();
+        let seconds = |to: Instant, from: Instant| self.span(to, from);
         let total = seconds(end, self.started);
         let Some(admitted) = self.admitted else {
             return format!(
@@ -79,6 +105,26 @@ impl Timing {
 mod tests {
     use super::*;
     use std::time::Duration;
+    #[test]
+    fn owner_wait_is_left_out_of_every_duration() {
+        let start = Instant::now();
+        let at = |seconds| start + Duration::from_secs(seconds);
+        let mut timing = Timing::new(start);
+        timing.admit(at(1));
+        timing.pause(at(3));
+        assert_eq!(timing.compact(at(30)), "3.0s", "open pause is excluded");
+        timing.resume(at(33));
+        assert_eq!(timing.compact(at(34)), "4.0s");
+        timing.pause(at(35));
+        timing.finish(at(40));
+        assert_eq!(
+            timing.compact(at(90)),
+            "5.0s",
+            "finish closes an open pause"
+        );
+        timing.resume(at(95));
+        assert!(!timing.paused());
+    }
     #[test]
     fn phases_use_distinct_intervals_and_terminal_observations_are_frozen() {
         let start = Instant::now();

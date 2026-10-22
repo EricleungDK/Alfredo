@@ -362,6 +362,10 @@ pub fn task_status(
 fn chat_status(session: &crate::model::Session) -> RowStatus {
     use crate::model::Status;
     match &session.status {
+        // The owner is the bottleneck: not a spinner, and not model work.
+        Status::Connecting | Status::Streaming if session.pending_approval().is_some() => {
+            RowStatus::Decision
+        }
         Status::Connecting | Status::Streaming if session.short_status() == "queued" => {
             RowStatus::Queued
         }

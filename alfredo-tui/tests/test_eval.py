@@ -491,6 +491,34 @@ class ProbeTests(unittest.TestCase):
         self.assertIn(probes.marker('007'), body)
         self.assertLessEqual(server.arrive['007'], server.sent['007'])
 
+    def test_server_stamps_are_waited_for_when_the_reply_is_seen_before_the_stamp(self):
+        server = probes.MarkerServer()
+        self.addCleanup(server.close)
+        server.arrive['004'] = 10.0
+
+        def stamp_late():  # the handler flushed, the pty reader already saw the marker, the stamp lands later
+            time.sleep(0.15)
+            server.sent['004'] = 10.2
+
+        thread = threading.Thread(target=stamp_late)
+        thread.start()
+        self.addCleanup(thread.join)
+        self.assertEqual((10.0, 10.2), probes.server_stamps(server, '004', wait=1.0))
+
+    def test_server_stamps_name_which_stamp_is_missing(self):
+        server = probes.MarkerServer()
+        self.addCleanup(server.close)
+        self.assertIn('never reached the server', probes.server_stamps(server, '001', wait=0.05)['error'])
+        server.arrive['001'] = 1.0
+        error = probes.server_stamps(server, '001', wait=0.05)['error']
+        self.assertIn('reached the server', error)
+        self.assertIn('no send stamp', error)
+        self.assertNotIn('never reached', error)
+
+    def test_reply_to_screen_is_never_negative(self):
+        self.assertEqual(0.0, probes.reply_to_screen_ms(seen_at=5.0, sent_at=5.002))
+        self.assertAlmostEqual(3.0, probes.reply_to_screen_ms(seen_at=5.003, sent_at=5.0))
+
     def test_model_server_can_hold_worker_requests_until_released(self):
         task = run_eval.load_tasks(EVAL, ['T1'])[0]
         server = run_eval.ModelServer(answers=task['answers'])
