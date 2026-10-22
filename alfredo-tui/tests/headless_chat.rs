@@ -229,6 +229,71 @@ fn an_errored_call_carries_its_reason_in_json_and_on_stderr() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// Issue #313: a model-chosen path or tool name with ESC/BEL must not reach stderr as raw
+/// control bytes, and a path with control characters is refused, so no file is created.
+#[test]
+fn headless_chat_keeps_control_characters_off_stderr_and_refuses_their_paths() {
+    let root = repository("control");
+    let fixture = scripted_chat(vec![
+        tool_calls(&[(
+            "write_file",
+            json!({"path": "esc\u{1b}]0;PWNED\u{7}name.txt", "content": "x\n"}),
+        )]),
+        done("Could not write it."),
+    ]);
+    let output = run(
+        &root,
+        &fixture,
+        &[
+            "--chat",
+            "write it",
+            "--headless",
+            "--approve",
+            "workspace-edits",
+        ],
+    );
+    let value = result(&output);
+    assert_eq!(output.status.code(), Some(0), "{value}");
+    assert_ne!(value["calls"][0]["result"], "ok", "{value}");
+    let text = stderr(&output);
+    assert!(
+        !text.chars().any(|c| c.is_control() && c != '\n'),
+        "raw control bytes on stderr: {text:?}"
+    );
+    let names: Vec<_> = fs::read_dir(root.join("workspace"))
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(names.iter().all(|n| !n.contains("name.txt")), "{names:?}");
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn headless_chat_strips_control_characters_from_tool_names_on_stderr() {
+    let root = repository("toolname");
+    let fixture = scripted_chat(vec![
+        tool_calls(&[(
+            "write_file\u{1b}[31m",
+            json!({"path": "a.txt", "content": "x\n"}),
+        )]),
+        done("Done."),
+    ]);
+    let output = run(
+        &root,
+        &fixture,
+        &["--chat", "hi", "--headless", "--approve", "workspace-edits"],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(
+        !text.chars().any(|c| c.is_control() && c != '\n'),
+        "raw control bytes on stderr: {text:?}"
+    );
+    assert!(text.contains("tool write_file[31m"), "{text}");
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn approve_is_headless_chat_only_and_validated() {
     let root = repository("usage");

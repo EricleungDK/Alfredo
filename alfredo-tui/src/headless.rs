@@ -33,7 +33,14 @@ extern "C" fn on_signal(_: libc::c_int) {
 
 /// Progress line on stderr; a closed pipe must not abort the run.
 fn say(line: impl std::fmt::Display) {
-    let _ = writeln!(std::io::stderr(), "{line}");
+    let _ = writeln!(std::io::stderr(), "{}", stderr_line(line));
+}
+
+/// One printable line for stderr. Approval cards, tool names, paths and errors carry
+/// model-chosen text, so control characters (ESC, BEL, C1 CSI, CR) go and line breaks
+/// become spaces: the terminal or CI log shows text, and no second line can be forged.
+fn stderr_line(line: impl std::fmt::Display) -> String {
+    alfredo_tui::dashboard::single_line(&line.to_string())
 }
 
 /// SIGINT and SIGTERM request the same cancellation as `/stop`.
@@ -1025,6 +1032,20 @@ mod tests {
         let value = turn.json("m", Policy::Deny, &[]);
         assert_eq!(value["calls"][0]["path"], "units.py");
         assert_eq!(value["calls"][0]["result"], "ok");
+    }
+
+    #[test]
+    fn stderr_lines_carry_no_control_characters_or_line_breaks() {
+        assert_eq!(
+            stderr_line("approval new file esc\u{1b}]0;PWNED\u{7}name.txt: approved"),
+            "approval new file esc]0;PWNEDname.txt: approved"
+        );
+        assert_eq!(stderr_line("a\nb\tc\u{9b}d\r"), "a b cd");
+        assert_eq!(
+            stderr_line("#3 failed: x\n#4 accepted"),
+            "#3 failed: x #4 accepted"
+        );
+        assert_eq!(stderr_line("plain — text"), "plain — text");
     }
 
     #[test]
