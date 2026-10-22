@@ -931,6 +931,8 @@ fn push_url_allowed(url: &str) -> bool {
         };
         return word(host) && port_ok && user.is_none_or(user_ok);
     }
+    // scp-style: git reads the host before the first `:` and the path after it, so the
+    // path holds no `:` or `@`, and the host is a name, not a URL scheme word (#309).
     let Some((left, path)) = url.split_once(':') else {
         return false;
     };
@@ -938,7 +940,46 @@ fn push_url_allowed(url: &str) -> bool {
         Some((user, host)) => (Some(user), host),
         None => (None, left),
     };
-    !path.is_empty() && word(host) && user.is_none_or(word)
+    let scheme_word = ["https", "http", "ssh", "git", "file", "ext", "fd"]
+        .iter()
+        .any(|scheme| host.eq_ignore_ascii_case(scheme));
+    let named = host.chars().any(|c| c.is_ascii_alphabetic() || c == '.');
+    !path.is_empty()
+        && !path.contains([':', '@'])
+        && word(host)
+        && named
+        && !scheme_word
+        && user.is_none_or(word)
+}
+
+/// A URL for a refusal message: everything before the last `@` (user info, which may be a
+/// token) is replaced by `***`, the scheme is kept, control characters are escaped.
+fn redacted(url: &str) -> String {
+    let scheme_end = url.find("://").map_or(0, |i| i + 3);
+    let shown = match url.rfind('@') {
+        Some(at) => {
+            let keep = if at < scheme_end {
+                ""
+            } else {
+                &url[..scheme_end]
+            };
+            format!("{keep}***{}", &url[at..])
+        }
+        None => url.to_string(),
+    };
+    shown
+        .chars()
+        .map(|c| {
+            if c.is_control() {
+                c.escape_default().to_string()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect::<String>()
+        .chars()
+        .take(120)
+        .collect()
 }
 
 /// `url` without user info (tokens) in it.
@@ -969,18 +1010,15 @@ fn plan_push(root: &Path, arguments: &Value) -> Result<PushPlan, String> {
         root,
         &["remote", "get-url", "--push", "--all", "--", &remote],
     )?;
-    let urls: Vec<&str> = urls
-        .lines()
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .collect();
+    // The raw values are checked (no trimming): git uses them as they are.
+    let urls: Vec<&str> = urls.split('\n').filter(|url| !url.is_empty()).collect();
     if urls.is_empty() {
         return Err(format!("remote {remote} has no push URL"));
     }
     if let Some(url) = urls.iter().find(|url| !push_url_allowed(url)) {
         return Err(format!(
             "remote {remote} URL {} is not https://, ssh:// or user@host:path; chat git_push refuses it (the owner can push by hand)",
-            shown(&without_credentials(url))
+            redacted(url)
         ));
     }
     let url = urls
@@ -1227,6 +1265,19 @@ mod tests {
         ] {
             assert!(!push_url_allowed(url), "{url}");
         }
+    }
+
+    #[test]
+    fn refused_urls_are_shown_without_user_info() {
+        assert_eq!(
+            redacted("https://a@b@github.com/x"),
+            "https://***@github.com/x"
+        );
+        assert_eq!(
+            redacted("evil:tok@github.com:o/r.git"),
+            "***@github.com:o/r.git"
+        );
+        assert_eq!(redacted("/tmp/r\u{1b}[2J.git"), "/tmp/r\\u{1b}[2J.git");
     }
 
     #[test]
