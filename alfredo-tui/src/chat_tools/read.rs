@@ -459,6 +459,20 @@ mod tests {
         assert!(error.contains("symbolic link"), "{error}");
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_file_removed_after_the_open_is_refused_before_its_name_is_trusted() {
+        // Linux names an unlinked file "<path> (deleted)", which the `.pem` suffix
+        // match in `secret` would miss. The handle has no links left, so it is refused.
+        let (_base, root, _cleanup) = confined_sandbox();
+        let key = root.join("key.pem");
+        std::fs::write(&key, "PRIVATE KEY\n").unwrap();
+        let file = std::fs::File::open(&key).unwrap();
+        std::fs::remove_file(&key).unwrap();
+        let error = crate::chat_tools::confined_handle(&root, &file).err();
+        assert!(error.is_some(), "a removed .pem handle was accepted");
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_fifo_is_refused_at_once_instead_of_blocking_the_open() {

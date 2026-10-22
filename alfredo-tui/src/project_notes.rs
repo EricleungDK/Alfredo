@@ -135,6 +135,8 @@ mod tests {
     #[test]
     fn notes_do_not_leak_outside_text_when_agents_md_is_swapped_for_a_symlink() {
         const ITERATIONS: usize = 200_000;
+        /// Loads that must run within the budget for the race to count as exercised.
+        const MIN_RUNS: usize = 20_000;
         let base =
             std::env::temp_dir().join(format!("alfredo-notes-swap-race-{}", std::process::id()));
         let _cleanup = Cleanup(base.clone());
@@ -168,6 +170,10 @@ mod tests {
             (leaks, runs)
         });
         eprintln!("Notes::load swap race: LEAKS={leaks} over {runs} loads");
+        assert!(
+            runs >= MIN_RUNS,
+            "only {runs} loads ran; the race was not exercised"
+        );
         assert_eq!(leaks, 0, "outside text was framed as project notes");
     }
 

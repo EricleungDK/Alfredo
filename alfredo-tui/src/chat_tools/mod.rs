@@ -275,7 +275,7 @@ pub(crate) fn open_confined(
 /// Refuses unless the opened handle is a regular file inside the workspace. Linux only:
 /// `/proc/self/fd/N` names the file the handle refers to. Without it the read is refused.
 #[cfg(target_os = "linux")]
-fn confined_handle(workspace: &Path, file: &std::fs::File) -> Result<(), String> {
+pub(crate) fn confined_handle(workspace: &Path, file: &std::fs::File) -> Result<(), String> {
     use std::os::unix::io::AsRawFd;
     let opened = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
         .map_err(|_| "cannot confirm where the file lies (no /proc); refused".to_string())?;
@@ -293,7 +293,7 @@ fn confined_handle(workspace: &Path, file: &std::fs::File) -> Result<(), String>
 
 /// Other Unix targets cannot name an opened file, so they refuse confined reads.
 #[cfg(all(unix, not(target_os = "linux")))]
-fn confined_handle(_workspace: &Path, _file: &std::fs::File) -> Result<(), String> {
+pub(crate) fn confined_handle(_workspace: &Path, _file: &std::fs::File) -> Result<(), String> {
     Err("cannot confirm where the file lies on this platform; refused".into())
 }
 
