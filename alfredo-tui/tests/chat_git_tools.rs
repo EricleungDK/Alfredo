@@ -348,6 +348,118 @@ fn non_repository_inside_a_parent_repository_is_an_error() {
     }
 }
 
+/// Issue #359: a workspace whose `.git` leads to another repository (a gitfile, a `commondir`
+/// file behind a gitfile, or a `commondir` in a plain `.git` directory) shows none of it.
+#[test]
+fn a_git_pointer_to_another_repository_is_never_read() {
+    let other = Repo::new();
+    fs::write(other.root.join("creds.txt"), "AWS_SECRET=hunter2\n").unwrap();
+    git(&other.root, &["add", "creds.txt"]);
+    git(&other.root, &["commit", "-q", "-m", "add creds"]);
+    let other_git = other.root.join(".git");
+    let branch = git(&other.root, &["symbolic-ref", "--short", "HEAD"]);
+    let head = format!("ref: refs/heads/{}\n", branch.trim());
+    let ws = other.base.join("ws");
+    for name in ["gitfile", "commondir behind a gitfile", "commondir in a .git directory"] {
+        let _ = fs::remove_dir_all(&ws);
+        fs::create_dir_all(&ws).unwrap();
+        match name {
+            "gitfile" => fs::write(ws.join(".git"), format!("gitdir: {}\n", other_git.display())).unwrap(),
+            "commondir behind a gitfile" => {
+                fs::write(ws.join(".git"), "gitdir: ./fake\n").unwrap();
+                fs::create_dir_all(ws.join("fake")).unwrap();
+                fs::write(ws.join("fake/HEAD"), &head).unwrap();
+                fs::write(ws.join("fake/commondir"), format!("{}\n", other_git.display())).unwrap();
+            }
+            _ => {
+                fs::create_dir_all(ws.join(".git")).unwrap();
+                fs::write(ws.join(".git/HEAD"), &head).unwrap();
+                fs::write(ws.join(".git/commondir"), format!("{}\n", other_git.display())).unwrap();
+            }
+        }
+        for (tool, arguments) in [
+            ("git_status", json!({})),
+            ("git_branch", json!({})),
+            ("git_log", json!({"max_count": 5})),
+            ("git_diff", json!({})),
+            ("git_diff", json!({"staged": true})),
+            ("git_diff", json!({"base": "HEAD~1", "target": "HEAD"})),
+        ] {
+            let output = chat_tools::dispatch(
+                &ws,
+                &ToolCall {
+                    name: tool.into(),
+                    arguments,
+                },
+            );
+            assert!(!output.contains("hunter2"), "{name} {tool}: {output}");
+            assert!(!output.contains("add creds"), "{name} {tool}: {output}");
+            assert!(output.starts_with("error:"), "{name} {tool}: {output}");
+        }
+    }
+}
+
+/// Issue #359: a worktree entry of another repository whose `gitdir` back-reference does not
+/// point at this workspace is not this workspace's linked worktree, whatever its HEAD says.
+#[test]
+fn a_worktree_entry_of_another_repository_that_is_not_ours_is_never_read() {
+    let other = Repo::new();
+    fs::write(other.root.join("creds.txt"), "AWS_SECRET=hunter2\n").unwrap();
+    git(&other.root, &["add", "creds.txt"]);
+    git(&other.root, &["commit", "-q", "-m", "add creds"]);
+    let entry = other.root.join(".git/worktrees/evil");
+    fs::create_dir_all(&entry).unwrap();
+    let branch = git(&other.root, &["symbolic-ref", "--short", "HEAD"]);
+    fs::write(entry.join("HEAD"), format!("ref: refs/heads/{}\n", branch.trim())).unwrap();
+    fs::write(entry.join("commondir"), "../..\n").unwrap();
+    fs::write(
+        entry.join("gitdir"),
+        format!("{}/elsewhere/.git\n", other.base.display()),
+    )
+    .unwrap();
+    let ws = other.base.join("ws");
+    fs::create_dir_all(&ws).unwrap();
+    fs::write(ws.join(".git"), format!("gitdir: {}\n", entry.display())).unwrap();
+    for tool in ["git_status", "git_log"] {
+        let output = chat_tools::dispatch(
+            &ws,
+            &ToolCall {
+                name: tool.into(),
+                arguments: json!({}),
+            },
+        );
+        assert!(!output.contains("hunter2"), "{tool}: {output}");
+        assert!(output.starts_with("error:"), "{tool}: {output}");
+    }
+}
+
+/// Issue #359: a linked worktree of the workspace's own repository is still read.
+#[test]
+fn a_linked_worktree_of_the_workspace_repository_reads_its_own_history() {
+    let repo = Repo::new();
+    let wt = repo.base.join("wt");
+    git(
+        &repo.root,
+        &["worktree", "add", "-q", "-b", "wt-branch", wt.to_str().unwrap()],
+    );
+    let log = chat_tools::dispatch(
+        &wt,
+        &ToolCall {
+            name: "git_log".into(),
+            arguments: json!({}),
+        },
+    );
+    assert!(log.contains("initial commit"), "{log}");
+    let branch = chat_tools::dispatch(
+        &wt,
+        &ToolCall {
+            name: "git_branch".into(),
+            arguments: json!({}),
+        },
+    );
+    assert!(branch.contains("current: wt-branch"), "{branch}");
+}
+
 #[test]
 fn renamed_secret_content_is_not_shown() {
     let repo = Repo::new();

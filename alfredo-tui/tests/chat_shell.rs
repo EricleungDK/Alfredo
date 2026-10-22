@@ -920,6 +920,56 @@ fn git_works_sandboxed_in_a_linked_worktree() {
     let _ = fs::remove_dir_all(base);
 }
 
+/// Issue #359: a workspace whose `.git` is a gitfile to another repository gets that
+/// repository's config and objects neither bound into the sandbox nor readable from it.
+#[test]
+fn a_gitfile_to_another_repository_is_not_bound_into_the_sandbox() {
+    if !sandbox_works() {
+        return;
+    }
+    let root = workspace("gitfile-ws");
+    let other = workspace("gitfile-other");
+    let git = |dir: &Path, args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?} {out:?}");
+    };
+    git(&other, &["init", "-q", "-b", "main"]);
+    git(
+        &other,
+        &[
+            "config",
+            "remote.origin.url",
+            "https://user:tok-7f3a@example.com/repo.git",
+        ],
+    );
+    fs::write(other.join("creds.txt"), "AWS_SECRET=hunter2\n").unwrap();
+    git(&other, &["add", "creds.txt"]);
+    git(&other, &["commit", "-q", "-m", "add creds"]);
+    fs::write(
+        root.join(".git"),
+        format!("gitdir: {}\n", other.join(".git").display()),
+    )
+    .unwrap();
+    let command = format!(
+        "cat '{}/config'; git log -p --oneline",
+        other.join(".git").display()
+    );
+    let card = approval::card(&root, &call(json!({"command": command}))).unwrap();
+    let result = approval::apply(&root, &card).unwrap();
+    assert!(!result.contains("tok-7f3a"), "{result}");
+    assert!(!result.contains("hunter2"), "{result}");
+    let _ = fs::remove_dir_all(root);
+    let _ = fs::remove_dir_all(other);
+}
+
 #[test]
 fn a_cwd_swapped_after_the_preview_is_refused() {
     let root = workspace("swap");
