@@ -274,18 +274,34 @@ pub(crate) fn open_confined(
 
 /// Refuses unless the opened handle is a regular file inside the workspace. Linux only:
 /// `/proc/self/fd/N` names the file the handle refers to. Without it the read is refused.
+/// The name is read before the link count, so a removal in between is caught by the
+/// count (issue #360).
 #[cfg(target_os = "linux")]
 pub(crate) fn confined_handle(workspace: &Path, file: &std::fs::File) -> Result<(), String> {
     use std::os::unix::fs::MetadataExt;
     use std::os::unix::io::AsRawFd;
-    // A file unlinked after the open reads back as "<path> (deleted)", which the name
-    // checks would misread, so the handle's own link count decides first.
-    let links = file.metadata().map_err(|error| error.to_string())?.nlink();
-    if links == 0 {
-        return Err("removed while it was read; refused".into());
-    }
     let opened = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
         .map_err(|_| "cannot confirm where the file lies (no /proc); refused".to_string())?;
+    if file.metadata().map_err(|error| error.to_string())?.nlink() == 0 {
+        return Err("removed while it was read; refused".into());
+    }
+    confined_name(workspace, &opened)
+}
+
+/// Decides from the name Linux reports for an open handle (see [`confined_handle`]).
+#[cfg(target_os = "linux")]
+pub(crate) fn confined_name(workspace: &Path, opened: &Path) -> Result<(), String> {
+    // Linux appends " (deleted)" to the name of a removed file. The name checks cannot
+    // tell that apart from a real name, so such a name is refused. A file whose real
+    // name ends in that suffix is refused too.
+    if opened
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().ends_with(" (deleted)"))
+    {
+        return Err(
+            "its name ends in \" (deleted)\", the form Linux gives a removed file; refused".into(),
+        );
+    }
     let root = workspace
         .canonicalize()
         .map_err(|_| "Coding Workspace is not available".to_string())?;

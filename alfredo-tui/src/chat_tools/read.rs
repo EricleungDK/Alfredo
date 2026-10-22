@@ -470,6 +470,17 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn a_name_ending_in_deleted_is_refused_as_a_removed_file() {
+        // The form Linux reports for a file unlinked after it was opened. The `.pem`
+        // suffix match would not see the secret kind behind it.
+        let (_base, root, _cleanup) = confined_sandbox();
+        let reported = root.join("key.pem (deleted)");
+        assert!(crate::chat_tools::confined_name(&root, &reported).is_err());
+        assert!(crate::chat_tools::confined_name(&root, &root.join("real.txt")).is_ok());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn a_file_removed_after_the_open_is_refused_before_its_name_is_trusted() {
         // Linux names an unlinked file "<path> (deleted)", which the `.pem` suffix
         // match in `secret` would miss. The handle has no links left, so it is refused.
