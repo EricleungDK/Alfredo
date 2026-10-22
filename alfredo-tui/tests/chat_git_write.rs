@@ -712,6 +712,14 @@ fn push_is_refused_when_repository_config_can_run_commands() {
         ("url./tmp/x.pushInsteadOf", "/tmp/y"),
         ("protocol.ext.allow", "always"),
         ("protocol.allow", "always"),
+        ("core.gitProxy", "touch MARK"),
+        ("remote.origin.proxy", "http://127.0.0.1:9"),
+        ("http.sslVerify", "false"),
+        ("http.sslCAInfo", "/tmp/x"),
+        ("remote.origin.vcs", "x"),
+        ("push.followTags", "true"),
+        ("push.recurseSubmodules", "on-demand"),
+        ("core.hooksPath", "/tmp/hooks"),
     ] {
         let repo = Repo::new().with_remote();
         fs::write(repo.root.join("a.txt"), "a\n").unwrap();
@@ -724,6 +732,270 @@ fn push_is_refused_when_repository_config_can_run_commands() {
             "{key}: {error}"
         );
     }
+}
+
+/// A commit of a new file `a.txt`, ahead of the remote.
+fn commit_a_file(repo: &Repo) {
+    fs::write(repo.root.join("a.txt"), "a\n").unwrap();
+    git(&repo.root, &["add", "a.txt"]);
+    git(&repo.root, &["commit", "-q", "-m", "local work"]);
+}
+
+/// An executable `#!/bin/sh` script at `path` running `body`.
+fn script(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Sets HOME to an empty directory for a test and restores it on drop: a signing key in
+/// the owner's global config would stop git from running a key command.
+struct EmptyHome(Option<std::ffi::OsString>);
+
+impl EmptyHome {
+    fn new(base: &Path) -> Self {
+        let home = base.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let old = std::env::var_os("HOME");
+        std::env::set_var("HOME", &home);
+        Self(old)
+    }
+}
+
+impl Drop for EmptyHome {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(old) => std::env::set_var("HOME", old),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+}
+
+/// #309 a: a signing key command in the repository config would run on commit.
+#[test]
+fn a_commit_never_runs_a_repository_signing_key_command() {
+    let repo = Repo::new();
+    let _home = EmptyHome::new(&repo.base);
+    let marker = repo.base.join("KEYCMD_MARK");
+    let keycmd = repo.base.join("keycmd");
+    script(&keycmd, &format!("touch '{}'; exit 1", marker.display()));
+    git(&repo.root, &["config", "commit.gpgsign", "true"]);
+    git(&repo.root, &["config", "gpg.format", "ssh"]);
+    git(
+        &repo.root,
+        &[
+            "config",
+            "gpg.ssh.defaultKeyCommand",
+            keycmd.to_str().unwrap(),
+        ],
+    );
+    fs::write(repo.root.join("b.txt"), "b\n").unwrap();
+    let before = repo.head();
+    let result = repo.approve("git_commit", json!({"message": "b", "files": ["b.txt"]}));
+    assert!(!marker.exists(), "the repository signing key command ran");
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(repo.head(), before);
+}
+
+/// #309 b: core.gitProxy runs a program before any git:// connection.
+#[test]
+fn a_push_never_runs_a_repository_git_proxy() {
+    let repo = Repo::new();
+    commit_a_file(&repo);
+    let marker = repo.base.join("PROXY_MARK");
+    let proxy = repo.base.join("proxy");
+    script(&proxy, &format!("touch '{}'; exit 1", marker.display()));
+    git(
+        &repo.root,
+        &["config", "core.gitProxy", proxy.to_str().unwrap()],
+    );
+    git(
+        &repo.root,
+        &["remote", "add", "origin", "git://127.0.0.1:9/x.git"],
+    );
+    let result = repo.approve("git_push", json!({}));
+    assert!(!marker.exists(), "the repository git proxy ran");
+    assert!(result.is_err(), "{result:?}");
+}
+
+/// #309 c: a local-path remote runs its own hooks (repository config does not reach them).
+#[test]
+fn a_push_to_a_local_path_never_runs_the_remote_hooks() {
+    let repo = Repo::new();
+    commit_a_file(&repo);
+    git(&repo.base, &["init", "-q", "--bare", "-b", "main", "hooked.git"]);
+    let bare = repo.base.join("hooked.git");
+    let marker = repo.base.join("HOOK_MARK");
+    script(
+        &bare.join("hooks/pre-receive"),
+        &format!("touch '{}'", marker.display()),
+    );
+    git(
+        &repo.root,
+        &["remote", "add", "origin", bare.to_str().unwrap()],
+    );
+    let result = repo.approve("git_push", json!({}));
+    assert!(!marker.exists(), "the remote pre-receive hook ran");
+    assert!(result.is_err(), "{result:?}");
+    assert_eq!(git(&bare, &["for-each-ref", "--format=%(refname)"]), "");
+}
+
+/// #309 d: a repository proxy and a TLS override would send the push through a
+/// man-in-the-middle while the card shows github.com.
+#[test]
+fn a_push_never_goes_through_a_repository_proxy_or_tls_override() {
+    let repo = Repo::new();
+    commit_a_file(&repo);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        if let Ok((stream, _)) = listener.accept() {
+            let _ = sender.send(());
+            drop(stream);
+        }
+    });
+    git(
+        &repo.root,
+        &["remote", "add", "origin", "https://github.com/owner/repo.git"],
+    );
+    git(
+        &repo.root,
+        &[
+            "config",
+            "remote.origin.proxy",
+            &format!("http://127.0.0.1:{port}"),
+        ],
+    );
+    git(&repo.root, &["config", "http.sslVerify", "false"]);
+    let result = repo.approve("git_push", json!({}));
+    let connected = receiver.recv_timeout(Duration::from_secs(2)).is_ok();
+    assert!(!connected, "the push reached the repository proxy");
+    assert!(result.is_err(), "{result:?}");
+}
+
+/// #309 f: push.followTags sends an annotated tag the card does not list.
+#[test]
+fn a_push_never_sends_tags_the_card_does_not_list() {
+    let repo = Repo::new().with_remote();
+    commit_a_file(&repo);
+    git(&repo.root, &["tag", "-a", "v1", "-m", "release"]);
+    git(&repo.root, &["config", "push.followTags", "true"]);
+    let result = repo.approve("git_push", json!({}));
+    assert!(
+        !git(&repo.remote(), &["tag"]).contains("v1"),
+        "a tag the card does not list was pushed"
+    );
+    assert!(result.is_err(), "{result:?}");
+}
+
+/// #309 g: the remote is repointed after the card; the apply must not push elsewhere.
+#[test]
+fn a_remote_repointed_after_the_card_is_refused_and_nothing_is_pushed() {
+    let repo = Repo::new().with_remote();
+    commit_a_file(&repo);
+    let card = repo.card("git_push", json!({})).unwrap();
+    let other = repo.base.join("other.git");
+    git(&repo.base, &["init", "-q", "--bare", "-b", "main", "other.git"]);
+    git(
+        &repo.root,
+        &["remote", "set-url", "origin", &ssh_url(&other)],
+    );
+    let error = approval::apply(&repo.root, &card).unwrap_err();
+    assert!(error.contains("changed"), "{error}");
+    assert_eq!(git(&other, &["for-each-ref", "--format=%(refname)"]), "");
+    assert_eq!(
+        git(&repo.remote(), &["rev-parse", "refs/heads/main"]).trim(),
+        git(&repo.root, &["rev-parse", "origin/main"]).trim()
+    );
+}
+
+/// Criterion 4: a repository config change between the card and the apply is refused.
+#[test]
+fn a_repository_config_change_after_the_card_is_refused() {
+    let repo = Repo::new();
+    fs::write(repo.root.join("b.txt"), "b\n").unwrap();
+    let card = repo
+        .card("git_commit", json!({"message": "b", "files": ["b.txt"]}))
+        .unwrap();
+    let before = repo.head();
+    git(&repo.root, &["config", "core.autocrlf", "true"]);
+    let error = approval::apply(&repo.root, &card).unwrap_err();
+    assert!(error.contains("changed"), "{error}");
+    assert_eq!(repo.head(), before);
+}
+
+/// Criterion 2: git_push takes only https://, ssh:// and scp-style remotes.
+#[test]
+fn push_remotes_must_be_https_ssh_or_scp_style() {
+    let repo = Repo::new();
+    commit_a_file(&repo);
+    git(
+        &repo.root,
+        &["remote", "add", "origin", "https://github.com/owner/repo.git"],
+    );
+    for url in [
+        "https://github.com/owner/repo.git",
+        "https://user@github.com/owner/repo.git",
+        "ssh://git@github.com/owner/repo.git",
+        "git@github.com:owner/repo.git",
+        "github.com:owner/repo.git",
+    ] {
+        git(&repo.root, &["remote", "set-url", "origin", url]);
+        repo.card("git_push", json!({}))
+            .unwrap_or_else(|error| panic!("{url} should be accepted: {error}"));
+    }
+    for url in [
+        "/tmp/elsewhere.git",
+        "../elsewhere.git",
+        "file:///tmp/elsewhere.git",
+        "git://127.0.0.1:9/x.git",
+        "http://example.com/x.git",
+        "ext::sh -c touch MARK",
+        "fd::3",
+        "ssh://-oProxyCommand=touch/x.git",
+        "https://-evil.example/x.git",
+    ] {
+        git(&repo.root, &["remote", "set-url", "origin", url]);
+        let error = repo.card("git_push", json!({})).unwrap_err();
+        assert!(error.contains("is not https://"), "{url}: {error}");
+    }
+}
+
+/// Repository config outside the allowlist is refused by every chat git write, by name.
+#[test]
+fn commit_refuses_repository_config_outside_the_allowlist() {
+    for (key, value) in [
+        ("core.pager", "touch MARK"),
+        ("core.editor", "touch MARK"),
+        ("diff.evil.command", "touch MARK"),
+        ("core.hooksPath", "/tmp/hooks"),
+        ("commit.gpgsign", "true"),
+    ] {
+        let repo = Repo::new();
+        git(&repo.root, &["config", key, value]);
+        fs::write(repo.root.join("b.txt"), "b\n").unwrap();
+        let error = repo
+            .card("git_commit", json!({"message": "b", "files": ["b.txt"]}))
+            .unwrap_err();
+        assert!(
+            error.to_lowercase().contains(&key.to_lowercase()),
+            "{key}: {error}"
+        );
+    }
+}
+
+/// Keys the chat writes need for ordinary repositories stay allowed.
+#[test]
+fn ordinary_repository_config_is_still_allowed_for_writes() {
+    let repo = Repo::new();
+    git(&repo.root, &["config", "core.autocrlf", "false"]);
+    git(&repo.root, &["config", "branch.main.description", "x"]);
+    git(&repo.root, &["config", "pull.rebase", "true"]);
+    git(&repo.root, &["config", "push.default", "current"]);
+    fs::write(repo.root.join("b.txt"), "b\n").unwrap();
+    repo.card("git_commit", json!({"message": "b", "files": ["b.txt"]}))
+        .unwrap();
 }
 
 #[test]
