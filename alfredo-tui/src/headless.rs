@@ -734,22 +734,42 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
         prompt,
         policy,
     } = options;
-    let choice = runtime
-        .block_on(alfredo_tui::selection::automatic(&start, &state_dir))?
-        .ok_or_else(|| alfredo_tui::selection::not_a_repository_notice(&start))?;
     let chat = provider.clone();
-    if model_explicit {
-        preflight(runtime, &chat, &model)?;
-    }
+    let mut checked = false;
     // Read-only: the turn is not saved, so it neither owns the conversation nor
     // takes the selection journal, and runs beside an open TUI or another chat.
-    let view = alfredo_tui::workstation::ChatView::open(
-        &state_dir,
-        &choice.target(),
-        choice.mission.name(),
-        choice.mission.start_new(),
-        &conversation,
-    )?;
+    // Another run creating the default mission at the same moment can make either
+    // step report it missing or existing: look again, now that it is settled.
+    let mut attempt = 0;
+    let view = loop {
+        attempt += 1;
+        let opened = (|| {
+            let choice = runtime
+                .block_on(alfredo_tui::selection::automatic(&start, &state_dir))?
+                .ok_or_else(|| alfredo_tui::selection::not_a_repository_notice(&start))?;
+            if model_explicit && !checked {
+                preflight(runtime, &chat, &model)?;
+                checked = true;
+            }
+            alfredo_tui::workstation::ChatView::open(
+                &state_dir,
+                &choice.target(),
+                choice.mission.name(),
+                choice.mission.start_new(),
+                &conversation,
+            )
+        })();
+        match opened {
+            Err(error)
+                if attempt < 20
+                    && (error == alfredo_tui::tasks::MISSION_MISSING
+                        || error == alfredo_tui::tasks::MISSION_EXISTS) =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            other => break other?,
+        }
+    };
     let model = if model_explicit {
         model
     } else {
