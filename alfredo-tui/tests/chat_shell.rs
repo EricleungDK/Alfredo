@@ -920,15 +920,15 @@ fn git_works_sandboxed_in_a_linked_worktree() {
     let _ = fs::remove_dir_all(base);
 }
 
-/// Issue #359: a workspace whose `.git` is a gitfile to another repository gets that
-/// repository's config and objects neither bound into the sandbox nor readable from it.
+/// Issue #359: a workspace whose `.git` leads to another repository, by a gitfile or by a
+/// `commondir` file behind a gitfile, gets that repository's config and objects neither
+/// bound into the sandbox nor readable from it.
 #[test]
-fn a_gitfile_to_another_repository_is_not_bound_into_the_sandbox() {
+fn a_git_pointer_to_another_repository_is_not_bound_into_the_sandbox() {
     if !sandbox_works() {
         return;
     }
-    let root = workspace("gitfile-ws");
-    let other = workspace("gitfile-other");
+    let other = workspace("pointer-other");
     let git = |dir: &Path, args: &[&str]| {
         let out = Command::new("git")
             .args(args)
@@ -953,20 +953,32 @@ fn a_gitfile_to_another_repository_is_not_bound_into_the_sandbox() {
     fs::write(other.join("creds.txt"), "AWS_SECRET=hunter2\n").unwrap();
     git(&other, &["add", "creds.txt"]);
     git(&other, &["commit", "-q", "-m", "add creds"]);
-    fs::write(
-        root.join(".git"),
-        format!("gitdir: {}\n", other.join(".git").display()),
-    )
-    .unwrap();
-    let command = format!(
-        "cat '{}/config'; git log -p --oneline",
-        other.join(".git").display()
-    );
-    let card = approval::card(&root, &call(json!({"command": command}))).unwrap();
-    let result = approval::apply(&root, &card).unwrap();
-    assert!(!result.contains("tok-7f3a"), "{result}");
-    assert!(!result.contains("hunter2"), "{result}");
-    let _ = fs::remove_dir_all(root);
+    let other_git = other.join(".git");
+    for variant in ["gitfile", "commondir behind a gitfile"] {
+        let root = workspace("pointer-ws");
+        if variant == "gitfile" {
+            fs::write(
+                root.join(".git"),
+                format!("gitdir: {}\n", other_git.display()),
+            )
+            .unwrap();
+        } else {
+            fs::write(root.join(".git"), "gitdir: ./fake\n").unwrap();
+            fs::create_dir_all(root.join("fake")).unwrap();
+            fs::write(root.join("fake/HEAD"), "ref: refs/heads/main\n").unwrap();
+            fs::write(
+                root.join("fake/commondir"),
+                format!("{}\n", other_git.display()),
+            )
+            .unwrap();
+        }
+        let command = format!("cat '{}/config'; git log -p --oneline", other_git.display());
+        let card = approval::card(&root, &call(json!({"command": command}))).unwrap();
+        let result = approval::apply(&root, &card).unwrap();
+        assert!(!result.contains("tok-7f3a"), "{variant}: {result}");
+        assert!(!result.contains("hunter2"), "{variant}: {result}");
+        let _ = fs::remove_dir_all(root);
+    }
     let _ = fs::remove_dir_all(other);
 }
 

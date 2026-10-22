@@ -515,6 +515,41 @@ fn a_symlinked_git_directory_to_another_repository_is_never_read() {
     }
 }
 
+/// Issue #359 (review): a plain `.git` whose object store lists another repository's objects
+/// in `objects/info/alternates` shows that repository's history with no gitfile at all.
+#[test]
+fn an_alternates_file_into_another_repository_is_never_read() {
+    let other = Repo::new();
+    fs::write(other.root.join("creds.txt"), "AWS_SECRET=hunter2\n").unwrap();
+    git(&other.root, &["add", "creds.txt"]);
+    git(&other.root, &["commit", "-q", "-m", "add creds"]);
+    let sha = git(&other.root, &["rev-parse", "HEAD"]).trim().to_string();
+    git(&other.base, &["init", "-q", "-b", "main", "ws"]);
+    let ws = other.base.join("ws");
+    fs::write(
+        ws.join(".git/objects/info/alternates"),
+        format!("{}\n", other.root.join(".git/objects").display()),
+    )
+    .unwrap();
+    fs::write(ws.join(".git/refs/heads/main"), format!("{sha}\n")).unwrap();
+    for (tool, arguments) in [
+        ("git_status", json!({})),
+        ("git_log", json!({})),
+        ("git_diff", json!({"base": "HEAD~1", "target": "HEAD"})),
+    ] {
+        let output = chat_tools::dispatch(
+            &ws,
+            &ToolCall {
+                name: tool.into(),
+                arguments,
+            },
+        );
+        assert!(!output.contains("hunter2"), "{tool}: {output}");
+        assert!(!output.contains("add creds"), "{tool}: {output}");
+        assert!(output.starts_with("error:"), "{tool}: {output}");
+    }
+}
+
 /// Issue #359: a linked worktree whose back-reference is relative and has CRLF line ends is
 /// still the workspace's own linked worktree.
 #[test]
