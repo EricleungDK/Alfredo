@@ -782,8 +782,12 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
     let workspace = work.workspace().to_path_buf();
     let log = Log::for_store(work.store()).ok();
     let before = log.as_ref().map_or(0, |log| log.records().len());
+    let (context, notes) = work.chat_context_with_notes();
+    if let Some((_, line)) = notes {
+        say(line);
+    }
     let messages = vec![
-        work.chat_context(),
+        context,
         alfredo_tui::model::Message {
             role: "user".into(),
             content: prompt,
