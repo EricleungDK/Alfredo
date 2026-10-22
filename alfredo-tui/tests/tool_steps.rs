@@ -181,6 +181,55 @@ fn transcript_shows_each_tool_call_and_a_truncated_result() {
     assert!(text.contains("FINAL_ANSWER"));
 }
 
+/// One tool round with the given call, drawn; issue #274.
+fn row_text(name: &str, arguments: serde_json::Value) -> String {
+    let mut app = App::new("m".into());
+    let session = &mut app.sessions[0];
+    session.insert("go");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Admitted);
+    let call = ToolCall {
+        name: name.into(),
+        arguments,
+    };
+    let step = ToolStep {
+        calls: vec![call],
+        results: vec!["ok".into()],
+    };
+    session.apply(attempt, Update::ToolStep(step));
+    session.apply(attempt, Update::Token("DONE".into()));
+    session.apply(attempt, Update::Done);
+    screen_text(&app, 120, 30)
+}
+
+#[test]
+fn tool_rows_put_the_path_first_and_cut_long_text() {
+    let edit = json!({"new_text": "a", "old_text": "A1", "path": "README.md"});
+    let text = row_text("edit_file", edit);
+    assert!(text.contains("⚙ edit_file README.md"), "{text}");
+    assert!(!text.contains("A1 a"), "{text}");
+    let long = "w".repeat(500);
+    let text = row_text("write_file", json!({"path": "src/x.rs", "content": long}));
+    assert!(text.contains("⚙ write_file src/x.rs (1 line)"), "{text}");
+    assert!(!text.contains(&"w".repeat(100)), "{text}");
+}
+
+#[test]
+fn unknown_tools_keep_the_value_list_row() {
+    let text = row_text("frobnicate", json!({"b": "two", "a": "one"}));
+    assert!(text.contains("⚙ frobnicate one two"), "{text}");
+}
+
+#[test]
+fn tool_row_arguments_are_sanitised_and_may_arrive_as_a_json_string() {
+    let text = row_text("grep", json!({"pattern": "a\u{202e}b\nc"}));
+    assert!(text.contains("<U+202E>"), "{text}");
+    assert!(!text.contains('\u{202e}'), "{text}");
+    let text = row_text("edit_file", json!("{\"path\": \"src/main.rs\"}"));
+    assert!(text.contains("⚙ edit_file src/main.rs"), "{text}");
+}
+
 fn screen_text(app: &App, width: u16, height: u16) -> String {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal.draw(|frame| ui::draw(frame, app)).unwrap();

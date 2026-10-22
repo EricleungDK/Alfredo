@@ -1544,6 +1544,7 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   lines`; Ctrl+O again returns to one line. A conversation starts collapsed, the footer
   hint says which state is active, and the choice is not saved (the full text is, with the
   tool step, so it shows after a reload).
+- **Row summary (issue #274).** The `⚙` row leads with the path or primary argument and cuts long text to 60 characters on one line: `⚙ edit_file README.md`, `⚙ write_file src/x.rs (42 lines)`, `⚙ git_commit "add new file" (1 file)`, `⚙ grep "TODO" in src/`. Each registered tool has its summary in `src/chat_tools/summary.rs` (a unit test fails for a tool with none); a tool without one lists its argument values as before. Invisible characters still show as `<U+XXXX>`.
 - **Context.** The calls and results stay part of that turn: later turns send them
   before the reply they fed, they count toward the 128 KiB conversation limit and the
   `--num-ctx` estimate, and compaction summarises them with their turn. They are saved
