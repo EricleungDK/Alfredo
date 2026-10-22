@@ -773,7 +773,12 @@ fn sandbox_cannot_read_cargo_credentials_child() {
         "git/token",
     ] {
         let result = shell(format!("cat '{}/{name}' 2>&1; echo END", cargo.display()));
-        assert!(!result.contains(CARGO_SECRET), "{name} leaked: {result}");
+        // END proves the command ran; a sandbox failure string must not pass vacuously.
+        assert!(result.contains("END"), "{name} did not run: {result}");
+        assert!(
+            !result.contains(CARGO_SECRET),
+            "{name} leaked the planted token"
+        );
     }
     // Allowed entries still work: the registry is bound read-only.
     let result = shell(format!("cat '{}/registry/index/marker'", cargo.display()));
