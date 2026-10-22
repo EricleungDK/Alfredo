@@ -132,7 +132,7 @@ pub fn assemble(
 /// `..` paths, excluded names, symlink escape) and `read::text` (regular file,
 /// UTF-8, no NUL), plus a symlink check on every path component, a 256 KiB cap,
 /// and a refusal of gitignored untracked files. Anything uncertain is refused.
-fn read_mention(root: &Path, path: &str) -> Result<String, String> {
+fn read_mention(root: &Path, path: &str, check_failed: &mut bool) -> Result<String, String> {
     let full = resolve(root, path).map_err(|error| {
         if error.contains("must be relative") || error.contains("leaves the Coding Workspace") {
             format!("rejected: {error}")
@@ -160,7 +160,7 @@ fn read_mention(root: &Path, path: &str) -> Result<String, String> {
         return Err(format!("file is over {} KiB", MAX_FILE / 1024));
     }
     let relative = crate::chat_tools::display(root, &full);
-    if ignored_untracked(root, &relative) {
+    if ignored_untracked(root, &relative, check_failed) {
         return Err("ignored by .gitignore and not tracked; refused".into());
     }
     read::text(&full).map_err(|error| {
@@ -173,8 +173,13 @@ fn read_mention(root: &Path, path: &str) -> Result<String, String> {
 }
 
 /// True when git says `relative` is ignored, or could not say (fail closed).
-/// Tracked files are never "ignored" for this check, so they always pass.
-fn ignored_untracked(root: &Path, relative: &str) -> bool {
+/// Tracked files are never "ignored" for this check, so they always pass. After one
+/// timeout or error (`check_failed`), later mentions of the same prompt are refused
+/// without starting git again, so a hostile repository stalls the UI once, not per file.
+fn ignored_untracked(root: &Path, relative: &str, check_failed: &mut bool) -> bool {
+    if *check_failed {
+        return true;
+    }
     let mut command = Command::new("/usr/bin/git");
     git_read::hardened(&mut command)
         .arg("-C")
@@ -182,8 +187,13 @@ fn ignored_untracked(root: &Path, relative: &str) -> bool {
         .args(["check-ignore", "-q", "--"])
         .arg(relative);
     match git_read::run_bounded(command, 1024, IGNORE_DEADLINE) {
-        Ok((Some(status), _, _)) => status.code() != Some(1),
-        _ => true,
+        Ok((Some(status), _, _)) if matches!(status.code(), Some(0 | 1)) => {
+            status.code() != Some(1)
+        }
+        _ => {
+            *check_failed = true;
+            true
+        }
     }
 }
 
@@ -193,7 +203,10 @@ pub async fn attach(root: &Path, prompt: &str) -> Attachment {
     if candidates.is_empty() {
         return Attachment::default();
     }
-    assemble(&candidates, |path| read_mention(root, path))
+    let mut check_failed = false;
+    assemble(&candidates, |path| {
+        read_mention(root, path, &mut check_failed)
+    })
 }
 
 #[cfg(test)]

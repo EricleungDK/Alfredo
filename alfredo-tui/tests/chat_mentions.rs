@@ -184,6 +184,52 @@ async fn unsafe_and_unreadable_paths_are_refused_with_reasons() {
 }
 
 #[tokio::test]
+async fn excluded_names_are_refused_at_the_mention_level() {
+    let dir = repo();
+    fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+    fs::write(dir.path().join("target/debug/out.txt"), "built\n").unwrap();
+    fs::write(dir.path().join("id_rsa"), "PRIVATE\n").unwrap();
+    fs::write(dir.path().join("x.pem"), "PEM\n").unwrap();
+    let out = attach(
+        dir.path(),
+        "@.git/config @target/debug/out.txt @x.pem @id_rsa",
+    )
+    .await;
+    assert!(
+        !out.block.contains("built") && !out.block.contains("PEM"),
+        "{out:?}"
+    );
+    assert!(!out.block.contains("[core]"), "{out:?}");
+    for path in [".git/config", "target/debug/out.txt", "x.pem"] {
+        assert!(
+            out.notices
+                .iter()
+                .any(|n| n.starts_with(&format!("@{path}: not attached (excluded"))),
+            "{path}: {:?}",
+            out.notices
+        );
+    }
+}
+
+#[tokio::test]
+async fn one_failed_ignore_check_refuses_the_rest_without_waiting_again() {
+    let dir = repo();
+    let status = Command::new("mkfifo")
+        .arg(dir.path().join(".gitignore"))
+        .status()
+        .unwrap();
+    assert!(status.success());
+    for name in ["a.py", "b.py", "c.py"] {
+        fs::write(dir.path().join(name), "untracked\n").unwrap();
+    }
+    let started = std::time::Instant::now();
+    let out = attach(dir.path(), "@a.py @b.py @c.py").await;
+    assert!(started.elapsed() < std::time::Duration::from_secs(6));
+    assert!(out.block.is_empty(), "{out:?}");
+    assert_eq!(out.notices.len(), 3, "{:?}", out.notices);
+}
+
+#[tokio::test]
 async fn non_mentions_attach_nothing_and_say_nothing() {
     let dir = repo();
     let out = attach(dir.path(), "mail a@b.com, ping @everyone, @wayfinder map").await;

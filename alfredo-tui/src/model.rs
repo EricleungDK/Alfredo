@@ -259,7 +259,7 @@ pub struct Session {
     interrupted: Vec<usize>,
     pub status: Status,
     pub attempt: u64,
-    /// `@path` file contents (committed HEAD) appended to a user turn's model-visible
+    /// `@path` file contents (working tree) appended to a user turn's model-visible
     /// message, keyed by user-message index. Not shown, not saved.
     #[serde(skip)]
     attachments: std::collections::BTreeMap<usize, String>,

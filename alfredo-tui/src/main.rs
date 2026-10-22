@@ -667,7 +667,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
                             let mut messages = turn.messages;
-                            // `@path` mentions: committed HEAD contents join this user turn's
+                            // `@path` mentions: working-tree contents join this user turn's
                             // model-visible message (kept for follow-ups); the transcript is unchanged.
                             let session = &mut work.app.sessions[turn.session];
                             if !session.has_attachment(turn.user_message) {
