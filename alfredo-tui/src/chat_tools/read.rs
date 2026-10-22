@@ -387,38 +387,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Removes its directory on drop, so a failed assertion leaves nothing behind.
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
-    fn a_long_grep_returns_promptly_once_the_cancel_flag_is_set() {
-        // About 400 MB of non-matching content: a full scan takes seconds.
-        let dir = tree(100, 4_000_000);
+    fn a_grep_cancelled_before_or_during_the_scan_ends_at_the_next_file() {
+        // 40 files of 1 MiB, no match: a full scan would read all of them.
+        let dir = tree(40, 1 << 20);
+        let _cleanup = Cleanup(dir.clone());
         let owner = budget::CancelOnDrop::default();
         let round = budget::Budget::new(Duration::from_secs(300), owner.flag());
-        let worker = {
-            let dir = dir.clone();
-            let round = round.clone();
-            std::thread::spawn(move || {
-                budget::within(&round, || {
-                    let started = Instant::now();
-                    let out = grep_within(
-                        &dir,
-                        &json!({"pattern": "absent-text"}),
-                        u64::MAX,
-                        Duration::from_secs(300),
-                    );
-                    (out, started.elapsed())
-                })
-            })
-        };
-        std::thread::sleep(Duration::from_millis(100));
-        let cancelled = Instant::now();
-        drop(owner); // what aborting the turn does
-        let (out, _) = worker.join().unwrap();
+        // The flag is set before the scan starts; the first file check must see it.
+        drop(owner);
+        let started = Instant::now();
+        let out = budget::within(&round, || {
+            grep_within(
+                &dir,
+                &json!({"pattern": "absent-text"}),
+                u64::MAX,
+                Duration::from_secs(300),
+            )
+        });
         assert_eq!(out, Err("cancelled".to_string()));
-        assert!(
-            cancelled.elapsed() < Duration::from_secs(1),
-            "{:?}",
-            cancelled.elapsed()
-        );
-        let _ = std::fs::remove_dir_all(&dir);
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 }

@@ -51,9 +51,37 @@ pub async fn run_turn(
     session: usize,
     attempt: u64,
     model: String,
+    messages: Vec<Message>,
+    sender: Sender<Event>,
+    gate: Option<Gate>,
+) {
+    run_turn_limited(
+        provider,
+        workspace,
+        session,
+        attempt,
+        model,
+        messages,
+        sender,
+        gate,
+        ROUND_LIMIT,
+    )
+    .await;
+}
+
+/// [`run_turn`] with the per-round read-time limit as a parameter (tests use small ones).
+#[doc(hidden)]
+#[allow(clippy::too_many_arguments)]
+pub async fn run_turn_limited(
+    provider: &Ollama,
+    workspace: &Path,
+    session: usize,
+    attempt: u64,
+    model: String,
     mut messages: Vec<Message>,
     sender: Sender<Event>,
     gate: Option<Gate>,
+    round_limit: std::time::Duration,
 ) {
     let known = |model: &str| {
         no_tools_models()
@@ -201,7 +229,9 @@ pub async fn run_turn(
         let calls_bytes = serde_json::to_string(&calls).map_or(0, |text| text.len());
         // Bytes of this round already reported to the session.
         let mut reported = 0;
-        let budget = Budget::new(ROUND_LIMIT, cancel.flag());
+        // Only time spent in read calls counts against the round limit: owner think
+        // time on an approval card and mutating calls do not.
+        let mut read_spent = std::time::Duration::ZERO;
         for (index, call) in calls.iter().enumerate() {
             let used: usize = results.iter().map(String::len).sum::<usize>() + calls_bytes;
             let room = Room::of(provider.num_ctx(), held_text, held_window, used);
@@ -230,12 +260,18 @@ pub async fn run_turn(
                         cap_to(result, room.limit.max(MIN_RESULT))
                     }
                 },
-                _ if budget.expired() => ROUND_LIMIT_NOTE.to_string(),
+                _ if read_spent >= round_limit => ROUND_LIMIT_NOTE.to_string(),
                 _ if room.limit < MIN_RESULT => {
                     last_round = true;
                     room.note.to_string()
                 }
-                _ => blocking(workspace, call, room.limit, &budget).await,
+                _ => {
+                    let budget = Budget::new(round_limit - read_spent, cancel.flag());
+                    let started = std::time::Instant::now();
+                    let result = blocking(workspace, call, room.limit, &budget).await;
+                    read_spent += started.elapsed();
+                    result
+                }
             };
             // The session refuses a result past the conversation limit. Results were
             // budgeted above; if this one still would not fit, a read result becomes a

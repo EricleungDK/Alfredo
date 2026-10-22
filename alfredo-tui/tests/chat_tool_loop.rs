@@ -847,6 +847,100 @@ fn tool_calls(calls: &[(&str, serde_json::Value)]) -> Reply {
     )
 }
 
+/// Issue #257: a round whose read time is spent skips the reads not reached.
+#[tokio::test]
+async fn a_read_call_past_the_round_time_limit_is_not_run() {
+    let root = workspace("round-limit");
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, |_, index| {
+        if index == 0 {
+            tool_call("read_file", json!({"path": "README.md"}))
+        } else {
+            done("ok")
+        }
+    });
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(5)).unwrap();
+    let mut session = Session::new("fixture".into());
+    session.insert("read");
+    let messages = session.begin().unwrap();
+    let (sender, mut receiver) = mpsc::channel(256);
+    chat_tools::run_turn_limited(
+        &provider,
+        &root,
+        0,
+        1,
+        "fixture".into(),
+        messages,
+        sender,
+        None,
+        Duration::ZERO,
+    )
+    .await;
+    while let Ok(event) = receiver.try_recv() {
+        session.apply(event.attempt, event.update);
+    }
+    let steps = session.tool_steps(1);
+    assert_eq!(
+        steps[0].results[0],
+        "error: not run; round time limit reached"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Issue #257: owner think time on an approval card does not use up the read budget.
+#[tokio::test]
+async fn a_slow_approval_does_not_exhaust_the_round_read_budget() {
+    use alfredo_tui::chat_tools::approval::{self, Decision, Gate};
+    let root = workspace("slow-approval");
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, |_, index| {
+        if index == 0 {
+            tool_calls(&[
+                ("write_file", json!({"path": "new.txt", "content": "one"})),
+                ("read_file", json!({"path": "README.md"})),
+            ])
+        } else {
+            done("ok")
+        }
+    });
+    let (gate_sender, mut cards) = mpsc::channel::<approval::Request>(4);
+    tokio::spawn(async move {
+        while let Some(request) = cards.recv().await {
+            // Far longer than the 300 ms round limit used below.
+            tokio::time::sleep(Duration::from_millis(900)).await;
+            let _ = request.reply.send(Decision::Approve);
+        }
+    });
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(5)).unwrap();
+    let mut session = Session::new("fixture".into());
+    session.insert("write then read");
+    let messages = session.begin().unwrap();
+    let (sender, mut receiver) = mpsc::channel(256);
+    chat_tools::run_turn_limited(
+        &provider,
+        &root,
+        0,
+        1,
+        "fixture".into(),
+        messages,
+        sender,
+        Some(Gate::new(gate_sender, None)),
+        Duration::from_millis(300),
+    )
+    .await;
+    while let Ok(event) = receiver.try_recv() {
+        session.apply(event.attempt, event.update);
+    }
+    let steps = session.tool_steps(1);
+    assert!(
+        steps[0].results[1].contains("README_BODY_MARKER"),
+        "{:?}",
+        steps[0].results
+    );
+    assert_eq!(fs::read_to_string(root.join("new.txt")).unwrap(), "one");
+    let _ = fs::remove_dir_all(root);
+}
+
 /// Issue #271: a two-call round whose first call was approved and applied and whose
 /// second card was cancelled keeps the applied call in the transcript and in the
 /// next request; the unanswered call is in neither.
