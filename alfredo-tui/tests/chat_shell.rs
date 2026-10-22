@@ -655,6 +655,139 @@ fn sandboxed_cargo_works_when_a_rustup_toolchain_exists() {
     assert!(result.contains("cargo "), "{result}");
     let card = approval::card(&root, &call(json!({"command": "echo $CARGO_NET_OFFLINE"}))).unwrap();
     assert!(approval::apply(&root, &card).unwrap().contains("true"));
+    // Offline build and test of a crate with no dependencies, through the rustup proxies
+    // (issue #310: only the toolchain entries are bound, not the whole homes).
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn two() -> u8 { 2 }\n#[test]\nfn it_works() { assert_eq!(two(), 2); }\n",
+    )
+    .unwrap();
+    let card = approval::card(
+        &root,
+        &call(
+            json!({"command": "rustc --version && cargo build --offline && cargo test --offline"}),
+        ),
+    )
+    .unwrap();
+    let result = approval::apply(&root, &card).unwrap();
+    assert!(result.starts_with("exit code 0"), "{result}");
+    assert!(result.contains("rustc "), "{result}");
+    assert!(result.contains("test result: ok. 1 passed"), "{result}");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Marker the planted cargo credentials carry; the sandbox must never print it.
+const CARGO_SECRET: &str = "SECRET_TOKEN_310";
+/// Set in the child process of [`sandbox_cannot_read_cargo_credentials`] to the fake
+/// home it runs with (`HOME` is read at call time, so the parent process is not changed).
+const FAKE_HOME_ENV: &str = "ALFREDO_TEST_FAKE_HOME";
+
+/// Plant a fake `$HOME` with cargo credentials (issue #310). It lives under the cargo
+/// target tmpdir, not `/tmp`: the sandbox mounts a tmpfs over `/tmp`, which would hide it.
+fn fake_home(tag: &str) -> PathBuf {
+    let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "fake-home-{tag}-{}-{}",
+        std::process::id(),
+        ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&home);
+    let cargo = home.join(".cargo");
+    fs::create_dir_all(cargo.join("registry/index")).unwrap();
+    fs::create_dir_all(cargo.join("bin")).unwrap();
+    fs::write(cargo.join("registry/index/marker"), "REGISTRY_OK\n").unwrap();
+    for name in [
+        "credentials.toml",
+        "credentials",
+        "config.toml",
+        "config",
+        "Credentials.toml",
+        "anything",
+    ] {
+        fs::write(cargo.join(name), format!("token = \"{CARGO_SECRET}\"\n")).unwrap();
+    }
+    // A symlinked entry that points at a secret elsewhere must not be bound through.
+    fs::create_dir_all(home.join("secrets")).unwrap();
+    fs::write(home.join("secrets/token"), format!("{CARGO_SECRET}\n")).unwrap();
+    std::os::unix::fs::symlink(home.join("secrets"), cargo.join("git")).unwrap();
+    home
+}
+
+/// The attack from issue #310: a prompt-injected model reads the owner's cargo
+/// credentials with a sandboxed `run_command`. The body runs in a child process whose
+/// `HOME` is the fake home (see [`FAKE_HOME_ENV`]).
+#[test]
+fn sandbox_cannot_read_cargo_credentials() {
+    if !sandbox_works() {
+        return;
+    }
+    let home = fake_home("creds");
+    let planted = fs::read_to_string(home.join(".cargo/credentials.toml")).unwrap();
+    assert!(
+        planted.contains(CARGO_SECRET),
+        "the planted secret is on disk"
+    );
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "sandbox_cannot_read_cargo_credentials_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("HOME", &home)
+        .env(FAKE_HOME_ENV, &home)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn sandbox_cannot_read_cargo_credentials_child() {
+    let Some(home) = std::env::var_os(FAKE_HOME_ENV).map(PathBuf::from) else {
+        return;
+    };
+    let cargo = home.join(".cargo");
+    let root = workspace("creds");
+    let shell = |command: String| {
+        let card = approval::card(&root, &call(json!({ "command": command }))).unwrap();
+        approval::apply(&root, &card).unwrap()
+    };
+    for name in [
+        "credentials.toml",
+        "credentials",
+        "config.toml",
+        "config",
+        "Credentials.toml",
+        "anything",
+        "git/token",
+    ] {
+        let result = shell(format!("cat '{}/{name}' 2>&1; echo END", cargo.display()));
+        // END proves the command ran; a sandbox failure string must not pass vacuously.
+        assert!(result.contains("END"), "{name} did not run: {result}");
+        assert!(
+            !result.contains(CARGO_SECRET),
+            "{name} leaked the planted token"
+        );
+    }
+    // Allowed entries still work: the registry is bound read-only.
+    let result = shell(format!("cat '{}/registry/index/marker'", cargo.display()));
+    assert!(result.contains("REGISTRY_OK"), "{result}");
+    // The cargo home root is not listed either.
+    let listing = shell(format!("ls -A '{}'", cargo.display()));
+    for name in ["credentials", "config", "anything"] {
+        assert!(!listing.contains(name), "{listing}");
+    }
     let _ = fs::remove_dir_all(root);
 }
 
