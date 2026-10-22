@@ -69,7 +69,7 @@ fn clean(text: &str) -> String {
 
 /// Controls plus format (Cf) characters: bidi overrides and isolates, zero-width and
 /// invisible marks could make the prompt show other text than Enter submits.
-fn hidden(c: char) -> bool {
+pub(crate) fn hidden(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
