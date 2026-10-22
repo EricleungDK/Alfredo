@@ -5,6 +5,8 @@
 use super::{excluded, text_arg, Tier, Tool, MAX_OUTPUT};
 use serde_json::{json, Value};
 use std::{
+    cell::Cell,
+    collections::HashSet,
     fs,
     io::Read,
     path::{Path, PathBuf},
@@ -76,7 +78,12 @@ pub const GIT_DIFF: Tool = Tool {
     run: git_diff,
 };
 
-fn git_status(root: &Path, _: &Value) -> Result<String, String> {
+/// The tool call's git work runs under one budget (issue #359): see [`call_scope`].
+fn git_status(root: &Path, arguments: &Value) -> Result<String, String> {
+    call_scope(DEADLINE, || status_output(root, arguments))
+}
+
+fn status_output(root: &Path, _: &Value) -> Result<String, String> {
     refuse_filters(root)?;
     let output = git(
         root,
@@ -89,7 +96,11 @@ fn git_status(root: &Path, _: &Value) -> Result<String, String> {
     })
 }
 
-fn git_branch(root: &Path, _: &Value) -> Result<String, String> {
+fn git_branch(root: &Path, arguments: &Value) -> Result<String, String> {
+    call_scope(DEADLINE, || branch_output(root, arguments))
+}
+
+fn branch_output(root: &Path, _: &Value) -> Result<String, String> {
     let current = match git(root, &["symbolic-ref", "--quiet", "--short", "HEAD"]) {
         Ok(name) => name.trim().to_string(),
         Err(_) => format!(
@@ -110,6 +121,10 @@ fn git_branch(root: &Path, _: &Value) -> Result<String, String> {
 }
 
 fn git_log(root: &Path, arguments: &Value) -> Result<String, String> {
+    call_scope(DEADLINE, || log_output(root, arguments))
+}
+
+fn log_output(root: &Path, arguments: &Value) -> Result<String, String> {
     let reference = ref_arg(arguments, "ref")?.unwrap_or("HEAD");
     let count = match arguments.get("max_count") {
         None | Some(Value::Null) => DEFAULT_COMMITS,
@@ -137,6 +152,10 @@ fn git_log(root: &Path, arguments: &Value) -> Result<String, String> {
 }
 
 fn git_diff(root: &Path, arguments: &Value) -> Result<String, String> {
+    call_scope(DEADLINE, || diff_output(root, arguments))
+}
+
+fn diff_output(root: &Path, arguments: &Value) -> Result<String, String> {
     let base = ref_arg(arguments, "base")?;
     let target = ref_arg(arguments, "target")?;
     let staged = match arguments.get("staged") {
@@ -303,14 +322,13 @@ const FILTER_KEYS_LIMIT: usize = 64 << 10;
 /// and working-tree diffs would run the repository's clean filters (as worker host git).
 /// Fails closed: a listing that cannot be read whole is refused, never trusted as a prefix.
 pub(crate) fn refuse_filters(root: &Path) -> Result<(), String> {
-    refuse_filters_within(root, FILTER_KEYS_LIMIT, DEADLINE)
+    refuse_filters_within(root, FILTER_KEYS_LIMIT, call_clock())
 }
 
 /// [`refuse_filters`] with the listing read up to `limit` bytes within `deadline`. A cut or
 /// late listing is an error (run_bounded stops git), so the gate never trusts a prefix.
-fn refuse_filters_within(root: &Path, limit: usize, deadline: Duration) -> Result<(), String> {
+fn refuse_filters_within(root: &Path, limit: usize, clock: Clock) -> Result<(), String> {
     const NOT_RUN: &str = "git status and working-tree diffs are not run (git_log and git_diff with base and target still work)";
-    let clock = Clock::start(deadline);
     let command = git_command_within(root, &FILTER_KEYS_ARGS, clock)?;
     let (status, out, error) = run_bounded(command, limit, clock.left())?;
     match status {
@@ -358,7 +376,7 @@ pub(crate) fn git_limited(root: &Path, args: &[&str], limit: usize) -> Result<St
 /// Run git in `root`, stdout read up to `limit` bytes. The flag is whether the output was
 /// cut at `limit`; a git that fails is an error with its first message line.
 fn git_output(root: &Path, args: &[&str], limit: usize) -> Result<(bool, String), String> {
-    let clock = Clock::start(DEADLINE);
+    let clock = call_clock();
     read_output(
         git_command_within(root, args, clock)?,
         args[0],
@@ -409,6 +427,36 @@ impl Clock {
     }
 }
 
+thread_local! {
+    /// The budget of the tool call running on this thread (issue #359, one per call).
+    static CALL_CLOCK: Cell<Option<Clock>> = const { Cell::new(None) };
+}
+
+/// Runs one tool call (or one approval step of a git write) under one budget: every
+/// verification and git process it starts draws on `deadline` together, so the call as a
+/// whole stops at it. A call already inside a scope keeps the outer budget.
+pub(crate) fn call_scope<T>(deadline: Duration, run: impl FnOnce() -> T) -> T {
+    if CALL_CLOCK.with(Cell::get).is_some() {
+        return run();
+    }
+    struct Leave;
+    impl Drop for Leave {
+        fn drop(&mut self) {
+            CALL_CLOCK.with(|clock| clock.set(None));
+        }
+    }
+    CALL_CLOCK.with(|clock| clock.set(Some(Clock::start(deadline))));
+    let _leave = Leave;
+    run()
+}
+
+/// The budget of the running call; a lone git call outside any call gets a fresh one.
+pub(crate) fn call_clock() -> Clock {
+    CALL_CLOCK
+        .with(Cell::get)
+        .unwrap_or_else(|| Clock::start(DEADLINE))
+}
+
 /// `git -C root ARGS` with the hardened environment, pinned to the git directory that
 /// [`verified_git_dir`] checked (issue #359). The verification draws on `clock`.
 fn git_command_within(root: &Path, args: &[&str], clock: Clock) -> Result<Command, String> {
@@ -455,7 +503,7 @@ const OUTSIDE: &str = "the workspace's .git points outside the Coding Workspace 
 /// leads elsewhere, is refused. Paths are compared canonically, so symlinks, `..`, relative
 /// back-references and whitespace in the gitfile cannot hide another repository.
 pub(crate) fn verified_git_dir(root: &Path, config: Config) -> Result<VerifiedGit, String> {
-    verified_git_dir_within(root, Clock::start(DEADLINE), config)
+    verified_git_dir_within(root, call_clock(), config)
 }
 
 /// The git configuration a check runs under: the read tier's hardened one, or a write's,
@@ -518,44 +566,91 @@ pub(crate) fn verified_git_dir_within(
     if !verified {
         return Err(OUTSIDE.to_string());
     }
-    // Git reads objects through `objects/info/alternates` too: a store that borrows another
-    // repository's objects shows its history, so every entry must stay inside the repository.
-    for objects in [common_dir.join("objects"), git_dir.join("objects")] {
-        alternates_stay_within(&objects, &common_dir, 0)?;
+    // Nothing in the git directory, the common directory, refs or info may be a link, and
+    // every object store git reads (its own and the alternates it names) is walked for links
+    // and kept inside the repository: a link or a borrowed store shows another repository.
+    walk_without_links(&git_dir, clock, false)?;
+    walk_without_links(&common_dir, clock, false)?;
+    for tree in ["refs", "info"] {
+        walk_without_links(&common_dir.join(tree), clock, true)?;
+        if git_dir != common_dir {
+            walk_without_links(&git_dir.join(tree), clock, true)?;
+        }
     }
+    object_stores_within(&common_dir, clock)?;
     Ok(VerifiedGit {
         git_dir,
         common_dir,
     })
 }
 
-/// Refuses an object store whose `info/alternates` (followed recursively, as git does) names
-/// an object directory outside `common_dir`, or that cannot be read whole (issue #359).
-fn alternates_stay_within(objects: &Path, common_dir: &Path, depth: u32) -> Result<(), String> {
-    const ALTERNATES: &str = "the workspace's repository borrows objects from outside it (objects/info/alternates); git tools refuse";
-    let file = objects.join("info").join("alternates");
-    match fs::symlink_metadata(&file) {
+const LINKED: &str = "the workspace's repository holds a symbolic link in its git directory, refs or object store; git tools refuse";
+const UNCHECKED: &str = "the workspace's repository could not be checked for links or borrowed objects within the call's time limit; git tools refuse";
+const ALTERNATES: &str = "the workspace's repository borrows objects from outside it (objects/info/alternates); git tools refuse";
+
+/// Refuses a symbolic link among the entries of `dir`, or, when `recursive`, anywhere under
+/// it. A missing directory is fine. The walk is charged to `clock`: running out is a refusal,
+/// never a partial check (issue #359).
+fn walk_without_links(dir: &Path, clock: Clock, recursive: bool) -> Result<(), String> {
+    let unreadable = || UNCHECKED.to_string();
+    match fs::symlink_metadata(dir) {
+        Ok(meta) if meta.file_type().is_symlink() => return Err(LINKED.to_string()),
         Ok(_) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err(ALTERNATES.to_string()),
+        Err(_) => return Err(unreadable()),
     }
-    // Git follows at most a few links; a deeper chain is refused rather than trusted.
-    if depth > 5 {
-        return Err(ALTERNATES.to_string());
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        if clock.left().is_zero() {
+            return Err(unreadable());
+        }
+        for entry in fs::read_dir(&dir).map_err(|_| unreadable())? {
+            let entry = entry.map_err(|_| unreadable())?;
+            let kind = entry.file_type().map_err(|_| unreadable())?;
+            if kind.is_symlink() {
+                return Err(LINKED.to_string());
+            }
+            if recursive && kind.is_dir() {
+                pending.push(entry.path());
+            }
+        }
     }
-    let text = fs::read_to_string(&file).map_err(|_| ALTERNATES.to_string())?;
-    for line in text.lines().map(str::trim) {
-        if line.is_empty() || line.starts_with('#') {
+    Ok(())
+}
+
+/// Every object store the repository reads: its own, and each store its `info/alternates`
+/// names, followed transitively. Each store is walked for links and each entry must stay
+/// inside `common_dir`. A store already seen is skipped, so a cycle or a store shared by
+/// many paths is checked once (issue #359). Charged to `clock`.
+fn object_stores_within(common_dir: &Path, clock: Clock) -> Result<(), String> {
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+    let mut pending = vec![common_dir.join("objects")];
+    while let Some(store) = pending.pop() {
+        if !seen.insert(store.clone()) {
             continue;
         }
-        let entry = objects
-            .join(line)
-            .canonicalize()
-            .map_err(|_| ALTERNATES.to_string())?;
-        if !entry.starts_with(common_dir) {
-            return Err(ALTERNATES.to_string());
+        if clock.left().is_zero() {
+            return Err(UNCHECKED.to_string());
         }
-        alternates_stay_within(&entry, common_dir, depth + 1)?;
+        walk_without_links(&store, clock, true)?;
+        let text = match fs::read_to_string(store.join("info").join("alternates")) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(ALTERNATES.to_string()),
+        };
+        for line in text.lines().map(str::trim) {
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let entry = store
+                .join(line)
+                .canonicalize()
+                .map_err(|_| ALTERNATES.to_string())?;
+            if !entry.starts_with(common_dir) {
+                return Err(ALTERNATES.to_string());
+            }
+            pending.push(entry);
+        }
     }
     Ok(())
 }
@@ -755,6 +850,20 @@ mod tests {
     }
 
     #[test]
+    fn a_nested_git_call_draws_on_the_running_calls_budget() {
+        call_scope(Duration::from_millis(300), || {
+            std::thread::sleep(Duration::from_millis(200));
+            // A git call inside the call sees what is left of the call's own budget.
+            assert!(call_clock().left() < Duration::from_millis(150));
+            call_scope(Duration::from_secs(60), || {
+                assert!(call_clock().left() < Duration::from_millis(150));
+            });
+        });
+        // Outside any call a lone git call gets a fresh, full budget.
+        assert!(call_clock().left() > Duration::from_secs(14));
+    }
+
+    #[test]
     fn a_cut_listing_is_an_error_not_a_prefix() {
         let root = scratch_repo("cut-listing", "[filter \"f\"]\n\tclean = cat\n");
         let error = git_limited(&root, &["config", "--list"], 64).unwrap_err();
@@ -765,7 +874,7 @@ mod tests {
     #[test]
     fn a_cut_filter_listing_refuses_the_gate() {
         let root = scratch_repo("cut-gate", "[filter \"f\"]\n\tclean = cat\n");
-        let error = refuse_filters_within(&root, 8, DEADLINE).unwrap_err();
+        let error = refuse_filters_within(&root, 8, Clock::start(DEADLINE)).unwrap_err();
         assert!(error.contains("too large"), "{error}");
         let error = refuse_filters(&root).unwrap_err();
         assert!(error.contains("filter drivers"), "{error}");
@@ -790,8 +899,12 @@ mod tests {
             .write_all(include.as_bytes())
             .unwrap();
         let started = Instant::now();
-        let error = refuse_filters_within(&root, FILTER_KEYS_LIMIT, Duration::from_millis(300))
-            .unwrap_err();
+        let error = refuse_filters_within(
+            &root,
+            FILTER_KEYS_LIMIT,
+            Clock::start(Duration::from_millis(300)),
+        )
+        .unwrap_err();
         assert!(error.contains("stopped"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(5));
         let _ = fs::remove_dir_all(&root);

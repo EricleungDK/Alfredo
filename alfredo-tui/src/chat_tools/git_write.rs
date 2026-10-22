@@ -129,6 +129,15 @@ const NAMES: [&str; 4] = ["git_commit", "git_switch", "git_merge", "git_push"];
 pub(crate) fn fingerprint(
     root: &Path,
     name: &str,
+    arguments: &Value,
+) -> Option<Result<String, String>> {
+    git_read::call_scope(LOCAL_DEADLINE, || fingerprint_state(root, name, arguments))
+}
+
+/// [`fingerprint`] for one call's budget (issue #359).
+fn fingerprint_state(
+    root: &Path,
+    name: &str,
     _arguments: &Value,
 ) -> Option<Result<String, String>> {
     if !NAMES.contains(&name) {
@@ -173,7 +182,16 @@ pub(crate) fn preview(
     name: &str,
     arguments: &Value,
 ) -> Option<Result<(Change, CardKind), String>> {
-    let fingerprint = match fingerprint(root, name, arguments)? {
+    // One budget for the whole card: its fingerprint and its preview (issue #359).
+    git_read::call_scope(LOCAL_DEADLINE, || preview_card(root, name, arguments))
+}
+
+fn preview_card(
+    root: &Path,
+    name: &str,
+    arguments: &Value,
+) -> Option<Result<(Change, CardKind), String>> {
+    let fingerprint = match fingerprint_state(root, name, arguments)? {
         Ok(fingerprint) => fingerprint,
         Err(error) => return Some(Err(error)),
     };
@@ -300,7 +318,7 @@ fn refuse_repository_config(root: &Path) -> Result<(), String> {
 /// The repository config as a write reads it (`--show-scope`), read whole: local, worktree
 /// and the owner's global config, never a cut listing.
 fn config_listing(root: &Path) -> Result<String, String> {
-    let clock = git_read::Clock::start(LOCAL_DEADLINE);
+    let clock = git_read::call_clock();
     let mut command = local_command(root, clock)?;
     command.args(["config", "--null", "--list", "--show-scope"]);
     let (status, out, error) = git_read::run_bounded(command, FULL, clock.left())?;
@@ -535,7 +553,12 @@ fn refuse_secrets(root: &Path, pathspecs: &[String]) -> Result<(), String> {
     }
 }
 
+/// The `commit` tool: one budget for the whole call (issue #359).
 fn commit(root: &Path, arguments: &Value) -> Result<String, String> {
+    git_read::call_scope(LOCAL_DEADLINE, || commit_run(root, arguments))
+}
+
+fn commit_run(root: &Path, arguments: &Value) -> Result<String, String> {
     let plan = plan_commit(root, arguments)?;
     let mut args = vec!["commit", "--quiet", "--no-verify", "-m", &plan.message];
     if !plan.pathspecs.is_empty() {
@@ -626,7 +649,12 @@ fn plan_switch(root: &Path, arguments: &Value) -> Result<SwitchPlan, String> {
     })
 }
 
+/// The `switch` tool: one budget for the whole call (issue #359).
 fn switch(root: &Path, arguments: &Value) -> Result<String, String> {
+    git_read::call_scope(LOCAL_DEADLINE, || switch_run(root, arguments))
+}
+
+fn switch_run(root: &Path, arguments: &Value) -> Result<String, String> {
     let plan = plan_switch(root, arguments)?;
     if plan.create {
         // Validated above: a plain branch name that cannot start with `-`.
@@ -777,7 +805,12 @@ fn cut(text: &str, lines: usize) -> String {
     kept.join("\n")
 }
 
+/// The `merge` tool: one budget for the whole call (issue #359).
 fn merge(root: &Path, arguments: &Value) -> Result<String, String> {
+    git_read::call_scope(LOCAL_DEADLINE, || merge_run(root, arguments))
+}
+
+fn merge_run(root: &Path, arguments: &Value) -> Result<String, String> {
     let plan = plan_merge(root, arguments)?;
     let before = git_read::git(root, &["rev-parse", "HEAD"])?;
     if let Err(error) = write(
@@ -1078,7 +1111,12 @@ fn plan_push(root: &Path, arguments: &Value) -> Result<PushPlan, String> {
     })
 }
 
+/// The `push` tool: one budget for the whole call (issue #359).
 fn push(root: &Path, arguments: &Value) -> Result<String, String> {
+    git_read::call_scope(PUSH_DEADLINE, || push_run(root, arguments))
+}
+
+fn push_run(root: &Path, arguments: &Value) -> Result<String, String> {
     let plan = plan_push(root, arguments)?;
     let refspec = format!("refs/heads/{0}:refs/heads/{0}", plan.branch);
     write(
@@ -1143,11 +1181,11 @@ fn needed_terminal(error: &str) -> bool {
 fn write(root: &Path, args: &[&str], env: Env) -> Result<String, String> {
     let (mut command, clock) = match env {
         Env::Local => {
-            let clock = git_read::Clock::start(LOCAL_DEADLINE);
+            let clock = git_read::call_clock();
             (local_command(root, clock)?, clock)
         }
         Env::Remote => {
-            let clock = git_read::Clock::start(PUSH_DEADLINE);
+            let clock = git_read::call_clock();
             let verified = git_read::verified_git_dir_within(root, clock, git_read::Config::Owner)?;
             let mut command = Command::new("/usr/bin/git");
             for name in REDIRECTING_ENV {
