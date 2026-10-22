@@ -105,3 +105,11 @@ If a run loses time to something not covered here, add a line starting `Pitfall:
 run-log comment on #158: what happened, the exact error, what worked. The weekly scan (on
 reference days) reviews `Pitfall:` lines; any seen in two or more runs becomes a
 `technical` issue labelled `automation` to update this runbook or the scripts.
+
+## 10. Eric's ek workflow skills
+
+The build and security-fix runs orchestrate with Eric's ek skills (orchestrate-agent,
+failure-triage, finish). Read them from `docs/agents/ek/` in this repo. Don't clone
+EricleungDK/ek or run its `cloud/install.sh`: the sandbox's auto-mode classifier denies that
+as "Code from External" (seen in every build on 2026-10-22). See `docs/agents/ek/README.md`
+for how the copy is refreshed.
