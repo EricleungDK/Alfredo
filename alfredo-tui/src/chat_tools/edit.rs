@@ -154,6 +154,7 @@ struct Target {
 /// non-symlink, writable directory inside the workspace; the missing ones are then
 /// returned in [`Target::new_dirs`]. The same exclusion policy applies to each of them.
 fn resolve_target(root: &Path, path: &str, create_dirs: bool) -> Result<Target, String> {
+    refuse_control_characters(path)?;
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err("argument path is required".into());
@@ -208,6 +209,19 @@ fn resolve_target(root: &Path, path: &str, create_dirs: bool) -> Result<Target, 
             Ok(existing(full))
         }
     }
+}
+
+/// Issue #313: a path with a control character (ESC, BEL, C1 CSI, line break) is refused
+/// by its escaped form, never echoed raw, so the card, the logs and the terminal stay text.
+/// The same refusal as `git_read`'s path argument.
+fn refuse_control_characters(path: &str) -> Result<(), String> {
+    if path.chars().any(char::is_control) {
+        return Err(format!(
+            "path {:?} must be relative to the Coding Workspace and stay inside it",
+            path.chars().take(64).collect::<String>()
+        ));
+    }
+    Ok(())
 }
 
 /// Walk `relative` from the workspace root one component at a time (no symlink is
@@ -479,6 +493,7 @@ fn plan_write(
 /// (target, current content, edited content)
 fn plan_edit(root: &Path, arguments: &Value) -> Result<(PathBuf, String, String), String> {
     let path = required(arguments, "path")?;
+    refuse_control_characters(path)?;
     let raw_old_text = required(arguments, "old_text")?;
     let raw_new_text = required(arguments, "new_text")?;
     if raw_old_text.is_empty() {
