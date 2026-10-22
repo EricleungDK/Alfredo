@@ -158,9 +158,10 @@ pub(crate) fn cap_to(text: String, limit: usize) -> String {
     while !text.is_char_boundary(end) {
         end -= 1;
     }
-    // A budgeted cut of multi-line text ends on a whole line.
+    // A budgeted cut of multi-line text ends on a whole line, unless that would discard
+    // half the budget (a short header followed by one huge line keeps the plain cut).
     if limit < MAX_OUTPUT && text.as_bytes().get(end) != Some(&b'\n') {
-        if let Some(newline) = text[..end].rfind('\n').filter(|at| *at > 0) {
+        if let Some(newline) = text[..end].rfind('\n').filter(|at| *at >= end / 2) {
             end = newline;
         }
     }
@@ -230,4 +231,32 @@ pub(crate) fn display(root: &Path, path: &Path) -> String {
         .map(|component| component.as_os_str().to_string_lossy().into_owned())
         .collect::<Vec<_>>()
         .join("/")
+}
+
+#[cfg(test)]
+mod cap_tests {
+    use super::cap_to;
+
+    #[test]
+    fn budgeted_cut_keeps_the_body_of_a_header_plus_one_long_line() {
+        let text = format!("exit code 0 \u{b7} 1 line\n{}", "x".repeat(20_000));
+        let total = text.len();
+        let out = cap_to(text, 4000);
+        let (kept, footer) = out.rsplit_once('\n').unwrap();
+        assert!(kept.len() > 2000, "kept only {} bytes", kept.len());
+        assert_eq!(
+            footer,
+            format!("[truncated: {} of {total} bytes]", kept.len())
+        );
+    }
+
+    #[test]
+    fn budgeted_cut_of_multi_line_text_still_ends_on_a_whole_line() {
+        let text: String = (0..400).map(|n| format!("line {n:05} filler\n")).collect();
+        let out = cap_to(text, 4000);
+        let (kept, footer) = out.rsplit_once('\n').unwrap();
+        assert!(kept.ends_with("filler"), "{kept}");
+        assert!(kept.len() >= 2000 && kept.len() <= 4000);
+        assert!(footer.starts_with("[truncated: "), "{footer}");
+    }
 }
