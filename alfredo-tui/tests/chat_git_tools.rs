@@ -550,6 +550,105 @@ fn an_alternates_file_into_another_repository_is_never_read() {
     }
 }
 
+/// Issue #359 (review 2): an object store that is a symlink into another repository, or a
+/// pack directory that is one, shows that repository's history with no alternates at all.
+#[test]
+fn a_linked_object_store_or_pack_directory_into_another_repository_is_never_read() {
+    for variant in ["objects symlink", "pack symlink"] {
+        let other = Repo::new();
+        fs::write(other.root.join("creds.txt"), "AWS_SECRET=hunter2\n").unwrap();
+        git(&other.root, &["add", "creds.txt"]);
+        git(&other.root, &["commit", "-q", "-m", "add creds"]);
+        git(&other.root, &["repack", "-adq"]);
+        let sha = git(&other.root, &["rev-parse", "HEAD"]).trim().to_string();
+        let name = if variant == "pack symlink" {
+            "ws-pack"
+        } else {
+            "ws-objects"
+        };
+        git(&other.base, &["init", "-q", "-b", "main", name]);
+        let ws = other.base.join(name);
+        let store = ws.join(".git/objects");
+        if variant == "pack symlink" {
+            fs::remove_dir_all(store.join("pack")).unwrap();
+            std::os::unix::fs::symlink(other.root.join(".git/objects/pack"), store.join("pack"))
+                .unwrap();
+        } else {
+            fs::remove_dir_all(&store).unwrap();
+            std::os::unix::fs::symlink(other.root.join(".git/objects"), &store).unwrap();
+        }
+        fs::write(ws.join(".git/refs/heads/main"), format!("{sha}\n")).unwrap();
+        let output = chat_tools::dispatch(
+            &ws,
+            &ToolCall {
+                name: "git_log".into(),
+                arguments: json!({}),
+            },
+        );
+        assert!(!output.contains("add creds"), "{variant}: {output}");
+        assert!(output.starts_with("error:"), "{variant}: {output}");
+    }
+}
+
+/// Issue #359 (review 2): an alternates entry naming the repository's own object store is
+/// not another repository: the history still reads.
+#[test]
+fn an_alternates_entry_naming_the_own_object_store_still_reads() {
+    let repo = Repo::new();
+    let own = repo.root.join(".git/objects");
+    fs::write(own.join("info/alternates"), format!("{}\n", own.display())).unwrap();
+    let log = chat_tools::dispatch(
+        &repo.root,
+        &ToolCall {
+            name: "git_log".into(),
+            arguments: json!({}),
+        },
+    );
+    assert!(log.contains("initial commit"), "{log}");
+}
+
+/// Issue #359 (review 2): many alternates stores sharing each other must be checked once each,
+/// not once per path through them: a shared-store DAG (18 wide, 5 deep) stays within budget.
+#[test]
+fn a_dag_of_shared_object_stores_is_checked_once_per_store() {
+    let repo = Repo::new();
+    let root = repo.root.join(".git/stores");
+    let width = 18;
+    let depth = 5;
+    let dir = |layer: usize, index: usize| root.join(format!("l{layer}/d{index}/objects"));
+    for layer in 0..depth {
+        for index in 0..width {
+            fs::create_dir_all(dir(layer, index).join("info")).unwrap();
+        }
+    }
+    for layer in 0..depth - 1 {
+        for index in 0..width {
+            let next: String = (0..width)
+                .map(|next| format!("{}\n", dir(layer + 1, next).display()))
+                .collect();
+            fs::write(dir(layer, index).join("info/alternates"), next).unwrap();
+        }
+    }
+    let first: String = (0..width)
+        .map(|index| format!("{}\n", dir(0, index).display()))
+        .collect();
+    fs::write(repo.root.join(".git/objects/info/alternates"), first).unwrap();
+    let started = std::time::Instant::now();
+    let log = chat_tools::dispatch(
+        &repo.root,
+        &ToolCall {
+            name: "git_log".into(),
+            arguments: json!({}),
+        },
+    );
+    assert!(log.contains("initial commit"), "{log}");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
 /// Issue #359: a linked worktree whose back-reference is relative and has CRLF line ends is
 /// still the workspace's own linked worktree.
 #[test]
