@@ -45,10 +45,13 @@ pub struct Rule {
     pub escalated: bool,
 }
 
-/// Whether `card` may be always-allowed: an allowlistable tool, not a push card, and
-/// not a run_command that invokes `git … push`.
+/// Whether `card` may be always-allowed: an allowlistable tool, not a push card, not a
+/// run_command that invokes `git … push`, and not a write_file that creates directories
+/// (issue #272: those always ask, so a rule for write_file never covers making directories;
+/// the card fingerprint carries `+dirs:` exactly then).
 pub fn offered(card: &Card) -> bool {
     card.kind != CardKind::Push
+        && !(card.tool == "write_file" && card.fingerprint.contains("+dirs:"))
         && TOOLS
             .iter()
             .any(|tool| tool.name == card.tool && tool.tier.allowlistable())
