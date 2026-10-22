@@ -32,15 +32,54 @@ pub(crate) fn path_valid(path: &str) -> bool {
             .split('/')
             .any(|part| part.is_empty() || part == "." || part == "..")
 }
-/// Secret material and Git metadata: `.git` components, `.env*`, `*.pem`, `*.key`,
-/// `*.p12`, `*.pfx`. `lower` is a lowercased `/`-separated path.
+/// Secret material and Git metadata (issues #312 and the original list). `lower` is a
+/// lowercased `/`-separated path; every rule is tested on each path component, so a
+/// directory such as `.aws/` or `.ssh/` excludes everything under it.
+///
+/// - Directories: `.git`, `.ssh`, `.gnupg`, `.aws`, `.kube`.
+/// - Names: `.env*`, `.npmrc`, `.netrc`, `.pgpass`, `.git-credentials`, `secrets.yml`,
+///   `secrets.yaml`.
+/// - Name prefixes: `id_rsa`, `id_ed25519`, `id_ecdsa`, `id_dsa` (private keys and
+///   their `.pub`/backup siblings; a name that merely starts so is refused too), and
+///   `credentials` with a `.json` ending (`credentials*.json`).
+/// - Suffixes: `.pem`, `.key`, `.p12`, `.pfx`, `.env`, `.keystore`, `.jks`, `.tfvars`,
+///   `.tfvars.json`.
+///
+/// Bare `credentials` and `secrets.*` names other than the two above stay readable.
 pub(crate) fn secret(lower: &str) -> bool {
-    lower
-        .split('/')
-        .any(|part| part == ".git" || part.starts_with(".env"))
-        || [".pem", ".key", ".p12", ".pfx"]
+    lower.split('/').any(|part| {
+        matches!(
+            part,
+            ".git"
+                | ".ssh"
+                | ".gnupg"
+                | ".aws"
+                | ".kube"
+                | ".npmrc"
+                | ".netrc"
+                | ".pgpass"
+                | ".git-credentials"
+                | "secrets.yml"
+                | "secrets.yaml"
+        ) || part.starts_with(".env")
+            || ["id_rsa", "id_ed25519", "id_ecdsa", "id_dsa"]
+                .iter()
+                .any(|prefix| part.starts_with(prefix))
+            || (part.starts_with("credentials") && part.ends_with(".json"))
+            || [
+                ".pem",
+                ".key",
+                ".p12",
+                ".pfx",
+                ".env",
+                ".keystore",
+                ".jks",
+                ".tfvars",
+                ".tfvars.json",
+            ]
             .iter()
-            .any(|suffix| lower.ends_with(suffix))
+            .any(|suffix| part.ends_with(suffix))
+    })
 }
 
 /// Generated and vendor trees: `node_modules`, `target`, `dist`, `vendor`.
@@ -422,4 +461,105 @@ pub async fn committed_text(root: &Path, wanted: &[String]) -> Result<Vec<NamedS
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{excluded, secret};
+
+    /// Issue #312: credential files that must never be model inputs, in the forms a
+    /// repository commonly holds them. Every caller passes a lowercased path.
+    #[test]
+    fn secret_covers_common_credential_files_and_directories() {
+        for path in [
+            ".env",
+            ".env.local",
+            "prod.env",
+            "config/a.env",
+            ".git/HEAD",
+            "key.pem",
+            "deploy/server.key",
+            "client.p12",
+            "client.pfx",
+            ".npmrc",
+            "web/.npmrc",
+            ".netrc",
+            ".pgpass",
+            ".git-credentials",
+            "id_rsa",
+            "id_rsa.pub",
+            "keys/id_ed25519",
+            "id_ecdsa",
+            "id_dsa",
+            ".ssh/config",
+            "home/.ssh/known_hosts",
+            ".gnupg/secring.gpg",
+            ".aws/credentials",
+            ".aws/config",
+            "infra/.kube/config",
+            "credentials.json",
+            "config/credentials-prod.json",
+            "app.keystore",
+            "release/app.jks",
+            "terraform.tfvars",
+            "envs/prod.tfvars.json",
+            "secrets.yml",
+            "config/secrets.yaml",
+        ] {
+            assert!(secret(path), "{path} must be a secret");
+            assert!(excluded(path), "{path} must be excluded");
+        }
+    }
+
+    #[test]
+    fn secret_matches_case_insensitively_on_lowercased_input() {
+        for path in [
+            ".NPMRC",
+            "Prod.ENV",
+            "CONFIG/.AWS/Credentials",
+            "Id_RSA",
+            "A/.SSH/x",
+        ] {
+            let lower = path.to_lowercase();
+            assert!(secret(&lower), "{path} must be a secret");
+        }
+    }
+
+    /// Near misses that stay readable: names that only share a letter sequence
+    /// with a credential pattern, and documentation about them.
+    #[test]
+    fn secret_leaves_near_miss_names_alone() {
+        for path in [
+            "src/environment.rs",
+            "src/envelope.rs",
+            "docs/keys.md",
+            "src/keyboard.rs",
+            "src/secrets.rs",
+            "docs/secrets.md",
+            "notes/secrets.yml.md",
+            "src/credentials.rs",
+            "credentials.md",
+            "docs/credentials.json.txt",
+            "npmrc.md",
+            "docs/netrc-notes.md",
+            "src/ssh_client.rs",
+            "docs/ssh-guide.md",
+            "aws/readme.md",
+            "src/kubernetes.rs",
+            ".sshrc",
+            "rsa_parser.rs",
+            "tfvars.md",
+            "config/app.toml",
+        ] {
+            assert!(!secret(path), "{path} must stay readable");
+        }
+    }
+
+    #[test]
+    fn generated_trees_stay_excluded_and_unchanged() {
+        assert!(excluded("node_modules/x.js"));
+        assert!(excluded("pkg/vendor/lib.go"));
+        assert!(!secret("pkg/vendor/lib.go"));
+        assert!(!secret("src/main.rs"));
+    }
 }

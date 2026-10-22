@@ -1491,15 +1491,25 @@ repository's working tree, so uncommitted edits are seen). They run without aski
 
 - **Confinement.** Paths are relative to the repository root. Absolute paths, `..`, and
   symlinks that resolve outside the repository are refused; listing and search never
-  follow symlinks. The `@path` exclusions apply: `.git`, secrets (`.env*`, `*.pem`,
-  `*.key`, `*.p12`, `*.pfx`), `node_modules`, `target`, `dist`, `vendor`. Binary and
+  follow symlinks. The `@path` exclusions apply: `.git`, secrets (the **Secret files**
+  list below), `node_modules`, `target`, `dist`, `vendor`. Binary and
   non-UTF-8 files and files over 4 MiB are not shown.
+- **Secret files.** One list, used by every chat tool (`read_file`, `grep`, `list_files`,
+  `write_file`, `edit_file`, `git_diff`, `git_commit`), by `@path` mentions and by planner
+  context. Matching ignores case and applies to every path component:
+  `.git`, `.ssh`, `.gnupg`, `.aws` and `.kube` directories (everything under them);
+  `.env*` and `*.env` (`.env`, `prod.env`); `.npmrc`, `.netrc`, `.pgpass`,
+  `.git-credentials`; names starting `id_rsa`, `id_ed25519`, `id_ecdsa` or `id_dsa`
+  (keys and their `.pub` copies); `credentials*.json`; `secrets.yml`, `secrets.yaml`;
+  `*.pem`, `*.key`, `*.p12`, `*.pfx`, `*.keystore`, `*.jks`, `*.tfvars` and
+  `*.tfvars.json`. Names that only look similar stay readable, for example
+  `environment.rs`, `keys.md`, `credentials.md`, `secrets.md` and `ssh_client.rs`.
 - **Git is read-only.** Git tools never fetch or change refs, the index or the working
   tree: they run with `--no-optional-locks` (no index refresh), hooks and fsmonitor off,
   no external diff or textconv. `ref`, `base` and `target` must be plain ref names
   (letters, digits, `._/-~^@{}+`; no leading `-`, `..` or `:`) and follow
   `--end-of-options`; `path` is a literal pathspec under the same exclusions. Diffs leave
-  out secret files (`.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`) and files renamed or
+  out secret files (the **Secret files** list above) and files renamed or
   copied from them. Git runs only in the workspace itself (`GIT_CEILING_DIRECTORIES`),
   a call is stopped after 15 s, and when the repository config defines filter drivers or
   includes, `git_status` and working-tree or staged diffs are refused (they would run the
@@ -1777,8 +1787,8 @@ size limit, and it is kept in memory only (not restored after a restart).
 
 - Content comes from Git objects at `HEAD` (never the working tree, so uncommitted edits
   are not seen), through the same reader family and exclusion rules as planner references:
-  secrets (`.env*`, `*.pem`, `*.key`…), `.git`, `node_modules`, `target`, `dist`, `vendor`
-  are refused. Paths are relative to the repository root; absolute, `..`, empty-segment
+  secrets (the **Secret files** list under Chat tools (read-only)), `.git`, `node_modules`,
+  `target`, `dist`, `vendor` are refused. Paths are relative to the repository root; absolute, `..`, empty-segment
   and symlink or submodule paths are refused, as are directories, binary and non-UTF-8
   files and files over 256 KiB.
 - Bounds per prompt: at most 8 distinct mentions and 32 KiB of file text; a longer file

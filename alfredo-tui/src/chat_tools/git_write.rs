@@ -430,7 +430,7 @@ fn refuse_secrets(root: &Path, pathspecs: &[String]) -> Result<(), String> {
         .find(|name| crate::planning_context::secret(&name.to_lowercase()))
     {
         Some(name) => Err(format!(
-            "refused: {name} looks like a secret (.env*, *.pem, *.key, *.p12, *.pfx or .git); commit it by hand if intended"
+            "refused: {name} looks like a secret or credential file (see the secret-file list in docs/reference.md); commit it by hand if intended"
         )),
         None => Ok(()),
     }
