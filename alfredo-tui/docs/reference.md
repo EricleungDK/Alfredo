@@ -1788,9 +1788,9 @@ size limit, and it is kept in memory only (not restored after a restart).
 - Content comes from Git objects at `HEAD` (never the working tree, so uncommitted edits
   are not seen), through the same reader family and exclusion rules as planner references:
   secrets (the **Secret files** list under Chat tools (read-only)), `.git`, `node_modules`,
-  `target`, `dist`, `vendor` are refused. Paths are relative to the repository root; absolute, `..`, empty-segment
-  and symlink or submodule paths are refused, as are directories, binary and non-UTF-8
-  files and files over 256 KiB.
+  `target`, `dist`, `vendor` are refused. Paths are relative to the repository root;
+  absolute, `..`, empty-segment and symlink or submodule paths are refused, as are
+  directories, binary and non-UTF-8 files and files over 256 KiB.
 - Bounds per prompt: at most 8 distinct mentions and 32 KiB of file text; a longer file
   is cut with `[truncated: N of M bytes]`, and mentions past the budget are not attached.
 - Anything that looks like a path (contains `/` or `.`) but cannot be attached shows a

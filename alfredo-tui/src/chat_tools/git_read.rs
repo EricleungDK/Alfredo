@@ -16,14 +16,8 @@ const DEFAULT_COMMITS: u64 = 20;
 const MAX_COMMITS: u64 = 200;
 /// Longest ref or path argument accepted.
 const MAX_ARG: usize = 256;
-/// Secrets never shown in a diff (the `@path` secret exclusions, any depth, any case).
-const SECRET_PATHSPECS: [&str; 5] = [
-    ":(exclude,glob,icase)**/.env*",
-    ":(exclude,glob,icase)**/*.pem",
-    ":(exclude,glob,icase)**/*.key",
-    ":(exclude,glob,icase)**/*.p12",
-    ":(exclude,glob,icase)**/*.pfx",
-];
+/// Largest name listing git_diff checks for secrets; a longer one is refused, not cut.
+const DIFF_NAMES: usize = 4 << 20;
 
 pub const GIT_STATUS: Tool = Tool {
     name: "git_status",
@@ -174,7 +168,16 @@ fn git_diff(root: &Path, arguments: &Value) -> Result<String, String> {
     ];
     detect.extend(&selector);
     detect.push("--");
-    let derived: Vec<String> = secret_copies(&git_limited(root, &detect, 4 << 20)?)
+    // Every changed name in this selector (whole tree, any mode) that is a secret is
+    // left out by name, so the patch never carries its content.
+    let listing = git_limited(root, &detect, DIFF_NAMES)?;
+    if listing.len() >= DIFF_NAMES {
+        return Err(
+            "too many changed files to check for secret files; narrow with path or a smaller range"
+                .into(),
+        );
+    }
+    let hidden: Vec<String> = secret_names(&listing)?
         .into_iter()
         .map(|path| format!(":(exclude,literal){path}"))
         .collect();
@@ -197,8 +200,7 @@ fn git_diff(root: &Path, arguments: &Value) -> Result<String, String> {
         }
         None => args.push("."),
     }
-    args.extend(SECRET_PATHSPECS);
-    args.extend(derived.iter().map(String::as_str));
+    args.extend(hidden.iter().map(String::as_str));
     let output = git(root, &args)?;
     Ok(if output.is_empty() {
         "(no differences)\n".into()
@@ -207,23 +209,34 @@ fn git_diff(root: &Path, arguments: &Value) -> Result<String, String> {
     })
 }
 
-/// Targets of renames and copies whose source is excluded, from `--name-status -z`.
-fn secret_copies(listing: &str) -> Vec<String> {
+/// Changed paths that are secret files, from `--name-status -z`. A rename or copy
+/// counts as a whole: if either name is a secret, both names are left out, because the
+/// content moved out of or into a secret file. A malformed listing is an error.
+fn secret_names(listing: &str) -> Result<Vec<String>, String> {
+    let malformed =
+        || "git diff listed names that could not be read; nothing was shown".to_string();
     let mut fields = listing.split('\0');
     let mut found = Vec::new();
     while let Some(status) = fields.next() {
-        if status.starts_with(['R', 'C']) {
+        if status.is_empty() {
+            continue;
+        }
+        let names: Vec<&str> = if status.starts_with(['R', 'C']) {
             let (Some(source), Some(target)) = (fields.next(), fields.next()) else {
-                break;
+                return Err(malformed());
             };
-            if excluded(source) && !excluded(target) {
-                found.push(target.to_string());
-            }
-        } else if fields.next().is_none() {
-            break;
+            vec![source, target]
+        } else {
+            vec![fields.next().ok_or_else(malformed)?]
+        };
+        if names
+            .iter()
+            .any(|name| crate::planning_context::secret(&name.to_lowercase()))
+        {
+            found.extend(names.into_iter().map(String::from));
         }
     }
-    found
+    Ok(found)
 }
 
 /// Optional ref argument that cannot be read as an option, a path or a blob.

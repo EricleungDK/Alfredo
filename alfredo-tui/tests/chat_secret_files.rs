@@ -68,9 +68,8 @@ struct Repo {
 }
 
 impl Repo {
-    /// A repository with README.md committed and every SECRET_FILES entry written
-    /// (untracked) with its marker line.
-    fn with_secrets() -> Self {
+    /// A repository on `main` with README.md committed and nothing else.
+    fn plain() -> Self {
         let base = std::env::temp_dir().join(format!(
             "alfredo-secret-files-{}-{}",
             std::process::id(),
@@ -85,7 +84,13 @@ impl Repo {
         fs::write(root.join("README.md"), "# Demo\n").unwrap();
         git(&root, &["add", "README.md"]);
         git(&root, &["commit", "-q", "-m", "initial commit"]);
-        let repo = Self { base, root };
+        Self { base, root }
+    }
+
+    /// A repository with README.md committed and every SECRET_FILES entry written
+    /// (untracked) with its marker line.
+    fn with_secrets() -> Self {
+        let repo = Self::plain();
         for (index, path) in SECRET_FILES.iter().enumerate() {
             repo.write(path, &format!("{}\n", marker(index)));
         }
@@ -142,13 +147,17 @@ fn every_credential_file_is_refused_by_each_chat_tool() {
         let grep_file = repo.run("grep", json!({"pattern": secret, "path": path}));
         assert!(!grep_file.contains(&secret), "grep in {path}: {grep_file}");
 
-        let edit = repo.card(
-            "edit_file",
-            json!({"path": path, "old_text": secret, "new_text": "x"}),
-        );
-        assert!(edit.is_err(), "edit_file {path} was allowed");
-        let write = repo.card("write_file", json!({"path": path, "content": "x\n"}));
-        assert!(write.is_err(), "write_file {path} was allowed");
+        let edit = repo
+            .card(
+                "edit_file",
+                json!({"path": path, "old_text": secret, "new_text": "x"}),
+            )
+            .unwrap_err();
+        assert!(edit.contains("excluded"), "edit_file {path}: {edit}");
+        let write = repo
+            .card("write_file", json!({"path": path, "content": "x\n"}))
+            .unwrap_err();
+        assert!(write.contains("excluded"), "write_file {path}: {write}");
 
         let commit = repo
             .card("git_commit", json!({"message": "add it", "files": [path]}))
@@ -200,4 +209,66 @@ async fn planner_context_returns_no_credential_file_content() {
     for index in 0..SECRET_FILES.len() {
         assert!(!serialized.contains(&marker(index)), "{serialized}");
     }
+}
+
+/// Review of #312: git_diff shows no secret file's content, whether the file is
+/// tracked and modified or committed and changed between refs, in every diff mode.
+#[test]
+fn git_diff_never_shows_tracked_or_committed_secret_content() {
+    let repo = Repo::plain();
+    let tracked = [".npmrc", ".ssh/id_rsa", "infra/.kube/config", "prod.env"];
+    for path in tracked {
+        repo.write(path, "SECRET-DIFF v1\n");
+    }
+    repo.write("unchanged.key", "SECRET-DIFF stable\n");
+    git(&repo.root, &["add", "-A"]);
+    git(&repo.root, &["commit", "-q", "-m", "secrets v1"]);
+
+    // Modified in the working tree, with a visible non-secret change beside them.
+    for path in tracked {
+        repo.write(path, "SECRET-DIFF v2\n");
+    }
+    repo.write("README.md", "# Demo\nchanged\n");
+    for args in [json!({}), json!({"base": "main"})] {
+        let output = repo.run("git_diff", args.clone());
+        assert!(!output.contains("SECRET-DIFF"), "git_diff {args}: {output}");
+        assert!(output.contains("changed"), "git_diff {args}: {output}");
+    }
+    let scoped = repo.run("git_diff", json!({"path": "infra"}));
+    assert!(!scoped.contains("SECRET-DIFF"), "git_diff infra: {scoped}");
+    assert_eq!(scoped, "(no differences)\n");
+
+    // Staged, including a secret renamed unchanged to a non-secret name.
+    git(&repo.root, &["mv", "unchanged.key", "notes.txt"]);
+    git(&repo.root, &["add", "-A"]);
+    let staged = repo.run("git_diff", json!({"staged": true}));
+    assert!(!staged.contains("SECRET-DIFF"), "staged git_diff: {staged}");
+    assert!(staged.contains("changed"), "staged git_diff: {staged}");
+
+    // Committed on a branch: base...target shows the change from the committed secret.
+    git(&repo.root, &["checkout", "-q", "-b", "feat"]);
+    git(&repo.root, &["commit", "-q", "-m", "secrets v2"]);
+    let range = repo.run("git_diff", json!({"base": "main", "target": "feat"}));
+    assert!(
+        !range.contains("SECRET-DIFF"),
+        "base/target git_diff: {range}"
+    );
+    assert!(range.contains("changed"), "base/target git_diff: {range}");
+}
+
+/// Review of #312: a secret staged and renamed out of its name is refused for a
+/// pathspec commit that does not name the old path, not only in whole-index mode.
+#[test]
+fn commit_of_a_secret_renamed_to_a_plain_name_is_refused() {
+    let repo = Repo::plain();
+    repo.write(".npmrc", "_authToken=SECRET-RENAME\n");
+    git(&repo.root, &["add", "-f", ".npmrc"]);
+    git(&repo.root, &["commit", "-q", "-m", "add npmrc"]);
+    fs::create_dir_all(repo.root.join("docs")).unwrap();
+    git(&repo.root, &["mv", ".npmrc", "docs/notes.txt"]);
+    let error = repo
+        .card("git_commit", json!({"message": "move", "files": ["docs"]}))
+        .unwrap_err();
+    assert!(error.contains(".npmrc"), "{error}");
+    assert!(error.contains("by hand"), "{error}");
 }

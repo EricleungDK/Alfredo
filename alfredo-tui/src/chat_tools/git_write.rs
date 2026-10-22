@@ -424,6 +424,30 @@ fn refuse_secrets(root: &Path, pathspecs: &[String]) -> Result<(), String> {
                 names.extend(entries.next().map(String::from));
             }
         }
+        // Status shows a rename only when both names are in the pathspec, so a secret
+        // staged under a new name outside it (`git mv .npmrc docs/notes.txt`) is found
+        // here: the sources of every staged rename or copy in the whole index.
+        let index = full(
+            root,
+            &[
+                "diff",
+                "--cached",
+                "--no-ext-diff",
+                "--find-renames",
+                "--find-copies",
+                "--name-status",
+                "-z",
+                "--",
+            ],
+        )?;
+        let mut fields = index.split('\0').filter(|f| !f.is_empty());
+        while let Some(status) = fields.next() {
+            let first = fields.next();
+            if status.starts_with(['R', 'C']) {
+                names.extend(first.map(String::from));
+                fields.next();
+            }
+        }
     }
     match names
         .iter()
