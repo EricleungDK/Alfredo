@@ -92,6 +92,17 @@ fn text(path: &Path) -> Result<String, String> {
 }
 
 fn read_file(root: &Path, arguments: &Value) -> Result<String, String> {
+    read_file_within(root, arguments, MAX_OUTPUT)
+}
+
+/// [`read_file`] sized to `limit` bytes (at most [`MAX_OUTPUT`]), so a budgeted result
+/// still ends on a whole line and keeps its `start_line=` continuation footer.
+pub(crate) fn read_file_within(
+    root: &Path,
+    arguments: &Value,
+    limit: usize,
+) -> Result<String, String> {
+    let budget = limit.min(MAX_OUTPUT);
     let path = text_arg(arguments, "path")?.ok_or("missing required argument path")?;
     let start = match arguments.get("start_line") {
         None | Some(Value::Null) => 1,
@@ -114,7 +125,7 @@ fn read_file(root: &Path, arguments: &Value) -> Result<String, String> {
     let mut out = String::new();
     for (number, line) in content.lines().enumerate().skip(start - 1) {
         let entry = format!("{}\t{line}\n", number + 1);
-        if out.len() + entry.len() <= MAX_OUTPUT - 120 {
+        if out.len() + entry.len() <= budget.saturating_sub(120) {
             out.push_str(&entry);
             continue;
         }
@@ -128,7 +139,9 @@ fn read_file(root: &Path, arguments: &Value) -> Result<String, String> {
         }
         // The line alone exceeds the budget: show its start, cut at a char boundary.
         let prefix = format!("{}\t", number + 1);
-        let mut end = (MAX_OUTPUT - MAX_LINE_MARKER - prefix.len()).min(line.len());
+        let mut end = budget
+            .saturating_sub(MAX_LINE_MARKER.min(budget / 2) + prefix.len())
+            .min(line.len());
         while !line.is_char_boundary(end) {
             end -= 1;
         }
