@@ -72,6 +72,61 @@ fn active_turn_cannot_be_double_submitted() {
     assert_eq!(session.draft, "second");
 }
 
+/// Issue #322: the project-notes arrival line is a display-only transcript row.
+#[test]
+fn project_notes_arrival_row_is_shown_once_reset_by_clear_and_never_sent_or_saved() {
+    use ratatui::{backend::TestBackend, Terminal};
+    fn screen(session: &Session) -> String {
+        let mut app = App::new("fixture".into());
+        app.sessions[0] = session.clone();
+        let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+        terminal
+            .draw(|frame| alfredo_tui::ui::draw(frame, &app))
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+    let line = "· project notes: AGENTS.md (12 bytes)";
+    let mut session = started();
+    let (status, messages) = (session.status.clone(), session.messages.clone());
+    let request = session.request_through(0);
+    assert!(session.show_project_notes(1, line.into()));
+    // Same content later in the conversation: not announced again.
+    assert!(!session.show_project_notes(1, line.into()));
+    assert_eq!(
+        screen(&session).matches("project notes: AGENTS.md").count(),
+        1
+    );
+    // Changed content: announced again.
+    let changed = "· project notes: AGENTS.md (30 bytes)";
+    assert!(session.show_project_notes(2, changed.into()));
+    let shown = screen(&session);
+    assert!(
+        shown.contains("(12 bytes)") && shown.contains("(30 bytes)"),
+        "{shown}"
+    );
+    // Never sent, never saved, no effect on the turn.
+    assert_eq!(session.request_through(0), request);
+    assert_eq!(
+        (session.status.clone(), session.messages.clone()),
+        (status, messages)
+    );
+    let json = serde_json::to_string(&session).unwrap();
+    assert!(!json.contains("project notes"), "{json}");
+    let restored: Session = serde_json::from_str(&json).unwrap();
+    assert!(!screen(&restored).contains("project notes: AGENTS.md"));
+    // /clear starts the conversation over: the line comes back with the next turn.
+    session.apply(1, Update::Done);
+    session.clear_conversation().unwrap();
+    assert!(!screen(&session).contains("project notes: AGENTS.md"));
+    assert!(session.show_project_notes(1, line.into()));
+}
+
 #[test]
 fn client_timing_is_attempt_bound_visible_and_not_restored_as_live_time() {
     use ratatui::{backend::TestBackend, Terminal};
