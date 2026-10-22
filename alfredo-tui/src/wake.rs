@@ -22,7 +22,7 @@ use std::{
     cell::Cell,
     io,
     sync::{
-        atomic::{AtomicBool, AtomicU32, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, Sender},
         Arc,
     },
@@ -55,15 +55,35 @@ pub enum Next {
 
 /// Hang-up and terminate requests received by the interactive process (issue #342).
 static HANGUP: AtomicU32 = AtomicU32::new(0);
+/// Monotonic seconds (plus one, so zero means "none yet") of the first request.
+static FIRST_HANGUP: AtomicU64 = AtomicU64::new(0);
+
+/// A repeated request this long after the first means the orderly quit is wedged (it
+/// takes about 3 s to stop commands and 1 s to shut the runtime down).
+const WEDGED_AFTER_SECS: u64 = 5;
+
+fn monotonic_secs() -> u64 {
+    let mut now = libc::timespec {
+        tv_sec: 0,
+        tv_nsec: 0,
+    };
+    // SAFETY: clock_gettime is async-signal-safe and `now` is a valid out pointer.
+    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut now) };
+    u64::try_from(now.tv_sec).unwrap_or(0) + 1
+}
 
 extern "C" fn on_hangup(signum: libc::c_int) {
-    // The first signal asks for an orderly quit; a second one means the quit is stuck,
-    // so it gets the default action (end the process) like before the handler existed.
-    if HANGUP.fetch_add(1, Ordering::SeqCst) >= 1 {
-        // SAFETY: signal and raise are async-signal-safe.
-        unsafe {
-            libc::signal(signum, libc::SIG_DFL);
-            libc::raise(signum);
+    let now = monotonic_secs();
+    HANGUP.fetch_add(1, Ordering::SeqCst);
+    // Closing a terminal commonly sends two SIGHUPs within milliseconds, so a repeat only
+    // gets the default action (end the process) once the orderly quit has had its time.
+    if let Err(first) = FIRST_HANGUP.compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst) {
+        if now.saturating_sub(first) >= WEDGED_AFTER_SECS {
+            // SAFETY: signal and raise are async-signal-safe.
+            unsafe {
+                libc::signal(signum, libc::SIG_DFL);
+                libc::raise(signum);
+            }
         }
     }
 }

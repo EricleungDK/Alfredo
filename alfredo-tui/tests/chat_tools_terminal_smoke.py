@@ -274,11 +274,12 @@ class ChatTools(unittest.TestCase):
         self.assertFalse(root.joinpath('marker').exists(), 'the command ran on after quit')
         self.assertEqual(self.approval_outcomes(), ['cancelled'])
 
-    def check_signal_kills_the_host_command(self, signum):
+    def check_signal_kills_the_host_command(self, signum, times=1):
         root = self.start_slow_command('slow command on host')
         pid = int(root.joinpath('pid').read_text())
         self.assertTrue(self.alive(pid))
-        os.kill(self.terminal.process.pid, signum)
+        for _ in range(times):
+            os.kill(self.terminal.process.pid, signum)
         deadline = time.time() + 10
         while self.terminal.process.poll() is None and time.time() < deadline:
             if select.select([self.terminal.master], [], [], 0.05)[0]:
@@ -295,6 +296,10 @@ class ChatTools(unittest.TestCase):
 
     def test_sighup_kills_a_running_host_command(self):
         self.check_signal_kills_the_host_command(signal.SIGHUP)
+
+    def test_two_sighups_back_to_back_end_like_one(self):
+        # Closing a terminal tab commonly delivers SIGHUP twice within milliseconds.
+        self.check_signal_kills_the_host_command(signal.SIGHUP, times=2)
 
     def test_sigterm_kills_a_running_host_command_and_restores_the_terminal(self):
         self.check_signal_kills_the_host_command(signal.SIGTERM)

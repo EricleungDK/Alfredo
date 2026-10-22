@@ -1704,8 +1704,8 @@ default false), `timeout_seconds` (1–600, default 120).
   restores the terminal. `kill -9` cannot run the cleanup: sandboxed children still die
   with bubblewrap's `--die-with-parent`, a host command may not. An in-flight `git_push`
   can finish after Alfredo exits: it has no stop path yet, so Esc, Ctrl+Q, SIGHUP and SIGTERM
-  leave it running (a push already sent may complete unlogged). A second SIGHUP/SIGTERM
-  while the quit is stuck ends the process at once.
+  leave it running (a push already sent may complete unlogged). A repeated signal more than 5 s
+  after the first ends the process at once.
 - **Sandbox failure.** If bubblewrap is missing or cannot start, the model gets
   `error: the sandbox could not run the command (…); nothing ran on the host…` with a
   suggestion to escalate. Nothing is retried on the host without a new, approved call.
