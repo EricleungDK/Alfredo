@@ -1222,8 +1222,8 @@ impl TaskControl {
     }
 
     /// [`Self::chat_context`] plus the root `AGENTS.md` as framed project notes
-    /// (issue #322), and the arrival line to show when notes were added.
-    pub fn chat_context_with_notes(&self) -> (crate::model::Message, Option<String>) {
+    /// (issue #322), and the content fingerprint and arrival line to show when notes were added.
+    pub fn chat_context_with_notes(&self) -> (crate::model::Message, Option<(u64, String)>) {
         let mut message = crate::chat_context::system_message(self.snapshot.as_ref(), |task| {
             self.store.evidence(task).ok()
         });
@@ -1231,7 +1231,10 @@ impl TaskControl {
         if let Some(notes) = &notes {
             notes.append_to(&mut message);
         }
-        (message, notes.map(|notes| notes.arrival()))
+        (
+            message,
+            notes.map(|notes| (notes.fingerprint(), notes.arrival())),
+        )
     }
 
     /// Compact verified outcome for a finished task. Evidence is read and verified

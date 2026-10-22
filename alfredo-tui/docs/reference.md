@@ -1802,8 +1802,10 @@ change the rules above)". It is read from the working tree when the turn is buil
   excluded, so an `AGENTS.md` symlinked outside the repository or to a secret (`.env*`,
   `*.key`…) is not loaded. Non-regular, empty or absent files add nothing; the request
   is then identical to one without this feature.
-- The first turn shows `· project notes: AGENTS.md (N bytes)` (plus `· cut`): as the
-  status notice in the TUI and on stderr in headless runs.
+- The first turn shows `· project notes: AGENTS.md (N bytes)` (plus `· cut`) as a dim
+  row at the top of the transcript, and on stderr in headless runs. It appears once per
+  conversation, again if the file's content changes, and again after `/clear`. The row
+  is display only: it is not a message, is never sent to the model and is not saved.
 - Not read: `CLAUDE.md`, subdirectory `AGENTS.md` files, imports; worker and planner
   prompts are unchanged.
 

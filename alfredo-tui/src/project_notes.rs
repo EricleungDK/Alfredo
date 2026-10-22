@@ -80,6 +80,14 @@ impl Notes {
             .push_str(&format!("\n\n{HEADING}:\n{}\n{CLOSING}", self.text));
     }
 
+    /// Stable hash of what the model is shown, so a changed file is announced again.
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        (&self.text, self.bytes, self.cut).hash(&mut hasher);
+        hasher.finish()
+    }
+
     /// The transcript arrival line.
     pub fn arrival(&self) -> String {
         let cut = if self.cut { " · cut" } else { "" };
@@ -96,6 +104,27 @@ mod tests {
         assert_eq!(
             sanitise("a\u{202e}b\u{1b}[31mc\r\nd\te\u{200b}"),
             "ab[31mc\nd\te"
+        );
+    }
+
+    #[test]
+    fn the_fingerprint_follows_the_content_the_model_sees() {
+        let notes = |text: &str, cut| Notes {
+            text: text.into(),
+            bytes: text.len(),
+            cut,
+        };
+        assert_eq!(
+            notes("a", false).fingerprint(),
+            notes("a", false).fingerprint()
+        );
+        assert_ne!(
+            notes("a", false).fingerprint(),
+            notes("b", false).fingerprint()
+        );
+        assert_ne!(
+            notes("a", false).fingerprint(),
+            notes("a", true).fingerprint()
         );
     }
 

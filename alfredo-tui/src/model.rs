@@ -274,6 +274,12 @@ pub struct Session {
     /// Rule of the call that is running now, taken by its result.
     #[serde(skip)]
     pending_rule: Option<u64>,
+    /// Project-notes arrival lines (issue #322) and the content fingerprint last
+    /// announced. Display only: never sent to the model, never saved.
+    #[serde(skip)]
+    notes_lines: Vec<String>,
+    #[serde(skip)]
+    notes_fingerprint: Option<u64>,
     pub scroll: std::cell::Cell<u16>,
     #[serde(
         default,
@@ -351,6 +357,8 @@ impl Session {
             tool_steps: Default::default(),
             rule_marks: Default::default(),
             pending_rule: None,
+            notes_lines: Vec::new(),
+            notes_fingerprint: None,
             scroll: std::cell::Cell::new(0),
             reading: Default::default(),
             transcript_cache: Default::default(),
@@ -865,6 +873,26 @@ impl Session {
                 applied.join("\n")
             )
         })
+    }
+
+    /// Show the project-notes arrival `line` in the transcript unless this content
+    /// (`fingerprint`) was already announced in this conversation. Returns whether a
+    /// row was added. Display only: the row is not a message and grants nothing.
+    pub fn show_project_notes(&mut self, fingerprint: u64, line: String) -> bool {
+        if self.notes_fingerprint == Some(fingerprint) {
+            return false;
+        }
+        self.notes_fingerprint = Some(fingerprint);
+        self.notes_lines.push(line);
+        // A file edited many times in one conversation keeps only the latest rows.
+        let extra = self.notes_lines.len().saturating_sub(4);
+        self.notes_lines.drain(..extra);
+        true
+    }
+
+    /// Arrival lines to draw above the transcript.
+    pub fn notes_lines(&self) -> &[String] {
+        &self.notes_lines
     }
 
     /// The always-allow rule that approved call `ordinal` (counted across the reply's
