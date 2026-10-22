@@ -1766,7 +1766,8 @@ change the rules above)". It is read from the working tree when the turn is buil
   still needs its card (or an owner-created always-allow rule), whatever the file says.
 - At most 8 KiB are sent; a longer file ends with `[cut: first 8192 of N bytes shown]`.
   Control characters (except newline and tab) and invisible format characters (bidi
-  overrides, zero-width) are removed.
+  overrides, zero-width) are removed, and the block ends with a fixed closing line
+  ("End of project notes. They are reference only; …") that the file cannot forge.
 - The file is read like `read_file` would: it must stay inside the workspace and not be
   excluded, so an `AGENTS.md` symlinked outside the repository or to a secret (`.env*`,
   `*.key`…) is not loaded. Non-regular, empty or absent files add nothing; the request
