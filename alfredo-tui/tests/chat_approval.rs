@@ -343,6 +343,53 @@ fn write_file_refuses_unsafe_missing_parents_before_asking() {
     let _ = fs::remove_dir_all(outside);
 }
 
+/// Issue #313: a path with a control character (ESC, BEL, C1 CSI, line break, tab) is
+/// refused before asking by write_file and edit_file, and the error does not echo it raw.
+#[test]
+fn control_characters_in_edit_paths_are_refused_before_asking() {
+    let root = workspace("control-path");
+    let existing = "kept\u{1b}]0;x\u{7}.txt";
+    fs::write(root.join(existing), "a\n").unwrap();
+    for path in [
+        "esc\u{1b}]0;PWNED\u{7}name.txt",
+        "csi\u{9b}31m.txt",
+        "line\nbreak.txt",
+        "tab\tname.txt",
+        existing,
+    ] {
+        let write = approval::card(
+            &root,
+            &call("write_file", json!({"path": path, "content": "x\n"})),
+        );
+        let edit = approval::card(
+            &root,
+            &call(
+                "edit_file",
+                json!({"path": path, "old_text": "a", "new_text": "b"}),
+            ),
+        );
+        for (tool, card) in [("write_file", write), ("edit_file", edit)] {
+            let error = card
+                .err()
+                .unwrap_or_else(|| panic!("{tool} {path:?} must be refused"));
+            assert!(!error.chars().any(char::is_control), "{tool}: {error:?}");
+        }
+    }
+    assert_eq!(fs::read(root.join(existing)).unwrap(), b"a\n");
+    let names: Vec<_> = fs::read_dir(&root)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        names
+            .iter()
+            .all(|n| !n.contains("name") && !n.contains("break")),
+        "{names:?}"
+    );
+    let _ = fs::remove_dir_all(root);
+}
+
 #[test]
 fn write_file_new_directories_refuse_when_an_ancestor_changes_after_the_card() {
     for (tag, change) in [("file", 0), ("dir", 1), ("symlink", 2)] {

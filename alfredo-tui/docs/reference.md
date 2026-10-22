@@ -221,7 +221,8 @@ Approval gate, answered by a scripted policy instead of a card:
 
 - no `--approve`: every mutating call is denied;
 - `--approve workspace-edits`: `edit_file` and `write_file` whose path stays inside the
-  repository are approved; anything else (other tools, later card kinds) is denied.
+  repository are approved; anything else (other tools, later card kinds) is denied. A path
+  with a control character is refused before asking, and stderr lines carry no control characters.
 
 There is no other policy and no interactive equivalent: interactive chat always asks
 (ADR 0004). `--approve` is refused without `--chat … --headless`, and `--chat` without
@@ -1504,6 +1505,7 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   a call is stopped after 15 s, and when the repository config defines filter drivers or
   includes, `git_status` and working-tree or staged diffs are refused (they would run the
   repository's clean filters); `git_log` and `git_diff` with `base` and `target` still work.
+  A config too large to check is refused the same way.
 - **Size.** Every result is capped at 16 KiB; refusals come back to the model as
   `error: …` text it can react to. Results are also budgeted to the room left. With
   `--num-ctx`, each result is cut (same `[truncated: …]` marker) to `(window - prompt
@@ -1521,6 +1523,13 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   `--num-ctx`; `/compact` works on that failed conversation. When the window cannot hold
   the tool definitions (about 3k tokens) plus a 256-token reply floor, as at `--num-ctx
   2048`, that turn runs as plain chat with a one-line notice.
+- **Time limits.** A `grep` stops after scanning 64 MiB of file content or 10 s,
+  returning the matches found so far plus `[stopped: scanned N MiB in S s; narrow with
+  path]`. The read calls of one model reply share a 30 s limit (time on approval
+  cards and on write or run calls does not count); read calls not started by then return `error: not run; round time limit reached`, and a running git
+  call is stopped. Esc (or `/stop`, a chat switch, quit) sets a cancel flag that `grep`
+  checks between files and git calls check every few milliseconds, so the work ends
+  within about a second instead of running on in the background.
 - **Loop.** The model may answer, or ask for tools; Alfredo runs the calls, sends the
   results back and asks again. A turn runs at most 8 tool rounds; per round 16 calls run,
   further calls (up to 64) get an `error: not run` result and any beyond are dropped;
@@ -1555,6 +1564,7 @@ Approval (ADR 0004); there is no skip-approval mode.
 | `write_file` | `path`, `content` | Creates or replaces a UTF-8 text file (missing parent directories are created after approval and listed on the card as `new directories: src, src/util`; they are refused before asking when a parent exists as a file or symlink, or the path is `.git`, secret, generated or outside the workspace, or the first existing parent is read-only; at most 1 MiB); writes `content` exactly as given, so LF content replaces CRLF (the card says `line endings CRLF → LF`, `final newline removed` and so on instead of `(no line changes)`) |
 | `edit_file` | `path`, `old_text`, `new_text` | Replaces the one exact occurrence of `old_text`; zero or several matches are refused, as is an edit that changes nothing (identical `old_text` and `new_text`, or line-ending changes in an all-CRLF file; use `write_file` to change endings). In a file whose every line ends in CRLF, `old_text`/`new_text` are matched as LF text and the result keeps CRLF; a file mixing CRLF and LF is matched on exact bytes (the not-found error says so) and `new_text` is inserted as given |
 
+- **Invisible characters on the card.** Format characters (bidi overrides and isolates, zero-width and tag characters; issue #305) in an approval card or a `⚙` row show as `<U+XXXX>` instead of being drawn, so the card never looks different from what runs.
 - **Read-only files.** `write_file` and `edit_file` refuse an existing file without the owner write bit (for example `chmod 444`) with `<path> is read-only; …`, before any approval card is raised and again before the write, and leave the file unchanged.
 
 - **Card.** The transcript shows `? Approve edit_file · edit README.md`, the arguments,
@@ -1634,11 +1644,11 @@ credentials). Each call pauses for Approval like a file edit.
   committable), remotes that are not a
   configured remote name (URLs and paths are refused), nothing to commit, an
   already-up-to-date merge or push, a detached HEAD for commit, merge and push, and
-  repositories whose config defines filter drivers or includes.
+  repositories whose config defines filter drivers, includes or `core.worktree`.
 - **Changed since the preview.** On approval HEAD, the current branch, local and
-  remote-tracking refs, the index and working-tree status must match the preview;
-  otherwise nothing runs and the model gets `error: the repository changed since the
-  preview…`.
+  remote-tracking refs, the index, working-tree status, the remote URLs and the
+  repository config must match the preview; otherwise nothing runs and the model gets
+  `error: the repository changed since the preview…`.
 - **Hardening.** Hooks never run (`core.hooksPath=/dev/null`, as worker host git) and
   fsmonitor is off. Commit, switch and merge see your global git config (identity) but
   not the rest of your environment. Push keeps your environment for credential helpers
@@ -1648,14 +1658,19 @@ credentials). Each call pauses for Approval like a file edit.
   `/dev/tty`; the push fails fast and says to add the key to ssh-agent or run git push
   yourself. It stops after 120 s (local writes also 120 s).
 - **Repository config is not trusted.** Your global and system git config are; config
-  local to the repository (or worktree) could be planted. Every write is refused when it
-  sets `merge.*.driver`, `gpg.program` or `gpg.*.program`; push is also refused for
-  `core.sshCommand`, `core.askPass`, `credential.*helper`, `remote.*.receivepack` or
-  `uploadpack`, `http(s).proxy`, `url.*.insteadOf` or `pushInsteadOf`, and `protocol.*`
-  allow overrides. The error names the key.
-- **Push URL.** The card shows the push URLs (`pushurl` included). A remote that is a
-  local path or `file://` URL is shown as that path; pushing to it runs that
-  repository's own receive hooks, as any push there would.
+  local to the repository (or worktree) could be planted. Every write is refused when
+  the repository (or worktree) config sets a key outside a short allowlist: `core` basics
+  (`core.bare`, `core.filemode`, `core.autocrlf`, …), `user.name`, `user.email`,
+  `init.defaultbranch`, `pull.rebase`, `push.default`, `remote.<name>.url`, `pushurl`,
+  `fetch`, `push` and `tagopt`, `branch.<name>.remote`, `merge`, `rebase`, `pushremote`
+  and `description`, and `commit.gpgsign` only when false. Keys that can run a program or
+  redirect a push (`core.gitProxy`, `core.hooksPath`, `core.pager`, `gpg.*`,
+  `merge.*.driver`, `remote.*.proxy`, `http.*`, `credential.*`, `receivepack`, `vcs`, …)
+  are refused. The error names the key; run the command by hand if it is intended.
+- **Push URL.** Push takes only `https://`, `ssh://` and scp-style `user@host:path`
+  remotes. A local path, `file://`, `git://`, `http://` or `ext::` URL is refused before
+  the card. The card shows the push URLs (`pushurl` included). A push sends only the
+  branch, with `--no-follow-tags` and `--no-recurse-submodules`.
 - **Merges need a clean tree.** `git_merge` is refused while tracked files have
   uncommitted changes, so an aborted merge restores exactly. A failed commit of named
   files restores the index. If a write is stopped or leaves `index.lock`, the error says
@@ -1671,10 +1686,18 @@ default false), `timeout_seconds` (1–600, default 120).
 - **Sandboxed (default).** Runs in the same bubblewrap Sandbox as worker checks: network
   off, the Coding Workspace writable, `.git` and system roots read-only, `HOME=/tmp`,
   tools under `/usr` and `/bin`. A linked worktree's shared Git directory is mounted
-  read-only so `git` reads work. If `~/.cargo` / `~/.rustup` exist they are mounted
-  read-only with `CARGO_HOME`, `RUSTUP_HOME`, `~/.cargo/bin` on `PATH` and
-  `CARGO_NET_OFFLINE=true`, so `cargo test` works with already-fetched dependencies. The card reads `? Approve run_command · run sh
-  test.sh` with `cwd . · sandboxed · network off · …` and the exact command.
+  read-only so `git` reads work. If `~/.cargo` / `~/.rustup` exist, only their toolchain
+  entries are mounted read-only (`~/.cargo/bin`, `registry`, `git`, `~/.rustup/toolchains`
+  and `settings.toml`), never the whole homes, so `~/.cargo/credentials.toml` and
+  `config.toml` stay unreadable. Symlinked toolchain entries are skipped, and
+  `~/.cargo/config.toml` is not read inside the sandbox, so source replacement and mirrors
+  do not apply there. `CARGO_HOME`, `RUSTUP_HOME`, `~/.cargo/bin` on `PATH` and
+  `CARGO_NET_OFFLINE=true` are set, so `cargo test` works with already-fetched dependencies.
+  Limit: the Coding Workspace is writable and mounted as is, so if it contains the cargo
+  home itself (a workspace at `$HOME`, or a dotfiles repository there), its credentials are
+  readable; the hiding applies only when the workspace does not contain `~/.cargo`.
+  The card reads `? Approve run_command · run sh test.sh` with
+  `cwd . · sandboxed · network off · …` and the exact command.
 - **Escalated.** `escalate: true` runs on the host with your environment and network
   (for `git push`, package installs). The card is red with a reversed
   `! HOST · network on · your environment and credentials (SSH agent, tokens)` banner
@@ -1699,8 +1722,13 @@ default false), `timeout_seconds` (1–600, default 120).
   about a second, sandboxed or on the host; Alfredo waits up to 3 s for it on exit. The
   approval log records `cancelled` (not `applied`) and the chat status reads
   `running run_command · Ns · Esc stops` while it runs. A rule-approved run (no card)
-  is stopped the same way. A closed terminal (SIGHUP) or `kill -9` cannot run the cleanup:
-  sandboxed children still die with bubblewrap's `--die-with-parent`, a host command may not.
+  is stopped the same way. A closed terminal (SIGHUP) or `kill` (SIGTERM) quits like
+  Ctrl+Q: the interactive TUI handles both, kills the command, logs `cancelled`, saves and
+  restores the terminal. `kill -9` cannot run the cleanup: sandboxed children still die
+  with bubblewrap's `--die-with-parent`, a host command may not. An in-flight `git_push`
+  can finish after Alfredo exits: it has no stop path yet, so Esc, Ctrl+Q, SIGHUP and SIGTERM
+  leave it running (a push already sent may complete unlogged). A repeated signal more than 5 s
+  after the first ends the process at once.
 - **Sandbox failure.** If bubblewrap is missing or cannot start, the model gets
   `error: the sandbox could not run the command (…); nothing ran on the host…` with a
   suggestion to escalate. Nothing is retried on the host without a new, approved call.

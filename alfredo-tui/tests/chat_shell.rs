@@ -546,6 +546,103 @@ fn escalated_cards_look_different_from_sandboxed_ones() {
     let _ = fs::remove_dir_all(root);
 }
 
+/// Issue #305: format (Cf) characters must never reach the terminal from a card or a
+/// tool-step row; they show as `<U+XXXX>` so the owner sees the text differs.
+const CF: [char; 4] = ['\u{202E}', '\u{200B}', '\u{2066}', '\u{E0041}'];
+
+fn assert_no_cf(text: &str) {
+    for c in CF.into_iter().chain(['\u{FEFF}', '\u{2069}']) {
+        assert!(!text.contains(c), "raw U+{:04X} drawn: {text}", c as u32);
+    }
+}
+
+fn draw_steps(step: alfredo_tui::model::ToolStep) -> String {
+    let mut session = Session::new("m".into());
+    session.insert("run it");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Admitted);
+    session.apply(attempt, Update::ToolStep(step));
+    session.apply(attempt, Update::Token("done".into()));
+    session.apply(attempt, Update::Done);
+    let mut app = App::new("m".into());
+    app.sessions[0] = session;
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+    let buffer = terminal.backend().buffer();
+    buffer.content().iter().map(|cell| cell.symbol()).collect()
+}
+
+#[test]
+fn a_run_command_card_never_draws_format_characters() {
+    let root = workspace("cf-run");
+    let command = "echo \u{202E}fdsa\u{200B}x \u{2066}y\u{E0041}z";
+    let card = approval::card(&root, &call(json!({"command": command}))).unwrap();
+    let text = draw(card);
+    assert_no_cf(&text);
+    for shown in ["<U+202E>", "<U+200B>", "<U+2066>", "<U+E0041>"] {
+        assert!(text.contains(shown), "{shown} missing: {text}");
+    }
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn file_and_git_cards_never_draw_format_characters() {
+    let root = workspace("cf-edit");
+    let mut card = approval::card(&root, &call(json!({"command": "true"}))).unwrap();
+    card.kind = CardKind::Edit;
+    card.tool = "write_file".into();
+    card.summary = "write n\u{202E}ew\u{200B}.txt".into();
+    card.preview = "+x\u{2066}y\u{E0041}\n-o\u{202E}ld".into();
+    card.arguments = json!({"path": "n\u{202E}ew\u{200B}.txt", "content": "x\u{2066}y"});
+    let text = draw(card.clone());
+    assert_no_cf(&text);
+    assert!(text.contains("<U+202E>"), "{text}");
+    card.tool = "git_commit".into();
+    card.kind = CardKind::Git;
+    card.summary = "commit \u{202E}fix\u{E0041}".into();
+    let text = draw(card);
+    assert_no_cf(&text);
+    assert!(text.contains("<U+E0041>"), "{text}");
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn tool_step_rows_never_draw_format_characters() {
+    let text = draw_steps(alfredo_tui::model::ToolStep {
+        calls: vec![ToolCall {
+            name: "run_command".into(),
+            arguments: json!({"command": "echo \u{202E}fdsa\u{200B}x \u{2066}y\u{E0041}z"}),
+        }],
+        results: vec!["ok \u{202E}rev\u{FEFF}".into()],
+    });
+    assert_no_cf(&text);
+    assert!(text.contains("<U+202E>"), "{text}");
+}
+
+#[test]
+fn cards_and_rows_keep_cjk_accents_and_emoji() {
+    let root = workspace("cf-plain");
+    let card = approval::card(&root, &call(json!({"command": "echo 你好 café 🙂"}))).unwrap();
+    let text = draw(card);
+    assert!(text.contains("café"), "{text}");
+    assert!(text.contains('🙂') && text.contains('你'), "{text}");
+    assert!(!text.contains("<U+"), "{text}");
+    let text = draw_steps(alfredo_tui::model::ToolStep {
+        calls: vec![ToolCall {
+            name: "run_command".into(),
+            arguments: json!({"command": "echo 你好 café 🙂"}),
+        }],
+        results: vec!["你好 café 🙂".into()],
+    });
+    assert!(
+        text.contains('🙂') && text.contains("café") && text.contains('你'),
+        "{text}"
+    );
+    assert!(!text.contains("<U+"), "{text}");
+    let _ = fs::remove_dir_all(root);
+}
+
 /// Issue #302: while an approved command runs the chat says so and that Esc stops it.
 #[test]
 fn a_running_command_shows_its_status_and_that_esc_stops_it() {
@@ -655,6 +752,139 @@ fn sandboxed_cargo_works_when_a_rustup_toolchain_exists() {
     assert!(result.contains("cargo "), "{result}");
     let card = approval::card(&root, &call(json!({"command": "echo $CARGO_NET_OFFLINE"}))).unwrap();
     assert!(approval::apply(&root, &card).unwrap().contains("true"));
+    // Offline build and test of a crate with no dependencies, through the rustup proxies
+    // (issue #310: only the toolchain entries are bound, not the whole homes).
+    fs::write(
+        root.join("Cargo.toml"),
+        "[package]\nname = \"tiny\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::create_dir(root.join("src")).unwrap();
+    fs::write(
+        root.join("src/lib.rs"),
+        "pub fn two() -> u8 { 2 }\n#[test]\nfn it_works() { assert_eq!(two(), 2); }\n",
+    )
+    .unwrap();
+    let card = approval::card(
+        &root,
+        &call(
+            json!({"command": "rustc --version && cargo build --offline && cargo test --offline"}),
+        ),
+    )
+    .unwrap();
+    let result = approval::apply(&root, &card).unwrap();
+    assert!(result.starts_with("exit code 0"), "{result}");
+    assert!(result.contains("rustc "), "{result}");
+    assert!(result.contains("test result: ok. 1 passed"), "{result}");
+    let _ = fs::remove_dir_all(root);
+}
+
+/// Marker the planted cargo credentials carry; the sandbox must never print it.
+const CARGO_SECRET: &str = "SECRET_TOKEN_310";
+/// Set in the child process of [`sandbox_cannot_read_cargo_credentials`] to the fake
+/// home it runs with (`HOME` is read at call time, so the parent process is not changed).
+const FAKE_HOME_ENV: &str = "ALFREDO_TEST_FAKE_HOME";
+
+/// Plant a fake `$HOME` with cargo credentials (issue #310). It lives under the cargo
+/// target tmpdir, not `/tmp`: the sandbox mounts a tmpfs over `/tmp`, which would hide it.
+fn fake_home(tag: &str) -> PathBuf {
+    let home = Path::new(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "fake-home-{tag}-{}-{}",
+        std::process::id(),
+        ID.fetch_add(1, Ordering::Relaxed)
+    ));
+    let _ = fs::remove_dir_all(&home);
+    let cargo = home.join(".cargo");
+    fs::create_dir_all(cargo.join("registry/index")).unwrap();
+    fs::create_dir_all(cargo.join("bin")).unwrap();
+    fs::write(cargo.join("registry/index/marker"), "REGISTRY_OK\n").unwrap();
+    for name in [
+        "credentials.toml",
+        "credentials",
+        "config.toml",
+        "config",
+        "Credentials.toml",
+        "anything",
+    ] {
+        fs::write(cargo.join(name), format!("token = \"{CARGO_SECRET}\"\n")).unwrap();
+    }
+    // A symlinked entry that points at a secret elsewhere must not be bound through.
+    fs::create_dir_all(home.join("secrets")).unwrap();
+    fs::write(home.join("secrets/token"), format!("{CARGO_SECRET}\n")).unwrap();
+    std::os::unix::fs::symlink(home.join("secrets"), cargo.join("git")).unwrap();
+    home
+}
+
+/// The attack from issue #310: a prompt-injected model reads the owner's cargo
+/// credentials with a sandboxed `run_command`. The body runs in a child process whose
+/// `HOME` is the fake home (see [`FAKE_HOME_ENV`]).
+#[test]
+fn sandbox_cannot_read_cargo_credentials() {
+    if !sandbox_works() {
+        return;
+    }
+    let home = fake_home("creds");
+    let planted = fs::read_to_string(home.join(".cargo/credentials.toml")).unwrap();
+    assert!(
+        planted.contains(CARGO_SECRET),
+        "the planted secret is on disk"
+    );
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "sandbox_cannot_read_cargo_credentials_child",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("HOME", &home)
+        .env(FAKE_HOME_ENV, &home)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let _ = fs::remove_dir_all(home);
+}
+
+#[test]
+fn sandbox_cannot_read_cargo_credentials_child() {
+    let Some(home) = std::env::var_os(FAKE_HOME_ENV).map(PathBuf::from) else {
+        return;
+    };
+    let cargo = home.join(".cargo");
+    let root = workspace("creds");
+    let shell = |command: String| {
+        let card = approval::card(&root, &call(json!({ "command": command }))).unwrap();
+        approval::apply(&root, &card).unwrap()
+    };
+    for name in [
+        "credentials.toml",
+        "credentials",
+        "config.toml",
+        "config",
+        "Credentials.toml",
+        "anything",
+        "git/token",
+    ] {
+        let result = shell(format!("cat '{}/{name}' 2>&1; echo END", cargo.display()));
+        // END proves the command ran; a sandbox failure string must not pass vacuously.
+        assert!(result.contains("END"), "{name} did not run: {result}");
+        assert!(
+            !result.contains(CARGO_SECRET),
+            "{name} leaked the planted token"
+        );
+    }
+    // Allowed entries still work: the registry is bound read-only.
+    let result = shell(format!("cat '{}/registry/index/marker'", cargo.display()));
+    assert!(result.contains("REGISTRY_OK"), "{result}");
+    // The cargo home root is not listed either.
+    let listing = shell(format!("ls -A '{}'", cargo.display()));
+    for name in ["credentials", "config", "anything"] {
+        assert!(!listing.contains(name), "{listing}");
+    }
     let _ = fs::remove_dir_all(root);
 }
 
