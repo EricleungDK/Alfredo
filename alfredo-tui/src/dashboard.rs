@@ -470,4 +470,23 @@ mod visible_tests {
         assert_eq!(single_line_visible("a\u{2066}\nb"), "a<U+2066> b");
         assert!(hidden('\u{FEFF}') && !hidden('é'));
     }
+
+    /// Issue #361: line separators are line breaks, so every single-line helper turns them
+    /// into a space, and the project-notes and plan strips (which use `hidden`) drop them.
+    #[test]
+    fn line_separators_never_reach_single_line_output_raw() {
+        let text = "a\u{2028}b\u{2029}c\u{85}d";
+        assert_eq!(single_line(text), "a b c d");
+        assert_eq!(single_line_visible(text), "a b c d");
+        assert_eq!(safe_visible("a\u{2028}b"), "a<U+2028>b");
+        assert!(hidden('\u{2028}') && hidden('\u{2029}') && hidden('\u{85}'));
+    }
+
+    /// Issue #361: the bidi isolates, marks and Arabic letter mark stay covered by `hidden`.
+    #[test]
+    fn bidi_isolates_and_marks_are_hidden() {
+        for c in ['\u{2066}', '\u{2069}', '\u{200E}', '\u{200F}', '\u{061C}'] {
+            assert!(hidden(c), "{c:?}");
+        }
+    }
 }

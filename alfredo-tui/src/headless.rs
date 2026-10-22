@@ -1052,6 +1052,16 @@ mod tests {
         assert_eq!(stderr_line("plain — text"), "plain — text");
     }
 
+    /// Issue #361: a model-chosen path with a reversed-order override (U+202E) and a line
+    /// separator (U+2028) must not reach stderr raw; the override shows as `<U+202E>` and
+    /// the separator becomes a space, so no second line can be forged.
+    #[test]
+    fn stderr_lines_show_format_characters_and_line_separators_inline() {
+        let line = stderr_line("approval write_file gpj.\u{202E}txt: approved\u{2028}#9 done");
+        assert_eq!(line, "approval write_file gpj.<U+202E>txt: approved #9 done");
+        assert!(!line.contains(['\u{202E}', '\u{2028}', '\u{2029}', '\u{85}']));
+    }
+
     #[test]
     fn detail_is_bounded_single_line_text_without_the_error_prefix() {
         assert_eq!(detail_of("error: no such file\x1b[0m\n"), "no such file[0m");
