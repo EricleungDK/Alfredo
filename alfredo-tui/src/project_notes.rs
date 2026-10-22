@@ -24,7 +24,7 @@ const CLOSING: &str =
 
 fn sanitise(text: &str) -> String {
     text.chars()
-        .filter(|&c| matches!(c, '\n' | '\t') || !crate::chat_tools::propose::hidden(c))
+        .filter(|&c| matches!(c, '\n' | '\t') || !crate::dashboard::hidden(c))
         .collect::<String>()
         .lines()
         .filter(|line| line.trim() != CLOSING)
