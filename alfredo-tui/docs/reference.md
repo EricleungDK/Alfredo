@@ -1673,10 +1673,18 @@ default false), `timeout_seconds` (1–600, default 120).
 - **Sandboxed (default).** Runs in the same bubblewrap Sandbox as worker checks: network
   off, the Coding Workspace writable, `.git` and system roots read-only, `HOME=/tmp`,
   tools under `/usr` and `/bin`. A linked worktree's shared Git directory is mounted
-  read-only so `git` reads work. If `~/.cargo` / `~/.rustup` exist they are mounted
-  read-only with `CARGO_HOME`, `RUSTUP_HOME`, `~/.cargo/bin` on `PATH` and
-  `CARGO_NET_OFFLINE=true`, so `cargo test` works with already-fetched dependencies. The card reads `? Approve run_command · run sh
-  test.sh` with `cwd . · sandboxed · network off · …` and the exact command.
+  read-only so `git` reads work. If `~/.cargo` / `~/.rustup` exist, only their toolchain
+  entries are mounted read-only (`~/.cargo/bin`, `registry`, `git`, `~/.rustup/toolchains`
+  and `settings.toml`), never the whole homes, so `~/.cargo/credentials.toml` and
+  `config.toml` stay unreadable. Symlinked toolchain entries are skipped, and
+  `~/.cargo/config.toml` is not read inside the sandbox, so source replacement and mirrors
+  do not apply there. `CARGO_HOME`, `RUSTUP_HOME`, `~/.cargo/bin` on `PATH` and
+  `CARGO_NET_OFFLINE=true` are set, so `cargo test` works with already-fetched dependencies.
+  Limit: the Coding Workspace is writable and mounted as is, so if it contains the cargo
+  home itself (a workspace at `$HOME`, or a dotfiles repository there), its credentials are
+  readable; the hiding applies only when the workspace does not contain `~/.cargo`.
+  The card reads `? Approve run_command · run sh test.sh` with
+  `cwd . · sandboxed · network off · …` and the exact command.
 - **Escalated.** `escalate: true` runs on the host with your environment and network
   (for `git push`, package installs). The card is red with a reversed
   `! HOST · network on · your environment and credentials (SSH agent, tokens)` banner
