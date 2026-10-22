@@ -283,15 +283,16 @@ pub(crate) fn git(root: &Path, args: &[&str]) -> Result<String, String> {
     git_output(root, args, MAX_OUTPUT * 2).map(|(_, output)| output)
 }
 
-/// Config keys that can run a filter driver or pull in another config file, in every
-/// scope git reads (includes are followed; no scope flag, as `REPOSITORY_CONFIG_ARGS`).
-/// git prints only the matching key names, so a large config cannot push one out of the
-/// output the way it cuts a full `config --list` (#308).
+/// Config keys that can run a filter driver, pull in another config file or move the
+/// working tree outside the workspace (`core.worktree`, #309), in every scope git reads
+/// (includes are followed; no scope flag, as `REPOSITORY_CONFIG_ARGS`). git prints only the
+/// matching key names, so a large config cannot push one out of the output the way it cuts
+/// a full `config --list` (#308).
 const FILTER_KEYS_ARGS: [&str; 4] = [
     "config",
     "--name-only",
     "--get-regexp",
-    "^(filter|include|includeif)\\.",
+    "^(filter|include|includeif)\\.|^core\\.worktree$",
 ];
 
 /// Most bytes of matching key names read; a listing past it is refused.
@@ -313,13 +314,13 @@ fn refuse_filters_within(root: &Path, limit: usize, deadline: Duration) -> Resul
         None => Err(format!(
             "repository config is too large to check for filter drivers; {NOT_RUN}"
         )),
-        // Every listed key is a filter or include key, so any output refuses.
+        // Every listed key is a filter, include or worktree key, so any output refuses.
         Some(status) if status.success() => {
             if out.is_empty() {
                 Ok(())
             } else {
                 Err(format!(
-                    "repository config defines filter drivers or includes; {NOT_RUN}"
+                    "repository config defines filter drivers, includes or core.worktree; {NOT_RUN}"
                 ))
             }
         }

@@ -10,6 +10,10 @@
 //! (`HARDENED_GIT_ARGS`, as worker host git), each call has a deadline. Local writes see
 //! the owner's global config (identity) but no other environment; push also keeps the
 //! environment credential helpers and the SSH agent need, with prompts off.
+//! Repository-local config is an allowlist (#309): a key that can run a program or
+//! redirect a remote refuses the call by name. Push takes only https, ssh and scp-style
+//! remotes, sends one branch with no tags and no submodules, and the approval fingerprint
+//! covers the config and the remote URLs, so a change after the card refuses the apply.
 //! A merge conflict is never resolved: the conflicted files are listed and the merge is
 //! aborted, so the repository is left as it was.
 use super::{
@@ -136,6 +140,8 @@ pub(crate) fn fingerprint(
 fn state(root: &Path) -> Result<String, String> {
     use sha2::{Digest, Sha256};
     git_read::refuse_filters(root)?;
+    let config = config_listing(root)?;
+    let remotes = full(root, &["remote", "--verbose"])?;
     let head =
         git_read::git(root, &["rev-parse", "--verify", "--quiet", "HEAD"]).unwrap_or_default();
     let branch = git_read::git(root, &["symbolic-ref", "--quiet", "HEAD"]).unwrap_or_default();
@@ -153,7 +159,7 @@ fn state(root: &Path) -> Result<String, String> {
         &["status", "--porcelain=v1", "-z", "--untracked-files=all"],
     )?;
     let mut hash = Sha256::new();
-    for part in [&head, &branch, &refs, &status] {
+    for part in [&head, &branch, &refs, &status, &config, &remotes] {
         hash.update(part.as_bytes());
         hash.update([0xff]);
     }
@@ -204,12 +210,69 @@ fn full(root: &Path, args: &[&str]) -> Result<String, String> {
     Ok(output)
 }
 
-/// Refuse when repository-local config (not the owner's global or system config) sets
-/// keys that make git run a command: merge drivers and signing programs for every write,
-/// and for push also SSH, askpass, credential helpers, pack programs, proxies, URL
-/// rewrites and protocol allow overrides.
-fn refuse_repository_config(root: &Path, push: bool) -> Result<(), String> {
-    let listing = full(root, &["config", "--list", "--show-scope"])?;
+/// Repository-local and worktree config keys a chat git write may run under (#309). None
+/// of them can run a program, redirect a remote or change what a card showed.
+const ALLOWED_LOCAL_KEYS: [&str; 18] = [
+    "core.autocrlf",
+    "core.bare",
+    "core.filemode",
+    "core.ignorecase",
+    "core.logallrefupdates",
+    "core.precomposeunicode",
+    "core.repositoryformatversion",
+    "core.sparsecheckout",
+    "core.sparsecheckoutcone",
+    "index.sparse",
+    "core.symlinks",
+    "extensions.objectformat",
+    "extensions.worktreeconfig",
+    "init.defaultbranch",
+    "pull.rebase",
+    "push.default",
+    "user.email",
+    "user.name",
+];
+
+/// Whether a repository-local `key` (lowercase) with `value` is on the allowlist. Remote
+/// and branch keys are per name (`remote.<name>.url`); `commit.gpgsign` only when false.
+fn allowed_local_key(key: &str, value: &str) -> bool {
+    if key == "commit.gpgsign" {
+        return matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "false" | "no" | "off" | "0"
+        );
+    }
+    if ALLOWED_LOCAL_KEYS.contains(&key) {
+        return true;
+    }
+    match (key.split_once('.'), key.rsplit_once('.')) {
+        (Some((section, _)), Some((head, variable))) if head.len() > section.len() => match section
+        {
+            "remote" => matches!(variable, "url" | "pushurl" | "fetch" | "push" | "tagopt"),
+            "branch" => matches!(
+                variable,
+                "remote" | "merge" | "rebase" | "pushremote" | "description"
+            ),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// A config key or URL for a message: printable characters only, at most 80.
+fn shown(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_ascii_graphic() || *c == ' ')
+        .take(80)
+        .collect()
+}
+
+/// Refuse when repository-local config (not the owner's global or system config) sets a
+/// key outside [`ALLOWED_LOCAL_KEYS`]: a signing key or proxy command, a merge driver, a
+/// pager, an editor, a helper, a URL rewrite or a protocol override would make git run a
+/// program or send data elsewhere. Refused by name, for every chat git write.
+fn refuse_repository_config(root: &Path) -> Result<(), String> {
+    let listing = config_listing(root)?;
     for line in listing.lines() {
         let Some((scope, entry)) = line.split_once('\t') else {
             continue;
@@ -217,31 +280,64 @@ fn refuse_repository_config(root: &Path, push: bool) -> Result<(), String> {
         if !matches!(scope, "local" | "worktree") {
             continue;
         }
-        let key = entry.split('=').next().unwrap_or_default().to_lowercase();
-        let ends = |prefix: &str, suffix: &str| key.starts_with(prefix) && key.ends_with(suffix);
-        let local = ends("merge.", ".driver") || ends("gpg.", ".program");
-        let remote = push
-            && (matches!(
-                key.as_str(),
-                "core.sshcommand"
-                    | "core.askpass"
-                    | "http.proxy"
-                    | "https.proxy"
-                    | "protocol.allow"
-            ) || ends("credential.", ".helper")
-                || ends("remote.", ".receivepack")
-                || ends("remote.", ".uploadpack")
-                || ends("http.", ".proxy")
-                || ends("url.", ".insteadof")
-                || ends("url.", ".pushinsteadof")
-                || ends("protocol.", ".allow"));
-        if local || remote {
+        let (key, value) = entry.split_once('=').unwrap_or((entry, "true"));
+        let key = key.to_lowercase();
+        if !allowed_local_key(&key, value) {
             return Err(format!(
-                "repository config sets {key}, which can make git run a command; refused (the owner can run this git command by hand)"
+                "repository config sets {}, which chat git writes do not allow (they can run a program or redirect a remote); refused (the owner can run this git command by hand)",
+                shown(&key)
             ));
         }
     }
     Ok(())
+}
+
+/// The repository config as a write reads it (`--show-scope`), read whole: local, worktree
+/// and the owner's global config, never a cut listing.
+fn config_listing(root: &Path) -> Result<String, String> {
+    let mut command = local_command(root)?;
+    command.args(["config", "--list", "--show-scope"]);
+    let (status, out, error) = git_read::run_bounded(command, FULL, LOCAL_DEADLINE)?;
+    match status {
+        None => Err("repository config is too large to check; refused".into()),
+        Some(status) if status.success() => Ok(String::from_utf8_lossy(&out).into_owned()),
+        Some(_) => Err(format!(
+            "repository config cannot be read ({})",
+            error
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("git config failed")
+                .trim()
+                .trim_start_matches("fatal: ")
+        )),
+    }
+}
+
+/// `git -C root` for a local write: hardened, with the owner's HOME (global identity) and
+/// no other environment; discovery stops above the parent.
+fn local_command(root: &Path) -> Result<Command, String> {
+    let ceiling = ceiling(root)?;
+    let mut command = Command::new("/usr/bin/git");
+    git_read::hardened(&mut command).env_remove("GIT_CONFIG_GLOBAL");
+    for name in ["HOME", "XDG_CONFIG_HOME"] {
+        match std::env::var_os(name) {
+            Some(value) => command.env(name, value),
+            None => command.env_remove(name),
+        };
+    }
+    command
+        .env("GIT_CEILING_DIRECTORIES", ceiling)
+        .arg("-C")
+        .arg(root);
+    Ok(command)
+}
+
+/// The directory above the repository, which git discovery may not climb past.
+fn ceiling(root: &Path) -> Result<std::path::PathBuf, String> {
+    let root = root
+        .canonicalize()
+        .map_err(|_| "Coding Workspace is not available".to_string())?;
+    Ok(root.parent().unwrap_or(&root).to_path_buf())
 }
 
 /// What a stopped or failed write may have left behind, for an honest report.
@@ -356,7 +452,7 @@ fn plan_commit(root: &Path, arguments: &Value) -> Result<CommitPlan, String> {
             .ok_or("files entries must name files, not the whole repository")?;
         pathspecs.push(format!(":(literal){path}"));
     }
-    refuse_repository_config(root, false)?;
+    refuse_repository_config(root)?;
     let branch = current_branch(root)?;
     refuse_secrets(root, &pathspecs)?;
     let listing = if pathspecs.is_empty() {
@@ -495,7 +591,7 @@ fn plan_switch(root: &Path, arguments: &Value) -> Result<SwitchPlan, String> {
         .ok_or("argument branch is required")?
         .to_string();
     let create = flag(arguments, "create")?;
-    refuse_repository_config(root, false)?;
+    refuse_repository_config(root)?;
     let exists = local_branch_exists(root, &branch);
     if create {
         if exists {
@@ -592,7 +688,7 @@ fn plan_merge(root: &Path, arguments: &Value) -> Result<MergePlan, String> {
         .ok_or("argument source is required")?
         .to_string();
     let target = ref_arg(arguments, "target")?;
-    refuse_repository_config(root, false)?;
+    refuse_repository_config(root)?;
     let current = current_branch(root)?;
     if let Some(target) = target {
         if target != current {
@@ -787,6 +883,47 @@ fn remote_arg(root: &Path, arguments: &Value) -> Result<String, String> {
     Ok(remote.to_string())
 }
 
+/// Whether git_push may send to `url`: `https://`, `ssh://` or scp-style `[user@]host:path`,
+/// with a host that cannot read as a command-line option (#309). Local paths, `file://`,
+/// `git://`, `http://`, `ext::` and the other remote helpers are refused.
+fn push_url_allowed(url: &str) -> bool {
+    let plain = |text: &str| {
+        !text.is_empty()
+            && text
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+    };
+    let word = |text: &str| plain(text) && text.starts_with(|c: char| c.is_ascii_alphanumeric());
+    if url.contains("::") {
+        return false;
+    }
+    if let Some(rest) = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("ssh://"))
+    {
+        let authority = rest.split('/').next().unwrap_or_default();
+        let (user, hostport) = match authority.rsplit_once('@') {
+            Some((user, hostport)) => (Some(user), hostport),
+            None => (None, authority),
+        };
+        let (host, port) = hostport.split_once(':').unwrap_or((hostport, ""));
+        return word(host)
+            && port.chars().all(|c| c.is_ascii_digit())
+            && user.is_none_or(|user| !user.starts_with('-'));
+    }
+    if url.contains("://") {
+        return false;
+    }
+    let Some((left, path)) = url.split_once(':') else {
+        return false;
+    };
+    let (user, host) = match left.split_once('@') {
+        Some((user, host)) => (Some(user), host),
+        None => (None, left),
+    };
+    !path.is_empty() && word(host) && user.is_none_or(word)
+}
+
 /// `url` without user info (tokens) in it.
 fn without_credentials(url: &str) -> String {
     match url.split_once("://") {
@@ -803,7 +940,7 @@ fn without_credentials(url: &str) -> String {
 
 fn plan_push(root: &Path, arguments: &Value) -> Result<PushPlan, String> {
     let remote = remote_arg(root, arguments)?;
-    refuse_repository_config(root, true)?;
+    refuse_repository_config(root)?;
     let branch = match ref_arg(arguments, "branch")? {
         Some(branch) => branch.to_string(),
         None => current_branch(root)?,
@@ -811,17 +948,29 @@ fn plan_push(root: &Path, arguments: &Value) -> Result<PushPlan, String> {
     if !local_branch_exists(root, &branch) {
         return Err(format!("no local branch {branch}"));
     }
-    let url = git_read::git(
+    let urls = full(
         root,
         &["remote", "get-url", "--push", "--all", "--", &remote],
-    )
-    .map(|urls| {
-        urls.lines()
-            .map(|url| without_credentials(url.trim()))
-            .collect::<Vec<_>>()
-            .join(", ")
-    })
-    .unwrap_or_default();
+    )?;
+    let urls: Vec<&str> = urls
+        .lines()
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .collect();
+    if urls.is_empty() {
+        return Err(format!("remote {remote} has no push URL"));
+    }
+    if let Some(url) = urls.iter().find(|url| !push_url_allowed(url)) {
+        return Err(format!(
+            "remote {remote} URL {} is not https://, ssh:// or user@host:path; chat git_push refuses it (the owner can push by hand)",
+            shown(&without_credentials(url))
+        ));
+    }
+    let url = urls
+        .iter()
+        .map(|url| without_credentials(url))
+        .collect::<Vec<_>>()
+        .join(", ");
     let tracking = format!("refs/remotes/{remote}/{branch}");
     let local = format!("refs/heads/{branch}");
     let tracked = git_read::git(
@@ -884,6 +1033,9 @@ fn push(root: &Path, arguments: &Value) -> Result<String, String> {
         &[
             "push",
             "--no-verify",
+            "--no-follow-tags",
+            "--no-recurse-submodules",
+            "--no-signed",
             "--end-of-options",
             &plan.remote,
             &refspec,
@@ -936,44 +1088,36 @@ fn needed_terminal(error: &str) -> bool {
 
 /// Run a writing git command in `root`. `Err` is git's message.
 fn write(root: &Path, args: &[&str], env: Env) -> Result<String, String> {
-    let ceiling = root
-        .canonicalize()
-        .map_err(|_| "Coding Workspace is not available".to_string())?;
-    let ceiling = ceiling.parent().unwrap_or(&ceiling).to_path_buf();
-    let mut command = Command::new("/usr/bin/git");
-    let deadline = match env {
-        Env::Local => {
-            git_read::hardened(&mut command).env_remove("GIT_CONFIG_GLOBAL");
-            for name in ["HOME", "XDG_CONFIG_HOME"] {
-                match std::env::var_os(name) {
-                    Some(value) => command.env(name, value),
-                    None => command.env_remove(name),
-                };
-            }
-            LOCAL_DEADLINE
-        }
+    let (mut command, deadline) = match env {
+        Env::Local => (local_command(root)?, LOCAL_DEADLINE),
         Env::Remote => {
+            let mut command = Command::new("/usr/bin/git");
             for name in REDIRECTING_ENV {
                 command.env_remove(name);
             }
+            // After the removals: GIT_CEILING_DIRECTORIES is in REDIRECTING_ENV too.
             command
+                .env("GIT_CEILING_DIRECTORIES", ceiling(root)?)
                 .env("GIT_TERMINAL_PROMPT", "0")
                 .env("LC_ALL", "C")
                 .env("GIT_PAGER", "cat")
+                .arg("-C")
+                .arg(root)
                 .arg("--no-pager")
                 .args(crate::worker::HARDENED_GIT_ARGS)
                 .args(["-c", "protocol.ext.allow=never"]);
-            PUSH_DEADLINE
+            (command, PUSH_DEADLINE)
         }
     };
-    command
-        .env("GIT_CEILING_DIRECTORIES", ceiling)
-        .arg("-C")
-        .arg(root)
-        .args(args);
+    command.args(args);
     detach_from_terminal(&mut command);
     let (status, out, error) = git_read::run_bounded(command, MAX_OUTPUT * 2, deadline)?;
     match status {
+        // Cut output: git was stopped part-way, so the result is not known. Never success.
+        None => Err(format!(
+            "git {} printed too much output and was stopped; check git status",
+            args[0]
+        )),
         Some(status) if !status.success() => {
             if matches!(env, Env::Remote) && needed_terminal(&error) {
                 return Err(TERMINAL_HINT.to_string());
@@ -994,7 +1138,7 @@ fn write(root: &Path, args: &[&str], env: Env) -> Result<String, String> {
                 lines.join("; ")
             })
         }
-        _ => Ok(String::from_utf8_lossy(&out).into_owned()),
+        Some(_) => Ok(String::from_utf8_lossy(&out).into_owned()),
     }
 }
 
@@ -1013,6 +1157,39 @@ mod tests {
             "git@github.com:o/r.git"
         );
         assert_eq!(without_credentials("/tmp/r.git"), "/tmp/r.git");
+    }
+
+    #[test]
+    fn push_urls_are_https_ssh_or_scp_style_only() {
+        for url in [
+            "https://github.com/o/r.git",
+            "https://user:tok@github.com:443/o/r.git",
+            "ssh://git@github.com/o/r.git",
+            "ssh://git@github.com:22/o/r.git",
+            "git@github.com:o/r.git",
+            "github.com:o/r.git",
+        ] {
+            assert!(push_url_allowed(url), "{url}");
+        }
+        for url in [
+            "/tmp/r.git",
+            "../r.git",
+            "./r.git",
+            "file:///tmp/r.git",
+            "git://127.0.0.1:9/x.git",
+            "http://example.com/x.git",
+            "ftp://example.com/x.git",
+            "ext::sh -c touch MARK",
+            "fd::3",
+            "ssh://-oProxyCommand=x/r.git",
+            "git@-oProxy:o/r.git",
+            "-oProxyCommand=x:o/r.git",
+            "https://github.com:port/o/r.git",
+            "https:///o/r.git",
+            "host:",
+        ] {
+            assert!(!push_url_allowed(url), "{url}");
+        }
     }
 
     #[test]

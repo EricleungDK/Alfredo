@@ -823,7 +823,10 @@ fn a_push_never_runs_a_repository_git_proxy() {
 fn a_push_to_a_local_path_never_runs_the_remote_hooks() {
     let repo = Repo::new();
     commit_a_file(&repo);
-    git(&repo.base, &["init", "-q", "--bare", "-b", "main", "hooked.git"]);
+    git(
+        &repo.base,
+        &["init", "-q", "--bare", "-b", "main", "hooked.git"],
+    );
     let bare = repo.base.join("hooked.git");
     let marker = repo.base.join("HOOK_MARK");
     script(
@@ -857,7 +860,12 @@ fn a_push_never_goes_through_a_repository_proxy_or_tls_override() {
     });
     git(
         &repo.root,
-        &["remote", "add", "origin", "https://github.com/owner/repo.git"],
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/repo.git",
+        ],
     );
     git(
         &repo.root,
@@ -896,7 +904,10 @@ fn a_remote_repointed_after_the_card_is_refused_and_nothing_is_pushed() {
     commit_a_file(&repo);
     let card = repo.card("git_push", json!({})).unwrap();
     let other = repo.base.join("other.git");
-    git(&repo.base, &["init", "-q", "--bare", "-b", "main", "other.git"]);
+    git(
+        &repo.base,
+        &["init", "-q", "--bare", "-b", "main", "other.git"],
+    );
     git(
         &repo.root,
         &["remote", "set-url", "origin", &ssh_url(&other)],
@@ -932,7 +943,12 @@ fn push_remotes_must_be_https_ssh_or_scp_style() {
     commit_a_file(&repo);
     git(
         &repo.root,
-        &["remote", "add", "origin", "https://github.com/owner/repo.git"],
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://github.com/owner/repo.git",
+        ],
     );
     for url in [
         "https://github.com/owner/repo.git",

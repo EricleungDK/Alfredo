@@ -1635,11 +1635,11 @@ credentials). Each call pauses for Approval like a file edit.
   committable), remotes that are not a
   configured remote name (URLs and paths are refused), nothing to commit, an
   already-up-to-date merge or push, a detached HEAD for commit, merge and push, and
-  repositories whose config defines filter drivers or includes.
+  repositories whose config defines filter drivers, includes or `core.worktree`.
 - **Changed since the preview.** On approval HEAD, the current branch, local and
-  remote-tracking refs, the index and working-tree status must match the preview;
-  otherwise nothing runs and the model gets `error: the repository changed since the
-  preview…`.
+  remote-tracking refs, the index, working-tree status, the remote URLs and the
+  repository config must match the preview; otherwise nothing runs and the model gets
+  `error: the repository changed since the preview…`.
 - **Hardening.** Hooks never run (`core.hooksPath=/dev/null`, as worker host git) and
   fsmonitor is off. Commit, switch and merge see your global git config (identity) but
   not the rest of your environment. Push keeps your environment for credential helpers
@@ -1649,14 +1649,19 @@ credentials). Each call pauses for Approval like a file edit.
   `/dev/tty`; the push fails fast and says to add the key to ssh-agent or run git push
   yourself. It stops after 120 s (local writes also 120 s).
 - **Repository config is not trusted.** Your global and system git config are; config
-  local to the repository (or worktree) could be planted. Every write is refused when it
-  sets `merge.*.driver`, `gpg.program` or `gpg.*.program`; push is also refused for
-  `core.sshCommand`, `core.askPass`, `credential.*helper`, `remote.*.receivepack` or
-  `uploadpack`, `http(s).proxy`, `url.*.insteadOf` or `pushInsteadOf`, and `protocol.*`
-  allow overrides. The error names the key.
-- **Push URL.** The card shows the push URLs (`pushurl` included). A remote that is a
-  local path or `file://` URL is shown as that path; pushing to it runs that
-  repository's own receive hooks, as any push there would.
+  local to the repository (or worktree) could be planted. Every write is refused when
+  the repository (or worktree) config sets a key outside a short allowlist: `core` basics
+  (`core.bare`, `core.filemode`, `core.autocrlf`, …), `user.name`, `user.email`,
+  `init.defaultbranch`, `pull.rebase`, `push.default`, `remote.<name>.url`, `pushurl`,
+  `fetch`, `push` and `tagopt`, `branch.<name>.remote`, `merge`, `rebase`, `pushremote`
+  and `description`, and `commit.gpgsign` only when false. Keys that can run a program or
+  redirect a push (`core.gitProxy`, `core.hooksPath`, `core.pager`, `gpg.*`,
+  `merge.*.driver`, `remote.*.proxy`, `http.*`, `credential.*`, `receivepack`, `vcs`, …)
+  are refused. The error names the key; run the command by hand if it is intended.
+- **Push URL.** Push takes only `https://`, `ssh://` and scp-style `user@host:path`
+  remotes. A local path, `file://`, `git://`, `http://` or `ext::` URL is refused before
+  the card. The card shows the push URLs (`pushurl` included). A push sends only the
+  branch, with `--no-follow-tags` and `--no-recurse-submodules`.
 - **Merges need a clean tree.** `git_merge` is refused while tracked files have
   uncommitted changes, so an aborted merge restores exactly. A failed commit of named
   files restores the index. If a write is stopped or leaves `index.lock`, the error says
