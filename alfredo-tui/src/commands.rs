@@ -87,7 +87,7 @@ pub const COMMANDS: &[(&str, &str)] = &[
         "/tell",
         "ID|architect TEXT — instruct an agent: steer, repair, follow up, revise",
     ),
-    ("/chat", "return to conversation (Ctrl+O shows tool results in full)"),
+    ("/chat", "return to conversation"),
     (
         "/clear",
         "start this conversation fresh; tasks are kept (Ctrl+N opens another)",

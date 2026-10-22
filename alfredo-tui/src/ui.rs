@@ -64,18 +64,12 @@ fn dim() -> Style {
 }
 
 /// Transcript rows for one tool round: `⚙ name args` per call and the first line of
-/// its result, cut to one row (issue #233). With `expanded` (Ctrl+O, issue #258) the
-/// result follows in full, capped at `EXPANDED_RESULT_LINES` rows and a `… N more lines`
-/// marker; the model always receives the full text either way.
+/// its result, cut to one row (issue #233). Full results go to the model only.
 /// `rule_of` names the always-allow rule that approved the call at that position of the
 /// step (issue #320); the row then says `rule #N`.
-/// Rows of one tool result shown when results are expanded.
-const EXPANDED_RESULT_LINES: usize = 200;
-
 fn tool_step_lines(
     step: &crate::model::ToolStep,
     width: usize,
-    expanded: bool,
     rule_of: impl Fn(usize) -> Option<u64>,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
@@ -97,21 +91,6 @@ fn tool_step_lines(
             dashboard::single_line_visible(&format!("⚙ {}{rule} {arguments}", call.name));
         lines.push(Line::styled(truncate(call_text.trim_end(), width), dim()));
         let count = result.lines().count();
-        if expanded {
-            lines.extend(result.lines().take(EXPANDED_RESULT_LINES).map(|line| {
-                Line::styled(
-                    format!("  ↳ {}", dashboard::single_line_visible(line)),
-                    dim(),
-                )
-            }));
-            if count > EXPANDED_RESULT_LINES {
-                lines.push(Line::styled(
-                    format!("  … {} more lines", count - EXPANDED_RESULT_LINES),
-                    dim(),
-                ));
-            }
-            continue;
-        }
         let first = dashboard::single_line_visible(result.lines().next().unwrap_or(""));
         let more = if count > 1 {
             format!(" … ({count} lines)")
@@ -270,8 +249,6 @@ fn draw_inner(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>) {
         dashboard::Footer::Plan
     } else if tasks.is_some_and(|tasks| tasks.visible) {
         dashboard::Footer::Tasks
-    } else if session.tool_results_expanded {
-        dashboard::Footer::ChatExpanded
     } else {
         dashboard::Footer::Chat
     };
@@ -1356,12 +1333,9 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         // Tool rounds (issue #233) show before the reply they fed: call, then a cut result.
         let mut first_call = 0;
         for step in session.tool_steps(index) {
-            lines.extend(tool_step_lines(
-                step,
-                width,
-                session.tool_results_expanded,
-                |at| session.rule_of(index, first_call + at),
-            ));
+            lines.extend(tool_step_lines(step, width, |at| {
+                session.rule_of(index, first_call + at)
+            }));
             first_call += step.calls.len();
         }
         base += lines.len();

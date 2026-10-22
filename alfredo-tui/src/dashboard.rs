@@ -226,8 +226,6 @@ pub enum Footer {
     Agent,
     /// Chat on the right.
     Chat,
-    /// Chat on the right with every tool result shown in full (Ctrl+O, issue #258).
-    ChatExpanded,
 }
 
 /// Footer hints for the right pane: task detail or chat.
@@ -282,19 +280,12 @@ pub fn footer(context: Footer, width: usize) -> String {
             ("F1 help", 0),
             ("^Q quit", 0),
         ],
-        Footer::Chat | Footer::ChatExpanded => &[
+        Footer::Chat => &[
             ("Enter send", 1),
             ("F6 pane", 1),
             ("F2 tasks", 1),
-            (
-                if context == Footer::ChatExpanded {
-                    "^O collapse results"
-                } else {
-                    "^O expand results"
-                },
-                2,
-            ),
             ("^N new", 2),
+            ("Tab switch", 3),
             ("PgUp/Dn scroll", 3),
             ("F1 help", 0),
             ("^Q quit", 0),

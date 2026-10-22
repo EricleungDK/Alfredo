@@ -288,10 +288,6 @@ pub struct Session {
     reading: std::cell::Cell<crate::reading::Viewport>,
     #[serde(skip)]
     pub(crate) transcript_cache: crate::transcript_cache::TranscriptCache,
-    /// Show every tool result in full in the transcript (Ctrl+O; issue #258). View
-    /// state only: not saved, and a restored conversation starts collapsed.
-    #[serde(skip)]
-    pub tool_results_expanded: bool,
     #[serde(skip)]
     queued: bool,
     #[serde(skip)]
@@ -366,7 +362,6 @@ impl Session {
             scroll: std::cell::Cell::new(0),
             reading: Default::default(),
             transcript_cache: Default::default(),
-            tool_results_expanded: false,
             queued: false,
             queue_observation: None,
             capacity_wait: None,
@@ -623,11 +618,6 @@ impl Session {
             self.clear_draft();
         }
         self.insert(&ch.to_string());
-    }
-
-    /// Ctrl+O: switch every tool result between one line and full text (issue #258).
-    pub fn toggle_tool_results(&mut self) {
-        self.tool_results_expanded = !self.tool_results_expanded;
     }
 
     pub fn clear_draft(&mut self) {

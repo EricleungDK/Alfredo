@@ -1308,10 +1308,6 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             work.tasks.planner.raw = !work.tasks.planner.raw;
                         }
-                        // Chat view: Ctrl+O shows every tool result in full (issue #258).
-                        KeyCode::Char('o') if ctrl && !work.tasks.visible => {
-                            work.app.sessions[index].toggle_tool_results();
-                        }
                         KeyCode::F(1) if work.app.sessions[index].draft.is_empty() => {
                             work.app.completion = Some(alfredo_tui::commands::Completion::all())
                         }
@@ -2417,7 +2413,7 @@ const HELP_LINES: &[&str] = &[
     "/compact summarise older turns into a short note now (also automatic near the size limit)",
     "/allow list always-allow rules (a on an approval card adds one; never for push) · /allow clear [ID]",
     "/workspace · /tasks [query or #ID] · /activity [query or #ID] · /chat · /refresh · /clean [yes] · /retry-task · /retry-command SESSION:COMMAND · /models · /model NAME",
-    "Enter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry · Ctrl+O show tool results in full (200 lines each) / one line",
+    "Enter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry",
     "F2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit",
     "--headless (with --go GOAL) runs without a terminal: one stderr line per autopilot state change, then one JSON object {model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]} on stdout. Exit 0 all accepted; 1 partial, failed or interrupted (SIGINT/SIGTERM cancel workers like /stop); 2 setup or usage error (Ollama unreachable, model not installed: Error on stderr, nothing on stdout). A failed run's stderr line carries the reason. Waits for the --on-finish hook after the JSON and reports its failure on stderr. Opens the repository's default mission.",
     "--chat PROMPT --headless runs one Chat Agent turn without a terminal (scripts, evals): read tools run; edit_file/write_file need --approve workspace-edits, which approves them only inside the repository and denies everything else (without it every change is denied). Outcomes go to chat-approvals.jsonl. One JSON object {model, state, policy, reply, steps, calls:[{tool,path,error,result}], approvals:[{tool,target,outcome,reason}], error} on stdout; exit 0 done, 1 failed or interrupted, 2 setup or usage error. The turn is not saved to the conversation. Interactive chat never skips approval.",
