@@ -362,6 +362,40 @@ fn headless_chat_keeps_control_characters_off_stderr_and_refuses_their_paths() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// Issue #361: a model-chosen path with a reversed-order override (U+202E) and a line
+/// separator (U+2028) must not reach stderr raw; the override shows as `<U+202E>` and
+/// the separator becomes a space.
+#[test]
+fn headless_chat_shows_format_characters_and_line_separators_inline_on_stderr() {
+    let root = repository("format");
+    let fixture = scripted_chat(vec![
+        tool_calls(&[(
+            "write_file",
+            json!({"path": "gpj.\u{202E}txt\u{2028}#9 done", "content": "x\n"}),
+        )]),
+        done("Could not write it."),
+    ]);
+    let output = run(
+        &root,
+        &fixture,
+        &[
+            "--chat",
+            "write it",
+            "--headless",
+            "--approve",
+            "workspace-edits",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(
+        !text.contains(['\u{202E}', '\u{2028}', '\u{2029}', '\u{85}']),
+        "raw format or line-separator characters on stderr: {text:?}"
+    );
+    assert!(text.contains("gpj.<U+202E>txt #9 done"), "{text}");
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn headless_chat_strips_control_characters_from_tool_names_on_stderr() {
     let root = repository("toolname");

@@ -37,10 +37,11 @@ fn say(line: impl std::fmt::Display) {
 }
 
 /// One printable line for stderr. Approval cards, tool names, paths and errors carry
-/// model-chosen text, so control characters (ESC, BEL, C1 CSI, CR) go and line breaks
-/// become spaces: the terminal or CI log shows text, and no second line can be forged.
+/// model-chosen text, so control characters (ESC, BEL, C1 CSI, CR) go, format characters
+/// such as bidi overrides show as `<U+XXXX>`, and line breaks (including U+2028 and
+/// U+2029) become spaces: the terminal or CI log shows text, and no second line can be forged.
 fn stderr_line(line: impl std::fmt::Display) -> String {
-    alfredo_tui::dashboard::single_line(&line.to_string())
+    alfredo_tui::dashboard::single_line_visible(&line.to_string())
 }
 
 /// SIGINT and SIGTERM request the same cancellation as `/stop`.
@@ -1050,6 +1051,19 @@ mod tests {
             "#3 failed: x #4 accepted"
         );
         assert_eq!(stderr_line("plain — text"), "plain — text");
+    }
+
+    /// Issue #361: a model-chosen path with a reversed-order override (U+202E) and a line
+    /// separator (U+2028) must not reach stderr raw; the override shows as `<U+202E>` and
+    /// the separator becomes a space, so no second line can be forged.
+    #[test]
+    fn stderr_lines_show_format_characters_and_line_separators_inline() {
+        let line = stderr_line("approval write_file gpj.\u{202E}txt: approved\u{2028}#9 done");
+        assert_eq!(
+            line,
+            "approval write_file gpj.<U+202E>txt: approved #9 done"
+        );
+        assert!(!line.contains(['\u{202E}', '\u{2028}', '\u{2029}', '\u{85}']));
     }
 
     #[test]

@@ -13,11 +13,18 @@ pub fn safe(text: &str) -> String {
         .collect()
 }
 
-/// Controls plus format (Cf) characters: bidi overrides and isolates, zero-width and
-/// invisible marks could make a prompt or an approval card show other text than runs.
-/// Shared by `propose_plan` (stripped) and the approval card (shown, see [`safe_visible`]).
+/// Line breaks (NEL, line and paragraph separators): each starts a new line in a log or
+/// prompt, so single-line output turns them into a space and [`hidden`] flags them.
+const LINE_SEPARATORS: [char; 3] = ['\u{0085}', '\u{2028}', '\u{2029}'];
+
+/// Controls, line separators ([`LINE_SEPARATORS`], issue #361) and format (Cf)
+/// characters: bidi overrides and isolates, zero-width and invisible marks could make a
+/// prompt or an approval card show other text than runs.
+/// Shared by `propose_plan` and project notes (stripped) and the approval card (shown,
+/// see [`safe_visible`]).
 pub fn hidden(c: char) -> bool {
     c.is_control()
+        || LINE_SEPARATORS.contains(&c)
         || matches!(
             c,
             '\u{00AD}'
@@ -59,7 +66,21 @@ pub fn safe_visible(text: &str) -> String {
 
 /// [`safe_visible`] on one line.
 pub fn single_line_visible(text: &str) -> String {
-    safe_visible(text).replace(['\n', '\t'], " ")
+    safe_visible(&line_breaks_as_spaces(text))
+}
+
+/// LF, tab and the [`LINE_SEPARATORS`] become a space, so single-line output never starts
+/// a second line (issue #361).
+fn line_breaks_as_spaces(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if matches!(c, '\n' | '\t') || LINE_SEPARATORS.contains(&c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// Truncate to `width` terminal cells, marking the cut with `…`.
@@ -210,7 +231,7 @@ pub fn autopilot_row(status: &crate::autopilot::Status, width: usize) -> String 
 }
 
 pub fn single_line(text: &str) -> String {
-    safe(text).replace(['\n', '\t'], " ")
+    safe(&line_breaks_as_spaces(text))
 }
 
 /// Which area the footer describes.
@@ -469,5 +490,24 @@ mod visible_tests {
         assert_eq!(safe_visible(plain), plain);
         assert_eq!(single_line_visible("a\u{2066}\nb"), "a<U+2066> b");
         assert!(hidden('\u{FEFF}') && !hidden('é'));
+    }
+
+    /// Issue #361: line separators are line breaks, so every single-line helper turns them
+    /// into a space, and the project-notes and plan strips (which use `hidden`) drop them.
+    #[test]
+    fn line_separators_never_reach_single_line_output_raw() {
+        let text = "a\u{2028}b\u{2029}c\u{85}d";
+        assert_eq!(single_line(text), "a b c d");
+        assert_eq!(single_line_visible(text), "a b c d");
+        assert_eq!(safe_visible("a\u{2028}b"), "a<U+2028>b");
+        assert!(hidden('\u{2028}') && hidden('\u{2029}') && hidden('\u{85}'));
+    }
+
+    /// Issue #361: the bidi isolates, marks and Arabic letter mark stay covered by `hidden`.
+    #[test]
+    fn bidi_isolates_and_marks_are_hidden() {
+        for c in ['\u{2066}', '\u{2069}', '\u{200E}', '\u{200F}', '\u{061C}'] {
+            assert!(hidden(c), "{c:?}");
+        }
     }
 }
