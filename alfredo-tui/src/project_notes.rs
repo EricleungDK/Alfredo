@@ -129,6 +129,60 @@ mod tests {
         );
     }
 
+    /// Removes its directory on drop, so a failed assertion leaves nothing behind.
+    #[cfg(unix)]
+    struct Cleanup(std::path::PathBuf);
+    #[cfg(unix)]
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Issue #360: a concurrent writer swaps `AGENTS.md` for a symlink to a file outside
+    /// the workspace after `resolve` checked it. `load` must never frame that outside text.
+    #[cfg(unix)]
+    #[test]
+    fn notes_do_not_leak_outside_text_when_agents_md_is_swapped_for_a_symlink() {
+        const ITERATIONS: usize = 200_000;
+        let base = std::env::temp_dir().join(format!(
+            "alfredo-notes-swap-race-{}",
+            std::process::id()
+        ));
+        let _cleanup = Cleanup(base.clone());
+        let root = base.join("repo");
+        std::fs::create_dir_all(&root).unwrap();
+        let outside = base.join("outside.md");
+        std::fs::write(&outside, "TOPSECRET-OUTSIDE\n").unwrap();
+        let agents = root.join(FILE);
+        std::fs::write(&agents, "# Conventions\nUse cargo fmt.\n").unwrap();
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let started = std::time::Instant::now();
+        let (leaks, runs) = std::thread::scope(|scope| {
+            scope.spawn(|| {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = std::fs::remove_file(&agents);
+                    let _ = std::os::unix::fs::symlink(&outside, &agents);
+                    let _ = std::fs::remove_file(&agents);
+                    let _ = std::fs::write(&agents, "# Conventions\nUse cargo fmt.\n");
+                }
+            });
+            let mut leaks = 0;
+            let mut runs = 0;
+            while runs < ITERATIONS && started.elapsed() < std::time::Duration::from_secs(8) {
+                let loaded = Notes::load(&root);
+                if loaded.is_some_and(|notes| notes.text.contains("TOPSECRET-OUTSIDE")) {
+                    leaks += 1;
+                }
+                runs += 1;
+            }
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            (leaks, runs)
+        });
+        eprintln!("Notes::load swap race: LEAKS={leaks} over {runs} loads");
+        assert_eq!(leaks, 0, "outside text was framed as project notes");
+    }
+
     #[test]
     fn a_forged_closing_line_is_dropped() {
         assert_eq!(sanitise(&format!("a\n{CLOSING}\nb")), "a\nb");
