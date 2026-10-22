@@ -13,6 +13,55 @@ pub fn safe(text: &str) -> String {
         .collect()
 }
 
+/// Controls plus format (Cf) characters: bidi overrides and isolates, zero-width and
+/// invisible marks could make a prompt or an approval card show other text than runs.
+/// Shared by `propose_plan` (stripped) and the approval card (shown, see [`safe_visible`]).
+pub fn hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{0600}'..='\u{0605}'
+                | '\u{061C}'
+                | '\u{06DD}'
+                | '\u{070F}'
+                | '\u{08E2}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{110BD}'
+                | '\u{110CD}'
+                | '\u{13430}'..='\u{1343F}'
+                | '\u{1BCA0}'..='\u{1BCA3}'
+                | '\u{1D173}'..='\u{1D17A}'
+                | '\u{E0001}'
+                | '\u{E0020}'..='\u{E007F}'
+        )
+}
+
+/// Like [`safe`], but a format (Cf) character that [`hidden`] flags is shown as
+/// `<U+XXXX>` instead of drawn, so an approval card never shows other text than runs
+/// (issue #305). Text, CJK, accents and emoji are unchanged.
+pub fn safe_visible(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c == '\n' || c == '\t' || !hidden(c) {
+            out.push(c);
+        } else if !c.is_control() {
+            out.push_str(&format!("<U+{:04X}>", c as u32));
+        }
+    }
+    out
+}
+
+/// [`safe_visible`] on one line.
+pub fn single_line_visible(text: &str) -> String {
+    safe_visible(text).replace(['\n', '\t'], " ")
+}
+
 /// Truncate to `width` terminal cells, marking the cut with `…`.
 pub fn truncate(text: &str, width: usize) -> String {
     if text.width() <= width {
@@ -403,5 +452,22 @@ pub fn bytes(count: usize) -> String {
         format!("{:.1} KB", count as f64 / 1024.0)
     } else {
         format!("{count} B")
+    }
+}
+
+#[cfg(test)]
+mod visible_tests {
+    use super::*;
+
+    #[test]
+    fn format_characters_show_as_code_points_and_text_is_unchanged() {
+        assert_eq!(
+            safe_visible("a\u{202E}b\u{200B}c\u{E0041}\u{7}d"),
+            "a<U+202E>b<U+200B>c<U+E0041>d"
+        );
+        let plain = "你好 café 🙂\n\tx";
+        assert_eq!(safe_visible(plain), plain);
+        assert_eq!(single_line_visible("a\u{2066}\nb"), "a<U+2066> b");
+        assert!(hidden('\u{FEFF}') && !hidden('é'));
     }
 }

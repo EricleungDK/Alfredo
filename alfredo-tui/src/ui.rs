@@ -28,6 +28,11 @@ fn safe(text: &str) -> String {
     dashboard::safe(text)
 }
 
+/// Approval cards and tool-step rows: format characters show as `<U+XXXX>` (issue #305).
+fn safe_visible(text: &str) -> String {
+    dashboard::safe_visible(text)
+}
+
 /// Fits a one-line notice into `width` cells, cutting at a word boundary with an ellipsis.
 fn fit_words(text: &str, width: usize) -> String {
     use unicode_width::UnicodeWidthStr;
@@ -82,10 +87,11 @@ fn tool_step_lines(
             serde_json::Value::Null => String::new(),
             other => other.to_string(),
         };
-        let call_text = single_line(&format!("⚙ {}{rule} {arguments}", call.name));
+        let call_text =
+            dashboard::single_line_visible(&format!("⚙ {}{rule} {arguments}", call.name));
         lines.push(Line::styled(truncate(call_text.trim_end(), width), dim()));
         let count = result.lines().count();
-        let first = single_line(result.lines().next().unwrap_or(""));
+        let first = dashboard::single_line_visible(result.lines().next().unwrap_or(""));
         let more = if count > 1 {
             format!(" … ({count} lines)")
         } else {
@@ -2332,7 +2338,11 @@ fn approval_card_lines(
     // A host-escalated run_command (#236) gets its own colour and a HOST banner.
     let (header, style) = match card.kind {
         CardKind::Push => (
-            format!("! PUSH {} · {}", card.tool, single_line(&card.summary)),
+            format!(
+                "! PUSH {} · {}",
+                card.tool,
+                dashboard::single_line_visible(&card.summary)
+            ),
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Red)
@@ -2345,7 +2355,11 @@ fn approval_card_lines(
                 Color::Yellow
             };
             (
-                format!("? Approve {} · {}", card.tool, single_line(&card.summary)),
+                format!(
+                    "? Approve {} · {}",
+                    card.tool,
+                    dashboard::single_line_visible(&card.summary)
+                ),
                 Style::default().fg(color).add_modifier(Modifier::BOLD),
             )
         }
@@ -2377,7 +2391,10 @@ fn approval_card_lines(
     }
     let arguments = card.arguments.to_string();
     let shown: String = arguments.chars().take(width.max(20) * 2).collect();
-    lines.push(Line::styled(format!("  args {}", safe(&shown)), dim()));
+    lines.push(Line::styled(
+        format!("  args {}", safe_visible(&shown)),
+        dim(),
+    ));
     // The header, args and key line always fit: a preview taller than the rows
     // left shows its first lines and a count of the rest (issue #268).
     let head = lines.len() - 1;
@@ -2391,7 +2408,7 @@ fn approval_card_lines(
     let heights: Vec<usize> = preview
         .iter()
         .map(|line| {
-            (safe(line).chars().count() + 2)
+            (safe_visible(line).chars().count() + 2)
                 .div_ceil(width.max(1))
                 .max(1)
         })
@@ -2419,7 +2436,7 @@ fn approval_card_lines(
             Color::DarkGray
         };
         lines.push(Line::styled(
-            format!("  {}", safe(line)),
+            format!("  {}", safe_visible(line)),
             Style::default().fg(color),
         ));
     }
@@ -2433,7 +2450,7 @@ fn approval_card_lines(
         match crate::chat_tools::allow::offer(card) {
             Some(offer) => format!(
                 "  y approve · {} · n deny · Esc cancels the turn (deny)",
-                safe(&offer)
+                safe_visible(&offer)
             ),
             None => "  y approve · n deny · Esc cancels the turn (deny)".into(),
         },
