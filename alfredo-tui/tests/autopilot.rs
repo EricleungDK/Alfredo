@@ -832,6 +832,285 @@ fn exhausted_repairs_hold_the_task_block_dependents_and_integrate_independent_wo
     );
 }
 
+/// The two-task plan whose worker and first repair write wrong content; the owner's
+/// `/repair` (title `Repair #3:`) gets the right content once `fixed` is set.
+fn repair_recovery_server(fixed: Arc<AtomicBool>) -> Server {
+    Server::new(move |request, _| {
+        if planner(request) {
+            return two_task_plan();
+        }
+        let prompt = worker_prompt(request);
+        if prompt.starts_with("Implement this task: Repair #3:") && fixed.load(Ordering::SeqCst) {
+            good_calc()
+        } else if prompt.starts_with("Implement this task: Add app") {
+            app()
+        } else if prompt.starts_with("Implement this task: Repair #1:")
+            && fixed.load(Ordering::SeqCst)
+        {
+            good_calc()
+        } else {
+            bad_calc()
+        }
+    })
+}
+
+/// Type `/repair ID hint` as the owner does and wait for the saved repair task.
+fn owner_repair(control: &mut TaskControl, runtime: &Runtime, id: u64, hint: &str) -> u64 {
+    let before = control.snapshot.as_ref().unwrap().tasks.len();
+    let intent = control
+        .prepare_command(&format!("/repair {id} {hint}"), "fixture")
+        .unwrap()
+        .expect("repair is a task command");
+    control.dispatch_prepared(runtime, &intent).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while control.snapshot.as_ref().unwrap().tasks.len() == before {
+        control.poll();
+        assert!(
+            Instant::now() < deadline,
+            "repair saved: {}",
+            control.notice
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    control.snapshot.as_ref().unwrap().tasks.len() as u64
+}
+
+fn failed_two_task_run(
+    fixture: &Fixture,
+    server: &Server,
+    runtime: &Runtime,
+) -> (Autopilot, TaskControl) {
+    let mut control = control(fixture, server, runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Make answer return 42 and add app", "fixture", 1, &control)
+        .unwrap();
+    drive(&mut autopilot, &mut control, runtime, "failed", finished);
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+    (autopilot, control)
+}
+
+#[test]
+fn repair_after_a_failed_go_reenters_the_loop_unblocks_dependents_and_integrates() {
+    let fixture = Fixture::new();
+    let head = fixture.head();
+    let fixed = Arc::new(AtomicBool::new(false));
+    let server = repair_recovery_server(fixed.clone());
+    let runtime = Runtime::new().unwrap();
+    let (mut autopilot, mut control) = failed_two_task_run(&fixture, &server, &runtime);
+    let report = autopilot.report().unwrap().to_string();
+    assert!(report.contains("repair budget exhausted (1/1)"), "{report}");
+    assert!(
+        report.contains("Next: Try a larger model, /repair 3 <hint>"),
+        "{report}"
+    );
+    let resume = autopilot.resume(&control).unwrap_err();
+    assert!(
+        resume.contains("/repair 3 <hint>") && resume.contains("/go GOAL"),
+        "{resume}"
+    );
+
+    fixed.store(true, Ordering::SeqCst);
+    assert_eq!(
+        owner_repair(&mut control, &runtime, 3, "return 42 please"),
+        4
+    );
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "repaired",
+        |autopilot, control| {
+            autopilot
+                .status(control)
+                .is_some_and(|status| status.state == RunState::Done)
+        },
+    );
+    let status = autopilot.status(&control).unwrap();
+    assert_eq!((status.done, status.total, status.failed), (2, 2, 0));
+    let snapshot = fixture.store.snapshot().unwrap();
+    let find = |id| snapshot.tasks.iter().find(|task| task.id == id).unwrap();
+    assert_eq!(find(4).status, TaskStatus::Accepted);
+    assert_eq!(find(2).status, TaskStatus::Accepted, "the dependent ran");
+    assert_eq!(snapshot.tasks.len(), 4, "no further repair was created");
+    let branch = status.branch.clone().expect("integration branch");
+    assert!(branch.starts_with("alfredo/go-"), "{branch}");
+    assert_eq!(
+        git(&fixture.workspace, &["show", &format!("{branch}:calc.py")]),
+        "def answer():\n    return 42"
+    );
+    assert!(git(&fixture.workspace, &["show", &format!("{branch}:app.py")]).contains("main"));
+    let report = autopilot.report().unwrap();
+    assert!(report.contains("via repair #4"), "{report}");
+    assert_eq!(fixture.head(), head);
+    assert_eq!(fixture.status(), "");
+}
+
+#[test]
+fn repair_after_a_failed_go_that_fails_again_ends_failed_with_the_same_guidance() {
+    let fixture = Fixture::new();
+    let fixed = Arc::new(AtomicBool::new(false));
+    let server = repair_recovery_server(fixed);
+    let runtime = Runtime::new().unwrap();
+    let (mut autopilot, mut control) = failed_two_task_run(&fixture, &server, &runtime);
+    assert_eq!(owner_repair(&mut control, &runtime, 3, "try harder"), 4);
+    // The loop re-entered: wait until the owner's repair has run and failed.
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "refailed",
+        |autopilot, control| {
+            let snapshot = control.snapshot.as_ref().unwrap();
+            autopilot
+                .status(control)
+                .is_some_and(|status| status.state == RunState::Failed)
+                && snapshot
+                    .tasks
+                    .iter()
+                    .any(|task| task.id == 4 && task.status == TaskStatus::Failed)
+                && autopilot
+                    .report()
+                    .is_some_and(|report| report.contains("Last failure:"))
+        },
+    );
+    let report = autopilot.report().unwrap().to_string();
+    assert!(report.contains("repair budget exhausted (2/2)"), "{report}");
+    assert!(
+        report.contains("Next: Try a larger model, /repair 4 <hint>"),
+        "{report}"
+    );
+    let snapshot = fixture.store.snapshot().unwrap();
+    assert_eq!(
+        snapshot.tasks.len(),
+        4,
+        "only the explicit /repair added one"
+    );
+    assert!(autopilot
+        .resume(&control)
+        .unwrap_err()
+        .contains("/repair 4 <hint>"));
+}
+
+#[test]
+fn repair_after_a_partial_go_reruns_only_its_family_and_integrates_a_new_branch() {
+    let fixture = Fixture::new();
+    let fixed = Arc::new(AtomicBool::new(false));
+    let flag = fixed.clone();
+    let server = Server::new(move |request, _| {
+        if planner(request) {
+            return json!({"tasks": [
+                {"title": "Make answer return 42", "acceptance": ["answer() returns 42"], "model": "fixture",
+                 "dependencies": [], "policy": {"files": ["calc.py"], "check": check("from calc import answer; assert answer() == 42")}},
+                {"title": "Add app reporting the answer", "acceptance": ["main() reports answer=42"], "model": "fixture",
+                 "dependencies": [1], "policy": {"files": ["app.py"], "check": check("from app import main; assert main() == 'answer=42'")}},
+                {"title": "Write notes", "acceptance": ["notes exist"], "model": "fixture",
+                 "dependencies": [], "policy": {"files": ["notes.txt"], "check": check("from pathlib import Path; assert Path('notes.txt').read_text()")}},
+            ]})
+            .to_string();
+        }
+        let prompt = worker_prompt(request);
+        if prompt.starts_with("Implement this task: Write notes") {
+            files("notes.txt", "")
+        } else if prompt.starts_with("Implement this task: Add app") {
+            app()
+        } else if prompt.contains("Repair #1:") && flag.load(Ordering::SeqCst) {
+            good_calc()
+        } else {
+            bad_calc()
+        }
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Answer, app and notes", "fixture", 1, &control)
+        .unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "partial", finished);
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+    let before = control.snapshot.as_ref().unwrap().tasks.len();
+    let head = |control: &TaskControl, root: u64| {
+        let snapshot = control.snapshot.as_ref().unwrap();
+        snapshot
+            .tasks
+            .iter()
+            .filter(|task| snapshot.repair_root(task.id) == Some(root))
+            .map(|task| task.id)
+            .max()
+            .unwrap()
+    };
+    let (answer_head, notes_head) = (head(&control, 1), head(&control, 3));
+    fixed.store(true, Ordering::SeqCst);
+    let repair = owner_repair(&mut control, &runtime, answer_head, "return 42 please");
+    assert_eq!(repair as usize, before + 1);
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "repaired",
+        |autopilot, control| {
+            autopilot.status(control).is_some_and(|status| {
+                status.state == RunState::Partial && status.done == 2 && status.branch.is_some()
+            })
+        },
+    );
+    let snapshot = fixture.store.snapshot().unwrap();
+    assert_eq!(
+        snapshot.tasks.len(),
+        before + 1,
+        "only the owner's repair was added"
+    );
+    assert_eq!(
+        head(&control, 3),
+        notes_head,
+        "the other failed family stays stuck"
+    );
+    let status = autopilot.status(&control).unwrap();
+    let branch = status.branch.unwrap();
+    assert_eq!(
+        git(&fixture.workspace, &["show", &format!("{branch}:calc.py")]),
+        "def answer():\n    return 42"
+    );
+    let report = autopilot.report().unwrap();
+    assert!(report.contains("repair budget exhausted"), "{report}");
+    assert!(
+        report.contains("the branch holds the accepted tasks only"),
+        "{report}"
+    );
+}
+
+#[test]
+fn a_finished_run_restored_after_restart_replays_nothing_and_still_honours_a_later_repair() {
+    let fixture = Fixture::new();
+    let fixed = Arc::new(AtomicBool::new(false));
+    let server = repair_recovery_server(fixed.clone());
+    let runtime = Runtime::new().unwrap();
+    let (autopilot, mut control) = failed_two_task_run(&fixture, &server, &runtime);
+    let tasks = control.snapshot.as_ref().unwrap().tasks.len();
+    drop(autopilot);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    for _ in 0..50 {
+        control.poll();
+        assert!(autopilot.tick(&runtime, &mut control).is_none());
+        thread::sleep(Duration::from_millis(2));
+    }
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+    assert_eq!(fixture.store.snapshot().unwrap().tasks.len(), tasks);
+    fixed.store(true, Ordering::SeqCst);
+    owner_repair(&mut control, &runtime, 3, "return 42 please");
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "repaired",
+        |autopilot, control| {
+            autopilot
+                .status(control)
+                .is_some_and(|status| status.state == RunState::Done)
+        },
+    );
+}
+
 /// A worker whose check dies the way a sandbox refused by the host does (the
 /// check's own process prints Bubblewrap's setup error as its first stderr line),
 /// driven through the real worker finalize, evidence and settle path.

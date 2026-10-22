@@ -109,6 +109,14 @@ struct Saved {
     /// finish; cleared when follow-up work reopens the run).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     hook_fired: bool,
+    /// Highest task id when the run last finished. A repair of one of this run's
+    /// families saved after that point is the owner's `/repair` and re-enters the loop.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    finished_through: Option<u64>,
+    /// Extra repairs per family granted by the owner's explicit `/repair` after a
+    /// finish; `--max-repairs` stays the automatic bound.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    granted: BTreeMap<u64, u32>,
 }
 fn is_zero(value: &u32) -> bool {
     *value == 0
@@ -139,6 +147,10 @@ impl Saved {
     }
     fn active(&self) -> bool {
         !matches!(self.phase, Phase::Done | Phase::Failed)
+    }
+    /// Automatic repairs allowed for a family, plus the owner's explicit ones.
+    fn repair_limit(&self, root: u64) -> u32 {
+        self.max_repairs + self.granted.get(&root).copied().unwrap_or(0)
     }
     fn validate(&self) -> Result<(), String> {
         if self.version != VERSION
@@ -794,6 +806,8 @@ impl Autopilot {
             total: 0,
             dirty: crate::worker::uncommitted_changes(tasks.workspace()),
             hook_fired: false,
+            finished_through: None,
+            granted: BTreeMap::new(),
         });
         self.last = None;
         self.last_key = None;
@@ -843,7 +857,25 @@ impl Autopilot {
             .as_mut()
             .ok_or("No autopilot goal; use /go GOAL")?;
         if !saved.active() {
-            return Err("Autopilot already finished; /go GOAL starts a new loop".into());
+            let repairable: Vec<String> = tasks
+                .snapshot
+                .as_ref()
+                .map(|snapshot| {
+                    families(snapshot, saved, tasks)
+                        .iter()
+                        .filter(|family| matches!(&family.settled, Settled::Stuck(reason) if reason.contains(BUDGET_EXHAUSTED)))
+                        .map(|family| format!("/repair {} <hint>", family.head))
+                        .collect()
+                })
+                .unwrap_or_default();
+            return Err(if repairable.is_empty() {
+                "Autopilot already finished; /go GOAL starts a new loop".into()
+            } else {
+                format!(
+                    "Autopilot already finished; {} retries the failed task, or /go GOAL starts a new loop",
+                    repairable.join(" or ")
+                )
+            });
         }
         saved.paused = false;
         if let Some(snapshot) = &tasks.snapshot {
@@ -1080,6 +1112,64 @@ impl Autopilot {
         self.persist();
     }
 
+    /// The owner's `/repair ID hint` on a task of this run after it finished (failed or
+    /// partial) re-enters the loop: the saved repair is approved, run and reviewed like
+    /// any other, and its family gets one more repair than `--max-repairs` allows. Only
+    /// a repair saved after the finish counts, so nothing from before is replayed, and
+    /// no other family is touched: stuck ones stay stuck.
+    fn reenter_for_repair(&mut self, tasks: &TaskControl) {
+        let (Some(saved), Some(snapshot)) = (self.saved.as_mut(), tasks.snapshot.as_ref()) else {
+            return;
+        };
+        if saved.active() || saved.first.is_none() {
+            return;
+        }
+        let Some(through) = saved.finished_through else {
+            // Saved by an older build: what exists now was there at the finish.
+            saved.finished_through = Some(highest_task(snapshot));
+            self.persist();
+            return;
+        };
+        let roots = saved.roots();
+        let mut grants: Vec<u64> = snapshot
+            .tasks
+            .iter()
+            .filter(|task| task.id > through && task.status != TaskStatus::Cancelled)
+            .filter_map(|task| snapshot.repair_root(task.repair_of?))
+            .filter(|root| roots.contains(root))
+            .collect();
+        if grants.is_empty() {
+            saved.finished_through = Some(highest_task(snapshot));
+            return;
+        }
+        grants.sort_unstable();
+        for root in grants {
+            *saved.granted.entry(root).or_default() += 1;
+        }
+        saved.finished_through = Some(highest_task(snapshot));
+        let elapsed = self.elapsed();
+        self.resume_running(elapsed);
+    }
+
+    /// Back to `Running` from a finished phase.
+    fn resume_running(&mut self, elapsed: u64) {
+        let Some(saved) = self.saved.as_mut() else {
+            return;
+        };
+        saved.phase = Phase::Running;
+        saved.paused = false;
+        saved.finished = None;
+        saved.report = None;
+        saved.hook_fired = false;
+        if saved.branch.is_some() {
+            saved.round += 1;
+        }
+        self.clock = (std::time::Instant::now(), elapsed);
+        self.notice = "Autopilot resumed for your repair".into();
+        self.attempts.clear();
+        self.persist();
+    }
+
     /// An owner revision of the draft replaces the plan request autopilot waits for.
     pub fn adopt_revision(&mut self, correlation: &str) {
         let Some(saved) = self.saved.as_mut() else {
@@ -1190,6 +1280,7 @@ impl Autopilot {
                 return None;
             }
         }
+        self.reenter_for_repair(tasks);
         let saved = self.saved.as_ref()?;
         if saved.paused || !saved.active() || saved.phase == Phase::Finishing {
             return None;
@@ -1393,9 +1484,11 @@ impl Autopilot {
             .as_ref()
             .zip(self.saved.as_ref())
             .and_then(|(snapshot, saved)| run_usage(tasks, snapshot, saved).line());
+        let through = tasks.snapshot.as_ref().map(highest_task);
         if let Some(saved) = self.saved.as_mut() {
             saved.phase = Phase::Failed;
             saved.finished = Some(saved.started + elapsed);
+            saved.finished_through = through;
             let mut report = format!(
                 "✗ Autopilot failed\n{}\n\n{:<LABEL$}{}",
                 clean(&saved.goal, 400),
@@ -1989,9 +2082,11 @@ impl Autopilot {
         });
         self.finished_notice = Some(notice.clone());
         let elapsed = self.elapsed();
+        let through = Some(highest_task(&snapshot));
         if let Some(saved) = self.saved.as_mut() {
             saved.phase = Phase::Done;
             saved.finished = Some(saved.started + elapsed);
+            saved.finished_through = through;
             saved.report = Some(report.clone());
             saved.branch = branch;
             saved.done = accepted as u32;
@@ -2196,6 +2291,10 @@ fn scope_blocker(scope: &understanding::Snapshot, goal: &str) -> Result<(), Stri
     ))
 }
 
+fn highest_task(snapshot: &Snapshot) -> u64 {
+    snapshot.tasks.iter().map(|task| task.id).max().unwrap_or(0)
+}
+
 /// Settle each planned task family from durable receipts plus local worker state.
 fn families(snapshot: &Snapshot, saved: &Saved, tasks: &TaskControl) -> Vec<Family> {
     let Some(first) = saved.first else {
@@ -2251,10 +2350,12 @@ fn families(snapshot: &Snapshot, saved: &Saved, tasks: &TaskControl) -> Vec<Fami
             match head_task.status {
                 TaskStatus::NeedsHumanReview => Settled::Stuck("held for human review".into()),
                 TaskStatus::Rejected => Settled::Stuck("rejected by review".into()),
-                TaskStatus::Failed if repairs >= saved.max_repairs => Settled::Stuck(format!(
-                    "failed; {BUDGET_EXHAUSTED} ({repairs}/{})",
-                    saved.max_repairs
-                )),
+                TaskStatus::Failed if repairs >= saved.repair_limit(root) => {
+                    Settled::Stuck(format!(
+                        "failed; {BUDGET_EXHAUSTED} ({repairs}/{})",
+                        saved.repair_limit(root)
+                    ))
+                }
                 TaskStatus::Cancelled if head_task.run.is_none() => {
                     Settled::Stuck("cancelled before start".into())
                 }
