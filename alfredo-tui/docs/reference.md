@@ -1504,6 +1504,7 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   a call is stopped after 15 s, and when the repository config defines filter drivers or
   includes, `git_status` and working-tree or staged diffs are refused (they would run the
   repository's clean filters); `git_log` and `git_diff` with `base` and `target` still work.
+  A config too large to check is refused the same way.
 - **Size.** Every result is capped at 16 KiB; refusals come back to the model as
   `error: …` text it can react to. Results are also budgeted to the room left. With
   `--num-ctx`, each result is cut (same `[truncated: …]` marker) to `(window - prompt

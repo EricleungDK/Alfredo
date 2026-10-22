@@ -6,6 +6,7 @@ use alfredo_tui::{
 use serde_json::json;
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
     sync::atomic::{AtomicU64, Ordering},
@@ -253,6 +254,81 @@ fn repository_filters_never_run() {
         assert!(output.starts_with("error: "), "{tool}: {output}");
     }
     assert!(!marker.exists(), "repository filter ran");
+}
+
+/// Appends a `[pad]` section of more than 1 MiB and then a `[filter "f"]` clean driver
+/// running `command`: the #308 attack, where the padding cuts a `git config` listing
+/// before the driver.
+fn append_padded_filter(root: &Path, command: &str) {
+    let mut config = fs::OpenOptions::new()
+        .append(true)
+        .open(root.join(".git/config"))
+        .unwrap();
+    let padding = "v".repeat(1_200_000);
+    write!(
+        config,
+        "[pad]\n\tk = {padding}\n[filter \"f\"]\n\tclean = {command}\n"
+    )
+    .unwrap();
+}
+
+#[test]
+fn padded_repository_config_never_hides_a_filter() {
+    let repo = Repo::new();
+    let marker = repo.base.join("padded-filter-ran");
+    append_padded_filter(&repo.root, &format!("touch {}; cat", marker.display()));
+    fs::write(repo.root.join(".gitattributes"), "* filter=f\n").unwrap();
+    fs::write(repo.root.join("README.md"), "# Demo\ndirty\n").unwrap();
+    let _ = fs::remove_file(&marker);
+    for (tool, arguments) in [("git_status", json!({})), ("git_diff", json!({}))] {
+        let output = repo.run(tool, arguments);
+        assert!(output.starts_with("error: "), "{tool}: {output}");
+        assert!(output.contains("filter drivers"), "{tool}: {output}");
+    }
+    assert!(!marker.exists(), "repository filter ran");
+}
+
+#[test]
+fn filter_and_include_keys_in_other_spellings_or_scopes_are_refused() {
+    for snippet in [
+        "[Filter \"f\"]\n\tClean = cat\n",
+        "[include]\n\tpath = /nonexistent/x\n",
+        "[includeIf \"gitdir:/nonexistent/\"]\n\tpath = /nonexistent/x\n",
+    ] {
+        let repo = Repo::new();
+        let mut config = fs::OpenOptions::new()
+            .append(true)
+            .open(repo.root.join(".git/config"))
+            .unwrap();
+        write!(config, "{snippet}").unwrap();
+        drop(config);
+        let output = repo.run("git_status", json!({}));
+        assert!(output.contains("filter drivers"), "{snippet}: {output}");
+    }
+    let repo = Repo::new();
+    git(&repo.root, &["config", "extensions.worktreeConfig", "true"]);
+    git(
+        &repo.root,
+        &["config", "--worktree", "filter.w.clean", "cat"],
+    );
+    let output = repo.run("git_status", json!({}));
+    assert!(output.contains("filter drivers"), "worktree: {output}");
+}
+
+#[test]
+fn padding_without_a_filter_does_not_block_git_status() {
+    let repo = Repo::new();
+    append_padded_filter(&repo.root, "cat");
+    let config = fs::read_to_string(repo.root.join(".git/config")).unwrap();
+    fs::write(
+        repo.root.join(".git/config"),
+        config.replace("[filter \"f\"]", "[other \"f\"]"),
+    )
+    .unwrap();
+    fs::write(repo.root.join("README.md"), "changed\n").unwrap();
+    let output = repo.run("git_status", json!({}));
+    assert!(!output.starts_with("error: "), "{output}");
+    assert!(output.contains("M README.md"), "{output}");
 }
 
 #[test]

@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use std::{
     io::Read,
     path::Path,
-    process::{Command, ExitStatus, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     time::{Duration, Instant},
 };
 
@@ -162,7 +162,8 @@ fn git_diff(root: &Path, arguments: &Value) -> Result<String, String> {
     }
     let selector: Vec<&str> = selector.iter().map(String::as_str).collect();
     // Files renamed or copied from a secret are secret too: find them across the
-    // whole tree, then leave them out of the (rename-free) diff.
+    // whole tree, then leave them out of the (rename-free) diff. The listing is read
+    // whole (git_limited): a cut listing would leave a secret copy out of the exclusions.
     let mut detect = vec![
         "diff",
         "--no-ext-diff",
@@ -273,24 +274,100 @@ pub(crate) fn path_arg(arguments: &Value) -> Result<Option<String>, String> {
     Ok(Some(path.to_string()))
 }
 
-/// Run read-only git in `root`; stdout is read up to just past [`MAX_OUTPUT`] (the
-/// dispatcher caps it with the marker), then git is stopped.
+/// Run read-only git in `root`; stdout is read up to twice [`MAX_OUTPUT`] and then git is
+/// stopped. Display only: a listing past that is shown cut (the dispatcher caps it again
+/// with the marker). Callers either show the output or need a small value (a ref, a count,
+/// a remote name) or its emptiness, which a cut cannot flip (audited for #308). A caller
+/// that decides on a whole listing uses [`git_limited`], which fails closed.
 pub(crate) fn git(root: &Path, args: &[&str]) -> Result<String, String> {
-    git_limited(root, args, MAX_OUTPUT * 2)
+    git_output(root, args, MAX_OUTPUT * 2).map(|(_, output)| output)
 }
+
+/// Config keys that can run a filter driver or pull in another config file, in every
+/// scope git reads (includes are followed; no scope flag, as `REPOSITORY_CONFIG_ARGS`).
+/// git prints only the matching key names, so a large config cannot push one out of the
+/// output the way it cuts a full `config --list` (#308).
+const FILTER_KEYS_ARGS: [&str; 4] = [
+    "config",
+    "--name-only",
+    "--get-regexp",
+    "^(filter|include|includeif)\\.",
+];
+
+/// Most bytes of matching key names read; a listing past it is refused.
+const FILTER_KEYS_LIMIT: usize = 64 << 10;
 
 /// Refuse when the repository config defines filter drivers or includes: `git status`
 /// and working-tree diffs would run the repository's clean filters (as worker host git).
+/// Fails closed: a listing that cannot be read whole is refused, never trusted as a prefix.
 pub(crate) fn refuse_filters(root: &Path) -> Result<(), String> {
-    let config = git_limited(root, &crate::worker::REPOSITORY_CONFIG_ARGS, 1 << 20)?;
-    if crate::worker::config_needs_qualification(&config) {
-        return Err("repository config defines filter drivers or includes; git status and working-tree diffs are not run (git_log and git_diff with base and target still work)".into());
-    }
-    Ok(())
+    refuse_filters_within(root, FILTER_KEYS_LIMIT, DEADLINE)
 }
 
-/// [`git`] reading at most `limit` bytes of stdout.
+/// [`refuse_filters`] with the listing read up to `limit` bytes within `deadline`. A cut or
+/// late listing is an error (run_bounded stops git), so the gate never trusts a prefix.
+fn refuse_filters_within(root: &Path, limit: usize, deadline: Duration) -> Result<(), String> {
+    const NOT_RUN: &str = "git status and working-tree diffs are not run (git_log and git_diff with base and target still work)";
+    let (status, out, error) = run_bounded(git_command(root, &FILTER_KEYS_ARGS)?, limit, deadline)?;
+    match status {
+        None => Err(format!(
+            "repository config is too large to check for filter drivers; {NOT_RUN}"
+        )),
+        // Every listed key is a filter or include key, so any output refuses.
+        Some(status) if status.success() => {
+            if out.is_empty() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "repository config defines filter drivers or includes; {NOT_RUN}"
+                ))
+            }
+        }
+        // `--get-regexp` exits 1 when no key matches; a broken config exits 128.
+        Some(status) if status.code() == Some(1) && out.is_empty() => Ok(()),
+        Some(_) => {
+            let first = error
+                .lines()
+                .find(|line| !line.trim().is_empty())
+                .unwrap_or("git config failed");
+            Err(format!(
+                "repository config cannot be read ({}); {NOT_RUN}",
+                first.trim().trim_start_matches("fatal: ")
+            ))
+        }
+    }
+}
+
+/// [`git`] reading at most `limit` bytes of stdout. A listing past `limit` is an error,
+/// never a prefix: a caller that decides on the listing (a secret check, a gate) must see
+/// all of it or nothing.
 pub(crate) fn git_limited(root: &Path, args: &[&str], limit: usize) -> Result<String, String> {
+    match git_output(root, args, limit)? {
+        (false, output) => Ok(output),
+        (true, _) => Err(format!(
+            "git {} output is larger than {limit} bytes and cannot be checked; refused",
+            args[0]
+        )),
+    }
+}
+
+/// Run git in `root`, stdout read up to `limit` bytes. The flag is whether the output was
+/// cut at `limit`; a git that fails is an error with its first message line.
+fn git_output(root: &Path, args: &[&str], limit: usize) -> Result<(bool, String), String> {
+    let (status, out, error) = run_bounded(git_command(root, args)?, limit, DEADLINE)?;
+    let cut = status.is_none();
+    if status.is_some_and(|status| !status.success()) {
+        let first = error.lines().find(|line| !line.trim().is_empty());
+        return Err(match first {
+            Some(line) => line.trim().trim_start_matches("fatal: ").to_string(),
+            None => format!("git {} failed", args[0]),
+        });
+    }
+    Ok((cut, String::from_utf8_lossy(&out).into_owned()))
+}
+
+/// `git -C root ARGS` with the hardened environment; discovery stops above the parent.
+fn git_command(root: &Path, args: &[&str]) -> Result<Command, String> {
     let ceiling = root
         .canonicalize()
         .map_err(|_| "Coding Workspace is not available".to_string())?;
@@ -301,24 +378,16 @@ pub(crate) fn git_limited(root: &Path, args: &[&str], limit: usize) -> Result<St
         .arg("-C")
         .arg(root)
         .args(args);
-    let (status, out, error) = run_bounded(command, limit, DEADLINE)?;
-    match status {
-        Some(status) if !status.success() => {
-            let first = error.lines().find(|line| !line.trim().is_empty());
-            Err(match first {
-                Some(line) => line.trim().trim_start_matches("fatal: ").to_string(),
-                None => format!("git {} failed", args[0]),
-            })
-        }
-        _ => Ok(String::from_utf8_lossy(&out).into_owned()),
-    }
+    Ok(command)
 }
 
 /// Longest one git call may run.
 pub(crate) const DEADLINE: Duration = Duration::from_secs(15);
 
-/// Run `command`, reading at most `limit` bytes of stdout. Stops it once the limit is
-/// reached (status `None`: output was cut) or `deadline` passes (an error).
+/// Run `command`, reading at most `limit` bytes of stdout. `status` is `None` only when
+/// the output was cut at `limit` (git is then stopped). Once the output ends, git is waited
+/// for, so its exit status is real. An error when `deadline` passes (git is stopped) or
+/// when stdout cannot be read.
 pub(crate) fn run_bounded(
     mut command: Command,
     limit: usize,
@@ -330,6 +399,7 @@ pub(crate) fn run_bounded(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|error| format!("cannot start git: {error}"))?;
+    let started = Instant::now();
     let stderr = child.stderr.take().map(|stderr| {
         std::thread::spawn(move || {
             let mut text = String::new();
@@ -337,46 +407,75 @@ pub(crate) fn run_bounded(
             text
         })
     });
-    let stdout = child.stdout.take().map(|stdout| {
-        std::thread::spawn(move || {
-            let mut out = Vec::new();
-            let _ = stdout.take(limit as u64).read_to_end(&mut out);
-            out
-        })
+    let Some(stdout) = child.stdout.take() else {
+        stop(&mut child);
+        return Err("cannot read git output".into());
+    };
+    let reader = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
+        let mut out = Vec::new();
+        stdout.take(limit as u64).read_to_end(&mut out)?;
+        Ok(out)
     });
-    let started = Instant::now();
-    let status = loop {
-        if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
-            break Some(status);
-        }
-        if stdout.as_ref().is_some_and(|thread| thread.is_finished()) {
-            // Limit reached (or stdout closed): give a closing git a moment, then stop it.
-            std::thread::sleep(Duration::from_millis(20));
-            if let Some(status) = child.try_wait().map_err(|error| error.to_string())? {
-                break Some(status);
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-            break None;
-        }
+    // Reading ends at the end of the output, or once `limit` bytes are in. A command that
+    // holds its output open past the deadline is stopped here.
+    while !reader.is_finished() {
         if started.elapsed() > deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!(
-                "git took longer than {} s and was stopped",
-                deadline.as_secs()
-            ));
+            stop(&mut child);
+            return Err(deadline_error(deadline));
         }
         std::thread::sleep(Duration::from_millis(5));
+    }
+    let out = match reader.join() {
+        Ok(Ok(out)) => out,
+        _ => {
+            stop(&mut child);
+            return Err("cannot read git output".into());
+        }
     };
-    let out = stdout
-        .and_then(|thread| thread.join().ok())
-        .unwrap_or_default();
-    let error = stderr
-        .and_then(|thread| thread.join().ok())
-        .unwrap_or_default();
-    let status = status.filter(|_| out.len() < limit);
+    let status = if out.len() >= limit {
+        stop(&mut child);
+        None
+    } else {
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) => {}
+                Err(error) => {
+                    stop(&mut child);
+                    return Err(error.to_string());
+                }
+            }
+            if started.elapsed() > deadline {
+                stop(&mut child);
+                return Err(deadline_error(deadline));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    };
+    // stderr is only for messages: wait for it within the deadline, never past it.
+    let mut error = String::new();
+    if let Some(thread) = stderr {
+        while !thread.is_finished() && started.elapsed() <= deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if thread.is_finished() {
+            error = thread.join().unwrap_or_default();
+        }
+    }
     Ok((status, out, error))
+}
+
+fn deadline_error(deadline: Duration) -> String {
+    format!(
+        "git took longer than {} s and was stopped",
+        deadline.as_secs()
+    )
+}
+
+/// Kills `child` and reaps it.
+fn stop(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// The clean environment and command-line overrides every git call here uses.
@@ -401,6 +500,81 @@ pub(crate) fn hardened(command: &mut Command) -> &mut Command {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs, io::Write, path::PathBuf};
+
+    /// A scratch repository (#308 unit tests); `config` is appended to its `.git/config`.
+    fn scratch_repo(name: &str, config: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("alfredo-git-read-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        assert!(Command::new("/usr/bin/git")
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success());
+        let mut file = fs::OpenOptions::new()
+            .append(true)
+            .open(root.join(".git/config"))
+            .unwrap();
+        file.write_all(config.as_bytes()).unwrap();
+        root
+    }
+
+    #[test]
+    fn a_cut_listing_is_an_error_not_a_prefix() {
+        let root = scratch_repo("cut-listing", "[filter \"f\"]\n\tclean = cat\n");
+        let error = git_limited(&root, &["config", "--list"], 64).unwrap_err();
+        assert!(error.contains("larger than 64 bytes"), "{error}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_cut_filter_listing_refuses_the_gate() {
+        let root = scratch_repo("cut-gate", "[filter \"f\"]\n\tclean = cat\n");
+        let error = refuse_filters_within(&root, 8, DEADLINE).unwrap_err();
+        assert!(error.contains("too large"), "{error}");
+        let error = refuse_filters(&root).unwrap_err();
+        assert!(error.contains("filter drivers"), "{error}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_listing_that_never_finishes_refuses_the_gate() {
+        // An include that is a FIFO with no writer: git config blocks reading it.
+        let root = scratch_repo("late-listing", "");
+        let fifo = root.join("pipe");
+        assert!(Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success());
+        let include = format!("[include]\n\tpath = {}\n", fifo.display());
+        fs::OpenOptions::new()
+            .append(true)
+            .open(root.join(".git/config"))
+            .unwrap()
+            .write_all(include.as_bytes())
+            .unwrap();
+        let started = Instant::now();
+        let error = refuse_filters_within(&root, FILTER_KEYS_LIMIT, Duration::from_millis(300))
+            .unwrap_err();
+        assert!(error.contains("stopped"), "{error}");
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_command_that_closes_its_output_is_waited_for() {
+        // stdout closes at once; git would exit with status 3 after the sleep.
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "exec >&-; sleep 0.3; exit 3"]);
+        let (status, out, _) = run_bounded(command, 4096, DEADLINE).unwrap();
+        assert_eq!(status.and_then(|status| status.code()), Some(3));
+        assert!(out.is_empty());
+    }
 
     #[test]
     fn a_command_past_its_deadline_is_stopped_with_an_error() {
