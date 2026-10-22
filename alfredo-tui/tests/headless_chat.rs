@@ -6,6 +6,7 @@ use ollama_fixture::{done, scripted_chat, tool_calls, Fixture, Reply};
 use serde_json::{json, Value};
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::{Command, Output, Stdio},
 };
@@ -1095,4 +1096,102 @@ fn headless_go_names_an_unrecordable_command_as_the_pause_reason() {
     let reason = failed[0]["reason"].as_str().unwrap();
     assert!(reason.contains(expected), "{reason}");
     let _ = fs::remove_dir_all(&root);
+}
+
+/// Issue 323: `--chat -` reads the prompt from stdin instead of sending a
+/// literal "-" to the model.
+#[test]
+fn chat_dash_reads_the_prompt_from_stdin() {
+    let root = repository("stdin");
+    let fixture = scripted_chat(vec![done("ok")]);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .args(["--model", "fixture", "--endpoint", &fixture.endpoint])
+        .arg("--workspace")
+        .arg(root.join("workspace"))
+        .arg("--state-dir")
+        .arg(root.join("state"))
+        .args(["--chat", "-", "--headless"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let mut stdin = child.stdin.take().unwrap();
+        stdin.write_all(b"from stdin").unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+    let value = result(&output);
+    assert_eq!(output.status.code(), Some(0), "{value}");
+    assert_eq!(value["state"], "done");
+    assert_eq!(value["reply"], "ok");
+    // The prompt the model saw came from stdin, not the literal "-".
+    let requests = fixture.requests.lock().unwrap();
+    let body = requests
+        .iter()
+        .find(|r| r.path == "POST /api/chat")
+        .unwrap()
+        .body
+        .to_string();
+    assert!(
+        body.contains("from stdin"),
+        "stdin prompt reached the model: {body}"
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Issue 323: `--chat -` with empty stdin is a usage error, not a turn.
+#[test]
+fn chat_dash_with_empty_stdin_is_a_usage_error() {
+    let root = repository("stdin-empty");
+    let fixture = scripted_chat(vec![done("unused")]);
+    let mut child = Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+        .args(["--model", "fixture", "--endpoint", &fixture.endpoint])
+        .arg("--workspace")
+        .arg(root.join("workspace"))
+        .arg("--state-dir")
+        .arg(root.join("state"))
+        .args(["--chat", "-", "--headless"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdin.take().unwrap());
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(2), "{}", stderr(&output));
+    assert!(
+        stderr(&output).contains("nonempty prompt on stdin"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(output.stdout.is_empty());
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Issue 323: `--chat` followed by a known flag (or nothing) reports a missing
+/// prompt instead of consuming the flag as the prompt.
+#[test]
+fn chat_followed_by_a_known_flag_reports_a_missing_prompt() {
+    let root = repository("stdin-flag");
+    let fixture = scripted_chat(vec![done("unused")]);
+    for args in [
+        &["--chat", "--headless"][..],
+        &["--chat", "--go", "x", "--headless"][..],
+        &["--chat"][..],
+    ] {
+        let output = run(&root, &fixture, args);
+        assert_eq!(
+            output.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+        assert!(
+            stderr(&output).contains("--chat needs a PROMPT"),
+            "{args:?}: {}",
+            stderr(&output)
+        );
+        assert!(output.stdout.is_empty(), "{args:?}");
+    }
 }

@@ -43,6 +43,88 @@ fn launch_error_message(error: String, journal: &std::path::Path) -> String {
     }
 }
 
+/// Cap on a `--chat -` prompt read from stdin (issue 323).
+const MAX_CHAT_STDIN_BYTES: usize = 256 * 1024;
+
+/// Resolve the `--chat PROMPT` value.
+///
+/// `-` reads the prompt from stdin (capped at [`MAX_CHAT_STDIN_BYTES`]); a value
+/// that is one of the known flags is rejected so `--chat --headless` reports a
+/// missing prompt instead of silently consuming the flag (issue 323).
+fn parse_chat_prompt(
+    args: &mut impl Iterator<Item = String>,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let value = args.next().ok_or("--chat needs a PROMPT")?;
+    if value == "-" {
+        return read_prompt_from_stdin();
+    }
+    if is_known_flag(&value) {
+        return Err("--chat needs a PROMPT".into());
+    }
+    if value.trim().is_empty() {
+        return Err("--chat needs a nonempty PROMPT".into());
+    }
+    Ok(value)
+}
+
+/// Read a `--chat -` prompt from stdin, enforcing the byte cap and rejecting
+/// empty input (issue 323).
+fn read_prompt_from_stdin() -> Result<String, Box<dyn std::error::Error>> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    std::io::stdin()
+        .take(MAX_CHAT_STDIN_BYTES as u64 + 1)
+        .read_to_end(&mut buf)?;
+    if buf.len() > MAX_CHAT_STDIN_BYTES {
+        let message = format!("--chat - stdin exceeds {MAX_CHAT_STDIN_BYTES} bytes");
+        return Err(message.into());
+    }
+    let prompt = String::from_utf8(buf)?;
+    if prompt.trim().is_empty() {
+        return Err("--chat - needs a nonempty prompt on stdin".into());
+    }
+    Ok(prompt)
+}
+
+/// True when `value` names a known CLI flag, so a missing `--chat` prompt that
+/// is actually the next flag is reported instead of consumed (issue 323).
+fn is_known_flag(value: &str) -> bool {
+    matches!(
+        value,
+        "--approve"
+            | "--chat"
+            | "--connect-retries"
+            | "--conversation"
+            | "--doctor"
+            | "--endpoint"
+            | "--go"
+            | "--headless"
+            | "--help"
+            | "-h"
+            | "--icons"
+            | "--inspect-qualification"
+            | "--keep-alive"
+            | "--max-repairs"
+            | "--max-turns"
+            | "--mission"
+            | "--model"
+            | "--new-mission"
+            | "--no-motion"
+            | "--num-ctx"
+            | "--on-finish"
+            | "--parallel-models"
+            | "--qualification-repetitions"
+            | "--qualify-inference"
+            | "--select"
+            | "--state-dir"
+            | "--structured-thinking"
+            | "--version"
+            | "-V"
+            | "--worker-format"
+            | "--workspace"
+    )
+}
+
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let starting = std::env::current_dir()?;
     let mut workspace = None;
@@ -101,11 +183,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--headless" => headless = true,
             "--chat" => {
-                let prompt = args.next().ok_or("--chat needs a PROMPT")?;
-                if prompt.trim().is_empty() {
-                    return Err("--chat needs a nonempty PROMPT".into());
-                }
-                chat_prompt = Some(prompt);
+                chat_prompt = Some(parse_chat_prompt(&mut args)?);
             }
             "--approve" => {
                 approve = Some(headless::Policy::parse(
@@ -2513,7 +2591,7 @@ const HELP_LINES: &[&str] = &[
     "Enter send · Ctrl+N new · Tab switch · Esc cancel · Ctrl+R retry · Ctrl+O show tool results in full (200 lines each) / one line",
     "F2 task detail/chat · F6 side pane · Up/Down select work · Alt+Left/Right collapse/expand · F3 evidence · F4 activity · PageUp/PageDown scroll · Ctrl+Q quit",
     "--headless (with --go GOAL) runs without a terminal: one stderr line per autopilot state change, then one JSON object {model, state, goal, branch, accepted, total, repairs, failed:[{id,title,reason}]} on stdout. Exit 0 all accepted; 1 partial, failed or interrupted (SIGINT/SIGTERM cancel workers like /stop); 2 setup or usage error (Ollama unreachable, model not installed: Error on stderr, nothing on stdout). A failed run's stderr line carries the reason. Waits for the --on-finish hook after the JSON and reports its failure on stderr. Opens the repository's default mission.",
-    "--chat PROMPT --headless runs one Chat Agent turn without a terminal (scripts, evals): read tools run; edit_file/write_file need --approve workspace-edits, which approves them only inside the repository and denies everything else (without it every change is denied). Outcomes go to chat-approvals.jsonl. One JSON object {model, state, policy, reply, steps, calls:[{tool,path,error,result}], approvals:[{tool,target,outcome,reason}], error} on stdout; exit 0 done, 1 failed or interrupted, 2 setup or usage error. The turn is not saved to the conversation. Interactive chat never skips approval.",
+    "--chat PROMPT|- --headless runs one Chat Agent turn without a terminal (scripts, evals): read tools run; edit_file/write_file need --approve workspace-edits, which approves them only inside the repository and denies everything else (without it every change is denied). `--chat -` reads PROMPT from stdin to EOF (cap 256 KiB); empty stdin or a missing prompt is a usage error (exit 2). Outcomes go to chat-approvals.jsonl. One JSON object {model, state, policy, reply, steps, calls:[{tool,path,error,result}], approvals:[{tool,target,outcome,reason}], error} on stdout; exit 0 done, 1 failed or interrupted, 2 setup or usage error. The turn is not saved to the conversation. Interactive chat never skips approval.",
     "--model NAME: in the terminal it is the model for new conversations (a restored conversation keeps its saved model). With --headless (--go or --chat) and --doctor an explicit --model is the model for that run even when the conversation has a saved one: it is checked against the installed list first (exit 2 names it), never saved, and echoed as \"model\" in the JSON and on one stderr line. Without --model (or with only ALFREDO_MODEL) the conversation's saved model applies.",
     "",
     "--doctor checks startup prerequisites without entering terminal mode or running inference.",
