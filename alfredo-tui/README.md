@@ -68,7 +68,7 @@ Esc denies and ends the turn (`docs/reference.md#chat-approval-and-file-edits`).
 (`docs/reference.md#chat-git-writes-and-push`). `run_command` runs an approved shell command in the Sandbox (network off), or on the host when escalated, behind a red HOST card (`docs/reference.md#chat-shell-commands-run_command`). For large or risky work chat calls
 `propose_plan`, which only prefills `/plan` or `/go` in your prompt; Enter starts it
 (`docs/reference.md#chat-proposes-governed-work`). Chat prompts also accept `@path/to/file`
-mentions: the file's committed HEAD content (at most 8 files, 32 KiB) is sent with that
+mentions: the file's current working-tree content (at most 8 files, 32 KiB) is sent with that
 message; see `docs/reference.md#chat-file-mentions-path`.
 
 `[ID]` defaults to the task selected in the task detail (F2). Everything is stored under
@@ -289,7 +289,7 @@ archive on a `v*` tag and creates a **draft** GitHub release.
 | `src/headless.rs` | `--go GOAL --headless`: autopilot without a terminal; `--chat PROMPT --headless`: one Chat Agent turn with a scripted approval policy; JSON result on stdout |
 | `src/on_finish.rs` | `--on-finish PROGRAM` completion hook (no shell, outside the sandbox, 10 s limit) |
 | `src/clean.rs` | `/clean`: removes retained worktrees of finished runs only |
-| `src/chat_mentions.rs`, `src/chat_context.rs` | `@path` mentions (committed HEAD content) and harness context for plain chat turns |
+| `src/chat_mentions.rs`, `src/chat_context.rs` | `@path` mentions (working-tree content) and harness context for plain chat turns |
 | `src/chat_tools/mod.rs`, `src/chat_tools/read.rs`, `src/chat_tools/git_read.rs`, `src/chat_tools/run.rs`, `src/chat_tools/edit.rs`, `src/chat_tools/shell.rs`, `src/chat_tools/approval.rs`, `src/chat_tools/git_write.rs`, `src/chat_tools/propose.rs` | Chat tool registry (definitions, tiers, dispatch, path confinement), read-only file and git tools, capped tool loop, write_file/edit_file, run_command (sandboxed or host-escalated), approval gate (card, decision, outcome log), git commit/switch/merge/push, propose_plan (prefills /plan or /go) |
 | `src/workstation.rs`, `src/wayfinder.rs` | One admitted workspace/mission plus its conversation owner; first-contact routing |
 | `src/selection.rs`, `src/selection_command.rs`, `src/selection_store.rs`, `src/missions.rs` | Startup workspace selection, its intent and journal; mission namespace discovery |

@@ -15,10 +15,10 @@
 pub mod allow;
 pub mod approval;
 mod edit;
-mod git_read;
+pub(crate) mod git_read;
 mod git_write;
 pub mod propose;
-mod read;
+pub(crate) mod read;
 mod run;
 mod shell;
 
