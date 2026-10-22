@@ -974,6 +974,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         )
                     });
                 if shown {
+                    work.app.note_approval_wait(request.session);
                     if let Some(old) = approval_replies.insert(request.session, request) {
                         old.cancel();
                     }
