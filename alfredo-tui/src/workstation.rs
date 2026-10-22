@@ -54,6 +54,7 @@ impl ChatView {
         }
         let snapshot = store.snapshot()?;
         let saved = ConversationStore::open_readonly(&store, conversation)?.load()?;
+        // `restore()` is used only to read the model the interactive restore would pick.
         let saved_model = saved.map(|saved| {
             let app = saved.restore();
             app.sessions[app.selected].model.clone()
