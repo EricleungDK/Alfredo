@@ -22,7 +22,7 @@ use std::{
     cell::Cell,
     io,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU32, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, Sender},
         Arc,
     },
@@ -51,6 +51,30 @@ pub enum Next {
     /// A runtime worker went idle: re-read every channel and task.
     Woken,
     Timeout,
+}
+
+/// Hang-up and terminate requests received by the interactive process (issue #342).
+static HANGUP: AtomicU32 = AtomicU32::new(0);
+
+extern "C" fn on_hangup(_: libc::c_int) {
+    HANGUP.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Make SIGHUP (closed terminal, dropped ssh) and SIGTERM request a quit like Ctrl+Q
+/// instead of ending the process at once, which would orphan a running host command.
+/// Interactive run loop only; the loop sees the flag within its 33 ms wait timeout.
+pub fn catch_hangup() {
+    let handler = on_hangup as extern "C" fn(libc::c_int) as libc::sighandler_t;
+    // SAFETY: the handler only stores to an atomic, which is async-signal-safe.
+    unsafe {
+        libc::signal(libc::SIGHUP, handler);
+        libc::signal(libc::SIGTERM, handler);
+    }
+}
+
+/// Whether SIGHUP or SIGTERM arrived since [`catch_hangup`].
+pub fn hangup_requested() -> bool {
+    HANGUP.load(Ordering::SeqCst) > 0
 }
 
 /// A source of terminal events, so in-loop prompts do not race the reader thread.

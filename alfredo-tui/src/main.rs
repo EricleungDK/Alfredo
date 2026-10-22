@@ -440,6 +440,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     execute!(io::stdout(), EnableBracketedPaste)?;
     // From here the reader thread owns terminal reads; prompts use `input`.
     input.spawn_reader()?;
+    alfredo_tui::wake::catch_hangup();
     let result = (|| -> io::Result<()> {
         let mut dirty = true;
         // A prompt held while earlier turns were summarised, ready to send.
@@ -932,6 +933,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 && !work.tasks.writing
                 && !work.wayfinder.active()
             {
+                break;
+            }
+            // SIGHUP/SIGTERM quit like Ctrl+Q: leave the loop, then the shared exit path below
+            // kills running host commands (logging `cancelled`), saves and restores the terminal.
+            if alfredo_tui::wake::hangup_requested() {
+                work.tasks.disable_dispatch();
                 break;
             }
             // Bound each batch so a fast stream cannot starve keyboard input.

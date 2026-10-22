@@ -6,7 +6,7 @@ Issue #235 journeys: "redraft README" asks for edit_file; the approval card show
 diff; y edits the file in place, n leaves it untouched and the model gets a refusal.
 Issue #264: text typed into the prompt while the card waits never decides it.
 Issue #302: Esc in the middle of an approved run_command (sandboxed or HOST) and Ctrl+Q
-both kill the command; its later `touch marker` never happens and the approval log says
+both kill the command; so do SIGHUP and SIGTERM (issue #342); its later `touch marker` never happens and the approval log says
 cancelled. Issue #239 journey: "refactor everything" asks for propose_plan; the turn ends and the
 prompt holds the editable /plan command; nothing else is requested or started."""
 import http.server
@@ -14,7 +14,9 @@ import json
 import os
 from pathlib import Path
 import select
+import signal
 import subprocess
+import termios
 import tempfile
 import threading
 import time
@@ -220,6 +222,20 @@ class ChatTools(unittest.TestCase):
             return False
         return state != 'Z'
 
+    def group_members(self, pgid):
+        """Live (not zombie) processes in process group `pgid`."""
+        members = []
+        for entry in Path('/proc').iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                fields = entry.joinpath('stat').read_text().rsplit(') ', 1)[1].split()
+            except OSError:
+                continue
+            if int(fields[2]) == pgid and fields[0] != 'Z':
+                members.append(int(entry.name))
+        return members
+
     def check_esc_stops_the_command(self, prompt):
         root = self.start_slow_command(prompt)
         # Issue #302: the status says what runs and that Esc stops it.
@@ -257,6 +273,33 @@ class ChatTools(unittest.TestCase):
         time.sleep(5)
         self.assertFalse(root.joinpath('marker').exists(), 'the command ran on after quit')
         self.assertEqual(self.approval_outcomes(), ['cancelled'])
+
+    def check_signal_kills_the_host_command(self, signum):
+        root = self.start_slow_command('slow command on host')
+        pid = int(root.joinpath('pid').read_text())
+        self.assertTrue(self.alive(pid))
+        os.kill(self.terminal.process.pid, signum)
+        deadline = time.time() + 10
+        while self.terminal.process.poll() is None and time.time() < deadline:
+            if select.select([self.terminal.master], [], [], 0.05)[0]:
+                self.terminal.output.extend(os.read(self.terminal.master, 65536))
+        self.assertIsNotNone(self.terminal.process.poll(), 'Alfredo did not exit')
+        self.assertEqual(self.terminal.process.returncode, 0, 'a signal quits like Ctrl+Q')
+        self.assertFalse(self.alive(pid), 'the host command outlived Alfredo')
+        # The whole process group is gone, not only the shell.
+        self.assertEqual(self.group_members(pid), [], 'part of the command group survived')
+        time.sleep(6)
+        self.assertFalse(root.joinpath('marker').exists(), 'the command ran on after the signal')
+        self.assertEqual(self.approval_outcomes(), ['cancelled'])
+        return root
+
+    def test_sighup_kills_a_running_host_command(self):
+        self.check_signal_kills_the_host_command(signal.SIGHUP)
+
+    def test_sigterm_kills_a_running_host_command_and_restores_the_terminal(self):
+        self.check_signal_kills_the_host_command(signal.SIGTERM)
+        self.assertIn(b'\x1b[?1049l', bytes(self.terminal.output), 'alternate screen left')
+        self.assertTrue(termios.tcgetattr(self.terminal.slave)[3] & termios.ICANON, 'raw mode off')
 
     def test_a_denied_edit_never_touches_the_file(self):
         self.terminal.write(b'redraft README\r')
