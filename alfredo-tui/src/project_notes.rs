@@ -81,6 +81,7 @@ impl Notes {
     }
 
     /// Stable hash of what the model is shown, so a changed file is announced again.
+    /// `DefaultHasher` is only compared within one process; the value is never persisted.
     pub fn fingerprint(&self) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
