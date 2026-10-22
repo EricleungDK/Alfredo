@@ -1521,6 +1521,13 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   `--num-ctx`; `/compact` works on that failed conversation. When the window cannot hold
   the tool definitions (about 3k tokens) plus a 256-token reply floor, as at `--num-ctx
   2048`, that turn runs as plain chat with a one-line notice.
+- **Time limits.** A `grep` stops after scanning 64 MiB of file content or 10 s,
+  returning the matches found so far plus `[stopped: scanned N MiB in S s; narrow with
+  path]`. The read calls of one model reply share a 30 s limit (time on approval
+  cards and on write or run calls does not count); read calls not started by then return `error: not run; round time limit reached`, and a running git
+  call is stopped. Esc (or `/stop`, a chat switch, quit) sets a cancel flag that `grep`
+  checks between files and git calls check every few milliseconds, so the work ends
+  within about a second instead of running on in the background.
 - **Loop.** The model may answer, or ask for tools; Alfredo runs the calls, sends the
   results back and asks again. A turn runs at most 8 tool rounds; per round 16 calls run,
   further calls (up to 64) get an `error: not run` result and any beyond are dropped;
