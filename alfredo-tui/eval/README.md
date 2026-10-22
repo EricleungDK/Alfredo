@@ -244,7 +244,10 @@ none touch your Ollama:
 
 - **M8/M9**: a marker-replying fake server (every reply is a unique `RPLYnnnX` string) and a pty.
   The probe scans raw pty bytes for the marker, so reply to screen is exact to about a millisecond
-  even while the spinner redraws. M8 runs `--probe-chats` chats; M9 types `--probe-keys` keys.
+  even while the spinner redraws. The server stamps the send time just before it writes the reply
+  (not after the flush, which let a fast reader see the marker first), so reply to screen includes
+  the write itself and is clamped at 0; `run_chat` waits up to 1 s for a late stamp, and its error
+  says whether the request never arrived or only the stamp is missing. M8 runs `--probe-chats` chats; M9 types `--probe-keys` keys.
 - **M10**: shells out to `cargo test --release --locked --test rendering_cost -- --ignored
   --nocapture` and parses the JSON it prints. This needs a release build of the test crate, which
   takes several minutes on 2 CPUs the first time (seconds once cached); skip it with

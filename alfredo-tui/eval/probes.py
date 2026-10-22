@@ -76,7 +76,7 @@ def run_render(tui_root, timeout=1800):
 
 
 class MarkerServer:
-    """Ollama-compatible loopback server whose reply is a unique marker, stamped on arrival and on send.
+    """Ollama-compatible loopback server whose reply is a unique marker, stamped on arrival and just before send.
 
     The marker lets the probe find the reply in raw pty bytes, which is exact where spinner redraws
     make "the screen changed" ambiguous. The prompt's last word keys the stamps.
@@ -113,9 +113,11 @@ class MarkerServer:
                 self.send_header('Content-Type', 'application/x-ndjson')
                 self.send_header('Connection', 'close')
                 self.end_headers()
-                self.wfile.write((json.dumps({'message': {'content': marker(key)}, 'done': True}) + '\n').encode())
-                self.wfile.flush()
+                body = (json.dumps({'message': {'content': marker(key)}, 'done': True}) + '\n').encode()
+                # Stamp before the write: the pty reader can see the marker the instant it is flushed.
                 server.sent[key] = time.monotonic()
+                self.wfile.write(body)
+                self.wfile.flush()
                 self.close_connection = True
 
         self.server = http.server.ThreadingHTTPServer(('127.0.0.1', 0), Handler)
@@ -128,6 +130,23 @@ class MarkerServer:
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=3)
+
+
+def server_stamps(server, key, wait=1.0):
+    """(arrive, sent) for `key`, waiting up to `wait` s for a late stamp; else {'error': ...} naming the missing one."""
+    deadline = time.monotonic() + wait
+    while key not in server.sent and time.monotonic() < deadline:
+        time.sleep(0.001)
+    if key not in server.arrive:
+        return {'error': f'chat {key} never reached the server'}
+    if key not in server.sent:
+        return {'error': f'chat {key} reached the server but the server recorded no send stamp'}
+    return server.arrive[key], server.sent[key]
+
+
+def reply_to_screen_ms(seen_at, sent_at):
+    """Send stamp to marker seen, in ms; clamped at 0 because the stamp is taken just before the write."""
+    return max(0.0, (seen_at - sent_at) * 1000)
 
 
 def marker(key):
@@ -188,10 +207,12 @@ def run_chat(binary, chats=DEFAULT_CHATS, model='fixture', tmp_root=None):
                          nap=0.0003):
                 return {'error': f'reply marker for chat {key} never reached the screen'}
             seen_at = seen[-1]
-            if key not in server.arrive or key not in server.sent:
-                return {'error': f'chat {key} never reached the server'}
-            enter_to_request.append((server.arrive[key] - pressed) * 1000)
-            reply_to_screen.append((seen_at - server.sent[key]) * 1000)
+            stamps = server_stamps(server, key)
+            if isinstance(stamps, dict):
+                return stamps
+            arrived, sent = stamps
+            enter_to_request.append((arrived - pressed) * 1000)
+            reply_to_screen.append(reply_to_screen_ms(seen_at, sent))
             _drain(terminal, 0.35)
         return {'enter_to_request_ms': enter_to_request, 'reply_to_screen_ms': reply_to_screen}
     except AssertionError as error:  # Terminal.pump: the TUI exited by itself
