@@ -310,8 +310,9 @@ pub(crate) fn refuse_filters(root: &Path) -> Result<(), String> {
 /// late listing is an error (run_bounded stops git), so the gate never trusts a prefix.
 fn refuse_filters_within(root: &Path, limit: usize, deadline: Duration) -> Result<(), String> {
     const NOT_RUN: &str = "git status and working-tree diffs are not run (git_log and git_diff with base and target still work)";
-    let command = git_command_within(root, &FILTER_KEYS_ARGS, deadline)?;
-    let (status, out, error) = run_bounded(command, limit, deadline)?;
+    let clock = Clock::start(deadline);
+    let command = git_command_within(root, &FILTER_KEYS_ARGS, clock)?;
+    let (status, out, error) = run_bounded(command, limit, clock.left())?;
     match status {
         None => Err(format!(
             "repository config is too large to check for filter drivers; {NOT_RUN}"
@@ -357,7 +358,13 @@ pub(crate) fn git_limited(root: &Path, args: &[&str], limit: usize) -> Result<St
 /// Run git in `root`, stdout read up to `limit` bytes. The flag is whether the output was
 /// cut at `limit`; a git that fails is an error with its first message line.
 fn git_output(root: &Path, args: &[&str], limit: usize) -> Result<(bool, String), String> {
-    read_output(git_command(root, args)?, args[0], limit, DEADLINE)
+    let clock = Clock::start(DEADLINE);
+    read_output(
+        git_command_within(root, args, clock)?,
+        args[0],
+        limit,
+        clock.left(),
+    )
 }
 
 /// Run `command` (git, named `verb` in messages), stdout read up to `limit` bytes within
@@ -380,16 +387,32 @@ fn read_output(
     Ok((cut, String::from_utf8_lossy(&out).into_owned()))
 }
 
-/// `git -C root ARGS` with the hardened environment, pinned to the git directory that
-/// [`verified_git_dir`] checked (issue #359).
-fn git_command(root: &Path, args: &[&str]) -> Result<Command, String> {
-    git_command_within(root, args, DEADLINE)
+/// One call's time budget, shared by its verification and its git run, so a call never takes
+/// longer than its deadline in all (issue #359).
+#[derive(Clone, Copy)]
+pub(crate) struct Clock {
+    started: Instant,
+    deadline: Duration,
 }
 
-/// [`git_command`] whose verification also runs within `deadline`: the caller's budget covers
-/// every git process it starts, the check included.
-fn git_command_within(root: &Path, args: &[&str], deadline: Duration) -> Result<Command, String> {
-    let verified = verified_git_dir_within(root, deadline, Config::Hardened)?;
+impl Clock {
+    pub(crate) fn start(deadline: Duration) -> Self {
+        Self {
+            started: Instant::now(),
+            deadline,
+        }
+    }
+
+    /// The budget not yet spent, for the next git process of the call.
+    pub(crate) fn left(&self) -> Duration {
+        self.deadline.saturating_sub(self.started.elapsed())
+    }
+}
+
+/// `git -C root ARGS` with the hardened environment, pinned to the git directory that
+/// [`verified_git_dir`] checked (issue #359). The verification draws on `clock`.
+fn git_command_within(root: &Path, args: &[&str], clock: Clock) -> Result<Command, String> {
+    let verified = verified_git_dir_within(root, clock, Config::Hardened)?;
     let mut command = hardened_command(root)?;
     pin_git_dir(&mut command, root, &verified);
     command.args(args);
@@ -432,7 +455,7 @@ const OUTSIDE: &str = "the workspace's .git points outside the Coding Workspace 
 /// leads elsewhere, is refused. Paths are compared canonically, so symlinks, `..`, relative
 /// back-references and whitespace in the gitfile cannot hide another repository.
 pub(crate) fn verified_git_dir(root: &Path, config: Config) -> Result<VerifiedGit, String> {
-    verified_git_dir_within(root, DEADLINE, config)
+    verified_git_dir_within(root, Clock::start(DEADLINE), config)
 }
 
 /// The git configuration a check runs under: the read tier's hardened one, or a write's,
@@ -443,11 +466,11 @@ pub(crate) enum Config {
     Owner,
 }
 
-/// [`verified_git_dir`] with its one git call stopped at `deadline`. A repository config
-/// that blocks git (a FIFO include) is then an error within the caller's budget.
-fn verified_git_dir_within(
+/// [`verified_git_dir`] whose one git call draws on `clock`. A repository config that blocks
+/// git (a FIFO include) is then an error within the caller's budget.
+pub(crate) fn verified_git_dir_within(
     root: &Path,
-    deadline: Duration,
+    clock: Clock,
     config: Config,
 ) -> Result<VerifiedGit, String> {
     let root = root
@@ -463,7 +486,7 @@ fn verified_git_dir_within(
         "--absolute-git-dir",
         "--git-common-dir",
     ]);
-    let (cut, listing) = read_output(command, "rev-parse", 64 << 10, deadline)?;
+    let (cut, listing) = read_output(command, "rev-parse", 64 << 10, clock.left())?;
     let lines: Vec<&str> = listing.lines().collect();
     let [git_dir, common_dir] = lines[..] else {
         return Err(format!("cannot locate the repository; {OUTSIDE}"));
@@ -495,10 +518,46 @@ fn verified_git_dir_within(
     if !verified {
         return Err(OUTSIDE.to_string());
     }
+    // Git reads objects through `objects/info/alternates` too: a store that borrows another
+    // repository's objects shows its history, so every entry must stay inside the repository.
+    for objects in [common_dir.join("objects"), git_dir.join("objects")] {
+        alternates_stay_within(&objects, &common_dir, 0)?;
+    }
     Ok(VerifiedGit {
         git_dir,
         common_dir,
     })
+}
+
+/// Refuses an object store whose `info/alternates` (followed recursively, as git does) names
+/// an object directory outside `common_dir`, or that cannot be read whole (issue #359).
+fn alternates_stay_within(objects: &Path, common_dir: &Path, depth: u32) -> Result<(), String> {
+    const ALTERNATES: &str = "the workspace's repository borrows objects from outside it (objects/info/alternates); git tools refuse";
+    let file = objects.join("info").join("alternates");
+    match fs::symlink_metadata(&file) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(ALTERNATES.to_string()),
+    }
+    // Git follows at most a few links; a deeper chain is refused rather than trusted.
+    if depth > 5 {
+        return Err(ALTERNATES.to_string());
+    }
+    let text = fs::read_to_string(&file).map_err(|_| ALTERNATES.to_string())?;
+    for line in text.lines().map(str::trim) {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let entry = objects
+            .join(line)
+            .canonicalize()
+            .map_err(|_| ALTERNATES.to_string())?;
+        if !entry.starts_with(common_dir) {
+            return Err(ALTERNATES.to_string());
+        }
+        alternates_stay_within(&entry, common_dir, depth + 1)?;
+    }
+    Ok(())
 }
 
 /// A git-reported directory, canonical, or the refusal when it is not a directory.

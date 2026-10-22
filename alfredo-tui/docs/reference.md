@@ -1501,13 +1501,14 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   (letters, digits, `._/-~^@{}+`; no leading `-`, `..` or `:`) and follow
   `--end-of-options`; `path` is a literal pathspec under the same exclusions. Diffs leave
   out secret files (`.env*`, `*.pem`, `*.key`, `*.p12`, `*.pfx`) and files renamed or
-  copied from them. Git runs only in the workspace itself (`GIT_CEILING_DIRECTORIES`) and
-  only on its own repository: a `.git` that points elsewhere (a gitfile, or a `commondir`
-  file) is refused, while a linked worktree of the workspace's repository is read. A call
-  is stopped after 15 s, and when the repository config defines filter drivers or
+  copied from them. Git runs only in the workspace itself (`GIT_CEILING_DIRECTORIES`),
+  a call is stopped after 15 s, and when the repository config defines filter drivers or
   includes, `git_status` and working-tree or staged diffs are refused (they would run the
   repository's clean filters); `git_log` and `git_diff` with `base` and `target` still work.
   A config too large to check is refused the same way.
+  Git also refuses a `.git` that points at another repository (a gitfile, a `commondir`
+  file, or `objects/info/alternates` into another repository); a linked worktree of the
+  workspace's own repository is read.
 - **Size.** Every result is capped at 16 KiB; refusals come back to the model as
   `error: …` text it can react to. Results are also budgeted to the room left. With
   `--num-ctx`, each result is cut (same `[truncated: …]` marker) to `(window - prompt
