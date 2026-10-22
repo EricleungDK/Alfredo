@@ -15,12 +15,17 @@ pub fn safe(text: &str) -> String {
 
 /// Controls plus format (Cf) characters: bidi overrides and isolates, zero-width and
 /// invisible marks could make a prompt or an approval card show other text than runs.
-/// Shared by `propose_plan` (stripped) and the approval card (shown, see [`safe_visible`]).
+/// Line and paragraph separators (U+2028, U+2029, and NEL U+0085) start a new line in
+/// a log or prompt, so they are hidden too (issue #361).
+/// Shared by `propose_plan` and project notes (stripped) and the approval card (shown,
+/// see [`safe_visible`]).
 pub fn hidden(c: char) -> bool {
     c.is_control()
         || matches!(
             c,
-            '\u{00AD}'
+            '\u{0085}'
+                | '\u{2028}'..='\u{2029}'
+                | '\u{00AD}'
                 | '\u{0600}'..='\u{0605}'
                 | '\u{061C}'
                 | '\u{06DD}'
@@ -59,7 +64,18 @@ pub fn safe_visible(text: &str) -> String {
 
 /// [`safe_visible`] on one line.
 pub fn single_line_visible(text: &str) -> String {
-    safe_visible(text).replace(['\n', '\t'], " ")
+    safe_visible(&line_breaks_as_spaces(text))
+}
+
+/// Line breaks (LF, tab, NEL and the Unicode line and paragraph separators) become a
+/// space, so single-line output never starts a second line (issue #361).
+fn line_breaks_as_spaces(text: &str) -> String {
+    text.chars()
+        .map(|c| match c {
+            '\n' | '\t' | '\u{0085}' | '\u{2028}' | '\u{2029}' => ' ',
+            _ => c,
+        })
+        .collect()
 }
 
 /// Truncate to `width` terminal cells, marking the cut with `…`.
@@ -210,7 +226,7 @@ pub fn autopilot_row(status: &crate::autopilot::Status, width: usize) -> String 
 }
 
 pub fn single_line(text: &str) -> String {
-    safe(text).replace(['\n', '\t'], " ")
+    safe(&line_breaks_as_spaces(text))
 }
 
 /// Which area the footer describes.

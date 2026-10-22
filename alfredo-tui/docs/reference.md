@@ -222,7 +222,7 @@ Approval gate, answered by a scripted policy instead of a card:
 - no `--approve`: every mutating call is denied;
 - `--approve workspace-edits`: `edit_file` and `write_file` whose path stays inside the
   repository are approved; anything else (other tools, later card kinds) is denied. A path
-  with a control character is refused before asking, and stderr lines carry no control characters.
+  with a control character is refused before asking, and stderr lines carry no control characters; format characters (such as U+202E) show as `<U+XXXX>` and line separators become spaces.
 
 There is no other policy and no interactive equivalent: interactive chat always asks
 (ADR 0004). `--approve` is refused without `--chat … --headless`, and `--chat` without
