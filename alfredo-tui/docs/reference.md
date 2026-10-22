@@ -1657,7 +1657,10 @@ default false), `timeout_seconds` (1–600, default 120).
 - **Escalated.** `escalate: true` runs on the host with your environment and network
   (for `git push`, package installs). The card is red with a reversed
   `! HOST · network on · your environment and credentials (SSH agent, tokens)` banner
-  and `run on HOST …`. Denying it runs nothing. Escalated
+  and `run on HOST …`. Denying it runs nothing.
+  The command runs in its own session with no controlling terminal, so a prompt that
+  needs one (sudo password, ssh passphrase or host key, git credentials) fails with a
+  note to use ssh-agent or a credential helper instead of drawing over the TUI. Escalated
   outcomes are logged with `"escalated": true` and show as `Chat run_command (HOST) …` in
   F4. An always-allow rule covers an escalated card only when the rule is itself
   escalated (see [always-allow rules](#chat-always-allow-rules)).
