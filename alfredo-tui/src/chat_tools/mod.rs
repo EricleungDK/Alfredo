@@ -261,7 +261,7 @@ pub(crate) fn open_confined(
         .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
         .open(resolved)
         .map_err(|error| match error.raw_os_error() {
-            Some(libc::ELOOP) => "changed to a symbolic link while it was read; refused".into(),
+            Some(libc::ELOOP) => "became a symbolic link after the workspace check; refused".into(),
             _ => error.to_string(),
         })?;
     let metadata = file.metadata().map_err(|error| error.to_string())?;
@@ -276,7 +276,14 @@ pub(crate) fn open_confined(
 /// `/proc/self/fd/N` names the file the handle refers to. Without it the read is refused.
 #[cfg(target_os = "linux")]
 pub(crate) fn confined_handle(workspace: &Path, file: &std::fs::File) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
     use std::os::unix::io::AsRawFd;
+    // A file unlinked after the open reads back as "<path> (deleted)", which the name
+    // checks would misread, so the handle's own link count decides first.
+    let links = file.metadata().map_err(|error| error.to_string())?.nlink();
+    if links == 0 {
+        return Err("removed while it was read; refused".into());
+    }
     let opened = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
         .map_err(|_| "cannot confirm where the file lies (no /proc); refused".to_string())?;
     let root = workspace

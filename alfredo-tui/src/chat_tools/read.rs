@@ -79,6 +79,11 @@ pub const GREP: Tool = Tool {
 /// handle, so a file swapped after the check is refused (issue #360).
 fn text(root: &Path, path: &Path) -> Result<String, String> {
     let (file, len) = open_confined(root, path)?;
+    contents(file, len)
+}
+
+/// The text of an opened file whose handle reports `len` bytes (see [`text`]).
+fn contents(file: std::fs::File, len: u64) -> Result<String, String> {
     if len > MAX_FILE {
         return Err(format!(
             "file is {len} bytes, over the {MAX_FILE}-byte read limit; use grep"
@@ -274,8 +279,12 @@ fn grep_within(
             stopped = true;
             break;
         }
-        scanned += std::fs::metadata(file).map_or(0, |m| m.len().min(MAX_FILE));
-        let Ok(content) = text(root, file) else {
+        // The budget counts what the handle reports, as the open saw it (issue #360).
+        let Ok((handle, len)) = open_confined(root, file) else {
+            continue;
+        };
+        scanned += len.min(MAX_FILE);
+        let Ok(content) = contents(handle, len) else {
             continue;
         };
         for (number, line) in content.lines().enumerate() {
