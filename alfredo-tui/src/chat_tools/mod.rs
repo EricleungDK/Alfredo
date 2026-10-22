@@ -275,6 +275,6 @@ mod cap_tests {
         );
         // A leading newline never backs up to an empty body.
         let leading = cap_to("\nabcdefgh".into(), 1);
-        assert!(leading.starts_with("\n[truncated: 1 of "), "{leading}");
+        assert!(leading.starts_with("\n\n[truncated: 1 of "), "{leading}");
     }
 }
