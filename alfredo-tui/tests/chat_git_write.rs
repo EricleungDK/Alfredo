@@ -748,8 +748,9 @@ fn script(path: &Path, body: &str) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// Sets HOME to an empty directory for a test and restores it on drop: a signing key in
-/// the owner's global config would stop git from running a key command.
+/// Sets HOME to an empty directory for one test and restores it on drop. It is process-wide
+/// (the environment is shared), so only the commit key test uses it: a signing key in the
+/// owner's global config would stop git from running the key command that test checks.
 struct EmptyHome(Option<std::ffi::OsString>);
 
 impl EmptyHome {
@@ -882,7 +883,9 @@ fn a_push_never_goes_through_a_repository_proxy_or_tls_override() {
     assert!(result.is_err(), "{result:?}");
 }
 
-/// #309 f: push.followTags sends an annotated tag the card does not list.
+/// #309 f: push.followTags sends an annotated tag the card does not list. The repository
+/// config route is refused by the allowlist; `--no-follow-tags` covers the owner's own
+/// global config, which is trusted and read by the push.
 #[test]
 fn a_push_never_sends_tags_the_card_does_not_list() {
     let repo = Repo::new().with_remote();
@@ -971,6 +974,14 @@ fn push_remotes_must_be_https_ssh_or_scp_style() {
         "fd::3",
         "ssh://-oProxyCommand=touch/x.git",
         "https://-evil.example/x.git",
+        // libcurl ends the authority at `?` or `#`: these resolve evil-probe.invalid.
+        "https://evil-probe.invalid?@github.com/o/r.git",
+        "https://evil-probe.invalid#@github.com/o/r.git",
+        // More than one `@`, and a backslash, where the host is read differently.
+        "https://a@b@github.com/x",
+        "https://github.com\\@evil/x",
+        "ssh://a@b@github.com/o/r.git",
+        "git@github.com@evil:o/r.git",
     ] {
         git(&repo.root, &["remote", "set-url", "origin", url]);
         let error = repo.card("git_push", json!({})).unwrap_err();
@@ -999,6 +1010,24 @@ fn commit_refuses_repository_config_outside_the_allowlist() {
             "{key}: {error}"
         );
     }
+}
+
+/// A subsection name may hold `=`: `[remote "a.url=z"] vcs = probe` must not read as the
+/// allowed key `remote.a.url`, so the listing is parsed as NUL-separated records (#309).
+#[test]
+fn a_config_subsection_holding_an_equals_sign_is_refused_by_its_full_key() {
+    let repo = Repo::new();
+    let mut config = fs::OpenOptions::new()
+        .append(true)
+        .open(repo.root.join(".git/config"))
+        .unwrap();
+    write!(config, "[remote \"a.url=z\"]\n\tvcs = probe\n").unwrap();
+    drop(config);
+    fs::write(repo.root.join("b.txt"), "b\n").unwrap();
+    let error = repo
+        .card("git_commit", json!({"message": "b", "files": ["b.txt"]}))
+        .unwrap_err();
+    assert!(error.contains("remote.a.url=z.vcs"), "{error}");
 }
 
 /// Keys the chat writes need for ordinary repositories stay allowed.
