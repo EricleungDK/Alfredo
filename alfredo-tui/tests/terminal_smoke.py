@@ -663,6 +663,19 @@ class TerminalSmoke(unittest.TestCase):
             os.write(master, b'\r')  # Enter on the placeholder creates the missing default mission.
             wait_for('◈ ○ chat 1'.encode())
             os.write(master, b'/scope\r')
+            # The default mission's creation can still be acknowledging when chat 1
+            # first shows; the app then rejects /scope and keeps it in the draft.
+            # Press Enter again until the command is accepted (CI flake, release smoke).
+            accepted_by = time.monotonic() + 30
+            while 'Outside flow' not in visible_screen(output):
+                self.assertLess(time.monotonic(), accepted_by, visible_screen(output))
+                if select.select([master], [], [], 0.05)[0]:
+                    output.extend(os.read(master, 65536))
+                    continue
+                if 'Wait for the pending acknowledgment' in visible_screen(output):
+                    time.sleep(0.3)
+                    os.write(master, b'\r')
+                self.assertIsNone(process.poll(), output.decode(errors='replace'))
             wait_for(b'Outside flow')
             os.write(master, b'/chat\r@unknown request\r')
             wait_for(b'Unknown capability')
