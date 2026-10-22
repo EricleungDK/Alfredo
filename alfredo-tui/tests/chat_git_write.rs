@@ -317,9 +317,13 @@ fn switch_creates_or_changes_branch_and_card_shows_from_to() {
 fn padded_config_filter_is_refused_before_switch() {
     let repo = Repo::new();
     repo.go_branch();
+    // The attribute lives on the target branch, so the checkout of feature.txt runs the
+    // smudge filter there (without the fix the marker is created).
+    git(&repo.root, &["checkout", "-q", "alfredo/go-7"]);
     fs::write(repo.root.join(".gitattributes"), "*.txt filter=s\n").unwrap();
     git(&repo.root, &["add", ".gitattributes"]);
     git(&repo.root, &["commit", "-q", "-m", "attributes"]);
+    git(&repo.root, &["checkout", "-q", "main"]);
     let marker = repo.base.join("smudge-ran");
     let mut config = fs::OpenOptions::new()
         .append(true)
@@ -334,11 +338,10 @@ fn padded_config_filter_is_refused_before_switch() {
     )
     .unwrap();
     drop(config);
-    let error = repo
-        .approve("git_switch", json!({"branch": "alfredo/go-7"}))
-        .unwrap_err();
+    let outcome = repo.approve("git_switch", json!({"branch": "alfredo/go-7"}));
+    assert!(!marker.exists(), "repository filter ran: {outcome:?}");
+    let error = outcome.unwrap_err();
     assert!(error.contains("filter drivers"), "{error}");
-    assert!(!marker.exists(), "repository filter ran");
     assert_eq!(repo.branch(), "main");
 }
 
