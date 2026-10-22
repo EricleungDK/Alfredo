@@ -1569,7 +1569,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 Ok(notice) => {
                                     work.app.sessions[index].remember_submission();
                                     work.app.sessions[index].clear_draft();
-                                    if notice.contains('\n') {
+                                    if args.trim().is_empty() && notice.contains('\n') {
                                         work.app.notice.clear();
                                         work.app.transient_rows =
                                             notice.lines().map(str::to_string).collect();

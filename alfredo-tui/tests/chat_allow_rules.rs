@@ -457,6 +457,39 @@ async fn a_rule_approved_run_command_reads_running_run_command_until_it_ends() {
     let _ = fs::remove_dir_all(state);
 }
 
+/// A rule announced for a call that never reported (Esc) marks no later call.
+#[test]
+fn a_cancelled_rule_run_does_not_mark_the_next_turns_card_approved_call() {
+    let mut session = Session::new("m".into());
+    session.insert("go");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(
+        attempt,
+        Update::RuleRunning {
+            tool: "run_command".into(),
+            rule: 7,
+        },
+    );
+    session.cancel();
+    session.insert("again");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(
+        attempt,
+        Update::ToolResult {
+            call: alfredo_tui::model::ToolCall {
+                name: "edit_file".into(),
+                arguments: json!({}),
+            },
+            result: "ok".into(),
+            new_round: true,
+        },
+    );
+    let at = session.messages.len() - 1;
+    assert_eq!(session.rule_of(at, 0), None);
+}
+
 /// Issue #320: `/allow` lists every rule in full on its own wrapped row.
 #[test]
 fn allow_lists_every_rule_in_full_at_100_columns() {

@@ -867,7 +867,6 @@ impl Session {
         })
     }
 
-    /// Tool rounds of the reply at `assistant_index` (empty when none).
     /// The always-allow rule that approved call `ordinal` (counted across the reply's
     /// rounds) of assistant message `assistant_index`, if one did.
     pub fn rule_of(&self, assistant_index: usize, ordinal: usize) -> Option<u64> {
@@ -878,6 +877,7 @@ impl Session {
             .map(|(_, rule)| *rule)
     }
 
+    /// Tool rounds of the reply at `assistant_index` (empty when none).
     pub fn tool_steps(&self, assistant_index: usize) -> &[ToolStep] {
         self.tool_steps
             .get(&assistant_index)
@@ -1073,6 +1073,7 @@ impl Session {
         self.compacting = None;
         self.approval = None;
         self.running_command = false;
+        self.pending_rule = None;
         if self.status.active() {
             self.status = Status::Cancelled;
             self.retry = None;
@@ -1718,6 +1719,14 @@ impl Session {
         if !matches!(update, Update::Metrics(_) | Update::RuleRunning { .. }) {
             self.running_command = false;
         }
+        // A rule only belongs to the call it announced: its result takes it, anything
+        // else (Done, Failed, a new round) drops it.
+        if !matches!(
+            update,
+            Update::Metrics(_) | Update::RuleRunning { .. } | Update::ToolResult { .. }
+        ) {
+            self.pending_rule = None;
+        }
         match update {
             Update::RuleRunning { tool, rule } => {
                 self.running_command = tool == "run_command";
@@ -1855,6 +1864,7 @@ impl Session {
         }
         if !self.status.active() {
             self.running_command = false;
+            self.pending_rule = None;
             self.retry = None;
             self.queued = false;
             self.queue_observation = None;
