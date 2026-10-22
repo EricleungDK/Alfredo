@@ -1523,8 +1523,8 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   2048`, that turn runs as plain chat with a one-line notice.
 - **Time limits.** A `grep` stops after scanning 64 MiB of file content or 10 s,
   returning the matches found so far plus `[stopped: scanned N MiB in S s; narrow with
-  path]`. A tool round (the calls of one model reply) has a 30 s limit; calls not
-  started by then return `error: not run; round time limit reached`, and a running git
+  path]`. The read calls of one model reply share a 30 s limit (time on approval
+  cards and on write or run calls does not count); read calls not started by then return `error: not run; round time limit reached`, and a running git
   call is stopped. Esc (or `/stop`, a chat switch, quit) sets a cancel flag that `grep`
   checks between files and git calls check every few milliseconds, so the work ends
   within about a second instead of running on in the background.
