@@ -1192,6 +1192,16 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
         );
         lines.push(Line::default());
     }
+    // Project notes arrival (issue #322): display only, not a message.
+    if !session.notes_lines().is_empty() {
+        lines.extend(
+            session
+                .notes_lines()
+                .iter()
+                .map(|line| Line::styled(safe(line), dim())),
+        );
+        lines.push(Line::default());
+    }
     let mut receipts = session.task_receipts().iter().peekable();
     // A Wayfinder preparation can finish after a later command was admitted.
     // Render at its saved user-turn boundary, preserving sequence within a boundary.
