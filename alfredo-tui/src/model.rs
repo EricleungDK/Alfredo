@@ -197,6 +197,13 @@ pub enum Update {
         result: String,
         new_round: bool,
     },
+    /// A tool call is about to run because always-allow rule `rule` approved it, with no
+    /// card (issue #320). Display only: marks the call's row and, for `run_command`,
+    /// the `running run_command` status.
+    RuleRunning {
+        tool: String,
+        rule: u64,
+    },
     Done,
     Failed(String),
 }
@@ -260,6 +267,13 @@ pub struct Session {
     /// Sent before that reply as context; saved (schema v19).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     tool_steps: std::collections::BTreeMap<usize, Vec<ToolStep>>,
+    /// Always-allow rule that approved each call, keyed by assistant-message index then
+    /// the call's position among that reply's calls (issue #320). Display only; not saved.
+    #[serde(skip)]
+    rule_marks: std::collections::BTreeMap<usize, Vec<(usize, u64)>>,
+    /// Rule of the call that is running now, taken by its result.
+    #[serde(skip)]
+    pending_rule: Option<u64>,
     pub scroll: std::cell::Cell<u16>,
     #[serde(
         default,
@@ -335,6 +349,8 @@ impl Session {
             attempt: 0,
             attachments: Default::default(),
             tool_steps: Default::default(),
+            rule_marks: Default::default(),
+            pending_rule: None,
             scroll: std::cell::Cell::new(0),
             reading: Default::default(),
             transcript_cache: Default::default(),
@@ -852,6 +868,16 @@ impl Session {
     }
 
     /// Tool rounds of the reply at `assistant_index` (empty when none).
+    /// The always-allow rule that approved call `ordinal` (counted across the reply's
+    /// rounds) of assistant message `assistant_index`, if one did.
+    pub fn rule_of(&self, assistant_index: usize, ordinal: usize) -> Option<u64> {
+        self.rule_marks
+            .get(&assistant_index)?
+            .iter()
+            .find(|(at, _)| *at == ordinal)
+            .map(|(_, rule)| *rule)
+    }
+
     pub fn tool_steps(&self, assistant_index: usize) -> &[ToolStep] {
         self.tool_steps
             .get(&assistant_index)
@@ -914,6 +940,7 @@ impl Session {
         self.messages.pop();
         self.sources.remove(&self.messages.len());
         self.tool_steps.remove(&self.messages.len());
+        self.rule_marks.remove(&self.messages.len());
         Ok(self.start())
     }
 
@@ -1677,6 +1704,7 @@ impl Session {
                 | Update::Token(_)
                 | Update::ToolStep(_)
                 | Update::ToolResult { .. }
+                | Update::RuleRunning { .. }
         ) {
             self.sources
                 .entry(self.messages.len() - 1)
@@ -1687,10 +1715,14 @@ impl Session {
         if !matches!(update, Update::Retrying(_) | Update::Metrics(_)) {
             self.retry = None;
         }
-        if !matches!(update, Update::Metrics(_)) {
+        if !matches!(update, Update::Metrics(_) | Update::RuleRunning { .. }) {
             self.running_command = false;
         }
         match update {
+            Update::RuleRunning { tool, rule } => {
+                self.running_command = tool == "run_command";
+                self.pending_rule = Some(rule);
+            }
             Update::Metrics(metrics) => self.metrics = Some(metrics),
             Update::Retrying(retry) => {
                 if self.status == Status::Connecting {
@@ -1781,6 +1813,11 @@ impl Session {
                 result,
                 new_round,
             } => {
+                let rule = self.pending_rule.take();
+                let ordinal = self
+                    .tool_steps
+                    .get(&(self.messages.len() - 1))
+                    .map_or(0, |rounds| rounds.iter().map(|s| s.calls.len()).sum());
                 let total = self.messages.iter().map(|m| m.content.len()).sum::<usize>()
                     + self.tool_bytes();
                 let step = ToolStep {
@@ -1796,6 +1833,12 @@ impl Session {
                             self.draft = command;
                             self.end();
                         }
+                    }
+                    if let Some(rule) = rule {
+                        self.rule_marks
+                            .entry(self.messages.len() - 1)
+                            .or_default()
+                            .push((ordinal, rule));
                     }
                     let rounds = self.tool_steps.entry(self.messages.len() - 1).or_default();
                     match rounds.last_mut() {
@@ -1827,6 +1870,9 @@ pub struct App {
     pub sessions: Vec<Session>,
     pub selected: usize,
     pub notice: String,
+    /// Rows shown under the transcript until the next key (`/allow` lists each rule on
+    /// its own row; issue #320). Not saved.
+    pub transient_rows: Vec<String>,
     pub models: Vec<String>,
     pub models_visible: bool,
     pub models_pending: bool,
@@ -1853,6 +1899,7 @@ impl App {
             sessions: vec![Session::new(model)],
             selected: 0,
             notice: String::new(),
+            transient_rows: Vec::new(),
             models: Vec::new(),
             models_visible: false,
             models_pending: false,
