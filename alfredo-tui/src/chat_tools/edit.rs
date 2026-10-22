@@ -13,7 +13,7 @@ const MAX_PREVIEW_LINES: usize = 80;
 pub const WRITE_FILE: Tool = Tool {
     name: "write_file",
     tier: Tier::Mutating,
-    description: "Create or replace a UTF-8 text file in the Coding Workspace with the given full content. Needs the owner's approval each call; the owner sees a diff. Prefer edit_file for small changes to an existing file. Missing parent directories are created too, and the approval card lists them (new directories: ...); none are created outside the workspace or through a symlink.",
+    description: "Create or replace a UTF-8 text file in the Coding Workspace with the given full content. Needs the owner's approval each call; the owner sees a diff. Prefer edit_file for small changes to an existing file. Creates missing directories.",
     parameters: || {
         json!({
             "type": "object",
