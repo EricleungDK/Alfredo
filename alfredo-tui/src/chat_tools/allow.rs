@@ -145,12 +145,11 @@ pub fn rule_for(card: &Card) -> Result<Rule, String> {
     })
 }
 
-/// One line naming what a rule covers.
+/// One line naming what a rule covers, in full (the view wraps it; issue #320).
 pub fn describe(rule: &Rule) -> String {
     let clean = |text: &str| -> String {
         text.chars()
             .map(|c| if c.is_control() { ' ' } else { c })
-            .take(120)
             .collect()
     };
     match &rule.command {
@@ -299,7 +298,8 @@ impl Rules {
     }
 }
 
-/// `/allow [clear [ID]]`: `args` is the text after `/allow`. `Ok` is the notice.
+/// `/allow [clear [ID]]`: `args` is the text after `/allow`. `Ok` is the notice; the rule
+/// list is several lines (a heading, then one row per rule).
 pub fn slash(rules: &Rules, args: &str) -> Result<String, String> {
     let words: Vec<&str> = args.split_whitespace().collect();
     match words.as_slice() {
@@ -308,9 +308,10 @@ pub fn slash(rules: &Rules, args: &str) -> Result<String, String> {
             if list.is_empty() {
                 return Ok("No always-allow rules · press a on an approval card to add one".into());
             }
+            // One row per rule (issue #320); the terminal shows the rows wrapped.
             Ok(format!(
-                "Always-allow rules: {} · /allow clear [ID] removes",
-                list.iter().map(describe).collect::<Vec<_>>().join(" · ")
+                "Always-allow rules · /allow clear [ID] removes\n{}",
+                list.iter().map(describe).collect::<Vec<_>>().join("\n")
             ))
         }
         ["clear"] => rules
