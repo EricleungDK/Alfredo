@@ -161,7 +161,10 @@ pub(crate) fn cap_to(text: String, limit: usize) -> String {
     // A budgeted cut of multi-line text ends on a whole line, unless that would discard
     // half the budget (a short header followed by one huge line keeps the plain cut).
     if limit < MAX_OUTPUT && text.as_bytes().get(end) != Some(&b'\n') {
-        if let Some(newline) = text[..end].rfind('\n').filter(|at| *at >= end / 2) {
+        if let Some(newline) = text[..end]
+            .rfind('\n')
+            .filter(|at| *at > 0 && *at >= end / 2)
+        {
             end = newline;
         }
     }
@@ -258,5 +261,20 @@ mod cap_tests {
         assert!(kept.ends_with("filler"), "{kept}");
         assert!(kept.len() >= 2000 && kept.len() <= 4000);
         assert!(footer.starts_with("[truncated: "), "{footer}");
+    }
+
+    #[test]
+    fn budgeted_cut_backs_up_only_from_the_half_budget_on() {
+        // limit 10: a newline at index 5 (end / 2) backs up; at index 4 the plain cut stays.
+        let at_half = cap_to("aaaaa\nbbbbbbbbbbbbbb".into(), 10);
+        assert!(at_half.starts_with("aaaaa\n[truncated: 5 of "), "{at_half}");
+        let before_half = cap_to("aaaa\nbbbbbbbbbbbbbbb".into(), 10);
+        assert!(
+            before_half.starts_with("aaaa\nbbbbb\n[truncated: 10 of "),
+            "{before_half}"
+        );
+        // A leading newline never backs up to an empty body.
+        let leading = cap_to("\nabcdefgh".into(), 1);
+        assert!(leading.starts_with("\n[truncated: 1 of "), "{leading}");
     }
 }
