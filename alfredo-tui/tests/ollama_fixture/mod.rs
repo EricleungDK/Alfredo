@@ -298,8 +298,8 @@ mod tests {
 
     #[test]
     fn serve_survives_another_listener_taking_the_reserved_port() {
-        let addr = reserve();
-        let squatter = TcpListener::bind(addr).unwrap();
+        let squatter = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = squatter.local_addr().unwrap();
         let fixture = serve(addr, |_, _| done("ok"));
         assert_ne!(fixture.endpoint, endpoint(addr));
         assert!(get(&fixture.endpoint).contains("200 OK"));
@@ -316,8 +316,11 @@ mod tests {
 
     #[test]
     fn serve_at_waits_for_a_port_that_is_released_shortly() {
-        let addr = reserve();
-        let squatter = TcpListener::bind(addr).unwrap();
+        // The test owns the port from the start: binding port 0 hands us a free
+        // one atomically. `reserve()` here would close the port and then rebind
+        // it, and a parallel test could take it in between (issue #373).
+        let squatter = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = squatter.local_addr().unwrap();
         let release = thread::spawn(move || {
             thread::sleep(Duration::from_millis(200));
             drop(squatter);
