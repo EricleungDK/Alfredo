@@ -17,6 +17,7 @@ use ratatui::{backend::TestBackend, Terminal};
 use serde_json::json;
 use std::{
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -310,6 +311,35 @@ fn switch_creates_or_changes_branch_and_card_shows_from_to() {
         .card("git_switch", json!({"branch": "main", "create": true}))
         .unwrap_err();
     assert!(error.contains("exists"), "{error}");
+}
+
+#[test]
+fn padded_config_filter_is_refused_before_switch() {
+    let repo = Repo::new();
+    repo.go_branch();
+    fs::write(repo.root.join(".gitattributes"), "*.txt filter=s\n").unwrap();
+    git(&repo.root, &["add", ".gitattributes"]);
+    git(&repo.root, &["commit", "-q", "-m", "attributes"]);
+    let marker = repo.base.join("smudge-ran");
+    let mut config = fs::OpenOptions::new()
+        .append(true)
+        .open(repo.root.join(".git/config"))
+        .unwrap();
+    // More than 1 MiB of padding before the driver (#308): the listing must not be cut.
+    let padding = "v".repeat(1_200_000);
+    write!(
+        config,
+        "[pad]\n\tk = {padding}\n[filter \"s\"]\n\tsmudge = touch {}; cat\n",
+        marker.display()
+    )
+    .unwrap();
+    drop(config);
+    let error = repo
+        .approve("git_switch", json!({"branch": "alfredo/go-7"}))
+        .unwrap_err();
+    assert!(error.contains("filter drivers"), "{error}");
+    assert!(!marker.exists(), "repository filter ran");
+    assert_eq!(repo.branch(), "main");
 }
 
 #[test]
