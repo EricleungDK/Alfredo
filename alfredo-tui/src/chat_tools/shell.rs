@@ -36,19 +36,54 @@ impl Stop {
 /// switch, a retry or quit kills the command's process group instead of leaving it to
 /// finish (its future, which holds this, is dropped on abort).
 #[derive(Default)]
-pub(crate) struct StopOnDrop(Stop);
+pub(crate) struct StopOnDrop {
+    stop: Stop,
+    /// Set by the owner once it has the call's result, so a normal drop is not an abort.
+    finished: Arc<AtomicBool>,
+    /// Set (before the stop) when dropped without `finish`: nobody will read the result.
+    abandoned: Arc<AtomicBool>,
+}
 
 impl StopOnDrop {
     pub(crate) fn stop(&self) -> Stop {
-        self.0.clone()
+        self.stop.clone()
+    }
+
+    /// Whether the turn was aborted, so the call's result must be reported by the
+    /// thread that ran it (issue #333).
+    pub(crate) fn abandoned(&self) -> Abandoned {
+        Abandoned(self.abandoned.clone())
+    }
+
+    /// The call's result was received: dropping this is not an abort.
+    pub(crate) fn finish(&self) {
+        self.finished.store(true, Ordering::SeqCst);
     }
 }
 
 impl Drop for StopOnDrop {
     fn drop(&mut self) {
-        self.0 .0.store(true, Ordering::SeqCst);
+        if !self.finished.load(Ordering::SeqCst) {
+            self.abandoned.store(true, Ordering::SeqCst);
+        }
+        self.stop.0.store(true, Ordering::SeqCst);
     }
 }
+
+/// Whether the turn that owned a call was aborted before it read the result.
+#[derive(Clone)]
+pub(crate) struct Abandoned(Arc<AtomicBool>);
+
+impl Abandoned {
+    pub(crate) fn get(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// First words of the result of a `run_command` that was killed mid-run (issue #333):
+/// `cancelled after Ns · killed; it may have partly run`. A command stopped before it
+/// started reports `error: cancelled before it started` instead, since nothing ran.
+pub const CANCELLED_RESULT: &str = "cancelled after ";
 
 /// Stop flags of the calls in flight, for [`stop_all`].
 static ACTIVE: Mutex<Vec<Arc<AtomicBool>>> = Mutex::new(Vec::new());

@@ -316,7 +316,7 @@ class ChatHarnessContext(unittest.TestCase):
 
 
 class ChatFileMentions(unittest.TestCase):
-    def test_at_path_attaches_committed_file_and_missing_file_notices(self):
+    def test_at_path_attaches_working_tree_file_and_missing_file_notices(self):
         chats = []
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -362,8 +362,9 @@ class ChatFileMentions(unittest.TestCase):
                 terminal.wait_for('MENTION_REPLY_1')
                 first = next(chat for chat in chats if chat['messages'][-1]['content'].startswith('@calc.py is it right'))
                 sent = first['messages'][-1]['content']
-                self.assertIn('FILE calc.py\ndef answer():\n    return 42\n', sent)
-                self.assertNotIn('WORKING_TREE_ONLY', sent)
+                self.assertIn('Attached files (working tree content', sent)
+                self.assertIn('FILE calc.py\nWORKING_TREE_ONLY = 1\n', sent)
+                self.assertNotIn('return 42', sent)
                 self.assertIn('@calc.py is it right', terminal.screen())  # the transcript shows what was typed
                 self.assertNotIn('FILE calc.py', terminal.screen())
                 # The follow-up still carries the file.
@@ -371,10 +372,10 @@ class ChatFileMentions(unittest.TestCase):
                 terminal.wait_for('MENTION_REPLY_2')
                 follow = chats[-1]['messages']
                 self.assertEqual(follow[-1]['content'], 'and then?')
-                self.assertIn('return 42', follow[-3]['content'])
+                self.assertIn('WORKING_TREE_ONLY', follow[-3]['content'])
                 # A missing file, an email and a bare @word: one notice, for the file only.
                 terminal.write(b'check @missing.rs mail a@b.com @everyone\r')
-                terminal.wait_for('@missing.rs: not attached (not committed at HEAD)')
+                terminal.wait_for('@missing.rs: not attached (no such file')
                 self.assertNotIn('everyone: not attached', terminal.screen())
                 terminal.write(b'\x11')
                 self.assertEqual(terminal.process.wait(timeout=5), 0)
@@ -582,7 +583,11 @@ class TerminalSmoke(unittest.TestCase):
                         assert 'RECORDED ACCEPTANCE CRITERIA' in request['messages'][-1]['content']
                         assert 'Calculation returns 42' in request['messages'][-1]['content']
                     # FILE-block answer; other fixtures keep legacy JSON answers.
-                    content = 'Updating answer.py.\n=== FILE: answer.py ===\nVALUE = 42\n=== END FILE ===\n'
+                    # When the prompt already shows VALUE = 42 (a dependent or repeated task), an
+                    # unchanged answer would fail as "No files changed" (#350): really edit the file.
+                    prompt = request['messages'][-1]['content']
+                    note = '# edit %d\n' % len(model_requests) if 'VALUE = 42' in prompt else ''
+                    content = 'Updating answer.py.\n=== FILE: answer.py ===\nVALUE = 42\n' + note + '=== END FILE ===\n'
                 else:
                     content = 'FAST_REPLY'
                 self.wfile.write((json.dumps({'message': {'content': content}, 'done': True, 'load_duration': 500000000, 'eval_duration': 2000000000, 'eval_count': 40}) + '\n').encode())

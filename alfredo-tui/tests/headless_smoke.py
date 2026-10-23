@@ -92,6 +92,21 @@ class HeadlessSmoke(unittest.TestCase):
         self.assertEqual(self.git('rev-parse', 'HEAD'), head)
         self.assertEqual(self.git('status', '--porcelain'), '')
 
+    def test_goal_completes_on_a_repository_whose_tree_listing_exceeds_the_git_output_bound(self):
+        # 4000 tracked files make `git ls-tree -r -l -z` about 436 KB, past the 256 KiB bound.
+        # Before the fix planning hung for the 30 s deadline three times (about 90 s) and failed.
+        for index in range(4000):
+            path = self.workspace / f'vendor/pkg{index % 200:03}/module_with_a_long_name_{index:05}.txt'
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text('x\n')
+        self.git('add', '.')
+        self.git('-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgSign=false', 'commit', '-qm', 'many files')
+        started = time.monotonic()
+        code, out, err = self.run_headless('--headless', timeout=60)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(self.result(out)['state'], 'done')
+        self.assertLess(time.monotonic() - started, 30)
+
     def test_failed_tasks_exit_1_and_are_listed(self):
         self.fixture.prose_worker = True
         code, out, err = self.run_headless('--headless', '--max-repairs', '0')
@@ -116,6 +131,21 @@ class HeadlessSmoke(unittest.TestCase):
         self.assertNotIn('larger model', err)
         # Only the provider's own connect retries hit the server; no repair attempt ran.
         self.assertEqual(set(self.fixture.markers()), {'PLAN', 'DROP'})
+
+    def test_worker_that_changes_nothing_is_not_accepted_even_when_the_check_passes_exit_1(self):
+        self.fixture.echo_worker = True
+        code, out, err = self.run_headless('--headless', '--max-repairs', '1')
+        self.assertEqual(code, 1, err)
+        result = self.result(out)
+        self.assertEqual((result['state'], result['accepted'], result['total']), ('failed', 0, 1))
+        self.assertEqual(result['repairs'], 1)
+        self.assertEqual([item['id'] for item in result['failed']], [1])
+        self.assertIn('repair budget exhausted', result['failed'][0]['reason'])
+        self.assertIn('branch', result)
+        self.assertIsNone(result['branch'], 'nothing was integrated')
+        self.assertEqual(self.fixture.markers(), ['PLAN', 'ECHO', 'ECHO'])
+        self.assertIn('failed 0/1', err)
+        self.assertEqual(self.git('branch', '--list', 'alfredo/*'), '')
 
     def hook(self, body):
         path = self.workspace.parent / 'hook.sh'
