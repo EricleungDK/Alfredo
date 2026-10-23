@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    dim, receipt_style, safe, single_line, truncate, verified_receipt, wrap_words, Color, Line,
+    Modifier, Span, Style, COMMAND_SUMMARY,
+};
 
 /// One short human sentence per canonical receipt.
 pub fn short_phase(receipt: &crate::tasks::Receipt) -> String {
