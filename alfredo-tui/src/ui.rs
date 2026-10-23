@@ -1350,6 +1350,16 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
             break;
         };
         group = None;
+        // An empty reply is told by the failure row below, not shown as a blank block
+        // (issue #397).
+        if index + 1 == session.messages.len()
+            && message.role != "user"
+            && message.content.trim().is_empty()
+            && session.tool_steps(index).is_empty()
+            && session.status == Status::Failed(crate::model::NO_TEXT.into())
+        {
+            continue;
+        }
         let (heading, color) = if message.role == "user" {
             ("You".into(), Color::DarkGray)
         } else {
@@ -1403,10 +1413,13 @@ fn draw_transcript(frame: &mut Frame, app: &App, tasks: Option<&TaskControl>, ar
     }
     // A failed request keeps its reason in the transcript until the next attempt.
     if let Status::Failed(error) = &session.status {
-        lines.push(Line::styled(
-            format!("✗ Request failed · {} · Ctrl+R retries", single_line(error)),
-            Style::default().fg(Color::Red),
-        ));
+        // The empty-reply text already names Ctrl+R (issue #397).
+        let text = if error == crate::model::NO_TEXT {
+            format!("✗ {error}")
+        } else {
+            format!("✗ Request failed · {} · Ctrl+R retries", single_line(error))
+        };
+        lines.push(Line::styled(text, Style::default().fg(Color::Red)));
     }
     segments.push(Segment::Run(lines));
     let block = frame_block(

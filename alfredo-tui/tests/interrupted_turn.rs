@@ -1,6 +1,6 @@
 //! #148: a cancelled or failed chat turn must not trap the conversation.
 use alfredo_tui::conversations::{ConversationStore, Snapshot};
-use alfredo_tui::model::{App, Session, Status, Update};
+use alfredo_tui::model::{App, Session, Status, Update, NO_TEXT};
 use alfredo_tui::tasks::TaskStore;
 
 fn roles(request: &[alfredo_tui::model::Message]) -> Vec<(&str, &str)> {
@@ -50,6 +50,72 @@ fn new_prompt_after_cancel_starts_a_turn_and_keeps_the_cancelled_one_visible() {
 }
 
 #[test]
+fn an_empty_reply_fails_the_turn_and_is_not_resent() {
+    let mut session = Session::new("test-model".into());
+    session.insert("hello there");
+    session.begin().unwrap();
+    session.apply(1, Update::Done);
+    assert_eq!(session.status, Status::Failed(NO_TEXT.into()));
+    assert_eq!(
+        NO_TEXT,
+        "Model returned no text; Ctrl+R retries or send again"
+    );
+    session.insert("second");
+    let request = session.begin().unwrap();
+    assert_eq!(roles(&request), [("user", "second")]);
+}
+
+#[test]
+fn a_whitespace_only_reply_also_fails() {
+    let mut session = Session::new("test-model".into());
+    session.insert("look");
+    session.begin().unwrap();
+    session.apply(1, Update::Token(" \n".into()));
+    session.apply(1, Update::Done);
+    assert_eq!(session.status, Status::Failed(NO_TEXT.into()));
+}
+
+#[test]
+fn an_empty_reply_shows_one_notice_and_no_blank_assistant_block() {
+    use ratatui::{backend::TestBackend, Terminal};
+    let mut app = App::new("fixture".into());
+    app.sessions[0].insert("hello there");
+    app.sessions[0].begin().unwrap();
+    app.sessions[0].apply(1, Update::Done);
+    let mut terminal = Terminal::new(TestBackend::new(120, 32)).unwrap();
+    terminal
+        .draw(|frame| alfredo_tui::ui::draw(frame, &app))
+        .unwrap();
+    let buffer = terminal.backend().buffer();
+    let rows: Vec<String> = (0..buffer.area.height)
+        .map(|y| {
+            (0..buffer.area.width)
+                .map(|x| buffer[(x, y)].symbol())
+                .collect()
+        })
+        .collect();
+    let screen = rows.join("\n");
+    assert!(screen.contains("hello there"), "{screen}");
+    assert!(!screen.contains("Assistant"), "{screen}");
+    assert!(screen.contains(&format!("✗ {NO_TEXT}")), "{screen}");
+    // Transcript row plus status line: the text appears in both.
+    assert!(screen.matches(NO_TEXT).count() >= 2, "{screen}");
+}
+
+#[test]
+fn retry_after_an_empty_reply_resends_the_prompt() {
+    let mut session = Session::new("test-model".into());
+    session.insert("hello there");
+    session.begin().unwrap();
+    session.apply(1, Update::Done);
+    let request = session.retry().unwrap();
+    assert_eq!(roles(&request), [("user", "hello there")]);
+    session.apply(2, Update::Token("hi".into()));
+    session.apply(2, Update::Done);
+    assert_eq!(session.status, Status::Complete);
+}
+
+#[test]
 fn new_prompt_after_failure_does_not_resend_the_failed_turn() {
     let mut session = interrupted("fail");
     session.insert("another");
@@ -73,6 +139,7 @@ fn a_started_new_turn_leaves_the_old_one_not_retryable() {
     let mut session = interrupted("cancel");
     session.insert("next");
     session.begin().unwrap();
+    session.apply(2, Update::Token("answer".into()));
     session.apply(2, Update::Done);
     assert!(session.retry().is_err());
 }
@@ -257,6 +324,7 @@ fn snapshot_json() -> serde_json::Value {
     app.sessions[0] = interrupted("fail");
     app.sessions[0].insert("next");
     app.sessions[0].begin().unwrap();
+    app.sessions[0].apply(2, Update::Token("answer".into()));
     app.sessions[0].apply(2, Update::Done);
     serde_json::to_value(Snapshot::capture(&app, "default")).unwrap()
 }
