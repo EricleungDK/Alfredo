@@ -560,6 +560,42 @@ fn saved_reading_anchor_survives_unseen_growth_restart_and_geometry_change() {
 }
 
 #[test]
+fn saving_drops_a_reading_anchor_the_data_cannot_account_for_but_load_still_refuses_one() {
+    let fixture = Fixture::new();
+    let store = ConversationStore::open(&fixture.tasks, "default").unwrap();
+    let mut app = App::new("fixture".into());
+    app.sessions[0].insert("History");
+    app.sessions[0].begin().unwrap();
+    app.sessions[0].apply(1, Update::Token("saved line\n".repeat(20)));
+    app.sessions[0].apply(1, Update::Done);
+    app.sessions[0].scroll.set(20);
+    // The render reports far more rows than the stored messages could explain.
+    app.sessions[0].reading_position(&[1; 5000], 10);
+    let snapshot = Snapshot::capture(&app, "default");
+    let saved = serde_json::to_value(&snapshot).unwrap();
+    assert!(
+        saved["sessions"][0]["reading"].get("anchor").is_none()
+            || saved["sessions"][0]["reading"]["anchor"].is_null()
+    );
+    store.save(&snapshot).unwrap();
+    assert_eq!(
+        store.load().unwrap().unwrap().restore().sessions[0]
+            .messages
+            .len(),
+        2
+    );
+    // A tampered file is still refused.
+    let mut bad = serde_json::to_value(Snapshot::capture(&app, "default")).unwrap();
+    bad["sessions"][0]["reading"] =
+        serde_json::json!({"anchor":{"line":1000000,"row":0},"last_offset":20});
+    let path = fixture.file();
+    let bytes = serde_json::to_vec(&bad).unwrap();
+    fs::write(&path, &bytes).unwrap();
+    assert!(store.load().is_err());
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+}
+
+#[test]
 fn v3_reading_migration_backs_up_exact_bytes_and_refuses_invalid_anchors() {
     let fixture = Fixture::new();
     let store = ConversationStore::open(&fixture.tasks, "default").unwrap();

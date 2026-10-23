@@ -79,6 +79,15 @@ class Fixture:
                             'command': SLOW, 'escalate': 'on host' in prompt}}}]}, 'done': False}]
                 elif 'slow command' in prompt:
                     chunks = [{'message': {'content': 'SLOW_DONE'}, 'done': False}]
+                elif 'read big' in prompt and not tool_results:
+                    chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
+                        {'function': {'name': 'read_file', 'arguments': {'path': 'big.txt'}}}]},
+                        'done': False}]
+                elif 'read big' in prompt:
+                    chunks = [{'message': {'content': 'BIG_DONE'}, 'done': False}]
+                elif 'slow one' in prompt:
+                    time.sleep(2)
+                    chunks = [{'message': {'content': 'SLOW_REPLY_MARKER'}, 'done': False}]
                 elif not tool_results:
                     chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
                         {'function': {'name': 'read_file', 'arguments': {'path': 'README.md'}}}]},
@@ -339,6 +348,42 @@ class ChatTools(unittest.TestCase):
         time.sleep(0.5)
         self.assertEqual(len(self.fixture.chats()), 1, 'the turn ended; nothing started')
         self.assertNotIn('SHOULD_NOT_CONTINUE', self.terminal.screen())
+
+    def test_reading_scrolled_up_over_expanded_results_never_stops_saving(self):
+        # Issue #375: Ctrl+O rows and a PgUp used to push the saved anchor past a line
+        # estimate, so the save failed and the next turn was lost on quit.
+        Path(os.path.realpath(self.repo.name), 'big.txt').write_text(
+            ''.join(f'BIG_ROW_{n}\n' for n in range(60)))
+        self.terminal.write(b'read big\r')
+        self.terminal.wait_for('BIG_DONE')
+        self.terminal.write(b'\x0f')  # Ctrl+O: expand tool results
+        self.terminal.wait_for('BIG_ROW_59')
+        self.terminal.write(b'slow one\r')
+        time.sleep(0.5)
+        self.terminal.write(b'\x1b[5~\x1b[5~')  # PgUp twice while the reply is pending
+        deadline = time.time() + 4
+        while time.time() < deadline:  # the reply lands while scrolled up
+            if select.select([self.terminal.master], [], [], 0.05)[0]:
+                self.terminal.output.extend(os.read(self.terminal.master, 65536))
+        self.terminal.write(b'x')  # draft autosave while scrolled up
+        deadline = time.time() + 2
+        while time.time() < deadline:
+            if select.select([self.terminal.master], [], [], 0.05)[0]:
+                self.terminal.output.extend(os.read(self.terminal.master, 65536))
+        self.assertNotIn('save failed', self.terminal.screen())
+        self.terminal.write(b'\x11')
+        deadline = time.time() + 10
+        while self.terminal.process.poll() is None and time.time() < deadline:
+            if select.select([self.terminal.master], [], [], 0.05)[0]:
+                self.terminal.output.extend(os.read(self.terminal.master, 65536))
+        self.assertEqual(self.terminal.process.returncode, 0, 'the final save succeeded')
+        self.terminal.close()
+        binary = Path(os.environ.get('ALFREDO_TUI_BINARY',
+            str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
+        env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=self.state.name)
+        self.terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint',
+                                   self.fixture.endpoint], os.path.realpath(self.repo.name), env)
+        self.terminal.wait_for('SLOW_REPLY_MARKER')
 
 
 if __name__ == '__main__':
