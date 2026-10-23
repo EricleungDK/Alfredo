@@ -259,6 +259,24 @@ class ChatTools(unittest.TestCase):
         self.assertEqual(self.approval_outcomes(), ['cancelled'])
         time.sleep(5)
         self.assertFalse(root.joinpath('marker').exists(), 'the command ran on after Esc')
+        # Issue #333: the killed command still gets its row, and the next request says
+        # it may have partly run.
+        self.terminal.wait_for('⚙ run_command')
+        self.terminal.wait_for('cancelled after')
+        self.terminal.wait_for('it may have partly run')
+        self.assertTrue(root.joinpath('started').exists())
+        self.terminal.write(b'and now something else\r')
+        self.terminal.wait_for('applied changes sent as context')
+        deadline = time.time() + 10
+        while time.time() < deadline:
+            sent = [m['content'] for body in self.fixture.chats() for m in body['messages']
+                    if m['role'] == 'assistant']
+            if any('cancelled mid-run, effects may be partial' in text for text in sent):
+                break
+            time.sleep(0.1)
+        self.assertTrue(any('[This turn was interrupted. Already applied before it stopped:\n- run_command '
+                            in text and ': cancelled mid-run, effects may be partial' in text
+                            for text in sent), sent)
 
     def test_esc_stops_a_running_sandboxed_command(self):
         self.check_esc_stops_the_command('slow command')

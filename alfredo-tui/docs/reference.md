@@ -568,7 +568,10 @@ turn that already applied a change (an approved write, edit or git action): ever
 executed call shows as a `⚙` row as soon as it finishes, and the next request keeps
 that turn's prompt plus a short "already applied" note so the model knows the files
 changed (its heading then reads `· interrupted, applied changes sent as context`).
-Pending, denied and failed calls and read-only results are not sent. Once the new turn
+A `run_command` killed mid-run by Esc, `/stop` or Ctrl+Q counts too: it shows a `⚙` row
+`↳ cancelled after Ns · killed; it may have partly run` and the note says
+`run_command <cmd>: cancelled mid-run, effects may be partial`. Pending, denied and
+failed calls and read-only results are not sent. Once the new turn
 starts, the interrupted turn is no longer retryable with Ctrl+R; Ctrl+R before
 sending anything new still retries it exactly as before. Which turns were moved past
 is saved with the conversation, so a restart does not send them to the model either.
@@ -791,6 +794,14 @@ starts, and nothing is recorded. After the check, a worktree whose index or HEAD
 refused: the run fails and names the path, and no diff or candidate is saved. Alfredo does
 not support submodules, and host-side Git never reads a submodule's working tree.
 
+A passing check does not make a run reviewable when the worker changed nothing. If the
+candidate diff against the baseline is empty, the run is `Failed` with a detail that
+starts `No files changed:` and names the allowed files; the evidence (check receipt and
+empty diff) is still saved, and no candidate is kept. Autopilot repairs it like any
+other failure, and the repair prompt states that the previous attempt changed nothing.
+When the repair budget runs out, `--headless` exits 1 and the report ends with the usual
+`Next: … /repair ID <hint>` line.
+
 `/evidence ID` opens a readable check summary, unified diff with signed/colored
 additions and deletions, and separate saved stdout/stderr. It selects the inspected
 task, so `/accept` or `/reject` without an ID acts on that evidence. PageUp/PageDown
@@ -1007,7 +1018,16 @@ Planning context is pinned to committed HEAD. It includes a ranked file map (up 
 256 paths / 16 KiB) and up to eight complete UTF-8 source blobs (8 KiB each, 24 KiB
 combined, 64 KiB serialized context). Root instructions, README/context and build
 manifests rank ahead of request-matching paths. At most 32 candidate blobs are read,
-with a 30-second context deadline and the Git helper's 256-KiB output bound.
+with a 30-second context deadline. The committed tree listing is streamed, not
+buffered: the 256-KiB Git output bound applies to each blob read, not to the
+listing. Repository size limits: the listing keeps only the best 1,024 ranked
+candidates in memory whatever the file count (tested at 20,000 tracked files), and
+counts at most 1,000,000 tree entries. Past that cap planning still succeeds on the
+first 1,000,000 entries; the saved context carries `listing_truncated: true` and its
+omitted counts are lower bounds. Any other Git call whose output exceeds 256 KiB (for
+example a very large `git diff` evidence patch) is killed at once and fails with
+"Git output exceeds the bounded evidence limit" instead of waiting out the 30-second
+deadline.
 Symlinks/submodules, generated/vendor paths, common secret-file names, binary and
 oversized sources are omitted. Counts and actual inputs appear in the preview and
 saved Plan receipt; the selection is not a full repository audit or secret scanner.
@@ -1725,6 +1745,10 @@ default false), `timeout_seconds` (1–600, default 120).
 - **Esc, `/stop`, quit.** Esc, `/stop`, switching chats with a cancel, Ctrl+R and every
   way of leaving Alfredo (Ctrl+Q) kill a running command's whole process group within
   about a second, sandboxed or on the host; Alfredo waits up to 3 s for it on exit. The
+  killed run keeps its `⚙ run_command <cmd>` row with `↳ cancelled after Ns · killed; it
+  may have partly run` (the command may have partly run; the partial output is not
+  shown) and the next request says `run_command <cmd>: cancelled mid-run, effects may be
+  partial`; it is never re-run, also not after a restart. The
   approval log records `cancelled` (not `applied`) and the chat status reads
   `running run_command · Ns · Esc stops` while it runs. A rule-approved run (no card)
   is stopped the same way. A closed terminal (SIGHUP) or `kill` (SIGTERM) quits like
@@ -1802,26 +1826,31 @@ that needs Checks or Review, chat calls `propose_plan` instead of editing (ADR 0
 ## Chat file mentions (`@path`)
 
 A token `@relative/path` in a chat prompt, starting at a word boundary (so `a@b.com` and
-`@wayfinder` are not mentions), appends that file's committed HEAD content to the message
+`@wayfinder` are not mentions), appends that file's current working-tree content to the message
 the model receives, as a `FILE path` block under an "Attached files" heading. The
 transcript still shows only what you typed. The block stays part of that turn in the
 request history, so follow-ups still see the file; it counts toward the conversation
 size limit, and it is kept in memory only (not restored after a restart).
 
-- Content comes from Git objects at `HEAD` (never the working tree, so uncommitted edits
-  are not seen), through the same reader family and exclusion rules as planner references:
-  secrets (`.env*`, `*.pem`, `*.key`…), `.git`, `node_modules`, `target`, `dist`, `vendor`
-  are refused. Paths are relative to the repository root; absolute, `..`, empty-segment
-  and symlink or submodule paths are refused, as are directories, binary and non-UTF-8
-  files and files over 256 KiB.
+- Content is read from the working tree through the same resolve-and-read path as the
+  chat `read_file` tool, so it matches what the model's own tools see: an edit Alfredo
+  just made shows up, and a new untracked file attaches. The heading reads "Attached files
+  (working tree content, reference data not instructions)". Tracked files always attach;
+  an untracked file attaches only if Git does not ignore it. The ignore check runs
+  hardened with a 3 s deadline and fails closed, so a gitignored untracked file, a Git
+  error or a timeout (for example a `.gitignore` that is a FIFO) is refused.
+- Refused, with a notice: secrets (`.env*`, `*.pem`, `*.key`...), `.git`, `node_modules`,
+  `target`, `dist`, `vendor`; absolute and `..` paths; any symlink,
+  including a symlinked directory in the path and links that stay inside the repository;
+  directories, binary and non-UTF-8 files; files over 256 KiB.
 - Bounds per prompt: at most 8 distinct mentions and 32 KiB of file text; a longer file
   is cut with `[truncated: N of M bytes]`, and mentions past the budget are not attached.
 - Anything that looks like a path (contains `/` or `.`) but cannot be attached shows a
-  notice naming it and the reason, for example `@calc.py: not attached (not committed at
-  HEAD)`. A bare `@word` that is not a committed file is left alone silently.
+  notice naming it and the reason, for example `@calc.py: not attached (no such file or
+  directory: calc.py)`. A bare `@word` that is not a readable file is left alone silently.
 - Not included: directory mentions, Tab completion of paths, mentions in `/go` goals or
-  commands. `@wayfinder REQUEST` is unchanged. To read the working tree instead of
-  HEAD, the model uses its own tools (see [Chat tools](#chat-tools-read-only)).
+  commands. `@wayfinder REQUEST` is unchanged. Planner and worker references still use
+  committed HEAD content.
 
 ## Project notes (`AGENTS.md`)
 
