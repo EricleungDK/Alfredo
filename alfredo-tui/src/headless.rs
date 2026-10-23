@@ -37,10 +37,11 @@ fn say(line: impl std::fmt::Display) {
 }
 
 /// One printable line for stderr. Approval cards, tool names, paths and errors carry
-/// model-chosen text, so control characters (ESC, BEL, C1 CSI, CR) go and line breaks
-/// become spaces: the terminal or CI log shows text, and no second line can be forged.
+/// model-chosen text, so control characters (ESC, BEL, C1 CSI, CR) go, format characters
+/// such as bidi overrides show as `<U+XXXX>`, and line breaks (including U+2028 and
+/// U+2029) become spaces: the terminal or CI log shows text, and no second line can be forged.
 fn stderr_line(line: impl std::fmt::Display) -> String {
-    alfredo_tui::dashboard::single_line(&line.to_string())
+    alfredo_tui::dashboard::single_line_visible(&line.to_string())
 }
 
 /// SIGINT and SIGTERM request the same cancellation as `/stop`.
@@ -169,7 +170,13 @@ fn result_json(
             _ => None,
         })
         .collect();
-    if status.state == RunState::Failed && (failed.is_empty() || run_error) {
+    // A paused run (autopilot halted itself) names its cause the same way. A plain
+    // pause's generic notice is no cause, so nothing is invented for it.
+    let paused_with_reason = status.state == RunState::Paused
+        && !reason.is_empty()
+        && reason != alfredo_tui::autopilot::PAUSED_NOTICE;
+    if paused_with_reason || (status.state == RunState::Failed && (failed.is_empty() || run_error))
+    {
         failed.push(serde_json::json!({
             "id": null, "title": "autopilot", "reason": reason
         }));
@@ -1056,6 +1063,19 @@ mod tests {
         assert_eq!(stderr_line("plain — text"), "plain — text");
     }
 
+    /// Issue #361: a model-chosen path with a reversed-order override (U+202E) and a line
+    /// separator (U+2028) must not reach stderr raw; the override shows as `<U+202E>` and
+    /// the separator becomes a space, so no second line can be forged.
+    #[test]
+    fn stderr_lines_show_format_characters_and_line_separators_inline() {
+        let line = stderr_line("approval write_file gpj.\u{202E}txt: approved\u{2028}#9 done");
+        assert_eq!(
+            line,
+            "approval write_file gpj.<U+202E>txt: approved #9 done"
+        );
+        assert!(!line.contains(['\u{202E}', '\u{2028}', '\u{2029}', '\u{85}']));
+    }
+
     #[test]
     fn detail_is_bounded_single_line_text_without_the_error_prefix() {
         assert_eq!(detail_of("error: no such file\x1b[0m\n"), "no such file[0m");
@@ -1127,6 +1147,39 @@ mod tests {
             Turn::default().json("m", Policy::Deny, &[])["state"],
             "failed"
         );
+    }
+
+    #[test]
+    fn json_names_the_reason_of_a_paused_run() {
+        let reason = "Autopilot paused: command not recorded: Command history capacity reached; start another conversation";
+        let paused = result_json("m", &status(RunState::Paused, 0), &[], reason, false);
+        assert_eq!(paused["state"], "paused");
+        assert_eq!(
+            paused["failed"],
+            serde_json::json!([{"id": null, "title": "autopilot", "reason": reason}])
+        );
+        // No reason known: nothing invented.
+        let unknown = result_json("m", &status(RunState::Paused, 0), &[], "", false);
+        assert_eq!(unknown["failed"], serde_json::json!([]));
+        // A plain pause's generic notice is not a cause.
+        let plain = result_json(
+            "m",
+            &status(RunState::Paused, 0),
+            &[],
+            alfredo_tui::autopilot::PAUSED_NOTICE,
+            false,
+        );
+        assert_eq!(plain["failed"], serde_json::json!([]));
+        // A failed task stays listed once; the pause reason joins it.
+        let outcomes = [outcome(
+            2,
+            TaskStatus::Failed,
+            0,
+            Some(Err("rejected by review".into())),
+        )];
+        let both = result_json("m", &status(RunState::Paused, 0), &outcomes, reason, false);
+        assert_eq!(both["failed"].as_array().unwrap().len(), 2);
+        assert_eq!(both["failed"][1]["reason"], reason);
     }
 
     #[test]

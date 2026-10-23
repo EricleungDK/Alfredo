@@ -425,6 +425,40 @@ fn headless_chat_keeps_control_characters_off_stderr_and_refuses_their_paths() {
     let _ = fs::remove_dir_all(&root);
 }
 
+/// Issue #361: a model-chosen path with a reversed-order override (U+202E) and a line
+/// separator (U+2028) must not reach stderr raw; the override shows as `<U+202E>` and
+/// the separator becomes a space.
+#[test]
+fn headless_chat_shows_format_characters_and_line_separators_inline_on_stderr() {
+    let root = repository("format");
+    let fixture = scripted_chat(vec![
+        tool_calls(&[(
+            "write_file",
+            json!({"path": "gpj.\u{202E}txt\u{2028}#9 done", "content": "x\n"}),
+        )]),
+        done("Could not write it."),
+    ]);
+    let output = run(
+        &root,
+        &fixture,
+        &[
+            "--chat",
+            "write it",
+            "--headless",
+            "--approve",
+            "workspace-edits",
+        ],
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
+    let text = stderr(&output);
+    assert!(
+        !text.contains(['\u{202E}', '\u{2028}', '\u{2029}', '\u{85}']),
+        "raw format or line-separator characters on stderr: {text:?}"
+    );
+    assert!(text.contains("gpj.<U+202E>txt #9 done"), "{text}");
+    let _ = fs::remove_dir_all(&root);
+}
+
 #[test]
 fn headless_chat_strips_control_characters_from_tool_names_on_stderr() {
     let root = repository("toolname");
@@ -831,5 +865,111 @@ fn concurrent_headless_chats_both_succeed_and_keep_the_approval_log_whole() {
     // `approvals_log` parses every line: a torn append would panic there.
     assert_eq!(approvals_log(&root).len(), 4);
     assert_eq!(conversation_files(&root), Vec::<String>::new());
+    let _ = fs::remove_dir_all(&root);
+}
+
+/// Fill a saved conversation's command history to its budget, in the serde format
+/// the app reads, leaving room for the startup selection command but not for
+/// autopilot's first. The history is capped at 512 commands and at 512 KiB of
+/// normalized command JSON plus 1 KiB reserved per command (`valid_commands`).
+fn fill_command_history(path: &Path) {
+    use alfredo_tui::{
+        command_intent::Intent,
+        console_command::{CommandState, ConsoleCommand},
+        tasks::{Action, Request},
+    };
+    const BUDGET: usize = 512 * 1024;
+    const RESERVED: usize = 1024;
+    // A selection arrival costs about 1.8 KiB, an autopilot plan about 1.5 KiB.
+    const HEADROOM: usize = 2600;
+    fn used(commands: &[Value]) -> usize {
+        let normalized: Vec<Value> = commands
+            .iter()
+            .cloned()
+            .map(|mut command| {
+                command["state"] = json!({"kind": "pending"});
+                command
+            })
+            .collect();
+        serde_json::to_vec(&normalized).unwrap().len() + commands.len() * RESERVED
+    }
+    let mut saved: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    let commands = saved["sessions"][0]["commands"].as_array_mut().unwrap();
+    let mut sequence = commands
+        .iter()
+        .map(|command| command["sequence"].as_u64().unwrap())
+        .max()
+        .unwrap();
+    let filler = |sequence: u64, padding: usize| {
+        let intent = Intent::Task {
+            request: Request {
+                correlation: format!("fill-{sequence}"),
+                expected_revision: 0,
+                action: Action::Propose {
+                    title: format!("Fill {sequence}"),
+                    model: "fixture".into(),
+                    dependencies: vec![],
+                },
+            },
+        };
+        let command = ConsoleCommand {
+            id: ConsoleCommand::identity(&intent),
+            sequence,
+            after_messages: 0,
+            attempt: 1,
+            text: format!("Fill {sequence}{}", "x".repeat(padding)),
+            intent,
+            state: CommandState::Refused {
+                reason: "filler".into(),
+            },
+        };
+        serde_json::to_value(command).unwrap()
+    };
+    let before = commands.len();
+    loop {
+        sequence += 1;
+        commands.push(filler(sequence, 0));
+        if used(commands) + HEADROOM > BUDGET {
+            // One filler too many: drop it, and pad the one before so that
+            // exactly HEADROOM bytes remain.
+            commands.pop();
+            let extra = BUDGET - HEADROOM - used(commands);
+            let last = commands.pop().unwrap()["sequence"].as_u64().unwrap();
+            commands.push(filler(last, extra));
+            break;
+        }
+    }
+    assert!(commands.len() > before && commands.len() <= 512);
+    let left = BUDGET - used(commands);
+    assert!(
+        (HEADROOM - 20..=HEADROOM).contains(&left),
+        "{left} bytes left"
+    );
+    fs::write(path, serde_json::to_string(&saved).unwrap()).unwrap();
+}
+
+#[test]
+fn headless_go_names_an_unrecordable_command_as_the_pause_reason() {
+    let root = repository("history-full");
+    let fixture = two_models();
+    let go = ["--go", "x", "--headless"];
+    // The first run only creates the saved conversation.
+    let first = run_model(&root, &fixture, Some("fixture"), &go);
+    assert!(!conversation_files(&root).is_empty(), "{}", stderr(&first));
+    for name in conversation_files(&root) {
+        fill_command_history(&mission_directory(&root).join(name));
+    }
+    let output = run_model(&root, &fixture, Some("fixture"), &go);
+    let expected = "Command history capacity reached";
+    let value = result(&output);
+    assert_eq!(output.status.code(), Some(1), "{value} {}", stderr(&output));
+    assert!(stderr(&output).contains(expected), "{}", stderr(&output));
+    assert_eq!(value["state"], "paused", "{value}");
+    let failed = value["failed"].as_array().unwrap();
+    assert_eq!(failed.len(), 1, "{value}");
+    assert_eq!(failed[0]["id"], Value::Null);
+    assert_eq!(failed[0]["title"], "autopilot");
+    let reason = failed[0]["reason"].as_str().unwrap();
+    assert!(reason.contains(expected), "{reason}");
     let _ = fs::remove_dir_all(&root);
 }
