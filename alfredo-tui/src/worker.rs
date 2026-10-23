@@ -428,7 +428,7 @@ pub struct Evidence {
     pub status: TaskStatus,
     pub detail: String,
     /// Typed failure class when the run failed for an environment reason
-    /// (`execution::SANDBOX_UNAVAILABLE`, `FILE_TOO_LARGE`); repairing the code cannot fix it.
+    /// (`execution::SANDBOX_UNAVAILABLE`, `FILE_TOO_LARGE`, `MODEL_UNREACHABLE`); repairing the code cannot fix it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure_code: Option<String>,
     pub patch: String,
@@ -831,6 +831,10 @@ pub const MAX_APPROVED_FILE: u64 = 64 * 1024;
 /// context bounds. Deterministic: neither a repair nor a larger model changes it.
 pub const FILE_TOO_LARGE: &str = "file-too-large";
 
+/// Evidence `failure_code` for a model request that could not reach the server.
+/// Not a code problem: a repair would hit the same dead endpoint.
+pub const MODEL_UNREACHABLE: &str = "model-unreachable";
+
 fn kib(bytes: u64) -> u64 {
     bytes.div_ceil(1024)
 }
@@ -843,6 +847,17 @@ pub fn file_too_large(path: &str, bytes: u64) -> String {
         MAX_APPROVED_FILE / 1024
     )
 }
+
+/// Failure text for a worker request the model server never answered. Its
+/// last sentence, after `Next: `, is the way forward; `/repair` is what re-enters a failed task.
+pub fn model_unreachable(endpoint: &str, task: u64) -> String {
+    format!(
+        "Cannot reach Ollama at {endpoint}; the server is down or the endpoint is wrong. {MODEL_UNREACHABLE_NEXT_PREFIX}Start Ollama, then /repair {task} retry"
+    )
+}
+
+/// Marks the way forward inside a [`model_unreachable`] message.
+pub const MODEL_UNREACHABLE_NEXT_PREFIX: &str = "Next: ";
 
 /// Splits a shared too-large message into its reason and the way forward (the
 /// last sentence); `None` for any other failure text.
@@ -1865,6 +1880,7 @@ async fn perform(
     if let Some(lineage) = lineage {
         provider = provider.with_sampling(lineage.temperature, lineage.num_predict);
     }
+    let endpoint = provider.endpoint_origin();
     let mut generation = provider.structured_generation();
     generation.answer_format = Some(format);
     evidence.generation = Some(generation);
@@ -1935,6 +1951,10 @@ async fn perform(
                 answer,
                 Some(inference_started.elapsed().as_secs()),
             );
+        }
+        if error.as_deref().is_some_and(crate::provider::is_connect_failure) {
+            evidence.failure_code = Some(MODEL_UNREACHABLE.into());
+            return Err(model_unreachable(&endpoint, task.id));
         }
         return Err(error.unwrap_or_else(|| "Worker stream ended before completion".into()));
     }

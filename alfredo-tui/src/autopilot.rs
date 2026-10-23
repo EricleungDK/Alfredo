@@ -1767,6 +1767,20 @@ impl Autopilot {
                 self.fail(tasks, format!("{cause}. {}", crate::doctor::BWRAP_FIX));
                 return Ok(None);
             }
+            if let Some(cause) =
+                find(family.head).and_then(|head| unreachable_failure(tasks, head))
+            {
+                let (reason, next) = cause
+                    .split_once(crate::worker::MODEL_UNREACHABLE_NEXT_PREFIX)
+                    .unwrap_or((&cause, ""));
+                let repairs: u32 = families.iter().map(|family| family.repairs).sum();
+                self.fail_with_next(
+                    tasks,
+                    reason.trim_end().to_string(),
+                    Some((next.to_string(), repairs)),
+                );
+                return Ok(None);
+            }
             if let Some(cause) = find(family.head).and_then(|head| too_large_failure(tasks, head)) {
                 // The last sentence of the shared message is the way forward.
                 let (reason, next) = cause.rsplit_once(". ").unwrap_or((&cause, ""));
@@ -2185,6 +2199,18 @@ fn too_large_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
     let evidence = tasks.store().evidence(head.id).ok()?;
     let evidence = serde_json::from_str::<crate::worker::Evidence>(&evidence).ok()?;
     (evidence.failure_code.as_deref() == Some(crate::worker::FILE_TOO_LARGE))
+        .then(|| clean(&evidence.detail, 300))
+}
+
+/// Failure text when the head's model request never reached the server. The run's
+/// evidence carries the typed `failure_code`; repairing the code cannot fix it.
+fn unreachable_failure(tasks: &TaskControl, head: &Task) -> Option<String> {
+    if head.status != TaskStatus::Failed {
+        return None;
+    }
+    let evidence = tasks.store().evidence(head.id).ok()?;
+    let evidence = serde_json::from_str::<crate::worker::Evidence>(&evidence).ok()?;
+    (evidence.failure_code.as_deref() == Some(crate::worker::MODEL_UNREACHABLE))
         .then(|| clean(&evidence.detail, 300))
 }
 

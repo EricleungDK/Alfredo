@@ -103,6 +103,17 @@ fn keep_alive_json(value: &str) -> serde_json::Value {
         .map_or_else(|_| value.into(), serde_json::Value::from)
 }
 
+/// Messages for a request that never reached, or lost, the model server.
+const CONNECT_FAILURE: &str = "Cannot reach Ollama; check the server and endpoint, then retry";
+const CONNECTION_LOST: &str = "Ollama connection lost; partial reply retained";
+const DISCONNECTED: &str = "Ollama disconnected before completion; partial reply retained";
+
+/// True when a request failure text is the provider's connect failure or a
+/// dropped connection: the server was unreachable, not the model wrong.
+pub fn is_connect_failure(reason: &str) -> bool {
+    [CONNECT_FAILURE, CONNECTION_LOST, DISCONNECTED].contains(&reason)
+}
+
 /// Pre-content failures carry no response and no side effects, so they are
 /// safe to retry; anything after content keeps the manual-retry contract.
 enum Failure {
@@ -1050,7 +1061,7 @@ impl Ollama {
             }
             Ok(Err(_)) => {
                 return Err(Failure::BeforeContent(
-                    "Cannot reach Ollama; check the server and endpoint, then retry".into(),
+                    CONNECT_FAILURE.into(),
                 ))
             }
             Ok(Ok(response)) => response,
@@ -1089,7 +1100,7 @@ impl Ollama {
             let chunk = match tokio::time::timeout(self.idle_timeout, response.chunk()).await {
                 Err(_) => return Err("Ollama stream stalled; partial reply retained".into()),
                 Ok(Err(_)) => {
-                    return Err(progress.failure("Ollama connection lost; partial reply retained"))
+                    return Err(progress.failure(CONNECTION_LOST))
                 }
                 Ok(Ok(chunk)) => chunk,
             };
@@ -1103,8 +1114,7 @@ impl Ollama {
                         .complete_recorded(identity, &body, sender, trace)
                         .await?);
                 }
-                return Err(progress
-                    .failure("Ollama disconnected before completion; partial reply retained"));
+                return Err(progress.failure(DISCONNECTED));
             };
             // Bound incomplete frames even when a server never supplies a newline.
             for byte in chunk {

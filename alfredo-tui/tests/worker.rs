@@ -590,6 +590,33 @@ async fn approved_file_over_the_bound_fails_with_a_typed_code_and_no_model_call(
     assert_eq!(evidence.detail, expected);
 }
 
+#[tokio::test]
+async fn unreachable_model_server_fails_with_a_typed_code_and_names_the_endpoint_and_next_step() {
+    let fixture = Fixture::new();
+    fixture.permit();
+    // Port 1 refuses connections: the worker request cannot connect.
+    let provider = Ollama::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap();
+    let (snapshot, _) = worker::start(
+        fixture.store.clone(),
+        1,
+        "unreachable".into(),
+        3,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(snapshot.tasks[0].status, TaskStatus::Failed);
+    let expected = "Cannot reach Ollama at http://127.0.0.1:1; the server is down or the endpoint is wrong. Next: Start Ollama, then /repair 1 retry";
+    assert_eq!(snapshot.tasks[0].run.as_ref().unwrap().detail, expected);
+    let evidence: worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    assert_eq!(
+        evidence.failure_code.as_deref(),
+        Some(worker::MODEL_UNREACHABLE)
+    );
+}
+
 async fn run_with_calc_of(bytes: usize) -> (worker::Evidence, String) {
     let fixture = Fixture::new();
     let mut text = "x = 1\n".repeat(bytes / 6);
