@@ -206,7 +206,6 @@ class GraderWithoutBwrapTests(Fixture):
         self.assertIn('refused', output)
 
 
-@unittest.skipUnless(HAVE_BWRAP, 'needs /usr/bin/bwrap and /usr/bin/prlimit (CI installs bubblewrap)')
 class NonUtf8CheckOutputTests(Fixture):
     """#390: invalid UTF-8 from check.sh must still grade, never raise (it became harness_error)."""
 
@@ -228,6 +227,7 @@ class NonUtf8CheckOutputTests(Fixture):
         self.assertTrue(ok, output)
 
 
+@unittest.skipUnless(HAVE_BWRAP, 'needs /usr/bin/bwrap and /usr/bin/prlimit (CI installs bubblewrap)')
 class LiveSandboxTests(Fixture):
     """Reproduces the #207 attack under the real bwrap profile."""
 
