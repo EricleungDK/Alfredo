@@ -1952,7 +1952,10 @@ async fn perform(
                 Some(inference_started.elapsed().as_secs()),
             );
         }
-        if error.as_deref().is_some_and(crate::provider::is_connect_failure) {
+        if error
+            .as_deref()
+            .is_some_and(crate::provider::is_connect_failure)
+        {
             evidence.failure_code = Some(MODEL_UNREACHABLE.into());
             return Err(model_unreachable(&endpoint, task.id));
         }

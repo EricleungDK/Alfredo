@@ -1099,9 +1099,7 @@ impl Ollama {
         loop {
             let chunk = match tokio::time::timeout(self.idle_timeout, response.chunk()).await {
                 Err(_) => return Err("Ollama stream stalled; partial reply retained".into()),
-                Ok(Err(_)) => {
-                    return Err(progress.failure(CONNECTION_LOST))
-                }
+                Ok(Err(_)) => return Err(progress.failure(CONNECTION_LOST)),
                 Ok(Ok(chunk)) => chunk,
             };
             let Some(chunk) = chunk else {

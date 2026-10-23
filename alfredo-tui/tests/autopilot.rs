@@ -1539,7 +1539,13 @@ fn model_unreachable(max_repairs: u32) {
     autopilot
         .start("Make the answer 42", "fixture", max_repairs, &control)
         .unwrap();
-    drive(&mut autopilot, &mut control, &runtime, "unreachable", finished);
+    drive(
+        &mut autopilot,
+        &mut control,
+        &runtime,
+        "unreachable",
+        finished,
+    );
     let status = autopilot.status(&control).unwrap();
     assert_eq!(status.state, RunState::Failed);
     assert_eq!(status.repairs, 0);

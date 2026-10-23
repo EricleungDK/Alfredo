@@ -657,9 +657,14 @@ async fn run_with_calc_of(bytes: usize) -> (worker::Evidence, String) {
 
 #[tokio::test]
 async fn file_of_exactly_64_kib_is_read_and_one_byte_more_is_refused() {
-    // Exactly at the bound the worker proceeds to the model (which here refuses).
+    // Exactly at the bound the worker proceeds to the model request (which here
+    // cannot connect, so the typed code is the unreachable one, not too-large).
     let (evidence, detail) = run_with_calc_of(64 * 1024).await;
-    assert_eq!(evidence.failure_code, None, "{detail}");
+    assert_eq!(
+        evidence.failure_code.as_deref(),
+        Some(worker::MODEL_UNREACHABLE),
+        "{detail}"
+    );
     assert!(!detail.contains("workers can edit"), "{detail}");
     let (evidence, detail) = run_with_calc_of(64 * 1024 + 1).await;
     assert_eq!(

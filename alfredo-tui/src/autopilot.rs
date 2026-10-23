@@ -1767,8 +1767,7 @@ impl Autopilot {
                 self.fail(tasks, format!("{cause}. {}", crate::doctor::BWRAP_FIX));
                 return Ok(None);
             }
-            if let Some(cause) =
-                find(family.head).and_then(|head| unreachable_failure(tasks, head))
+            if let Some(cause) = find(family.head).and_then(|head| unreachable_failure(tasks, head))
             {
                 let (reason, next) = cause
                     .split_once(crate::worker::MODEL_UNREACHABLE_NEXT_PREFIX)
