@@ -6,7 +6,7 @@ use super::{excluded, text_arg, Tier, Tool, MAX_OUTPUT};
 use serde_json::{json, Value};
 use std::{
     io::Read,
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, Command, ExitStatus, Stdio},
     time::{Duration, Instant},
 };
@@ -382,6 +382,100 @@ fn git_command(root: &Path, args: &[&str]) -> Result<Command, String> {
     Ok(command)
 }
 
+/// Tracked and untracked-but-not-ignored files under `rel` (a workspace-relative `/` path,
+/// empty for the whole workspace), as git lists them: `.gitignore` files at any depth,
+/// `.git/info/exclude` and the global excludes file (`excludes`; the hardened environment
+/// hides the user's home, so it is passed in) apply, tracked files stay listed. Discovery
+/// only: the caller still applies its own exclusions and checks each path on disk. Fails
+/// closed: repository filter drivers, a failing git or a listing past `limit` bytes is an
+/// error and the caller falls back to its own walk.
+pub(crate) fn list_unignored(
+    root: &Path,
+    rel: &str,
+    excludes: Option<&Path>,
+    limit: usize,
+) -> Result<Vec<String>, String> {
+    refuse_filters(root)?;
+    let config = excludes.map(|path| format!("core.excludesFile={}", path.display()));
+    let mut args = vec!["--literal-pathspecs"];
+    if let Some(config) = &config {
+        args.extend(["-c", config]);
+    }
+    args.extend([
+        "ls-files",
+        "-z",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+    ]);
+    if !rel.is_empty() {
+        args.extend(["--", rel]);
+    }
+    let out = git_limited(root, &args, limit)?;
+    Ok(out
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_string)
+        .collect())
+}
+
+/// Whether git ignores the untracked path `rel` (a tracked path is never ignored).
+pub(crate) fn is_ignored(root: &Path, rel: &str, excludes: Option<&Path>) -> Result<bool, String> {
+    let config = excludes.map(|path| format!("core.excludesFile={}", path.display()));
+    // check-ignore rejects `--literal-pathspecs`; the `./` prefix keeps a directory named
+    // like pathspec magic (`:(top)`) a plain path.
+    let rel = format!("./{rel}");
+    let mut args = vec![];
+    if let Some(config) = &config {
+        args.extend(["-c", config]);
+    }
+    args.extend(["check-ignore", "-q", "--", &rel]);
+    let (status, _, error) = run_bounded(git_command(root, &args)?, 1024, DEADLINE)?;
+    match status.and_then(|status| status.code()) {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        _ => Err(error
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("git check-ignore failed")
+            .to_string()),
+    }
+}
+
+/// The user's global git excludes file: `core.excludesFile` of the global config, else
+/// git's default `$XDG_CONFIG_HOME/git/ignore` or `~/.config/git/ignore`. Only if it
+/// exists. It can only hide more files from discovery, never show one.
+pub(crate) fn global_excludes() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    let mut command = Command::new("/usr/bin/git");
+    hardened(&mut command)
+        .env("HOME", &home)
+        .env_remove("GIT_CONFIG_GLOBAL")
+        .args([
+            "config",
+            "--global",
+            "--type=path",
+            "--get",
+            "core.excludesFile",
+        ]);
+    let configured = match run_bounded(command, 4096, DEADLINE) {
+        Ok((Some(status), out, _)) if status.success() => {
+            String::from_utf8_lossy(&out).trim().to_string()
+        }
+        _ => String::new(),
+    };
+    let path = if configured.is_empty() {
+        std::env::var_os("XDG_CONFIG_HOME")
+            .map(PathBuf::from)
+            .filter(|dir| dir.is_absolute())
+            .unwrap_or_else(|| home.join(".config"))
+            .join("git/ignore")
+    } else {
+        PathBuf::from(configured)
+    };
+    (path.is_absolute() && path.is_file()).then_some(path)
+}
+
 /// Longest one git call may run.
 pub(crate) const DEADLINE: Duration = Duration::from_secs(15);
 
@@ -538,6 +632,25 @@ mod tests {
             .unwrap();
         file.write_all(config.as_bytes()).unwrap();
         root
+    }
+
+    #[test]
+    fn the_global_excludes_file_hides_more_and_a_big_listing_is_refused() {
+        let root = scratch_repo("global-excludes", "");
+        fs::write(root.join("a.txt"), "a").unwrap();
+        fs::write(root.join("b.tmp"), "b").unwrap();
+        let excludes = root
+            .join("..")
+            .join(format!("excludes-{}", std::process::id()));
+        fs::write(&excludes, "*.tmp\n").unwrap();
+        let plain = list_unignored(&root, "", None, 4096).unwrap();
+        assert_eq!(plain, ["a.txt", "b.tmp"]);
+        let hidden = list_unignored(&root, "", Some(&excludes), 4096).unwrap();
+        assert_eq!(hidden, ["a.txt"]);
+        let error = list_unignored(&root, "", None, 4).unwrap_err();
+        assert!(error.contains("larger than 4 bytes"), "{error}");
+        let _ = fs::remove_file(&excludes);
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
