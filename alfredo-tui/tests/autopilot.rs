@@ -2832,7 +2832,20 @@ fn drive_recorded(
 #[test]
 fn chat_collapses_autopilot_commands_into_one_line_per_task() {
     let fixture = Fixture::new();
-    let server = one_good_task();
+    // The follow-up must really edit the accepted file: an unchanged answer fails (#350).
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return json!({"tasks": [
+                {"title": "Make answer return 42", "acceptance": ["answer() returns 42"], "model": "fixture",
+                 "dependencies": [], "policy": {"files": ["calc.py"], "check": check("from calc import answer; assert answer() == 42")}},
+            ]})
+            .to_string();
+        }
+        if worker_prompt(request).contains("keep answer at 42") {
+            return files("calc.py", "def answer():\n    return 42  # kept\n");
+        }
+        good_calc()
+    });
     let runtime = Runtime::new().unwrap();
     let mut control = control(&fixture, &server, &runtime);
     let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
