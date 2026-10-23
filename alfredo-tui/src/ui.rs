@@ -123,7 +123,7 @@ fn tool_step_lines(
         if expanded {
             lines.extend(result.lines().take(EXPANDED_RESULT_LINES).map(|line| {
                 Line::styled(
-                    format!("  ↳ {}", dashboard::single_line_visible(line)),
+                    format!("  ↳ {}", dashboard::single_line_visible_tabs(line)),
                     dim(),
                 )
             }));
@@ -135,7 +135,7 @@ fn tool_step_lines(
             }
             continue;
         }
-        let first = dashboard::single_line_visible(result.lines().next().unwrap_or(""));
+        let first = dashboard::single_line_visible_tabs(result.lines().next().unwrap_or(""));
         let more = if count > 1 {
             format!(" … ({count} lines)")
         } else {
@@ -1727,14 +1727,16 @@ fn approval_card_lines(
         .sum::<usize>()
         + 1;
     let mut budget = rows.saturating_sub(fixed);
-    let preview: Vec<&str> = card.preview.lines().collect();
+    // Tabs show as `→` plus padding, so a tab-only change never reads as no change
+    // (issue #404); the stops count from the `+`/`-` column, as in `git diff`.
+    let preview: Vec<(&str, String)> = card
+        .preview
+        .lines()
+        .map(|line| (line, dashboard::show_tabs(&safe_visible(line))))
+        .collect();
     let heights: Vec<usize> = preview
         .iter()
-        .map(|line| {
-            (safe_visible(line).chars().count() + 2)
-                .div_ceil(width.max(1))
-                .max(1)
-        })
+        .map(|(_, shown)| (shown.chars().count() + 2).div_ceil(width.max(1)).max(1))
         .collect();
     let mut shown = preview.len();
     if heights.iter().sum::<usize>() > budget {
@@ -1750,7 +1752,7 @@ fn approval_card_lines(
             shown += 1;
         }
     }
-    for line in &preview[..shown] {
+    for (line, text) in &preview[..shown] {
         let color = if line.starts_with('+') {
             Color::Green
         } else if line.starts_with('-') {
@@ -1759,7 +1761,7 @@ fn approval_card_lines(
             Color::DarkGray
         };
         lines.push(Line::styled(
-            format!("  {}", safe_visible(line)),
+            format!("  {text}"),
             Style::default().fg(color),
         ));
     }

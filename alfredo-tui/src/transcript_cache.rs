@@ -49,7 +49,7 @@ impl Inner {
             self.builds += 1;
             let entry = Entry {
                 content: text.to_owned(),
-                lines: crate::dashboard::safe(text)
+                lines: crate::dashboard::expand_tabs(&crate::dashboard::safe(text))
                     .lines()
                     .map(|line| Line::from(line.to_owned()))
                     .collect(),

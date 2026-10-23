@@ -64,6 +64,69 @@ pub fn safe_visible(text: &str) -> String {
     out
 }
 
+/// Tab stops are every `TAB_WIDTH` columns (issue #404).
+pub const TAB_WIDTH: usize = 4;
+
+/// Replace each tab with spaces up to the next [`TAB_WIDTH`] stop, counting columns per
+/// line (a `\n` restarts at 0) and by display width, so tab-indented code keeps its
+/// indent and `a\tb` keeps a gap. Display only: ratatui draws a raw tab as nothing.
+pub fn expand_tabs(text: &str) -> String {
+    tabs_as(text, false)
+}
+
+/// Like [`expand_tabs`], but each tab starts with `→` so a tab never looks like the
+/// spaces next to it (the approval card, issue #404). A literal `→` in the text shows as
+/// `<U+2192>`, so a file holding the arrow cannot pass for a tab.
+pub fn show_tabs(text: &str) -> String {
+    tabs_as(text, true)
+}
+
+fn tabs_as(text: &str, marked: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut column = 0;
+    for c in text.chars() {
+        match c {
+            '\n' => {
+                column = 0;
+                out.push(c);
+            }
+            '\t' => {
+                let pad = TAB_WIDTH - column % TAB_WIDTH;
+                column += pad;
+                if marked {
+                    out.push('→');
+                }
+                out.extend(std::iter::repeat_n(' ', pad - usize::from(marked)));
+            }
+            '→' if marked => {
+                out.push_str("<U+2192>");
+                column += "<U+2192>".len();
+            }
+            _ => {
+                column += unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+                out.push(c);
+            }
+        }
+    }
+    out
+}
+
+/// [`single_line_visible`] that keeps tabs as spaces to the next stop instead of
+/// flattening each to one space (tool-result rows, issue #404).
+pub fn single_line_visible_tabs(text: &str) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| {
+            if c == '\n' || LINE_SEPARATORS.contains(&c) {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect();
+    expand_tabs(&safe_visible(&flat))
+}
+
 /// [`safe_visible`] on one line.
 pub fn single_line_visible(text: &str) -> String {
     safe_visible(&line_breaks_as_spaces(text))
@@ -499,6 +562,27 @@ mod visible_tests {
         assert_eq!(safe_visible(plain), plain);
         assert_eq!(single_line_visible("a\u{2066}\nb"), "a<U+2066> b");
         assert!(hidden('\u{FEFF}') && !hidden('é'));
+    }
+
+    /// Issue #404: tabs expand to the next 4-column stop per line; the card form marks
+    /// each with `→` and escapes a literal arrow.
+    #[test]
+    fn tabs_expand_to_the_next_stop_and_the_card_marks_them() {
+        assert_eq!(expand_tabs("\tif x {"), "    if x {");
+        assert_eq!(expand_tabs("a\tb\tc"), "a   b   c");
+        assert_eq!(expand_tabs("abcd\te"), "abcd    e");
+        assert_eq!(expand_tabs("你\tb"), "你  b");
+        assert_eq!(expand_tabs("a\n\tb"), "a\n    b");
+        assert_eq!(show_tabs("\tx"), "→   x");
+        assert_eq!(show_tabs("abc\tx"), "abc→x");
+        assert_eq!(show_tabs("a\tb→"), "a→  b<U+2192>");
+        assert_ne!(show_tabs("a\tb"), show_tabs("a   b"));
+        assert_ne!(show_tabs("a\tb"), show_tabs("a→  b"));
+        assert_eq!(
+            single_line_visible_tabs("1\tx\u{2028}\t\u{202E}"),
+            "1   x   <U+202E>"
+        );
+        assert!(!expand_tabs("a\tb").contains('\t') && !show_tabs("a\tb").contains('\t'));
     }
 
     /// Issue #361: line separators are line breaks, so every single-line helper turns them
