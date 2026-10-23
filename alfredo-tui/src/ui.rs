@@ -1732,7 +1732,17 @@ fn approval_card_lines(
     let preview: Vec<(&str, String)> = card
         .preview
         .lines()
-        .map(|line| (line, dashboard::show_tabs(&safe_visible(line))))
+        .map(|line| {
+            // Only `+`/`-` diff lines mark tabs and escape a literal arrow; notes such as
+            // `line endings LF → CRLF` and the `@@` header keep their text.
+            let shown = safe_visible(line);
+            let shown = if line.starts_with(['+', '-']) {
+                dashboard::show_tabs(&shown)
+            } else {
+                dashboard::expand_tabs(&shown)
+            };
+            (line, shown)
+        })
         .collect();
     let heights: Vec<usize> = preview
         .iter()

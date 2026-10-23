@@ -748,14 +748,15 @@ fn the_pending_card_shows_tool_args_diff_and_keys() {
 fn edit_card_screen(file: &str, content: &str, old: &str, new: &str) -> String {
     let root = workspace("tabs");
     fs::write(root.join(file), content).unwrap();
-    let card = approval::card(
-        &root,
-        &call(
-            "edit_file",
-            json!({"path": file, "old_text": old, "new_text": new}),
-        ),
-    )
-    .unwrap();
+    let edit = call(
+        "edit_file",
+        json!({"path": file, "old_text": old, "new_text": new}),
+    );
+    card_screen(root, &edit)
+}
+
+fn card_screen(root: PathBuf, tool: &ToolCall) -> String {
+    let card = approval::card(&root, tool).unwrap();
     let _ = fs::remove_dir_all(root);
     let mut session = Session::new("m".into());
     session.insert("fix it");
@@ -791,6 +792,20 @@ fn a_tab_to_spaces_edit_card_shows_different_removed_and_added_lines() {
     let text = edit_card_screen("data.tsv", "id\tname\n1\talice\n", "1\talice", "1alice");
     assert!(text.contains("-1→ alice"), "{text}");
     assert!(text.contains("+1alice"), "{text}");
+}
+
+/// Issue #404: the line-ending note keeps its real arrow; only diff lines escape one.
+#[test]
+fn the_line_ending_note_keeps_its_arrow_on_the_card() {
+    let root = workspace("ending-note");
+    fs::write(root.join("win.txt"), b"one\r\ntwo\r\n").unwrap();
+    let lf = call(
+        "write_file",
+        json!({"path": "win.txt", "content": "one\ntwo\n"}),
+    );
+    let text = card_screen(root, &lf);
+    assert!(text.contains("line endings CRLF → LF"), "{text}");
+    assert!(!text.contains("<U+2192>"), "{text}");
 }
 
 /// Issue #404: a file that really contains the arrow cannot pass for a tab.
