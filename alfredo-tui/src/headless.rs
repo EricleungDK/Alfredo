@@ -644,6 +644,11 @@ impl Turn {
                 self.steps += usize::from(new_round);
                 self.record(&call, &result);
             }
+            // An empty reply is a failed turn, as in the TUI (issue #397). A capped turn's
+            // text is only the "ask again" notice, so it is judged by its stop.
+            Update::Done if self.stopped.is_none() && self.reply.trim().is_empty() => {
+                self.failure = Some(alfredo_tui::model::NO_TEXT.into());
+            }
             Update::Done => self.done = true,
             Update::Failed(reason) => self.failure = Some(reason),
             _ => {}

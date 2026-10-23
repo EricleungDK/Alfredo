@@ -176,6 +176,22 @@ fn without_a_policy_every_mutating_call_is_denied_and_logged() {
     let _ = fs::remove_dir_all(&root);
 }
 
+#[test]
+fn an_empty_reply_is_a_failed_turn_with_exit_1() {
+    let root = repository("empty");
+    let fixture = scripted_chat(vec![done("")]);
+    let output = run(&root, &fixture, &["--chat", "hi", "--headless"]);
+    let value = result(&output);
+    assert_eq!(output.status.code(), Some(1), "{value}");
+    assert_eq!(value["state"], "failed");
+    assert_eq!(
+        value["error"],
+        "Model returned no text; Ctrl+R retries or send again"
+    );
+    assert_eq!(value["reply"], "");
+    let _ = fs::remove_dir_all(&root);
+}
+
 /// System prompt of the first chat request the fixture saw.
 fn system_prompt(fixture: &Fixture) -> String {
     let requests = fixture.requests.lock().unwrap();

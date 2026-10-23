@@ -7,6 +7,8 @@ pub mod compaction;
 pub use compaction::Compaction;
 
 pub const MAX_TEXT: usize = 128 * 1024;
+/// Failure for a reply that finished with no text (issue #397).
+pub const NO_TEXT: &str = "Model returned no text; Ctrl+R retries or send again";
 /// Failure text when a reply or tool step would pass [`MAX_TEXT`]; names the ways out.
 pub const OUTPUT_LIMIT: &str = "Conversation output limit reached; run /compact or /clear, or press Ctrl+N for a new conversation";
 pub const MAX_DRAFT: usize = 16 * 1024;
@@ -2005,7 +2007,19 @@ impl Session {
                         .push((ordinal, rule));
                 }
             }
-            Update::Done => self.status = Status::Complete,
+            // A reply with no text is no answer (issue #397): fail it so the owner is told
+            // and `retry` or a new prompt drops it from the next request.
+            Update::Done => {
+                let empty = self
+                    .messages
+                    .last()
+                    .is_none_or(|message| message.content.trim().is_empty());
+                self.status = if empty {
+                    Status::Failed(NO_TEXT.into())
+                } else {
+                    Status::Complete
+                };
+            }
             Update::Failed(reason) => self.status = Status::Failed(reason),
         }
         if !self.status.active() {
