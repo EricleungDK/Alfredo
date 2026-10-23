@@ -46,6 +46,10 @@ fn invalid_arguments_fail_before_entering_terminal_mode() {
         vec!["--num-ctx", "2047"],
         vec!["--num-ctx", "262145"],
         vec!["--num-ctx", "big"],
+        vec!["--max-turns"],
+        vec!["--max-turns", "0"],
+        vec!["--max-turns", "33"],
+        vec!["--max-turns", "many"],
         vec!["--connect-retries"],
         vec!["--connect-retries", "-1"],
         vec!["--connect-retries", "11"],
@@ -73,6 +77,8 @@ fn connection_flags_are_documented_and_invalid_environment_fails_early() {
         "ALFREDO_KEEP_ALIVE",
         "--num-ctx",
         "ALFREDO_NUM_CTX",
+        "--max-turns",
+        "ALFREDO_MAX_TURNS",
     ] {
         assert!(help.contains(text), "{text}");
     }

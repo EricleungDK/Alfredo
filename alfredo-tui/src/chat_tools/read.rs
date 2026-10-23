@@ -1,7 +1,10 @@
 //! Read tier: read_file, list_files, grep on the Coding Workspace working tree.
-use super::{budget, display, excluded, open_confined, resolve, text_arg, Tier, Tool, MAX_OUTPUT};
+use super::{
+    budget, display, excluded, git_read, open_confined, resolve, text_arg, Tier, Tool, MAX_OUTPUT,
+};
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     io::Read,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -174,7 +177,7 @@ pub(crate) fn read_file_within(
 
 /// Regular files under `start` in sorted order; symlinks are never followed.
 /// Returns the files and whether the walk stopped early.
-fn walk(start: &Path, limit: usize) -> (Vec<PathBuf>, bool) {
+fn walk(start: &Path, limit: usize, skip_noise: bool) -> (Vec<PathBuf>, bool) {
     let mut files = Vec::new();
     let mut stack = vec![start.to_path_buf()];
     let mut visits = 0;
@@ -193,7 +196,8 @@ fn walk(start: &Path, limit: usize) -> (Vec<PathBuf>, bool) {
             let Ok(kind) = entry.file_type() else {
                 continue;
             };
-            if excluded(&entry.file_name().to_string_lossy()) {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if excluded(&name) || (skip_noise && noise(&name.to_lowercase())) {
                 continue;
             }
             if kind.is_dir() {
@@ -208,20 +212,112 @@ fn walk(start: &Path, limit: usize) -> (Vec<PathBuf>, bool) {
     (files, false)
 }
 
+/// Directory names skipped in discovery below the listed path, even with no `.gitignore`:
+/// Python virtualenvs, bytecode caches and installed packages. `build` is not here, since
+/// it can be real source; a `.gitignore` hides it when it is not.
+fn noise(lower: &str) -> bool {
+    lower
+        .split('/')
+        .any(|part| matches!(part, ".venv" | "venv" | "__pycache__" | "site-packages"))
+}
+
+/// Largest git listing used for discovery, in bytes; a bigger one falls back to the walk.
+const MAX_LISTING: usize = 16 << 20;
+
+/// Files chosen for discovery under `start` (an existing path inside `root`), in the
+/// order [`walk`] yields, whether the listing stopped early, and a note when `start` is
+/// itself ignored. In a git workspace git's ignore rules decide (tracked files stay);
+/// otherwise, or when git cannot list, the plain [`walk`] is the fallback. [`excluded`]
+/// and [`noise`] always apply on top, so ignore files can only hide more.
+fn discover(root: &Path, start: &Path, limit: usize) -> (Vec<PathBuf>, bool, Option<String>) {
+    let canonical = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let rel = start
+        .strip_prefix(&canonical)
+        .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_default();
+    let excludes = git_read::global_excludes();
+    let ignored = git_read::is_ignored(root, &rel, excludes.as_deref());
+    // Inside an ignored directory (by git, or a virtualenv/cache name) the caller asked
+    // for it by name: list it with the plain walk and say so.
+    let named = noise(&rel.to_lowercase());
+    if named || (!rel.is_empty() && ignored == Ok(true)) {
+        let (files, cut) = walk(start, limit, false);
+        let note = format!("note: {rel} is ignored (by .gitignore or as a virtualenv or cache directory); listed because you named it");
+        return (files, cut, Some(note));
+    }
+    let Ok(listing) = git_read::list_unignored(root, &rel, excludes.as_deref(), MAX_LISTING) else {
+        let (files, cut) = walk(start, limit, true);
+        return (files, cut, None);
+    };
+    let mut paths: Vec<Vec<&str>> = listing
+        .iter()
+        .map(|path| path.split('/').collect())
+        .collect();
+    // The walk's order: within a directory its files by name, then its subdirectories.
+    paths.sort_by(|a, b| {
+        for (index, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            if x != y {
+                let (x_file, y_file) = (index + 1 == a.len(), index + 1 == b.len());
+                return y_file.cmp(&x_file).then_with(|| x.cmp(y));
+            }
+        }
+        a.len().cmp(&b.len())
+    });
+    paths.dedup();
+    let mut parents: HashMap<String, bool> = HashMap::new();
+    let mut files = Vec::new();
+    for parts in paths {
+        let relative = parts.join("/");
+        let lower = relative.to_lowercase();
+        // Git does not validate the names in an index it reads: only a clean relative
+        // path may become a file (an absolute or `..` name must never leave the root).
+        // Each component is tested as well as the whole path, as the walk tested every
+        // directory name, so a `certs.key/` directory stays hidden.
+        if !crate::planning_context::path_valid(&relative)
+            || parts.iter().any(|part| excluded(part))
+            || excluded(&relative)
+            || noise(&lower)
+        {
+            continue;
+        }
+        let full = canonical.join(&relative);
+        if !full.starts_with(&canonical) {
+            continue;
+        }
+        // A regular file only (never a symlink, a submodule or a deleted tracked path),
+        // reached through real directories: a tracked directory swapped for a symlink
+        // must not lead out of the workspace.
+        let parent = parts[..parts.len() - 1].join("/");
+        let real = *parents.entry(parent.clone()).or_insert_with(|| {
+            canonical
+                .join(&parent)
+                .canonicalize()
+                .is_ok_and(|real| real == canonical.join(&parent))
+        });
+        if !real || !std::fs::symlink_metadata(&full).is_ok_and(|meta| meta.is_file()) {
+            continue;
+        }
+        if files.len() >= limit {
+            return (files, true, None);
+        }
+        files.push(full);
+    }
+    (files, false, None)
+}
+
 fn list_files(root: &Path, arguments: &Value) -> Result<String, String> {
     let path = text_arg(arguments, "path")?.unwrap_or(".");
     let full = resolve(root, path)?;
     if full.is_file() {
         return Ok(display(root, &full));
     }
-    let (files, cut) = walk(&full, MAX_ENTRIES);
+    let (files, cut, note) = discover(root, &full, MAX_ENTRIES);
+    let mut out = note.map(|note| format!("[{note}]\n")).unwrap_or_default();
     if files.is_empty() {
-        return Ok("no files".into());
+        out.push_str("no files");
+        return Ok(out);
     }
-    let mut out: String = files
-        .iter()
-        .map(|file| display(root, file) + "\n")
-        .collect();
+    out.extend(files.iter().map(|file| display(root, file) + "\n"));
     if cut {
         out.push_str(&format!(
             "[truncated: first {} files; list a subdirectory with path]",
@@ -261,12 +357,12 @@ fn grep_within(
     };
     let path = text_arg(arguments, "path")?.unwrap_or(".");
     let full = resolve(root, path)?;
-    let (files, mut cut) = if full.is_file() {
-        (vec![full], false)
+    let (files, mut cut, note) = if full.is_file() {
+        (vec![full], false, None)
     } else {
-        walk(&full, MAX_VISITS)
+        discover(root, &full, MAX_VISITS)
     };
-    let mut out = String::new();
+    let mut out = note.map(|note| format!("[{note}]\n")).unwrap_or_default();
     let mut matches = 0;
     'files: for file in &files {
         if round.as_ref().is_some_and(|b| b.cancel.is_set()) {
@@ -306,7 +402,8 @@ fn grep_within(
         }
     }
     if matches == 0 && !cut && !stopped {
-        return Ok("no matches".into());
+        out.push_str("no matches");
+        return Ok(out);
     }
     if cut {
         out.push_str(&format!(
