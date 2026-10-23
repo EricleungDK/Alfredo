@@ -64,6 +64,14 @@ class Fixture:
                             'reason': 'broad refactor'}}}]}, 'done': False}]
                 elif 'refactor everything' in prompt:
                     chunks = [{'message': {'content': 'SHOULD_NOT_CONTINUE'}, 'done': False}]
+                elif 'find handle_request' in prompt and not tool_results:
+                    chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
+                        {'function': {'name': 'grep', 'arguments': {
+                            'pattern': 'def handle_request'}}}]}, 'done': False}]
+                elif 'find handle_request' in prompt:
+                    seen = 'src/app.py:1:def handle_request' in tool_results[-1]['content']
+                    chunks = [{'message': {'content': 'GREP_FOUND_APP' if seen else 'GREP_VENV_NOISE'},
+                               'done': False}]
                 elif 'redraft' in prompt and not tool_results:
                     chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
                         {'function': {'name': 'edit_file', 'arguments': {
@@ -79,6 +87,9 @@ class Fixture:
                             'command': SLOW, 'escalate': 'on host' in prompt}}}]}, 'done': False}]
                 elif 'slow command' in prompt:
                     chunks = [{'message': {'content': 'SLOW_DONE'}, 'done': False}]
+                elif 'loop forever' in prompt:
+                    chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
+                        {'function': {'name': 'list_files', 'arguments': {}}}]}, 'done': False}]
                 elif 'read big' in prompt and not tool_results:
                     chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
                         {'function': {'name': 'read_file', 'arguments': {'path': 'big.txt'}}}]},
@@ -130,8 +141,11 @@ class ChatTools(unittest.TestCase):
             str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
         env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=self.state.name)
         self.terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint',
-                                   self.fixture.endpoint], root, env)
+                                   self.fixture.endpoint, *self.extra_args()], root, env)
         self.terminal.wait_for('ALFREDO')
+
+    def extra_args(self):
+        return ['--max-turns', '3'] if 'max_turns' in self._testMethodName else []
 
     def tearDown(self):
         self.terminal.close()
@@ -158,6 +172,26 @@ class ChatTools(unittest.TestCase):
         self.assertIn('README_BODY_MARKER', second[-1]['content'])
         self.assertIn('read_file', second[0]['content'], 'the system prompt names the tools')
 
+
+    def test_grep_skips_a_gitignored_virtualenv_so_project_files_are_found(self):
+        root = Path(os.path.realpath(self.repo.name))
+        root.joinpath('.gitignore').write_text('.venv/\n__pycache__/\nbuild/\n*.log\n')
+        for n in range(300):
+            mod = root / '.venv/lib/python3.12/site-packages' / f'pkg{n}' / 'mod.py'
+            mod.parent.mkdir(parents=True)
+            mod.write_text('import os\ndef handle_request_x():\n')
+        root.joinpath('src').mkdir()
+        root.joinpath('src/app.py').write_text('def handle_request():\n    pass\n')
+        self.terminal.write(b'find handle_request\r')
+        self.terminal.wait_for('GREP_FOUND_APP')
+        tool = self.fixture.chats()[1]['messages'][-1]['content']
+        self.assertNotIn('.venv', tool)
+
+    def test_max_turns_caps_the_tool_rounds_and_the_notice_names_the_cap(self):
+        # Issue #321: --max-turns 3 stops a looping model after 3 rounds.
+        self.terminal.write(b'loop forever\r')
+        self.terminal.wait_for('tool step limit reached after 3 rounds')
+        self.assertEqual(len(self.fixture.chats()), 4)
 
     def readme(self):
         return Path(os.path.realpath(self.repo.name), 'README.md').read_text()

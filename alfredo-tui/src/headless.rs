@@ -607,6 +607,8 @@ struct Turn {
     failure: Option<String>,
     /// Set when a cap ended the turn (issue #278): state `stopped`, exit 1.
     stopped: Option<Stop>,
+    /// Round cap the turn ran under (`--max-turns`); None is the default.
+    cap: Option<usize>,
 }
 
 impl Turn {
@@ -667,7 +669,8 @@ impl Turn {
         let error = match (&self.failure, self.done, self.stopped) {
             (Some(reason), _, _) => Some(reason.clone()),
             (None, _, Some(Stop::StepLimit)) => Some(format!(
-                "{STEP_CAP_NOTICE} after {MAX_STEPS} rounds; the turn was cut off"
+                "{STEP_CAP_NOTICE} after {} rounds; the turn was cut off",
+                self.cap.unwrap_or(MAX_STEPS)
             )),
             (None, _, Some(Stop::OutputLimit)) => {
                 Some("the conversation is near its size limit; the turn was cut off".to_string())
@@ -876,6 +879,7 @@ pub fn run_chat(options: ChatOptions) -> Result<i32, String> {
         turn.failure = Some("interrupted".into());
         turn.stopped = None;
     }
+    turn.cap = chat.max_turns();
     let records = log.map_or_else(Vec::new, |log| log.records());
     let value = turn.json(&model, policy, records.get(before..).unwrap_or(&[]));
     let _ = writeln!(std::io::stdout(), "{value}");
