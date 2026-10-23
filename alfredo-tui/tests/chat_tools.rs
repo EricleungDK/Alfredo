@@ -524,3 +524,36 @@ fn when_git_cannot_list_the_plain_walk_is_the_fallback() {
     let listed = workspace.run("list_files", json!({}));
     assert!(lines(&listed).contains(&"x.log"), "{listed}");
 }
+
+#[test]
+fn a_repository_config_cannot_make_discovery_run_programs() {
+    // Repo-local fsmonitor and hooks must not run for the git listing; a .gitignore
+    // negation cannot re-include an excluded path.
+    let workspace = git_workspace();
+    let ran = workspace.root.parent().unwrap().join(format!(
+        "ran-343-{}-{}",
+        std::process::id(),
+        workspace.root.file_name().unwrap().to_string_lossy()
+    ));
+    let _ = fs::remove_file(&ran);
+    let script = workspace.root.join("fsmon.sh");
+    fs::write(&script, format!("#!/bin/sh\ntouch {}\n", ran.display())).unwrap();
+    git(
+        &workspace,
+        &["config", "core.fsmonitor", script.to_str().unwrap()],
+    );
+    git(
+        &workspace,
+        &["config", "core.hooksPath", workspace.root.to_str().unwrap()],
+    );
+    put(&workspace, "ok.txt", "needle ok\n");
+    put(&workspace, ".env", "needle secret\n");
+    put(&workspace, ".gitignore", "!.env\n");
+    let listed = workspace.run("list_files", json!({}));
+    let found = workspace.run("grep", json!({"pattern": "needle"}));
+    assert!(lines(&listed).contains(&"ok.txt"), "{listed}");
+    assert!(!listed.contains(".env"), "{listed}");
+    assert_eq!(found.trim(), "ok.txt:1:needle ok");
+    assert!(!ran.exists(), "repository fsmonitor ran");
+    let _ = fs::remove_file(&ran);
+}
