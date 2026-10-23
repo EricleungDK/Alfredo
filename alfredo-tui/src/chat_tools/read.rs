@@ -77,7 +77,7 @@ pub const GREP: Tool = Tool {
 /// Contents of a regular text file inside the workspace, or why it cannot be read.
 /// `path` is a path [`resolve`] returned; the size and the bytes come from the opened
 /// handle, so a file swapped after the check is refused (issue #360).
-fn text(root: &Path, path: &Path) -> Result<String, String> {
+pub(crate) fn text(root: &Path, path: &Path) -> Result<String, String> {
     let (file, len) = open_confined(root, path)?;
     contents(file, len)
 }

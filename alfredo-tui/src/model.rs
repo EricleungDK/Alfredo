@@ -259,7 +259,7 @@ pub struct Session {
     interrupted: Vec<usize>,
     pub status: Status,
     pub attempt: u64,
-    /// `@path` file contents (committed HEAD) appended to a user turn's model-visible
+    /// `@path` file contents (working tree) appended to a user turn's model-visible
     /// message, keyed by user-message index. Not shown, not saved.
     #[serde(skip)]
     attachments: std::collections::BTreeMap<usize, String>,
@@ -858,12 +858,27 @@ impl Session {
             .iter()
             .flat_map(|step| step.calls.iter().zip(&step.results))
             .filter(|(call, result)| {
-                !result.starts_with("error:")
+                (!result.starts_with("error:") || killed_run(call, result))
                     && TOOLS.iter().any(|tool| {
                         tool.name == call.name && matches!(tool.tier, Tier::Mutating | Tier::Push)
                     })
             })
             .map(|(call, result)| {
+                if killed_run(call, result) {
+                    let command: String = call
+                        .arguments
+                        .get("command")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .chars()
+                        .map(|c| if c.is_control() { ' ' } else { c })
+                        .take(160)
+                        .collect();
+                    return format!(
+                        "- {} {command}: cancelled mid-run, effects may be partial",
+                        call.name
+                    );
+                }
                 let target = call
                     .arguments
                     .get("path")
@@ -1646,6 +1661,14 @@ impl Session {
     pub fn source(&self, message: usize) -> Option<&ResponseSource> {
         self.sources.get(&message)
     }
+    /// Saving must never fail because of where the user is reading (issue #375): a
+    /// scroll anchor the stored data cannot account for is view state, so it is dropped
+    /// (the saved offset then reads from the bottom) instead of refusing the snapshot.
+    pub(crate) fn drop_unbounded_reading(&mut self, schema: u32) {
+        if !self.valid_reading(schema) {
+            self.reading.set(Default::default());
+        }
+    }
     pub(crate) fn valid_reading(&self, schema: u32) -> bool {
         // Newline plus two structural lines per message is a conservative bound;
         // layout clamps the wrapped row when terminal geometry changes.
@@ -1660,8 +1683,25 @@ impl Session {
                     .tool_steps
                     .values()
                     .flatten()
-                    .map(|step| 2 * step.calls.len() + 1)
+                    .map(|step| {
+                        // Collapsed: call row + cut result per call. Expanded (Ctrl+O,
+                        // #369): up to 200 result rows and a marker per call.
+                        2 * step.calls.len()
+                            + 1
+                            + step
+                                .results
+                                .iter()
+                                .map(|result| result.lines().count().min(200) + 1)
+                                .sum::<usize>()
+                    })
                     .sum::<usize>()
+                // Compaction note (#187): marker, one row per summary line, blank row.
+                + self.compaction().map_or(0, |note| {
+                    note.summary.bytes().filter(|b| *b == b'\n').count() + 3
+                })
+                // Project notes (#322) render above the transcript.
+                + self.notes_lines.len()
+                + 1
         };
         let reading = self.reading.get();
         let has_worker_result = |command: &crate::console_command::ConsoleCommand| {
@@ -1740,7 +1780,54 @@ impl Session {
         self.apply(attempt, Update::Token(text));
         self.apply(attempt, Update::Done);
     }
+    /// Add one finished call to the last reply's tool steps. False (nothing added) when
+    /// the step is invalid or would pass the conversation limit.
+    fn push_tool_result(&mut self, call: ToolCall, result: String, new_round: bool) -> bool {
+        let total =
+            self.messages.iter().map(|m| m.content.len()).sum::<usize>() + self.tool_bytes();
+        let step = ToolStep {
+            calls: vec![call],
+            results: vec![result],
+        };
+        if !step.valid() || total + step.bytes() > MAX_TEXT {
+            return false;
+        }
+        // A chat proposal (#239) fills an empty prompt; typed text is kept.
+        if let Some(command) = crate::chat_tools::propose::prefill(&step) {
+            if self.draft.trim().is_empty() && self.history_index.is_none() {
+                self.draft = command;
+                self.end();
+            }
+        }
+        let rounds = self.tool_steps.entry(self.messages.len() - 1).or_default();
+        match rounds.last_mut() {
+            Some(open) if !new_round && open.calls.len() < 64 => {
+                open.calls.extend(step.calls);
+                open.results.extend(step.results);
+            }
+            _ => rounds.push(step),
+        }
+        true
+    }
+
     pub fn apply(&mut self, attempt: u64, update: Update) {
+        // A command killed by Esc, /stop or quit is reported after the cancel, by the
+        // thread that reaped it (issue #333): it still joins the cancelled reply.
+        if let Update::ToolResult {
+            call,
+            result,
+            new_round,
+        } = &update
+        {
+            if self.attempt == attempt
+                && self.status == Status::Cancelled
+                && !self.messages.is_empty()
+                && result.starts_with(crate::chat_tools::CANCELLED_RESULT)
+            {
+                self.push_tool_result(call.clone(), result.clone(), *new_round);
+                return;
+            }
+        }
         if self.attempt != attempt || !self.status.active() {
             return;
         }
@@ -1877,36 +1964,13 @@ impl Session {
                     .tool_steps
                     .get(&(self.messages.len() - 1))
                     .map_or(0, |rounds| rounds.iter().map(|s| s.calls.len()).sum());
-                let total = self.messages.iter().map(|m| m.content.len()).sum::<usize>()
-                    + self.tool_bytes();
-                let step = ToolStep {
-                    calls: vec![call],
-                    results: vec![result],
-                };
-                if !step.valid() || total + step.bytes() > MAX_TEXT {
+                if !self.push_tool_result(call, result, new_round) {
                     self.status = Status::Failed(OUTPUT_LIMIT.into());
-                } else {
-                    // A chat proposal (#239) fills an empty prompt; typed text is kept.
-                    if let Some(command) = crate::chat_tools::propose::prefill(&step) {
-                        if self.draft.trim().is_empty() && self.history_index.is_none() {
-                            self.draft = command;
-                            self.end();
-                        }
-                    }
-                    if let Some(rule) = rule {
-                        self.rule_marks
-                            .entry(self.messages.len() - 1)
-                            .or_default()
-                            .push((ordinal, rule));
-                    }
-                    let rounds = self.tool_steps.entry(self.messages.len() - 1).or_default();
-                    match rounds.last_mut() {
-                        Some(open) if !new_round && open.calls.len() < 64 => {
-                            open.calls.extend(step.calls);
-                            open.results.extend(step.results);
-                        }
-                        _ => rounds.push(step),
-                    }
+                } else if let Some(rule) = rule {
+                    self.rule_marks
+                        .entry(self.messages.len() - 1)
+                        .or_default()
+                        .push((ordinal, rule));
                 }
             }
             Update::Done => self.status = Status::Complete,
@@ -1924,6 +1988,11 @@ impl Session {
             }
         }
     }
+}
+
+/// Whether `result` is that of a `run_command` killed mid-run (issue #333).
+fn killed_run(call: &ToolCall, result: &str) -> bool {
+    call.name == "run_command" && result.starts_with(crate::chat_tools::CANCELLED_RESULT)
 }
 
 pub struct App {
