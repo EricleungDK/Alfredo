@@ -338,7 +338,11 @@ fn an_invalid_max_turns_exits_two_naming_the_range() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("1 to 32"), "{stderr}");
     }
-    let output = run(&root, &fixture, &["--chat", "hi", "--headless", "--max-turns"]);
+    let output = run(
+        &root,
+        &fixture,
+        &["--chat", "hi", "--headless", "--max-turns"],
+    );
     assert_eq!(output.status.code(), Some(2));
     let _ = fs::remove_dir_all(&root);
 }

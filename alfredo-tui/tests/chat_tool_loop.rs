@@ -263,7 +263,17 @@ async fn a_configured_cap_stops_the_loop_after_that_many_rounds() {
     session.insert("loop forever");
     let messages = session.begin().unwrap();
     let (sender, mut receiver) = mpsc::channel(256);
-    chat_tools::run_turn(&provider, &root, 0, 1, "fixture".into(), messages, sender, None).await;
+    chat_tools::run_turn(
+        &provider,
+        &root,
+        0,
+        1,
+        "fixture".into(),
+        messages,
+        sender,
+        None,
+    )
+    .await;
     while let Ok(event) = receiver.try_recv() {
         session.apply(event.attempt, event.update);
     }
