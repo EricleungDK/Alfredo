@@ -242,6 +242,95 @@ pub fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
     Ok(full)
 }
 
+/// Open a file that [`resolve`] returned, for reading, and check the handle itself
+/// (issue #360). Returns the handle and the size `fstat` reports for it.
+///
+/// `resolve` checks the path and the caller then opens it by name, so a concurrent
+/// writer can swap a component for a symlink in between. `O_NOFOLLOW` refuses a symlink
+/// as the last component. `O_NONBLOCK` stops a FIFO from blocking the open (it is then
+/// refused as not a regular file). `O_NOCTTY` keeps a terminal from becoming the
+/// controlling one. Directory components are not covered by `O_NOFOLLOW`, so the file the
+/// handle refers to must also lie under the canonical workspace and outside [`excluded`]
+/// (see [`confined_handle`]).
+#[cfg(unix)]
+pub(crate) fn open_confined(
+    workspace: &Path,
+    resolved: &Path,
+) -> Result<(std::fs::File, u64), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_NOCTTY | libc::O_CLOEXEC)
+        .open(resolved)
+        .map_err(|error| match error.raw_os_error() {
+            Some(libc::ELOOP) => "became a symbolic link after the workspace check; refused".into(),
+            _ => error.to_string(),
+        })?;
+    let metadata = file.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file() {
+        return Err("not a regular file".into());
+    }
+    confined_handle(workspace, &file)?;
+    Ok((file, metadata.len()))
+}
+
+/// Refuses unless the opened handle is a regular file inside the workspace. Linux only:
+/// `/proc/self/fd/N` names the file the handle refers to. Without it the read is refused.
+/// The name is read before the link count, so a removal in between is caught by the
+/// count (issue #360).
+#[cfg(target_os = "linux")]
+pub(crate) fn confined_handle(workspace: &Path, file: &std::fs::File) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    use std::os::unix::io::AsRawFd;
+    let opened = std::fs::read_link(format!("/proc/self/fd/{}", file.as_raw_fd()))
+        .map_err(|_| "cannot confirm where the file lies (no /proc); refused".to_string())?;
+    if file.metadata().map_err(|error| error.to_string())?.nlink() == 0 {
+        return Err("removed while it was read; refused".into());
+    }
+    confined_name(workspace, &opened)
+}
+
+/// Decides from the name Linux reports for an open handle (see [`confined_handle`]).
+#[cfg(target_os = "linux")]
+pub(crate) fn confined_name(workspace: &Path, opened: &Path) -> Result<(), String> {
+    // Linux appends " (deleted)" to the name of a removed file. The name checks cannot
+    // tell that apart from a real name, so such a name is refused. A file whose real
+    // name ends in that suffix is refused too.
+    if opened
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().ends_with(" (deleted)"))
+    {
+        return Err(
+            "its name ends in \" (deleted)\", the form Linux gives a removed file; refused".into(),
+        );
+    }
+    let root = workspace
+        .canonicalize()
+        .map_err(|_| "Coding Workspace is not available".to_string())?;
+    let inside = opened
+        .strip_prefix(&root)
+        .map_err(|_| "leaves the Coding Workspace through a symlink; refused".to_string())?;
+    if excluded(&inside.to_string_lossy().replace('\\', "/")) {
+        return Err("excluded (Git metadata, secrets or generated files)".into());
+    }
+    Ok(())
+}
+
+/// Other Unix targets cannot name an opened file, so they refuse confined reads.
+#[cfg(all(unix, not(target_os = "linux")))]
+pub(crate) fn confined_handle(_workspace: &Path, _file: &std::fs::File) -> Result<(), String> {
+    Err("cannot confirm where the file lies on this platform; refused".into())
+}
+
+/// Confined reads need Unix file descriptors; other platforms refuse them.
+#[cfg(not(unix))]
+pub(crate) fn open_confined(
+    _workspace: &Path,
+    _resolved: &Path,
+) -> Result<(std::fs::File, u64), String> {
+    Err("confined reads are not supported on this platform; refused".into())
+}
+
 /// Workspace-relative display form with `/` separators.
 pub(crate) fn display(root: &Path, path: &Path) -> String {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
