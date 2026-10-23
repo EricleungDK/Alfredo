@@ -96,7 +96,8 @@ fn scenario() -> Vec<String> {
 
 /// Captured on the uncached renderer (origin/main @ 52e5e90) before the cache existed;
 /// re-captured for #258, which adds the `^O expand results` footer hint (frame bodies
-/// are unchanged).
+/// are unchanged); re-captured for #404, which expands the tab in message 1's `\ttabbed` line
+/// to four spaces (the golden had it vanish).
 const GOLDEN: [&str; 21] = [
     "8efcb6e369f15a7356a1633cf2d2ab64b47cd8a5e7904f0ba318fa54f709656a",
     "aa80a31ced18b14400d600e7670760f10ef4d28b81c4a6315033bcf771d81daf",
@@ -109,9 +110,9 @@ const GOLDEN: [&str; 21] = [
     "c8de1b79a3e98afd3776c0cb006446365f254606c57e8ca547b9cd609dc349bf",
     "fc4ca5b9376d952cbcf62f5e9fbb371c58c6e087223afd22f605894cf92a6cd7",
     "fc4ca5b9376d952cbcf62f5e9fbb371c58c6e087223afd22f605894cf92a6cd7",
-    "01d06276ba96ec1db89995339d834d8aaca05a262a5e75d2f9129e91f497e324",
-    "0ea73612074aea3fab34eb068f1907760475670f8be46ba930da4cdec7f3d2b4",
-    "0d9eb1cf232eb7ed8194cfef7fdba5779c3e4f1febfc4f5b41a1ef64df2965d3",
+    "74137953f371429fb1a28dbf22fb6f7223c09365871672e4372b108f3c658666",
+    "faf96de0ac8d0168e9f6f51ca9a6b94d92e99ff7e2b936c393952a74606a594c",
+    "829a0ee7e3da89fbac9738e8598f32d2eff9e19f9d8b57e28351ce1b902676fb",
     "8efcb6e369f15a7356a1633cf2d2ab64b47cd8a5e7904f0ba318fa54f709656a",
     "66535fad939251375f37f0614b28cacefd1b0df7c2c9ca6dc393221ce1b6ec02",
     "a39f3b71a19d1a109861a1d9e9cea3e6e680da31606d5934c69ecc1e4b78efcb",
