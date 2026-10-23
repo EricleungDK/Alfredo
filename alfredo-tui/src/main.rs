@@ -2076,6 +2076,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if !alfredo_tui::chat_tools::stop_running_commands(Duration::from_secs(3)) {
         eprintln!("A chat command did not stop within 3s; check for leftover processes");
     }
+    // The killed commands report their `⚙` rows (issue #333) before the final save.
+    while let Ok(event) = receiver.try_recv() {
+        work.app.apply(event);
+    }
     // Save the chat draft, not an agent's unsent note; close keeps that note in
     // the agent drafts file.
     alfredo_tui::agent_view::close(&mut work.app, &mut work.tasks, false);

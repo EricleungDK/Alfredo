@@ -568,7 +568,10 @@ turn that already applied a change (an approved write, edit or git action): ever
 executed call shows as a `⚙` row as soon as it finishes, and the next request keeps
 that turn's prompt plus a short "already applied" note so the model knows the files
 changed (its heading then reads `· interrupted, applied changes sent as context`).
-Pending, denied and failed calls and read-only results are not sent. Once the new turn
+A `run_command` killed mid-run by Esc, `/stop` or Ctrl+Q counts too: it shows a `⚙` row
+`↳ cancelled after Ns · killed; it may have partly run` and the note says
+`run_command <cmd>: cancelled mid-run, effects may be partial`. Pending, denied and
+failed calls and read-only results are not sent. Once the new turn
 starts, the interrupted turn is no longer retryable with Ctrl+R; Ctrl+R before
 sending anything new still retries it exactly as before. Which turns were moved past
 is saved with the conversation, so a restart does not send them to the model either.
@@ -1725,6 +1728,10 @@ default false), `timeout_seconds` (1–600, default 120).
 - **Esc, `/stop`, quit.** Esc, `/stop`, switching chats with a cancel, Ctrl+R and every
   way of leaving Alfredo (Ctrl+Q) kill a running command's whole process group within
   about a second, sandboxed or on the host; Alfredo waits up to 3 s for it on exit. The
+  killed run keeps its `⚙ run_command <cmd>` row with `↳ cancelled after Ns · killed; it
+  may have partly run` (the command may have partly run; the partial output is not
+  shown) and the next request says `run_command <cmd>: cancelled mid-run, effects may be
+  partial`; it is never re-run, also not after a restart. The
   approval log records `cancelled` (not `applied`) and the chat status reads
   `running run_command · Ns · Esc stops` while it runs. A rule-approved run (no card)
   is stopped the same way. A closed terminal (SIGHUP) or `kill` (SIGTERM) quits like
