@@ -271,6 +271,7 @@ fn serve_reply(
                         || prompt.contains("Worker stream ended before completion")
                         || prompt.contains("Worker cancelled during inference")
                         || prompt.contains("AssertionError")
+                        || prompt.contains("previous attempt changed nothing")
                         || prompt.contains("-token limit")
                         || prompt.contains("(truncated)"))
             );
@@ -6142,6 +6143,73 @@ async fn identical_repair_is_named_no_progress_and_next_repair_leads_with_failur
         TaskStatus::ReviewReady,
         "{detail}"
     );
+}
+
+/// Task 1 may edit calc.py; its check already passes on the baseline (`return 0`).
+fn already_passing_fixture() -> Fixture {
+    let fixture = Fixture::new();
+    fixture.action(Action::Permit {
+        task: 1,
+        policy: WorkPolicy {
+            files: vec!["calc.py".into()],
+            check: [
+                "/usr/bin/python3",
+                "-B",
+                "-c",
+                "from calc import answer; answer()",
+            ]
+            .map(String::from)
+            .to_vec(),
+        },
+    });
+    fixture.action(Action::Approve { task: 1 });
+    fixture
+}
+
+#[tokio::test]
+async fn worker_result_that_changes_nothing_fails_with_evidence_even_when_the_check_passes() {
+    let fixture = already_passing_fixture();
+    let (_, detail) = run_captured(&fixture, 1, "def answer():\n    return 0\n", None).await;
+    assert!(
+        detail.starts_with("No files changed: ") && detail.contains("calc.py"),
+        "{detail}"
+    );
+    let snapshot = fixture.store.snapshot().unwrap();
+    assert_eq!(snapshot.tasks[0].status, TaskStatus::Failed, "{detail}");
+    // The evidence record is still written, with the passing check and an empty diff.
+    let evidence: worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(1).unwrap()).unwrap();
+    assert_eq!(evidence.status, TaskStatus::Failed);
+    assert!(evidence.patch.trim().is_empty(), "{}", evidence.patch);
+    assert!(evidence.candidate_commit.is_none());
+    assert!(worker::check_passed(evidence.check.as_ref().unwrap()));
+    // A real edit under the same check is still reviewed.
+    let second = repair_of(&fixture, 1);
+    let (_, detail) = run_captured(&fixture, second, "def answer():\n    return 1\n", None).await;
+    assert_eq!(
+        fixture.store.snapshot().unwrap().tasks[1].status,
+        TaskStatus::ReviewReady,
+        "{detail}"
+    );
+}
+
+#[tokio::test]
+async fn repair_after_an_unchanged_result_says_the_previous_attempt_changed_nothing() {
+    let fixture = already_passing_fixture();
+    let (_, detail) = run_captured(&fixture, 1, "def answer():\n    return 0\n", None).await;
+    assert!(detail.starts_with("No files changed:"), "{detail}");
+    let second = repair_of(&fixture, 1);
+    let (request, detail) =
+        run_captured(&fixture, second, "def answer():\n    return 0\n", None).await;
+    let section = failing_section(&last_prompt(&request));
+    assert!(
+        section.contains("previous attempt changed nothing"),
+        "{section}"
+    );
+    assert!(section.contains("No files changed"), "{section}");
+    // Its own unchanged answer is not replayed as conversation history.
+    assert_eq!(request["messages"].as_array().unwrap().len(), 1);
+    assert!(detail.starts_with("No files changed:"), "{detail}");
 }
 
 #[tokio::test]

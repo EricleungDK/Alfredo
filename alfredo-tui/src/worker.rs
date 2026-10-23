@@ -721,41 +721,160 @@ async fn first_gitlink(root: &Path, args: &[&str]) -> Result<Option<String>> {
     Ok(None)
 }
 
-pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
+const OUTPUT_EXCEEDED: &str = "Git output exceeds the bounded evidence limit";
+
+/// Reads `reader` into `buf` and fails as soon as more than `OUTPUT` bytes
+/// arrive, so the caller can kill Git instead of waiting on a full pipe.
+async fn read_bounded(
+    mut reader: impl tokio::io::AsyncRead + Unpin,
+    buf: &mut Vec<u8>,
+) -> Result<()> {
+    let mut chunk = vec![0u8; 16 * 1024];
+    loop {
+        let count = reader.read(&mut chunk).await.map_err(|e| e.to_string())?;
+        if count == 0 {
+            return Ok(());
+        }
+        buf.extend_from_slice(&chunk[..count]);
+        if buf.len() > OUTPUT {
+            return Err(OUTPUT_EXCEEDED.into());
+        }
+    }
+}
+
+fn git_failure(root: &Path, args: &[&str], mut out: Vec<u8>, mut err: Vec<u8>) -> String {
+    if args.contains(&"merge-tree") {
+        err.append(&mut out);
+    }
+    let text = git_error_text(&err);
+    if text.contains("not a git repository") {
+        return not_a_repository(root);
+    }
+    format!("Git failed: {text}")
+}
+
+fn spawn_git(root: &Path, args: &[&str]) -> Result<tokio::process::Child> {
     let mut command = host_git_command(root, args);
     command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = command
+    command
         .spawn()
-        .map_err(|e| format!("Cannot start Git: {e}"))?;
-    let mut stdout = child.stdout.take().unwrap().take((OUTPUT + 1) as u64);
-    let mut stderr = child.stderr.take().unwrap().take((OUTPUT + 1) as u64);
+        .map_err(|e| format!("Cannot start Git: {e}"))
+}
+
+pub(crate) async fn git(root: &Path, args: &[&str]) -> Result<String> {
+    let mut child = spawn_git(root, args)?;
+    let stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
     within_git_deadline(async {
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let (status, _, _) = tokio::try_join!(
-            child.wait(),
-            stdout.read_to_end(&mut out),
-            stderr.read_to_end(&mut err)
-        )
-        .map_err(|e| e.to_string())?;
-        if out.len() > OUTPUT || err.len() > OUTPUT {
-            return Err("Git output exceeds the bounded evidence limit".into());
-        }
+        let result = tokio::try_join!(
+            async { child.wait().await.map_err(|e| e.to_string()) },
+            read_bounded(stdout, &mut out),
+            read_bounded(stderr, &mut err)
+        );
+        let status = match result {
+            Ok((status, _, _)) => status,
+            Err(error) => {
+                // Over the limit (or a read error): Git would block on a full
+                // pipe, so stop it now rather than wait out the deadline.
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(error);
+            }
+        };
         if !status.success() {
-            if args.contains(&"merge-tree") {
-                err.extend_from_slice(&out);
-            }
-            let text = git_error_text(&err);
-            if text.contains("not a git repository") {
-                return Err(not_a_repository(root));
-            }
-            return Err(format!("Git failed: {text}"));
+            return Err(git_failure(root, args, out, err));
         }
         String::from_utf8(out).map_err(|_| "Git returned non-UTF-8 output".into())
+    })
+    .await?
+}
+
+/// Longest single NUL-terminated record `git_records` accepts.
+const RECORD_LIMIT: usize = 64 * 1024;
+
+/// Streams the NUL-separated records of `git args` to `on_record` without
+/// holding the whole output, so listings larger than `OUTPUT` work. `on_record`
+/// returns `Ok(false)` to stop early; Git is then killed and the call succeeds.
+/// stderr keeps the `OUTPUT` bound and a record over `RECORD_LIMIT` is refused.
+pub(crate) async fn git_records(
+    root: &Path,
+    args: &[&str],
+    mut on_record: impl FnMut(&[u8]) -> Result<bool>,
+) -> Result<()> {
+    let mut child = spawn_git(root, args)?;
+    let mut stdout = child.stdout.take().unwrap();
+    let stderr = child.stderr.take().unwrap();
+    within_git_deadline(async {
+        let mut err = Vec::new();
+        let mut pending: Vec<u8> = Vec::new();
+        let mut chunk = vec![0u8; 16 * 1024];
+        let mut stopped = false;
+        let mut stderr_read = Box::pin(read_bounded(stderr, &mut err));
+        let mut stderr_done = false;
+        let streamed: Result<()> = async {
+            while !stopped {
+                tokio::select! {
+                    count = stdout.read(&mut chunk) => {
+                        let count = count.map_err(|e| e.to_string())?;
+                        if count == 0 {
+                            break;
+                        }
+                        pending.extend_from_slice(&chunk[..count]);
+                        let mut start = 0;
+                        while let Some(end) = pending[start..].iter().position(|&b| b == 0) {
+                            if !on_record(&pending[start..start + end])? {
+                                stopped = true;
+                                break;
+                            }
+                            start += end + 1;
+                        }
+                        pending.drain(..start);
+                        if !stopped && pending.len() > RECORD_LIMIT {
+                            return Err("Git record exceeds the bounded evidence limit".into());
+                        }
+                    }
+                    read = &mut stderr_read, if !stderr_done => {
+                        stderr_done = true;
+                        read?;
+                    }
+                }
+            }
+            Ok(())
+        }
+        .await;
+        if let Err(error) = streamed {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Err(error);
+        }
+        if stopped {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return Ok(());
+        }
+        if !stderr_done {
+            if let Err(error) = stderr_read.await {
+                let _ = child.start_kill();
+                let _ = child.wait().await;
+                return Err(error);
+            }
+        } else {
+            drop(stderr_read);
+        }
+        let status = child.wait().await.map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err(git_failure(root, args, Vec::new(), err));
+        }
+        if !pending.is_empty() {
+            return Err("Git output ended inside a record".into());
+        }
+        Ok(())
     })
     .await?
 }
@@ -1006,6 +1125,8 @@ pub fn check_passed(check: &ExecutionReceipt) -> bool {
 
 /// Detail prefix for a failed repair whose files equal its parent attempt's.
 pub const NO_CHANGE: &str = "No change from previous attempt";
+/// Detail prefix for a run whose passing check ran on an unchanged baseline (#350).
+pub const NO_FILES_CHANGED: &str = "No files changed:";
 const FAILING_LINES: usize = 30;
 const FAILING_BYTES: usize = 2048;
 /// Repair sampling steps; a lineage never samples hotter than the last.
@@ -1118,6 +1239,7 @@ fn lineage(store: &TaskStore, snapshot: &Snapshot, task: &Task) -> Option<Lineag
     }
     let detail = parent.as_ref().map_or("", |p| p.detail.as_str());
     let no_progress = detail.starts_with(NO_CHANGE);
+    let unchanged_baseline = detail.starts_with(NO_FILES_CHANGED);
     let limit = parent
         .as_ref()
         .and_then(|p| p.generation.as_ref())
@@ -1128,10 +1250,13 @@ fn lineage(store: &TaskStore, snapshot: &Snapshot, task: &Task) -> Option<Lineag
     } else {
         4096
     };
-    let level = failed.saturating_sub(1) + usize::from(no_progress);
+    let level = failed.saturating_sub(1) + usize::from(no_progress || unchanged_baseline);
     let mut section = String::from("WHAT IS STILL FAILING (previous attempt; fix these first)\n");
     if no_progress {
         section.push_str("The previous attempt returned identical code that still fails the same check. Do not return it again; change the implementation to fix the failures below.\n");
+    }
+    if unchanged_baseline {
+        section.push_str("The previous attempt changed nothing: every allowed file came back identical to the repository, so the passing check proves no work was done. Do not return the files unchanged; make the edit the task asks for.\n");
     }
     if hit {
         section.push_str(&format!("The previous attempt's output hit the {}-token limit before the file plan was complete; this request allows {num_predict} tokens. Return only files that must change, without commentary.\n", limit.unwrap_or(4096)));
@@ -1592,7 +1717,21 @@ pub async fn start_checked(
             Err(refusal) => Err(refusal),
         };
         match patch {
-            Ok(patch) => evidence.patch = patch,
+            Ok(patch) => {
+                // A passing check on an unchanged baseline proves nothing was done (#350).
+                if evidence.status == TaskStatus::ReviewReady && patch.trim().is_empty() {
+                    evidence.status = TaskStatus::Failed;
+                    evidence.detail = format!(
+                        "{NO_FILES_CHANGED} the check passed but the answer left every allowed file identical to the baseline (allowed: {})",
+                        task.policy.as_ref().map_or(String::new(), |p| p.files.join(", "))
+                    )
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(900)
+                    .collect();
+                }
+                evidence.patch = patch;
+            }
             Err(error) => {
                 evidence.patch = format!("Diff unavailable: {error}");
                 if evidence.status == TaskStatus::ReviewReady {
@@ -2238,6 +2377,107 @@ mod git_error_tests {
         assert!(text.contains("working tree. Use '--'"), "{text}");
         assert!(text.contains("revisions like this:"), "{text}");
         assert!(!text.contains("tree.Use") && !text.contains("  "), "{text}");
+    }
+}
+
+#[cfg(test)]
+mod git_output_limit_tests {
+    use super::{git, OUTPUT};
+    use std::{
+        io::Write,
+        process::Command,
+        time::{Duration, Instant},
+    };
+
+    #[tokio::test]
+    async fn output_over_the_limit_kills_git_and_fails_fast() {
+        let root = std::env::temp_dir().join(format!("alfredo-git-limit-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let run = |args: &[&str]| {
+            assert!(Command::new("git")
+                .arg("-C")
+                .arg(&root)
+                .args(args)
+                .status()
+                .unwrap()
+                .success())
+        };
+        run(&["init", "-q"]);
+        let blob = vec![b'a'; OUTPUT * 4];
+        let mut hash = Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["hash-object", "-w", "--stdin"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        hash.stdin.take().unwrap().write_all(&blob).unwrap();
+        let id = String::from_utf8(hash.wait_with_output().unwrap().stdout).unwrap();
+        let started = Instant::now();
+        let error = git(&root, &["cat-file", "blob", id.trim()])
+            .await
+            .unwrap_err();
+        assert_eq!(error, "Git output exceeds the bounded evidence limit");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[tokio::test]
+    async fn records_stream_past_the_limit_stop_early_and_report_failures() {
+        let root = std::env::temp_dir().join(format!("alfredo-git-records-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["init", "-q"])
+            .status()
+            .unwrap()
+            .success());
+        for index in 0..1500 {
+            std::fs::write(root.join(format!("{}{index}", "n".repeat(240))), "x").unwrap();
+        }
+        assert!(Command::new("git")
+            .arg("-C")
+            .arg(&root)
+            .args(["add", "."])
+            .status()
+            .unwrap()
+            .success());
+        let listing = ["ls-files", "-z", "--stage"];
+        let mut seen = 0;
+        super::git_records(&root, &listing, |_| {
+            seen += 1;
+            Ok(true)
+        })
+        .await
+        .unwrap();
+        assert_eq!(seen, 1500); // about 450 KB, above the 256 KiB bound
+        assert_eq!(
+            git(&root, &listing).await.unwrap_err(),
+            "Git output exceeds the bounded evidence limit"
+        );
+        let mut first = 0;
+        let started = Instant::now();
+        super::git_records(&root, &listing, |_| {
+            first += 1;
+            Ok(false)
+        })
+        .await
+        .unwrap();
+        assert_eq!(first, 1);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        let failure = super::git_records(&root, &["ls-tree", "-z", "no-such-ref"], |_| Ok(true))
+            .await
+            .unwrap_err();
+        assert!(failure.starts_with("Git failed"), "{failure}");
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 

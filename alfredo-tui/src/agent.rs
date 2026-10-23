@@ -173,7 +173,9 @@ pub fn prepare(store: &TaskStore, snapshot: &Snapshot, task: &Task) -> Result<Pr
         return Ok(fresh("Worker model changed"));
     }
     // Replaying a repeated answer as history anchors the model to it again.
-    if evidence.detail.starts_with(crate::worker::NO_CHANGE) {
+    if evidence.detail.starts_with(crate::worker::NO_CHANGE)
+        || evidence.detail.starts_with(crate::worker::NO_FILES_CHANGED)
+    {
         return Ok(fresh("Previous attempt made no change; fresh Local Agent"));
     }
     let Some(record) = evidence.agent else {
