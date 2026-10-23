@@ -233,7 +233,7 @@ def grade(task, repo, ref, *, unsafe_unsandboxed=False):
             argv = sandbox_argv(export, task['check'], *tools)
         else:
             argv = ['sh', str(task['check'])]
-        run = subprocess.run(argv, cwd=export, env=env, timeout=60, capture_output=True, text=True)
+        run = subprocess.run(argv, cwd=export, env=env, timeout=60, capture_output=True, text=True, errors='replace')
         tail = (run.stdout + run.stderr).strip().splitlines()[-6:]
         return run.returncode == 0, '\n'.join(tail)[:800]
     except subprocess.TimeoutExpired:

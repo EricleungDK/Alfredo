@@ -206,6 +206,27 @@ class GraderWithoutBwrapTests(Fixture):
         self.assertIn('refused', output)
 
 
+class NonUtf8CheckOutputTests(Fixture):
+    """#390: invalid UTF-8 from check.sh must still grade, never raise (it became harness_error)."""
+
+    def grade_with_check(self, script):
+        check = self.root / 'check.sh'
+        check.write_text(script, encoding='utf-8')
+        task = dict(self.task, check=check)
+        with self.no_sandbox():
+            return run_eval.grade(task, self.repo, 'HEAD', unsafe_unsandboxed=True)
+
+    def test_invalid_utf8_with_exit_1_fails_with_a_readable_tail(self):
+        ok, output = self.grade_with_check('printf "bad \\377 byte\\n"\nexit 1\n')
+        self.assertFalse(ok)
+        self.assertIn('bad', output)
+        self.assertIn('byte', output)
+
+    def test_invalid_utf8_with_exit_0_passes(self):
+        ok, output = self.grade_with_check('printf "\\377\\n"\nexit 0\n')
+        self.assertTrue(ok, output)
+
+
 @unittest.skipUnless(HAVE_BWRAP, 'needs /usr/bin/bwrap and /usr/bin/prlimit (CI installs bubblewrap)')
 class LiveSandboxTests(Fixture):
     """Reproduces the #207 attack under the real bwrap profile."""
