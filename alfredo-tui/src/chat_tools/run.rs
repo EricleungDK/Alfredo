@@ -280,7 +280,15 @@ pub async fn run_turn_limited(
                     ),
                     // An approved write still runs; only its (short) report is capped.
                     Some(gate) => {
-                        let result = gated(workspace, gate, session, attempt, call, &sender).await;
+                        let result = gated(
+                            workspace,
+                            gate,
+                            session,
+                            attempt,
+                            (call, index == 0),
+                            &sender,
+                        )
+                        .await;
                         cap_to(result, room.limit.max(MIN_RESULT))
                     }
                 },
@@ -403,7 +411,7 @@ async fn gated(
     gate: &Gate,
     session: usize,
     attempt: u64,
-    call: &ToolCall,
+    (call, new_round): (&ToolCall, bool),
     events: &Sender<Event>,
 ) -> String {
     let root = workspace.to_path_buf();
@@ -438,13 +446,22 @@ async fn gated(
             let log = gate.log.clone();
             let stop_guard = super::shell::StopOnDrop::default();
             let stop = stop_guard.stop();
-            return tokio::task::spawn_blocking(move || {
+            let late = Late::new(&stop_guard, events, session, attempt, call, new_round);
+            let result = tokio::task::spawn_blocking(move || {
                 super::shell::scoped(&stop, || {
-                    decided(&root, &card, Decision::Approve, log.as_ref(), Some(rule.id))
+                    late.report(decided(
+                        &root,
+                        &card,
+                        Decision::Approve,
+                        log.as_ref(),
+                        Some(rule.id),
+                    ))
                 })
             })
             .await
             .unwrap_or_else(|_| "error: tool execution stopped unexpectedly".into());
+            stop_guard.finish();
+            return result;
         }
     }
     let (reply, decision) = oneshot::channel();
@@ -484,9 +501,10 @@ async fn gated(
     // stops a running command; the blocking call then logs `cancelled` (issue #302).
     let stop_guard = super::shell::StopOnDrop::default();
     let stop = stop_guard.stop();
+    let late = Late::new(&stop_guard, events, session, attempt, call, new_round);
     // No await between here and the spawn: once spawned, the call runs and logs even
     // if this turn is aborted.
-    tokio::task::spawn_blocking(move || {
+    let result = tokio::task::spawn_blocking(move || {
         super::shell::scoped(&stop, || {
             // `a` adds the rule, then runs this call like `y`. A rule that cannot be
             // saved still approves this one call.
@@ -494,11 +512,63 @@ async fn gated(
                 (Decision::AlwaysAllow, Some(rules)) => rules.add_for(&card).ok().map(|r| r.id),
                 _ => None,
             };
-            decided(&root, &card, decision, log.as_ref(), rule)
+            late.report(decided(&root, &card, decision, log.as_ref(), rule))
         })
     })
     .await
-    .unwrap_or_else(|_| "error: tool execution stopped unexpectedly".into())
+    .unwrap_or_else(|_| "error: tool execution stopped unexpectedly".into());
+    stop_guard.finish();
+    result
+}
+
+/// Reports the result of a `run_command` killed mid-run when the turn that ran it was
+/// aborted (Esc, /stop, quit) and so never reads it (issue #333): the same
+/// [`Update::ToolResult`] a finished call sends, from the thread that reaped the
+/// process. The session accepts it after the cancel; nothing is re-run.
+struct Late {
+    events: Sender<Event>,
+    session: usize,
+    attempt: u64,
+    call: ToolCall,
+    new_round: bool,
+    abandoned: super::shell::Abandoned,
+}
+
+impl Late {
+    fn new(
+        guard: &super::shell::StopOnDrop,
+        events: &Sender<Event>,
+        session: usize,
+        attempt: u64,
+        call: &ToolCall,
+        new_round: bool,
+    ) -> Self {
+        Self {
+            events: events.clone(),
+            session,
+            attempt,
+            call: call.clone(),
+            new_round,
+            abandoned: guard.abandoned(),
+        }
+    }
+
+    /// `result` unchanged, sent on first if it is a killed run nobody will read.
+    fn report(self, result: String) -> String {
+        if result.starts_with(super::shell::CANCELLED_RESULT) && self.abandoned.get() {
+            // `try_send`: never blocks quit; a full channel only loses the row.
+            let _ = self.events.try_send(Event {
+                session: self.session,
+                attempt: self.attempt,
+                update: Update::ToolResult {
+                    call: self.call,
+                    result: result.clone(),
+                    new_round: self.new_round,
+                },
+            });
+        }
+        result
+    }
 }
 
 /// Run (or deny) a decided card and log the outcome; `rule` approved it, if any.
@@ -511,20 +581,38 @@ fn decided(
 ) -> String {
     let (result, outcome) = match decision {
         Decision::Deny => (approval::DENIED.to_string(), Outcome::Denied),
-        Decision::Approve | Decision::AlwaysAllow => match approval::apply(root, card) {
-            Ok(output) => (super::cap(output), Outcome::Applied),
-            // A command stopped mid-run (issue #302) was not applied.
-            Err(reason)
-                if matches!(card.kind, approval::CardKind::Shell { .. })
-                    && reason.starts_with("cancelled") =>
-            {
-                (super::cap(format!("error: {reason}")), Outcome::Cancelled)
+        Decision::Approve | Decision::AlwaysAllow => {
+            let started = std::time::Instant::now();
+            match approval::apply(root, card) {
+                Ok(output) => (super::cap(output), Outcome::Applied),
+                // A command stopped mid-run (issue #302) was not applied, but it may have
+                // partly run (issue #333); one stopped before it started ran nothing.
+                Err(reason)
+                    if matches!(card.kind, approval::CardKind::Shell { .. })
+                        && reason.starts_with("cancelled (") =>
+                {
+                    let (_, detail) = reason.split_once('\n').unwrap_or((&reason, ""));
+                    let secs = started.elapsed().as_secs();
+                    (
+                        super::cap(format!(
+                            "{}{secs}s · killed; it may have partly run\n{detail}",
+                            super::shell::CANCELLED_RESULT
+                        )),
+                        Outcome::Cancelled,
+                    )
+                }
+                Err(reason)
+                    if matches!(card.kind, approval::CardKind::Shell { .. })
+                        && reason.starts_with("cancelled") =>
+                {
+                    (super::cap(format!("error: {reason}")), Outcome::Cancelled)
+                }
+                Err(reason) => (
+                    super::cap(format!("error: {reason}")),
+                    Outcome::Failed(reason),
+                ),
             }
-            Err(reason) => (
-                super::cap(format!("error: {reason}")),
-                Outcome::Failed(reason),
-            ),
-        },
+        }
     };
     if let Some(log) = log {
         log.append_by(card, &outcome, rule);

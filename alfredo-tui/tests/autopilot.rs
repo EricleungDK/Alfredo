@@ -2635,6 +2635,55 @@ fn identical_repair_is_reported_as_no_progress_and_the_next_repair_samples_hotte
     );
 }
 
+#[test]
+fn worker_that_echoes_the_file_unchanged_is_never_accepted_even_when_the_check_passes() {
+    let fixture = Fixture::new();
+    let head = fixture.head();
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return json!({"tasks": [{"title": "Make answer return 42", "acceptance": ["answer() is 42"],
+                "model": "fixture", "dependencies": [], "policy": {"files": ["calc.py"],
+                "check": check("from calc import answer; answer()")}}]})
+            .to_string();
+        }
+        files("calc.py", "def answer():\n    return 0\n")
+    });
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Make answer return 42", "fixture", 1, &control)
+        .unwrap();
+    drive(&mut autopilot, &mut control, &runtime, "failed", finished);
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Failed);
+    let snapshot = fixture.store.snapshot().unwrap();
+    assert!(snapshot
+        .tasks
+        .iter()
+        .all(|task| !matches!(task.status, TaskStatus::ReviewReady | TaskStatus::Accepted)));
+    assert_eq!(decisions(&snapshot, 1), 0, "nothing was reviewed");
+    let repair = snapshot
+        .tasks
+        .iter()
+        .find(|t| t.repair_of == Some(1))
+        .unwrap();
+    assert!(
+        repair.title.contains("autopilot: No files changed:") && repair.title.contains("calc.py"),
+        "{}",
+        repair.title
+    );
+    let last = server.prompts().pop().unwrap();
+    assert!(last.contains("previous attempt changed nothing"), "{last}");
+    let report = autopilot.report().unwrap().to_string();
+    assert!(report.contains("repair budget exhausted (1/1)"), "{report}");
+    assert!(report.contains("No files changed:"), "{report}");
+    assert!(
+        report.contains("Next: Try a larger model, /repair 2 <hint>"),
+        "{report}"
+    );
+    assert_eq!(fixture.head(), head);
+}
+
 fn textutil_plan(first_check: Value) -> String {
     json!({"tasks": [
         {"title": "Create textutil", "acceptance": ["word_count and reverse_words work"], "model": "fixture",
@@ -2783,7 +2832,20 @@ fn drive_recorded(
 #[test]
 fn chat_collapses_autopilot_commands_into_one_line_per_task() {
     let fixture = Fixture::new();
-    let server = one_good_task();
+    // The follow-up must really edit the accepted file: an unchanged answer fails (#350).
+    let server = Server::new(|request, _| {
+        if planner(request) {
+            return json!({"tasks": [
+                {"title": "Make answer return 42", "acceptance": ["answer() returns 42"], "model": "fixture",
+                 "dependencies": [], "policy": {"files": ["calc.py"], "check": check("from calc import answer; assert answer() == 42")}},
+            ]})
+            .to_string();
+        }
+        if worker_prompt(request).contains("keep answer at 42") {
+            return files("calc.py", "def answer():\n    return 42  # kept\n");
+        }
+        good_calc()
+    });
     let runtime = Runtime::new().unwrap();
     let mut control = control(&fixture, &server, &runtime);
     let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
