@@ -519,6 +519,43 @@ fn toggling_the_raw_view_does_not_change_what_plan_save_stores() {
     assert_eq!(toggled_tasks, untouched_tasks);
 }
 #[test]
+fn architect_request_sees_agents_md_once_as_a_source_and_never_as_framed_notes() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let fixture = Fixture::new();
+    let workspace = fixture.root.join("workspace");
+    fs::write(workspace.join("AGENTS.md"), "ARCHITECT_ONCE_MARKER").unwrap();
+    for args in [
+        vec!["add", "."],
+        vec!["-c", "core.hooksPath=/dev/null", "commit", "-qm", "notes"],
+    ] {
+        assert!(std::process::Command::new("git")
+            .arg("-C")
+            .arg(&workspace)
+            .args(args)
+            .status()
+            .unwrap()
+            .success());
+    }
+    confirm_scope(&fixture.store);
+    let (provider, server, requests) = server_capture(
+        serde_json::json!({"tasks":plan().tasks}).to_string(),
+        true,
+        Duration::ZERO,
+    );
+    let mut control = TaskControl::new(fixture.store.clone());
+    control.set_provider(provider);
+    control.refresh(&runtime);
+    wait(&mut control, |c| !c.pending);
+    control
+        .command(&runtime, "/plan Make test_calc.py pass", "fixture")
+        .unwrap();
+    wait(&mut control, |c| c.planner.draft.is_some());
+    server.join().unwrap();
+    let body = requests.recv().unwrap().to_string();
+    assert_eq!(body.matches("ARCHITECT_ONCE_MARKER").count(), 1, "{body}");
+    assert!(!body.contains("Project notes from"), "{body}");
+}
+#[test]
 fn planner_instruction_runs_existing_tests_and_keeps_them_out_of_written_files() {
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let fixture = Fixture::new();

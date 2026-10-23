@@ -3066,6 +3066,7 @@ mod evidence_refresh_tests {
             model_metrics: None,
             failure_code: None,
             generation: None,
+            project_notes: None,
             run: run.id.clone(),
             baseline: run.baseline.clone(),
             status: TaskStatus::Failed,

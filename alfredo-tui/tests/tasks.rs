@@ -527,6 +527,7 @@ fn capacity_finish(store: &TaskStore, snapshot: &alfredo_tui::tasks::Snapshot) -
         model_metrics: None,
         failure_code: None,
         generation: None,
+        project_notes: None,
         check: None,
     })
     .unwrap();

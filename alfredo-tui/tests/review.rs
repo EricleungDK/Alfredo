@@ -15,6 +15,7 @@ fn fixture() -> String {
         candidate_commit: None,
         model_metrics: None, failure_code: None,
         generation: None,
+        project_notes: None,
         run: "task-42-run-3".into(), baseline: "a".repeat(40), status: TaskStatus::Failed,
         detail: "Check did not run".into(),
         patch: "diff --git a/calc.py b/calc.py\n--- a/calc.py\n+++ b/calc.py\n@@ -1 +1 @@\n-old\n+new 界🦀\n\u{1b}[2J\u{7}tail".into(), check: None,
