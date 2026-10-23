@@ -169,9 +169,11 @@ fn result_json(
             _ => None,
         })
         .collect();
-    // A paused run (autopilot halted itself) names its cause the same way; nothing is
-    // invented when no reason is known.
-    let paused_with_reason = status.state == RunState::Paused && !reason.is_empty();
+    // A paused run (autopilot halted itself) names its cause the same way. A plain
+    // pause's generic notice is no cause, so nothing is invented for it.
+    let paused_with_reason = status.state == RunState::Paused
+        && !reason.is_empty()
+        && reason != alfredo_tui::autopilot::PAUSED_NOTICE;
     if paused_with_reason || (status.state == RunState::Failed && (failed.is_empty() || run_error))
     {
         failed.push(serde_json::json!({
@@ -1141,6 +1143,15 @@ mod tests {
         // No reason known: nothing invented.
         let unknown = result_json("m", &status(RunState::Paused, 0), &[], "", false);
         assert_eq!(unknown["failed"], serde_json::json!([]));
+        // A plain pause's generic notice is not a cause.
+        let plain = result_json(
+            "m",
+            &status(RunState::Paused, 0),
+            &[],
+            alfredo_tui::autopilot::PAUSED_NOTICE,
+            false,
+        );
+        assert_eq!(plain["failed"], serde_json::json!([]));
         // A failed task stays listed once; the pause reason joins it.
         let outcomes = [outcome(
             2,

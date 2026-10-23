@@ -27,6 +27,10 @@ const VERSION: u32 = 1;
 const LABEL: usize = 10;
 /// Fields of one-line results are separated by three spaces.
 const GAP: &str = "   ";
+/// The notice of a plain pause: no cause beyond the pause itself.
+pub const PAUSED_NOTICE: &str =
+    "Autopilot paused · running workers finish · /resume or F5 continues";
+
 /// Repeated submissions of one decision without effect pause the loop.
 const ATTEMPTS: u32 = 3;
 const MAX_STATE: usize = 256 * 1024;
@@ -846,7 +850,7 @@ impl Autopilot {
         saved.paused = true;
         tasks.disable_dispatch();
         self.persist();
-        self.notice = "Autopilot paused · running workers finish · /resume or F5 continues".into();
+        self.notice = PAUSED_NOTICE.into();
         self.notice.clone()
     }
 
