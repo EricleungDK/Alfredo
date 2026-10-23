@@ -75,7 +75,7 @@ pub const GREP: Tool = Tool {
 };
 
 /// Contents of a regular text file, or why it cannot be read.
-fn text(path: &Path) -> Result<String, String> {
+pub(crate) fn text(path: &Path) -> Result<String, String> {
     let metadata = std::fs::metadata(path).map_err(|error| error.to_string())?;
     if !metadata.is_file() {
         return Err("not a regular file".into());

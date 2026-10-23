@@ -668,7 +668,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 continue;
                             }
                             let mut messages = turn.messages;
-                            // `@path` mentions: committed HEAD contents join this user turn's
+                            // `@path` mentions: working-tree contents join this user turn's
                             // model-visible message (kept for follow-ups); the transcript is unchanged.
                             let session = &mut work.app.sessions[turn.session];
                             if !session.has_attachment(turn.user_message) {
@@ -2075,6 +2075,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     // running command's process group and wait for it before the terminal is released.
     if !alfredo_tui::chat_tools::stop_running_commands(Duration::from_secs(3)) {
         eprintln!("A chat command did not stop within 3s; check for leftover processes");
+    }
+    // The killed commands report their `⚙` rows (issue #333) before the final save.
+    while let Ok(event) = receiver.try_recv() {
+        work.app.apply(event);
     }
     // Save the chat draft, not an agent's unsent note; close keeps that note in
     // the agent drafts file.
