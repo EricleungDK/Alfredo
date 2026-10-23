@@ -103,6 +103,47 @@ fn an_empty_reply_shows_one_notice_and_no_blank_assistant_block() {
 }
 
 #[test]
+fn tool_rounds_then_an_empty_final_reply_fail() {
+    use alfredo_tui::model::{ToolCall, ToolStep};
+    let mut session = Session::new("test-model".into());
+    session.insert("look");
+    session.begin().unwrap();
+    session.apply(
+        1,
+        Update::ToolStep(ToolStep {
+            calls: vec![ToolCall {
+                name: "list_files".into(),
+                arguments: serde_json::json!({}),
+            }],
+            results: vec!["a.txt".into()],
+        }),
+    );
+    session.apply(1, Update::Done);
+    assert_eq!(session.status, Status::Failed(NO_TEXT.into()));
+}
+
+#[test]
+fn a_propose_plan_hand_off_stays_complete() {
+    use alfredo_tui::model::{ToolCall, ToolStep};
+    let mut session = Session::new("test-model".into());
+    session.insert("plan it");
+    session.begin().unwrap();
+    session.apply(
+        1,
+        Update::ToolStep(ToolStep {
+            calls: vec![ToolCall {
+                name: "propose_plan".into(),
+                arguments: serde_json::json!({"goal": "g", "mode": "plan", "reason": "r"}),
+            }],
+            results: vec!["proposed".into()],
+        }),
+    );
+    session.apply(1, Update::Token("Proposed `/plan g`.".into()));
+    session.apply(1, Update::Done);
+    assert_eq!(session.status, Status::Complete);
+}
+
+#[test]
 fn retry_after_an_empty_reply_resends_the_prompt() {
     let mut session = Session::new("test-model".into());
     session.insert("hello there");

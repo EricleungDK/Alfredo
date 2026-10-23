@@ -7,9 +7,9 @@ pub mod compaction;
 pub use compaction::Compaction;
 
 pub const MAX_TEXT: usize = 128 * 1024;
-/// Failure text when a reply or tool step would pass [`MAX_TEXT`]; names the ways out.
 /// Failure for a reply that finished with no text (issue #397).
 pub const NO_TEXT: &str = "Model returned no text; Ctrl+R retries or send again";
+/// Failure text when a reply or tool step would pass [`MAX_TEXT`]; names the ways out.
 pub const OUTPUT_LIMIT: &str = "Conversation output limit reached; run /compact or /clear, or press Ctrl+N for a new conversation";
 pub const MAX_DRAFT: usize = 16 * 1024;
 pub const MAX_SESSIONS: usize = 8;
