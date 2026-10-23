@@ -233,6 +233,7 @@ to save; their diff is kept in the run's evidence. See
 | `--state-dir DIR` | `~/.local/state/alfredo` (env `ALFREDO_STATE_DIR`) | State location; must be outside the repo |
 | `--keep-alive VALUE` | `30m` (env `ALFREDO_KEEP_ALIVE`) | Ollama `keep_alive`: `30m`, `300`, `-1`, or `default` |
 | `--num-ctx N` | unset (env `ALFREDO_NUM_CTX`) | Ollama input window in tokens, 2048–262144, sent on every request; reply length is clamped to the room left, and prompts that leave under 256 tokens are refused, not truncated. Unset: server default |
+| `--max-turns N` | `8` (env `ALFREDO_MAX_TURNS`) | Tool rounds one chat turn may run, 1–32, interactive and `--chat --headless`; a model that asks for more is stopped with a notice naming N. Out of range or non-numeric exits 2 |
 | `--connect-retries N` | 3 | Auto-retry (1 s, 2 s, 4 s…) before any reply text, 0–10 |
 | `--parallel-models N` | 2 | Concurrent model requests per endpoint across terminals, 1–8 |
 | `--structured-thinking auto\|on\|off` | `off` | Thinking mode for structured (plan/worker) requests |

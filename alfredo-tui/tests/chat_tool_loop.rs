@@ -252,6 +252,51 @@ async fn the_loop_stops_at_the_step_cap_with_a_visible_notice() {
 }
 
 #[tokio::test]
+async fn a_configured_cap_stops_the_loop_after_that_many_rounds() {
+    let root = workspace("cap-configured");
+    let addr = ollama_fixture::reserve();
+    let fixture = ollama_fixture::serve(addr, |_, _| tool_call("list_files", json!({})));
+    let provider = Ollama::new(&fixture.endpoint, Duration::from_secs(5))
+        .unwrap()
+        .with_max_turns(Some(3));
+    let mut session = Session::new("fixture".into());
+    session.insert("loop forever");
+    let messages = session.begin().unwrap();
+    let (sender, mut receiver) = mpsc::channel(256);
+    chat_tools::run_turn(
+        &provider,
+        &root,
+        0,
+        1,
+        "fixture".into(),
+        messages,
+        sender,
+        None,
+    )
+    .await;
+    while let Ok(event) = receiver.try_recv() {
+        session.apply(event.attempt, event.update);
+    }
+    assert_eq!(session.tool_steps(1).len(), 3);
+    assert!(session.messages[1]
+        .content
+        .contains("[Stopped: tool step limit reached after 3 rounds; ask again to continue]"));
+    assert_eq!(fixture.count("POST /api/chat"), 4);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn max_turns_accepts_one_to_thirty_two_and_names_the_range_otherwise() {
+    assert_eq!(chat_tools::parse_max_turns(""), Ok(None));
+    assert_eq!(chat_tools::parse_max_turns("1"), Ok(Some(1)));
+    assert_eq!(chat_tools::parse_max_turns(" 32 "), Ok(Some(32)));
+    for bad in ["0", "33", "-1", "many", "3.5"] {
+        let error = chat_tools::parse_max_turns(bad).unwrap_err();
+        assert!(error.contains("1 to 32") && error.contains(bad), "{error}");
+    }
+}
+
+#[tokio::test]
 async fn string_arguments_are_stored_and_replayed_as_objects() {
     let root = workspace("strargs");
     let addr = ollama_fixture::reserve();

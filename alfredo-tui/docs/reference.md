@@ -233,7 +233,7 @@ stdout one JSON object
 `{state, stopped, policy, reply, steps, calls:[{tool,path,error,result,detail}], approvals:[{tool,target,outcome,reason}],
 error}`. `state` is `done`, `stopped` or `failed`; `result` is `ok`, `denied`, `malformed` or `error`;
 `detail` is the tool's error text (at most 200 bytes, control characters removed; `null` when
-`error` is false). A turn cut off by the tool step cap (8 rounds) or by the conversation size
+`error` is false). A turn cut off by the tool step cap (8 rounds by default, `--max-turns`) or by the conversation size
 limit is `state` `stopped` with `stopped` `step_limit` or `output_limit` (`null` otherwise) and
 `error` naming the cap; its `reply` is the text before the cut, without the interactive "ask again"
 notice. Exit 0 done; 1 stopped, failed or interrupted (SIGINT/SIGTERM deny further cards, wait up to 10 s for
@@ -401,6 +401,8 @@ is loading or busy. Model discovery bypasses this queue.
   `keep_alive` on chat, planner and worker requests. Accepts Go durations (`30m`,
   `1h30m`), integer seconds (`300`; `-1` keeps the model loaded), or `default` to
   omit the field and use the server setting.
+- `--max-turns N` (env `ALFREDO_MAX_TURNS`, 1–32, default 8) sets the tool-round cap of
+  one chat turn; see [Chat tools](#chat-tools-read-only). Approvals are unchanged.
 - `--num-ctx N` (env `ALFREDO_NUM_CTX`, 2048–262144 tokens, default unset) sets
   Ollama `options.num_ctx` on every chat, planner, worker and repair request and on
   the preload (so the model is not reloaded to resize its window). Unset, the option
@@ -1555,10 +1557,10 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   checks between files and git calls check every few milliseconds, so the work ends
   within about a second instead of running on in the background.
 - **Loop.** The model may answer, or ask for tools; Alfredo runs the calls, sends the
-  results back and asks again. A turn runs at most 8 tool rounds; per round 16 calls run,
+  results back and asks again. A turn runs at most 8 tool rounds (`--max-turns N`, env `ALFREDO_MAX_TURNS`, 1–32, applies to the TUI and `--chat --headless`; out of range or non-numeric exits 2); per round 16 calls run,
   further calls (up to 64) get an `error: not run` result and any beyond are dropped;
-  a model that asks for a ninth is stopped and the reply ends with `[Stopped: tool step
-  limit reached after 8 rounds; ask again to continue]`. A failed request ends the turn as
+  a model that asks for one more is stopped and the reply ends with `[Stopped: tool step
+  limit reached after 8 rounds; ask again to continue]` (N is the actual cap). A failed request ends the turn as
   usual (Ctrl+R retries the whole turn). Esc cancels between or during rounds.
 - **On screen.** Before the reply, each call shows as `⚙ read_file README.md` followed by
   `↳` and the first line of its result cut to one row (`… (N lines)` when longer). The
