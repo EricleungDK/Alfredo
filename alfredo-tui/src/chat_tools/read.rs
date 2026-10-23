@@ -264,10 +264,21 @@ fn discover(root: &Path, start: &Path, limit: usize) -> (Vec<PathBuf>, bool, Opt
     for parts in paths {
         let relative = parts.join("/");
         let lower = relative.to_lowercase();
-        if excluded(&relative) || noise(&lower) {
+        // Git does not validate the names in an index it reads: only a clean relative
+        // path may become a file (an absolute or `..` name must never leave the root).
+        // Each component is tested as well as the whole path, as the walk tested every
+        // directory name, so a `certs.key/` directory stays hidden.
+        if !crate::planning_context::path_valid(&relative)
+            || parts.iter().any(|part| excluded(part))
+            || excluded(&relative)
+            || noise(&lower)
+        {
             continue;
         }
         let full = canonical.join(&relative);
+        if !full.starts_with(&canonical) {
+            continue;
+        }
         // A regular file only (never a symlink, a submodule or a deleted tracked path),
         // reached through real directories: a tracked directory swapped for a symlink
         // must not lead out of the workspace.

@@ -1507,7 +1507,8 @@ repository's working tree, so uncommitted edits are seen). They run without aski
   leading `[note: … is ignored …]` line. `read_file` is unchanged: it reads any
   non-excluded file by path. Outside git, or when git cannot list (a failing git, a
   repository config with filter drivers or includes, a listing over 16 MiB), the plain walk
-  is used with the fixed exclusions only.
+  is used with the fixed exclusions only. Nested repositories and submodule contents are
+  not listed in a git workspace.
 - **Git is read-only.** Git tools never fetch or change refs, the index or the working
   tree: they run with `--no-optional-locks` (no index refresh), hooks and fsmonitor off,
   no external diff or textconv. `ref`, `base` and `target` must be plain ref names

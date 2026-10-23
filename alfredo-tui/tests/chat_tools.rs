@@ -486,6 +486,103 @@ fn a_gitignore_never_re_includes_secrets_or_generated_trees() {
     }
 }
 
+/// Overwrite `.git/index` with version-2 entries named `names` (git does not validate the
+/// names it reads), each a stage-0 regular file; the checksum comes from `sha1sum`.
+fn craft_index(workspace: &Workspace, names: &[&str]) {
+    use std::io::Write;
+    let mut names: Vec<&str> = names.to_vec();
+    names.sort_unstable();
+    let mut body = b"DIRC".to_vec();
+    body.extend(2u32.to_be_bytes());
+    body.extend((names.len() as u32).to_be_bytes());
+    for name in names {
+        let mut entry = Vec::new();
+        for field in [0u32, 0, 0, 0, 0, 0, 0o100644, 0, 0, 3] {
+            entry.extend(field.to_be_bytes());
+        }
+        // The blob id of "hi\n"; discovery never reads objects.
+        entry.extend([
+            0x45, 0xb9, 0x83, 0xbe, 0x36, 0xb7, 0x3c, 0x07, 0x88, 0xdc, 0x9c, 0xbc, 0xb7, 0x6c,
+            0xbb, 0x80, 0xfc, 0x7b, 0xb0, 0x57,
+        ]);
+        entry.extend((name.len() as u16).to_be_bytes());
+        entry.extend(name.as_bytes());
+        let pad = 8 - entry.len() % 8;
+        entry.extend(std::iter::repeat(0).take(pad));
+        body.extend(entry);
+    }
+    let mut child = std::process::Command::new("sha1sum")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(&body).unwrap();
+    let out = child.wait_with_output().unwrap().stdout;
+    let hex = String::from_utf8(out).unwrap();
+    for pair in hex.as_bytes()[..40].chunks(2) {
+        body.push(u8::from_str_radix(std::str::from_utf8(pair).unwrap(), 16).unwrap());
+    }
+    fs::write(workspace.root.join(".git/index"), body).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn a_crafted_index_entry_cannot_list_or_search_a_file_outside_the_workspace() {
+    let workspace = git_workspace();
+    put(&workspace, "ok.txt", "needle ok\n");
+    let outside = workspace.base.join("outside-343");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("secret.txt"), "needle OUTSIDE\n").unwrap();
+    let absolute = outside.join("secret.txt").to_string_lossy().into_owned();
+    // The same file reached by `..` from the workspace root.
+    let climbing = format!(
+        "../{}/outside-343/secret.txt",
+        workspace.base.file_name().unwrap().to_string_lossy()
+    );
+    craft_index(
+        &workspace,
+        &["ok.txt", &absolute, &climbing, "a/../ok.txt", "./ok.txt"],
+    );
+    let listed = workspace.run("list_files", json!({}));
+    let found = workspace.run("grep", json!({"pattern": "needle"}));
+    for out in [&listed, &found] {
+        assert!(!out.contains("OUTSIDE"), "{out}");
+        assert!(!out.contains("secret.txt"), "{out}");
+        assert!(!out.contains("outside-343"), "{out}");
+    }
+    assert!(lines(&listed).contains(&"ok.txt"), "{listed}");
+    assert!(found.contains("ok.txt:1:needle ok"), "{found}");
+}
+
+#[test]
+fn directories_named_like_secret_files_are_not_listed_or_searched() {
+    let workspace = git_workspace();
+    put(&workspace, "ok.txt", "fine\n");
+    for dir in ["tracked.key", "tracked.pem", "loose.key", "loose.pem"] {
+        put(&workspace, &format!("{dir}/inner.txt"), "SECRET_DIR\n");
+        put(&workspace, &format!("sub/{dir}/inner.txt"), "SECRET_DIR\n");
+    }
+    git(
+        &workspace,
+        &[
+            "add",
+            "tracked.key/inner.txt",
+            "tracked.pem/inner.txt",
+            "sub/tracked.key/inner.txt",
+            "sub/tracked.pem/inner.txt",
+        ],
+    );
+    let listed = workspace.run("list_files", json!({}));
+    assert!(lines(&listed).contains(&"ok.txt"), "{listed}");
+    assert!(!listed.contains("inner.txt"), "{listed}");
+    assert_eq!(
+        workspace
+            .run("grep", json!({"pattern": "SECRET_DIR"}))
+            .trim(),
+        "no matches"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn a_tracked_path_behind_a_swapped_in_symlink_is_not_listed_or_searched() {
