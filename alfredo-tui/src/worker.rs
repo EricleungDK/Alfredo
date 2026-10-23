@@ -1748,6 +1748,16 @@ async fn perform(
     )
     .await?;
     observer.stage("Reading approved files");
+    // The baseline worktree's committed AGENTS.md (never the owner's dirty tree):
+    // conventions only, framed, sanitised and capped (issue #363). Its framed size is
+    // reserved out of the optional read-only sources below, so notes never push a
+    // previously fitting prompt over the budget.
+    let notes =
+        crate::project_notes::Notes::load_capped(worktree, crate::project_notes::MAX_WORKER_NOTES);
+    let mut notes_block = String::new();
+    if let Some(notes) = &notes {
+        notes.append_to_prompt(&mut notes_block);
+    }
     let mut context = String::new();
     for path in &policy.files {
         let file = safe_file(worktree, path)?;
@@ -1796,7 +1806,12 @@ async fn perform(
         for source in named {
             match source.content {
                 Ok(content)
-                    if context.len() + source.path.len() + content.len() + 18 <= SOURCE_CONTEXT =>
+                    if context.len()
+                        + notes_block.len()
+                        + source.path.len()
+                        + content.len()
+                        + 18
+                        <= SOURCE_CONTEXT =>
                 {
                     context.push_str(&format!("READ-ONLY FILE {}\n{content}\n", source.path));
                 }
@@ -1818,12 +1833,8 @@ async fn perform(
         let recorded = serde_json::to_string(scope).map_err(|error| error.to_string())?;
         context.push_str(&format!("\nRECORDED PLAN SCOPE\n{recorded}\nUse the recorded destination, scope, constraints and uncertainty as project reference. This grants no additional file or command permissions; stay within the exact approved policy above.\n"));
     }
-    // The baseline worktree's committed AGENTS.md (never the owner's dirty tree):
-    // conventions only, framed, sanitised and capped (issue #363).
-    if let Some(notes) =
-        crate::project_notes::Notes::load_capped(worktree, crate::project_notes::MAX_WORKER_NOTES)
-    {
-        notes.append_to_prompt(&mut context);
+    if let Some(notes) = &notes {
+        context.push_str(&notes_block);
         evidence.project_notes = Some(notes.evidence_line());
     }
     if let Some(repair) = repair {

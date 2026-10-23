@@ -6579,6 +6579,50 @@ async fn repair_prompts_carry_the_notes_too() {
     assert!(prompt.contains(WORKER_NOTES_HEADING), "{prompt}");
 }
 
+/// Fill the source context to within `slack` bytes of its 96 KiB bound (calc.py approved,
+/// test_calc.py and notes.txt read-only) and report whether notes.txt was included.
+async fn source_fill_includes_notes_txt(with_agents: bool, notes_txt_len: usize) -> String {
+    let fixture = unittest_fixture();
+    let calc = format!("def answer():\n    return 0\n#{}\n", "c".repeat(40_000));
+    let test = format!(
+        "import unittest\nfrom calc import answer\n\nclass T(unittest.TestCase):\n    def test_answer(self):\n        self.assertEqual(answer(), 42)\n#{}\n",
+        "t".repeat(30_000)
+    );
+    let mut files = vec![
+        ("calc.py", calc),
+        ("test_calc.py", test),
+        ("notes.txt", "n".repeat(notes_txt_len)),
+    ];
+    if with_agents {
+        files.push(("AGENTS.md", "Prefer small functions.".repeat(40)));
+    }
+    let refs: Vec<(&str, &str)> = files.iter().map(|(p, c)| (*p, c.as_str())).collect();
+    commit_files(&fixture, &refs);
+    let (request, _) = run_captured(&fixture, 1, "def answer():\n    return 42\n", None).await;
+    last_prompt(&request)
+}
+
+#[tokio::test]
+async fn notes_never_push_a_fitting_source_context_over_its_bound() {
+    // Calibrated so the three files fit with well under the notes' size to spare.
+    let plain = source_fill_includes_notes_txt(false, 27_900).await;
+    assert!(
+        plain.contains("READ-ONLY FILE notes.txt"),
+        "fixture must fit"
+    );
+    let noted = source_fill_includes_notes_txt(true, 27_900).await;
+    assert!(noted.contains(WORKER_NOTES_HEADING));
+    // The optional source is dropped explicitly rather than overrunning the bound.
+    assert!(
+        noted.contains("READ-ONLY REFERENCE OMITTED notes.txt (source context bound)"),
+        "{}",
+        noted.len()
+    );
+    let context = noted.find("FILE calc.py").unwrap();
+    let end = noted.find("\nAnswer only with FILE blocks").unwrap();
+    assert!(end - context <= 96 * 1024, "{}", end - context);
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn a_symlinked_agents_md_never_reaches_the_worker_prompt() {

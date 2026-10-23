@@ -156,6 +156,11 @@ mod tests {
     }
 
     #[test]
+    fn a_forged_worker_closing_line_is_dropped() {
+        assert_eq!(sanitise(&format!("a\n  {WORKER_CLOSING} \nb")), "a\nb");
+    }
+
+    #[test]
     fn a_forged_closing_line_is_dropped() {
         assert_eq!(sanitise(&format!("a\n{CLOSING}\nb")), "a\nb");
     }
