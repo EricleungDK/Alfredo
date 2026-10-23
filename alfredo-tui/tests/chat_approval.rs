@@ -744,6 +744,89 @@ fn the_pending_card_shows_tool_args_diff_and_keys() {
     assert!(text.contains("n deny"));
 }
 
+/// A pending edit card for `content` in `file`, drawn at 120x40 (issue #404).
+fn edit_card_screen(file: &str, content: &str, old: &str, new: &str) -> String {
+    let root = workspace("tabs");
+    fs::write(root.join(file), content).unwrap();
+    let edit = call(
+        "edit_file",
+        json!({"path": file, "old_text": old, "new_text": new}),
+    );
+    card_screen(root, &edit)
+}
+
+fn card_screen(root: PathBuf, tool: &ToolCall) -> String {
+    let card = approval::card(&root, tool).unwrap();
+    let _ = fs::remove_dir_all(root);
+    let mut session = Session::new("m".into());
+    session.insert("fix it");
+    session.begin().unwrap();
+    let attempt = session.attempt;
+    session.apply(attempt, Update::Admitted);
+    let now = Instant::now();
+    assert!(session.await_approval(attempt, card, now));
+    session.approval_visible(true, now);
+    let mut app = App::new("m".into());
+    app.sessions[0] = session;
+    let mut terminal = Terminal::new(TestBackend::new(120, 40)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, &app)).unwrap();
+    assert!(
+        !terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .any(|cell| cell.symbol().contains('\t')),
+        "a raw tab reached the terminal buffer"
+    );
+    screen(&terminal)
+}
+
+/// Issue #404: a tab shows as an arrow plus padding to the next 4-column stop, so a
+/// tab to spaces edit never renders two identical `-`/`+` lines.
+#[test]
+fn a_tab_to_spaces_edit_card_shows_different_removed_and_added_lines() {
+    let text = edit_card_screen("Makefile", "all:\n\techo hi\n", "\techo hi", "    echo hi");
+    assert!(text.contains("-→  echo hi"), "{text}");
+    assert!(text.contains("+    echo hi"), "{text}");
+    let text = edit_card_screen("data.tsv", "id\tname\n1\talice\n", "1\talice", "1alice");
+    assert!(text.contains("-1→ alice"), "{text}");
+    assert!(text.contains("+1alice"), "{text}");
+}
+
+/// Issue #404: the line-ending note keeps its real arrow; only diff lines escape one.
+#[test]
+fn the_line_ending_note_keeps_its_arrow_on_the_card() {
+    let root = workspace("ending-note");
+    fs::write(root.join("win.txt"), b"one\r\ntwo\r\n").unwrap();
+    let lf = call(
+        "write_file",
+        json!({"path": "win.txt", "content": "one\ntwo\n"}),
+    );
+    let text = card_screen(root, &lf);
+    assert!(text.contains("line endings CRLF → LF"), "{text}");
+    assert!(!text.contains("<U+2192>"), "{text}");
+}
+
+/// Issue #404: a file that really contains the arrow cannot pass for a tab.
+#[test]
+fn a_literal_arrow_cannot_pass_for_a_tab_on_the_card() {
+    let text = edit_card_screen("a.txt", "a\tb\n", "a\tb", "a→  b");
+    assert!(text.contains("-a→ b"), "{text}");
+    assert!(text.contains("+a<U+2192>  b"), "{text}");
+}
+
+/// Issue #404: tab-indented code keeps its indent and the card's `args` line still
+/// shows the escaped `\t`; hidden characters still show as `<U+XXXX>`.
+#[test]
+fn tab_indented_card_lines_keep_their_indent_and_args_stay_escaped() {
+    let text = edit_card_screen("main.go", "\tif x {\n", "\tif x {", "\tif y\u{202e} {");
+    assert!(text.contains("-→  if x {"), "{text}");
+    assert!(text.contains("+→  if y<U+202E> {"), "{text}");
+    assert!(text.contains("\"old_text\":\"\\tif x {\""), "{text}");
+    assert!(!text.contains('\u{202e}'), "{text}");
+}
+
 /// Issue #273: a chat parked on a card says it needs the owner, not "thinking".
 #[test]
 fn a_pending_card_shows_approve_in_the_side_pane_row_and_the_header() {

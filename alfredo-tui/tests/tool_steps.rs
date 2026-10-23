@@ -172,7 +172,7 @@ fn transcript_shows_each_tool_call_and_a_truncated_result() {
         .map(|cell| cell.symbol())
         .collect();
     assert!(text.contains("⚙ read_file README.md"), "{text}");
-    assert!(text.contains("1 # Demo"), "{text}");
+    assert!(text.contains("1   # Demo"), "{text}");
     assert!(text.contains("…"), "result is truncated");
     assert!(
         !text.contains(&"w".repeat(200)),
@@ -272,6 +272,45 @@ fn ctrl_o_toggles_full_tool_results_and_the_footer_says_which() {
 
     app.sessions[0].toggle_tool_results();
     assert_eq!(screen_text(&app, 120, 40), collapsed);
+}
+
+fn no_raw_tab(app: &App, width: u16, height: u16) {
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+    terminal.draw(|frame| ui::draw(frame, app)).unwrap();
+    assert!(
+        !terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .any(|cell| cell.symbol().contains('\t')),
+        "a raw tab reached the terminal buffer"
+    );
+}
+
+/// Issue #404: tabs in replies and expanded results expand to the next 4-column stop.
+#[test]
+fn tabs_in_replies_and_expanded_results_keep_indent_and_gaps() {
+    let mut app = App::new("m".into());
+    tool_turn(
+        &mut app.sessions[0],
+        "show",
+        "2\tif x {\n3\t\treturn\n4\tend\u{202e}",
+        "func main() {\n\tif x {\n\t\treturn\n\t}\n}\nTabbed:a\tb\tc",
+    );
+    let collapsed = screen_text(&app, 120, 40);
+    assert!(collapsed.contains("↳ 2   if x {"), "{collapsed}");
+    assert!(collapsed.contains("    if x {"), "{collapsed}");
+    assert!(collapsed.contains("        return"), "{collapsed}");
+    assert!(collapsed.contains("Tabbed:a    b   c"), "{collapsed}");
+    no_raw_tab(&app, 120, 40);
+    app.sessions[0].toggle_tool_results();
+    let full = screen_text(&app, 120, 40);
+    assert!(full.contains("↳ 2   if x {"), "{full}");
+    assert!(full.contains("↳ 3       return"), "{full}");
+    assert!(full.contains("↳ 4   end"), "{full}");
+    assert!(!full.contains('\u{202e}'), "{full}");
+    no_raw_tab(&app, 120, 40);
 }
 
 #[test]
