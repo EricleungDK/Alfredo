@@ -169,6 +169,10 @@ jobs:
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           bwrap --ro-bind / / --unshare-user --unshare-pid --unshare-net true
       - if: steps.need.outputs.run == 'true'
+        name: Fetch locked dependencies
+        # package_release.py reads crate metadata offline, so sources must be present.
+        run: cargo fetch --locked --manifest-path "$MANIFEST"
+      - if: steps.need.outputs.run == 'true'
         name: Package release archive
         run: python3 alfredo-tui/scripts/package_release.py --output alfredo-tui/dist
       - if: steps.need.outputs.run == 'true'
