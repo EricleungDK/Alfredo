@@ -204,6 +204,10 @@ pub enum Update {
         tool: String,
         rule: u64,
     },
+    /// A line for the user about the turn (issue #281), e.g. a model that has no tool
+    /// support. Shown as a notice (TUI footer, headless stderr); never stored in the
+    /// assistant message, so it is not sent back to the model.
+    Notice(String),
     Done,
     Failed(String),
 }
@@ -1953,7 +1957,7 @@ impl Session {
                         .push(step);
                 }
             }
-            Update::Stopped(_) => {}
+            Update::Stopped(_) | Update::Notice(_) => {}
             Update::ToolResult {
                 call,
                 result,
@@ -2178,6 +2182,12 @@ impl App {
 
     pub fn apply(&mut self, event: Event) {
         if let Some(session) = self.sessions.get_mut(event.session) {
+            if let Update::Notice(text) = &event.update {
+                if session.attempt == event.attempt && session.status.active() {
+                    self.notice = text.clone();
+                }
+                return;
+            }
             session.apply(event.attempt, event.update);
         }
     }

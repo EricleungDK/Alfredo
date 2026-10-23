@@ -906,7 +906,8 @@ impl Planner {
                 | Update::ToolStep(_)
                 | Update::ToolResult { .. }
                 | Update::RuleRunning { .. }
-                | Update::Stopped(_) => {}
+                | Update::Stopped(_)
+                | Update::Notice(_) => {}
                 Update::Admitted => {
                     self.notice = "Plan waiting for model server · no action taken".into()
                 }

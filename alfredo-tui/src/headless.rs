@@ -607,6 +607,8 @@ struct Turn {
     failure: Option<String>,
     /// Set when a cap ended the turn (issue #278): state `stopped`, exit 1.
     stopped: Option<Stop>,
+    /// Set when the model has no tool support (issue #281): the reply stays the model's text.
+    no_tools: bool,
 }
 
 impl Turn {
@@ -615,6 +617,10 @@ impl Turn {
             // After a stop the text is only the TUI's "ask again" notice.
             Update::Token(text) if self.stopped.is_none() => self.reply.push_str(&text),
             Update::Stopped(stop) => self.stopped = Some(stop),
+            Update::Notice(text) => {
+                self.no_tools = true;
+                say(text.chars().filter(|c| !c.is_control()).collect::<String>());
+            }
             Update::ToolStep(step) => {
                 self.steps += 1;
                 for (call, result) in step.calls.iter().zip(&step.results) {
@@ -700,6 +706,7 @@ impl Turn {
             "stopped": self.stopped.map(Stop::label),
             "policy": policy.label(),
             "reply": self.reply.trim(),
+            "tools": !self.no_tools,
             "steps": self.steps,
             "calls": self.calls.iter().map(|call| serde_json::json!({
                 "tool": call.tool, "path": call.path,
@@ -1084,6 +1091,20 @@ mod tests {
         assert_eq!(value["state"], "stopped");
         assert_eq!(value["stopped"], "output_limit");
         assert_eq!(value["error"], "Conversation output limit reached");
+    }
+
+    #[test]
+    fn a_notice_stays_out_of_the_reply_and_marks_tools_false() {
+        let mut turn = Turn::default();
+        turn.update(Update::Notice("Model m has no tool support".into()));
+        turn.update(Update::Token("Hi".into()));
+        turn.update(Update::Done);
+        let value = turn.json("m", Policy::Deny, &[]);
+        assert_eq!(value["reply"], "Hi");
+        assert_eq!(value["tools"], false);
+        let mut plain = Turn::default();
+        plain.update(Update::Done);
+        assert_eq!(plain.json("m", Policy::Deny, &[])["tools"], true);
     }
 
     #[test]

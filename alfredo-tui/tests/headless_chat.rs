@@ -285,6 +285,30 @@ fn a_turn_stopped_by_the_step_cap_is_stopped_not_done() {
 }
 
 #[test]
+fn the_no_tool_support_notice_is_on_stderr_not_in_the_reply() {
+    let root = repository("notools");
+    let fixture = ollama_fixture::serve(ollama_fixture::reserve(), |request, _| {
+        if request.path != "POST /api/chat" {
+            ollama_fixture::running(&["fixture"])
+        } else if request.body.get("tools").is_some() {
+            Reply::Json(400, r#"{"error":"fixture does not support tools"}"#.into())
+        } else {
+            done("ECHO hi")
+        }
+    });
+    let output = run(&root, &fixture, &["--chat", "hi", "--headless"]);
+    let value = result(&output);
+    assert_eq!(value["state"], "done", "{value}");
+    assert_eq!(value["reply"], "ECHO hi");
+    assert!(
+        stderr(&output).contains("has no tool support"),
+        "{}",
+        stderr(&output)
+    );
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn an_errored_call_carries_its_reason_in_json_and_on_stderr() {
     let root = repository("detail");
     let fixture = scripted_chat(vec![

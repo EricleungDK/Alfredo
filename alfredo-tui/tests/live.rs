@@ -43,7 +43,8 @@ async fn live_ollama_completes_through_the_rust_transport() {
                 | Update::ToolStep(_)
                 | Update::ToolResult { .. }
                 | Update::RuleRunning { .. }
-                | Update::Stopped(_) => {}
+                | Update::Stopped(_)
+                | Update::Notice(_) => {}
                 Update::Thinking => { thinking_started.get_or_insert_with(|| start.elapsed()); }
                 Update::Token(token) => {
                     first_token.get_or_insert_with(|| start.elapsed());
