@@ -169,7 +169,11 @@ fn result_json(
             _ => None,
         })
         .collect();
-    if status.state == RunState::Failed && (failed.is_empty() || run_error) {
+    // A paused run (autopilot halted itself) names its cause the same way; nothing is
+    // invented when no reason is known.
+    let paused_with_reason = status.state == RunState::Paused && !reason.is_empty();
+    if paused_with_reason || (status.state == RunState::Failed && (failed.is_empty() || run_error))
+    {
         failed.push(serde_json::json!({
             "id": null, "title": "autopilot", "reason": reason
         }));
@@ -1123,6 +1127,30 @@ mod tests {
             Turn::default().json("m", Policy::Deny, &[])["state"],
             "failed"
         );
+    }
+
+    #[test]
+    fn json_names_the_reason_of_a_paused_run() {
+        let reason = "Autopilot paused: command not recorded: Command history capacity reached; start another conversation";
+        let paused = result_json("m", &status(RunState::Paused, 0), &[], reason, false);
+        assert_eq!(paused["state"], "paused");
+        assert_eq!(
+            paused["failed"],
+            serde_json::json!([{"id": null, "title": "autopilot", "reason": reason}])
+        );
+        // No reason known: nothing invented.
+        let unknown = result_json("m", &status(RunState::Paused, 0), &[], "", false);
+        assert_eq!(unknown["failed"], serde_json::json!([]));
+        // A failed task stays listed once; the pause reason joins it.
+        let outcomes = [outcome(
+            2,
+            TaskStatus::Failed,
+            0,
+            Some(Err("rejected by review".into())),
+        )];
+        let both = result_json("m", &status(RunState::Paused, 0), &outcomes, reason, false);
+        assert_eq!(both["failed"].as_array().unwrap().len(), 2);
+        assert_eq!(both["failed"][1]["reason"], reason);
     }
 
     #[test]

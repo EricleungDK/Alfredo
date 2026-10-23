@@ -2231,14 +2231,28 @@ fn submit_autopilot(
     let Some(submission) = work.autopilot.tick(runtime, &mut work.tasks) else {
         return false;
     };
+    record_autopilot_command(work, origin, submission, pending);
+    true
+}
+
+/// Record autopilot's command in conversation `origin`. A command that cannot be
+/// recorded pauses autopilot with the error as its own notice, so the status panel,
+/// the saved state and headless output all name the reason, not just the footer.
+fn record_autopilot_command(
+    work: &mut Workstation,
+    origin: usize,
+    submission: alfredo_tui::autopilot::Submission,
+    pending: &mut Option<(usize, String)>,
+) {
     match work.app.sessions[origin].submit_autopilot_command(submission.text, submission.intent) {
         Ok(id) => *pending = Some((origin, id)),
         Err(error) => {
-            work.autopilot.pause(&mut work.tasks);
-            work.app.notice = format!("Autopilot paused: command not recorded: {error}");
+            let notice = format!("Autopilot paused: command not recorded: {error}");
+            work.autopilot
+                .pause_because(&mut work.tasks, notice.clone());
+            work.app.notice = notice;
         }
     }
-    true
 }
 
 /// Record an owner instruction's next step in an idle conversation, then release
@@ -2734,6 +2748,49 @@ mod tests {
             )
             .unwrap();
         Some((origin, id))
+    }
+    #[test]
+    fn an_unrecordable_autopilot_command_pauses_with_the_error_as_autopilot_notice() {
+        let fixture = WayfinderFixture::new();
+        let mut work = fixture.open();
+        work.autopilot
+            .start("Answer only", "fixture", 2, &work.tasks)
+            .unwrap();
+        let command = |n: usize| alfredo_tui::autopilot::Submission {
+            text: format!("Autopilot · fill {n}"),
+            intent: Intent::Task {
+                request: Request {
+                    correlation: format!("fill-{n}"),
+                    expected_revision: 0,
+                    action: Action::Propose {
+                        title: format!("Fill {n}"),
+                        model: "fixture".into(),
+                        dependencies: vec![],
+                    },
+                },
+            },
+        };
+        let mut pending = None;
+        let mut filled = 0;
+        while work.autopilot.running() && filled < 2000 {
+            super::record_autopilot_command(&mut work, 0, command(filled), &mut pending);
+            pending = None;
+            filled += 1;
+        }
+        assert!(!work.autopilot.running(), "the history never filled");
+        let expected = "Command history capacity reached";
+        assert!(work.app.notice.contains(expected), "{}", work.app.notice);
+        assert!(
+            work.autopilot.notice().contains(expected),
+            "autopilot notice: {}",
+            work.autopilot.notice()
+        );
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        work.autopilot
+            .command(&runtime, &mut work.tasks, "/autopilot", "fixture", 2)
+            .unwrap();
+        let panel = work.tasks.autopilot_report.clone().unwrap();
+        assert!(panel.contains(expected), "{panel}");
     }
     fn poll_wayfinder_completion(
         work: &mut alfredo_tui::workstation::Workstation,

@@ -1613,6 +1613,44 @@ fn pause_stops_decisions_human_hold_is_never_resolved_and_restart_restores_pause
 }
 
 #[test]
+fn pause_because_carries_the_specific_reason_in_notice_saved_state_and_status_panel() {
+    let fixture = Fixture::new();
+    let server = Server::new(|_, _| String::new());
+    let runtime = Runtime::new().unwrap();
+    let mut control = control(&fixture, &server, &runtime);
+    let mut autopilot = Autopilot::open(&fixture.directory(), "default").unwrap();
+    autopilot
+        .start("Answer only", "fixture", 2, &control)
+        .unwrap();
+    let reason = "Autopilot paused: command not recorded: Command history capacity reached; start another conversation";
+    autopilot.pause_because(&mut control, reason.into());
+    assert_eq!(autopilot.status(&control).unwrap().state, RunState::Paused);
+    assert!(!control.dispatch.enabled);
+    assert_eq!(autopilot.notice(), reason);
+    let saved = fs::read_dir(fixture.directory())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("autopilot-") && name.ends_with(".json"))
+        })
+        .expect("saved autopilot state");
+    let saved: Value = serde_json::from_slice(&fs::read(saved).unwrap()).unwrap();
+    assert_eq!(saved["paused"], true);
+    assert_eq!(saved["notice"], reason);
+    autopilot
+        .command(&runtime, &mut control, "/autopilot", "fixture", 2)
+        .unwrap();
+    let panel = control.autopilot_report.clone().unwrap();
+    assert!(
+        panel.contains("Command history capacity reached"),
+        "{panel}"
+    );
+}
+
+#[test]
 fn stop_cancels_running_workers_through_the_cancel_path() {
     let fixture = Fixture::new();
     let (release, gate) = std::sync::mpsc::channel::<()>();

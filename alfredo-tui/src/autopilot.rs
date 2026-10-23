@@ -850,6 +850,16 @@ impl Autopilot {
         self.notice.clone()
     }
 
+    /// Pause like `pause`, but with the cause as the notice (live, saved and shown in
+    /// the status panel and headless output) instead of the generic pause text.
+    pub fn pause_because(&mut self, tasks: &mut TaskControl, notice: String) -> String {
+        if !self.saved.as_ref().is_some_and(|saved| saved.active()) {
+            return "No active autopilot".into();
+        }
+        self.halt(tasks, notice);
+        self.notice.clone()
+    }
+
     /// A typed `/dispatch off` is the user taking control: pause rather than
     /// re-enable dispatch behind their back. Other manual commands pass through.
     pub fn observe_manual(&mut self, text: &str, tasks: &mut TaskControl) {

@@ -197,7 +197,12 @@ accepted; 1 partial, failed or interrupted; 2 setup or usage error (`--headless`
 without `--go`, with `--select`, `--mission` or `--new-mission`, no repository, no
 sandbox, Ollama unreachable, model not installed; these print `Error: …` on stderr and
 nothing on stdout, checked before planning with the `--doctor` model checks). A failed
-run ends with `failed 0/0: <reason>` on stderr as well as in the JSON. After the JSON,
+run ends with `failed 0/0: <reason>` on stderr as well as in the JSON. When autopilot
+pauses itself (a command it could not record, such as `Command history capacity
+reached; start another conversation`, or a refusal it cannot get past), the reason is
+printed on stderr and `failed` carries `{id:null,title:"autopilot",reason}` next to any
+failed tasks (additive: a paused run with no known reason keeps `failed:[]`). The same
+reason is autopilot's notice, so `/autopilot` and the saved state show it too. After the JSON,
 an `--on-finish` hook is awaited (see Completion hook). SIGINT and SIGTERM stop the run as `/stop` does: workers are cancelled,
 the state is kept paused and `/resume` in the TUI continues it. A second signal during the drain reports at once; a runtime error after launch
 stops the run and reports state `failed` (exit 1). Wayfinder-style goals are
