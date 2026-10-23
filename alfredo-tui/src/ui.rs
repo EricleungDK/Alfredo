@@ -63,6 +63,30 @@ fn dim() -> Style {
     Style::default().fg(Color::DarkGray)
 }
 
+/// The argument part of a `⚙` row (issue #274): a registered tool's summary (path or
+/// primary argument first, long text cut), else every value in map order. The caller
+/// still passes the row through `single_line_visible`.
+fn tool_row_arguments(name: &str, arguments: &serde_json::Value) -> String {
+    let normalized = crate::chat_tools::normalize_arguments(arguments);
+    if normalized.is_object() {
+        if let Some(summary) = crate::chat_tools::summary::summarize(name, &normalized) {
+            return summary;
+        }
+    }
+    match arguments {
+        serde_json::Value::Object(map) => map
+            .values()
+            .map(|value| match value {
+                serde_json::Value::String(text) => text.clone(),
+                other => other.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(" "),
+        serde_json::Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
 /// Transcript rows for one tool round: `⚙ name args` per call and the first line of
 /// its result, cut to one row (issue #233). With `expanded` (Ctrl+O, issue #258) the
 /// result follows in full, capped at `EXPANDED_RESULT_LINES` rows and a `… N more lines`
@@ -81,18 +105,7 @@ fn tool_step_lines(
     let mut lines = Vec::new();
     for (position, (call, result)) in step.calls.iter().zip(&step.results).enumerate() {
         let rule = rule_of(position).map_or(String::new(), |id| format!(" (rule #{id})"));
-        let arguments = match &call.arguments {
-            serde_json::Value::Object(map) => map
-                .values()
-                .map(|value| match value {
-                    serde_json::Value::String(text) => text.clone(),
-                    other => other.to_string(),
-                })
-                .collect::<Vec<_>>()
-                .join(" "),
-            serde_json::Value::Null => String::new(),
-            other => other.to_string(),
-        };
+        let arguments = tool_row_arguments(&call.name, &call.arguments);
         let call_text =
             dashboard::single_line_visible(&format!("⚙ {}{rule} {arguments}", call.name));
         lines.push(Line::styled(truncate(call_text.trim_end(), width), dim()));
