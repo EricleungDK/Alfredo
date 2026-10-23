@@ -285,6 +285,65 @@ fn a_turn_stopped_by_the_step_cap_is_stopped_not_done() {
 }
 
 #[test]
+fn max_turns_sets_the_cap_in_the_json_result() {
+    let root = repository("step-cap-max-turns");
+    let fixture = scripted_chat(vec![tool_calls(&[("list_files", json!({}))])]);
+    let output = run(
+        &root,
+        &fixture,
+        &["--chat", "LOOP", "--headless", "--max-turns", "3"],
+    );
+    let value = result(&output);
+    assert_eq!(output.status.code(), Some(1), "{value}");
+    assert_eq!(value["stopped"], "step_limit");
+    assert_eq!(value["steps"], 3);
+    assert!(value["error"].as_str().unwrap().contains("after 3 rounds"));
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn max_turns_can_come_from_the_environment_and_the_flag_wins() {
+    let root = repository("step-cap-env");
+    let fixture = scripted_chat(vec![tool_calls(&[("list_files", json!({}))])]);
+    let run_env = |extra: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_alfredo-tui"))
+            .args(["--model", "fixture", "--endpoint", &fixture.endpoint])
+            .arg("--workspace")
+            .arg(root.join("workspace"))
+            .arg("--state-dir")
+            .arg(root.join("state"))
+            .args(["--chat", "LOOP", "--headless"])
+            .args(extra)
+            .env("ALFREDO_MAX_TURNS", "2")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap()
+    };
+    assert_eq!(result(&run_env(&[]))["steps"], 2);
+    assert_eq!(result(&run_env(&["--max-turns", "4"]))["steps"], 4);
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn an_invalid_max_turns_exits_two_naming_the_range() {
+    let root = repository("max-turns-invalid");
+    let fixture = scripted_chat(vec![done("ok")]);
+    for bad in ["0", "33", "many"] {
+        let output = run(
+            &root,
+            &fixture,
+            &["--chat", "hi", "--headless", "--max-turns", bad],
+        );
+        assert_eq!(output.status.code(), Some(2), "{bad}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("1 to 32"), "{stderr}");
+    }
+    let output = run(&root, &fixture, &["--chat", "hi", "--headless", "--max-turns"]);
+    assert_eq!(output.status.code(), Some(2));
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
 fn an_errored_call_carries_its_reason_in_json_and_on_stderr() {
     let root = repository("detail");
     let fixture = scripted_chat(vec![

@@ -79,6 +79,9 @@ class Fixture:
                             'command': SLOW, 'escalate': 'on host' in prompt}}}]}, 'done': False}]
                 elif 'slow command' in prompt:
                     chunks = [{'message': {'content': 'SLOW_DONE'}, 'done': False}]
+                elif 'loop forever' in prompt:
+                    chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
+                        {'function': {'name': 'list_files', 'arguments': {}}}]}, 'done': False}]
                 elif not tool_results:
                     chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
                         {'function': {'name': 'read_file', 'arguments': {'path': 'README.md'}}}]},
@@ -121,8 +124,11 @@ class ChatTools(unittest.TestCase):
             str(Path(__file__).resolve().parents[1] / 'target/debug/alfredo-tui')))
         env = dict(os.environ, TERM='xterm-256color', ALFREDO_STATE_DIR=self.state.name)
         self.terminal = Pty(self, [str(binary), '--model', 'fixture', '--endpoint',
-                                   self.fixture.endpoint], root, env)
+                                   self.fixture.endpoint, *self.extra_args()], root, env)
         self.terminal.wait_for('ALFREDO')
+
+    def extra_args(self):
+        return ['--max-turns', '3'] if 'max_turns' in self._testMethodName else []
 
     def tearDown(self):
         self.terminal.close()
@@ -149,6 +155,12 @@ class ChatTools(unittest.TestCase):
         self.assertIn('README_BODY_MARKER', second[-1]['content'])
         self.assertIn('read_file', second[0]['content'], 'the system prompt names the tools')
 
+
+    def test_max_turns_caps_the_tool_rounds_and_the_notice_names_the_cap(self):
+        # Issue #321: --max-turns 3 stops a looping model after 3 rounds.
+        self.terminal.write(b'loop forever\r')
+        self.terminal.wait_for('tool step limit reached after 3 rounds')
+        self.assertEqual(len(self.fixture.chats()), 4)
 
     def readme(self):
         return Path(os.path.realpath(self.repo.name), 'README.md').read_text()
