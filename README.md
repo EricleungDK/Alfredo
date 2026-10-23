@@ -161,7 +161,7 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 | Key | Action |
 | --- | --- |
 | Enter | Send prompt or command |
-| Shift+Enter | New line (if the terminal reports it; paste also works) |
+| Ctrl+J / Alt+Enter | New line (shown as `↵`) on any terminal; Shift+Enter too where the terminal reports it, and paste also works |
 | F1 | Command picker (empty prompt); Tab after `/prefix` completes |
 | F2 | Right pane: task detail / conversation |
 | F3 | Evidence for the selected task (task detail) |
@@ -183,6 +183,9 @@ Manual control is always available (`/plan`, `/task`, `/approve`, `/run`,
 | Esc | Cancel the current model request (keeps partial reply); close pickers. You can then send a new prompt or switch `/model` |
 | Ctrl+R | Retry a failed or cancelled turn, until you send a new prompt |
 | y / n (approval card) | Approve / deny a chat file edit; Esc denies and ends the turn |
+| Ctrl+A / Ctrl+E | Move to the start / end of the prompt |
+| Ctrl+Left / Ctrl+Right (Alt+B / Alt+F) | Move one word left / right |
+| Ctrl+K | Delete from the cursor to the end of the prompt |
 | Ctrl+W / Ctrl+U | Delete word / clear prompt |
 | Ctrl+Q / Ctrl+C | Quit (cancels workers and waits for their results) |
 

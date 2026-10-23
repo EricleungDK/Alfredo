@@ -65,6 +65,72 @@ fn paste_is_bounded_without_splitting_a_cluster_and_commands_reset_the_cursor() 
 }
 
 #[test]
+fn word_motions_stop_at_whitespace_boundaries_and_keep_clusters_whole() {
+    let mut editor = Session::new("fixture".into());
+    editor.insert("hello  wor\u{301}ld 👩‍💻x\nnext");
+    editor.word_left();
+    assert_eq!(&editor.draft[editor.cursor()..], "next");
+    editor.word_left();
+    assert_eq!(&editor.draft[editor.cursor()..], "👩‍💻x\nnext");
+    editor.word_left();
+    assert_eq!(&editor.draft[editor.cursor()..], "wor\u{301}ld 👩‍💻x\nnext");
+    editor.word_left();
+    assert_eq!(editor.cursor(), 0);
+    editor.word_left();
+    assert_eq!(editor.cursor(), 0);
+    editor.word_right();
+    assert_eq!(&editor.draft[..editor.cursor()], "hello");
+    editor.word_right();
+    assert_eq!(&editor.draft[..editor.cursor()], "hello  wor\u{301}ld");
+    editor.word_right();
+    assert_eq!(&editor.draft[..editor.cursor()], "hello  wor\u{301}ld 👩‍💻x");
+    editor.word_right();
+    editor.word_right();
+    assert_eq!(editor.cursor(), editor.draft.len());
+}
+
+#[test]
+fn kill_to_end_deletes_from_the_cursor_and_is_a_noop_at_the_end() {
+    let mut editor = Session::new("fixture".into());
+    editor.insert("keep 👩‍💻 drop\nme");
+    editor.end();
+    editor.kill_to_end();
+    assert_eq!(editor.draft, "keep 👩‍💻 drop\nme");
+    editor.home();
+    editor.word_right();
+    editor.kill_to_end();
+    assert_eq!(editor.draft, "keep");
+    assert_eq!(editor.cursor(), "keep".len());
+    editor.insert("!");
+    assert_eq!(editor.draft, "keep!");
+}
+
+#[test]
+fn newline_insert_respects_the_draft_limit_and_motions_clear_a_rejection() {
+    let mut editor = Session::new("fixture".into());
+    editor.insert("abc");
+    editor.insert("\n");
+    editor.insert("def");
+    assert_eq!(editor.draft, "abc\ndef");
+    assert!(editor.draft_view(80).contains('↵'));
+    editor.clear_draft();
+    editor.insert(&"x".repeat(MAX_DRAFT));
+    assert!(editor.insert("\n").truncated);
+    assert_eq!(editor.draft.len(), MAX_DRAFT);
+    for edit in 0..3 {
+        let mut session = Session::new("fixture".into());
+        session.insert("/gp x");
+        session.reject_draft();
+        match edit {
+            0 => session.word_left(),
+            1 => session.word_right(),
+            _ => session.kill_to_end(),
+        }
+        assert!(!session.replace_pending(), "edit {edit}");
+    }
+}
+
+#[test]
 fn session_switch_keeps_independent_drafts_and_cursor_positions() {
     let mut app = App::new("fixture".into());
     app.sessions[0].insert("ac");

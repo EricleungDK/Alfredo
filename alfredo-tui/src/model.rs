@@ -676,6 +676,34 @@ impl Session {
         self.draft.replace_range(start..self.cursor, "");
         self.cursor = start;
     }
+    /// Moves to the start of the previous whitespace-delimited word (Ctrl+Left, Alt+B).
+    pub fn word_left(&mut self) {
+        self.rejected = None;
+        self.cursor = self.draft[..self.cursor()]
+            .trim_end()
+            .char_indices()
+            .rev()
+            .find(|(_, ch)| ch.is_whitespace())
+            .map(|(index, ch)| index + ch.len_utf8())
+            .unwrap_or(0);
+    }
+    /// Moves to the end of the next whitespace-delimited word (Ctrl+Right, Alt+F).
+    pub fn word_right(&mut self) {
+        self.rejected = None;
+        let cursor = self.cursor();
+        let rest = &self.draft[cursor..];
+        let word = rest.trim_start();
+        let skipped = rest.len() - word.len();
+        let length = word.find(char::is_whitespace).unwrap_or(word.len());
+        self.cursor = cursor + skipped + length;
+    }
+    /// Deletes from the cursor to the end of the draft (Ctrl+K).
+    pub fn kill_to_end(&mut self) {
+        self.rejected = None;
+        let cursor = self.cursor();
+        self.draft.truncate(cursor);
+        self.cursor = cursor;
+    }
     pub fn delete_word(&mut self) {
         self.rejected = None;
         let end = self.cursor();
