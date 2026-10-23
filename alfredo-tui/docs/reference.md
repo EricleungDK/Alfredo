@@ -247,13 +247,13 @@ There is no other policy and no interactive equivalent: interactive chat always 
 decision. Stderr gets one line per approval and one per tool call (`tool NAME PATH (result)`;
 a call that did not succeed adds the reason: `(error: parent directory of a/b does not exist)`);
 stdout one JSON object
-`{state, stopped, policy, reply, steps, calls:[{tool,path,error,result,detail}], approvals:[{tool,target,outcome,reason}],
+`{state, stopped, policy, reply, tools, steps, calls:[{tool,path,error,result,detail}], approvals:[{tool,target,outcome,reason}],
 error}`. `state` is `done`, `stopped` or `failed`; `result` is `ok`, `denied`, `malformed` or `error`;
 `detail` is the tool's error text (at most 200 bytes, control characters removed; `null` when
 `error` is false). A turn cut off by the tool step cap (8 rounds by default, `--max-turns`) or by the conversation size
 limit is `state` `stopped` with `stopped` `step_limit` or `output_limit` (`null` otherwise) and
 `error` naming the cap; its `reply` is the text before the cut, without the interactive "ask again"
-notice. Exit 0 done; 1 stopped, failed or interrupted (SIGINT/SIGTERM deny further cards, wait up to 10 s for
+notice. `tools` is `false` when the model had no tool support and the turn ran as plain chat. Exit 0 done; 1 stopped, failed or interrupted (SIGINT/SIGTERM deny further cards, wait up to 10 s for
 answered cards to be logged, then cancel the turn); 2 setup or usage error. The turn is not saved to the conversation, and
 it does not own it: it takes no conversation lock, reads the conversation only for its saved model, and so runs beside an
 open TUI or another headless chat on the same repository (`--go --headless` still takes the lock). Concurrent runs append
@@ -1608,7 +1608,8 @@ repository's working tree, so uncommitted edits are seen). They run without aski
 - **Needs a tool-capable model.** If Ollama answers HTTP 400 `... does not support
   tools`, that round is retried once without tools and chat continues as plain chat:
   one notice (`Model X has no tool support; chat is running without file tools`) is
-  shown, the system prompt stops promising tools, and later turns with that model in
+  shown in the footer (headless: on stderr; never in the reply, saved text or later
+  requests), the system prompt stops promising tools, and later turns with that model in
   the same session send none. Other HTTP errors show Ollama's own `error` text (about
   200 characters, control characters removed) and are not retried without tools.
 - **Not available.** Commands and Git operations are not chat tools yet; the model is

@@ -198,8 +198,8 @@ pub async fn run_turn_limited(
                 }
                 strip_tool_prompt(&mut messages);
                 let name: String = model.chars().filter(|c| !c.is_control()).collect();
-                if !send(Update::Token(format!(
-                    "[Model {name} has no tool support; chat is running without file tools]\n\n"
+                if !send(Update::Notice(format!(
+                    "Model {name} has no tool support; chat is running without file tools"
                 )))
                 .await
                 {

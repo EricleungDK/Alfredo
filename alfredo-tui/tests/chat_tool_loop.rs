@@ -814,17 +814,27 @@ async fn a_model_without_tool_support_falls_back_to_plain_chat_once() {
     let mut session = Session::new(model.into());
     let messages = begin(&mut session, "hi");
     let events = run_as(&fixture.endpoint, &root, model, messages).await;
+    let notices: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.update {
+            Update::Notice(text) => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        notices,
+        [format!(
+            "Model {model} has no tool support; chat is running without file tools"
+        )]
+    );
     for event in events {
         session.apply(event.attempt, event.update);
     }
     let reply = &session.messages.last().unwrap().content;
     assert!(reply.contains("plain hello"), "{reply}");
-    assert!(
-        reply.contains(&format!(
-            "Model {model} has no tool support; chat is running without file tools"
-        )),
-        "{reply}"
-    );
+    // Issue #281: the notice is a notice, never assistant text.
+    assert!(!reply.contains("no tool support"), "{reply}");
+    assert_eq!(reply.trim(), "plain hello");
     assert!(!matches!(session.status, Status::Failed(_)));
     let requests = fixture.requests.lock().unwrap().clone();
     assert_eq!(requests.len(), 2);
@@ -833,6 +843,17 @@ async fn a_model_without_tool_support_falls_back_to_plain_chat_once() {
     let system = requests[1].body["messages"][0]["content"].as_str().unwrap();
     assert!(!system.contains("read_file"), "{system}");
     assert!(system.contains("no tools"), "{system}");
+
+    // The next request's history carries no notice (issue #281).
+    session.insert("second one");
+    let history = session.begin().unwrap();
+    assert!(
+        history
+            .iter()
+            .all(|m| !m.content.contains("no tool support")),
+        "{history:?}"
+    );
+    assert_eq!(history.len(), 3, "{history:?}");
 
     // A later turn skips tools without probing and shows no second notice.
     let mut later = Session::new(model.into());
@@ -846,6 +867,28 @@ async fn a_model_without_tool_support_falls_back_to_plain_chat_once() {
     assert_eq!(requests.len(), 3);
     assert!(requests[2].body.get("tools").is_none());
     let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn a_notice_reaches_the_footer_and_never_the_transcript() {
+    let mut app = alfredo_tui::model::App::new("m".into());
+    app.sessions[0].insert("hi");
+    app.sessions[0].begin().unwrap();
+    let attempt = app.sessions[0].attempt;
+    app.apply(Event {
+        session: 0,
+        attempt,
+        update: Update::Notice("Model m has no tool support".into()),
+    });
+    assert_eq!(app.notice, "Model m has no tool support");
+    assert!(app.sessions[0].messages.last().unwrap().content.is_empty());
+    app.notice.clear();
+    app.apply(Event {
+        session: 0,
+        attempt: attempt + 1,
+        update: Update::Notice("stale".into()),
+    });
+    assert!(app.notice.is_empty());
 }
 
 #[tokio::test]
