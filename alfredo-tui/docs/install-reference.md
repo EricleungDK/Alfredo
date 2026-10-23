@@ -344,6 +344,16 @@ version. Conflicting backups, malformed anchors and downgrades refuse unchanged.
 Use a v4-compatible reader for newly saved histories. Restore an older backup only
 with all terminals stopped; doing so loses subsequent history changes.
 
+## Slash command type-ahead
+
+Typing `/` as the whole first word of the prompt lists the commands that match what
+you typed, prefix matches first and then substring matches, each with its usage
+hint. Up/Down choose; Enter or Tab fills `/name ` into the prompt without
+submitting it; Esc closes the list and keeps the text; backspacing past `/` closes it.
+A fully typed command name still submits on Enter, and a message that is a path
+(`/path/in/chat ...`, with a space) or plain text and `@` mentions are unaffected.
+In the F1 picker, typing filters the list the same way (Backspace edits the filter).
+
 ## Installed-model completion
 
 At the end of `/model PREFIX` or `/assign ID PREFIX`, press Tab to choose from
