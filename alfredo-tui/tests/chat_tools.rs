@@ -286,3 +286,241 @@ fn grep_reports_path_line_and_text_and_skips_git() {
         "{ignored_case}"
     );
 }
+
+// Issue #343: discovery honours git's ignore rules.
+
+/// A Workspace whose `.git` is a real repository (the plain one has a fake `.git`).
+fn git_workspace() -> Workspace {
+    let workspace = Workspace::new();
+    fs::remove_dir_all(workspace.root.join(".git")).unwrap();
+    git(&workspace, &["init", "-q"]);
+    workspace
+}
+
+fn git(workspace: &Workspace, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&workspace.root)
+        .args(args)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?}");
+}
+
+fn put(workspace: &Workspace, path: &str, body: &str) {
+    let full = workspace.root.join(path);
+    fs::create_dir_all(full.parent().unwrap()).unwrap();
+    fs::write(full, body).unwrap();
+}
+
+fn lines(output: &str) -> Vec<&str> {
+    output.lines().collect()
+}
+
+/// The repro of issue #343: a Python repo whose ignored `.venv` would fill the caps.
+fn python_repo() -> Workspace {
+    let workspace = git_workspace();
+    put(
+        &workspace,
+        ".gitignore",
+        ".venv/\n__pycache__/\nbuild/\n*.log\n",
+    );
+    for n in 0..600 {
+        put(
+            &workspace,
+            &format!(".venv/lib/python3.12/site-packages/pkg{n}/mod.py"),
+            "import os\ndef handle_request_x():\n",
+        );
+    }
+    for n in 0..300 {
+        put(
+            &workspace,
+            &format!("build/lib/m{n}.py"),
+            "def handle_request_b():\n",
+        );
+    }
+    put(
+        &workspace,
+        "src/app.py",
+        "def handle_request():\n    pass\n",
+    );
+    put(&workspace, "tests/test_app.py", "import app\n");
+    put(&workspace, "x.log", "needle log\n");
+    workspace
+}
+
+#[test]
+fn list_files_and_grep_skip_git_ignored_paths_so_project_files_come_first() {
+    let workspace = python_repo();
+    let listed = workspace.run("list_files", json!({}));
+    for wanted in [".gitignore", "src/app.py", "tests/test_app.py"] {
+        assert!(
+            lines(&listed).contains(&wanted),
+            "{wanted} missing: {listed}"
+        );
+    }
+    for hidden in [".venv", "build/", "x.log"] {
+        assert!(!listed.contains(hidden), "{hidden} listed: {listed}");
+    }
+    assert!(!listed.contains("[truncated"), "{listed}");
+    let found = workspace.run("grep", json!({"pattern": "def handle_request"}));
+    assert_eq!(found.trim(), "src/app.py:1:def handle_request():");
+    let log = workspace.run("grep", json!({"pattern": "needle"}));
+    assert_eq!(log.trim(), "no matches");
+}
+
+#[test]
+fn tracked_files_stay_visible_even_when_they_match_an_ignore_pattern() {
+    let workspace = python_repo();
+    put(&workspace, "kept.log", "needle kept\n");
+    git(&workspace, &["add", "-f", "kept.log"]);
+    let listed = workspace.run("list_files", json!({}));
+    assert!(lines(&listed).contains(&"kept.log"), "{listed}");
+    assert!(!lines(&listed).contains(&"x.log"), "{listed}");
+    let found = workspace.run("grep", json!({"pattern": "needle"}));
+    assert_eq!(found.trim(), "kept.log:1:needle kept");
+}
+
+#[test]
+fn nested_gitignore_and_info_exclude_are_honoured() {
+    let workspace = git_workspace();
+    put(&workspace, "pkg/.gitignore", "generated.txt\n");
+    put(&workspace, "pkg/generated.txt", "needle gen\n");
+    put(&workspace, "pkg/real.txt", "needle real\n");
+    put(&workspace, "scratch.txt", "needle scratch\n");
+    fs::write(workspace.root.join(".git/info/exclude"), "scratch.txt\n").unwrap();
+    let listed = workspace.run("list_files", json!({}));
+    assert!(lines(&listed).contains(&"pkg/real.txt"), "{listed}");
+    assert!(!listed.contains("generated.txt"), "{listed}");
+    assert!(!listed.contains("scratch.txt"), "{listed}");
+    let found = workspace.run("grep", json!({"pattern": "needle"}));
+    assert_eq!(found.trim(), "pkg/real.txt:1:needle real");
+}
+
+#[test]
+fn virtualenv_and_cache_directories_are_skipped_without_a_gitignore() {
+    for in_git in [true, false] {
+        let workspace = if in_git {
+            git_workspace()
+        } else {
+            Workspace::new()
+        };
+        for dir in [".venv", "venv", "pkg/__pycache__", "lib/site-packages"] {
+            put(&workspace, &format!("{dir}/mod.py"), "needle env\n");
+        }
+        put(&workspace, "build/gen.py", "needle build\n");
+        let listed = workspace.run("list_files", json!({}));
+        assert!(
+            lines(&listed).contains(&"build/gen.py"),
+            "{in_git}: {listed}"
+        );
+        for hidden in ["venv", "__pycache__", "site-packages"] {
+            assert!(!listed.contains(hidden), "{in_git} {hidden}: {listed}");
+        }
+        let found = workspace.run("grep", json!({"pattern": "needle"}));
+        assert_eq!(found.trim(), "build/gen.py:1:needle build", "{in_git}");
+    }
+}
+
+#[test]
+fn an_explicit_path_inside_an_ignored_directory_still_lists_with_a_note() {
+    let workspace = python_repo();
+    let listed = workspace.run("list_files", json!({"path": ".venv"}));
+    assert!(
+        listed.contains(".venv/lib/python3.12/site-packages/pkg0/mod.py"),
+        "{listed}"
+    );
+    assert!(listed.to_lowercase().contains("ignored"), "{listed}");
+    let built = workspace.run("list_files", json!({"path": "build"}));
+    assert!(built.contains("build/lib/m0.py"), "{built}");
+    assert!(built.to_lowercase().contains("ignored"), "{built}");
+    let found = workspace.run(
+        "grep",
+        json!({"pattern": "handle_request_b", "path": "build"}),
+    );
+    assert!(
+        found.contains("build/lib/m0.py:1:def handle_request_b():"),
+        "{found}"
+    );
+    // A path that is not ignored carries no note.
+    let src = workspace.run("list_files", json!({"path": "src"}));
+    assert_eq!(src.trim(), "src/app.py\nsrc/main.rs");
+}
+
+#[test]
+fn read_file_on_an_ignored_non_secret_file_is_unchanged() {
+    let workspace = python_repo();
+    let out = workspace.run("read_file", json!({"path": "x.log"}));
+    assert_eq!(out.trim(), "1\tneedle log");
+}
+
+#[test]
+fn a_gitignore_never_re_includes_secrets_or_generated_trees() {
+    let workspace = git_workspace();
+    put(
+        &workspace,
+        ".gitignore",
+        "!.env\n!*.pem\n!vendor/\n!target/\n",
+    );
+    put(&workspace, ".env", "SECRET_ENV\n");
+    put(&workspace, "id.pem", "SECRET_PEM\n");
+    put(&workspace, "vendor/lib.rs", "SECRET_VENDOR\n");
+    put(&workspace, "target/out.txt", "SECRET_TARGET\n");
+    put(&workspace, "ok.txt", "fine\n");
+    git(
+        &workspace,
+        &["add", "-f", ".env", "id.pem", "vendor/lib.rs"],
+    );
+    let listed = workspace.run("list_files", json!({}));
+    assert!(lines(&listed).contains(&"ok.txt"), "{listed}");
+    for hidden in [".env", ".pem", "vendor", "target", ".git/"] {
+        assert!(!listed.contains(hidden), "{hidden}: {listed}");
+    }
+    assert_eq!(
+        workspace.run("grep", json!({"pattern": "SECRET_"})).trim(),
+        "no matches"
+    );
+    for path in [".env", "id.pem", "vendor/lib.rs", ".git/HEAD"] {
+        let out = workspace.run("read_file", json!({"path": path}));
+        assert!(out.starts_with("error: "), "{path}: {out}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tracked_path_behind_a_swapped_in_symlink_is_not_listed_or_searched() {
+    let workspace = git_workspace();
+    put(&workspace, "link/inner.txt", "needle inside\n");
+    git(&workspace, &["add", "link/inner.txt"]);
+    // The directory is replaced by a symlink to a folder outside the workspace.
+    let outside = workspace.base.join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("inner.txt"), "needle OUTSIDE\n").unwrap();
+    fs::remove_dir_all(workspace.root.join("link")).unwrap();
+    std::os::unix::fs::symlink(&outside, workspace.root.join("link")).unwrap();
+    put(&workspace, "ok.txt", "needle ok\n");
+    let listed = workspace.run("list_files", json!({}));
+    assert!(!listed.contains("link"), "{listed}");
+    let found = workspace.run("grep", json!({"pattern": "needle"}));
+    assert_eq!(found.trim(), "ok.txt:1:needle ok");
+}
+
+#[test]
+fn when_git_cannot_list_the_plain_walk_is_the_fallback() {
+    // Fake `.git`: git fails, so ignore files are not applied but the fixed
+    // exclusions still are.
+    let workspace = Workspace::new();
+    put(&workspace, ".gitignore", "*.log\n");
+    put(&workspace, "x.log", "needle log\n");
+    put(&workspace, ".venv/a.py", "needle venv\n");
+    let listed = workspace.run("list_files", json!({}));
+    assert!(lines(&listed).contains(&"x.log"), "{listed}");
+    assert!(!listed.contains(".venv"), "{listed}");
+    // Repository filter drivers make the git listing refuse; same fallback.
+    let workspace = git_workspace();
+    put(&workspace, ".gitignore", "*.log\n");
+    put(&workspace, "x.log", "needle log\n");
+    git(&workspace, &["config", "filter.x.clean", "cat"]);
+    let listed = workspace.run("list_files", json!({}));
+    assert!(lines(&listed).contains(&"x.log"), "{listed}");
+}

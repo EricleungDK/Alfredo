@@ -64,6 +64,14 @@ class Fixture:
                             'reason': 'broad refactor'}}}]}, 'done': False}]
                 elif 'refactor everything' in prompt:
                     chunks = [{'message': {'content': 'SHOULD_NOT_CONTINUE'}, 'done': False}]
+                elif 'find handle_request' in prompt and not tool_results:
+                    chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
+                        {'function': {'name': 'grep', 'arguments': {
+                            'pattern': 'def handle_request'}}}]}, 'done': False}]
+                elif 'find handle_request' in prompt:
+                    seen = 'src/app.py:1:def handle_request' in tool_results[-1]['content']
+                    chunks = [{'message': {'content': 'GREP_FOUND_APP' if seen else 'GREP_VENV_NOISE'},
+                               'done': False}]
                 elif 'redraft' in prompt and not tool_results:
                     chunks = [{'message': {'role': 'assistant', 'content': '', 'tool_calls': [
                         {'function': {'name': 'edit_file', 'arguments': {
@@ -149,6 +157,20 @@ class ChatTools(unittest.TestCase):
         self.assertIn('README_BODY_MARKER', second[-1]['content'])
         self.assertIn('read_file', second[0]['content'], 'the system prompt names the tools')
 
+
+    def test_grep_skips_a_gitignored_virtualenv_so_project_files_are_found(self):
+        root = Path(os.path.realpath(self.repo.name))
+        root.joinpath('.gitignore').write_text('.venv/\n__pycache__/\nbuild/\n*.log\n')
+        for n in range(300):
+            mod = root / '.venv/lib/python3.12/site-packages' / f'pkg{n}' / 'mod.py'
+            mod.parent.mkdir(parents=True)
+            mod.write_text('import os\ndef handle_request_x():\n')
+        root.joinpath('src').mkdir()
+        root.joinpath('src/app.py').write_text('def handle_request():\n    pass\n')
+        self.terminal.write(b'find handle_request\r')
+        self.terminal.wait_for('GREP_FOUND_APP')
+        tool = self.fixture.chats()[1]['messages'][-1]['content']
+        self.assertNotIn('.venv', tool)
 
     def readme(self):
         return Path(os.path.realpath(self.repo.name), 'README.md').read_text()
