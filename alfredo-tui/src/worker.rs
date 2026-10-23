@@ -1121,6 +1121,8 @@ pub fn check_passed(check: &ExecutionReceipt) -> bool {
 
 /// Detail prefix for a failed repair whose files equal its parent attempt's.
 pub const NO_CHANGE: &str = "No change from previous attempt";
+/// Detail prefix for a run whose passing check ran on an unchanged baseline (#350).
+pub const NO_FILES_CHANGED: &str = "No files changed:";
 const FAILING_LINES: usize = 30;
 const FAILING_BYTES: usize = 2048;
 /// Repair sampling steps; a lineage never samples hotter than the last.
@@ -1233,6 +1235,7 @@ fn lineage(store: &TaskStore, snapshot: &Snapshot, task: &Task) -> Option<Lineag
     }
     let detail = parent.as_ref().map_or("", |p| p.detail.as_str());
     let no_progress = detail.starts_with(NO_CHANGE);
+    let unchanged_baseline = detail.starts_with(NO_FILES_CHANGED);
     let limit = parent
         .as_ref()
         .and_then(|p| p.generation.as_ref())
@@ -1243,10 +1246,13 @@ fn lineage(store: &TaskStore, snapshot: &Snapshot, task: &Task) -> Option<Lineag
     } else {
         4096
     };
-    let level = failed.saturating_sub(1) + usize::from(no_progress);
+    let level = failed.saturating_sub(1) + usize::from(no_progress || unchanged_baseline);
     let mut section = String::from("WHAT IS STILL FAILING (previous attempt; fix these first)\n");
     if no_progress {
         section.push_str("The previous attempt returned identical code that still fails the same check. Do not return it again; change the implementation to fix the failures below.\n");
+    }
+    if unchanged_baseline {
+        section.push_str("The previous attempt changed nothing: every allowed file came back identical to the repository, so the passing check proves no work was done. Do not return the files unchanged; make the edit the task asks for.\n");
     }
     if hit {
         section.push_str(&format!("The previous attempt's output hit the {}-token limit before the file plan was complete; this request allows {num_predict} tokens. Return only files that must change, without commentary.\n", limit.unwrap_or(4096)));
@@ -1706,7 +1712,21 @@ pub async fn start_checked(
             Err(refusal) => Err(refusal),
         };
         match patch {
-            Ok(patch) => evidence.patch = patch,
+            Ok(patch) => {
+                // A passing check on an unchanged baseline proves nothing was done (#350).
+                if evidence.status == TaskStatus::ReviewReady && patch.trim().is_empty() {
+                    evidence.status = TaskStatus::Failed;
+                    evidence.detail = format!(
+                        "{NO_FILES_CHANGED} the check passed but the answer left every allowed file identical to the baseline (allowed: {})",
+                        task.policy.as_ref().map_or(String::new(), |p| p.files.join(", "))
+                    )
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(900)
+                    .collect();
+                }
+                evidence.patch = patch;
+            }
             Err(error) => {
                 evidence.patch = format!("Diff unavailable: {error}");
                 if evidence.status == TaskStatus::ReviewReady {

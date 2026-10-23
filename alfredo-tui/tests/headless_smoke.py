@@ -119,6 +119,21 @@ class HeadlessSmoke(unittest.TestCase):
             self.assertTrue(item['title'] and item['reason'])
         self.assertIn('failed 0/2', err)
 
+    def test_worker_that_changes_nothing_is_not_accepted_even_when_the_check_passes_exit_1(self):
+        self.fixture.echo_worker = True
+        code, out, err = self.run_headless('--headless', '--max-repairs', '1')
+        self.assertEqual(code, 1, err)
+        result = self.result(out)
+        self.assertEqual((result['state'], result['accepted'], result['total']), ('failed', 0, 1))
+        self.assertEqual(result['repairs'], 1)
+        self.assertEqual([item['id'] for item in result['failed']], [1])
+        self.assertIn('repair budget exhausted', result['failed'][0]['reason'])
+        self.assertIn('branch', result)
+        self.assertIsNone(result['branch'], 'nothing was integrated')
+        self.assertEqual(self.fixture.markers(), ['PLAN', 'ECHO', 'ECHO'])
+        self.assertIn('failed 0/1', err)
+        self.assertEqual(self.git('branch', '--list', 'alfredo/*'), '')
+
     def hook(self, body):
         path = self.workspace.parent / 'hook.sh'
         marker = self.workspace.parent / 'marker'

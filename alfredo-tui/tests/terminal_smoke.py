@@ -583,7 +583,11 @@ class TerminalSmoke(unittest.TestCase):
                         assert 'RECORDED ACCEPTANCE CRITERIA' in request['messages'][-1]['content']
                         assert 'Calculation returns 42' in request['messages'][-1]['content']
                     # FILE-block answer; other fixtures keep legacy JSON answers.
-                    content = 'Updating answer.py.\n=== FILE: answer.py ===\nVALUE = 42\n=== END FILE ===\n'
+                    # When the prompt already shows VALUE = 42 (a dependent or repeated task), an
+                    # unchanged answer would fail as "No files changed" (#350): really edit the file.
+                    prompt = request['messages'][-1]['content']
+                    note = '# edit %d\n' % len(model_requests) if 'VALUE = 42' in prompt else ''
+                    content = 'Updating answer.py.\n=== FILE: answer.py ===\nVALUE = 42\n' + note + '=== END FILE ===\n'
                 else:
                     content = 'FAST_REPLY'
                 self.wfile.write((json.dumps({'message': {'content': content}, 'done': True, 'load_duration': 500000000, 'eval_duration': 2000000000, 'eval_count': 40}) + '\n').encode())

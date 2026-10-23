@@ -37,6 +37,8 @@ class AutopilotServer:
         # Recovery smoke options: one passing task whose first worker request can be held.
         self.single_task = False
         self.hold_calc = None
+        # Issue #350: one task whose check passes on the baseline; every worker answer echoes calc.py unchanged.
+        self.echo_worker = False
         fixture = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
@@ -73,8 +75,13 @@ class AutopilotServer:
                              'model': request['model'], 'dependencies': [1],
                              'policy': {'files': ['app.py'], 'check': CHECK_APP}},
                         ]
+                        if fixture.echo_worker:
+                            tasks = [dict(tasks[0], policy={'files': ['calc.py'], 'check': ['/usr/bin/true']})]
                         content = ('no plan today' if fixture.bad_plan else
                                    json.dumps({'tasks': tasks[:1] if fixture.single_task else tasks}))
+                    elif fixture.echo_worker:
+                        marker = 'ECHO'
+                        content = json.dumps({'files': [{'path': 'calc.py', 'content': 'def answer():\n    return 0\n'}]})
                     elif fixture.prose_worker:
                         marker = 'PROSE'
                         content = 'I would rather talk about it than write any code.'
