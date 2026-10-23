@@ -103,6 +103,17 @@ fn keep_alive_json(value: &str) -> serde_json::Value {
         .map_or_else(|_| value.into(), serde_json::Value::from)
 }
 
+/// Messages for a request that never reached, or lost, the model server.
+const CONNECT_FAILURE: &str = "Cannot reach Ollama; check the server and endpoint, then retry";
+const CONNECTION_LOST: &str = "Ollama connection lost; partial reply retained";
+const DISCONNECTED: &str = "Ollama disconnected before completion; partial reply retained";
+
+/// True when a request failure text is the provider's connect failure or a
+/// dropped connection: the server was unreachable, not the model wrong.
+pub fn is_connect_failure(reason: &str) -> bool {
+    [CONNECT_FAILURE, CONNECTION_LOST, DISCONNECTED].contains(&reason)
+}
+
 /// Pre-content failures carry no response and no side effects, so they are
 /// safe to retry; anything after content keeps the manual-retry contract.
 enum Failure {
@@ -184,6 +195,8 @@ pub struct Ollama {
     keep_alive: Option<String>,
     /// User-chosen input window (`--num-ctx`); None omits the option.
     num_ctx_override: Option<u32>,
+    /// Chat tool-round cap (`--max-turns`); None keeps the default.
+    max_turns: Option<usize>,
     connect_retries: u32,
     retry_backoff: Duration,
     /// Schema-constrained temperature; token limit applies to every request.
@@ -369,6 +382,7 @@ impl Ollama {
             recorder: None,
             keep_alive: None,
             num_ctx_override: None,
+            max_turns: None,
             connect_retries: 0,
             retry_backoff: Duration::from_secs(1),
             temperature: 0.0,
@@ -394,6 +408,17 @@ impl Ollama {
     pub fn with_num_ctx(mut self, num_ctx: Option<u32>) -> Self {
         self.num_ctx_override = num_ctx;
         self
+    }
+
+    /// Tool rounds one chat turn may run; None keeps the default. Use
+    /// `chat_tools::parse_max_turns` first.
+    pub fn with_max_turns(mut self, max_turns: Option<usize>) -> Self {
+        self.max_turns = max_turns;
+        self
+    }
+
+    pub fn max_turns(&self) -> Option<usize> {
+        self.max_turns
     }
 
     pub fn num_ctx(&self) -> Option<u32> {
@@ -1050,7 +1075,7 @@ impl Ollama {
             }
             Ok(Err(_)) => {
                 return Err(Failure::BeforeContent(
-                    "Cannot reach Ollama; check the server and endpoint, then retry".into(),
+                    CONNECT_FAILURE.into(),
                 ))
             }
             Ok(Ok(response)) => response,
@@ -1088,9 +1113,7 @@ impl Ollama {
         loop {
             let chunk = match tokio::time::timeout(self.idle_timeout, response.chunk()).await {
                 Err(_) => return Err("Ollama stream stalled; partial reply retained".into()),
-                Ok(Err(_)) => {
-                    return Err(progress.failure("Ollama connection lost; partial reply retained"))
-                }
+                Ok(Err(_)) => return Err(progress.failure(CONNECTION_LOST)),
                 Ok(Ok(chunk)) => chunk,
             };
             let Some(chunk) = chunk else {
@@ -1103,8 +1126,7 @@ impl Ollama {
                         .complete_recorded(identity, &body, sender, trace)
                         .await?);
                 }
-                return Err(progress
-                    .failure("Ollama disconnected before completion; partial reply retained"));
+                return Err(progress.failure(DISCONNECTED));
             };
             // Bound incomplete frames even when a server never supplies a newline.
             for byte in chunk {

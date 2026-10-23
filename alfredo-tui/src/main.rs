@@ -63,6 +63,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut worker_format = alfredo_tui::worker::WorkerFormat::default();
     let mut keep_alive = std::env::var("ALFREDO_KEEP_ALIVE").unwrap_or_else(|_| "30m".into());
     let mut num_ctx = std::env::var("ALFREDO_NUM_CTX").unwrap_or_default();
+    let mut max_turns = std::env::var("ALFREDO_MAX_TURNS").unwrap_or_default();
     let mut connect_retries = 3;
     let mut doctor = false;
     let mut qualification_output = None;
@@ -186,6 +187,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                     .next()
                     .ok_or("--num-ctx needs a token count from 2048 to 262144")?
             }
+            "--max-turns" => {
+                max_turns = args
+                    .next()
+                    .ok_or("--max-turns needs a tool-round count from 1 to 32")?
+            }
             "--connect-retries" => {
                 connect_retries = args
                     .next()
@@ -281,6 +287,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if qualification_repetitions.is_some() {
         return Err("--qualification-repetitions requires --qualify-inference".into());
     }
+    let max_turns = alfredo_tui::chat_tools::parse_max_turns(&max_turns).unwrap_or_else(|error| {
+        eprintln!("Error: {error}");
+        std::process::exit(2)
+    });
     let provider = Ollama::new(&endpoint, Duration::from_secs(60))?
         .with_loading_deadline(Duration::from_secs(120))
         .with_parallelism(parallel_models)?
@@ -288,6 +298,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         .with_worker_format(worker_format)
         .with_keep_alive(alfredo_tui::provider::parse_keep_alive(&keep_alive)?)
         .with_num_ctx(alfredo_tui::provider::parse_num_ctx(&num_ctx)?)
+        .with_max_turns(max_turns)
         .with_connect_retries(connect_retries)?;
     if doctor {
         let runtime = Runtime::new()?;
@@ -1075,6 +1086,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             match event {
                 Event::Key(key) if key.kind != KeyEventKind::Release => {
                     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+                    let alt_only = key.modifiers == KeyModifiers::ALT;
                     let index = work.app.selected;
                     let key_at = std::time::Instant::now();
                     work.app.sessions[index].note_key(key_at);
@@ -1412,6 +1424,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                                 request = Some(work.app.sessions[index].retry());
                             }
                         }
+                        // Readline motions (issue #351); Alt+Left/Right stay with the task tree.
+                        KeyCode::Left if ctrl => work.app.sessions[index].word_left(),
+                        KeyCode::Right if ctrl => work.app.sessions[index].word_right(),
+                        KeyCode::Char('b') if alt_only => work.app.sessions[index].word_left(),
+                        KeyCode::Char('f') if alt_only => work.app.sessions[index].word_right(),
+                        KeyCode::Char('a') if ctrl => work.app.sessions[index].home(),
+                        KeyCode::Char('e') if ctrl => work.app.sessions[index].end(),
+                        KeyCode::Char('k') if ctrl => work.app.sessions[index].kill_to_end(),
                         KeyCode::Left => work.app.sessions[index].left(),
                         KeyCode::Right => work.app.sessions[index].right(),
                         KeyCode::Home => work.app.sessions[index].home(),
@@ -1419,7 +1439,16 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                         KeyCode::Delete => work.app.sessions[index].delete(),
                         KeyCode::Char('w') if ctrl => work.app.sessions[index].delete_word(),
                         KeyCode::Char('u') if ctrl => work.app.sessions[index].clear_draft(),
-                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::SHIFT) => {
+                        // Ctrl+J (LF) and Alt+Enter (ESC CR) work on terminals without the kitty
+                        // protocol, where Shift+Enter arrives as plain Enter (issue #351).
+                        KeyCode::Char('j') if ctrl => {
+                            work.app.sessions[index].insert("\n");
+                        }
+                        KeyCode::Enter
+                            if key
+                                .modifiers
+                                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+                        {
                             work.app.sessions[index].insert("\n");
                         }
                         KeyCode::Enter
@@ -2422,6 +2451,7 @@ const HELP_LINES: &[&str] = &[
     "--worker-format blocks|json: coding workers answer with plain-text FILE blocks (default, no schema) or the legacy schema-constrained JSON file plan. Either answer is accepted; qualification always requests json.",
     "--keep-alive keeps the model loaded between requests (default 30m; seconds, -1 forever, default = server setting); the model is preloaded at start and on /model.",
     "--num-ctx N sets Ollama's input window (num_ctx, tokens, 2048..262144; env ALFREDO_NUM_CTX) on every chat, planner, worker and repair request and the preload, clamps the reply limit to the room left, and refuses a request whose estimated prompt (bytes/3) plus 256 tokens exceeds it instead of letting Ollama truncate silently. Unset: the server's window applies and requests are unchanged. The chat shows ctx used/N after each reply.",
+    "--max-turns N (1..32, default 8; env ALFREDO_MAX_TURNS) caps the tool rounds of one chat turn, interactive and --chat --headless; a turn that asks for more stops with the step-limit notice naming N. Approvals are unchanged. Out of range or non-numeric exits 2.",
     "--connect-retries retries model requests that fail before any reply text, including Ollama error frames (default 3, backoff 1s/2s/4s…; 0 disables). The header shows server health.",
     "Explicit file/check permission and approval required. Conversation history and drafts restore without replaying interrupted requests.",
     "--go GOAL starts autopilot after launch: plan, save, approve, dispatch, auto-review passing checks, bounded auto-repair (--max-repairs, default 3), one local alfredo/go-ID integration branch. Never pushes or moves your branch.",
