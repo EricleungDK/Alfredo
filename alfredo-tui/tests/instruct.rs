@@ -783,6 +783,7 @@ fn finish(fixture: &Fixture, status: TaskStatus, detail: &str) {
         candidate_commit: None,
         model_metrics: None, failure_code: None,
         generation: None,
+        project_notes: None,
         run: run.id.clone(),
         baseline: run.baseline.clone(),
         status: status.clone(),

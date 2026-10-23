@@ -111,6 +111,7 @@ impl Fixture {
             model_metrics: None,
             failure_code: None,
             generation: None,
+            project_notes: None,
             check: None,
         })
         .unwrap();
