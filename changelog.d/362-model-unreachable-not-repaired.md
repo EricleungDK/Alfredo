@@ -1,2 +1,2 @@
 ### Fixed
-- A dropped or refused Ollama connection during a worker or repair request no longer spends the repair budget: the task gets the typed `model-unreachable` failure, autopilot stops with the endpoint named, and `Next:` says to start Ollama and `/repair ID retry` instead of advising a larger model or `--max-repairs` (#362).
+- A dropped or refused Ollama connection during a worker or repair request no longer spends the repair budget: the task gets the typed `model-unreachable` failure, autopilot stops with the endpoint named, and `Next:` says to start Ollama and `/repair ID retry` instead of advising a larger model or `--max-repairs`; a manual `/run` shows the same reason and a `Next` row in the task pane (#362).

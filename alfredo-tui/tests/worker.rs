@@ -618,6 +618,55 @@ async fn unreachable_model_server_fails_with_a_typed_code_and_names_the_endpoint
     );
 }
 
+#[tokio::test]
+async fn unreachable_model_server_on_a_repair_attempt_gets_the_typed_code_for_that_task() {
+    let fixture = Fixture::new();
+    fixture.permit();
+    let (provider, job, _) = server(good_plan(), Duration::ZERO);
+    worker::start(
+        fixture.store.clone(),
+        1,
+        "original".into(),
+        3,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    job.join().unwrap();
+    fixture.action(Action::Review {
+        task: 1,
+        accept: false,
+    });
+    fixture.action(Action::Repair {
+        task: 1,
+        reason: "Explain the result more clearly in notes.txt".into(),
+    });
+    fixture.action(Action::Approve { task: 2 });
+    let provider = Ollama::new("http://127.0.0.1:1", Duration::from_secs(1)).unwrap();
+    let (snapshot, _) = worker::start(
+        fixture.store.clone(),
+        2,
+        "repair-unreachable".into(),
+        8,
+        provider,
+        Arc::new(AtomicBool::new(false)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(snapshot.tasks[1].status, TaskStatus::Failed);
+    assert_eq!(
+        snapshot.tasks[1].run.as_ref().unwrap().detail,
+        "Cannot reach Ollama at http://127.0.0.1:1; the server is down or the endpoint is wrong. Next: Start Ollama, then /repair 2 retry"
+    );
+    let evidence: worker::Evidence =
+        serde_json::from_str(&fixture.store.evidence(2).unwrap()).unwrap();
+    assert_eq!(
+        evidence.failure_code.as_deref(),
+        Some(worker::MODEL_UNREACHABLE)
+    );
+}
+
 async fn run_with_calc_of(bytes: usize) -> (worker::Evidence, String) {
     let fixture = Fixture::new();
     let mut text = "x = 1\n".repeat(bytes / 6);

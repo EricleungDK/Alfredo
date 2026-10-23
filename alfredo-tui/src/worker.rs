@@ -978,6 +978,15 @@ pub fn model_unreachable(endpoint: &str, task: u64) -> String {
 /// Marks the way forward inside a [`model_unreachable`] message.
 pub const MODEL_UNREACHABLE_NEXT_PREFIX: &str = "Next: ";
 
+/// Splits a [`model_unreachable`] message into its reason and the way forward;
+/// `None` for any other failure text.
+pub fn model_unreachable_advice(detail: &str) -> Option<(&str, &str)> {
+    let (reason, next) = detail.split_once(MODEL_UNREACHABLE_NEXT_PREFIX)?;
+    detail
+        .starts_with("Cannot reach Ollama at ")
+        .then_some((reason.trim_end(), next))
+}
+
 /// Splits a shared too-large message into its reason and the way forward (the
 /// last sentence); `None` for any other failure text.
 pub fn too_large_advice(detail: &str) -> Option<(&str, &str)> {
