@@ -508,7 +508,7 @@ fn craft_index(workspace: &Workspace, names: &[&str]) {
         entry.extend((name.len() as u16).to_be_bytes());
         entry.extend(name.as_bytes());
         let pad = 8 - entry.len() % 8;
-        entry.extend(std::iter::repeat(0).take(pad));
+        entry.extend(std::iter::repeat_n(0, pad));
         body.extend(entry);
     }
     let mut child = std::process::Command::new("sha1sum")
